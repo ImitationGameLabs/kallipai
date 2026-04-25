@@ -1,0 +1,64 @@
+[workspace]
+members = [
+  "crates/just-agent-core",
+  "crates/just-agent",
+  "crates/just-agent-tui",
+  "crates/just-agent-daemon",
+  "crates/just-agent-client",
+]
+
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+license = "MIT"
+
+[workspace.metadata.crane]
+name = "just-agent"
+
+[workspace.dependencies]
+just-llm-client = "0.1.0"
+
+just-agent-core = { path = "crates/just-agent-core" }
+just-agent-client = { path = "crates/just-agent-client" }
+just-agent-daemon = { path = "crates/just-agent-daemon" }
+
+anyhow = "1.0.102"
+async-trait = "0.1.89"
+async-stream = "0.3.6"
+dotenvy = "0.15.7"
+futures-core = "0.3.32"
+futures-util = "0.3.32"
+regex = "1.12.3"
+reqwest = { version = "0.13.2", default-features = false, features = [
+  "json",
+  "rustls",
+  "stream",
+] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+tokio = { version = "1.52.1", features = [
+  "macros",
+  "rt-multi-thread",
+  "process",
+  "sync",
+  "time",
+] }
+portable-pty = "0.9.0"
+strip-ansi-escapes = "0.2.1"
+
+axum = "0.8"
+tokio-stream = "0.1"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rable = "0.2.0"
+clap = { version = "4.6", features = ["derive", "env"] }
+ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
+ratatui-textarea = "0.9.1"
+pulldown-cmark = "0.13.3"
+comfy-table = "7.2.2"
+syntect = "5.3"
+dirs = "6"
+unicode-width = "0.2.2"

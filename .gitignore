@@ -1,0 +1,18 @@
+# Rust build artifacts
+/target/
+
+# Environment files
+/.env
+/.env.local
+
+# Local drafts
+/.draft/
+
+# Nix
+/result
+
+# direnv
+/.direnv/
+
+# pre-commit
+/.pre-commit-config.yaml

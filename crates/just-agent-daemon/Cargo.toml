@@ -1,0 +1,21 @@
+[package]
+name = "just-agent-daemon"
+description = "HTTP API server hosting multiple agent instances"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+just-agent-core = { workspace = true }
+just-llm-client = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+axum = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+futures-core = { workspace = true }

@@ -1,0 +1,100 @@
+//! Slash command definitions, parsing, and completion matching.
+
+/// Input from the TUI, sent through the prompt channel.
+pub enum UserInput {
+    /// A normal chat message to send to the LLM.
+    Prompt(String),
+    /// A slash command to execute.
+    Command(SlashCommand),
+}
+
+/// A parsed slash command.
+#[derive(Debug)]
+pub enum SlashCommand {
+    Help,
+    Quit,
+    Clear,
+    Status,
+    Compact,
+    Skill { name: String },
+}
+
+/// Static descriptor for a known command.
+pub struct CommandInfo {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub has_arg: bool,
+}
+
+const COMMANDS: &[CommandInfo] = &[
+    CommandInfo { name: "/help", description: "Show available commands", has_arg: false },
+    CommandInfo { name: "/quit", description: "Exit the TUI", has_arg: false },
+    CommandInfo { name: "/clear", description: "Clear chat output", has_arg: false },
+    CommandInfo { name: "/status", description: "Show context token usage", has_arg: false },
+    CommandInfo { name: "/compact", description: "Force context compaction", has_arg: false },
+    CommandInfo { name: "/skill", description: "Load a skill by name", has_arg: true },
+];
+
+/// Returns the full command registry.
+pub fn commands() -> &'static [CommandInfo] {
+    COMMANDS
+}
+
+/// Try to parse user input as a slash command.
+///
+/// Returns:
+/// - `None` — input is a normal prompt (doesn't start with `/` or contains newlines)
+/// - `Some(Ok(cmd))` — successfully parsed command
+/// - `Some(Err(msg))` — starts with `/` but invalid (unknown, missing arg)
+pub fn parse(input: &str) -> Option<Result<SlashCommand, String>> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('/') || trimmed.contains('\n') {
+        return None;
+    }
+
+    // Split into command word and the rest
+    let (cmd, rest) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
+    let cmd = cmd.to_ascii_lowercase();
+
+    // Handle commands that take an argument
+    if cmd == "/skill" {
+        let name = rest.trim();
+        if name.is_empty() {
+            return Some(Err("usage: /skill <name>".into()));
+        }
+        return Some(Ok(SlashCommand::Skill { name: name.to_owned() }));
+    }
+
+    let result = match cmd.as_str() {
+        "/help" => SlashCommand::Help,
+        "/quit" | "/q" | "/exit" => SlashCommand::Quit,
+        "/clear" => SlashCommand::Clear,
+        "/status" => SlashCommand::Status,
+        "/compact" => SlashCommand::Compact,
+        _ => return Some(Err(format!("unknown command: {cmd}"))),
+    };
+
+    Some(Ok(result))
+}
+
+/// Return command descriptors whose names start with `prefix`.
+pub fn matching(prefix: &str) -> Vec<&'static CommandInfo> {
+    let lower = prefix.to_ascii_lowercase();
+    commands()
+        .iter()
+        .filter(|c| c.name.starts_with(lower.as_str()))
+        .collect()
+}
+
+/// Build formatted help text listing all commands.
+pub fn help_text() -> String {
+    let mut out = String::from("Available commands:\n");
+    for cmd in commands() {
+        let arg_hint = if cmd.has_arg { " <arg>" } else { "" };
+        out.push_str(&format!(
+            "  {:<12} {}{}\n",
+            cmd.name, cmd.description, arg_hint
+        ));
+    }
+    out
+}

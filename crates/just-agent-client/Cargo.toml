@@ -1,0 +1,16 @@
+[package]
+name = "just-agent-client"
+description = "Daemon client library for just-agent"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+just-agent-core = { workspace = true }
+just-llm-client = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
