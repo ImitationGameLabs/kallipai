@@ -31,8 +31,6 @@ const COMMANDS: &[CommandInfo] = &[
     CommandInfo { name: "/quit", description: "Exit the TUI", has_arg: false },
     CommandInfo { name: "/clear", description: "Clear chat output", has_arg: false },
     CommandInfo { name: "/status", description: "Show context token usage", has_arg: false },
-    CommandInfo { name: "/compact", description: "Force context compaction", has_arg: false },
-    CommandInfo { name: "/skill", description: "Load a skill by name", has_arg: true },
 ];
 
 /// Returns the full command registry.
@@ -53,24 +51,14 @@ pub fn parse(input: &str) -> Option<Result<SlashCommand, String>> {
     }
 
     // Split into command word and the rest
-    let (cmd, rest) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
+    let (cmd, _rest) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
     let cmd = cmd.to_ascii_lowercase();
-
-    // Handle commands that take an argument
-    if cmd == "/skill" {
-        let name = rest.trim();
-        if name.is_empty() {
-            return Some(Err("usage: /skill <name>".into()));
-        }
-        return Some(Ok(SlashCommand::Skill { name: name.to_owned() }));
-    }
 
     let result = match cmd.as_str() {
         "/help" => SlashCommand::Help,
         "/quit" | "/q" | "/exit" => SlashCommand::Quit,
         "/clear" => SlashCommand::Clear,
         "/status" => SlashCommand::Status,
-        "/compact" => SlashCommand::Compact,
         _ => return Some(Err(format!("unknown command: {cmd}"))),
     };
 

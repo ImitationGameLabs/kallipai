@@ -66,20 +66,10 @@ async fn handle_command(
     match cmd {
         SlashCommand::Status => {
             let usage = ctx.store.lock().await.usage_snapshot();
-            let pinned_tokens: usize = usage.pinned_items.iter().map(|(_, t)| *t).sum();
-            let msg = format!(
-                "turns: {} ({} est tokens), pinned: {} ({} tokens), summary: {} tokens, last prompt: {}",
-                usage.turn_count,
-                usage.turn_tokens,
-                usage.pinned_items.len(),
-                pinned_tokens,
-                usage.summary_tokens,
-                usage
-                    .last_prompt_tokens
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| "n/a".into()),
-            );
-            agent_tx.send(AgentEvent::Status(msg)).await.ok();
+            agent_tx
+                .send(AgentEvent::Status(usage.format_summary()))
+                .await
+                .ok();
         }
         SlashCommand::Compact => {
             agent_tx.send(AgentEvent::Busy).await.ok();

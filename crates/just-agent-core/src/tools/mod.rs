@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use just_llm_client::ToolDispatcher;
-use shell::{PtyBuilder, shell_tool_set};
 use just_llm_client::types::chat::{FunctionDefinition, ToolDefinition, ToolType};
 use serde_json::json;
+use shell::{PtyBuilder, shell_tool_set};
 use tokio::sync::Mutex;
 
 use crate::context::{AgenticContext, ContextStore};

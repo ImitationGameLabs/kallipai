@@ -203,23 +203,11 @@ async fn handle_command(
             // No buffer to clear in stdio mode.
         }
         SlashCommand::Status => match client.agent_status(agent_id).await {
-            Ok(usage) => println!("{usage:#?}"),
+            Ok(usage) => println!("{}", usage.format_summary()),
             Err(e) => eprintln!("[error] {e}"),
         },
-        SlashCommand::Compact => {
-            if let Err(e) = client.agent_compact(agent_id).await {
-                eprintln!("[error] {e}");
-            } else {
-                println!("compaction triggered");
-            }
-        }
-        SlashCommand::Skill { name } => {
-            if let Err(e) = client.agent_load_skill(agent_id, &name).await {
-                eprintln!("[error] {e}");
-            } else {
-                println!("skill loaded: {name}");
-            }
-        }
+        // Unreachable: parse() never produces these
+        _ => {}
     }
 }
 

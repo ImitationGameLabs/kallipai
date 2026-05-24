@@ -34,6 +34,23 @@ pub struct ContextUsage {
     pub last_prompt_tokens: Option<u32>,
 }
 
+impl ContextUsage {
+    pub fn format_summary(&self) -> String {
+        let pinned_tokens: usize = self.pinned_items.iter().map(|(_, t)| *t).sum();
+        format!(
+            "turns: {} ({} est tokens), pinned: {} ({} tokens), summary: {} tokens, last prompt: {}",
+            self.turn_count,
+            self.turn_tokens,
+            self.pinned_items.len(),
+            pinned_tokens,
+            self.summary_tokens,
+            self.last_prompt_tokens
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "n/a".into()),
+        )
+    }
+}
+
 /// Result of evicting turns from the context store.
 #[derive(Clone, Debug)]
 pub struct EvictResult {

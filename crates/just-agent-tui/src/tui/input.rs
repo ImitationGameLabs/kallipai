@@ -1,40 +1,42 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 
+use just_agent_client::DaemonClient;
+use just_agent_core::command::{self, SlashCommand};
+
 use super::super::Action;
 use super::{App, ChatLine};
-use just_agent_core::command::{self, SlashCommand};
 
 impl App {
     /// Handle a crossterm key event.
-    pub fn handle_key_event(&mut self, key: KeyEvent, action_tx: &mpsc::Sender<Action>) {
+    pub async fn handle_key_event(
+        &mut self,
+        key: KeyEvent,
+        action_tx: &mpsc::Sender<Action>,
+        client: &DaemonClient,
+        agent_id: &str,
+    ) {
         if key.kind != KeyEventKind::Press {
             return;
         }
 
-        // Approval popup: intercept 1/2 keys
+        // Approval popup: intercept 1/2/Esc keys
         if self.approval.is_pending() {
-            if let KeyCode::Char(ch) = key.code {
-                if let Some(decision_str) = self.approval.handle_key(ch)
-                    && let Some(request_id) = self.approval.last_request_id()
-                {
-                    action_tx
-                        .try_send(Action::RespondApproval {
-                            request_id: request_id.to_owned(),
-                            decision: decision_str,
-                        })
-                        .ok();
-                }
-            } else if key.code == KeyCode::Esc
-                && let Some(decision_str) = self.approval.cancel()
+            let decision = if let KeyCode::Char(ch) = key.code {
+                self.approval.handle_key(ch)
+            } else if key.code == KeyCode::Esc {
+                self.approval.cancel()
+            } else {
+                None
+            };
+            if let Some(decision_str) = decision
                 && let Some(request_id) = self.approval.last_request_id()
+                && let Err(e) = client
+                    .respond_approval(agent_id, request_id, &decision_str, None)
+                    .await
             {
-                action_tx
-                    .try_send(Action::RespondApproval {
-                        request_id: request_id.to_owned(),
-                        decision: decision_str,
-                    })
-                    .ok();
+                self.chat_lines.push(ChatLine::Error(e.to_string()));
+                self.auto_scroll = true;
             }
             return;
         }
@@ -145,7 +147,7 @@ impl App {
                         action_tx.try_send(Action::SendPrompt(text)).ok();
                     }
                     Some(Ok(cmd)) => {
-                        self.dispatch_command(cmd, action_tx);
+                        self.dispatch_command(cmd, client, agent_id).await;
                     }
                     Some(Err(msg)) => {
                         self.chat_lines.push(ChatLine::Error(msg));
@@ -162,8 +164,14 @@ impl App {
     }
 
     /// Dispatch a parsed slash command.
-    fn dispatch_command(&mut self, cmd: SlashCommand, action_tx: &mpsc::Sender<Action>) {
+    ///
+    /// Three dispatch categories:
+    /// - **TUI-local** (help/quit/clear): no daemon call, handled entirely here
+    /// - **Daemon query** (status): request-response, awaits daemon endpoint directly
+    /// - **Unreachable** (compact/skill): not user-facing, handled agenticly
+    async fn dispatch_command(&mut self, cmd: SlashCommand, client: &DaemonClient, agent_id: &str) {
         match cmd {
+            // TUI-local
             SlashCommand::Help => {
                 self.chat_lines.push(ChatLine::System(command::help_text()));
                 self.auto_scroll = true;
@@ -174,30 +182,20 @@ impl App {
             SlashCommand::Clear => {
                 self.chat_lines.clear();
             }
-            SlashCommand::Status => {
-                action_tx
-                    .try_send(Action::SendPrompt("/status".into()))
-                    .ok();
-                self.chat_lines
-                    .push(ChatLine::System("requesting status...".into()));
-                self.auto_scroll = true;
-            }
-            SlashCommand::Compact => {
-                action_tx
-                    .try_send(Action::SendPrompt("/compact".into()))
-                    .ok();
-                self.chat_lines
-                    .push(ChatLine::System("running compaction...".into()));
-                self.auto_scroll = true;
-            }
-            SlashCommand::Skill { name } => {
-                action_tx
-                    .try_send(Action::SendPrompt(format!("/skill {name}")))
-                    .ok();
-                self.chat_lines
-                    .push(ChatLine::System(format!("loading skill: {name}...")));
-                self.auto_scroll = true;
-            }
+            // Daemon query
+            SlashCommand::Status => match client.agent_status(agent_id).await {
+                Ok(usage) => {
+                    self.chat_lines
+                        .push(ChatLine::Status(usage.format_summary()));
+                    self.auto_scroll = true;
+                }
+                Err(e) => {
+                    self.chat_lines.push(ChatLine::Error(e.to_string()));
+                    self.auto_scroll = true;
+                }
+            },
+            // Unreachable: parse() never produces these, but daemon routes still use the variants
+            _ => {}
         }
     }
 }

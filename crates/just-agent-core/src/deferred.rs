@@ -202,9 +202,9 @@ impl DeferredQueue {
         self.actions
             .values()
             .filter(|a| {
-                status_filter.as_ref().is_none_or(|f| {
-                    std::mem::discriminant(&a.status) == std::mem::discriminant(f)
-                })
+                status_filter
+                    .as_ref()
+                    .is_none_or(|f| std::mem::discriminant(&a.status) == std::mem::discriminant(f))
             })
             .map(|a| DeferredActionInfo {
                 request_id: a.request_id.clone(),

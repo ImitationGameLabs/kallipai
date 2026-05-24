@@ -46,35 +46,27 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Actions enqueued by the synchronous App that need async processing.
+/// Fire-and-forget prompt delivery. Results arrive via SSE.
 enum Action {
     SendPrompt(String),
-    RespondApproval { request_id: String, decision: String },
 }
 
 async fn run_tui(client: DaemonClient, agent_id: String) -> Result<()> {
     // Subscribe to SSE before anything else.
     let mut event_stream = client.event_stream(&agent_id).await?;
 
-    // Channel for async actions from the synchronous App.
+    // Channel for prompt delivery to the background task.
     let (action_tx, mut action_rx) = mpsc::channel::<Action>(64);
 
-    // Background task: processes async actions (prompt sending, approval responses).
+    // Background task: delivers prompts to the daemon.
     {
         let client = client.clone();
         let agent_id = agent_id.clone();
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
-                let result = match action {
-                    Action::SendPrompt(text) => client.post_prompt(&agent_id, &text).await,
-                    Action::RespondApproval { request_id, decision } => {
-                        client
-                            .respond_approval(&agent_id, &request_id, &decision, None)
-                            .await
-                    }
-                };
-                if let Err(e) = result {
-                    tracing::error!("action failed: {e}");
+                let Action::SendPrompt(text) = action;
+                if let Err(e) = client.post_prompt(&agent_id, &text).await {
+                    tracing::error!("prompt delivery failed: {e}");
                 }
             }
         });
@@ -105,7 +97,7 @@ async fn run_tui(client: DaemonClient, agent_id: String) -> Result<()> {
             Some(event) = key_rx.recv() => {
                 match event {
                     ratatui::crossterm::event::Event::Key(key) => {
-                        app.handle_key_event(key, &action_tx);
+                        app.handle_key_event(key, &action_tx, &client, &agent_id).await;
                         if app.should_quit {
                             break;
                         }
