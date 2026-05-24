@@ -93,7 +93,7 @@ JUST_LLM_DEEPSEEK_API_KEY=your-key \
 cargo run -p just-agent-daemon
 
 # Headless CLI
-cargo run -p just-agent -- --prompt "Show the current working directory."
+cargo run -p just-agent -- start --prompt "Show the current working directory."
 
 # Or the TUI
 cargo run -p just-agent-tui

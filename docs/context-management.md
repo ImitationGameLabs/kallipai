@@ -57,35 +57,18 @@ The pinned summary survives. But eviction is more general than compaction — th
 agent might evict turns to switch focus to a different task, not just to shrink
 context within the same task.
 
-## Compaction strategies
+## Compaction
 
 When the token budget is exceeded (automatically checked each agent round),
-compaction triggers. Three strategies are available:
-
-### Evict
-
-Drops all working turns outright. Preserves the existing summary. No LLM call
-needed. The cheapest but most aggressive strategy.
-
-### Summarize (default)
+compaction triggers using a summarize strategy:
 
 Makes an LLM call to summarize old turns. Builds input by incorporating the
 existing summary first (for accumulation), then fills from oldest turns forward
 until a token budget is exhausted. The new summary replaces the old one, and
 all processed turns are dropped.
 
-### Truncate
-
-Iterates all turns, truncating individual messages that exceed a token limit
-(default: 2000 tokens per message). Preserves turn structure. No LLM call
-needed.
-
-### Strategy selection
-
-Configured via the `JUST_AGENT_COMPACT_STRATEGY` environment variable:
-- `"evict"` → EvictStrategy
-- `"truncate"` → TruncateStrategy
-- anything else (default `"summarize"`) → SummarizeStrategy
+The maximum summary token count is configured via the
+`JUST_AGENT_COMPACT_MAX_TOKENS` environment variable (default: 1200).
 
 ## Automatic compaction in the agent loop
 
@@ -107,7 +90,16 @@ Skills are a natural consequence of agentic context management:
 1. The agent accumulates experience — effective patterns for a CLI tool, debugging
    strategies, project-specific conventions.
 2. It distills that experience into a markdown file:
-   `.just-agent/skills/<name>/SKILL.md` (with optional YAML frontmatter).
+   `<data-dir>/just-agent/skills/<name>/SKILL.md` (with optional YAML frontmatter).
+
+   The data directory is determined by `JUST_AGENT_DATA_DIR` env var, or the
+   platform default if unset:
+
+   | Platform | Default path                               |
+   | -------- | ------------------------------------------ |
+   | Linux    | `~/.local/share/just-agent`                |
+   | macOS    | `~/Library/Application Support/just-agent` |
+   | Windows  | `%APPDATA%\just-agent`                     |
 3. When it encounters a matching situation later, it reads the file and pins
    the content into context.
 4. When the skill is no longer needed, `context_unpin` removes it.
@@ -119,7 +111,7 @@ content.
 ### Skill file format
 
 ```
-.just-agent/skills/
+<data-dir>/just-agent/skills/
 └── my-skill/
     └── SKILL.md
 ```

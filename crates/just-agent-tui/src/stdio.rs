@@ -144,6 +144,9 @@ fn handle_sse_event(event: SseEvent, approval_tx: &mpsc::Sender<ApprovalPrompt>,
         SseEvent::AssistantContent { content } => {
             println!("{content}");
         }
+        // Delta events are intentionally ignored in stdio mode — only the
+        // final `Finished` content is printed, since incremental output
+        // makes no sense in a piped/pipe-friendly interactive session.
         SseEvent::AssistantContentDelta { .. } => {}
         SseEvent::ReasoningDelta { .. } => {}
         SseEvent::ToolCall { name, args } => {

@@ -54,7 +54,7 @@ experience is worth capturing as a new skill. A good skill captures the
 key decisions, pitfalls, and effective patterns — not a blow-by-blow
 transcript.
 
-To create a skill, write a `.just-agent/skills/<name>/SKILL.md` file
+To create a skill, write a `SKILL.md` file under the skills directory
 with a YAML frontmatter header (name, description) followed by markdown
 instructions. Keep it concise and focused on what you wish you had known
 before starting.
@@ -150,7 +150,7 @@ impl LlmTool for SkillLoadTool {
     }
 
     fn description(&self) -> &str {
-        "Load a skill from .just-agent/skills/<name>/SKILL.md and pin it into \
+        "Load a skill from the skills directory and pin it into \
          the agent's context. Skills are suggestions and best practices, not \
          mandatory instructions."
     }
@@ -161,7 +161,7 @@ impl LlmTool for SkillLoadTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The skill name (directory under .just-agent/skills/)."
+                    "description": "The skill name (directory under the skills directory)."
                 }
             },
             "required": ["name"]

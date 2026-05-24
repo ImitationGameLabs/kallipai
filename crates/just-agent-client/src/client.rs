@@ -56,8 +56,11 @@ impl DaemonClient {
     }
 
     /// Send a prompt and wait for the agent to finish (with timeout).
-    /// Internally subscribes to SSE, posts the prompt, then waits for
-    /// `Finished` / `Error` / `MaxRoundsExceeded`.
+    ///
+    /// Subscribes to SSE before posting the prompt, then waits for a terminal
+    /// event (`Finished` / `Error` / `MaxRoundsExceeded`). Intermediate delta
+    /// events are intentionally ignored — this is a request-response API, not
+    /// a streaming display. Use [`event_stream`] for real-time consumption.
     pub async fn send_prompt(&self, id: &str, prompt: &str, timeout_secs: u64) -> Result<String> {
         // Subscribe to SSE before sending prompt to avoid race condition.
         let sse_response = self
