@@ -19,6 +19,8 @@ pub enum Commands {
     Stop(IdArgs),
     /// Stream agent events
     Events(IdArgs),
+    /// Show agent context usage
+    Status(IdArgs),
     /// Respond to approval request
     Approve(ApproveArgs),
 }

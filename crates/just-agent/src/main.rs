@@ -62,6 +62,11 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Status(args) => {
+            let client = DaemonClient::new(&args.daemon.daemon_url);
+            let usage = client.agent_status(&args.id).await?;
+            println!("{}", usage.format_summary());
+        }
         Commands::Approve(args) => {
             init_tracing();
             let client = DaemonClient::new(&args.daemon.daemon_url);
