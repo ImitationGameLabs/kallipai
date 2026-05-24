@@ -20,6 +20,25 @@ impl App {
             return;
         }
 
+        // Quit confirmation popup: intercept 1/2/Esc
+        if self.quit_confirm {
+            match key.code {
+                KeyCode::Char('1') => {
+                    self.kill_on_exit = true;
+                    self.should_quit = true;
+                }
+                KeyCode::Char('2') => {
+                    self.kill_on_exit = false;
+                    self.should_quit = true;
+                }
+                KeyCode::Esc => {
+                    self.quit_confirm = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Approval popup: intercept 1/2/Esc keys
         if self.approval.is_pending() {
             let decision = if let KeyCode::Char(ch) = key.code {
@@ -177,7 +196,7 @@ impl App {
                 self.auto_scroll = true;
             }
             SlashCommand::Quit => {
-                self.should_quit = true;
+                self.quit_confirm = true;
             }
             SlashCommand::Clear => {
                 self.chat_lines.clear();

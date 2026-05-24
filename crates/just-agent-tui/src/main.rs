@@ -127,5 +127,12 @@ async fn run_tui(client: DaemonClient, agent_id: String) -> Result<()> {
     )
     .ok();
     ratatui::restore();
+
+    if app.kill_on_exit
+        && let Err(e) = client.kill_agent(&agent_id).await
+    {
+        tracing::warn!("failed to kill agent on exit: {e}");
+    }
+
     Ok(())
 }

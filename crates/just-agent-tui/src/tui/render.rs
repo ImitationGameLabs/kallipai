@@ -1,8 +1,8 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Margin};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Stylize};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 
 use super::wrap::word_wrap_line_count;
 use super::{App, ChatLine};
@@ -65,7 +65,11 @@ impl App {
         self.visible_height = visible_height;
 
         self.completion.render(frame, input_area);
-        self.approval.render(frame, input_area);
+        if !self.quit_confirm {
+            self.approval.render(frame, input_area);
+        } else {
+            self.render_quit_popup(frame, input_area);
+        }
         frame.render_widget(&self.textarea, input_area);
     }
 
@@ -122,5 +126,30 @@ impl App {
             }
         }
         Text::from(lines)
+    }
+
+    fn render_quit_popup(&self, frame: &mut Frame, input_area: Rect) {
+        let width = 37.min(input_area.width);
+        let height = 7u16;
+        let popup_area = Rect {
+            x: input_area.x + (input_area.width.saturating_sub(width)) / 2,
+            y: input_area.y.saturating_sub(height),
+            width,
+            height,
+        };
+        frame.render_widget(Clear, popup_area);
+
+        let lines = vec![
+            Line::from(""),
+            Line::from("  [1] Stop agent and exit"),
+            Line::from("  [2] Keep agent running and exit"),
+            Line::from(""),
+            Line::from("  Esc to cancel".dark_gray()),
+        ];
+
+        let popup = Paragraph::new(lines)
+            .block(Block::bordered().title(" Exit ").yellow())
+            .wrap(Wrap { trim: true });
+        frame.render_widget(popup, popup_area);
     }
 }
