@@ -221,20 +221,7 @@ pub async fn compact_context(ctx: &AgentContext) -> Result<bool> {
     };
 
     let mut guard = ctx.store.lock().await;
-    if result.summary.is_none() && result.modified_turns.is_none() {
-        guard.prepend_turns(drained);
-        bail!(
-            "compaction strategy '{}' produced no summary and no modified turns",
-            ctx.strategy.name()
-        );
-    }
-
-    if let Some(modified) = result.modified_turns {
-        guard.prepend_turns(modified);
-    }
-    if let Some(summary) = result.summary {
-        guard.set_summary(summary);
-    }
+    guard.set_summary(result.summary);
 
     info!(
         strategy = ctx.strategy.name(),

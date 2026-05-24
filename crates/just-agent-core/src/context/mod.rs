@@ -13,6 +13,6 @@ mod compose;
 mod store;
 mod turn;
 
-pub use compact::{CompactionStrategy, strategy_from_name};
+pub use compact::{CompactionStrategy, SummarizeStrategy};
 pub use compose::compose_context;
 pub use store::{AgenticContext, ContextStore, ContextUsage};

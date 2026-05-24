@@ -1,8 +1,7 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use just_llm_client::ChatClient;
 use just_llm_client::types::chat::ChatMessage;
-use tracing::warn;
 
 use super::{CompactionResult, CompactionStrategy};
 
@@ -71,26 +70,20 @@ impl CompactionStrategy for SummarizeStrategy {
 
         let response = client.create_chat_completion(request).await?;
 
-        let (summary, summary_tokens) = match response
+        let summary = match response
             .first_choice_content()
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            Some(s) => {
-                let tokens = s.chars().count() / 4 + 16;
-                (Some(s.to_owned()), tokens)
-            }
-            None => {
-                warn!("compaction: LLM returned empty summary");
-                (None, 0)
-            }
+            Some(s) => s.to_owned(),
+            None => bail!("compaction: LLM returned empty summary"),
         };
+        let summary_tokens = summary.chars().count() / 4 + 16;
 
         Ok(CompactionResult {
             summary,
             summary_tokens,
             turns_compacted: turns_used,
-            modified_turns: None,
         })
     }
 }

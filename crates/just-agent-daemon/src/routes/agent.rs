@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use just_agent_core::config::AgentConfig;
-use just_agent_core::context::{AgenticContext, ContextStore, strategy_from_name};
+use just_agent_core::context::{AgenticContext, ContextStore, SummarizeStrategy};
 use just_agent_core::deferred::DeferredQueue;
 use just_agent_core::policy::{AgentPolicy, AuthorizedToolExecutor};
 use just_agent_core::provider::client_from_env;
@@ -70,7 +70,8 @@ pub async fn create_agent(
     );
     let tool_defs = executor.tool_definitions();
     store.lock().await.set_tool_definitions(tool_defs);
-    let strategy = strategy_from_name(&config.compaction_strategy, config.compact_max_tokens);
+    let strategy: Box<dyn just_agent_core::context::CompactionStrategy> =
+        Box::new(SummarizeStrategy::new(config.compact_max_tokens));
 
     let prompt = config.prompt.take();
     let ctx = AgentContext {

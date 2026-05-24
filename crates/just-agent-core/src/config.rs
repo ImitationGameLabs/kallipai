@@ -7,7 +7,6 @@ const DEFAULT_MAX_TOOL_ROUNDS: usize = 32;
 const DEFAULT_COMPACT_MAX_TOKENS: u32 = 1_200;
 const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 128_000;
 const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 8_192;
-const DEFAULT_COMPACTION_STRATEGY: &str = "summarize";
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 
 /// Runtime configuration for `just-agent`.
@@ -19,7 +18,6 @@ pub struct AgentConfig {
     pub workspace_root: PathBuf,
     pub context_window_tokens: usize,
     pub output_reserve_tokens: usize,
-    pub compaction_strategy: String,
     pub compact_max_tokens: u32,
     pub tool_timeout_secs: u64,
     pub skills: Vec<String>,
@@ -47,8 +45,6 @@ impl AgentConfig {
             .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
         let output_reserve_tokens = parse_env::<usize>("JUST_AGENT_OUTPUT_RESERVE_TOKENS")?
             .unwrap_or(DEFAULT_OUTPUT_RESERVE_TOKENS);
-        let compaction_strategy = std::env::var("JUST_AGENT_COMPACTION_STRATEGY")
-            .unwrap_or_else(|_| DEFAULT_COMPACTION_STRATEGY.into());
         let compact_max_tokens = parse_env::<u32>("JUST_AGENT_COMPACT_MAX_TOKENS")?
             .unwrap_or(DEFAULT_COMPACT_MAX_TOKENS);
         let tool_timeout_secs =
@@ -78,7 +74,6 @@ impl AgentConfig {
             workspace_root,
             context_window_tokens,
             output_reserve_tokens,
-            compaction_strategy,
             compact_max_tokens,
             tool_timeout_secs,
             skills,
