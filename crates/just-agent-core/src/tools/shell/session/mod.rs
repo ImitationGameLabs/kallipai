@@ -1,6 +1,6 @@
 //! Shell session management tools.
 //!
-//! Each sub-module implements an [`LlmTool`](crate::tools::LlmTool) that maps to
+//! Each sub-module implements an [`LlmTool`](just_llm_client::LlmTool) that maps to
 //! a single [`ShellBackend`](super::backend::ShellBackend) method, exposing session
 //! lifecycle operations (create, list, switch, kill, restart) and output capture
 //! to the LLM.
