@@ -67,6 +67,9 @@ impl AgentConfig {
             parse_env::<u32>("JUST_AGENT_MAX_RETRIES")?.unwrap_or(DEFAULT_MAX_RETRIES);
         let retry_base_delay_secs = parse_env::<u64>("JUST_AGENT_RETRY_BASE_DELAY_SECS")?
             .unwrap_or(DEFAULT_RETRY_BASE_DELAY_SECS);
+        if retry_base_delay_secs == 0 {
+            bail!("JUST_AGENT_RETRY_BASE_DELAY_SECS must be greater than zero");
+        }
         // max_delay and retry_timeout use defaults (30s / 120s) — intentionally
         // not exposed as env vars since they rarely need tuning.
         let retry_policy = RetryPolicy {
