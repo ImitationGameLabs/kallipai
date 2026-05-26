@@ -219,18 +219,4 @@ impl DaemonClient {
             .context("failed to parse status response")?;
         Ok(status)
     }
-
-    /// Load a skill into the agent's context.
-    pub async fn agent_load_skill(&self, id: &str, name: &str) -> Result<()> {
-        self.inner
-            .http
-            .post(self.url(&format!("/agents/{id}/skill")))
-            .json(&SkillRequest { name: name.to_owned() })
-            .send()
-            .await
-            .context("failed to load skill")?
-            .error_for_status()
-            .context("daemon returned error")?;
-        Ok(())
-    }
 }

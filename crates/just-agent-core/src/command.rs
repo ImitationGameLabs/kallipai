@@ -15,7 +15,6 @@ pub enum SlashCommand {
     Quit,
     Clear,
     Status,
-    Skill { name: String },
 }
 
 /// Static descriptor for a known command.

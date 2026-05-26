@@ -28,7 +28,6 @@ pub(crate) struct ListAgentsResponse {
 pub struct AgentSummary {
     pub id: String,
     pub workspace_root: String,
-    pub skills: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,11 +35,6 @@ pub(crate) struct ApprovalRequestBody {
     pub request_id: String,
     pub decision: String,
     pub reason: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct SkillRequest {
-    pub name: String,
 }
 
 /// Deferred action info extracted from an SSE `DeferredCreated` event.

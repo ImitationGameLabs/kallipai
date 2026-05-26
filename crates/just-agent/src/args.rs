@@ -21,6 +21,8 @@ pub enum Commands {
     Events(IdArgs),
     /// Show agent context usage
     Status(IdArgs),
+    /// Interrupt current agent operation
+    Interrupt(IdArgs),
     /// Respond to approval request
     Approve(ApproveArgs),
 }

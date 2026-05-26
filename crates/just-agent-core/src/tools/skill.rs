@@ -190,17 +190,6 @@ pub fn skill_tool_set(ctx: Arc<Mutex<dyn AgenticContext>>) -> Vec<Box<dyn LlmToo
     vec![Box::new(SkillLoadTool::new(ctx))]
 }
 
-/// Load a skill from disk and pin it into the agent context.
-pub fn pin_skill(ctx: &mut dyn AgenticContext, name: &str) -> Result<()> {
-    let content = load_skill(name)?;
-    let label = format!("skill:{name}");
-    ctx.pin(
-        &label,
-        ChatMessage::user(format!("[skill: {name}]\n{content}")),
-    )?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

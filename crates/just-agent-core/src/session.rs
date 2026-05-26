@@ -109,32 +109,12 @@ async fn handle_command(
     ctx: &mut AgentContext,
     agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
 ) {
-    match cmd {
-        SlashCommand::Status => {
-            let usage = ctx.store.lock().await.usage_snapshot();
-            agent_tx
-                .send(AgentEvent::Status(usage.format_summary()))
-                .await
-                .ok();
-        }
-        SlashCommand::Skill { name } => {
-            match crate::tools::pin_skill(&mut *ctx.store.lock().await, name) {
-                Ok(()) => {
-                    agent_tx
-                        .send(AgentEvent::Status(format!("skill '{name}' loaded")))
-                        .await
-                        .ok();
-                }
-                Err(e) => {
-                    agent_tx
-                        .send(AgentEvent::Error(format!("skill load failed: {e:#}")))
-                        .await
-                        .ok();
-                }
-            }
-        }
-        // Local commands (Help, Quit, Clear) are handled in the TUI layer.
-        _ => {}
+    if let SlashCommand::Status = cmd {
+        let usage = ctx.store.lock().await.usage_snapshot();
+        agent_tx
+            .send(AgentEvent::Status(usage.format_summary()))
+            .await
+            .ok();
     }
 }
 

@@ -2,14 +2,11 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use just_agent_core::command::{SlashCommand, UserInput};
 use just_agent_core::context::{AgenticContext, ContextUsage};
 
+use crate::state::SharedState;
 use just_agent_core::retry::RetryRecord;
 use serde::Serialize;
-
-use super::SkillRequest;
-use crate::state::SharedState;
 
 /// Combined status response: context usage + recent retry history.
 #[derive(Serialize)]
@@ -38,24 +35,4 @@ pub async fn agent_status(
         .cloned()
         .collect::<Vec<_>>();
     Ok(Json(AgentStatus { context, recent_retries }))
-}
-
-/// POST /agents/{id}/skill — load a skill by name.
-pub async fn agent_load_skill(
-    State(state): State<SharedState>,
-    Path(id): Path<String>,
-    Json(req): Json<SkillRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let agents = state.agents.read().await;
-    let entry = agents
-        .iter()
-        .find(|e| e.id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    entry
-        .agent
-        .prompt_tx
-        .send(UserInput::Command(SlashCommand::Skill { name: req.name }))
-        .await
-        .map_err(|_| StatusCode::GONE)?;
-    Ok(StatusCode::ACCEPTED)
 }

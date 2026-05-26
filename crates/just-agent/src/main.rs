@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
                 println!("No agents running.");
             } else {
                 for a in &agents {
-                    println!("{}  ws={}  skills={:?}", a.id, a.workspace_root, a.skills);
+                    println!("{}  ws={}", a.id, a.workspace_root);
                 }
             }
         }
@@ -83,6 +83,11 @@ async fn main() -> Result<()> {
                     );
                 }
             }
+        }
+        Commands::Interrupt(args) => {
+            let client = DaemonClient::new(&args.daemon.daemon_url);
+            client.interrupt_agent(&args.id).await?;
+            println!("Agent {} interrupted.", args.id);
         }
         Commands::Approve(args) => {
             init_tracing();

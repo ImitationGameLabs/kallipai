@@ -229,8 +229,6 @@ async fn handle_command(
             }
             Err(e) => eprintln!("[error] {e}"),
         },
-        // Unreachable: parse() never produces these
-        _ => {}
     }
 }
 

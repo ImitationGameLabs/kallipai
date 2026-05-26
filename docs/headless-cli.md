@@ -45,7 +45,7 @@ Default timeout: 300 seconds.
 just-agent list
 ```
 
-Prints all agents with their workspace and loaded skills.
+Prints all agents with their workspace root.
 
 ### `stop` — Kill an agent
 
@@ -67,6 +67,24 @@ line). Useful for monitoring or piping into `jq`.
 ```bash
 $ just-agent events "$AGENT_ID" | jq -c 'select(.type == "ToolCall")'
 ```
+
+
+### `status` — Show agent context usage
+
+```bash
+just-agent status <ID>
+```
+
+Prints context token usage and recent retry history for the agent.
+
+### `interrupt` — Interrupt agent operation
+
+```bash
+just-agent interrupt <ID>
+```
+
+Gracefully interrupts the agent's current operation. The agent persists its
+state and stops processing. Use `stop` to kill the agent entirely.
 
 ### `approve` — Respond to a deferred action
 
@@ -143,10 +161,10 @@ just-agent send "$AGENT_B" "Execute this plan: $PLAN"
 just-agent list
 
 # Check an agent's context usage before sending more work
-# (via the client library — not yet exposed as a CLI subcommand)
+just-agent status $AGENT_ID
 
-# Load a skill into a running agent
-# (via the client library — not yet exposed as a CLI subcommand)
+# Interrupt a running agent gracefully (without killing it)
+just-agent interrupt $AGENT_ID
 ```
 
 ## Environment variables
@@ -174,7 +192,6 @@ let id = client.spawn(Some("/project"), vec!["code-review"], None).await?;
 let result = client.send_prompt(&id, "Review src/main.rs", 120).await?;
 client.kill_agent(&id).await?;
 
-// Additional methods not yet in the CLI:
+// Additional client methods:
 let usage = client.agent_status(&id).await?;
-client.agent_load_skill(&id, "security-review").await?;
 ```

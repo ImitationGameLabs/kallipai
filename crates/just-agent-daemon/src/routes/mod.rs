@@ -39,11 +39,6 @@ pub struct CreateAgentResponse {
     pub id: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SkillRequest {
-    pub name: String,
-}
-
 use serde::Serialize;
 
 /// Build the full axum router with all agent routes.
@@ -73,9 +68,5 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/agents/{id}/status",
             axum::routing::get(context::agent_status),
-        )
-        .route(
-            "/agents/{id}/skill",
-            axum::routing::post(context::agent_load_skill),
         )
 }
