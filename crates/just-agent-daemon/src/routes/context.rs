@@ -3,6 +3,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use just_agent_core::context::{AgenticContext, ContextUsage};
+use just_agent_core::types::AgentState;
 
 use crate::state::SharedState;
 use just_agent_core::retry::RetryRecord;
@@ -11,6 +12,7 @@ use serde::Serialize;
 /// Combined status response: context usage + recent retry history.
 #[derive(Serialize)]
 pub struct AgentStatus {
+    pub state: AgentState,
     pub context: ContextUsage,
     pub recent_retries: Vec<RetryRecord>,
 }
@@ -34,5 +36,9 @@ pub async fn agent_status(
         .take(20)
         .cloned()
         .collect::<Vec<_>>();
-    Ok(Json(AgentStatus { context, recent_retries }))
+    Ok(Json(AgentStatus {
+        state: entry.agent.get_state(),
+        context,
+        recent_retries,
+    }))
 }

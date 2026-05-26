@@ -1,5 +1,26 @@
 //! Shared types used across the agent crate.
 
+/// Agent lifecycle state exposed via the status endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    Idle,
+    Busy,
+}
+
+impl AgentState {
+    pub const IDLE: u8 = 0;
+    pub const BUSY: u8 = 1;
+}
+
+impl std::fmt::Display for AgentState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AgentState::Idle => "idle",
+            AgentState::Busy => "busy",
+        })
+    }
+}
 use serde::{Deserialize, Serialize};
 #[derive(Debug)]
 pub enum AgentEvent {

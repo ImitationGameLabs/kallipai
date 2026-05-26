@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
                 println!("No agents running.");
             } else {
                 for a in &agents {
-                    println!("{}  ws={}", a.id, a.workspace_root);
+                    println!("{}  {}  ws={}", a.id, a.state, a.workspace_root);
                 }
             }
         }
@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
         Commands::Status(args) => {
             let client = DaemonClient::new(&args.daemon.daemon_url);
             let status = client.agent_status(&args.id).await?;
+            println!("state: {}", status.state);
             println!("{}", status.context.format_summary());
             if !status.recent_retries.is_empty() {
                 println!(

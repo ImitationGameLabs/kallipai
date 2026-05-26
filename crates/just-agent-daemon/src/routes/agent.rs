@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -12,22 +13,25 @@ use just_agent_core::policy::{AgentPolicy, AuthorizedToolExecutor};
 use just_agent_core::provider::client_from_env;
 use just_agent_core::session::{self, AgentContext};
 use just_agent_core::tools::{build_tool_dispatch, ensure_meta_skill, load_skill};
+use just_agent_core::types::SseEvent;
 use just_llm_client::types::chat::ChatMessage;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use super::{CreateAgentRequest, CreateAgentResponse, ListAgentsResponse};
 use crate::bridge::bridge_task;
-use crate::state::{Agent, AgentEntry, AgentSummary, SharedState};
+use crate::state::{Agent, AgentEntry, AgentState, AgentSummary, SharedState};
 
 /// Reconstruct runtime resources shared by create and restore.
-async fn spawn_agent(
+pub(crate) async fn spawn_agent(
     store: Arc<tokio::sync::Mutex<ContextStore>>,
     deferred: Arc<tokio::sync::Mutex<DeferredQueue>>,
     session_dir: std::path::PathBuf,
     config: AgentConfig,
     initial_prompt: Option<String>,
     parent_cancel: CancellationToken,
+    events_tx: broadcast::Sender<SseEvent>,
 ) -> anyhow::Result<Agent> {
     let cancel = parent_cancel.child_token();
 
@@ -72,8 +76,13 @@ async fn spawn_agent(
         prompt_rx,
         agent_tx,
     ));
-    let (events_tx, _) = tokio::sync::broadcast::channel(256);
-    let bridge_handle = tokio::spawn(bridge_task(agent_rx, events_tx.clone(), cancel.clone()));
+    let state = Arc::new(AtomicU8::new(AgentState::IDLE));
+    let bridge_handle = tokio::spawn(bridge_task(
+        agent_rx,
+        events_tx.clone(),
+        parent_cancel.clone(),
+        state.clone(),
+    ));
 
     Ok(Agent {
         prompt_tx,
@@ -85,6 +94,7 @@ async fn spawn_agent(
         store,
         session_dir: Some(session_dir),
         cancel,
+        state,
     })
 }
 
@@ -121,6 +131,7 @@ pub async fn create_agent(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let prompt = config.prompt.take();
+    let (events_tx, _) = broadcast::channel(256);
     let agent = spawn_agent(
         store,
         deferred,
@@ -128,6 +139,7 @@ pub async fn create_agent(
         config,
         prompt,
         state.shutdown.clone(),
+        events_tx,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -148,6 +160,7 @@ pub async fn list_agents(State(state): State<SharedState>) -> Json<ListAgentsRes
         .map(|entry| AgentSummary {
             id: entry.id.clone(),
             workspace_root: entry.agent.config.workspace_root.display().to_string(),
+            state: entry.agent.get_state(),
         })
         .collect();
     Json(ListAgentsResponse { agents: summaries })
@@ -223,6 +236,7 @@ pub async fn restore_sessions(state: &SharedState) {
 
             let store = Arc::new(tokio::sync::Mutex::new(sess.store));
             let deferred = Arc::new(tokio::sync::Mutex::new(sess.deferred));
+            let (events_tx, _) = broadcast::channel(256);
 
             match spawn_agent(
                 store,
@@ -231,6 +245,7 @@ pub async fn restore_sessions(state: &SharedState) {
                 config,
                 None,
                 state.shutdown.clone(),
+                events_tx,
             )
             .await
             {
