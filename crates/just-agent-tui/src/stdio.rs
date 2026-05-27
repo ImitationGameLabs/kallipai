@@ -21,7 +21,7 @@ pub async fn run_stdio(client: DaemonClient, agent_id: String) -> Result<()> {
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
                 let result = match action {
-                    Action::SendPrompt(text) => client.post_prompt(&agent_id, &text).await,
+                    Action::SendPrompt(text) => client.post_message(&agent_id, &text).await,
                     Action::RespondApproval { request_id, decision } => {
                         client
                             .respond_approval(&agent_id, &request_id, &decision, None)

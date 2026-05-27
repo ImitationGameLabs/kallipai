@@ -15,6 +15,9 @@ const DEFAULT_RETRY_BASE_DELAY_SECS: u64 = 1;
 const DEFAULT_PINNED_BUDGET_RATIO: f64 = 0.25;
 const DEFAULT_CONTEXT_THRESHOLDS: &[u8] = &[50, 60, 70, 80];
 
+/// Default max delegation depth for top-level agents.
+pub const DEFAULT_MAX_DEPTH: u8 = 3;
+
 /// Runtime configuration for `just-agent`.
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -30,6 +33,9 @@ pub struct AgentConfig {
     pub retry_policy: RetryPolicy,
     pub pinned_budget_ratio: f64,
     pub context_thresholds: Vec<u8>,
+    pub agent_id: Option<String>,
+    pub created_by: Option<String>,
+    pub permissions: PermissionProfile,
 }
 
 impl AgentConfig {
@@ -128,7 +134,7 @@ impl AgentConfig {
             prompt,
             system_prompt,
             max_tool_rounds,
-            workspace_root,
+            workspace_root: workspace_root.clone(),
             context_window_tokens,
             output_reserve_tokens,
             summary_max_tokens,
@@ -137,6 +143,9 @@ impl AgentConfig {
             retry_policy,
             pinned_budget_ratio,
             context_thresholds,
+            agent_id: None,
+            created_by: None,
+            permissions: PermissionProfile::new(workspace_root),
         })
     }
 
@@ -155,6 +164,26 @@ impl AgentConfig {
     pub fn effective_budget(&self) -> usize {
         self.context_window_tokens
             .saturating_sub(self.output_reserve_tokens)
+    }
+}
+
+/// Permission profile controlling agent delegation capabilities.
+#[derive(Clone, Debug)]
+pub struct PermissionProfile {
+    /// Remaining delegation levels. Decremented for each subagent.
+    pub max_depth: u8,
+    /// Workspace boundary. Subagents must operate within their supervisor's workspace.
+    pub workspace_root: PathBuf,
+}
+
+impl PermissionProfile {
+    pub fn new(workspace_root: PathBuf) -> Self {
+        Self { max_depth: DEFAULT_MAX_DEPTH, workspace_root }
+    }
+
+    /// Create a profile for a subagent with decremented depth.
+    pub fn subagent(workspace_root: PathBuf, supervisor_depth: u8) -> Self {
+        Self { max_depth: supervisor_depth.saturating_sub(1), workspace_root }
     }
 }
 

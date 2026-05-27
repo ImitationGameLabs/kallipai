@@ -9,14 +9,16 @@ use crate::state::SharedState;
 
 pub async fn respond_approval(
     State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
     Path(id): Path<String>,
     Json(req): Json<ApprovalRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     let agents = state.agents.read().await;
+    crate::auth::require_superior(&auth.0, &agents, &id)?;
     let entry = agents
         .iter()
         .find(|e| e.id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or((StatusCode::NOT_FOUND, "agent not found".into()))?;
 
     {
         let mut deferred = entry.agent.deferred.lock().await;
@@ -24,7 +26,7 @@ pub async fn respond_approval(
             "approve" => {
                 deferred
                     .approve(&req.request_id)
-                    .map_err(|_| StatusCode::NOT_FOUND)?;
+                    .map_err(|_| (StatusCode::NOT_FOUND, "request_id not found".into()))?;
                 entry
                     .agent
                     .events_tx
@@ -36,7 +38,7 @@ pub async fn respond_approval(
                 let reason = req.reason.as_deref().unwrap_or("denied").to_owned();
                 deferred
                     .deny(&req.request_id, &reason)
-                    .map_err(|_| StatusCode::NOT_FOUND)?;
+                    .map_err(|_| (StatusCode::NOT_FOUND, "request_id not found".into()))?;
                 entry
                     .agent
                     .events_tx
@@ -44,7 +46,12 @@ pub async fn respond_approval(
                     .ok();
                 serde_json::to_string(&*deferred).ok()
             }
-            _ => return Err(StatusCode::BAD_REQUEST),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "decision must be 'approve' or 'deny'".into(),
+                ));
+            }
         };
 
         // Persist while still holding the lock so the agent loop's

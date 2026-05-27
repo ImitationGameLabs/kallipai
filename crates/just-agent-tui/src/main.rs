@@ -36,8 +36,33 @@ async fn main() -> Result<()> {
             .init();
     }
 
-    let client = DaemonClient::new(&args.daemon_url);
-    let agent_id = client.spawn(None, args.skills, None).await?;
+    let token = match std::env::var("JUST_AGENT_AUTH_TOKEN").ok() {
+        Some(tok) => tok,
+        None if !args.stdio => {
+            eprint!("Auth token (from daemon output): ");
+            let mut tok = String::new();
+            std::io::stdin().read_line(&mut tok)?;
+            let tok = tok.trim().to_owned();
+            if tok.is_empty() {
+                anyhow::bail!("no token provided");
+            }
+            tok
+        }
+        None => {
+            anyhow::bail!(
+                "JUST_AGENT_AUTH_TOKEN not set. Set the env var or run without --stdio for interactive prompt."
+            );
+        }
+    };
+    let client = DaemonClient::new_with_token(&args.daemon_url, token);
+    let agent_id = client
+        .spawn(just_agent_core::types::CreateAgentRequest {
+            workspace_root: None,
+            skills: args.skills,
+            prompt: None,
+            created_by: None,
+        })
+        .await?;
 
     if args.stdio {
         stdio::run_stdio(client, agent_id).await
@@ -65,7 +90,7 @@ async fn run_tui(client: DaemonClient, agent_id: String) -> Result<()> {
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
                 let Action::SendPrompt(text) = action;
-                if let Err(e) = client.post_prompt(&agent_id, &text).await {
+                if let Err(e) = client.post_message(&agent_id, &text).await {
                     tracing::error!("prompt delivery failed: {e}");
                 }
             }

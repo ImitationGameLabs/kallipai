@@ -2,20 +2,14 @@ mod agent;
 pub use agent::restore_sessions;
 mod approval;
 mod context;
-mod prompt;
+mod message;
 
 use axum::Router;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use state::SharedState;
 
 use crate::state;
-
-#[derive(Debug, Deserialize)]
-pub struct CreateAgentRequest {
-    pub workspace_root: Option<String>,
-    pub skills: Vec<String>,
-    pub prompt: Option<String>,
-}
+use just_agent_core::types::{CreateAgentRequest, CreateAgentResponse};
 
 #[derive(Debug, Serialize)]
 pub struct ListAgentsResponse {
@@ -23,7 +17,7 @@ pub struct ListAgentsResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PromptRequest {
+pub struct MessageRequest {
     pub text: String,
 }
 
@@ -34,13 +28,6 @@ pub struct ApprovalRequest {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct CreateAgentResponse {
-    pub id: String,
-}
-
-use serde::Serialize;
-
 /// Build the full axum router with all agent routes.
 pub fn router() -> Router<SharedState> {
     Router::new()
@@ -49,12 +36,12 @@ pub fn router() -> Router<SharedState> {
             axum::routing::post(agent::create_agent).get(agent::list_agents),
         )
         .route(
-            "/agents/{id}/prompt",
-            axum::routing::post(prompt::send_prompt),
+            "/agents/{id}/message",
+            axum::routing::post(message::send_message),
         )
         .route(
             "/agents/{id}/events",
-            axum::routing::get(prompt::sse_events),
+            axum::routing::get(message::sse_events),
         )
         .route(
             "/agents/{id}/approval",

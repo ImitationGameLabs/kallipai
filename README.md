@@ -72,13 +72,13 @@ The flow:
 2. A deferred result is returned to the LLM immediately, so the agent can
    continue working on other things.
 3. The approval request is emitted as an SSE event, visible to any client
-   (TUI, CLI, or a parent agent).
+   (TUI, CLI, or a supervisor agent).
 4. The client approves or denies the request via the daemon API.
 5. On the next agent round, the approval notification is injected into context.
    The agent then calls `approval_redeem` to execute the stored action.
 
-This design is intentional for multi-agent scenarios: a parent agent can monitor
-deferred actions from its sub-agents and make approval decisions programmatically,
+This design is intentional for multi-agent scenarios: a supervisor agent can monitor
+deferred actions from its subagents and make approval decisions programmatically,
 without a human in the loop. Or it can surface the decision to a human.
 
 ## Quick start

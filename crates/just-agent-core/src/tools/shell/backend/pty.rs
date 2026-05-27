@@ -145,6 +145,7 @@ pub struct PtyBuilder {
     stability_threshold: usize,
     fallback_cwd: PathBuf,
     fallback_shell: String,
+    env: HashMap<OsString, OsString>,
 }
 
 impl PtyBuilder {
@@ -161,6 +162,7 @@ impl PtyBuilder {
             stability_threshold: DEFAULT_STABILITY_THRESHOLD,
             fallback_cwd: PathBuf::from(DEFAULT_FALLBACK_CWD),
             fallback_shell: DEFAULT_FALLBACK_SHELL.to_owned(),
+            env: HashMap::new(),
         }
     }
 
@@ -234,6 +236,25 @@ impl PtyBuilder {
     /// Default: `"/bin/bash"`.
     pub fn fallback_shell(mut self, shell: impl Into<String>) -> Self {
         self.fallback_shell = shell.into();
+        self
+    }
+
+    /// Adds an environment variable to inject into every shell session.
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.insert(key.into(), value.into());
+        self
+    }
+
+    /// Adds multiple environment variables to inject into every shell session.
+    pub fn envs<I, K, V>(mut self, envs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<OsString>,
+        V: Into<OsString>,
+    {
+        for (k, v) in envs {
+            self.env.insert(k.into(), v.into());
+        }
         self
     }
 
@@ -357,6 +378,11 @@ impl PtyBackend {
         cmd.env("NO_COLOR", "1");
         cmd.env("LS_COLORS", "");
         cmd.env("CLICOLOR", "0");
+
+        // Inject user-configured environment variables.
+        for (key, value) in &self.config.env {
+            cmd.env(key, value);
+        }
 
         cmd.cwd(&cwd);
 

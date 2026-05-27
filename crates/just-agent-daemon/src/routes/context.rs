@@ -18,15 +18,17 @@ pub struct AgentStatus {
 }
 
 /// GET /agents/{id}/status — return context usage and retry history.
+/// Any authenticated identity may query any agent's status.
 pub async fn agent_status(
     State(state): State<SharedState>,
+    _auth: crate::auth::AuthIdentity,
     Path(id): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let agents = state.agents.read().await;
     let entry = agents
         .iter()
         .find(|e| e.id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or((StatusCode::NOT_FOUND, "agent not found".into()))?;
     let store = entry.agent.store.lock().await;
     let context = store.usage_snapshot();
     let recent_retries = store

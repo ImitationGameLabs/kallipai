@@ -148,3 +148,18 @@ impl From<AgentEvent> for SseEvent {
         }
     }
 }
+
+/// Request body for creating a new agent instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAgentRequest {
+    pub workspace_root: Option<String>,
+    pub skills: Vec<String>,
+    pub prompt: Option<String>,
+    pub created_by: Option<String>,
+}
+
+/// Response body returned after creating an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAgentResponse {
+    pub id: String,
+}

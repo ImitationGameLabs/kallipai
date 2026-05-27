@@ -1,4 +1,5 @@
 mod args;
+mod auth;
 mod bridge;
 mod routes;
 mod sse;
@@ -24,21 +25,26 @@ async fn main() -> Result<()> {
     // Expose daemon URL so agent shells can discover it via $JUST_AGENT_DAEMON_URL.
     // Safe: called once at startup, single-threaded, before any concurrent operations.
     unsafe {
-        std::env::set_var(
-            "JUST_AGENT_DAEMON_URL",
-            format!("http://{}", args.listen_addr),
-        );
+        std::env::set_var("JUST_AGENT_DAEMON_URL", &args.advertise_url);
     }
 
-    let state = Arc::new(AppState::new());
+    let operator_token = uuid::Uuid::new_v4().to_string();
+    println!("─────────────────────────────────────────────────");
+    println!("  Operator token (set before using CLI/TUI):");
+    println!("  export JUST_AGENT_AUTH_TOKEN={operator_token}");
+    println!("─────────────────────────────────────────────────");
+
+    let state = Arc::new(AppState::new(operator_token));
 
     // Restore persisted sessions before accepting requests.
     routes::restore_sessions(&state).await;
 
-    let app = routes::router().with_state(state.clone());
+    let app = routes::router()
+        .with_state(state.clone())
+        .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr).await?;
-    info!(addr = %args.listen_addr, "daemon listening");
+    info!(addr = %args.listen_addr, advertise = %args.advertise_url, "daemon listening");
     let shutdown_token = state.shutdown.clone();
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown_token))

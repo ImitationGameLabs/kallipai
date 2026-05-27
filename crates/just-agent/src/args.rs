@@ -11,10 +11,10 @@ pub struct Cli {
 pub enum Commands {
     /// Start a new agent via daemon
     Start(StartArgs),
-    /// Send prompt to agent and wait for result
+    /// Send message to agent
     Send(SendArgs),
     /// List all agents
-    List(DaemonArgs),
+    List,
     /// Stop an agent
     Stop(IdArgs),
     /// Stream agent events
@@ -28,16 +28,7 @@ pub enum Commands {
 }
 
 #[derive(Args)]
-pub struct DaemonArgs {
-    /// Daemon URL.
-    #[arg(long, env = "JUST_AGENT_DAEMON_URL", default_value = "http://localhost:3000")]
-    pub daemon_url: String,
-}
-
-#[derive(Args)]
 pub struct StartArgs {
-    #[command(flatten)]
-    pub daemon: DaemonArgs,
     /// Working directory for the agent.
     #[arg(long)]
     pub workspace_root: Option<String>,
@@ -51,29 +42,20 @@ pub struct StartArgs {
 
 #[derive(Args)]
 pub struct SendArgs {
-    #[command(flatten)]
-    pub daemon: DaemonArgs,
     /// Agent ID.
     pub id: String,
-    /// Prompt text to send.
-    pub prompt: String,
-    /// Timeout in seconds.
-    #[arg(long, default_value = "300")]
-    pub timeout: u64,
+    /// Message to send.
+    pub message: String,
 }
 
 #[derive(Args)]
 pub struct IdArgs {
-    #[command(flatten)]
-    pub daemon: DaemonArgs,
     /// Agent ID.
     pub id: String,
 }
 
 #[derive(Args)]
 pub struct ApproveArgs {
-    #[command(flatten)]
-    pub daemon: DaemonArgs,
     /// Agent ID.
     pub id: String,
     /// Request ID of the deferred action.

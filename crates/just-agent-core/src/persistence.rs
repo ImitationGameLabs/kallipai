@@ -31,13 +31,22 @@ pub fn session_dir(agent_id: &str) -> Result<PathBuf> {
 }
 
 /// Create session directory and write initial meta.json.
-pub fn create_session(agent_id: &str, workspace_root: &Path) -> Result<PathBuf> {
+pub fn create_session(
+    agent_id: &str,
+    workspace_root: &Path,
+    created_by: Option<&str>,
+    max_depth: u8,
+) -> Result<PathBuf> {
     let dir = session_dir(agent_id)?;
     std::fs::create_dir_all(&dir)?;
 
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "workspace_root": workspace_root.to_string_lossy(),
     });
+    if let Some(supervisor_id) = created_by {
+        meta["created_by"] = serde_json::Value::String(supervisor_id.to_owned());
+    }
+    meta["max_depth"] = serde_json::Value::Number(max_depth.into());
     atomic_write(
         &dir.join("meta.json"),
         &serde_json::to_string_pretty(&meta)?,
@@ -89,6 +98,12 @@ pub struct SessionMeta {
     /// Consecutive rapid restart counter (reset when outside the window).
     #[serde(default)]
     pub consecutive_restart_count: u32,
+    /// Supervisor agent ID (for subagents).
+    #[serde(default, rename = "created_by")]
+    pub created_by: Option<String>,
+    /// Remaining delegation depth.
+    #[serde(default)]
+    pub max_depth: Option<u8>,
 }
 
 /// Maximum consecutive rapid restarts before refusing restore.
@@ -108,6 +123,8 @@ pub struct PendingRestore {
     pub agent_id: String,
     pub session_dir: PathBuf,
     pub workspace_root: PathBuf,
+    pub created_by: Option<String>,
+    pub max_depth: Option<u8>,
 }
 
 /// A session fully deserialized and ready to resume.
@@ -151,6 +168,8 @@ pub fn scan_sessions() -> Vec<PendingRestore> {
                 agent_id,
                 session_dir: path,
                 workspace_root: meta.workspace_root,
+                created_by: meta.created_by,
+                max_depth: meta.max_depth,
             }),
             Err(e) => {
                 tracing::warn!(id = %agent_id, "skipping session: {e:#}");

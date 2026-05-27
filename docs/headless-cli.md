@@ -4,8 +4,8 @@
 automation — no TTY, no interactive prompts, structured output. This is how
 agents manage other agents.
 
-All subcommands accept `--daemon-url` (env: `JUST_AGENT_DAEMON_URL`, default
-`http://localhost:3000`).
+All subcommands use `JUST_AGENT_AUTH_TOKEN` (mandatory) and `JUST_AGENT_DAEMON_URL`
+(env, default `http://127.0.0.1:3000`).
 
 ## Subcommands
 
@@ -23,21 +23,20 @@ $ just-agent start --workspace-root /projects/frontend --skill code-review
 a3f1b2c4-5678-90ab-cdef-1234567890ab
 ```
 
-### `send` — Send a prompt and wait for result
+### `send` — Send a message to an agent
 
 ```bash
-just-agent send <ID> <PROMPT> [--timeout <secs>]
+just-agent send <ID> <MESSAGE>
 ```
 
-Sends a prompt to the agent and blocks until the agent finishes, errors, or
-times out. Prints the final assistant content to stdout.
+Sends a message to the agent's input queue. The daemon accepts the message
+immediately (202 Accepted) and processes it asynchronously. Subscribe to
+`events` to observe results.
 
 ```bash
 $ AGENT_ID=$(just-agent start --workspace-root /projects/api)
-$ just-agent send "$AGENT_ID" "List all TODO comments in src/" --timeout 120
+$ just-agent send "$AGENT_ID" "List all TODO comments in src/"
 ```
-
-Default timeout: 300 seconds.
 
 ### `list` — List running agents
 
@@ -101,20 +100,20 @@ $ just-agent approve "$AGENT_ID" "req-abc123" approve
 
 ## Scripting patterns
 
-### Capture output in a variable
+### Send and monitor
 
 ```bash
 AGENT_ID=$(just-agent start --workspace-root /my/project)
-RESULT=$(just-agent send "$AGENT_ID" "Summarize the project structure")
-echo "$RESULT"
-just-agent stop "$AGENT_ID"
+just-agent send "$AGENT_ID" "Summarize the project structure"
+# Observe results via events stream
+just-agent events "$AGENT_ID" | jq -c 'select(.type == "Content")'
 ```
 
 ### Monitor tool calls in real time
 
 ```bash
 just-agent events "$AGENT_ID" | jq -c '{type, name: .name, args: .args}' &
-just-agent send "$AGENT_ID" "Run the test suite and report failures" --timeout 180
+just-agent send "$AGENT_ID" "Run the test suite and report failures"
 ```
 
 ### Filter for approval requests
@@ -137,21 +136,21 @@ FRONTEND=$(just-agent start --workspace-root /projects/frontend --skill code-rev
 BACKEND=$(just-agent start --workspace-root /projects/backend --skill security-review)
 
 # Send work to both
-just-agent send "$FRONTEND" "Review the latest changes for performance issues" --timeout 120 &
-just-agent send "$BACKEND" "Audit dependencies for known vulnerabilities" --timeout 180 &
+just-agent send "$FRONTEND" "Review the latest changes for performance issues" &
+just-agent send "$BACKEND" "Audit dependencies for known vulnerabilities" &
 
-# Wait for both
+# Wait for both sends to complete
 wait
 ```
 
-### Chain agents — feed output into another agent
+### Chain agents — coordinate via events
 
 ```bash
-# Agent A produces a plan
-PLAN=$(just-agent send "$AGENT_A" "Create an implementation plan for feature X")
+# Send work to agent A
+just-agent send "$AGENT_A" "Create an implementation plan for feature X"
 
-# Agent B executes the plan in a different project
-just-agent send "$AGENT_B" "Execute this plan: $PLAN"
+# Agent A's output can be consumed via events, then forwarded to agent B
+just-agent send "$AGENT_B" "Review the plan from agent A for security issues"
 ```
 
 ### Cross-project coordination
@@ -169,13 +168,14 @@ just-agent interrupt $AGENT_ID
 
 ## Environment variables
 
-| Variable                    | Purpose                                          |
-| --------------------------- | ------------------------------------------------ |
-| `JUST_AGENT_DAEMON_URL`     | Daemon address (default `http://localhost:3000`) |
-| `JUST_LLM_PROVIDER`         | LLM provider (e.g. `deepseek`)                   |
-| `JUST_LLM_MODEL`            | Model name (e.g. `deepseek-v4-flash`)            |
-| `JUST_LLM_DEEPSEEK_API_KEY` | API key for DeepSeek provider                    |
-| `RUST_LOG`                  | Tracing filter (e.g. `just_agent_client=debug`)  |
+| Variable                    | Purpose                                           |
+| --------------------------- | ------------------------------------------------- |
+| `JUST_AGENT_AUTH_TOKEN`     | Auth token (required, provided by daemon startup) |
+| `JUST_AGENT_DAEMON_URL`     | Daemon address (default `http://127.0.0.1:3000`)  |
+| `JUST_LLM_PROVIDER`         | LLM provider (e.g. `deepseek`)                    |
+| `JUST_LLM_MODEL`            | Model name (e.g. `deepseek-v4-flash`)             |
+| `JUST_LLM_DEEPSEEK_API_KEY` | API key for DeepSeek provider                     |
+| `RUST_LOG`                  | Tracing filter (e.g. `just_agent_client=debug`)   |
 
 ## Client library
 
@@ -185,13 +185,21 @@ For Rust programs that need more control than the CLI offers, the
 ```rust
 use just_agent_client::DaemonClient;
 
-let client = DaemonClient::new("http://localhost:3000");
+let client = DaemonClient::new_with_token("http://127.0.0.1:3000", token);
 
-// Spawn, send, kill
-let id = client.spawn(Some("/project"), vec!["code-review"], None).await?;
-let result = client.send_prompt(&id, "Review src/main.rs", 120).await?;
-client.kill_agent(&id).await?;
+// Spawn an agent
+let id = client.spawn(CreateAgentRequest {
+    workspace_root: Some("/project".into()),
+    skills: vec!["code-review".into()],
+    prompt: None,
+    created_by: None,
+}).await?;
 
-// Additional client methods:
+// Send a message (fire-and-forget)
+client.post_message(&id, "Review src/main.rs").await?;
+
+// Stream events, check status, kill
+let mut stream = client.event_stream(&id).await?;
 let usage = client.agent_status(&id).await?;
+client.kill_agent(&id).await?;
 ```

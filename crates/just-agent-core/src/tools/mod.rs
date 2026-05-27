@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -21,8 +22,11 @@ pub use skill::{ensure_meta_skill, load_skill};
 /// the caller via `std::env::set_current_dir`).
 ///
 /// Context tools share the same `ContextStore` as the main loop.
-pub async fn build_tool_dispatch(ctx: Arc<Mutex<ContextStore>>) -> Result<ToolDispatcher> {
-    let backend = PtyBuilder::new("main").build().await?;
+pub async fn build_tool_dispatch(
+    ctx: Arc<Mutex<ContextStore>>,
+    env: HashMap<String, String>,
+) -> Result<ToolDispatcher> {
+    let backend = PtyBuilder::new("main").envs(env).build().await?;
     let backend = Arc::new(Mutex::new(backend));
 
     let mut dispatch = ToolDispatcher::new();

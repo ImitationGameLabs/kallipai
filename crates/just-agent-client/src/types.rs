@@ -1,23 +1,12 @@
 use just_agent_core::context::ContextUsage;
 use just_agent_core::retry::RetryRecord;
 use just_agent_core::types::AgentState;
+pub(crate) use just_agent_core::types::{CreateAgentRequest, CreateAgentResponse};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
-pub(crate) struct PromptRequest {
+pub(crate) struct MessageRequest {
     pub text: String,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct CreateAgentRequest {
-    pub workspace_root: Option<String>,
-    pub skills: Vec<String>,
-    pub prompt: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CreateAgentResponse {
-    pub id: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -18,6 +19,7 @@ pub type SharedState = Arc<AppState>;
 pub struct AppState {
     pub agents: RwLock<Vec<AgentEntry>>,
     pub shutdown: CancellationToken,
+    pub operator_token: String,
 }
 
 pub struct AgentEntry {
@@ -36,6 +38,10 @@ pub struct Agent {
     pub session_dir: Option<PathBuf>,
     pub cancel: CancellationToken,
     pub state: Arc<AtomicU8>,
+    pub auth_token: String,
+    /// Environment variables injected into PTY sessions (JUST_AGENT_ID, JUST_AGENT_AUTH_TOKEN, etc.).
+    /// Preserved across reactivation so the agent retains its identity.
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,7 +61,7 @@ impl Agent {
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        Self { agents: RwLock::new(Vec::new()), shutdown: CancellationToken::new() }
+    pub fn new(operator_token: String) -> Self {
+        Self { agents: RwLock::new(Vec::new()), shutdown: CancellationToken::new(), operator_token }
     }
 }

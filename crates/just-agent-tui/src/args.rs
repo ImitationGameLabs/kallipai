@@ -5,7 +5,7 @@ use clap::Parser;
 #[command(name = "just-agent-tui", about = "Interactive TUI client for just-agent")]
 pub struct Args {
     /// Daemon URL.
-    #[arg(long, env = "JUST_AGENT_DAEMON_URL", default_value = "http://localhost:3000")]
+    #[arg(long, env = "JUST_AGENT_DAEMON_URL", default_value = "http://127.0.0.1:3000")]
     pub daemon_url: String,
 
     /// Activate a skill by name (repeatable).
