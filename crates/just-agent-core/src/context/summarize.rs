@@ -39,7 +39,10 @@ pub struct ContextSummarizer {
 
 impl ContextSummarizer {
     pub fn new(max_tokens: u32) -> Self {
-        Self { max_tokens, prompt: SUMMARIZE_PROMPT.to_owned() }
+        Self {
+            max_tokens,
+            prompt: SUMMARIZE_PROMPT.to_owned(),
+        }
     }
 
     /// Summarize the given turns via an LLM call.
@@ -88,6 +91,10 @@ impl ContextSummarizer {
         };
         let estimated_tokens = text.chars().count() / 4 + 16;
 
-        Ok(Summary { text, estimated_tokens, source_turns: turns_used })
+        Ok(Summary {
+            text,
+            estimated_tokens,
+            source_turns: turns_used,
+        })
     }
 }

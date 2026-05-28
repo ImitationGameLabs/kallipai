@@ -32,7 +32,9 @@ pub struct AgentContext {
 impl AgentContext {
     /// Persist context and deferred state to disk. Logs warnings on failure.
     pub async fn persist(&self) {
-        let Some(ref dir) = self.session_dir else { return };
+        let Some(ref dir) = self.session_dir else {
+            return;
+        };
 
         {
             let guard = self.store.lock().await;

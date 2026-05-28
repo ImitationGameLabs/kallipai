@@ -29,7 +29,11 @@ impl AuthorizedToolExecutor {
         policy: AgentPolicy,
         deferred: Arc<Mutex<DeferredQueue>>,
     ) -> Self {
-        Self { dispatch, policy, deferred }
+        Self {
+            dispatch,
+            policy,
+            deferred,
+        }
     }
 
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -144,7 +148,9 @@ fn parse_status_filter(args_json: &str) -> Option<DeferredStatus> {
     match s {
         "pending" => Some(DeferredStatus::Pending),
         "approved" => Some(DeferredStatus::Approved),
-        "denied" => Some(DeferredStatus::Denied { reason: String::new() }),
+        "denied" => Some(DeferredStatus::Denied {
+            reason: String::new(),
+        }),
         "redeemed" => Some(DeferredStatus::Redeemed),
         "cancelled" => Some(DeferredStatus::Cancelled),
         _ => None,

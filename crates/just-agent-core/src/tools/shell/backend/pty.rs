@@ -31,7 +31,10 @@ struct ScrollbackBuffer {
 
 impl ScrollbackBuffer {
     fn new(max_lines: usize) -> Self {
-        Self { lines: Vec::with_capacity(1024), max_lines }
+        Self {
+            lines: Vec::with_capacity(1024),
+            max_lines,
+        }
     }
 
     fn append_line(&mut self, line: &str) {
@@ -576,13 +579,21 @@ impl ShellBackend for PtyBackend {
         self.write_to_session(session, payload.as_bytes())?;
 
         if background {
-            return Ok(ShellOutput { output: String::new(), exit_code: None, timed_out: false });
+            return Ok(ShellOutput {
+                output: String::new(),
+                exit_code: None,
+                timed_out: false,
+            });
         }
 
         let full_output = match self.wait_for_completion(session, timeout_duration).await {
             Ok(output) => output,
             Err(ShellError::Timeout { .. }) => {
-                return Ok(ShellOutput { output: String::new(), exit_code: None, timed_out: true });
+                return Ok(ShellOutput {
+                    output: String::new(),
+                    exit_code: None,
+                    timed_out: true,
+                });
             }
             Err(error) => return Err(error),
         };
@@ -590,7 +601,11 @@ impl ShellBackend for PtyBackend {
         let diffed = strip_common_prefix(&before, &full_output);
         let (output, exit_code) = Self::extract_output(&diffed, &sentinel);
 
-        Ok(ShellOutput { output, exit_code, timed_out: false })
+        Ok(ShellOutput {
+            output,
+            exit_code,
+            timed_out: false,
+        })
     }
     async fn capture_output(&mut self, lines: usize) -> Result<String, ShellError> {
         let session_name = self.current_session.clone();

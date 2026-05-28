@@ -186,12 +186,18 @@ pub struct PermissionProfile {
 
 impl PermissionProfile {
     pub fn new(workspace_root: PathBuf) -> Self {
-        Self { max_depth: DEFAULT_MAX_DEPTH, workspace_root }
+        Self {
+            max_depth: DEFAULT_MAX_DEPTH,
+            workspace_root,
+        }
     }
 
     /// Create a profile for a subagent with decremented depth.
     pub fn subagent(workspace_root: PathBuf, supervisor_depth: u8) -> Self {
-        Self { max_depth: supervisor_depth.saturating_sub(1), workspace_root }
+        Self {
+            max_depth: supervisor_depth.saturating_sub(1),
+            workspace_root,
+        }
     }
 }
 

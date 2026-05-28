@@ -47,7 +47,11 @@ impl DaemonClient {
 
     /// Set Authorization: Bearer <token> if an auth token is configured.
     fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some(ref token) = self.inner.auth_token { req.bearer_auth(token) } else { req }
+        if let Some(ref token) = self.inner.auth_token {
+            req.bearer_auth(token)
+        } else {
+            req
+        }
     }
 
     /// Spawn a new agent instance on the daemon.
@@ -71,7 +75,9 @@ impl DaemonClient {
             self.inner
                 .http
                 .post(self.url(&format!("/agents/{id}/message")))
-                .json(&MessageRequest { text: text.to_owned() }),
+                .json(&MessageRequest {
+                    text: text.to_owned(),
+                }),
         )
         .send()
         .await

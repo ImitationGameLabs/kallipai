@@ -132,5 +132,9 @@ pub fn make_summary(tool_name: &str, args_json: &str) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_owned() } else { format!("{}...", &s[..max]) }
+    if s.len() <= max {
+        s.to_owned()
+    } else {
+        format!("{}...", &s[..max])
+    }
 }

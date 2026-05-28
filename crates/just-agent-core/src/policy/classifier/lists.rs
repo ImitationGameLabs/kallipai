@@ -9,8 +9,9 @@ use super::util;
 // Constants
 // ---------------------------------------------------------------------------
 
-pub(super) const SHELL_INTERPRETERS: &[&str] =
-    &["bash", "sh", "dash", "zsh", "ksh", "csh", "tcsh", "fish", "ash", "busybox"];
+pub(super) const SHELL_INTERPRETERS: &[&str] = &[
+    "bash", "sh", "dash", "zsh", "ksh", "csh", "tcsh", "fish", "ash", "busybox",
+];
 
 pub(super) const EVAL_COMMANDS: &[&str] = &["eval", "exec", "source", "."];
 
@@ -50,8 +51,15 @@ pub(super) const DANGEROUS_COMMANDS: &[&str] = &[
 ];
 
 /// Environment variables that can alter security-critical behavior.
-pub(super) const DANGEROUS_ENV_VARS: &[&str] =
-    &["PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH", "HOME", "SHELL", "IFS"];
+pub(super) const DANGEROUS_ENV_VARS: &[&str] = &[
+    "PATH",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "PYTHONPATH",
+    "HOME",
+    "SHELL",
+    "IFS",
+];
 
 /// Truly read-only commands that cannot modify filesystem state or execute code.
 const ALLOW_READONLY: &[&str] = &[
@@ -82,15 +90,19 @@ pub(super) fn check_dangerous_invocation(cmd_name: &str, words: &[Node]) -> Opti
                 dangerous: true,
             })
         }
-        "chmod" if util::has_any_flag(words, &["777"]) => {
-            Some(ToolDecision::Ask { reason: "chmod 777".into(), dangerous: true })
-        }
+        "chmod" if util::has_any_flag(words, &["777"]) => Some(ToolDecision::Ask {
+            reason: "chmod 777".into(),
+            dangerous: true,
+        }),
         "git"
             if util::has_subcommand_and_flag(words, "reset", "--hard")
                 || util::has_subcommand_and_flag(words, "reset", "--keep")
                 || util::has_subcommand_and_flag(words, "clean", "-fd") =>
         {
-            Some(ToolDecision::Ask { reason: "destructive git operation".into(), dangerous: true })
+            Some(ToolDecision::Ask {
+                reason: "destructive git operation".into(),
+                dangerous: true,
+            })
         }
         _ => None,
     }

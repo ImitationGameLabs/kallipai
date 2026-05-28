@@ -30,7 +30,9 @@ pub async fn respond_approval(
                 entry
                     .agent
                     .events_tx
-                    .send(SseEvent::DeferredApproved { request_id: req.request_id.clone() })
+                    .send(SseEvent::DeferredApproved {
+                        request_id: req.request_id.clone(),
+                    })
                     .ok();
                 serde_json::to_string(&*deferred).ok()
             }
@@ -42,7 +44,10 @@ pub async fn respond_approval(
                 entry
                     .agent
                     .events_tx
-                    .send(SseEvent::DeferredDenied { request_id: req.request_id.clone(), reason })
+                    .send(SseEvent::DeferredDenied {
+                        request_id: req.request_id.clone(),
+                        reason,
+                    })
                     .ok();
                 serde_json::to_string(&*deferred).ok()
             }

@@ -82,7 +82,10 @@ impl AppState {
 
 impl AgentRegistry {
     pub fn new() -> Self {
-        Self { agents: HashMap::new(), token_index: HashMap::new() }
+        Self {
+            agents: HashMap::new(),
+            token_index: HashMap::new(),
+        }
     }
 
     // -- read helpers --

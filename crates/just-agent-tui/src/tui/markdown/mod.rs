@@ -20,7 +20,10 @@ pub fn render_markdown(input: &str, term_width: u16) -> Vec<Line<'static>> {
     opts.insert(Options::ENABLE_TASKLISTS);
 
     let parser = Parser::new_ext(input, opts);
-    let mut renderer = MdRenderer { term_width, ..Default::default() };
+    let mut renderer = MdRenderer {
+        term_width,
+        ..Default::default()
+    };
     renderer.run(parser);
 
     let elapsed = t0.elapsed();
@@ -310,7 +313,11 @@ impl MdRenderer {
             return;
         }
 
-        let width = if self.term_width > 4 { self.term_width - 2 } else { 80 };
+        let width = if self.term_width > 4 {
+            self.term_width - 2
+        } else {
+            80
+        };
 
         let mut table = Table::new();
         table.load_preset(UTF8_FULL).force_no_tty().set_width(width);

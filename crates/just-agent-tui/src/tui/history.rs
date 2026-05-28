@@ -11,7 +11,11 @@ pub struct InputHistory {
 
 impl InputHistory {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), position: 0, draft: None }
+        Self {
+            entries: Vec::new(),
+            position: 0,
+            draft: None,
+        }
     }
 
     /// Record a submitted input. Resets navigation position.

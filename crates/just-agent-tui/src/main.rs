@@ -54,7 +54,11 @@ async fn main() -> Result<()> {
 
     let session = Session::connect(client).await?;
 
-    if args.stdio { stdio::run_stdio(session).await } else { run_tui(session).await }
+    if args.stdio {
+        stdio::run_stdio(session).await
+    } else {
+        run_tui(session).await
+    }
 }
 
 /// Fire-and-forget prompt delivery. Results arrive via SSE.

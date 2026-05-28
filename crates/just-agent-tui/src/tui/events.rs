@@ -83,7 +83,13 @@ impl App {
                 self.streaming_content = false;
                 self.streaming_reasoning = false;
             }
-            SseEvent::DeferredCreated { request_id, tool_name, summary, reason, dangerous } => {
+            SseEvent::DeferredCreated {
+                request_id,
+                tool_name,
+                summary,
+                reason,
+                dangerous,
+            } => {
                 self.show_approval(DeferredInfo {
                     request_id,
                     tool_name,
@@ -104,7 +110,12 @@ impl App {
                 )));
                 self.auto_scroll = true;
             }
-            SseEvent::Retrying { attempt, max_attempts, error, delay_secs } => {
+            SseEvent::Retrying {
+                attempt,
+                max_attempts,
+                error,
+                delay_secs,
+            } => {
                 self.chat_lines.push(ChatLine::Retrying {
                     attempt,
                     max_attempts,

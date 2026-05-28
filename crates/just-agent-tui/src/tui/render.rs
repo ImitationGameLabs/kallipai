@@ -57,7 +57,10 @@ impl App {
                 .viewport_content_length(visible_height);
             frame.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight),
-                chat_area.inner(Margin { vertical: 1, horizontal: 0 }),
+                chat_area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
                 &mut scrollbar_state,
             );
         }
@@ -125,7 +128,12 @@ impl App {
                         ]));
                     }
                 }
-                ChatLine::Retrying { attempt, max_attempts, error, delay_secs } => {
+                ChatLine::Retrying {
+                    attempt,
+                    max_attempts,
+                    error,
+                    delay_secs,
+                } => {
                     lines.push(Line::from(vec![
                         "\u{27F3} ".dim(),
                         format!("retrying ({attempt}/{max_attempts}): ").dim(),

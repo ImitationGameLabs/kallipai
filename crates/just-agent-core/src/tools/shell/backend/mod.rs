@@ -86,7 +86,11 @@ mod tests {
             is_current: true,
             window_count: 1,
         };
-        let output = ShellOutput { output: "ok".to_owned(), exit_code: Some(0), timed_out: false };
+        let output = ShellOutput {
+            output: "ok".to_owned(),
+            exit_code: Some(0),
+            timed_out: false,
+        };
 
         assert_eq!(info.name, "main");
         assert_eq!(output.exit_code, Some(0));

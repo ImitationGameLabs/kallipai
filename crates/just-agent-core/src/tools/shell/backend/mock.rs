@@ -158,11 +158,19 @@ impl ShellBackend for MockShellBackend {
 
         if self.should_timeout {
             self.should_timeout = false;
-            return Ok(ShellOutput { output: String::new(), exit_code: None, timed_out: true });
+            return Ok(ShellOutput {
+                output: String::new(),
+                exit_code: None,
+                timed_out: true,
+            });
         }
 
         if background {
-            return Ok(ShellOutput { output: String::new(), exit_code: None, timed_out: false });
+            return Ok(ShellOutput {
+                output: String::new(),
+                exit_code: None,
+                timed_out: false,
+            });
         }
 
         Ok(ShellOutput {

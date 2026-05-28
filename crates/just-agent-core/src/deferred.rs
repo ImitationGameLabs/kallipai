@@ -42,8 +42,15 @@ pub struct DeferredActionInfo {
 /// Notification pushed when an external approval/denial arrives.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DeferredNotification {
-    Approved { request_id: String, summary: String },
-    Denied { request_id: String, summary: String, reason: String },
+    Approved {
+        request_id: String,
+        summary: String,
+    },
+    Denied {
+        request_id: String,
+        summary: String,
+        reason: String,
+    },
 }
 
 /// Info about the most recently enqueued deferred action (consumed once).
@@ -80,7 +87,11 @@ impl Default for DeferredQueue {
 
 impl DeferredQueue {
     pub fn new() -> Self {
-        Self { actions: HashMap::new(), notifications: VecDeque::new(), last_deferred: None }
+        Self {
+            actions: HashMap::new(),
+            notifications: VecDeque::new(),
+            last_deferred: None,
+        }
     }
 
     /// Enqueue a deferred action and return the request_id.
@@ -151,7 +162,9 @@ impl DeferredQueue {
                 action.status
             );
         }
-        action.status = DeferredStatus::Denied { reason: reason.to_owned() };
+        action.status = DeferredStatus::Denied {
+            reason: reason.to_owned(),
+        };
         self.notifications.push_back(DeferredNotification::Denied {
             request_id: request_id.to_owned(),
             summary: action.summary.clone(),

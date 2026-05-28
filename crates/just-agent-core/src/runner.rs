@@ -84,7 +84,9 @@ pub async fn run_agent_rounds(
 
         // Enable streaming
         request.stream = Some(true);
-        request.stream_options = Some(StreamOptions { include_usage: Some(true) });
+        request.stream_options = Some(StreamOptions {
+            include_usage: Some(true),
+        });
 
         let mut retry_records = Vec::new();
         let prior_retries = {
@@ -196,10 +198,18 @@ pub async fn run_agent_rounds(
 
         let mut turn_messages = vec![ChatMessage::ToolCalls(ToolCallsMessage {
             role: "assistant".into(),
-            content: if content.is_empty() { None } else { Some(content) },
+            content: if content.is_empty() {
+                None
+            } else {
+                Some(content)
+            },
             name: None,
             tool_calls: tool_calls.clone(),
-            reasoning_content: if reasoning.is_empty() { None } else { Some(reasoning) },
+            reasoning_content: if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            },
         })];
 
         for call in tool_calls {
@@ -416,13 +426,20 @@ fn format_deferred_notifications(notifications: &[DeferredNotification]) -> Stri
     let mut parts = Vec::new();
     for n in notifications {
         match n {
-            DeferredNotification::Approved { request_id, summary } => {
+            DeferredNotification::Approved {
+                request_id,
+                summary,
+            } => {
                 parts.push(format!(
                     "Deferred action {request_id} (\"{summary}\") has been approved. \
                      Call approval_redeem with this request_id to execute."
                 ));
             }
-            DeferredNotification::Denied { request_id, summary, reason } => {
+            DeferredNotification::Denied {
+                request_id,
+                summary,
+                reason,
+            } => {
                 parts.push(format!(
                     "Deferred action {request_id} (\"{summary}\") has been denied: {reason}"
                 ));
@@ -449,7 +466,9 @@ struct ToolCallAccumulator {
 
 impl ToolCallAccumulator {
     fn new() -> Self {
-        Self { calls: BTreeMap::new() }
+        Self {
+            calls: BTreeMap::new(),
+        }
     }
 
     fn push(&mut self, delta: &ChatCompletionChunkToolCall) {

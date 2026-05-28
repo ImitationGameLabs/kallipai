@@ -131,8 +131,10 @@ impl AgenticContext for ContextStore {
                 self.pinned_token_budget
             );
         }
-        self.pinned
-            .push(PinnedItem { label: label.to_owned(), message });
+        self.pinned.push(PinnedItem {
+            label: label.to_owned(),
+            message,
+        });
         Ok(())
     }
 
@@ -174,7 +176,11 @@ impl AgenticContext for ContextStore {
             .map(|t| t.estimated_tokens)
             .sum();
         self.turns.drain(0..to_evict);
-        EvictResult { evicted: to_evict, remaining_turns: self.turns.len(), freed_tokens }
+        EvictResult {
+            evicted: to_evict,
+            remaining_turns: self.turns.len(),
+            freed_tokens,
+        }
     }
 
     fn replace_pin(&mut self, label: &str, message: ChatMessage) -> Result<()> {
@@ -196,8 +202,10 @@ impl AgenticContext for ContextStore {
         if let Some(idx) = existing_idx {
             self.pinned[idx].message = message;
         } else {
-            self.pinned
-                .push(PinnedItem { label: label.to_owned(), message });
+            self.pinned.push(PinnedItem {
+                label: label.to_owned(),
+                message,
+            });
         }
         Ok(())
     }
@@ -250,8 +258,11 @@ impl ContextStore {
         let estimated_tokens = Turn::estimate_tokens(&messages);
         let id = TurnId(self.next_turn_id);
         self.next_turn_id += 1;
-        self.turns
-            .push_back(Turn { id, messages, estimated_tokens });
+        self.turns.push_back(Turn {
+            id,
+            messages,
+            estimated_tokens,
+        });
         id
     }
 

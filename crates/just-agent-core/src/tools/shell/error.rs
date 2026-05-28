@@ -53,17 +53,24 @@ impl ShellError {
 
     /// Creates an execution-failed error.
     pub fn execution_failed(reason: impl Into<String>) -> Self {
-        Self::ExecutionFailed { reason: reason.into() }
+        Self::ExecutionFailed {
+            reason: reason.into(),
+        }
     }
 
     /// Creates a backend error.
     pub fn backend(reason: impl Into<String>) -> Self {
-        Self::BackendError { reason: reason.into() }
+        Self::BackendError {
+            reason: reason.into(),
+        }
     }
 
     /// Creates a session-create-failed error.
     pub fn session_create_failed(name: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::SessionCreateFailed { name: name.into(), reason: reason.into() }
+        Self::SessionCreateFailed {
+            name: name.into(),
+            reason: reason.into(),
+        }
     }
 }
 

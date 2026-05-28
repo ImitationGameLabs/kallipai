@@ -190,12 +190,30 @@ impl From<AgentEvent> for SseEvent {
             AgentEvent::Error(msg) => SseEvent::Error { message: msg },
             AgentEvent::Status(msg) => SseEvent::Status { message: msg },
             AgentEvent::Busy => SseEvent::Busy,
-            AgentEvent::DeferredCreated { request_id, tool_name, summary, reason, dangerous } => {
-                SseEvent::DeferredCreated { request_id, tool_name, summary, reason, dangerous }
-            }
-            AgentEvent::Retrying { attempt, max_attempts, error, delay_secs } => {
-                SseEvent::Retrying { attempt, max_attempts, error, delay_secs }
-            }
+            AgentEvent::DeferredCreated {
+                request_id,
+                tool_name,
+                summary,
+                reason,
+                dangerous,
+            } => SseEvent::DeferredCreated {
+                request_id,
+                tool_name,
+                summary,
+                reason,
+                dangerous,
+            },
+            AgentEvent::Retrying {
+                attempt,
+                max_attempts,
+                error,
+                delay_secs,
+            } => SseEvent::Retrying {
+                attempt,
+                max_attempts,
+                error,
+                delay_secs,
+            },
             AgentEvent::Cancelled => SseEvent::Cancelled,
         }
     }

@@ -9,7 +9,11 @@ use clap::Parser;
 )]
 pub struct Args {
     /// Daemon URL.
-    #[arg(long, env = "JUST_AGENT_DAEMON_URL", default_value = "http://127.0.0.1:3000")]
+    #[arg(
+        long,
+        env = "JUST_AGENT_DAEMON_URL",
+        default_value = "http://127.0.0.1:3000"
+    )]
     pub daemon_url: String,
 
     /// Use stdin/stdout instead of the TUI. Still interactive, not for scripting.

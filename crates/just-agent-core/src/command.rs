@@ -25,10 +25,26 @@ pub struct CommandInfo {
 }
 
 const COMMANDS: &[CommandInfo] = &[
-    CommandInfo { name: "/help", description: "Show available commands", has_arg: false },
-    CommandInfo { name: "/quit", description: "Exit the TUI", has_arg: false },
-    CommandInfo { name: "/clear", description: "Clear chat output", has_arg: false },
-    CommandInfo { name: "/status", description: "Show context token usage", has_arg: false },
+    CommandInfo {
+        name: "/help",
+        description: "Show available commands",
+        has_arg: false,
+    },
+    CommandInfo {
+        name: "/quit",
+        description: "Exit the TUI",
+        has_arg: false,
+    },
+    CommandInfo {
+        name: "/clear",
+        description: "Clear chat output",
+        has_arg: false,
+    },
+    CommandInfo {
+        name: "/status",
+        description: "Show context token usage",
+        has_arg: false,
+    },
 ];
 
 /// Returns the full command registry.

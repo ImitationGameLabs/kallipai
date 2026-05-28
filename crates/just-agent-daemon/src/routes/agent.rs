@@ -218,7 +218,10 @@ pub async fn create_agent(
         registry.register(
             id.clone(),
             auth_token,
-            AgentEntry { agent, subagent_ids: vec![] },
+            AgentEntry {
+                agent,
+                subagent_ids: vec![],
+            },
         );
     }
     info!(id = %id, supervisor = ?req.created_by, ws = %log_ws, depth = log_depth, "created agent");
@@ -397,7 +400,14 @@ pub async fn restore_sessions(state: &SharedState) {
         match restore_one(p, state.shutdown.clone()).await {
             Ok((id, auth_token, agent)) => {
                 let mut registry = state.registry.write().await;
-                registry.register(id, auth_token, AgentEntry { agent, subagent_ids: vec![] });
+                registry.register(
+                    id,
+                    auth_token,
+                    AgentEntry {
+                        agent,
+                        subagent_ids: vec![],
+                    },
+                );
                 info!(id = %agent_id, "restored session");
             }
             Err(e) => {

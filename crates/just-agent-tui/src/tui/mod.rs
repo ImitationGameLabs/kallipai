@@ -17,13 +17,21 @@ use completion::CompletionState;
 pub enum ChatLine {
     User(String),
     Assistant(String),
-    ToolCall { name: String, args: String },
+    ToolCall {
+        name: String,
+        args: String,
+    },
     ToolResult(String),
     Reasoning(String),
     Status(String),
     Error(String),
     System(String),
-    Retrying { attempt: u32, max_attempts: u32, error: String, delay_secs: f64 },
+    Retrying {
+        attempt: u32,
+        max_attempts: u32,
+        error: String,
+        delay_secs: f64,
+    },
 }
 
 /// TUI application state.

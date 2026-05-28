@@ -15,15 +15,19 @@ use super::{delegate, helpers, lists, util};
 pub fn classify_command(command: &str) -> ToolDecision {
     let trimmed = command.trim();
     if trimmed.is_empty() {
-        return ToolDecision::Deny { reason: "empty commands are not allowed".into() };
+        return ToolDecision::Deny {
+            reason: "empty commands are not allowed".into(),
+        };
     }
 
     match rable::parse(trimmed, false) {
-        Ok(nodes) if nodes.is_empty() => {
-            ToolDecision::Deny { reason: "command parsed to an empty AST".into() }
-        }
+        Ok(nodes) if nodes.is_empty() => ToolDecision::Deny {
+            reason: "command parsed to an empty AST".into(),
+        },
         Ok(nodes) => classify_nodes(&nodes),
-        Err(e) => ToolDecision::Deny { reason: format!("failed to parse command: {e}") },
+        Err(e) => ToolDecision::Deny {
+            reason: format!("failed to parse command: {e}"),
+        },
     }
 }
 
@@ -42,9 +46,15 @@ pub(super) fn classify_node_ref(node: &Node) -> ToolDecision {
 fn classify_node(node: &Node) -> ToolDecision {
     match &node.kind {
         // --- Simple command ---
-        NodeKind::Command { assignments, words, redirects } => {
+        NodeKind::Command {
+            assignments,
+            words,
+            redirects,
+        } => {
             if words.is_empty() && assignments.is_empty() && redirects.is_empty() {
-                return ToolDecision::Deny { reason: "empty command".into() };
+                return ToolDecision::Deny {
+                    reason: "empty command".into(),
+                };
             }
             classify_simple_command(words, redirects, assignments)
         }
@@ -86,18 +96,37 @@ fn classify_node(node: &Node) -> ToolDecision {
         }
 
         // --- Control flow ---
-        NodeKind::If { condition, then_body, else_body, redirects } => {
-            helpers::classify_multi(&[condition, then_body], else_body.as_deref(), redirects)
-        }
+        NodeKind::If {
+            condition,
+            then_body,
+            else_body,
+            redirects,
+        } => helpers::classify_multi(&[condition, then_body], else_body.as_deref(), redirects),
 
-        NodeKind::While { condition, body, redirects }
-        | NodeKind::Until { condition, body, redirects } => {
-            helpers::classify_multi(&[condition, body], None, redirects)
+        NodeKind::While {
+            condition,
+            body,
+            redirects,
         }
+        | NodeKind::Until {
+            condition,
+            body,
+            redirects,
+        } => helpers::classify_multi(&[condition, body], None, redirects),
 
         // For/Select: recurse into both the iteration words and the loop body.
-        NodeKind::For { words, body, redirects, .. }
-        | NodeKind::Select { words, body, redirects, .. } => {
+        NodeKind::For {
+            words,
+            body,
+            redirects,
+            ..
+        }
+        | NodeKind::Select {
+            words,
+            body,
+            redirects,
+            ..
+        } => {
             let mut dec = helpers::classify_multi(&[body], None, redirects);
             if let Some(ws) = words {
                 dec = helpers::stricter(dec, classify_nodes(ws));
@@ -105,12 +134,16 @@ fn classify_node(node: &Node) -> ToolDecision {
             dec
         }
 
-        NodeKind::ForArith { body, redirects, .. } => {
-            helpers::classify_multi(&[body], None, redirects)
-        }
+        NodeKind::ForArith {
+            body, redirects, ..
+        } => helpers::classify_multi(&[body], None, redirects),
 
         // Case: check the match word, each pattern's expressions, and each pattern's body.
-        NodeKind::Case { word, patterns, redirects } => {
+        NodeKind::Case {
+            word,
+            patterns,
+            redirects,
+        } => {
             let mut dec = classify_node(word);
             for pat in patterns {
                 for pat_node in &pat.patterns {
@@ -139,9 +172,10 @@ fn classify_node(node: &Node) -> ToolDecision {
 
         // --- Redirects ---
         NodeKind::Redirect { .. } => helpers::classify_redirect_node(node),
-        NodeKind::HereDoc { .. } => {
-            ToolDecision::Ask { reason: "heredocs require approval".into(), dangerous: false }
-        }
+        NodeKind::HereDoc { .. } => ToolDecision::Ask {
+            reason: "heredocs require approval".into(),
+            dangerous: false,
+        },
 
         // --- Substitutions ---
         NodeKind::CommandSubstitution { command, .. } => classify_node(command),
@@ -176,7 +210,11 @@ fn classify_node(node: &Node) -> ToolDecision {
         },
 
         // --- Arithmetic command ---
-        NodeKind::ArithmeticCommand { expression, redirects, .. } => {
+        NodeKind::ArithmeticCommand {
+            expression,
+            redirects,
+            ..
+        } => {
             let expr_dec = expression
                 .as_deref()
                 .map_or(ToolDecision::Allow, classify_node);
@@ -190,7 +228,10 @@ fn classify_node(node: &Node) -> ToolDecision {
 
         // --- Coproc ---
         NodeKind::Coproc { command, .. } => helpers::stricter(
-            ToolDecision::Ask { reason: "coproc requires approval".into(), dangerous: false },
+            ToolDecision::Ask {
+                reason: "coproc requires approval".into(),
+                dangerous: false,
+            },
             classify_node(command),
         ),
 
@@ -216,7 +257,9 @@ fn classify_node(node: &Node) -> ToolDecision {
         | NodeKind::Array { .. }
         | NodeKind::Comment { .. } => ToolDecision::Allow,
 
-        NodeKind::Empty => ToolDecision::Deny { reason: "empty command".into() },
+        NodeKind::Empty => ToolDecision::Deny {
+            reason: "empty command".into(),
+        },
 
         // --- Arithmetic expression nodes (leaf) ---
         NodeKind::ArithNumber { .. }
@@ -237,7 +280,11 @@ fn classify_node(node: &Node) -> ToolDecision {
         NodeKind::ArithAssign { target, value, .. } => {
             helpers::stricter(classify_node(target), classify_node(value))
         }
-        NodeKind::ArithTernary { condition, if_true, if_false } => {
+        NodeKind::ArithTernary {
+            condition,
+            if_true,
+            if_false,
+        } => {
             let mut dec = classify_node(condition);
             if let Some(t) = if_true.as_deref() {
                 dec = helpers::stricter(dec, classify_node(t));

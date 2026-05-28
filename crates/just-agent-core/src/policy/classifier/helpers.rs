@@ -13,11 +13,20 @@ pub(super) fn stricter(a: ToolDecision, b: ToolDecision) -> ToolDecision {
             ToolDecision::Deny { reason }
         }
         (
-            ToolDecision::Ask { reason: ra, dangerous: da },
-            ToolDecision::Ask { reason: rb, dangerous: db },
+            ToolDecision::Ask {
+                reason: ra,
+                dangerous: da,
+            },
+            ToolDecision::Ask {
+                reason: rb,
+                dangerous: db,
+            },
         ) => {
             let reason = if ra.len() >= rb.len() { ra } else { rb };
-            ToolDecision::Ask { reason, dangerous: da || db }
+            ToolDecision::Ask {
+                reason,
+                dangerous: da || db,
+            }
         }
         (ToolDecision::Ask { reason, dangerous }, ToolDecision::Allow)
         | (ToolDecision::Allow, ToolDecision::Ask { reason, dangerous }) => {
@@ -70,9 +79,10 @@ pub(super) fn classify_redirect_node(node: &Node) -> ToolDecision {
             };
             stricter(op_dec, super::walker::classify_node_ref(target))
         }
-        NodeKind::HereDoc { .. } => {
-            ToolDecision::Ask { reason: "heredocs require approval".into(), dangerous: false }
-        }
+        NodeKind::HereDoc { .. } => ToolDecision::Ask {
+            reason: "heredocs require approval".into(),
+            dangerous: false,
+        },
         _ => super::walker::classify_node_ref(node),
     }
 }

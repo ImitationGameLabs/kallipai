@@ -63,5 +63,9 @@ fn collect_remaining_args(words: &[Node]) -> Option<String> {
         .iter()
         .filter_map(|w| util::word_literal_value(w).map(strip_quotes))
         .collect();
-    if args.is_empty() { None } else { Some(args.join(" ")) }
+    if args.is_empty() {
+        None
+    } else {
+        Some(args.join(" "))
+    }
 }

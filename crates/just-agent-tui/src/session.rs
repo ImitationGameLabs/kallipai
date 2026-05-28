@@ -32,7 +32,10 @@ impl Session {
     pub async fn connect(client: DaemonClient) -> Result<Self> {
         let agents = client.list_agents().await?;
         if let Some(root) = agents.into_iter().find(|a| a.created_by.is_none()) {
-            return Ok(Self { client, agent_id: root.id });
+            return Ok(Self {
+                client,
+                agent_id: root.id,
+            });
         }
 
         let agent_id = client

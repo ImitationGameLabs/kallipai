@@ -17,7 +17,10 @@ pub struct ApprovalState {
 
 impl ApprovalState {
     pub fn new() -> Self {
-        Self { info: None, last_request_id: None }
+        Self {
+            info: None,
+            last_request_id: None,
+        }
     }
 
     /// Show the approval popup for the given deferred action.
@@ -63,8 +66,12 @@ impl ApprovalState {
 
         let width = (input_area.width).min(60);
         let height = 8u16; // border(2) + tool + reason + summary + blank + options
-        let popup_area =
-            Rect { x: input_area.x + 1, y: input_area.y.saturating_sub(height), width, height };
+        let popup_area = Rect {
+            x: input_area.x + 1,
+            y: input_area.y.saturating_sub(height),
+            width,
+            height,
+        };
 
         frame.render_widget(Clear, popup_area);
 
@@ -103,7 +110,11 @@ impl ApprovalState {
             Line::from(Span::styled(
                 options,
                 Style::default()
-                    .fg(if info.dangerous { Color::Red } else { Color::Cyan })
+                    .fg(if info.dangerous {
+                        Color::Red
+                    } else {
+                        Color::Cyan
+                    })
                     .add_modifier(ratatui::style::Modifier::BOLD),
             )),
         ];

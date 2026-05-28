@@ -19,15 +19,23 @@ enum PendingPrompt {
 
 enum Action {
     SendPrompt(String),
-    RespondApproval { request_id: String, decision: String },
+    RespondApproval {
+        request_id: String,
+        decision: String,
+    },
 }
 
 /// Action resulting from a stdin line, to be dispatched by the main loop.
 enum StdinAction {
     None,
     SendPrompt(String),
-    RespondApproval { request_id: String, decision: String },
-    Quit { kill: bool },
+    RespondApproval {
+        request_id: String,
+        decision: String,
+    },
+    Quit {
+        kill: bool,
+    },
     Command(SlashCommand),
 }
 
@@ -44,7 +52,10 @@ pub async fn run_stdio(session: Session) -> Result<()> {
             while let Some(action) = action_rx.recv().await {
                 let result = match action {
                     Action::SendPrompt(text) => client.post_message(&agent_id, &text).await,
-                    Action::RespondApproval { request_id, decision } => {
+                    Action::RespondApproval {
+                        request_id,
+                        decision,
+                    } => {
                         client
                             .respond_approval(&agent_id, &request_id, &decision, None)
                             .await
@@ -184,7 +195,13 @@ fn handle_sse_event(event: SseEvent, busy: &mut bool, pending: &mut PendingPromp
         SseEvent::Busy => {
             *busy = true;
         }
-        SseEvent::DeferredCreated { request_id, tool_name, summary, reason, dangerous } => {
+        SseEvent::DeferredCreated {
+            request_id,
+            tool_name,
+            summary,
+            reason,
+            dangerous,
+        } => {
             if !matches!(pending, PendingPrompt::None) {
                 eprintln!("[warning] dropping previous pending prompt for new approval request");
             }
@@ -202,7 +219,12 @@ fn handle_sse_event(event: SseEvent, busy: &mut bool, pending: &mut PendingPromp
         SseEvent::DeferredDenied { request_id, reason } => {
             eprintln!("[deferred] {request_id} denied: {reason}");
         }
-        SseEvent::Retrying { attempt, max_attempts, error, delay_secs } => {
+        SseEvent::Retrying {
+            attempt,
+            max_attempts,
+            error,
+            delay_secs,
+        } => {
             eprintln!("[retry {attempt}/{max_attempts}] {error} — waiting {delay_secs:.1}s");
         }
         SseEvent::Cancelled => {
@@ -267,7 +289,10 @@ fn handle_stdin_line(line: &str, pending: &mut PendingPrompt) -> StdinAction {
                 "1" | "2" => {
                     *pending = PendingPrompt::None;
                     let decision = if trimmed == "1" { "approve" } else { "deny" };
-                    StdinAction::RespondApproval { request_id: rid, decision: decision.to_owned() }
+                    StdinAction::RespondApproval {
+                        request_id: rid,
+                        decision: decision.to_owned(),
+                    }
                 }
                 _ => {
                     eprint!("[approval] [1] Approve  [2] Deny: ");

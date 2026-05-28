@@ -17,7 +17,11 @@ pub struct CompletionState {
 
 impl CompletionState {
     pub fn new() -> Self {
-        Self { visible: false, candidates: Vec::new(), selected: 0 }
+        Self {
+            visible: false,
+            candidates: Vec::new(),
+            selected: 0,
+        }
     }
 
     /// Recompute candidates from the current textarea content.
@@ -77,8 +81,12 @@ impl CompletionState {
         let popup_width = 40u16.min(input_area.width);
 
         let popup_y = input_area.y.saturating_sub(popup_height);
-        let popup_area =
-            Rect { x: input_area.x + 1, y: popup_y, width: popup_width, height: popup_height };
+        let popup_area = Rect {
+            x: input_area.x + 1,
+            y: popup_y,
+            width: popup_width,
+            height: popup_height,
+        };
 
         // Clear the area behind the popup
         frame.render_widget(Clear, popup_area);
