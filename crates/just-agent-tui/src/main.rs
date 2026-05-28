@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use futures_util::StreamExt;
 use just_agent_client::DaemonClient;
+use just_agent_core::types::AgentId;
 use tokio::sync::mpsc;
 
 use args::Args;
@@ -76,7 +77,7 @@ enum Action {
     SendPrompt(String),
 }
 
-async fn run_tui(client: DaemonClient, agent_id: String) -> Result<()> {
+async fn run_tui(client: DaemonClient, agent_id: AgentId) -> Result<()> {
     // Subscribe to SSE before anything else.
     let mut event_stream = client.event_stream(&agent_id).await?;
 

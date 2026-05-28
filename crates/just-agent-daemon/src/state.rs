@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use axum::http::StatusCode;
 use just_agent_core::command::UserInput;
 use just_agent_core::config::AgentConfig;
 use just_agent_core::context::ContextStore;
 use just_agent_core::deferred::DeferredQueue;
+pub use just_agent_core::types::AgentId;
 pub use just_agent_core::types::AgentState;
 use just_agent_core::types::SseEvent;
 use serde::{Deserialize, Serialize};
@@ -17,14 +19,21 @@ use tokio_util::sync::CancellationToken;
 pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
-    pub agents: RwLock<Vec<AgentEntry>>,
+    pub registry: RwLock<AgentRegistry>,
     pub shutdown: CancellationToken,
     pub operator_token: String,
 }
 
+/// Combined index: agent map + token→id lookup + subagent reverse pointers.
+/// All mutations go through methods that maintain invariants atomically.
+pub struct AgentRegistry {
+    agents: HashMap<AgentId, AgentEntry>,
+    token_index: HashMap<String, AgentId>,
+}
+
 pub struct AgentEntry {
-    pub id: String,
     pub agent: Agent,
+    pub subagent_ids: Vec<AgentId>,
 }
 
 pub struct Agent {
@@ -46,7 +55,7 @@ pub struct Agent {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AgentSummary {
-    pub id: String,
+    pub id: AgentId,
     pub workspace_root: String,
     pub state: AgentState,
 }
@@ -62,6 +71,415 @@ impl Agent {
 
 impl AppState {
     pub fn new(operator_token: String) -> Self {
-        Self { agents: RwLock::new(Vec::new()), shutdown: CancellationToken::new(), operator_token }
+        Self {
+            registry: RwLock::new(AgentRegistry::new()),
+            shutdown: CancellationToken::new(),
+            operator_token,
+        }
+    }
+}
+
+impl AgentRegistry {
+    pub fn new() -> Self {
+        Self { agents: HashMap::new(), token_index: HashMap::new() }
+    }
+
+    // -- read helpers --
+
+    pub fn get(&self, id: &AgentId) -> Option<&AgentEntry> {
+        self.agents.get(id)
+    }
+
+    pub fn get_mut(&mut self, id: &AgentId) -> Option<&mut AgentEntry> {
+        self.agents.get_mut(id)
+    }
+
+    pub fn contains_key(&self, id: &AgentId) -> bool {
+        self.agents.contains_key(id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.agents.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.agents.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&AgentId, &AgentEntry)> {
+        self.agents.iter()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &AgentEntry> {
+        self.agents.values()
+    }
+
+    pub fn get_agent_id_by_token(&self, token: &str) -> Option<&AgentId> {
+        self.token_index.get(token)
+    }
+
+    // -- write helpers --
+
+    /// Insert agent, register token, update supervisor's subagent_ids.
+    pub fn register(&mut self, id: AgentId, auth_token: String, entry: AgentEntry) {
+        // In the create path the supervisor is already registered, so this
+        // updates its subagent_ids eagerly.
+        //
+        // During restore the supervisor may not be registered yet, making
+        // this a no-op; rebuild_subagent_ids fixes the reverse pointers
+        // once all restores complete.
+        if let Some(ref supervisor_id) = entry.agent.config.created_by
+            && let Some(supervisor) = self.agents.get_mut(supervisor_id)
+        {
+            supervisor.subagent_ids.push(id.clone());
+        }
+        self.token_index.insert(auth_token, id.clone());
+        self.agents.insert(id, entry);
+    }
+
+    /// Remove agent, unregister token, update supervisor's subagent_ids.
+    pub fn unregister(&mut self, id: &AgentId) -> Option<AgentEntry> {
+        let entry = self.agents.remove(id)?;
+        self.token_index.remove(&entry.agent.auth_token);
+        if let Some(ref supervisor_id) = entry.agent.config.created_by
+            && let Some(supervisor) = self.agents.get_mut(supervisor_id)
+        {
+            supervisor.subagent_ids.retain(|sid| sid != id);
+        }
+        Some(entry)
+    }
+
+    /// Rebuild subagent_ids for all agents from created_by relationships.
+    pub fn rebuild_subagent_ids(&mut self) {
+        for entry in self.agents.values_mut() {
+            entry.subagent_ids.clear();
+        }
+        let pairs: Vec<(AgentId, AgentId)> = self
+            .agents
+            .iter()
+            .filter_map(|(id, entry)| Some((id.clone(), entry.agent.config.created_by.clone()?)))
+            .collect();
+        for (child_id, supervisor_id) in &pairs {
+            if let Some(supervisor) = self.agents.get_mut(supervisor_id) {
+                supervisor.subagent_ids.push(child_id.clone());
+            }
+        }
+    }
+
+    // -- authorization helpers --
+
+    /// Walk the `created_by` chain from `start_id` upward with cycle detection.
+    pub fn walk_supervisor_chain(
+        &self,
+        start_id: &AgentId,
+    ) -> Result<Vec<&AgentEntry>, (StatusCode, String)> {
+        let mut visited = HashSet::new();
+        let mut current_id = start_id.clone();
+        let mut chain = Vec::new();
+        loop {
+            if !visited.insert(current_id.clone()) {
+                return Err((StatusCode::FORBIDDEN, "circular supervisor chain".into()));
+            }
+            let entry = self
+                .get(&current_id)
+                .ok_or((StatusCode::FORBIDDEN, "broken supervisor chain".into()))?;
+            chain.push(entry);
+            match &entry.agent.config.created_by {
+                Some(supervisor_id) => current_id = supervisor_id.clone(),
+                None => break,
+            }
+        }
+        Ok(chain)
+    }
+
+    /// Caller must be the operator or the direct supervisor of the subagent being created.
+    /// Returns the supervisor's `AgentEntry` for delegation checks.
+    pub fn require_supervisor(
+        &self,
+        identity: &crate::auth::Identity,
+        supervisor_id: &AgentId,
+    ) -> Result<&AgentEntry, (StatusCode, String)> {
+        let supervisor = self.get(supervisor_id).ok_or((
+            StatusCode::NOT_FOUND,
+            format!("supervisor agent {supervisor_id} not found"),
+        ))?;
+        match identity {
+            crate::auth::Identity::Operator => Ok(supervisor),
+            crate::auth::Identity::Agent { id } if id == supervisor_id => Ok(supervisor),
+            _ => Err((
+                StatusCode::FORBIDDEN,
+                "invalid auth token for supervisor agent".into(),
+            )),
+        }
+    }
+
+    /// Caller must be the operator or a superior of the target agent.
+    pub fn require_superior(
+        &self,
+        identity: &crate::auth::Identity,
+        target_id: &AgentId,
+    ) -> Result<(), (StatusCode, String)> {
+        match identity {
+            crate::auth::Identity::Operator => return Ok(()),
+            crate::auth::Identity::Agent { id: caller_id } => {
+                let chain = self.walk_supervisor_chain(target_id)?;
+                if chain
+                    .iter()
+                    .any(|e| e.agent.config.created_by.as_ref() == Some(caller_id))
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err((
+            StatusCode::FORBIDDEN,
+            "not authorized to manage this agent".into(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Identity;
+    use just_agent_core::config::PermissionProfile;
+    use just_agent_core::retry::RetryPolicy;
+
+    fn make_entry(created_by: Option<AgentId>, auth_token: String) -> AgentEntry {
+        let (prompt_tx, _) = mpsc::channel(1);
+        let (events_tx, _) = broadcast::channel(1);
+        let config = AgentConfig {
+            prompt: None,
+            system_prompt: String::new(),
+            max_tool_rounds: 1,
+            workspace_root: PathBuf::from("/tmp"),
+            context_window_tokens: 128_000,
+            output_reserve_tokens: 8_192,
+            summary_max_tokens: 1_200,
+            tool_timeout_secs: 120,
+            skills: vec![],
+            retry_policy: RetryPolicy::default(),
+            pinned_budget_ratio: 0.25,
+            context_thresholds: vec![50, 80],
+            agent_id: None,
+            created_by,
+            permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+        };
+        AgentEntry {
+            agent: Agent {
+                prompt_tx,
+                events_tx,
+                deferred: Arc::new(Mutex::new(DeferredQueue::new())),
+                config,
+                agent_handle: tokio::spawn(async {}),
+                bridge_handle: tokio::spawn(async {}),
+                store: Arc::new(Mutex::new(ContextStore::new())),
+                session_dir: None,
+                cancel: CancellationToken::new(),
+                state: Arc::new(AtomicU8::new(AgentState::IDLE)),
+                auth_token,
+                env: HashMap::new(),
+            },
+            subagent_ids: vec![],
+        }
+    }
+
+    fn add_root(registry: &mut AgentRegistry, id: &AgentId) {
+        let token = format!("tok-{id}");
+        registry.register(id.clone(), token, make_entry(None, format!("agent-{id}")));
+    }
+
+    fn add_sub(registry: &mut AgentRegistry, id: &AgentId, supervisor: &AgentId) {
+        let token = format!("tok-{id}");
+        registry.register(
+            id.clone(),
+            token,
+            make_entry(Some(supervisor.clone()), format!("agent-{id}")),
+        );
+    }
+
+    // -- Registry consistency: agents + token_index + subagent_ids stay in sync --
+
+    #[tokio::test]
+    async fn register_unregister_syncs_token_index() {
+        let mut reg = AgentRegistry::new();
+        let id = AgentId::random();
+        // In production, the registry token and agent.auth_token are always identical.
+        let token = "test-token";
+        reg.register(id.clone(), token.into(), make_entry(None, token.into()));
+        assert!(reg.contains_key(&id));
+        assert_eq!(reg.get_agent_id_by_token(token), Some(&id));
+
+        let removed = reg.unregister(&id).unwrap();
+        assert_eq!(removed.agent.auth_token, token);
+        assert!(!reg.contains_key(&id));
+        assert!(reg.get_agent_id_by_token(token).is_none());
+    }
+
+    #[tokio::test]
+    async fn register_links_subagent_to_supervisor() {
+        let mut reg = AgentRegistry::new();
+        let sup = AgentId::random();
+        let child = AgentId::random();
+        add_root(&mut reg, &sup);
+        add_sub(&mut reg, &child, &sup);
+        assert_eq!(reg.get(&sup).unwrap().subagent_ids, vec![child]);
+    }
+
+    #[tokio::test]
+    async fn unregister_removes_subagent_pointer() {
+        let mut reg = AgentRegistry::new();
+        let sup = AgentId::random();
+        let child = AgentId::random();
+        add_root(&mut reg, &sup);
+        add_sub(&mut reg, &child, &sup);
+        reg.unregister(&child).unwrap();
+        assert!(reg.get(&sup).unwrap().subagent_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebuild_fixes_out_of_order_subagent_ids() {
+        let mut reg = AgentRegistry::new();
+        let sup = AgentId::random();
+        let child = AgentId::random();
+        // Register child before supervisor — eager link in register() is a no-op.
+        add_sub(&mut reg, &child, &sup);
+        add_root(&mut reg, &sup);
+        assert!(reg.get(&sup).unwrap().subagent_ids.is_empty());
+        reg.rebuild_subagent_ids();
+        assert_eq!(reg.get(&sup).unwrap().subagent_ids, vec![child]);
+    }
+
+    // -- Supervisor chain walking --
+
+    #[tokio::test]
+    async fn walk_chain_traverses_ancestors() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        let b = AgentId::random();
+        let c = AgentId::random();
+        add_root(&mut reg, &a);
+        add_sub(&mut reg, &b, &a);
+        add_sub(&mut reg, &c, &b);
+        let chain = reg.walk_supervisor_chain(&c).unwrap();
+        assert_eq!(chain.len(), 3);
+        assert!(chain[2].agent.config.created_by.is_none()); // root
+    }
+
+    #[tokio::test]
+    async fn walk_chain_rejects_cycle() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        let b = AgentId::random();
+        reg.register(
+            a.clone(),
+            "ta".into(),
+            make_entry(Some(b.clone()), "aa".into()),
+        );
+        reg.register(b, "tb".into(), make_entry(Some(a.clone()), "ab".into()));
+        match reg.walk_supervisor_chain(&a) {
+            Err((status, msg)) => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert!(msg.contains("circular"));
+            }
+            Ok(_) => panic!("expected cycle error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn walk_chain_rejects_broken_link() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        let ghost = AgentId::random();
+        reg.register(a.clone(), "t".into(), make_entry(Some(ghost), "a".into()));
+        match reg.walk_supervisor_chain(&a) {
+            Err((status, _)) => assert_eq!(status, StatusCode::FORBIDDEN),
+            Ok(_) => panic!("expected broken chain error"),
+        }
+    }
+
+    // -- Authorization: require_superior --
+
+    #[tokio::test]
+    async fn superior_operator_bypasses_all() {
+        let mut reg = AgentRegistry::new();
+        let target = AgentId::random();
+        add_root(&mut reg, &target);
+        reg.require_superior(&Identity::Operator, &target).unwrap();
+    }
+
+    #[tokio::test]
+    async fn superior_ancestor_accepted() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        let b = AgentId::random();
+        let c = AgentId::random();
+        add_root(&mut reg, &a);
+        add_sub(&mut reg, &b, &a);
+        add_sub(&mut reg, &c, &b);
+        // a is grand-supervisor of c.
+        reg.require_superior(&Identity::Agent { id: a.clone() }, &c)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn superior_rejects_unrelated() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        let other = AgentId::random();
+        add_root(&mut reg, &a);
+        add_root(&mut reg, &other);
+        match reg.require_superior(&Identity::Agent { id: other }, &a) {
+            Err((status, _)) => assert_eq!(status, StatusCode::FORBIDDEN),
+            Ok(_) => panic!("expected FORBIDDEN"),
+        }
+    }
+
+    #[tokio::test]
+    async fn superior_rejects_child_accessing_parent() {
+        let mut reg = AgentRegistry::new();
+        let parent = AgentId::random();
+        let child = AgentId::random();
+        add_root(&mut reg, &parent);
+        add_sub(&mut reg, &child, &parent);
+        match reg.require_superior(&Identity::Agent { id: child }, &parent) {
+            Err((status, _)) => assert_eq!(status, StatusCode::FORBIDDEN),
+            Ok(_) => panic!("expected FORBIDDEN"),
+        }
+    }
+
+    // -- Authorization: require_supervisor --
+
+    #[tokio::test]
+    async fn supervisor_allows_operator_and_self() {
+        let mut reg = AgentRegistry::new();
+        let id = AgentId::random();
+        add_root(&mut reg, &id);
+        reg.require_supervisor(&Identity::Operator, &id).unwrap();
+        reg.require_supervisor(&Identity::Agent { id: id.clone() }, &id)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervisor_rejects_wrong_identity() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        let other = AgentId::random();
+        add_root(&mut reg, &a);
+        add_root(&mut reg, &other);
+        match reg.require_supervisor(&Identity::Agent { id: other }, &a) {
+            Err((status, _)) => assert_eq!(status, StatusCode::FORBIDDEN),
+            Ok(_) => panic!("expected FORBIDDEN"),
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_returns_not_found_for_missing() {
+        let reg = AgentRegistry::new();
+        let ghost = AgentId::random();
+        match reg.require_supervisor(&Identity::Operator, &ghost) {
+            Err((status, _)) => assert_eq!(status, StatusCode::NOT_FOUND),
+            Ok(_) => panic!("expected NOT_FOUND"),
+        }
     }
 }

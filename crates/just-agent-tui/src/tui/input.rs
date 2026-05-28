@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 
 use just_agent_client::DaemonClient;
 use just_agent_core::command::{self, SlashCommand};
+use just_agent_core::types::AgentId;
 
 use super::super::Action;
 use super::{App, ChatLine};
@@ -14,7 +15,7 @@ impl App {
         key: KeyEvent,
         action_tx: &mpsc::Sender<Action>,
         client: &DaemonClient,
-        agent_id: &str,
+        agent_id: &AgentId,
     ) {
         if key.kind != KeyEventKind::Press {
             return;
@@ -196,7 +197,12 @@ impl App {
     /// Two dispatch categories:
     /// - **TUI-local** (help/quit/clear): no daemon call, handled entirely here
     /// - **Daemon query** (status): request-response, awaits daemon endpoint directly
-    async fn dispatch_command(&mut self, cmd: SlashCommand, client: &DaemonClient, agent_id: &str) {
+    async fn dispatch_command(
+        &mut self,
+        cmd: SlashCommand,
+        client: &DaemonClient,
+        agent_id: &AgentId,
+    ) {
         match cmd {
             // TUI-local
             SlashCommand::Help => {

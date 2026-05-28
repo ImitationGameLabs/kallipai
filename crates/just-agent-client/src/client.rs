@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use just_agent_core::types::AgentId;
 use just_agent_core::types::SseEvent;
 use just_llm_client::JsonEventStream;
 
@@ -50,7 +51,7 @@ impl DaemonClient {
     }
 
     /// Spawn a new agent instance on the daemon.
-    pub async fn spawn(&self, req: CreateAgentRequest) -> Result<String> {
+    pub async fn spawn(&self, req: CreateAgentRequest) -> Result<AgentId> {
         let resp: CreateAgentResponse = self
             .with_auth(self.inner.http.post(self.url("/agents")).json(&req))
             .send()
@@ -65,7 +66,7 @@ impl DaemonClient {
     }
 
     /// Fire-and-forget message POST. Use when already consuming the SSE stream.
-    pub async fn post_message(&self, id: &str, text: &str) -> Result<()> {
+    pub async fn post_message(&self, id: &AgentId, text: &str) -> Result<()> {
         self.with_auth(
             self.inner
                 .http
@@ -97,7 +98,7 @@ impl DaemonClient {
 
     /// Kill an agent instance.
     /// Requires superior-level auth if the daemon enforces it.
-    pub async fn kill_agent(&self, id: &str) -> Result<()> {
+    pub async fn kill_agent(&self, id: &AgentId) -> Result<()> {
         self.with_auth(self.inner.http.delete(self.url(&format!("/agents/{id}"))))
             .send()
             .await
@@ -109,7 +110,7 @@ impl DaemonClient {
 
     /// Interrupt the current agent operation gracefully.
     /// Requires superior-level auth if the daemon enforces it.
-    pub async fn interrupt_agent(&self, id: &str) -> Result<()> {
+    pub async fn interrupt_agent(&self, id: &AgentId) -> Result<()> {
         self.with_auth(
             self.inner
                 .http
@@ -124,7 +125,7 @@ impl DaemonClient {
     }
 
     /// Get a raw SSE event stream for the given agent.
-    pub async fn event_stream(&self, id: &str) -> Result<JsonEventStream<SseEvent>> {
+    pub async fn event_stream(&self, id: &AgentId) -> Result<JsonEventStream<SseEvent>> {
         let response = self
             .with_auth(
                 self.inner
@@ -140,7 +141,7 @@ impl DaemonClient {
     /// Send an approval decision for a deferred action.
     pub async fn respond_approval(
         &self,
-        id: &str,
+        id: &AgentId,
         request_id: &str,
         decision: &str,
         reason: Option<&str>,
@@ -164,7 +165,7 @@ impl DaemonClient {
     }
 
     /// Get agent status including context usage and retry history.
-    pub async fn agent_status(&self, id: &str) -> Result<AgentStatusResponse> {
+    pub async fn agent_status(&self, id: &AgentId) -> Result<AgentStatusResponse> {
         let status = self
             .with_auth(
                 self.inner

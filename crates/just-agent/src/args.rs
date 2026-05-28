@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+use just_agent_core::types::AgentId;
 
 #[derive(Parser)]
 #[command(name = "just-agent", about = "Agent CLI: daemon client")]
@@ -43,7 +44,7 @@ pub struct StartArgs {
 #[derive(Args)]
 pub struct SendArgs {
     /// Agent ID.
-    pub id: String,
+    pub id: AgentId,
     /// Message to send.
     pub message: String,
 }
@@ -51,13 +52,13 @@ pub struct SendArgs {
 #[derive(Args)]
 pub struct IdArgs {
     /// Agent ID.
-    pub id: String,
+    pub id: AgentId,
 }
 
 #[derive(Args)]
 pub struct ApproveArgs {
     /// Agent ID.
-    pub id: String,
+    pub id: AgentId,
     /// Request ID of the deferred action.
     pub request_id: String,
     /// Approval decision: approve or deny.

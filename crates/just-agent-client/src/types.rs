@@ -1,5 +1,6 @@
 use just_agent_core::context::ContextUsage;
 use just_agent_core::retry::RetryRecord;
+use just_agent_core::types::AgentId;
 use just_agent_core::types::AgentState;
 pub(crate) use just_agent_core::types::{CreateAgentRequest, CreateAgentResponse};
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ pub(crate) struct ListAgentsResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentSummary {
-    pub id: String,
+    pub id: AgentId,
     pub workspace_root: String,
     pub state: AgentState,
 }

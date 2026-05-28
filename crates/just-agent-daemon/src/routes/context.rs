@@ -3,6 +3,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use just_agent_core::context::{AgenticContext, ContextUsage};
+use just_agent_core::types::AgentId;
 use just_agent_core::types::AgentState;
 
 use crate::state::SharedState;
@@ -22,12 +23,11 @@ pub struct AgentStatus {
 pub async fn agent_status(
     State(state): State<SharedState>,
     _auth: crate::auth::AuthIdentity,
-    Path(id): Path<String>,
+    Path(id): Path<AgentId>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let agents = state.agents.read().await;
-    let entry = agents
-        .iter()
-        .find(|e| e.id == id)
+    let registry = state.registry.read().await;
+    let entry = registry
+        .get(&id)
         .ok_or((StatusCode::NOT_FOUND, "agent not found".into()))?;
     let store = entry.agent.store.lock().await;
     let context = store.usage_snapshot();

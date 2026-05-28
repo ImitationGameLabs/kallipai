@@ -6,10 +6,11 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use just_agent_client::DaemonClient;
 use just_agent_core::command::{self, SlashCommand};
+use just_agent_core::types::AgentId;
 use just_agent_core::types::SseEvent;
 use tokio::sync::mpsc;
 
-pub async fn run_stdio(client: DaemonClient, agent_id: String) -> Result<()> {
+pub async fn run_stdio(client: DaemonClient, agent_id: AgentId) -> Result<()> {
     let mut event_stream = client.event_stream(&agent_id).await?;
 
     let (action_tx, mut action_rx) = mpsc::channel::<Action>(64);
@@ -199,7 +200,7 @@ fn handle_sse_event(event: SseEvent, approval_tx: &mpsc::Sender<ApprovalPrompt>,
 async fn handle_command(
     cmd: SlashCommand,
     client: &DaemonClient,
-    agent_id: &str,
+    agent_id: &AgentId,
     should_quit: &mut bool,
 ) {
     match cmd {

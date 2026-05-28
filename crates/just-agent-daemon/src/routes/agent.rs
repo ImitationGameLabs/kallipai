@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 
+use anyhow::Context as _;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -14,7 +16,7 @@ use just_agent_core::policy::{AgentPolicy, AuthorizedToolExecutor};
 use just_agent_core::provider::client_from_env;
 use just_agent_core::session::{self, AgentContext};
 use just_agent_core::tools::{build_tool_dispatch, ensure_meta_skill, load_skill};
-use just_agent_core::types::SseEvent;
+use just_agent_core::types::{AgentId, SseEvent};
 use just_llm_client::types::chat::ChatMessage;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -24,82 +26,85 @@ use super::{CreateAgentRequest, CreateAgentResponse, ListAgentsResponse};
 use crate::bridge::bridge_task;
 use crate::state::{Agent, AgentEntry, AgentState, AgentSummary, SharedState};
 
+pub(crate) struct SpawnArgs {
+    pub store: Arc<tokio::sync::Mutex<ContextStore>>,
+    pub deferred: Arc<tokio::sync::Mutex<DeferredQueue>>,
+    pub session_dir: PathBuf,
+    pub config: AgentConfig,
+    pub initial_prompt: Option<String>,
+    pub shutdown_cancel: CancellationToken,
+    pub events_tx: broadcast::Sender<SseEvent>,
+    pub auth_token: String,
+    pub env: HashMap<String, String>,
+}
+
 /// Reconstruct runtime resources shared by create and restore.
-pub(crate) async fn spawn_agent(
-    store: Arc<tokio::sync::Mutex<ContextStore>>,
-    deferred: Arc<tokio::sync::Mutex<DeferredQueue>>,
-    session_dir: std::path::PathBuf,
-    config: AgentConfig,
-    initial_prompt: Option<String>,
-    shutdown_cancel: CancellationToken,
-    events_tx: broadcast::Sender<SseEvent>,
-    auth_token: String,
-    env: HashMap<String, String>,
-) -> anyhow::Result<Agent> {
-    let cancel = shutdown_cancel.child_token();
+pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
+    let cancel = args.shutdown_cancel.child_token();
 
     let client = {
         let meta = ensure_meta_skill()?;
-        let mut sp = config.system_prompt.clone();
+        let mut sp = args.config.system_prompt.clone();
         sp.push_str("\n\n");
         sp.push_str(&meta);
         client_from_env(&sp)?
     };
 
-    let dispatch = build_tool_dispatch(store.clone(), env.clone()).await?;
+    let dispatch = build_tool_dispatch(args.store.clone(), args.env.clone()).await?;
 
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(256);
     let (prompt_tx, prompt_rx) = tokio::sync::mpsc::channel(16);
 
     let executor = AuthorizedToolExecutor::new(
         dispatch,
-        AgentPolicy::new(config.workspace_root.clone()),
-        deferred.clone(),
+        AgentPolicy::new(args.config.workspace_root.clone()),
+        args.deferred.clone(),
     );
     let tool_defs = executor.tool_definitions();
-    store.lock().await.set_tool_definitions(tool_defs);
-    let pinned_budget = (config.effective_budget() as f64 * config.pinned_budget_ratio) as usize;
-    store.lock().await.set_pinned_budget(pinned_budget);
-    let summarizer = ContextSummarizer::new(config.summary_max_tokens);
+    args.store.lock().await.set_tool_definitions(tool_defs);
+    let pinned_budget =
+        (args.config.effective_budget() as f64 * args.config.pinned_budget_ratio) as usize;
+    args.store.lock().await.set_pinned_budget(pinned_budget);
+    let summarizer = ContextSummarizer::new(args.config.summary_max_tokens);
 
     let ctx = AgentContext {
         client,
-        store: store.clone(),
-        deferred: deferred.clone(),
+        store: args.store.clone(),
+        deferred: args.deferred.clone(),
         executor,
         summarizer,
-        config: config.clone(),
-        session_dir: Some(session_dir.clone()),
+        config: args.config.clone(),
+        session_dir: Some(args.session_dir.clone()),
         cancel: cancel.clone(),
     };
 
     let agent_handle = tokio::spawn(session::agent_task(
         ctx,
-        initial_prompt,
+        args.initial_prompt,
         prompt_rx,
         agent_tx,
     ));
     let state = Arc::new(AtomicU8::new(AgentState::IDLE));
     let bridge_handle = tokio::spawn(bridge_task(
         agent_rx,
-        events_tx.clone(),
-        shutdown_cancel.clone(),
+        args.events_tx.clone(),
+        args.shutdown_cancel.clone(),
         state.clone(),
     ));
 
     Ok(Agent {
         prompt_tx,
-        events_tx,
-        deferred,
-        config,
+        events_tx: args.events_tx,
+        deferred: args.deferred,
+        config: args.config,
         agent_handle,
         bridge_handle,
-        store,
-        session_dir: Some(session_dir),
+        store: args.store,
+        session_dir: Some(args.session_dir),
         cancel,
         state,
-        auth_token,
-        env,
+        auth_token: args.auth_token,
+        env: args.env,
     })
 }
 
@@ -113,7 +118,7 @@ pub async fn create_agent(
         crate::auth::require_operator(&auth.0)?;
     }
 
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = AgentId::random();
     let auth_token = uuid::Uuid::new_v4().to_string();
 
     let mut config = {
@@ -123,13 +128,13 @@ pub async fn create_agent(
     };
     config.agent_id = Some(id.clone());
     let mut env = HashMap::new();
-    env.insert("JUST_AGENT_ID".into(), id.clone());
+    env.insert("JUST_AGENT_ID".into(), id.to_string());
     env.insert("JUST_AGENT_AUTH_TOKEN".into(), auth_token.clone());
 
     // Subagent: validate supervisor and delegation constraints.
     if let Some(ref supervisor_id) = req.created_by {
-        let agents = state.agents.read().await;
-        let supervisor = crate::auth::require_supervisor(&auth.0, &agents, supervisor_id)?;
+        let registry = state.registry.read().await;
+        let supervisor = registry.require_supervisor(&auth.0, supervisor_id)?;
 
         let supervisor_perms = &supervisor.agent.config.permissions;
         if supervisor_perms.max_depth == 0 {
@@ -172,36 +177,32 @@ pub async fn create_agent(
         info!(skill = skill_name, "loaded skill");
     }
 
-    let session_dir = persistence::create_session(
-        &id,
-        &config.workspace_root,
-        config.created_by.as_deref(),
-        config.permissions.max_depth,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let session_dir =
+        persistence::create_session(&id, &config.workspace_root, config.created_by.as_ref())
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let prompt = config.prompt.take();
     let log_ws = config.workspace_root.display().to_string();
     let log_depth = config.permissions.max_depth;
     let (events_tx, _) = broadcast::channel(256);
-    let agent = spawn_agent(
+    let agent = spawn_agent(SpawnArgs {
         store,
         deferred,
         session_dir,
         config,
-        prompt,
-        state.shutdown.clone(),
+        initial_prompt: prompt,
+        shutdown_cancel: state.shutdown.clone(),
         events_tx,
-        auth_token,
+        auth_token: auth_token.clone(),
         env,
-    )
+    })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     {
-        let mut agents = state.agents.write().await;
+        let mut registry = state.registry.write().await;
         // Re-verify supervisor was not deleted during agent spawn.
         if let Some(ref supervisor_id) = req.created_by
-            && !agents.iter().any(|e| e.id == *supervisor_id)
+            && !registry.contains_key(supervisor_id)
         {
             // Supervisor gone — clean up the orphaned subagent.
             agent.agent_handle.abort();
@@ -214,7 +215,11 @@ pub async fn create_agent(
                 "supervisor agent was deleted during creation".into(),
             ));
         }
-        agents.push(AgentEntry { id: id.clone(), agent });
+        registry.register(
+            id.clone(),
+            auth_token,
+            AgentEntry { agent, subagent_ids: vec![] },
+        );
     }
     info!(id = %id, supervisor = ?req.created_by, ws = %log_ws, depth = log_depth, "created agent");
 
@@ -227,11 +232,11 @@ pub async fn list_agents(
     State(state): State<SharedState>,
     _auth: crate::auth::AuthIdentity,
 ) -> Json<ListAgentsResponse> {
-    let agents = state.agents.read().await;
-    let summaries: Vec<AgentSummary> = agents
+    let registry = state.registry.read().await;
+    let summaries: Vec<AgentSummary> = registry
         .iter()
-        .map(|entry| AgentSummary {
-            id: entry.id.clone(),
+        .map(|(id, entry)| AgentSummary {
+            id: id.clone(),
             workspace_root: entry.agent.config.workspace_root.display().to_string(),
             state: entry.agent.get_state(),
         })
@@ -242,32 +247,39 @@ pub async fn list_agents(
 pub async fn delete_agent(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
-    Path(id): Path<String>,
+    Path(id): Path<AgentId>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let entry = {
-        let mut agents = state.agents.write().await;
-        crate::auth::require_superior(&auth.0, &agents, &id)?;
-        let Some(idx) = agents.iter().position(|e| e.id == id) else {
+        let mut registry = state.registry.write().await;
+        registry.require_superior(&auth.0, &id)?;
+        let Some(entry) = registry.get(&id) else {
             return Ok(StatusCode::NOT_FOUND);
         };
         // Agent must be idle and have no subagents.
-        let entry = &agents[idx];
         if entry.agent.get_state() != AgentState::Idle {
             return Err((
                 StatusCode::CONFLICT,
                 "agent is busy, interrupt it first".into(),
             ));
         }
-        let has_subagents = agents
-            .iter()
-            .any(|e| e.agent.config.created_by.as_deref() == Some(id.as_str()));
-        if has_subagents {
+        if !entry.subagent_ids.is_empty() {
             return Err((
                 StatusCode::CONFLICT,
                 "agent has active subagents, delete or interrupt them first".into(),
             ));
         }
-        agents.remove(idx)
+        // Unregister under the same write lock — should always succeed since
+        // `get` above confirmed the agent exists. Defensive fallback in case
+        // the invariant is violated by a future refactor.
+        match registry.unregister(&id) {
+            Some(e) => e,
+            None => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "agent vanished during deletion".into(),
+                ));
+            }
+        }
     };
 
     // Signal graceful cancellation.
@@ -290,26 +302,87 @@ pub async fn delete_agent(
 pub async fn interrupt_agent(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
-    Path(id): Path<String>,
+    Path(id): Path<AgentId>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let agents = state.agents.read().await;
-    crate::auth::require_superior(&auth.0, &agents, &id)?;
-    let Some(entry) = agents.iter().find(|e| e.id == id) else {
+    let registry = state.registry.read().await;
+    registry.require_superior(&auth.0, &id)?;
+    let Some(entry) = registry.get(&id) else {
         return Ok(StatusCode::NOT_FOUND);
     };
     entry.agent.cancel.cancel();
     Ok(StatusCode::ACCEPTED)
 }
 
-/// Fire-and-forget: spawn one restore task per persisted session.
-///
-/// Returns immediately so the HTTP server can start accepting requests.
-/// Each session restores concurrently; agents appear in the map once ready.
-///
-/// TODO: A tampered `meta.json` could set a subagent's workspace_root outside its
-/// supervisor's boundary, bypassing the validation done at creation time. Consider
-/// reading each supervisor's `meta.json` at restore and verifying the subagent's
-/// workspace remains within the supervisor's workspace_root.
+/// Validate supervisor chain and compute delegation depth for a subagent.
+/// Returns the computed `max_depth` for the subagent's `PermissionProfile`.
+fn validate_subagent_depth(
+    workspace_root: &std::path::Path,
+    supervisor_id: &AgentId,
+) -> anyhow::Result<u8> {
+    let supervisor_meta =
+        persistence::read_meta(supervisor_id).context("supervisor meta missing")?;
+
+    if !workspace_root.starts_with(&supervisor_meta.workspace_root) {
+        anyhow::bail!("workspace outside supervisor boundary");
+    }
+
+    let mut levels: u8 = 1;
+    let mut visited = HashSet::new();
+    visited.insert(supervisor_id.clone());
+    let mut current_meta = supervisor_meta;
+    while let Some(ref parent_id) = current_meta.created_by {
+        if !visited.insert(parent_id.clone()) {
+            anyhow::bail!("circular supervisor chain detected");
+        }
+        levels = levels.saturating_add(1);
+        current_meta = persistence::read_meta(parent_id).context("incomplete supervisor chain")?;
+    }
+
+    Ok(just_agent_core::config::DEFAULT_MAX_DEPTH.saturating_sub(levels))
+}
+
+/// Restore a single persisted session to a running agent.
+async fn restore_one(
+    p: persistence::PendingRestore,
+    shutdown: CancellationToken,
+) -> anyhow::Result<(AgentId, String, Agent)> {
+    let sess = persistence::restore_session(&p.agent_id, &p.session_dir)?;
+
+    let mut config = AgentConfig::load(None, vec![], Some(p.workspace_root.clone()))?;
+    config.agent_id = Some(p.agent_id.clone());
+    config.created_by = p.created_by.clone();
+
+    if let Some(ref supervisor_id) = p.created_by {
+        config.permissions.max_depth = validate_subagent_depth(&p.workspace_root, supervisor_id)?;
+    }
+
+    let store = Arc::new(tokio::sync::Mutex::new(sess.store));
+    let deferred = Arc::new(tokio::sync::Mutex::new(sess.deferred));
+    let (events_tx, _) = broadcast::channel(256);
+
+    let auth_token = uuid::Uuid::new_v4().to_string();
+    let mut env = HashMap::new();
+    env.insert("JUST_AGENT_ID".into(), p.agent_id.to_string());
+    env.insert("JUST_AGENT_AUTH_TOKEN".into(), auth_token.clone());
+
+    let agent = spawn_agent(SpawnArgs {
+        store,
+        deferred,
+        session_dir: sess.session_dir,
+        config,
+        initial_prompt: None,
+        shutdown_cancel: shutdown,
+        events_tx,
+        auth_token: auth_token.clone(),
+        env,
+    })
+    .await?;
+
+    Ok((sess.agent_id, auth_token, agent))
+}
+
+/// Restore persisted sessions sequentially, then rebuild `subagent_ids`
+/// from `created_by` relationships.
 pub async fn restore_sessions(state: &SharedState) {
     let pending = persistence::scan_sessions();
     if pending.is_empty() {
@@ -317,65 +390,20 @@ pub async fn restore_sessions(state: &SharedState) {
     }
 
     info!(count = pending.len(), "restoring sessions");
+
     for p in pending {
-        let state = state.clone();
-        tokio::spawn(async move {
-            let sess = match persistence::restore_session(&p.agent_id, &p.session_dir) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(id = %p.agent_id, "restore failed: {e:#}");
-                    return;
-                }
-            };
-
-            let mut config = match AgentConfig::load(None, vec![], Some(p.workspace_root.clone())) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!(id = %p.agent_id, "restore config failed: {e:#}");
-                    return;
-                }
-            };
-            config.agent_id = Some(p.agent_id.clone());
-            config.created_by = p.created_by.clone();
-            if let Some(depth) = p.max_depth {
-                config.permissions.max_depth =
-                    depth.min(just_agent_core::config::DEFAULT_MAX_DEPTH);
+        let agent_id = p.agent_id.clone();
+        match restore_one(p, state.shutdown.clone()).await {
+            Ok((id, auth_token, agent)) => {
+                let mut registry = state.registry.write().await;
+                registry.register(id, auth_token, AgentEntry { agent, subagent_ids: vec![] });
+                info!(id = %agent_id, "restored session");
             }
-
-            let store = Arc::new(tokio::sync::Mutex::new(sess.store));
-            let deferred = Arc::new(tokio::sync::Mutex::new(sess.deferred));
-            let (events_tx, _) = broadcast::channel(256);
-
-            let auth_token = uuid::Uuid::new_v4().to_string();
-            let mut env = HashMap::new();
-            env.insert("JUST_AGENT_ID".into(), p.agent_id.clone());
-            env.insert("JUST_AGENT_AUTH_TOKEN".into(), auth_token.clone());
-
-            match spawn_agent(
-                store,
-                deferred,
-                sess.session_dir,
-                config,
-                None,
-                state.shutdown.clone(),
-                events_tx,
-                auth_token,
-                env,
-            )
-            .await
-            {
-                Ok(agent) => {
-                    state
-                        .agents
-                        .write()
-                        .await
-                        .push(AgentEntry { id: sess.agent_id.clone(), agent });
-                    info!(id = %sess.agent_id, "restored session");
-                }
-                Err(e) => {
-                    tracing::error!(id = %sess.agent_id, "restore failed: {e:#}");
-                }
+            Err(e) => {
+                tracing::error!(id = %agent_id, "restore failed: {e:#}");
             }
-        });
+        }
     }
+
+    state.registry.write().await.rebuild_subagent_ids();
 }

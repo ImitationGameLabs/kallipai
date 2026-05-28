@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use futures_util::StreamExt;
 use just_agent_client::DaemonClient;
+use just_agent_core::types::AgentId;
 
 use args::{Cli, Commands};
 
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
                     workspace_root: args.workspace_root,
                     skills: args.skills,
                     prompt: args.prompt,
-                    created_by: std::env::var("JUST_AGENT_ID").ok(),
+                    created_by: std::env::var("JUST_AGENT_ID").ok().map(AgentId::from),
                 })
                 .await?;
             println!("{id}");

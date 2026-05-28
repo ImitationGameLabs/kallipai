@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::retry::RetryPolicy;
+use crate::types::AgentId;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a minimal coding agent. Use shell_session_exec for shell commands. Use shell_session_create to create persistent shell sessions, shell_session_list to inspect them, shell_session_capture to inspect recent output, and shell_session_restart or shell_session_kill when session lifecycle control is necessary. Keep answers concise and prefer the least risky tool that can accomplish the task.\n\nWhen a tool returns {\"deferred\": true, \"request_id\": \"...\"}, the action was NOT executed and is pending approval. Continue with other work. When you see an approval notification in context, call approval_redeem with the request_id to execute. Call approval_list to check status, approval_cancel if you no longer need a pending action.";
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 32;
@@ -15,7 +16,14 @@ const DEFAULT_RETRY_BASE_DELAY_SECS: u64 = 1;
 const DEFAULT_PINNED_BUDGET_RATIO: f64 = 0.25;
 const DEFAULT_CONTEXT_THRESHOLDS: &[u8] = &[50, 60, 70, 80];
 
-/// Default max delegation depth for top-level agents.
+/// Hard-coded maximum delegation depth for top-level agents.
+///
+/// Not configurable — hard-coding avoids the complexity of persisting and
+/// re-validating a dynamic value across restarts. The depth is recomputed
+/// from the `created_by` chain on restore (depth = Self - chain length),
+/// eliminating any attack surface from tampered `meta.json`. A future
+/// increase to this constant will cover all reasonable delegation needs
+/// once the chain-walking restore path is sufficiently tested.
 pub const DEFAULT_MAX_DEPTH: u8 = 3;
 
 /// Runtime configuration for `just-agent`.
@@ -33,8 +41,8 @@ pub struct AgentConfig {
     pub retry_policy: RetryPolicy,
     pub pinned_budget_ratio: f64,
     pub context_thresholds: Vec<u8>,
-    pub agent_id: Option<String>,
-    pub created_by: Option<String>,
+    pub agent_id: Option<AgentId>,
+    pub created_by: Option<AgentId>,
     pub permissions: PermissionProfile,
 }
 

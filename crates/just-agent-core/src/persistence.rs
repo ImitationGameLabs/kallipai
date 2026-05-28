@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::ContextStore;
 use crate::deferred::DeferredQueue;
+use crate::types::AgentId;
 use just_llm_client::types::chat::ChatMessage;
 /// Resolve the base sessions directory.
 fn sessions_base() -> Result<PathBuf> {
@@ -26,16 +27,15 @@ fn sessions_base() -> Result<PathBuf> {
 }
 
 /// Session directory for a given agent.
-pub fn session_dir(agent_id: &str) -> Result<PathBuf> {
-    Ok(sessions_base()?.join(agent_id))
+pub fn session_dir(agent_id: &AgentId) -> Result<PathBuf> {
+    Ok(sessions_base()?.join(agent_id.as_ref()))
 }
 
 /// Create session directory and write initial meta.json.
 pub fn create_session(
-    agent_id: &str,
+    agent_id: &AgentId,
     workspace_root: &Path,
-    created_by: Option<&str>,
-    max_depth: u8,
+    created_by: Option<&AgentId>,
 ) -> Result<PathBuf> {
     let dir = session_dir(agent_id)?;
     std::fs::create_dir_all(&dir)?;
@@ -44,9 +44,8 @@ pub fn create_session(
         "workspace_root": workspace_root.to_string_lossy(),
     });
     if let Some(supervisor_id) = created_by {
-        meta["created_by"] = serde_json::Value::String(supervisor_id.to_owned());
+        meta["created_by"] = serde_json::to_value(supervisor_id)?;
     }
-    meta["max_depth"] = serde_json::Value::Number(max_depth.into());
     atomic_write(
         &dir.join("meta.json"),
         &serde_json::to_string_pretty(&meta)?,
@@ -56,7 +55,7 @@ pub fn create_session(
 }
 
 /// Remove a session directory.
-pub fn cleanup_session(agent_id: &str) -> Result<()> {
+pub fn cleanup_session(agent_id: &AgentId) -> Result<()> {
     let dir = session_dir(agent_id)?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
@@ -100,10 +99,15 @@ pub struct SessionMeta {
     pub consecutive_restart_count: u32,
     /// Supervisor agent ID (for subagents).
     #[serde(default, rename = "created_by")]
-    pub created_by: Option<String>,
-    /// Remaining delegation depth.
-    #[serde(default)]
-    pub max_depth: Option<u8>,
+    pub created_by: Option<AgentId>,
+}
+
+/// Read a session's meta.json without side effects.
+/// Used for validating supervisor chains at restore time.
+pub fn read_meta(agent_id: &AgentId) -> Result<SessionMeta> {
+    let path = session_dir(agent_id)?.join("meta.json");
+    let json = fs::read_to_string(&path).context("reading meta.json")?;
+    serde_json::from_str(&json).context("parsing meta.json")
 }
 
 /// Maximum consecutive rapid restarts before refusing restore.
@@ -120,16 +124,15 @@ fn now_epoch_secs() -> u64 {
 
 /// Lightweight handle produced by scanning the sessions directory.
 pub struct PendingRestore {
-    pub agent_id: String,
+    pub agent_id: AgentId,
     pub session_dir: PathBuf,
     pub workspace_root: PathBuf,
-    pub created_by: Option<String>,
-    pub max_depth: Option<u8>,
+    pub created_by: Option<AgentId>,
 }
 
 /// A session fully deserialized and ready to resume.
 pub struct RestorableSession {
-    pub agent_id: String,
+    pub agent_id: AgentId,
     pub session_dir: PathBuf,
     pub store: ContextStore,
     pub deferred: DeferredQueue,
@@ -159,7 +162,10 @@ pub fn scan_sessions() -> Vec<PendingRestore> {
         if !path.is_dir() {
             continue;
         }
-        let agent_id = match path.file_name().map(|n| n.to_string_lossy().into_owned()) {
+        let agent_id = match path
+            .file_name()
+            .map(|n| AgentId::from(n.to_string_lossy().into_owned()))
+        {
             Some(id) => id,
             None => continue,
         };
@@ -169,7 +175,6 @@ pub fn scan_sessions() -> Vec<PendingRestore> {
                 session_dir: path,
                 workspace_root: meta.workspace_root,
                 created_by: meta.created_by,
-                max_depth: meta.max_depth,
             }),
             Err(e) => {
                 tracing::warn!(id = %agent_id, "skipping session: {e:#}");
@@ -215,7 +220,7 @@ fn check_meta(dir: &Path) -> Result<SessionMeta> {
 ///
 /// Reads context.json and deferred.json, fixes incomplete turns, and
 /// injects the restart message.
-pub fn restore_session(agent_id: &str, dir: &Path) -> Result<RestorableSession> {
+pub fn restore_session(agent_id: &AgentId, dir: &Path) -> Result<RestorableSession> {
     let mut store: ContextStore = match fs::read_to_string(dir.join("context.json")) {
         Ok(json) => serde_json::from_str(&json).context("parsing context.json")?,
         Err(_) => ContextStore::new(),
@@ -234,7 +239,7 @@ pub fn restore_session(agent_id: &str, dir: &Path) -> Result<RestorableSession> 
     store.push_turn(vec![ChatMessage::user(RESTART_MESSAGE)]);
 
     Ok(RestorableSession {
-        agent_id: agent_id.to_owned(),
+        agent_id: agent_id.clone(),
         session_dir: dir.to_owned(),
         store,
         deferred,

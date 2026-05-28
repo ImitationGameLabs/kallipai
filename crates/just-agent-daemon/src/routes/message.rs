@@ -6,9 +6,10 @@ use just_agent_core::command::UserInput;
 use tracing::{error, info};
 
 use super::MessageRequest;
-use crate::routes::agent::spawn_agent;
+use crate::routes::agent::{SpawnArgs, spawn_agent};
 use crate::sse::sse_stream;
 use crate::state::SharedState;
+use just_agent_core::types::AgentId;
 
 /// Any authenticated agent may send a message to any other agent.
 /// This is intentional: inter-agent communication should not require a
@@ -16,15 +17,14 @@ use crate::state::SharedState;
 pub async fn send_message(
     State(state): State<SharedState>,
     _auth: crate::auth::AuthIdentity,
-    Path(id): Path<String>,
+    Path(id): Path<AgentId>,
     Json(req): Json<MessageRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Fast path: agent is alive, send directly.
     {
-        let agents = state.agents.read().await;
-        let entry = agents
-            .iter()
-            .find(|e| e.id == id)
+        let registry = state.registry.read().await;
+        let entry = registry
+            .get(&id)
             .ok_or((StatusCode::NOT_FOUND, "agent not found".into()))?;
         if entry
             .agent
@@ -38,10 +38,9 @@ pub async fn send_message(
     }
 
     // Slow path: agent is dead, reactivate.
-    let mut agents = state.agents.write().await;
-    let entry = agents
-        .iter_mut()
-        .find(|e| e.id == id)
+    let mut registry = state.registry.write().await;
+    let entry = registry
+        .get_mut(&id)
         .ok_or((StatusCode::NOT_FOUND, "agent not found".into()))?;
 
     // Double-check under write lock: another request may have reactivated.
@@ -61,17 +60,17 @@ pub async fn send_message(
     let session_dir = entry.agent.session_dir.clone().unwrap_or_default();
     let saved_token = entry.agent.auth_token.clone();
     let saved_env = entry.agent.env.clone();
-    entry.agent = spawn_agent(
-        entry.agent.store.clone(),
-        entry.agent.deferred.clone(),
+    entry.agent = spawn_agent(SpawnArgs {
+        store: entry.agent.store.clone(),
+        deferred: entry.agent.deferred.clone(),
         session_dir,
-        entry.agent.config.clone(),
-        Some(req.text),
-        state.shutdown.clone(),
-        entry.agent.events_tx.clone(),
-        saved_token,
-        saved_env,
-    )
+        config: entry.agent.config.clone(),
+        initial_prompt: Some(req.text),
+        shutdown_cancel: state.shutdown.clone(),
+        events_tx: entry.agent.events_tx.clone(),
+        auth_token: saved_token,
+        env: saved_env,
+    })
     .await
     .map_err(|e| {
         error!(id = %id, "reactivation failed: {e:#}");
@@ -88,12 +87,11 @@ pub async fn send_message(
 pub async fn sse_events(
     State(state): State<SharedState>,
     _auth: crate::auth::AuthIdentity,
-    Path(id): Path<String>,
+    Path(id): Path<AgentId>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let agents = state.agents.read().await;
-    let entry = agents
-        .iter()
-        .find(|e| e.id == id)
+    let registry = state.registry.read().await;
+    let entry = registry
+        .get(&id)
         .ok_or((StatusCode::NOT_FOUND, "agent not found".into()))?;
     let rx = entry.agent.events_tx.subscribe();
     Ok(sse_stream(rx))

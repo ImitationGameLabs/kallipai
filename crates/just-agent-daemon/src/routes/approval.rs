@@ -2,6 +2,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use just_agent_core::persistence;
+use just_agent_core::types::AgentId;
 use just_agent_core::types::SseEvent;
 
 use super::ApprovalRequest;
@@ -10,14 +11,13 @@ use crate::state::SharedState;
 pub async fn respond_approval(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
-    Path(id): Path<String>,
+    Path(id): Path<AgentId>,
     Json(req): Json<ApprovalRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let agents = state.agents.read().await;
-    crate::auth::require_superior(&auth.0, &agents, &id)?;
-    let entry = agents
-        .iter()
-        .find(|e| e.id == id)
+    let registry = state.registry.read().await;
+    registry.require_superior(&auth.0, &id)?;
+    let entry = registry
+        .get(&id)
         .ok_or((StatusCode::NOT_FOUND, "agent not found".into()))?;
 
     {

@@ -74,16 +74,16 @@ async fn shutdown_signal(token: CancellationToken) {
 
 /// Give in-flight agent tasks a brief window to persist, then abort.
 async fn graceful_agent_shutdown(state: &AppState) {
-    let agents = state.agents.read().await;
-    if agents.is_empty() {
+    let registry = state.registry.read().await;
+    if registry.is_empty() {
         return;
     }
-    info!(count = agents.len(), "waiting for agents to persist");
+    info!(count = registry.len(), "waiting for agents to persist");
 
     // Allow agents a few seconds to finish persisting after cancellation.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    for entry in agents.iter() {
+    for entry in registry.values() {
         entry.agent.agent_handle.abort();
         entry.agent.bridge_handle.abort();
     }
