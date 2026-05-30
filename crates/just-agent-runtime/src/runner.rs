@@ -134,7 +134,7 @@ pub async fn run_agent_rounds(
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut tool_acc = ToolCallAccumulator::new();
-        let mut usage_prompt_tokens: Option<u32> = None;
+        let mut response_usage: Option<just_llm_client::types::chat::Usage> = None;
 
         tokio::pin!(stream);
         loop {
@@ -173,8 +173,8 @@ pub async fn run_agent_rounds(
                         }
                     }
 
-                    if let Some(usage) = &chunk.usage {
-                        usage_prompt_tokens = Some(usage.prompt_tokens);
+                    if let Some(usage) = chunk.usage.clone() {
+                        response_usage = Some(usage);
                     }
                 }
                 _ = ctx.cancel.cancelled() => {
@@ -184,8 +184,8 @@ pub async fn run_agent_rounds(
             }
         }
 
-        if let Some(pt) = usage_prompt_tokens {
-            ctx.store.lock().await.set_last_usage(pt);
+        if let Some(usage) = response_usage {
+            ctx.store.lock().await.accumulate_usage(&usage);
         }
 
         let tool_calls = tool_acc.finish();

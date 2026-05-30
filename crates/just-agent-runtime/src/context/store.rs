@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 
 use anyhow::{Result, bail};
-use just_agent_common::context::ContextUsage;
+use just_agent_common::context::{ContextUsage, CumulativeUsage};
 use just_llm_client::types::chat::{ChatMessage, ToolDefinition};
 
 use just_agent_common::retry::RetryRecord;
@@ -72,6 +72,9 @@ pub struct ContextStore {
     summary_tokens: usize,
     /// Exact prompt token count from the last provider response.
     last_prompt_tokens: Option<u32>,
+    /// Cumulative token usage across all LLM calls in this session.
+    #[serde(default)]
+    cumulative_usage: CumulativeUsage,
     /// The next turn ID to assign.
     next_turn_id: u64,
     /// Historical retry records, persisted across session restarts.
@@ -132,6 +135,7 @@ impl AgenticContext for ContextStore {
             turn_count: self.turns.len(),
             turn_tokens,
             last_prompt_tokens: self.last_prompt_tokens,
+            cumulative_usage: self.cumulative_usage,
         }
     }
 
@@ -198,6 +202,7 @@ impl ContextStore {
             summary: None,
             summary_tokens: 0,
             last_prompt_tokens: None,
+            cumulative_usage: CumulativeUsage::default(),
             next_turn_id: 0,
             retry_log: Vec::new(),
             pinned_token_budget: 0,
@@ -215,9 +220,14 @@ impl ContextStore {
         &self.tool_definitions
     }
 
-    /// Cache the exact prompt token count from a provider response.
-    pub fn set_last_usage(&mut self, prompt_tokens: u32) {
-        self.last_prompt_tokens = Some(prompt_tokens);
+    /// Accumulate exact token usage from a provider response.
+    pub fn accumulate_usage(&mut self, usage: &just_llm_client::types::chat::Usage) {
+        self.cumulative_usage.prompt_tokens += usage.prompt_tokens as u64;
+        self.cumulative_usage.completion_tokens += usage.completion_tokens as u64;
+        if let Some(hit) = usage.prompt_cache_hit_tokens {
+            self.cumulative_usage.cache_hit_tokens += hit as u64;
+        }
+        self.last_prompt_tokens = Some(usage.prompt_tokens);
     }
 
     /// Append a new turn from the given messages.
