@@ -2,7 +2,10 @@ use clap::{Args, Parser, Subcommand};
 use just_agent_common::types::AgentId;
 
 #[derive(Parser)]
-#[command(name = "just-agent", about = "Agent CLI: daemon client")]
+#[command(
+    name = "just-agent",
+    about = "Headless CLI to spawn, monitor, and orchestrate agents"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -10,6 +13,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[command(flatten)]
+    Agent(AgentCommand),
+    /// Manage approvals
+    #[command(subcommand)]
+    Approval(ApprovalCommand),
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommand {
     /// Start a new agent via daemon
     Start(StartArgs),
     /// Send message to agent
@@ -24,9 +36,6 @@ pub enum Commands {
     Status(IdArgs),
     /// Interrupt current agent operation
     Interrupt(IdArgs),
-    /// Manage approvals
-    #[command(subcommand)]
-    Approval(ApprovalCommand),
 }
 
 #[derive(Args)]
