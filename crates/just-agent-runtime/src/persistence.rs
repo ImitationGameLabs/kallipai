@@ -104,7 +104,7 @@ pub fn load_policy(dir: &Path) -> Result<ToolPolicy> {
 // ---------------------------------------------------------------------------
 
 /// Minimal metadata persisted per session.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub workspace_root: PathBuf,
     /// Time of the last successful restore.
@@ -135,8 +135,7 @@ const CONSECUTIVE_RESTART_WINDOW: TimeDuration = TimeDuration::seconds(60);
 pub struct PendingRestore {
     pub agent_id: AgentId,
     pub session_dir: PathBuf,
-    pub workspace_root: PathBuf,
-    pub created_by: Option<AgentId>,
+    pub meta: SessionMeta,
 }
 
 /// A session fully deserialized and ready to resume.
@@ -182,8 +181,7 @@ pub fn scan_sessions() -> Vec<PendingRestore> {
             Ok(meta) => pending.push(PendingRestore {
                 agent_id,
                 session_dir: path,
-                workspace_root: meta.workspace_root,
-                created_by: meta.created_by,
+                meta,
             }),
             Err(e) => {
                 tracing::warn!(id = %agent_id, "skipping session: {e:#}");

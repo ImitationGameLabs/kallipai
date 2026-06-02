@@ -1298,6 +1298,7 @@ dependencies = [
  "axum",
  "clap",
  "futures-core",
+ "futures-util",
  "just-agent-common",
  "just-agent-runtime",
  "just-llm-client",

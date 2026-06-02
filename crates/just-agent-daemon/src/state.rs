@@ -129,12 +129,10 @@ impl AgentRegistry {
 
     /// Insert agent, register token, update supervisor's subagent_ids.
     pub fn register(&mut self, id: AgentId, auth_token: String, entry: AgentEntry) {
-        // In the create path the supervisor is already registered, so this
-        // updates its subagent_ids eagerly.
-        //
-        // During restore the supervisor may not be registered yet, making
-        // this a no-op; rebuild_subagent_ids fixes the reverse pointers
-        // once all restores complete.
+        // Eagerly link: if the supervisor is already registered, update its
+        // subagent_ids now. This always succeeds in the create path
+        // (supervisor is validated before we get here) and in the restore
+        // path (top-down BFS guarantees supervisor is registered first).
         if let Some(ref supervisor_id) = entry.agent.config.created_by
             && let Some(supervisor) = self.agents.get_mut(supervisor_id)
         {
@@ -154,23 +152,6 @@ impl AgentRegistry {
             supervisor.subagent_ids.retain(|sid| sid != id);
         }
         Some(entry)
-    }
-
-    /// Rebuild subagent_ids for all agents from created_by relationships.
-    pub fn rebuild_subagent_ids(&mut self) {
-        for entry in self.agents.values_mut() {
-            entry.subagent_ids.clear();
-        }
-        let pairs: Vec<(AgentId, AgentId)> = self
-            .agents
-            .iter()
-            .filter_map(|(id, entry)| Some((id.clone(), entry.agent.config.created_by.clone()?)))
-            .collect();
-        for (child_id, supervisor_id) in &pairs {
-            if let Some(supervisor) = self.agents.get_mut(supervisor_id) {
-                supervisor.subagent_ids.push(child_id.clone());
-            }
-        }
     }
 
     // -- authorization helpers --
@@ -343,19 +324,6 @@ mod tests {
         add_sub(&mut reg, &child, &sup);
         reg.unregister(&child).unwrap();
         assert!(reg.get(&sup).unwrap().subagent_ids.is_empty());
-    }
-
-    #[tokio::test]
-    async fn rebuild_fixes_out_of_order_subagent_ids() {
-        let mut reg = AgentRegistry::new();
-        let sup = AgentId::random();
-        let child = AgentId::random();
-        // Register child before supervisor — eager link in register() is a no-op.
-        add_sub(&mut reg, &child, &sup);
-        add_root(&mut reg, &sup);
-        assert!(reg.get(&sup).unwrap().subagent_ids.is_empty());
-        reg.rebuild_subagent_ids();
-        assert_eq!(reg.get(&sup).unwrap().subagent_ids, vec![child]);
     }
 
     // -- Supervisor chain walking --
