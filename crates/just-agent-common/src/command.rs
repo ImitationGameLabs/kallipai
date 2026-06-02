@@ -15,6 +15,7 @@ pub enum SlashCommand {
     Quit,
     Clear,
     Status,
+    Approvals,
 }
 
 /// Static descriptor for a known command.
@@ -45,6 +46,11 @@ const COMMANDS: &[CommandInfo] = &[
         description: "Show context token usage",
         has_arg: false,
     },
+    CommandInfo {
+        name: "/approvals",
+        description: "View and manage deferred actions",
+        has_arg: false,
+    },
 ];
 
 /// Returns the full command registry.
@@ -73,6 +79,7 @@ pub fn parse(input: &str) -> Option<Result<SlashCommand, String>> {
         "/quit" | "/q" | "/exit" => SlashCommand::Quit,
         "/clear" => SlashCommand::Clear,
         "/status" => SlashCommand::Status,
+        "/approvals" => SlashCommand::Approvals,
         _ => return Some(Err(format!("unknown command: {cmd}"))),
     };
 

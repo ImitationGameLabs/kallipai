@@ -14,28 +14,17 @@ use crate::session::Session;
 enum PendingPrompt {
     None,
     QuitConfirm,
-    DeferredAction { deferred_action_id: String },
 }
 
 enum Action {
     SendPrompt(String),
-    RespondDeferred {
-        deferred_action_id: String,
-        decision: String,
-    },
 }
 
 /// Action resulting from a stdin line, to be dispatched by the main loop.
 enum StdinAction {
     None,
     SendPrompt(String),
-    RespondDeferred {
-        deferred_action_id: String,
-        decision: String,
-    },
-    Quit {
-        kill: bool,
-    },
+    Quit { kill: bool },
     Command(SlashCommand),
 }
 
@@ -52,14 +41,6 @@ pub async fn run_stdio(session: Session) -> Result<()> {
             while let Some(action) = action_rx.recv().await {
                 let result = match action {
                     Action::SendPrompt(text) => client.post_message(&agent_id, &text).await,
-                    Action::RespondDeferred {
-                        deferred_action_id,
-                        decision,
-                    } => {
-                        client
-                            .respond_deferred_action(&deferred_action_id, &decision, None)
-                            .await
-                    }
                 };
                 if let Err(e) = result {
                     eprintln!("[error] {e}");
@@ -118,12 +99,6 @@ pub async fn run_stdio(session: Session) -> Result<()> {
                         busy = true;
                         action_tx.send(Action::SendPrompt(text)).await.ok();
                     }
-                    StdinAction::RespondDeferred { deferred_action_id, decision } => {
-                        action_tx
-                            .send(Action::RespondDeferred { deferred_action_id, decision })
-                            .await
-                            .ok();
-                    }
                     StdinAction::Quit { kill } => {
                         kill_on_exit = kill;
                         should_quit = true;
@@ -138,7 +113,7 @@ pub async fn run_stdio(session: Session) -> Result<()> {
             Some(result) = event_stream.next() => {
                 match result {
                     Ok(event) => {
-                        handle_sse_event(event, &mut busy, &mut pending);
+                        handle_sse_event(event, &mut busy);
                     }
                     Err(e) => {
                         eprintln!("[error] SSE: {e}");
@@ -156,7 +131,7 @@ pub async fn run_stdio(session: Session) -> Result<()> {
     Ok(())
 }
 
-fn handle_sse_event(event: SseEvent, busy: &mut bool, pending: &mut PendingPrompt) {
+fn handle_sse_event(event: SseEvent, busy: &mut bool) {
     match event {
         SseEvent::Reasoning { content } => {
             println!("[think] {content}");
@@ -195,40 +170,8 @@ fn handle_sse_event(event: SseEvent, busy: &mut bool, pending: &mut PendingPromp
         SseEvent::Busy => {
             *busy = true;
         }
-        SseEvent::DeferredCreated {
-            id: _,
-            tool_name,
-            arguments: _,
-            reason: _,
-            dangerous: _,
-        } => {
-            eprintln!("[approval] tool: {tool_name}");
-        }
-        SseEvent::DeferredCommitted {
-            id,
-            tool_name,
-            arguments,
-            reason,
-            dangerous,
-        } => {
-            if !matches!(pending, PendingPrompt::None) {
-                eprintln!("[warning] dropping previous pending prompt for new approval");
-            }
-            let label = if dangerous { "DANGER" } else { "approval" };
-            eprintln!("[{label}] tool: {tool_name}");
-            eprintln!("[{label}] arguments: {}", format_json_value(&arguments));
-            eprintln!("[{label}] reason: {reason}");
-            eprint!("[{label}] [1] Approve  [2] Deny: ");
-            io::stderr().flush().ok();
-            *pending = PendingPrompt::DeferredAction {
-                deferred_action_id: id,
-            };
-        }
-        SseEvent::DeferredApproved { id } => {
-            println!("[approval] {id} approved");
-        }
-        SseEvent::DeferredDenied { id, reason } => {
-            eprintln!("[approval] {id} denied: {reason}");
+        SseEvent::DeferredActionUpdated { id, status } => {
+            println!("[approval] {id} {status}");
         }
         SseEvent::Retrying {
             attempt,
@@ -273,20 +216,14 @@ async fn handle_command(cmd: SlashCommand, session: &Session, pending: &mut Pend
             }
             Err(e) => eprintln!("[error] {e}"),
         },
+        SlashCommand::Approvals => {
+            eprintln!("[system] /approvals is only available in TUI mode");
+        }
     }
 }
 
 /// Format a JSON value for display in stdio deferred action prompts.
 /// Objects and arrays are pretty-printed; scalars use compact form.
-fn format_json_value(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-            serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
-        }
-        _ => v.to_string(),
-    }
-}
-
 fn handle_stdin_line(line: &str, pending: &mut PendingPrompt) -> StdinAction {
     let trimmed = line.trim();
     match pending {
@@ -305,24 +242,6 @@ fn handle_stdin_line(line: &str, pending: &mut PendingPrompt) -> StdinAction {
                 StdinAction::None
             }
         },
-        PendingPrompt::DeferredAction { deferred_action_id } => {
-            let rid = deferred_action_id.clone();
-            match trimmed {
-                "1" | "2" => {
-                    *pending = PendingPrompt::None;
-                    let decision = if trimmed == "1" { "approve" } else { "deny" };
-                    StdinAction::RespondDeferred {
-                        deferred_action_id: rid,
-                        decision: decision.to_owned(),
-                    }
-                }
-                _ => {
-                    eprint!("[approval] [1] Approve  [2] Deny: ");
-                    io::stderr().flush().ok();
-                    StdinAction::None
-                }
-            }
-        }
         PendingPrompt::None => match command::parse(line) {
             None => StdinAction::SendPrompt(line.to_owned()),
             Some(Ok(cmd)) => StdinAction::Command(cmd),

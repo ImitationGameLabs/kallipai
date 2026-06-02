@@ -52,16 +52,6 @@ pub enum DeferredNotification {
     Denied { id: String, reason: String },
 }
 
-/// Info about the most recently enqueued deferred action (consumed once).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DeferredCreateInfo {
-    pub id: String,
-    pub tool_name: String,
-    pub args_json: String,
-    pub reason: String,
-    pub dangerous: bool,
-}
-
 /// Store of deferred tool actions awaiting approval.
 ///
 /// Shared between the executor (enqueue, redeem, cancel) and the daemon
@@ -73,12 +63,15 @@ pub struct DeferredActionStore {
     /// Transient: drained each round, not persisted.
     #[serde(skip)]
     notifications: VecDeque<DeferredNotification>,
-    /// Transient: one-shot flag, not persisted.
-    #[serde(skip)]
-    last_deferred: Option<DeferredCreateInfo>,
     /// Transient: one-shot flag for committed actions, not persisted.
     #[serde(skip)]
     last_committed: Option<DeferredCommittedInfo>,
+    /// Transient: one-shot flag for redeemed actions, not persisted.
+    #[serde(skip)]
+    last_redeemed: Option<String>,
+    /// Transient: one-shot flag for cancelled actions, not persisted.
+    #[serde(skip)]
+    last_cancelled: Option<String>,
 }
 
 impl Default for DeferredActionStore {
@@ -92,8 +85,9 @@ impl DeferredActionStore {
         Self {
             actions: HashMap::new(),
             notifications: VecDeque::new(),
-            last_deferred: None,
             last_committed: None,
+            last_redeemed: None,
+            last_cancelled: None,
         }
     }
 
@@ -118,20 +112,8 @@ impl DeferredActionStore {
             deny_reason: None,
             created_at,
         };
-        self.last_deferred = Some(DeferredCreateInfo {
-            id: id.clone(),
-            tool_name: tool_name.to_owned(),
-            args_json: args_json.to_owned(),
-            reason: reason.to_owned(),
-            dangerous,
-        });
         self.actions.insert(id.clone(), action);
         id
-    }
-
-    /// Take the info about the most recently enqueued action (one-shot).
-    pub fn take_last_deferred(&mut self) -> Option<DeferredCreateInfo> {
-        self.last_deferred.take()
     }
 
     /// Approve a committed action.
@@ -199,6 +181,7 @@ impl DeferredActionStore {
             DeferredActionStatus::Approved => {}
         }
         action.status = DeferredActionStatus::Redeemed;
+        self.last_redeemed = Some(id.to_owned());
         Ok(action.clone())
     }
 
@@ -220,6 +203,7 @@ impl DeferredActionStore {
             }
             prev => {
                 action.status = DeferredActionStatus::Cancelled;
+                self.last_cancelled = Some(id.to_owned());
                 Ok(prev)
             }
         }
@@ -255,6 +239,16 @@ impl DeferredActionStore {
     /// Take the info about the most recently committed action (one-shot).
     pub fn take_last_committed(&mut self) -> Option<DeferredCommittedInfo> {
         self.last_committed.take()
+    }
+
+    /// Take the ID of the most recently redeemed action (one-shot).
+    pub fn take_last_redeemed(&mut self) -> Option<String> {
+        self.last_redeemed.take()
+    }
+
+    /// Take the ID of the most recently cancelled action (one-shot).
+    pub fn take_last_cancelled(&mut self) -> Option<String> {
+        self.last_cancelled.take()
     }
 
     /// List deferred actions, optionally filtered by status.
@@ -458,14 +452,6 @@ mod tests {
         q.commit(&id, "first").unwrap();
         // Already committed
         assert!(q.commit(&id, "second").is_err());
-    }
-
-    #[test]
-    fn take_last_deferred_is_one_shot() {
-        let mut q = DeferredActionStore::new();
-        q.enqueue("t", "{}", "reason", false);
-        assert!(q.take_last_deferred().is_some());
-        assert!(q.take_last_deferred().is_none());
     }
 
     #[test]

@@ -1,16 +1,10 @@
 use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
 
-use just_agent_client::DeferredInfo;
 use just_agent_common::types::SseEvent;
 
-use super::{App, ChatLine};
+use super::{App, AppMode, ChatLine};
 
 impl App {
-    /// Show deferred action popup from SSE DeferredCreated event data.
-    pub fn show_deferred_action(&mut self, info: DeferredInfo) {
-        self.deferred_action.show(info);
-    }
-
     /// Push an error into chat lines.
     pub fn push_error(&mut self, msg: String) {
         self.chat_lines.push(ChatLine::Error(msg));
@@ -83,41 +77,16 @@ impl App {
                 self.streaming_content = false;
                 self.streaming_reasoning = false;
             }
-            SseEvent::DeferredCreated {
-                id: _,
-                tool_name,
-                arguments: _,
-                reason: _,
-                dangerous: _,
-            } => {
-                self.chat_lines
-                    .push(ChatLine::Status(format!("tool call deferred: {tool_name}")));
-                self.auto_scroll = true;
-            }
-            SseEvent::DeferredCommitted {
-                id,
-                tool_name,
-                arguments,
-                reason,
-                dangerous,
-            } => {
-                self.show_deferred_action(DeferredInfo {
-                    id,
-                    tool_name,
-                    arguments,
-                    reason,
-                    dangerous,
-                });
-            }
-            SseEvent::DeferredApproved { id } => {
-                self.chat_lines
-                    .push(ChatLine::Status(format!("approval {id} approved")));
-                self.auto_scroll = true;
-            }
-            SseEvent::DeferredDenied { id, reason } => {
-                self.chat_lines
-                    .push(ChatLine::Error(format!("approval {id} denied: {reason}")));
-                self.auto_scroll = true;
+            SseEvent::DeferredActionUpdated { id, status } => {
+                if matches!(self.mode, AppMode::Approvals) {
+                    if let Some(state) = self.approvals.as_mut() {
+                        state.stale = true;
+                    }
+                } else {
+                    self.chat_lines
+                        .push(ChatLine::Status(format!("deferred action {id}: {status}")));
+                    self.auto_scroll = true;
+                }
             }
             SseEvent::Retrying {
                 attempt,

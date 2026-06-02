@@ -95,13 +95,6 @@ pub enum AgentEvent {
     Error(String),
     Status(String),
     Busy,
-    DeferredCreated {
-        id: String,
-        tool_name: String,
-        arguments: serde_json::Value,
-        reason: String,
-        dangerous: bool,
-    },
     DeferredCommitted {
         id: String,
         tool_name: String,
@@ -114,6 +107,12 @@ pub enum AgentEvent {
         max_attempts: u32,
         error: String,
         delay_secs: f64,
+    },
+    DeferredRedeemed {
+        id: String,
+    },
+    DeferredCancelled {
+        id: String,
     },
     Cancelled,
 }
@@ -159,26 +158,9 @@ pub enum SseEvent {
         message: String,
     },
     Busy,
-    DeferredCreated {
+    DeferredActionUpdated {
         id: String,
-        tool_name: String,
-        arguments: serde_json::Value,
-        reason: String,
-        dangerous: bool,
-    },
-    DeferredCommitted {
-        id: String,
-        tool_name: String,
-        arguments: serde_json::Value,
-        reason: String,
-        dangerous: bool,
-    },
-    DeferredApproved {
-        id: String,
-    },
-    DeferredDenied {
-        id: String,
-        reason: String,
+        status: DeferredActionStatus,
     },
     Retrying {
         attempt: u32,
@@ -189,60 +171,45 @@ pub enum SseEvent {
     Cancelled,
 }
 
-impl From<AgentEvent> for SseEvent {
-    fn from(event: AgentEvent) -> Self {
+impl SseEvent {
+    /// Convert an AgentEvent to an SSE event for broadcast.
+    /// Returns `None` for events handled by other means (e.g., routed to superiors).
+    pub fn try_from_agent(event: AgentEvent) -> Option<Self> {
         match event {
-            AgentEvent::Reasoning(content) => SseEvent::Reasoning { content },
-            AgentEvent::AssistantContent(content) => SseEvent::AssistantContent { content },
+            AgentEvent::DeferredCommitted { .. } => None,
+            AgentEvent::DeferredRedeemed { id } => Some(Self::DeferredActionUpdated {
+                id,
+                status: DeferredActionStatus::Redeemed,
+            }),
+            AgentEvent::DeferredCancelled { id } => Some(Self::DeferredActionUpdated {
+                id,
+                status: DeferredActionStatus::Cancelled,
+            }),
+            AgentEvent::Reasoning(content) => Some(Self::Reasoning { content }),
+            AgentEvent::AssistantContent(content) => Some(Self::AssistantContent { content }),
             AgentEvent::AssistantContentDelta { delta } => {
-                SseEvent::AssistantContentDelta { delta }
+                Some(Self::AssistantContentDelta { delta })
             }
-            AgentEvent::ReasoningDelta { delta } => SseEvent::ReasoningDelta { delta },
-            AgentEvent::ToolCall { name, args } => SseEvent::ToolCall { name, args },
-            AgentEvent::ToolResult(result) => SseEvent::ToolResult { result },
-            AgentEvent::Finished(content) => SseEvent::Finished { content },
-            AgentEvent::MaxRoundsExceeded => SseEvent::MaxRoundsExceeded,
-            AgentEvent::Error(msg) => SseEvent::Error { message: msg },
-            AgentEvent::Status(msg) => SseEvent::Status { message: msg },
-            AgentEvent::Busy => SseEvent::Busy,
-            AgentEvent::DeferredCreated {
-                id,
-                tool_name,
-                arguments,
-                reason,
-                dangerous,
-            } => SseEvent::DeferredCreated {
-                id,
-                tool_name,
-                arguments,
-                reason,
-                dangerous,
-            },
-            AgentEvent::DeferredCommitted {
-                id,
-                tool_name,
-                arguments,
-                reason,
-                dangerous,
-            } => SseEvent::DeferredCommitted {
-                id,
-                tool_name,
-                arguments,
-                reason,
-                dangerous,
-            },
+            AgentEvent::ReasoningDelta { delta } => Some(Self::ReasoningDelta { delta }),
+            AgentEvent::ToolCall { name, args } => Some(Self::ToolCall { name, args }),
+            AgentEvent::ToolResult(result) => Some(Self::ToolResult { result }),
+            AgentEvent::Finished(content) => Some(Self::Finished { content }),
+            AgentEvent::MaxRoundsExceeded => Some(Self::MaxRoundsExceeded),
+            AgentEvent::Error(msg) => Some(Self::Error { message: msg }),
+            AgentEvent::Status(msg) => Some(Self::Status { message: msg }),
+            AgentEvent::Busy => Some(Self::Busy),
             AgentEvent::Retrying {
                 attempt,
                 max_attempts,
                 error,
                 delay_secs,
-            } => SseEvent::Retrying {
+            } => Some(Self::Retrying {
                 attempt,
                 max_attempts,
                 error,
                 delay_secs,
-            },
-            AgentEvent::Cancelled => SseEvent::Cancelled,
+            }),
+            AgentEvent::Cancelled => Some(Self::Cancelled),
         }
     }
 }

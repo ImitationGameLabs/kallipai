@@ -71,8 +71,10 @@ pub enum ApprovalCommand {
     List(ApprovalListArgs),
     /// Show details of an approval
     Get(ApprovalGetArgs),
-    /// Approve or deny
-    Respond(ApprovalRespondArgs),
+    /// Approve a committed action
+    Approve(ApprovalIdArgs),
+    /// Deny a committed action
+    Deny(ApprovalDenyArgs),
 }
 
 #[derive(Args)]
@@ -104,9 +106,15 @@ pub struct ApprovalGetArgs {
 }
 
 #[derive(Args)]
-pub struct ApprovalRespondArgs {
+pub struct ApprovalIdArgs {
     /// Approval ID.
     pub id: String,
-    /// Decision: approve or deny.
-    pub decision: String,
+}
+
+#[derive(Args)]
+pub struct ApprovalDenyArgs {
+    /// Approval ID.
+    pub id: String,
+    /// Reason for denial.
+    pub reason: String,
 }

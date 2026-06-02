@@ -6,4 +6,4 @@ pub use just_agent_common::types::{
     DeferredActionDecisionBody, DeferredActionEntry, DeferredActionStatus,
     ListDeferredActionsResponse, ToolCallContent,
 };
-pub use types::{AgentSummary, DeferredInfo, ListDeferredActionsParams};
+pub use types::{AgentSummary, ListDeferredActionsParams};

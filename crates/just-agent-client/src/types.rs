@@ -26,16 +26,6 @@ pub struct AgentSummary {
     pub created_by: Option<AgentId>,
 }
 
-/// Deferred action info extracted from an SSE `DeferredCreated` event.
-#[derive(Debug, Clone)]
-pub struct DeferredInfo {
-    pub id: String,
-    pub tool_name: String,
-    pub arguments: serde_json::Value,
-    pub reason: String,
-    pub dangerous: bool,
-}
-
 /// Combined agent status: context usage + retry history.
 #[derive(Debug, Deserialize)]
 pub struct AgentStatusResponse {

@@ -241,23 +241,16 @@ pub async fn run_agent_rounds(
                 }
             };
 
-            // Check if this was a deferred action and emit DeferredCreated.
-            if let Some(info) = ctx.deferred.lock().await.take_last_deferred() {
-                let arguments =
-                    serde_json::from_str(&info.args_json).unwrap_or(serde_json::Value::Null);
-                tx.send(AgentEvent::DeferredCreated {
-                    id: info.id,
-                    tool_name: info.tool_name,
-                    arguments,
-                    reason: info.reason,
-                    dangerous: info.dangerous,
-                })
-                .await
-                .ok();
-            }
-
-            // Check if a deferred action was committed and emit DeferredCommitted.
-            if let Some(info) = ctx.deferred.lock().await.take_last_committed() {
+            // Check deferred action state transitions (single lock acquisition).
+            let (committed, redeemed, cancelled) = {
+                let mut d = ctx.deferred.lock().await;
+                (
+                    d.take_last_committed(),
+                    d.take_last_redeemed(),
+                    d.take_last_cancelled(),
+                )
+            };
+            if let Some(info) = committed {
                 let arguments =
                     serde_json::from_str(&info.args_json).unwrap_or(serde_json::Value::Null);
                 tx.send(AgentEvent::DeferredCommitted {
@@ -269,6 +262,12 @@ pub async fn run_agent_rounds(
                 })
                 .await
                 .ok();
+            }
+            if let Some(id) = redeemed {
+                tx.send(AgentEvent::DeferredRedeemed { id }).await.ok();
+            }
+            if let Some(id) = cancelled {
+                tx.send(AgentEvent::DeferredCancelled { id }).await.ok();
             }
 
             tx.send(AgentEvent::ToolResult(result.clone())).await.ok();

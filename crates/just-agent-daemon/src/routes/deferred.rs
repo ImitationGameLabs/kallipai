@@ -1,10 +1,9 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use just_agent_common::types::SseEvent;
 use just_agent_common::types::{
     DeferredActionDecisionBody, DeferredActionEntry, DeferredActionStatus,
-    ListDeferredActionsResponse,
+    ListDeferredActionsResponse, SseEvent,
 };
 use just_agent_runtime::persistence;
 
@@ -132,7 +131,10 @@ pub async fn respond_deferred_action(
                 entry
                     .agent
                     .events_tx
-                    .send(SseEvent::DeferredApproved { id: id.clone() })
+                    .send(SseEvent::DeferredActionUpdated {
+                        id: id.clone(),
+                        status: DeferredActionStatus::Approved,
+                    })
                     .ok();
                 serde_json::to_string(&*deferred).ok()
             }
@@ -144,9 +146,9 @@ pub async fn respond_deferred_action(
                 entry
                     .agent
                     .events_tx
-                    .send(SseEvent::DeferredDenied {
+                    .send(SseEvent::DeferredActionUpdated {
                         id: id.clone(),
-                        reason,
+                        status: DeferredActionStatus::Denied,
                     })
                     .ok();
                 serde_json::to_string(&*deferred).ok()

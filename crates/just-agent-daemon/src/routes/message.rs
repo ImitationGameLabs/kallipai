@@ -70,6 +70,7 @@ pub async fn send_message(
         events_tx: entry.agent.events_tx.clone(),
         auth_token: saved_token,
         env: saved_env,
+        shared_state: state.clone(),
     })
     .await
     .map_err(|e| {

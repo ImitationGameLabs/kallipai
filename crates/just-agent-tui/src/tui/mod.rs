@@ -1,5 +1,4 @@
 mod completion;
-mod deferred_action;
 mod events;
 mod history;
 mod input;
@@ -7,10 +6,10 @@ mod markdown;
 mod render;
 mod wrap;
 
+use just_agent_common::types::DeferredActionEntry;
 use ratatui_textarea::TextArea;
 
 use completion::CompletionState;
-use deferred_action::DeferredActionState;
 
 /// A line in the chat output area.
 #[derive(Debug)]
@@ -34,6 +33,42 @@ pub enum ChatLine {
     },
 }
 
+/// Active TUI view.
+pub enum AppMode {
+    Chat,
+    Approvals,
+}
+
+/// Phase within the approvals view.
+pub enum ApprovalPhase {
+    /// Navigating the list of committed deferred actions.
+    Browsing,
+    /// Selected an action — showing approve/deny options.
+    Deciding,
+    /// Typing a deny reason.
+    DenyInput { buffer: String },
+}
+
+/// State for the approvals view.
+pub struct ApprovalsState {
+    entries: Vec<DeferredActionEntry>,
+    selected: usize,
+    phase: ApprovalPhase,
+    /// Set when a DeferredActionUpdated SSE event arrives; triggers re-fetch on next key.
+    stale: bool,
+}
+
+impl ApprovalsState {
+    fn new(entries: Vec<DeferredActionEntry>) -> Self {
+        Self {
+            entries,
+            selected: 0,
+            phase: ApprovalPhase::Browsing,
+            stale: false,
+        }
+    }
+}
+
 /// TUI application state.
 pub struct App {
     pub chat_lines: Vec<ChatLine>,
@@ -42,9 +77,10 @@ pub struct App {
     pub agent_busy: bool,
     pub should_quit: bool,
     pub kill_on_exit: bool,
+    pub mode: AppMode,
+    pub approvals: Option<ApprovalsState>,
     quit_confirm: bool,
     completion: CompletionState,
-    deferred_action: DeferredActionState,
     history: history::InputHistory,
     scroll_pos: usize,
     content_length: usize,
@@ -74,9 +110,10 @@ impl App {
             agent_busy: false,
             should_quit: false,
             kill_on_exit: false,
+            mode: AppMode::Chat,
+            approvals: None,
             quit_confirm: false,
             completion: CompletionState::new(),
-            deferred_action: DeferredActionState::new(),
             history: history::InputHistory::new(),
         }
     }

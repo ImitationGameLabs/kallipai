@@ -38,6 +38,7 @@ pub(crate) struct SpawnArgs {
     pub events_tx: broadcast::Sender<SseEvent>,
     pub auth_token: String,
     pub env: HashMap<String, String>,
+    pub shared_state: SharedState,
 }
 
 /// Reconstruct runtime resources shared by create and restore.
@@ -87,11 +88,20 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
         agent_tx,
     ));
     let state = Arc::new(AtomicU8::new(AgentState::IDLE));
+    // TODO: extract agent_id from SpawnArgs as a required field so the type system
+    // enforces this invariant instead of relying on callers to set config.agent_id.
+    let agent_id = args
+        .config
+        .agent_id
+        .clone()
+        .expect("agent_id must be set before spawn");
     let bridge_handle = tokio::spawn(bridge_task(
+        agent_id,
         agent_rx,
         args.events_tx.clone(),
         args.shutdown_cancel.clone(),
         state.clone(),
+        args.shared_state.clone(),
     ));
 
     Ok(Agent {
@@ -197,6 +207,7 @@ pub async fn create_agent(
         events_tx,
         auth_token: auth_token.clone(),
         env,
+        shared_state: state.clone(),
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -351,6 +362,7 @@ fn validate_subagent_depth(
 async fn restore_one(
     p: persistence::PendingRestore,
     shutdown: CancellationToken,
+    shared_state: SharedState,
 ) -> anyhow::Result<(AgentId, String, Agent)> {
     let sess = persistence::restore_session(&p.agent_id, &p.session_dir)?;
 
@@ -381,6 +393,7 @@ async fn restore_one(
         events_tx,
         auth_token: auth_token.clone(),
         env,
+        shared_state,
     })
     .await?;
 
@@ -400,7 +413,7 @@ pub async fn restore_sessions(state: &SharedState) {
 
     for p in pending {
         let agent_id = p.agent_id.clone();
-        match restore_one(p, state.shutdown.clone()).await {
+        match restore_one(p, state.shutdown.clone(), state.clone()).await {
             Ok((id, auth_token, agent)) => {
                 let mut registry = state.registry.write().await;
                 registry.register(

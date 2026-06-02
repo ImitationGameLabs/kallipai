@@ -64,18 +64,56 @@ pub(super) const DANGEROUS_ENV_VARS: &[&str] = &[
 /// Truly read-only commands that cannot modify filesystem state or execute code.
 const ALLOW_READONLY: &[&str] = &[
     // Filesystem info
-    "pwd", "ls", "find", "stat", "file", "tree", "du", "df", // Search
-    "rg", "grep", "ag", "ack", "fgrep", "egrep", // File viewing
-    "cat", "head", "tail", "less", "more", "bat", // Text processing (read-only pipes)
-    "sort", "uniq", "wc", "cut", "tr", "comm", "diff", // Output
-    "echo", "printf", // Environment info
-    "env", "printenv", "which", "type", // System info
-    "date", "uname", "hostname", "whoami", "id", // Process info
-    "ps", "top", "htop", // Data processing (read-only)
-    "jq", "yq", // Shell builtins (side-effect-free)
-    "test", "true", "false",
+    "pwd",
+    "ls",
+    "find",
+    "stat",
+    "file",
+    "tree",
+    "du",
+    "df", // Search
+    "rg",
+    "grep",
+    "ag",
+    "ack",
+    "fgrep",
+    "egrep", // File viewing
+    "cat",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "bat", // Text processing (read-only pipes)
+    "sort",
+    "uniq",
+    "wc",
+    "cut",
+    "tr",
+    "comm",
+    "diff", // Output
+    "echo",
+    "printf", // Environment info
+    "env",
+    "printenv",
+    "which",
+    "type", // System info
+    "date",
+    "uname",
+    "hostname",
+    "whoami",
+    "id", // Process info
+    "ps",
+    "top",
+    "htop", // Data processing (read-only)
+    "jq",
+    "yq", // Shell builtins (side-effect-free)
+    "test",
+    "true",
+    "false",
     // Test runners (consistent with subcommand-gated cargo test / go test)
     "pytest",
+    // Agent CLI (approval/management commands, auth handled by daemon)
+    "just-agent",
 ];
 
 // ---------------------------------------------------------------------------

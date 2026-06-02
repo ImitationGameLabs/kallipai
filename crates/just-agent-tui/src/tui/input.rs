@@ -2,11 +2,12 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 
 use just_agent_client::DaemonClient;
+use just_agent_client::ListDeferredActionsParams;
 use just_agent_common::command::{self, SlashCommand};
 use just_agent_common::types::AgentId;
 
 use super::super::Action;
-use super::{App, ChatLine};
+use super::{App, AppMode, ApprovalPhase, ChatLine};
 
 impl App {
     /// Handle a crossterm key event.
@@ -18,6 +19,12 @@ impl App {
         agent_id: &AgentId,
     ) {
         if key.kind != KeyEventKind::Press {
+            return;
+        }
+
+        // Approvals view handles its own keys.
+        if matches!(self.mode, AppMode::Approvals) {
+            self.handle_approvals_key(key, client).await;
             return;
         }
 
@@ -36,27 +43,6 @@ impl App {
                     self.quit_confirm = false;
                 }
                 _ => {}
-            }
-            return;
-        }
-
-        // Deferred action popup: intercept 1/2/Esc keys
-        if self.deferred_action.is_pending() {
-            let decision = if let KeyCode::Char(ch) = key.code {
-                self.deferred_action.handle_key(ch)
-            } else if key.code == KeyCode::Esc {
-                self.deferred_action.cancel()
-            } else {
-                None
-            };
-            if let Some(decision_str) = decision
-                && let Some(id) = self.deferred_action.last_id()
-                && let Err(e) = client
-                    .respond_deferred_action(id, &decision_str, None)
-                    .await
-            {
-                self.chat_lines.push(ChatLine::Error(e.to_string()));
-                self.auto_scroll = true;
             }
             return;
         }
@@ -192,11 +178,118 @@ impl App {
         self.completion.update(&text);
     }
 
+    /// Handle key events in the approvals view.
+    async fn handle_approvals_key(&mut self, key: KeyEvent, client: &DaemonClient) {
+        let Some(state) = self.approvals.as_mut() else {
+            self.mode = AppMode::Chat;
+            return;
+        };
+
+        match &mut state.phase {
+            ApprovalPhase::Browsing => match key.code {
+                KeyCode::Up => {
+                    state.selected = state.selected.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    if !state.entries.is_empty() {
+                        state.selected = (state.selected + 1).min(state.entries.len() - 1);
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    if !state.entries.is_empty() {
+                        state.phase = ApprovalPhase::Deciding;
+                    }
+                }
+                KeyCode::Char('r') => {
+                    self.refresh_approvals(client).await;
+                }
+                KeyCode::Esc => {
+                    self.mode = AppMode::Chat;
+                    self.approvals = None;
+                }
+                _ => {}
+            },
+            ApprovalPhase::Deciding => match key.code {
+                KeyCode::Char('1') => {
+                    let id = state.entries[state.selected].id.clone();
+                    match client.respond_deferred_action(&id, "approve", None).await {
+                        Ok(()) => self.refresh_approvals(client).await,
+                        Err(e) => {
+                            state.phase = ApprovalPhase::Browsing;
+                            self.chat_lines.push(ChatLine::Error(e.to_string()));
+                        }
+                    }
+                }
+                KeyCode::Char('2') => {
+                    state.phase = ApprovalPhase::DenyInput {
+                        buffer: String::new(),
+                    };
+                }
+                KeyCode::Esc => {
+                    state.phase = ApprovalPhase::Browsing;
+                }
+                _ => {}
+            },
+            ApprovalPhase::DenyInput { buffer } => match key.code {
+                KeyCode::Enter => {
+                    if !buffer.is_empty() {
+                        let reason = std::mem::take(buffer);
+                        let id = state.entries[state.selected].id.clone();
+                        match client
+                            .respond_deferred_action(&id, "deny", Some(&reason))
+                            .await
+                        {
+                            Ok(()) => self.refresh_approvals(client).await,
+                            Err(e) => {
+                                state.phase = ApprovalPhase::Browsing;
+                                self.chat_lines.push(ChatLine::Error(e.to_string()));
+                            }
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    state.phase = ApprovalPhase::Deciding;
+                }
+                KeyCode::Backspace => {
+                    buffer.pop();
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                }
+                _ => {}
+            },
+        }
+    }
+
+    /// Re-fetch committed deferred actions and update approvals state.
+    async fn refresh_approvals(&mut self, client: &DaemonClient) {
+        match client
+            .list_deferred_actions(&ListDeferredActionsParams {
+                status: Some("committed".into()),
+                limit: Some(20),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(resp) => {
+                if let Some(state) = self.approvals.as_mut() {
+                    state.entries = resp.items;
+                    state.selected = state.selected.min(state.entries.len().saturating_sub(1));
+                    state.phase = ApprovalPhase::Browsing;
+                    state.stale = false;
+                }
+            }
+            Err(e) => {
+                self.chat_lines.push(ChatLine::Error(e.to_string()));
+            }
+        }
+    }
+
     /// Dispatch a parsed slash command.
     ///
     /// Two dispatch categories:
     /// - **TUI-local** (help/quit/clear): no daemon call, handled entirely here
-    /// - **Daemon query** (status): request-response, awaits daemon endpoint directly
+    /// - **Daemon query** (status/approvals): request-response, awaits daemon endpoint directly
     async fn dispatch_command(
         &mut self,
         cmd: SlashCommand,
@@ -238,6 +331,25 @@ impl App {
                     self.auto_scroll = true;
                 }
             },
+            SlashCommand::Approvals => {
+                match client
+                    .list_deferred_actions(&ListDeferredActionsParams {
+                        status: Some("committed".into()),
+                        limit: Some(20),
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(resp) => {
+                        self.approvals = Some(super::ApprovalsState::new(resp.items));
+                        self.mode = AppMode::Approvals;
+                    }
+                    Err(e) => {
+                        self.chat_lines.push(ChatLine::Error(e.to_string()));
+                        self.auto_scroll = true;
+                    }
+                }
+            }
         }
     }
 }

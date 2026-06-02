@@ -138,12 +138,19 @@ async fn main() -> Result<()> {
                 let a = client.get_deferred_action(&args.id).await?;
                 print_deferred_entry(&a);
             }
-            ApprovalCommand::Respond(args) => {
+            ApprovalCommand::Approve(args) => {
                 let client = build_client();
                 client
-                    .respond_deferred_action(&args.id, &args.decision, None)
+                    .respond_deferred_action(&args.id, "approve", None)
                     .await?;
-                println!("Decision sent.");
+                println!("Approved.");
+            }
+            ApprovalCommand::Deny(args) => {
+                let client = build_client();
+                client
+                    .respond_deferred_action(&args.id, "deny", Some(&args.reason))
+                    .await?;
+                println!("Denied.");
             }
         },
     }
