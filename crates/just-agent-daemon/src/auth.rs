@@ -19,7 +19,14 @@ pub enum Identity {
 /// Layer 1 (Authentication): parses the `Authorization: Bearer <token>` header,
 /// matches against `operator_token` first, then checks the registry token index.
 #[derive(Debug, Clone)]
-pub struct AuthIdentity(pub Identity);
+pub struct AuthIdentity(Identity);
+
+impl AuthIdentity {
+    /// Access the resolved [`Identity`].
+    pub fn identity(&self) -> &Identity {
+        &self.0
+    }
+}
 
 impl FromRequestParts<SharedState> for AuthIdentity {
     type Rejection = (StatusCode, String);

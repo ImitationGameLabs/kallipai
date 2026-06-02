@@ -129,7 +129,7 @@ pub async fn create_agent(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Root agents require operator privilege.
     if req.created_by.is_none() {
-        crate::auth::require_operator(&auth.0)?;
+        crate::auth::require_operator(auth.identity())?;
     }
 
     let id = AgentId::random();
@@ -150,7 +150,7 @@ pub async fn create_agent(
     // Subagent: validate supervisor and delegation constraints.
     if let Some(ref supervisor_id) = req.created_by {
         let registry = state.registry.read().await;
-        let supervisor = registry.require_supervisor(&auth.0, supervisor_id)?;
+        let supervisor = registry.require_supervisor(auth.identity(), supervisor_id)?;
 
         let supervisor_perms = &supervisor.agent.config.permissions;
         if supervisor_perms.max_depth == 0 {
@@ -287,7 +287,7 @@ pub async fn delete_agent(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let entry = {
         let mut registry = state.registry.write().await;
-        registry.require_superior(&auth.0, &id)?;
+        registry.require_superior(auth.identity(), &id)?;
         let Some(entry) = registry.get(&id) else {
             return Ok(StatusCode::NOT_FOUND);
         };
@@ -341,7 +341,7 @@ pub async fn interrupt_agent(
     Path(id): Path<AgentId>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let registry = state.registry.read().await;
-    registry.require_superior(&auth.0, &id)?;
+    registry.require_superior(auth.identity(), &id)?;
     let Some(entry) = registry.get(&id) else {
         return Ok(StatusCode::NOT_FOUND);
     };

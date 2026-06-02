@@ -24,7 +24,7 @@ pub async fn list_deferred_actions(
 
     let mut entries: Vec<DeferredActionEntry> = Vec::new();
     for (agent_id, entry) in registry.iter() {
-        if registry.require_superior(&auth.0, agent_id).is_err() {
+        if registry.require_superior(auth.identity(), agent_id).is_err() {
             continue;
         }
         if let Some(ref filter_agent) = params.requested_by
@@ -88,7 +88,7 @@ pub async fn get_deferred_action(
     for (agent_id, entry) in registry.iter() {
         let deferred = entry.agent.deferred.lock().await;
         if let Some(info) = deferred.get(&id) {
-            registry.require_superior(&auth.0, agent_id)?;
+            registry.require_superior(auth.identity(), agent_id)?;
             return Ok(Json(DeferredActionEntry {
                 id: info.id,
                 requested_by: agent_id.clone(),
@@ -119,7 +119,7 @@ pub async fn respond_deferred_action(
             continue;
         }
 
-        registry.require_superior(&auth.0, agent_id)?;
+        registry.require_superior(auth.identity(), agent_id)?;
 
         let json = match req.decision.as_str() {
             "approve" => {

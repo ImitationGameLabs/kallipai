@@ -115,7 +115,7 @@ pub async fn update_policy(
     Json(new_policy): Json<ToolPolicy>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let registry = state.registry.read().await;
-    registry.require_superior(&auth.0, &id)?;
+    registry.require_superior(auth.identity(), &id)?;
 
     let entry = registry
         .get(&id)
