@@ -11,7 +11,7 @@ use just_agent_common::agentid::AgentId;
 use just_agent_common::policy::ToolPolicy;
 use just_agent_common::protocol::SseEvent;
 use just_agent_runtime::approval::ApprovalStore;
-use just_agent_runtime::config::{AgentConfig, PermissionProfile, default_tool_policy};
+use just_agent_runtime::config::{AgentConfig, PermissionProfile, tool_policy_from_env};
 use just_agent_runtime::context::{AgenticContext, ContextStore, ContextSummarizer};
 use just_agent_runtime::persistence;
 use just_agent_runtime::policy::{AgentPolicy, AuthorizedToolExecutor};
@@ -146,7 +146,7 @@ pub async fn create_agent(
     env.insert("JUST_AGENT_ID".into(), id.to_string());
     env.insert("JUST_AGENT_AUTH_TOKEN".into(), auth_token.clone());
 
-    let mut tool_policy = default_tool_policy();
+    let mut tool_policy = tool_policy_from_env();
 
     // Subagent: validate supervisor and delegation constraints.
     if let Some(ref supervisor_id) = req.created_by {

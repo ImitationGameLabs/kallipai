@@ -41,6 +41,47 @@ pub fn default_tool_policy() -> ToolPolicy {
     }
 }
 
+/// Returns the tool policy, checking `JUST_AGENT_ALLOW_TOOLS` if set.
+///
+/// When the env var is not set (or set to an empty/whitespace-only string),
+/// returns the hardcoded [`default_tool_policy`] unchanged. When set to a
+/// comma-separated list of tool names, those tools get `PolicyDecision::Allow`
+/// and all others default to `Ask`.
+///
+/// Note: `Classify` is not expressible via this env var — it is a debug
+/// override, not a full policy language. When set, `shell_session_exec`
+/// loses its `Classify` behavior and becomes either `Allow` (if listed) or
+/// `Ask` (if not listed).
+///
+/// Only affects root agents at creation time. Subagents inherit their
+/// supervisor's policy.
+pub fn tool_policy_from_env() -> ToolPolicy {
+    let Ok(raw) = std::env::var("JUST_AGENT_ALLOW_TOOLS") else {
+        return default_tool_policy();
+    };
+    if raw.trim().is_empty() {
+        return default_tool_policy();
+    }
+    let known = default_tool_policy();
+    let mut tools = std::collections::BTreeMap::new();
+    for name in raw.split(',') {
+        let name = name.trim();
+        if !name.is_empty() {
+            if !known.tools.contains_key(name) {
+                tracing::warn!(
+                    "JUST_AGENT_ALLOW_TOOLS: unknown tool name '{name}' \
+                     — not in default tool policy, may be a typo"
+                );
+            }
+            tools.insert(name.to_owned(), PolicyDecision::Allow);
+        }
+    }
+    ToolPolicy {
+        default: PolicyDecision::Ask,
+        tools,
+    }
+}
+
 /// Hard-coded maximum delegation depth for top-level agents.
 ///
 /// Not configurable — hard-coding avoids the complexity of persisting and
