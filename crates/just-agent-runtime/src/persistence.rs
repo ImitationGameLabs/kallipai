@@ -66,7 +66,7 @@ pub fn cleanup_session(agent_id: &AgentId) -> Result<()> {
 }
 
 /// Atomically write content to a file via temp file + rename.
-fn atomic_write(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let parent = path.parent().context("path has no parent")?;
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     let temp_path = parent.join(format!(".{file_name}.tmp"));

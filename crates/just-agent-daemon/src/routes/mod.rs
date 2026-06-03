@@ -57,4 +57,8 @@ pub fn router() -> Router<SharedState> {
             "/agents/{id}/skills/{name}/meta",
             axum::routing::get(skill::skill_meta),
         )
+        .route(
+            "/agents/{id}/skills/{name}/promote",
+            axum::routing::post(skill::skill_promote),
+        )
 }

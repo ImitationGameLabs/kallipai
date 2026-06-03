@@ -211,3 +211,20 @@ pub struct SkillMeta {
     #[serde(default)]
     pub description: Option<String>,
 }
+
+/// Request body for POST /agents/{id}/skills/{name}/promote.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillPromoteRequest {
+    /// Overwrite if the skill already exists in the shared directory.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Response for POST /agents/{id}/skills/{name}/promote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillPromoteResponse {
+    /// The promoted skill name.
+    pub name: String,
+    /// Absolute path where the skill was written in the shared directory.
+    pub destination: String,
+}

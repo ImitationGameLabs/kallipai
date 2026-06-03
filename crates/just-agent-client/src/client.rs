@@ -9,7 +9,8 @@ use crate::types::{ListApprovalsParams, MessageRequest};
 use crate::{
     AgentPermissionsResponse, AgentStatusResponse, AgentSummary, ApprovalDecisionBody,
     ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ListAgentsResponse,
-    ListApprovalsResponse, SkillMeta, SkillPathsResponse, ToolPolicy,
+    ListApprovalsResponse, SkillMeta, SkillPathsResponse, SkillPromoteRequest,
+    SkillPromoteResponse, ToolPolicy,
 };
 
 struct Inner {
@@ -321,6 +322,35 @@ impl DaemonClient {
             .json()
             .await
             .context("failed to parse skill meta response")?;
+        Ok(resp)
+    }
+
+    /// Promote a local skill to the shared skill directory.
+    ///
+    /// The skill name is URL-encoded so that nested paths like
+    /// `code/refactoring` survive as a single path segment.
+    pub async fn skill_promote(
+        &self,
+        id: &AgentId,
+        name: &str,
+        force: bool,
+    ) -> Result<SkillPromoteResponse> {
+        let encoded = name.replace('/', "%2F");
+        let resp = self
+            .with_auth(
+                self.inner
+                    .http
+                    .post(self.url(&format!("/agents/{id}/skills/{encoded}/promote")))
+                    .json(&SkillPromoteRequest { force }),
+            )
+            .send()
+            .await
+            .context("failed to promote skill")?
+            .error_for_status()
+            .context("daemon returned error")?
+            .json()
+            .await
+            .context("failed to parse skill promote response")?;
         Ok(resp)
     }
 }

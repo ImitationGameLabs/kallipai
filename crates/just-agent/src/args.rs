@@ -151,6 +151,8 @@ pub enum SkillCommand {
     Paths(SkillPathsArgs),
     /// Show metadata for a specific skill
     Meta(SkillMetaArgs),
+    /// Promote a local skill to the shared directory
+    Promote(SkillPromoteArgs),
 }
 
 #[derive(Args)]
@@ -160,4 +162,13 @@ pub struct SkillPathsArgs;
 pub struct SkillMetaArgs {
     /// Skill name (supports nested paths like code/refactoring).
     pub name: String,
+}
+
+#[derive(Args)]
+pub struct SkillPromoteArgs {
+    /// Skill name (supports nested paths like code/refactoring).
+    pub name: String,
+    /// Overwrite if the skill already exists in the shared directory.
+    #[arg(long)]
+    pub force: bool,
 }

@@ -214,6 +214,71 @@ pub fn ensure_meta_skill() -> Result<String> {
     load_skill(META_SKILL_NAME, None)
 }
 
+/// Promotes a skill from the agent-local session directory to the shared
+/// skill directory. Validates the skill name, checks frontmatter, and
+/// copies the file. Rejects the `bootstrap` skill unconditionally.
+///
+/// `shared_root` is the base directory for shared skills (typically
+/// [`skill_dir()`]). The destination is written to
+/// `shared_root/<name>/SKILL.md`. This parameter is explicit rather than
+/// read from environment variables, keeping the function testable without
+/// global state mutation.
+///
+/// Only reads from the agent-local directory — does not fall back to shared.
+/// Rejects overwrite unless `force` is true. Returns the destination path.
+pub fn promote_skill(
+    name: &str,
+    session_dir: Option<&Path>,
+    shared_root: &Path,
+    force: bool,
+) -> Result<String> {
+    validate_skill_name(name)?;
+
+    if name == META_SKILL_NAME {
+        bail!(
+            "cannot promote the '{META_SKILL_NAME}' skill; \
+             it is managed by the skill system"
+        );
+    }
+
+    let session_dir =
+        session_dir.ok_or_else(|| anyhow::anyhow!("agent has no session directory"))?;
+
+    let src = session_dir.join("skills").join(name).join("SKILL.md");
+    if !src.exists() {
+        bail!("local skill '{name}' not found at {}", src.display());
+    }
+
+    let content = std::fs::read_to_string(&src)
+        .with_context(|| format!("failed to read local skill '{name}'"))?;
+
+    // Verify frontmatter has a valid name field.
+    if parse_frontmatter_meta(&content).is_none() {
+        bail!(
+            "skill '{name}' has no valid frontmatter; \
+             a 'name' field in YAML frontmatter is required for promoting"
+        );
+    }
+
+    let dest_dir = shared_root.join(name);
+    let dest = dest_dir.join("SKILL.md");
+
+    if dest.exists() && !force {
+        bail!(
+            "skill '{name}' already exists in shared directory at {}; \
+             use --force to overwrite",
+            dest.display()
+        );
+    }
+
+    std::fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("failed to create directory {}", dest_dir.display()))?;
+    crate::persistence::atomic_write(&dest, &content)
+        .with_context(|| format!("failed to write skill to {}", dest.display()))?;
+
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 /// Strips YAML frontmatter (content between `---` delimiters).
 ///
 /// Returns the body after the second `---`. If no frontmatter is found,
@@ -389,5 +454,141 @@ mod tests {
     fn parse_frontmatter_meta_returns_none_without_frontmatter() {
         let input = "Just plain markdown.\n";
         assert!(parse_frontmatter_meta(input).is_none());
+    }
+
+    // --- promote_skill tests ---
+
+    /// Helper: create a temp session dir with a local skill.
+    fn setup_local_skill(session_dir: &std::path::Path, name: &str, content: &str) {
+        let skill_dir = session_dir.join("skills").join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+    }
+
+    #[test]
+    fn promote_skill_copies_to_shared() {
+        let session = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        setup_local_skill(
+            session.path(),
+            "my-skill",
+            "---\nname: my-skill\ndescription: test\n---\nBody\n",
+        );
+
+        let dest = promote_skill("my-skill", Some(session.path()), shared.path(), false).unwrap();
+        assert!(dest.contains("my-skill"));
+        assert!(std::path::Path::new(&dest).exists());
+
+        let written = std::fs::read_to_string(&dest).unwrap();
+        assert!(written.contains("name: my-skill"));
+    }
+
+    #[test]
+    fn promote_skill_rejects_bootstrap() {
+        let session = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        setup_local_skill(
+            session.path(),
+            "bootstrap",
+            "---\nname: bootstrap\n---\nBody\n",
+        );
+
+        let err =
+            promote_skill("bootstrap", Some(session.path()), shared.path(), false).unwrap_err();
+        assert!(err.to_string().contains("bootstrap"));
+    }
+
+    #[test]
+    fn promote_skill_rejects_overwrite_without_force() {
+        let session = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+
+        // Pre-create the destination.
+        let dest_dir = shared.path().join("existing");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        std::fs::write(dest_dir.join("SKILL.md"), "old content").unwrap();
+
+        setup_local_skill(
+            session.path(),
+            "existing",
+            "---\nname: existing\n---\nNew\n",
+        );
+
+        let err =
+            promote_skill("existing", Some(session.path()), shared.path(), false).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn promote_skill_allows_overwrite_with_force() {
+        let session = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+
+        // Pre-create the destination.
+        let dest_dir = shared.path().join("existing");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        std::fs::write(dest_dir.join("SKILL.md"), "old content").unwrap();
+
+        setup_local_skill(
+            session.path(),
+            "existing",
+            "---\nname: existing\n---\nNew\n",
+        );
+
+        promote_skill("existing", Some(session.path()), shared.path(), true).unwrap();
+        let written =
+            std::fs::read_to_string(shared.path().join("existing").join("SKILL.md")).unwrap();
+        assert!(written.contains("New"));
+    }
+
+    #[test]
+    fn promote_skill_rejects_missing_local() {
+        let session = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+
+        let err =
+            promote_skill("nonexistent", Some(session.path()), shared.path(), false).unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn promote_skill_rejects_no_session_dir() {
+        let shared = tempfile::tempdir().unwrap();
+        let err = promote_skill("whatever", None, shared.path(), false).unwrap_err();
+        assert!(err.to_string().contains("no session directory"));
+    }
+
+    #[test]
+    fn promote_skill_rejects_invalid_name() {
+        let session = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let err = promote_skill("../evil", Some(session.path()), shared.path(), false).unwrap_err();
+        assert!(err.to_string().contains("invalid skill name"));
+    }
+
+    #[test]
+    fn promote_skill_rejects_no_frontmatter() {
+        let session = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        setup_local_skill(session.path(), "bare", "Just markdown, no frontmatter.\n");
+
+        let err = promote_skill("bare", Some(session.path()), shared.path(), false).unwrap_err();
+        assert!(err.to_string().contains("no valid frontmatter"));
+    }
+
+    #[test]
+    fn promote_skill_supports_nested_name() {
+        let session = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        setup_local_skill(
+            session.path(),
+            "code/refactor",
+            "---\nname: refactor\n---\nBody\n",
+        );
+
+        let dest =
+            promote_skill("code/refactor", Some(session.path()), shared.path(), false).unwrap();
+        assert!(dest.contains("code/refactor"));
+        assert!(std::path::Path::new(&dest).exists());
     }
 }

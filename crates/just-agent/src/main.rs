@@ -216,6 +216,12 @@ async fn main() -> Result<()> {
                     println!("description: {desc}");
                 }
             }
+            SkillCommand::Promote(args) => {
+                let client = build_client();
+                let id = agent_id_from_env()?;
+                let resp = client.skill_promote(&id, &args.name, args.force).await?;
+                println!("promoted '{}' to {}", resp.name, resp.destination);
+            }
         },
     }
     Ok(())
