@@ -21,6 +21,9 @@ pub enum Commands {
     /// Manage agent tool policy
     #[command(subcommand)]
     Policy(PolicyCommand),
+    /// Skill discovery
+    #[command(subcommand)]
+    Skill(SkillCommand),
 }
 
 #[derive(Subcommand)]
@@ -140,4 +143,21 @@ pub struct PolicySetArgs {
     pub tool: String,
     /// Decision: allow, ask, deny, classify.
     pub decision: String,
+}
+
+#[derive(Subcommand)]
+pub enum SkillCommand {
+    /// Show skill directory paths
+    Paths(SkillPathsArgs),
+    /// Show metadata for a specific skill
+    Meta(SkillMetaArgs),
+}
+
+#[derive(Args)]
+pub struct SkillPathsArgs;
+
+#[derive(Args)]
+pub struct SkillMetaArgs {
+    /// Skill name (supports nested paths like code/refactoring).
+    pub name: String,
 }

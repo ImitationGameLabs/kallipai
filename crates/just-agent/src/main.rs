@@ -9,7 +9,7 @@ use just_agent_client::DaemonClient;
 use just_agent_common::agentid::AgentId;
 use just_agent_common::policy::PolicyDecision;
 
-use args::{AgentCommand, ApprovalCommand, Cli, Commands, PolicyCommand};
+use args::{AgentCommand, ApprovalCommand, Cli, Commands, PolicyCommand, SkillCommand};
 
 fn build_client() -> DaemonClient {
     let url =
@@ -17,6 +17,13 @@ fn build_client() -> DaemonClient {
     let token = std::env::var("JUST_AGENT_AUTH_TOKEN")
         .expect("JUST_AGENT_AUTH_TOKEN must be set (export it from daemon startup output)");
     DaemonClient::new_with_token(&url, token)
+}
+
+/// Read agent ID from JUST_AGENT_ID env var.
+fn agent_id_from_env() -> anyhow::Result<AgentId> {
+    std::env::var("JUST_AGENT_ID")
+        .map_err(|_| anyhow::anyhow!("JUST_AGENT_ID env var not set"))
+        .and_then(|s| s.parse::<AgentId>().map_err(Into::into))
 }
 
 #[tokio::main]
@@ -188,6 +195,26 @@ async fn main() -> Result<()> {
                 policy.tools.insert(args.tool.clone(), decision);
                 client.update_policy(&args.id, &policy).await?;
                 println!("Updated {} = {}.", args.tool, decision);
+            }
+        },
+        Commands::Skill(cmd) => match cmd {
+            SkillCommand::Paths(_) => {
+                let client = build_client();
+                let id = agent_id_from_env()?;
+                let paths = client.skill_paths(&id).await?;
+                println!("shared: {}", paths.shared);
+                if let Some(local) = &paths.local {
+                    println!("local:  {local}");
+                }
+            }
+            SkillCommand::Meta(args) => {
+                let client = build_client();
+                let id = agent_id_from_env()?;
+                let meta = client.skill_meta(&id, &args.name).await?;
+                println!("name: {}", meta.name);
+                if let Some(desc) = &meta.description {
+                    println!("description: {desc}");
+                }
             }
         },
     }

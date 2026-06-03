@@ -188,9 +188,15 @@ pub async fn create_agent(
     let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
     let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
 
+    // Create session directory before loading skills so that agent-local
+    // skills can be resolved from the session dir.
+    let session_dir =
+        persistence::create_session(&id, &config.workspace_root, config.created_by.as_ref())
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     for skill_name in &config.skills {
-        let content =
-            load_skill(skill_name).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let content = load_skill(skill_name, Some(session_dir.as_path()))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
         store
             .lock()
             .await
@@ -201,10 +207,6 @@ pub async fn create_agent(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         info!(skill = skill_name, "loaded skill");
     }
-
-    let session_dir =
-        persistence::create_session(&id, &config.workspace_root, config.created_by.as_ref())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     persistence::persist_policy(
         &session_dir,

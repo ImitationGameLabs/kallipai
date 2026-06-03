@@ -122,7 +122,6 @@ The YAML frontmatter is stripped on load; only the body is pinned into context.
 
 ### Meta-skill
 
-A built-in meta-skill called `novel-task` is auto-created on first run. It
-provides guidance for approaching unfamiliar situations: gather information
-broadly, verify assumptions incrementally, ask for help when uncertain, and
-distill experience into new skills after the fact.
+A built-in meta-skill called `bootstrap` is auto-created on first run. It
+teaches the agent how to discover, load, and create skills, along with
+behavioral guidelines for approaching unfamiliar situations.

@@ -8,6 +8,6 @@ pub use just_agent_common::policy::{PolicyDecision, ToolPolicy};
 pub use just_agent_common::protocol::{
     AgentPermissionsResponse, AgentStatusResponse, AgentSummary, ApprovalDecisionBody,
     ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ListAgentsResponse, ListApprovalsQuery,
-    ListApprovalsResponse,
+    ListApprovalsResponse, SkillMeta, SkillPathsResponse,
 };
 pub use types::ListApprovalsParams;

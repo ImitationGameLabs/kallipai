@@ -9,7 +9,7 @@ use crate::types::{ListApprovalsParams, MessageRequest};
 use crate::{
     AgentPermissionsResponse, AgentStatusResponse, AgentSummary, ApprovalDecisionBody,
     ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ListAgentsResponse,
-    ListApprovalsResponse, ToolPolicy,
+    ListApprovalsResponse, SkillMeta, SkillPathsResponse, ToolPolicy,
 };
 
 struct Inner {
@@ -280,5 +280,47 @@ impl DaemonClient {
         .error_for_status()
         .context("daemon returned error")?;
         Ok(())
+    }
+
+    /// Get skill directory paths for an agent (shared + local).
+    pub async fn skill_paths(&self, id: &AgentId) -> Result<SkillPathsResponse> {
+        let resp = self
+            .with_auth(
+                self.inner
+                    .http
+                    .get(self.url(&format!("/agents/{id}/skills/paths"))),
+            )
+            .send()
+            .await
+            .context("failed to get skill paths")?
+            .error_for_status()
+            .context("daemon returned error")?
+            .json()
+            .await
+            .context("failed to parse skill paths response")?;
+        Ok(resp)
+    }
+
+    /// Get skill metadata (name + description) for a specific skill.
+    ///
+    /// The skill name is URL-encoded so that nested paths like
+    /// `code/refactoring` survive as a single path segment.
+    pub async fn skill_meta(&self, id: &AgentId, name: &str) -> Result<SkillMeta> {
+        let encoded = name.replace('/', "%2F");
+        let resp = self
+            .with_auth(
+                self.inner
+                    .http
+                    .get(self.url(&format!("/agents/{id}/skills/{encoded}/meta"))),
+            )
+            .send()
+            .await
+            .context("failed to get skill meta")?
+            .error_for_status()
+            .context("daemon returned error")?
+            .json()
+            .await
+            .context("failed to parse skill meta response")?;
+        Ok(resp)
     }
 }

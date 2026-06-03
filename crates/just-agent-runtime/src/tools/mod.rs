@@ -13,7 +13,7 @@ pub mod context;
 pub mod shell;
 pub mod skill;
 
-pub use skill::{ensure_meta_skill, load_skill};
+pub use skill::{ensure_meta_skill, load_skill, skill_dir, skill_metadata};
 
 /// Builds the tool registry exposed by `just-agent`.
 ///
@@ -33,7 +33,7 @@ pub async fn build_tool_dispatch(
     dispatch.add_tools(shell_tool_set(backend))?;
     let ctx_dyn: Arc<Mutex<dyn AgenticContext>> = ctx;
     dispatch.add_tools(context::context_tool_set(ctx_dyn.clone()))?;
-    dispatch.add_tools(skill::skill_tool_set(ctx_dyn))?;
+    dispatch.add_tools(skill::file_pin_tool_set(ctx_dyn))?;
 
     Ok(dispatch)
 }

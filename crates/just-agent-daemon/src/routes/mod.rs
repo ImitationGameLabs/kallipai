@@ -4,6 +4,7 @@ pub use restore::restore_sessions;
 mod approval;
 mod context;
 mod message;
+mod skill;
 
 use axum::Router;
 use just_agent_common::protocol::{ListAgentsResponse, ListApprovalsQuery, MessageRequest};
@@ -47,5 +48,13 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/approvals/{id}",
             axum::routing::get(approval::get_approval).post(approval::respond_approval),
+        )
+        .route(
+            "/agents/{id}/skills/paths",
+            axum::routing::get(skill::skill_paths),
+        )
+        .route(
+            "/agents/{id}/skills/{name}/meta",
+            axum::routing::get(skill::skill_meta),
         )
 }

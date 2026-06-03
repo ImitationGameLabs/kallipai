@@ -2,7 +2,12 @@
 //!
 //! Skills are suggestions, never mandatory instructions. They enter the
 //! agent's context through the pinned layer of the context store.
+//!
+//! The [`load_skill`] function resolves skill files from the shared skill
+//! directory or an agent-local session directory. The [`FilePinTool`] LLM tool
+//! exposes a general-purpose "read file and pin" operation to the agent.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -14,53 +19,66 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::context::AgenticContext;
+use just_agent_common::protocol::SkillMeta;
 
-const META_SKILL_NAME: &str = "novel-task";
+const META_SKILL_NAME: &str = "bootstrap";
 
 const DEFAULT_META_SKILL: &str = r#"---
-name: novel-task
-description: How to approach unfamiliar tasks with care
+name: bootstrap
+description: Skill system usage and behavioral guidelines
 ---
 
-# Approaching Unfamiliar Tasks
+# Skill System
 
-This skill guides you when encountering something new or uncertain.
+You have access to a skill system for loading reference material and best practices.
+
+## Discovering Skills
+
+- `just-agent skill paths` — shows shared and local skill directory paths
+- `just-agent skill meta <name>` — shows a skill's name and description
+- List available skills with `ls` on the returned paths
+
+## Loading Skills
+
+Use `read_file_and_pin` to load a file into persistent context. Skill files
+are at `<skill_dir>/<name>/SKILL.md`. Use the label `skill:<name>` for skills.
+Use `context_unpin` to remove pinned items.
+
+## Creating Skills
+
+Use `just-agent skill paths` to find your local directory, then write
+`<name>/SKILL.md` there with YAML frontmatter. Only write to your local
+directory — the shared directory is managed by operators.
+
+    ---
+    name: my-skill
+    description: Short description
+    ---
+
+    # Skill content here
+
+Keep skills concise — capture key decisions, pitfalls, and effective patterns.
+
+# Behavioral Guidelines
 
 ## Gather Information
 
 When facing something unfamiliar, read broadly before acting. Check
 documentation, search for existing patterns, examine similar code in the
-project. Don't rush to the first solution — understanding the landscape
-first leads to better outcomes.
+project. Don't rush to the first solution.
 
 ## Verify Carefully
 
-Test assumptions before committing to them. Run small experiments to
-confirm your understanding matches reality. Prefer incremental validation
-over bold leaps. If a command might have destructive effects, check what
-it would do before running it.
+Test assumptions before committing. Run small experiments to confirm your
+understanding matches reality. Prefer incremental validation over bold leaps.
 
 ## Ask for Help
 
 When genuinely uncertain, ask the user rather than guessing. A short
-question is better than a long wrong path. Acknowledge what you don't
-know — honesty about uncertainty builds trust.
-
-## Distill Experience
-
-After successfully navigating unfamiliar territory, reflect on what
-worked. If this is a task type likely to recur, consider whether the
-experience is worth capturing as a new skill. A good skill captures the
-key decisions, pitfalls, and effective patterns — not a blow-by-blow
-transcript.
-
-To create a skill, write a `SKILL.md` file under the skills directory
-with a YAML frontmatter header (name, description) followed by markdown
-instructions. Keep it concise and focused on what you wish you had known
-before starting.
+question is better than a long wrong path.
 "#;
 
-/// Returns the skill directory.
+/// Returns the shared skill directory.
 ///
 /// Uses `JUST_AGENT_DATA_DIR` env var if set, otherwise falls back to
 /// the platform data directory (`~/.local/share/just-agent/skills/`).
@@ -74,14 +92,99 @@ pub fn skill_dir() -> std::path::PathBuf {
         .join("skills")
 }
 
-/// Reads a skill file, strips frontmatter, and returns the body.
-pub fn load_skill(name: &str) -> Result<String> {
-    if name.contains('/') || name.contains('\\') || name == ".." {
+/// Parses YAML frontmatter from a SKILL.md file.
+///
+/// Returns `None` if no frontmatter is present. Handles the simple
+/// `key: value` format used in skill files without requiring a YAML library.
+fn parse_frontmatter_meta(content: &str) -> Option<SkillMeta> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    let after_first = trimmed[3..].trim_start_matches(['\n', '\r']);
+    let end = after_first.find("\n---")?;
+
+    let frontmatter = &after_first[..end];
+    let mut name = None;
+    let mut description = None;
+
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("name:") {
+            name = Some(rest.trim().to_owned());
+        } else if let Some(rest) = line.strip_prefix("description:") {
+            description = Some(rest.trim().to_owned());
+        }
+    }
+
+    name.map(|n| SkillMeta {
+        name: n,
+        description,
+    })
+}
+
+/// Resolves a skill file to its raw content.
+///
+/// Checks the agent-local directory first (if `session_dir` is provided),
+/// then falls back to the shared skill directory. Returns the raw file
+/// content including frontmatter.
+fn resolve_skill_content(name: &str, session_dir: Option<&Path>) -> Result<String> {
+    // Try agent-local first.
+    if let Some(sd) = session_dir {
+        let local_path = sd.join("skills").join(name).join("SKILL.md");
+        if local_path.exists() {
+            return std::fs::read_to_string(&local_path)
+                .with_context(|| format!("failed to read local skill '{name}'"));
+        }
+    }
+
+    // Fall back to shared.
+    let path = skill_dir().join(name).join("SKILL.md");
+    std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read skill '{name}' from {}", path.display()))
+}
+
+/// Reads a skill file and returns its metadata (name + description).
+///
+/// If the file has no frontmatter, `name` defaults to the last path
+/// component of the skill name.
+pub fn skill_metadata(name: &str, session_dir: Option<&Path>) -> Result<SkillMeta> {
+    validate_skill_name(name)?;
+    let content = resolve_skill_content(name, session_dir)?;
+
+    Ok(parse_frontmatter_meta(&content).unwrap_or_else(|| {
+        let default_name = name.rsplit('/').next().unwrap_or(name).to_owned();
+        SkillMeta {
+            name: default_name,
+            description: None,
+        }
+    }))
+}
+
+/// Validates a skill name for path traversal attacks.
+///
+/// Allows `/` for nested categories (e.g. `code/refactoring`) but rejects
+/// `..` components, backslashes, and empty components.
+fn validate_skill_name(name: &str) -> Result<()> {
+    if name.contains('\\') {
         bail!("invalid skill name: {name}");
     }
-    let path = skill_dir().join(name).join("SKILL.md");
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read skill '{name}' from {}", path.display()))?;
+    for component in name.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            bail!("invalid skill name: {name}");
+        }
+    }
+    Ok(())
+}
+
+/// Reads a skill file, strips frontmatter, and returns the body.
+///
+/// Checks the agent-local directory first (if `session_dir` is provided),
+/// then falls back to the shared skill directory. Local takes precedence
+/// on name collision.
+pub fn load_skill(name: &str, session_dir: Option<&Path>) -> Result<String> {
+    validate_skill_name(name)?;
+    let content = resolve_skill_content(name, session_dir)?;
     Ok(strip_frontmatter(&content).trim().to_owned())
 }
 
@@ -100,7 +203,7 @@ pub fn ensure_meta_skill() -> Result<String> {
             .with_context(|| format!("failed to write meta-skill to {}", path.display()))?;
     }
 
-    load_skill(META_SKILL_NAME)
+    load_skill(META_SKILL_NAME, None)
 }
 
 /// Strips YAML frontmatter (content between `---` delimiters).
@@ -125,69 +228,94 @@ fn strip_frontmatter(content: &str) -> &str {
     content
 }
 
-// --- skill_load ---
+// --- read_file_and_pin ---
 
 #[derive(Debug, Deserialize, Serialize)]
-struct SkillLoadArgs {
-    name: String,
+struct FilePinArgs {
+    /// File path. Relative paths resolve against the workspace root.
+    path: String,
+    /// Label for the pinned item.
+    label: String,
 }
 
-/// Reads a skill from disk and pins it into the agent's context.
-pub struct SkillLoadTool {
+/// Reads a file from disk and pins its content into the agent's context.
+///
+/// Strips YAML frontmatter if present. Relative paths resolve against the
+/// workspace root (current working directory). This is a general-purpose
+/// shortcut for the common pattern of reading a file and pinning it for
+/// cross-turn reference.
+pub struct FilePinTool {
     ctx: Arc<Mutex<dyn AgenticContext>>,
 }
 
-impl SkillLoadTool {
+impl FilePinTool {
     pub fn new(ctx: Arc<Mutex<dyn AgenticContext>>) -> Self {
         Self { ctx }
     }
 }
 
 #[async_trait]
-impl LlmTool for SkillLoadTool {
+impl LlmTool for FilePinTool {
     fn name(&self) -> &str {
-        "skill_load"
+        "read_file_and_pin"
     }
 
     fn description(&self) -> &str {
-        "Load a skill from the skills directory and pin it into \
-         the agent's context. Skills are suggestions and best practices, not \
-         mandatory instructions."
+        "Read a file from disk and pin its content into context. \
+         Strips YAML frontmatter if present. Use this to load reference \
+         material, skills, or any content that should persist across \
+         conversation turns."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "name": {
+                "path": {
                     "type": "string",
-                    "description": "The skill name (directory under the skills directory)."
+                    "description": "File path. Relative paths resolve against the workspace root."
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Label for the pinned item. Use 'skill:<name>' convention for skills."
                 }
             },
-            "required": ["name"]
+            "required": ["path", "label"]
         })
     }
 
     async fn call(&self, args_json: &str) -> Result<String> {
-        let args: SkillLoadArgs =
-            serde_json::from_str(args_json).context("skill_load: invalid arguments")?;
-        let content = load_skill(&args.name)?;
-        let label = format!("skill:{}", args.name);
-        let message = ChatMessage::user(format!("[skill: {}]\n{content}", args.name));
+        let args: FilePinArgs =
+            serde_json::from_str(args_json).context("read_file_and_pin: invalid arguments")?;
 
+        let path = std::path::Path::new(&args.path);
+        let resolved = if path.is_relative() {
+            std::env::current_dir()
+                .context("failed to determine working directory")?
+                .join(path)
+        } else {
+            path.to_path_buf()
+        };
+
+        let content = std::fs::read_to_string(&resolved)
+            .with_context(|| format!("failed to read file '{}'", resolved.display()))?;
+        let body = strip_frontmatter(&content).trim().to_owned();
+
+        let message = ChatMessage::user(body);
         let mut ctx = self.ctx.lock().await;
-        ctx.pin(&label, message)?;
+        ctx.pin(&args.label, message)?;
         let labels = ctx.pinned_labels();
         Ok(serde_json::to_string(&json!({
-            "loaded": args.name,
+            "pinned": args.label,
+            "source": resolved.display().to_string(),
             "pinned_labels": labels,
         }))?)
     }
 }
 
-/// Creates the skill-loading tool.
-pub fn skill_tool_set(ctx: Arc<Mutex<dyn AgenticContext>>) -> Vec<Box<dyn LlmTool>> {
-    vec![Box::new(SkillLoadTool::new(ctx))]
+/// Creates the file-pin tool set.
+pub fn file_pin_tool_set(ctx: Arc<Mutex<dyn AgenticContext>>) -> Vec<Box<dyn LlmTool>> {
+    vec![Box::new(FilePinTool::new(ctx))]
 }
 
 #[cfg(test)]
@@ -213,8 +341,45 @@ mod tests {
     }
 
     #[test]
-    fn reject_path_traversal() {
-        assert!(load_skill("../etc/passwd").is_err());
-        assert!(load_skill("foo/bar").is_err());
+    fn validate_skill_name_allows_nested() {
+        assert!(validate_skill_name("code/refactoring").is_ok());
+        assert!(validate_skill_name("a/b/c").is_ok());
+        assert!(validate_skill_name("simple").is_ok());
+    }
+
+    #[test]
+    fn validate_skill_name_rejects_traversal() {
+        assert!(validate_skill_name("../etc/passwd").is_err());
+        assert!(validate_skill_name("foo/..").is_err());
+        assert!(validate_skill_name("foo/../bar").is_err());
+        assert!(validate_skill_name("foo//bar").is_err());
+        assert!(validate_skill_name("foo/./bar").is_err());
+    }
+
+    #[test]
+    fn load_skill_rejects_backslash() {
+        assert!(load_skill("foo\\bar", None).is_err());
+    }
+
+    #[test]
+    fn parse_frontmatter_meta_extracts_name_and_description() {
+        let input = "---\nname: refactoring\ndescription: Safe patterns\n---\nBody here\n";
+        let meta = parse_frontmatter_meta(input).unwrap();
+        assert_eq!(meta.name, "refactoring");
+        assert_eq!(meta.description.as_deref(), Some("Safe patterns"));
+    }
+
+    #[test]
+    fn parse_frontmatter_meta_name_only() {
+        let input = "---\nname: minimal\n---\nBody\n";
+        let meta = parse_frontmatter_meta(input).unwrap();
+        assert_eq!(meta.name, "minimal");
+        assert!(meta.description.is_none());
+    }
+
+    #[test]
+    fn parse_frontmatter_meta_returns_none_without_frontmatter() {
+        let input = "Just plain markdown.\n";
+        assert!(parse_frontmatter_meta(input).is_none());
     }
 }
