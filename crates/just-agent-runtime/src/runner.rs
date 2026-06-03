@@ -7,10 +7,10 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use tracing::{info, warn};
 
-use crate::context::{AgenticContext, compose_context};
 use crate::approval::ApprovalNotification;
-use crate::session::AgentContext;
+use crate::context::{AgenticContext, compose_context};
 use crate::event::{AgentEvent, AgentOutcome};
+use crate::session::AgentContext;
 use just_llm_client::types::chat::{
     ChatCompletionChunkToolCall, ChatMessage, ChatToolCall, FunctionCall, StreamOptions,
     ToolCallsMessage, ToolChoice, ToolChoiceMode, ToolType,

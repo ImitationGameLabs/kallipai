@@ -2,8 +2,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use just_agent_common::types::{
-    ApprovalDecisionBody, ApprovalEntry, ApprovalStatus,
-    ListApprovalsResponse, SseEvent,
+    ApprovalDecisionBody, ApprovalEntry, ApprovalStatus, ListApprovalsResponse, SseEvent,
 };
 use just_agent_runtime::persistence;
 
@@ -24,7 +23,10 @@ pub async fn list_approvals(
 
     let mut entries: Vec<ApprovalEntry> = Vec::new();
     for (agent_id, entry) in registry.iter() {
-        if registry.require_superior(auth.identity(), agent_id).is_err() {
+        if registry
+            .require_superior(auth.identity(), agent_id)
+            .is_err()
+        {
             continue;
         }
         if let Some(ref filter_agent) = params.requested_by

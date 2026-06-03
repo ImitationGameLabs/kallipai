@@ -6,12 +6,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use just_agent_common::command::{SlashCommand, UserInput};
 use crate::event::{AgentEvent, AgentOutcome};
+use just_agent_common::command::{SlashCommand, UserInput};
 
+use crate::approval::ApprovalStore;
 use crate::config::AgentConfig;
 use crate::context::{AgenticContext, ContextStore, ContextSummarizer};
-use crate::approval::ApprovalStore;
 use crate::policy::AuthorizedToolExecutor;
 use crate::runner;
 use just_llm_client::types::chat::ChatMessage;

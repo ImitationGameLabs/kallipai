@@ -299,7 +299,7 @@ pub fn approval_result_json(id: &str, tool_name: &str) -> String {
     .unwrap_or_else(|_| r#"{"ok":true,"pending_approval":true}"#.to_owned())
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct ApprovalDeferredResponse {
     ok: bool,
     pending_approval: bool,

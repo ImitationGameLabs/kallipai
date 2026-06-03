@@ -1,7 +1,7 @@
-pub mod event;
+pub mod approval;
 pub mod config;
 pub mod context;
-pub mod approval;
+pub mod event;
 pub mod persistence;
 pub mod policy;
 pub mod provider;

@@ -13,8 +13,8 @@ use just_llm_client::{LlmError, TransportError};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use just_agent_common::retry::RetryRecord;
 use crate::event::AgentEvent;
+use just_agent_common::retry::RetryRecord;
 
 /// Configuration for LLM request retry behavior.
 #[derive(Clone, Debug)]

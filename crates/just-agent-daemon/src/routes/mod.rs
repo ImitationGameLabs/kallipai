@@ -1,8 +1,8 @@
 mod agent;
 mod restore;
 pub use restore::restore_sessions;
-mod context;
 mod approval;
+mod context;
 mod message;
 
 use axum::Router;
@@ -43,13 +43,9 @@ pub fn router() -> Router<SharedState> {
             "/agents/{id}/policy",
             axum::routing::get(context::get_policy).put(context::update_policy),
         )
-        .route(
-            "/approvals",
-            axum::routing::get(approval::list_approvals),
-        )
+        .route("/approvals", axum::routing::get(approval::list_approvals))
         .route(
             "/approvals/{id}",
-            axum::routing::get(approval::get_approval)
-                .post(approval::respond_approval),
+            axum::routing::get(approval::get_approval).post(approval::respond_approval),
         )
 }

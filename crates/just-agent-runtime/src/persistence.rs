@@ -14,8 +14,8 @@ use just_agent_common::types::ToolPolicy;
 use serde::{Deserialize, Serialize};
 use time::{Duration as TimeDuration, OffsetDateTime};
 
-use crate::context::ContextStore;
 use crate::approval::ApprovalStore;
+use crate::context::ContextStore;
 use just_agent_common::types::AgentId;
 use just_llm_client::types::chat::ChatMessage;
 /// Resolve the base sessions directory.

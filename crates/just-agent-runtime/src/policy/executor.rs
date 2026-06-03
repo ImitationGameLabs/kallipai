@@ -94,8 +94,11 @@ impl AuthorizedToolExecutor {
                 created_at: a.created_at,
             })
             .collect();
-        serde_json::to_string(&ApprovalListResponse { ok: true, actions: items })
-            .unwrap_or_else(|e| error_result("approval_list", e.to_string()))
+        serde_json::to_string(&ApprovalListResponse {
+            ok: true,
+            actions: items,
+        })
+        .unwrap_or_else(|e| error_result("approval_list", e.to_string()))
     }
 
     async fn handle_commit(&self, args_json: &str) -> String {

@@ -235,10 +235,7 @@ impl App {
                     if !buffer.is_empty() {
                         let reason = std::mem::take(buffer);
                         let id = state.entries[state.selected].id.clone();
-                        match client
-                            .respond_approval(&id, "deny", Some(&reason))
-                            .await
-                        {
+                        match client.respond_approval(&id, "deny", Some(&reason)).await {
                             Ok(()) => self.refresh_approvals(client).await,
                             Err(e) => {
                                 state.phase = ApprovalPhase::Browsing;

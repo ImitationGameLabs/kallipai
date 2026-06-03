@@ -84,7 +84,7 @@ impl App {
                     }
                 } else {
                     self.chat_lines
-.push(ChatLine::Status(format!("[approval] {id}: {status}")));
+                        .push(ChatLine::Status(format!("[approval] {id}: {status}")));
                     self.auto_scroll = true;
                 }
             }

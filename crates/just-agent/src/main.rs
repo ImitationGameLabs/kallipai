@@ -156,9 +156,7 @@ async fn main() -> Result<()> {
             }
             ApprovalCommand::Approve(args) => {
                 let client = build_client();
-                client
-                    .respond_approval(&args.id, "approve", None)
-                    .await?;
+                client.respond_approval(&args.id, "approve", None).await?;
                 println!("Approved.");
             }
             ApprovalCommand::Deny(args) => {
