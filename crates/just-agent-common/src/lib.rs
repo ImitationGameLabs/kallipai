@@ -1,9 +1,9 @@
+pub mod agentid;
+pub mod approval;
 pub mod command;
 pub mod context;
+pub mod policy;
+pub mod protocol;
 pub mod retry;
-pub mod types;
 
-pub use types::{
-    AgentPermissionsResponse, AgentStatusResponse, AgentSummary, ListAgentsResponse,
-    ListApprovalsQuery, MessageRequest, PolicyDecision, ToolPolicy,
-};
+pub use agentid::AgentId;

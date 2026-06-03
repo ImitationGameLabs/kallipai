@@ -1,6 +1,6 @@
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_core::Stream;
-use just_agent_common::types::SseEvent;
+use just_agent_common::protocol::SseEvent;
 use std::convert::Infallible;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;

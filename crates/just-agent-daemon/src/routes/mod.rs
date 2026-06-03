@@ -6,7 +6,7 @@ mod context;
 mod message;
 
 use axum::Router;
-use just_agent_common::types::{ListAgentsResponse, ListApprovalsQuery, MessageRequest};
+use just_agent_common::protocol::{ListAgentsResponse, ListApprovalsQuery, MessageRequest};
 use state::SharedState;
 
 use crate::state;

@@ -1,10 +1,11 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 
+use crate::command;
 use just_agent_client::DaemonClient;
 use just_agent_client::ListApprovalsParams;
-use just_agent_common::command::{self, SlashCommand};
-use just_agent_common::types::AgentId;
+use just_agent_common::agentid::AgentId;
+use just_agent_common::command::SlashCommand;
 
 use super::super::Action;
 use super::{App, AppMode, ApprovalPhase, ChatLine};

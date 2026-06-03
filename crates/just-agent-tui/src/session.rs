@@ -1,6 +1,6 @@
 use anyhow::Result;
 use just_agent_client::DaemonClient;
-use just_agent_common::types::AgentId;
+use just_agent_common::agentid::AgentId;
 
 /// Holds the daemon connection and agent identity.
 pub(crate) struct Session {
@@ -39,7 +39,7 @@ impl Session {
         }
 
         let agent_id = client
-            .spawn(just_agent_common::types::CreateAgentRequest {
+            .spawn(just_agent_common::protocol::CreateAgentRequest {
                 workspace_root: None,
                 skills: vec![],
                 prompt: None,

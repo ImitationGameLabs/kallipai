@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use just_agent_common::types::AgentId;
+use just_agent_common::agentid::AgentId;
 
 #[derive(Parser)]
 #[command(

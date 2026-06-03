@@ -7,7 +7,9 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use just_agent_common::types::{AgentId, SseEvent, ToolPolicy};
+use just_agent_common::agentid::AgentId;
+use just_agent_common::policy::ToolPolicy;
+use just_agent_common::protocol::SseEvent;
 use just_agent_runtime::approval::ApprovalStore;
 use just_agent_runtime::config::{AgentConfig, PermissionProfile, default_tool_policy};
 use just_agent_runtime::context::{AgenticContext, ContextStore, ContextSummarizer};
@@ -21,7 +23,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use just_agent_common::types::{CreateAgentRequest, CreateAgentResponse};
+use just_agent_common::protocol::{CreateAgentRequest, CreateAgentResponse};
 
 use super::ListAgentsResponse;
 use crate::bridge::bridge_task;

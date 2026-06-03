@@ -3,7 +3,7 @@
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
-use just_agent_common::types::{PolicyDecision, ToolPolicy};
+use just_agent_common::policy::{PolicyDecision, ToolPolicy};
 
 use crate::tools::shell::session::{ExecArgs, KillArgs};
 

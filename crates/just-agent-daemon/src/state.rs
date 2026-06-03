@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use axum::http::StatusCode;
+pub use just_agent_common::agentid::AgentId;
 use just_agent_common::command::UserInput;
-pub use just_agent_common::types::AgentId;
-pub use just_agent_common::types::AgentState;
-pub use just_agent_common::types::AgentSummary;
-use just_agent_common::types::SseEvent;
-use just_agent_common::types::ToolPolicy;
+use just_agent_common::policy::ToolPolicy;
+pub use just_agent_common::protocol::AgentState;
+pub use just_agent_common::protocol::AgentSummary;
+use just_agent_common::protocol::SseEvent;
 use just_agent_runtime::approval::ApprovalStore;
 use just_agent_runtime::config::AgentConfig;
 use just_agent_runtime::context::ContextStore;

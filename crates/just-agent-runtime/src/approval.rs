@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub use just_agent_common::types::{ApprovalStatus, ToolCallContent};
+pub use just_agent_common::approval::{ApprovalStatus, ToolCallContent};
 use time::OffsetDateTime;
 
 /// A tool action pending approval.

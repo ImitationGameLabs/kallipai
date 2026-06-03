@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::retry::RetryPolicy;
-use just_agent_common::types::{AgentId, PolicyDecision, ToolPolicy};
+use just_agent_common::AgentId;
+use just_agent_common::policy::{PolicyDecision, ToolPolicy};
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a minimal coding agent. Use shell_session_exec for shell commands. Use shell_session_create to create persistent shell sessions, shell_session_list to inspect them, shell_session_capture to inspect recent output, and shell_session_restart or shell_session_kill when session lifecycle control is necessary. Keep answers concise and prefer the least risky tool that can accomplish the task.\n\nWhen a tool returns {\"pending_approval\": true, \"id\": \"...\"}, the action was deferred and is pending authorization. Continue with other work. When you see an approval notification in context, call approval_redeem with the id to execute. Call approval_list to check status, approval_cancel if you no longer need a pending approval.";
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 32;

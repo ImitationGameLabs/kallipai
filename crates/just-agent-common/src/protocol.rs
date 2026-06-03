@@ -1,0 +1,194 @@
+//! HTTP/SSE wire types for daemon-client communication.
+
+use serde::{Deserialize, Serialize};
+
+use crate::agentid::AgentId;
+use crate::approval::{ApprovalStatus, ToolCallContent};
+use crate::policy::ToolPolicy;
+
+/// Agent lifecycle state exposed via the status endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    Idle,
+    Busy,
+}
+
+impl AgentState {
+    pub const IDLE: u8 = 0;
+    pub const BUSY: u8 = 1;
+}
+
+impl std::fmt::Display for AgentState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AgentState::Idle => "idle",
+            AgentState::Busy => "busy",
+        })
+    }
+}
+
+/// Wire-format event for SSE transport (daemon to client).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SseEvent {
+    Reasoning {
+        content: String,
+    },
+    AssistantContent {
+        content: String,
+    },
+    AssistantContentDelta {
+        delta: String,
+    },
+    ReasoningDelta {
+        delta: String,
+    },
+    ToolCall {
+        name: String,
+        args: String,
+    },
+    ToolResult {
+        result: String,
+    },
+    Finished {
+        content: String,
+    },
+    MaxRoundsExceeded,
+    Error {
+        message: String,
+    },
+    Status {
+        message: String,
+    },
+    Busy,
+    ApprovalUpdated {
+        id: String,
+        status: ApprovalStatus,
+    },
+    Retrying {
+        attempt: u32,
+        max_attempts: u32,
+        error: String,
+        delay_secs: f64,
+    },
+    Cancelled,
+}
+
+/// Request body for creating a new agent instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAgentRequest {
+    pub workspace_root: Option<String>,
+    pub skills: Vec<String>,
+    pub prompt: Option<String>,
+    pub created_by: Option<AgentId>,
+}
+
+/// Response body returned after creating an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAgentResponse {
+    pub id: AgentId,
+}
+
+/// A single approval entry in API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalEntry {
+    pub id: String,
+    pub requested_by: AgentId,
+    pub content: ToolCallContent,
+    /// Agent-provided justification for the tool call.
+    pub commit_reason: Option<String>,
+    pub status: ApprovalStatus,
+    pub deny_reason: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+}
+
+impl ApprovalEntry {
+    /// Construct an [`ApprovalEntry`] from an approval info snapshot and the owning agent id.
+    ///
+    /// Encapsulates the field-by-field mapping so callers don't need to
+    /// repeat the construction at every call site.
+    pub fn from_info(
+        id: String,
+        requested_by: AgentId,
+        content: ToolCallContent,
+        commit_reason: Option<String>,
+        status: ApprovalStatus,
+        deny_reason: Option<String>,
+        created_at: time::OffsetDateTime,
+    ) -> Self {
+        Self {
+            id,
+            requested_by,
+            content,
+            commit_reason,
+            status,
+            deny_reason,
+            created_at,
+        }
+    }
+}
+
+/// Response for listing approvals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListApprovalsResponse {
+    pub items: Vec<ApprovalEntry>,
+    pub total: usize,
+}
+
+/// Request body for approving or denying an approval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalDecisionBody {
+    pub decision: String,
+    pub reason: Option<String>,
+}
+
+/// Response for GET /agents/{id}/permissions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPermissionsResponse {
+    pub max_depth: u8,
+    pub workspace_root: String,
+    pub created_by: Option<AgentId>,
+    pub tool_policy: ToolPolicy,
+}
+
+/// Summary of an agent instance returned in list responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSummary {
+    pub id: AgentId,
+    pub workspace_root: String,
+    pub state: AgentState,
+    pub created_by: Option<AgentId>,
+}
+
+/// Combined agent status: lifecycle state + context usage + recent retry history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentStatusResponse {
+    pub state: AgentState,
+    pub context: crate::context::ContextUsage,
+    pub recent_retries: Vec<crate::retry::RetryRecord>,
+}
+
+/// Request body for sending a message to an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageRequest {
+    pub text: String,
+}
+
+/// Response body for listing agents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListAgentsResponse {
+    pub agents: Vec<AgentSummary>,
+}
+
+/// Query parameters for listing approvals.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ListApprovalsQuery {
+    pub offset: Option<u64>,
+    /// Page size. Server clamps to [1, 20]; defaults to 5 when unset.
+    pub limit: Option<u64>,
+    pub requested_by: Option<AgentId>,
+    pub status: Option<String>,
+    pub order: Option<String>,
+}

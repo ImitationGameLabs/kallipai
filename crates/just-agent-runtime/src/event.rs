@@ -3,7 +3,7 @@
 //! These types carry information between the agent runner/session modules
 //! and the daemon bridge. They are not serialized over the wire -- the
 //! bridge converts them to the SSE wire-format events defined in
-//! `just_agent_common::types::SseEvent`.
+//! `just_agent_common::protocol::SseEvent`.
 
 /// Events emitted by the agent runner during execution.
 ///

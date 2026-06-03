@@ -231,7 +231,7 @@ struct ApprovalListResponse {
 #[derive(Serialize)]
 struct ApprovalListItem {
     id: String,
-    content: just_agent_common::types::ToolCallContent,
+    content: just_agent_common::approval::ToolCallContent,
     commit_reason: Option<String>,
     status: ApprovalStatus,
     deny_reason: Option<String>,

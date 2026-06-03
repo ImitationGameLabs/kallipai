@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use just_agent_common::types::AgentId;
-use just_agent_common::types::SseEvent;
+use just_agent_common::agentid::AgentId;
+use just_agent_common::protocol::SseEvent;
 use just_llm_client::JsonEventStream;
 
 use crate::types::{ListApprovalsParams, MessageRequest};

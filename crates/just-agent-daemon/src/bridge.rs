@@ -1,8 +1,10 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use just_agent_common::agentid::AgentId;
+use just_agent_common::approval::ApprovalStatus;
 use just_agent_common::command::UserInput;
-use just_agent_common::types::{AgentId, AgentState, ApprovalStatus, SseEvent};
+use just_agent_common::protocol::{AgentState, SseEvent};
 use just_agent_runtime::event::AgentEvent;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;

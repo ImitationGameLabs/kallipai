@@ -2,9 +2,9 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use just_agent_common::types::{
-    AgentId, AgentPermissionsResponse, AgentStatusResponse, ToolPolicy,
-};
+use just_agent_common::agentid::AgentId;
+use just_agent_common::policy::ToolPolicy;
+use just_agent_common::protocol::{AgentPermissionsResponse, AgentStatusResponse};
 use just_agent_runtime::context::AgenticContext;
 use just_agent_runtime::persistence;
 

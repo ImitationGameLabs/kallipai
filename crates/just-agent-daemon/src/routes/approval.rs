@@ -1,8 +1,9 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use just_agent_common::types::{
-    ApprovalDecisionBody, ApprovalEntry, ApprovalStatus, ListApprovalsResponse, SseEvent,
+use just_agent_common::approval::ApprovalStatus;
+use just_agent_common::protocol::{
+    ApprovalDecisionBody, ApprovalEntry, ListApprovalsResponse, SseEvent,
 };
 use just_agent_runtime::persistence;
 

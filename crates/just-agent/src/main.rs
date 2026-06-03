@@ -6,7 +6,8 @@ use anyhow::Result;
 use clap::Parser;
 use futures_util::StreamExt;
 use just_agent_client::DaemonClient;
-use just_agent_common::types::{AgentId, PolicyDecision};
+use just_agent_common::agentid::AgentId;
+use just_agent_common::policy::PolicyDecision;
 
 use args::{AgentCommand, ApprovalCommand, Cli, Commands, PolicyCommand};
 
@@ -26,7 +27,7 @@ async fn main() -> Result<()> {
             AgentCommand::Start(args) => {
                 let client = build_client();
                 let id = client
-                    .spawn(just_agent_common::types::CreateAgentRequest {
+                    .spawn(just_agent_common::protocol::CreateAgentRequest {
                         workspace_root: args.workspace_root,
                         skills: args.skills,
                         prompt: args.prompt,
@@ -193,7 +194,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn print_approval_entry(a: &just_agent_common::types::ApprovalEntry) {
+fn print_approval_entry(a: &just_agent_common::protocol::ApprovalEntry) {
     println!("id: {}", a.id);
     println!("status: {}", a.status);
     println!("requested_by: {}", a.requested_by);

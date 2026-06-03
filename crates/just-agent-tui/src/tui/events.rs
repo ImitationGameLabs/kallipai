@@ -1,6 +1,6 @@
 use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
 
-use just_agent_common::types::SseEvent;
+use just_agent_common::protocol::SseEvent;
 
 use super::{App, AppMode, ChatLine};
 

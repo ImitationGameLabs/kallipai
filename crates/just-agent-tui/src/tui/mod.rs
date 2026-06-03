@@ -6,7 +6,7 @@ mod markdown;
 mod render;
 mod wrap;
 
-use just_agent_common::types::ApprovalEntry;
+use just_agent_common::protocol::ApprovalEntry;
 use ratatui_textarea::TextArea;
 
 use completion::CompletionState;

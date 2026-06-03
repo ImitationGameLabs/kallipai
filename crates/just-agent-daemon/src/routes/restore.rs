@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use just_agent_common::types::{AgentId, ToolPolicy};
+use just_agent_common::agentid::AgentId;
+use just_agent_common::policy::ToolPolicy;
 use just_agent_runtime::config::AgentConfig;
 use just_agent_runtime::persistence;
 use tokio::sync::broadcast;
