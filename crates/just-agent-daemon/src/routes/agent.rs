@@ -9,7 +9,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use just_agent_common::types::{AgentId, SseEvent, ToolPolicy};
-use just_agent_runtime::config::{AgentConfig, PermissionProfile};
+use just_agent_runtime::config::{AgentConfig, PermissionProfile, default_tool_policy};
 use just_agent_runtime::context::{AgenticContext, ContextStore, ContextSummarizer};
 use just_agent_runtime::approval::ApprovalStore;
 use just_agent_runtime::persistence;
@@ -145,7 +145,7 @@ pub async fn create_agent(
     env.insert("JUST_AGENT_ID".into(), id.to_string());
     env.insert("JUST_AGENT_AUTH_TOKEN".into(), auth_token.clone());
 
-    let mut tool_policy = ToolPolicy::default();
+    let mut tool_policy = default_tool_policy();
 
     // Subagent: validate supervisor and delegation constraints.
     if let Some(ref supervisor_id) = req.created_by {

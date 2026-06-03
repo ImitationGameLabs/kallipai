@@ -77,54 +77,6 @@ impl std::borrow::Borrow<str> for AgentId {
     }
 }
 
-#[derive(Debug)]
-pub enum AgentEvent {
-    Reasoning(String),
-    AssistantContent(String),
-    AssistantContentDelta {
-        delta: String,
-    },
-    ReasoningDelta {
-        delta: String,
-    },
-    ToolCall {
-        name: String,
-        args: String,
-    },
-    ToolResult(String),
-    Finished(String),
-    MaxRoundsExceeded,
-    Error(String),
-    Status(String),
-    Busy,
-    ApprovalCommitted {
-        id: String,
-        tool_name: String,
-        arguments: serde_json::Value,
-        commit_reason: String,
-    },
-    Retrying {
-        attempt: u32,
-        max_attempts: u32,
-        error: String,
-        delay_secs: f64,
-    },
-    ApprovalRedeemed {
-        id: String,
-    },
-    ApprovalCancelled {
-        id: String,
-    },
-    Cancelled,
-}
-
-/// Outcome of running the agent round loop.
-pub enum AgentOutcome {
-    Finished { content: String },
-    MaxRoundsExceeded,
-    Cancelled,
-}
-
 /// Wire-format event for SSE transport (daemon to client).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -170,49 +122,6 @@ pub enum SseEvent {
         delay_secs: f64,
     },
     Cancelled,
-}
-
-impl SseEvent {
-    /// Convert an AgentEvent to an SSE event for broadcast.
-    /// Returns `None` for events handled by other means (e.g., routed to superiors).
-    pub fn try_from_agent(event: AgentEvent) -> Option<Self> {
-        match event {
-            AgentEvent::ApprovalCommitted { .. } => None,
-            AgentEvent::ApprovalRedeemed { id } => Some(Self::ApprovalUpdated {
-                id,
-                status: ApprovalStatus::Redeemed,
-            }),
-            AgentEvent::ApprovalCancelled { id } => Some(Self::ApprovalUpdated {
-                id,
-                status: ApprovalStatus::Cancelled,
-            }),
-            AgentEvent::Reasoning(content) => Some(Self::Reasoning { content }),
-            AgentEvent::AssistantContent(content) => Some(Self::AssistantContent { content }),
-            AgentEvent::AssistantContentDelta { delta } => {
-                Some(Self::AssistantContentDelta { delta })
-            }
-            AgentEvent::ReasoningDelta { delta } => Some(Self::ReasoningDelta { delta }),
-            AgentEvent::ToolCall { name, args } => Some(Self::ToolCall { name, args }),
-            AgentEvent::ToolResult(result) => Some(Self::ToolResult { result }),
-            AgentEvent::Finished(content) => Some(Self::Finished { content }),
-            AgentEvent::MaxRoundsExceeded => Some(Self::MaxRoundsExceeded),
-            AgentEvent::Error(msg) => Some(Self::Error { message: msg }),
-            AgentEvent::Status(msg) => Some(Self::Status { message: msg }),
-            AgentEvent::Busy => Some(Self::Busy),
-            AgentEvent::Retrying {
-                attempt,
-                max_attempts,
-                error,
-                delay_secs,
-            } => Some(Self::Retrying {
-                attempt,
-                max_attempts,
-                error,
-                delay_secs,
-            }),
-            AgentEvent::Cancelled => Some(Self::Cancelled),
-        }
-    }
 }
 
 /// Request body for creating a new agent instance.
@@ -362,26 +271,6 @@ impl ToolPolicy {
         }
     }
 
-    /// Default policy matching the current hardcoded behavior.
-    pub fn hardcoded_default() -> Self {
-        let mut tools = BTreeMap::new();
-        tools.insert("shell_session_list".into(), PolicyDecision::Allow);
-        tools.insert("shell_session_capture".into(), PolicyDecision::Allow);
-        tools.insert("shell_session_create".into(), PolicyDecision::Allow);
-        tools.insert("shell_session_kill".into(), PolicyDecision::Ask);
-        tools.insert("shell_session_restart".into(), PolicyDecision::Ask);
-        tools.insert("shell_session_exec".into(), PolicyDecision::Classify);
-        tools.insert("context_pin".into(), PolicyDecision::Allow);
-        tools.insert("context_unpin".into(), PolicyDecision::Allow);
-        tools.insert("context_status".into(), PolicyDecision::Allow);
-        tools.insert("context_evict".into(), PolicyDecision::Allow);
-        tools.insert("skill_load".into(), PolicyDecision::Allow);
-        Self {
-            default: PolicyDecision::Ask,
-            tools,
-        }
-    }
-
     /// Look up the decision for a tool name.
     pub fn decision_for(&self, tool_name: &str) -> PolicyDecision {
         self.tools.get(tool_name).copied().unwrap_or(self.default)
@@ -418,12 +307,6 @@ impl ToolPolicy {
         } else {
             Err(violations)
         }
-    }
-}
-
-impl Default for ToolPolicy {
-    fn default() -> Self {
-        Self::hardcoded_default()
     }
 }
 

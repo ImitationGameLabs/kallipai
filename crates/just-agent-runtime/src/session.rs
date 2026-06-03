@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use just_agent_common::command::{SlashCommand, UserInput};
-use just_agent_common::types::{AgentEvent, AgentOutcome};
+use crate::event::{AgentEvent, AgentOutcome};
 
 use crate::config::AgentConfig;
 use crate::context::{AgenticContext, ContextStore, ContextSummarizer};

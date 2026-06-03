@@ -222,7 +222,7 @@ impl AgentRegistry {
 mod tests {
     use super::*;
     use crate::auth::Identity;
-    use just_agent_runtime::config::PermissionProfile;
+    use just_agent_runtime::config::{PermissionProfile, default_tool_policy};
     use just_agent_runtime::retry::RetryPolicy;
 
     fn make_entry(created_by: Option<AgentId>, auth_token: String) -> AgentEntry {
@@ -259,7 +259,7 @@ mod tests {
                 state: Arc::new(AtomicU8::new(AgentState::IDLE)),
                 auth_token,
                 env: HashMap::new(),
-                tool_policy: Arc::new(std::sync::RwLock::new(ToolPolicy::default())),
+                tool_policy: Arc::new(std::sync::RwLock::new(default_tool_policy())),
             },
             subagent_ids: vec![],
         }

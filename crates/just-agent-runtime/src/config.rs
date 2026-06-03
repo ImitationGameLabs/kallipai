@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::retry::RetryPolicy;
-use just_agent_common::types::AgentId;
+use just_agent_common::types::{AgentId, PolicyDecision, ToolPolicy};
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a minimal coding agent. Use shell_session_exec for shell commands. Use shell_session_create to create persistent shell sessions, shell_session_list to inspect them, shell_session_capture to inspect recent output, and shell_session_restart or shell_session_kill when session lifecycle control is necessary. Keep answers concise and prefer the least risky tool that can accomplish the task.\n\nWhen a tool returns {\"pending_approval\": true, \"id\": \"...\"}, the action was deferred and is pending authorization. Continue with other work. When you see an approval notification in context, call approval_redeem with the id to execute. Call approval_list to check status, approval_cancel if you no longer need a pending approval.";
 const DEFAULT_MAX_TOOL_ROUNDS: usize = 32;
@@ -15,6 +15,30 @@ const DEFAULT_MAX_RETRIES: u32 = 3;
 const DEFAULT_RETRY_BASE_DELAY_SECS: u64 = 1;
 const DEFAULT_PINNED_BUDGET_RATIO: f64 = 0.25;
 const DEFAULT_CONTEXT_THRESHOLDS: &[u8] = &[50, 60, 70, 80];
+
+/// Default tool policy matching the current hardcoded behavior.
+///
+/// Lives in the runtime crate because it encodes knowledge of specific tool
+/// names defined by the runtime's tool registry.
+pub fn default_tool_policy() -> ToolPolicy {
+    use std::collections::BTreeMap;
+    let mut tools = BTreeMap::new();
+    tools.insert("shell_session_list".into(), PolicyDecision::Allow);
+    tools.insert("shell_session_capture".into(), PolicyDecision::Allow);
+    tools.insert("shell_session_create".into(), PolicyDecision::Allow);
+    tools.insert("shell_session_kill".into(), PolicyDecision::Ask);
+    tools.insert("shell_session_restart".into(), PolicyDecision::Ask);
+    tools.insert("shell_session_exec".into(), PolicyDecision::Classify);
+    tools.insert("context_pin".into(), PolicyDecision::Allow);
+    tools.insert("context_unpin".into(), PolicyDecision::Allow);
+    tools.insert("context_status".into(), PolicyDecision::Allow);
+    tools.insert("context_evict".into(), PolicyDecision::Allow);
+    tools.insert("skill_load".into(), PolicyDecision::Allow);
+    ToolPolicy {
+        default: PolicyDecision::Ask,
+        tools,
+    }
+}
 
 /// Hard-coded maximum delegation depth for top-level agents.
 ///

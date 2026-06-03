@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use just_agent_common::retry::RetryRecord;
-use just_agent_common::types::AgentEvent;
+use crate::event::AgentEvent;
 
 /// Configuration for LLM request retry behavior.
 #[derive(Clone, Debug)]

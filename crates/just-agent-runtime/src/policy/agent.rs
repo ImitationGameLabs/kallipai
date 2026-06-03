@@ -62,9 +62,10 @@ impl AgentPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::default_tool_policy;
 
     fn make_policy() -> AgentPolicy {
-        AgentPolicy::new(Arc::new(RwLock::new(ToolPolicy::default())))
+        AgentPolicy::new(Arc::new(RwLock::new(default_tool_policy())))
     }
 
     #[test]
@@ -108,7 +109,7 @@ mod tests {
 
     #[test]
     fn policy_update_takes_effect() {
-        let shared = Arc::new(RwLock::new(ToolPolicy::default()));
+        let shared = Arc::new(RwLock::new(default_tool_policy()));
         let policy = AgentPolicy::new(shared.clone());
 
         // Default: shell_session_list is allow.
