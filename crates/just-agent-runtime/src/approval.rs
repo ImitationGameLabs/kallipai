@@ -22,6 +22,22 @@ pub struct ApprovalAction {
     pub created_at: OffsetDateTime,
 }
 
+impl From<&ApprovalAction> for ApprovalInfo {
+    fn from(a: &ApprovalAction) -> Self {
+        Self {
+            id: a.id.clone(),
+            content: ToolCallContent {
+                tool_name: a.tool_name.clone(),
+                arguments: serde_json::from_str(&a.args_json).unwrap_or(serde_json::Value::Null),
+            },
+            commit_reason: a.commit_reason.clone(),
+            status: a.status,
+            deny_reason: a.deny_reason.clone(),
+            created_at: a.created_at,
+        }
+    }
+}
+
 /// A lightweight snapshot returned by list operations.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalInfo {
@@ -248,18 +264,7 @@ impl ApprovalStore {
         self.actions
             .values()
             .filter(|a| status_filter.is_none_or(|f| &a.status == f))
-            .map(|a| ApprovalInfo {
-                id: a.id.clone(),
-                content: ToolCallContent {
-                    tool_name: a.tool_name.clone(),
-                    arguments: serde_json::from_str(&a.args_json)
-                        .unwrap_or(serde_json::Value::Null),
-                },
-                commit_reason: a.commit_reason.clone(),
-                status: a.status,
-                deny_reason: a.deny_reason.clone(),
-                created_at: a.created_at,
-            })
+            .map(ApprovalInfo::from)
             .collect()
     }
 
@@ -270,17 +275,7 @@ impl ApprovalStore {
 
     /// Look up a single action by id.
     pub fn get(&self, id: &str) -> Option<ApprovalInfo> {
-        self.actions.get(id).map(|a| ApprovalInfo {
-            id: a.id.clone(),
-            content: ToolCallContent {
-                tool_name: a.tool_name.clone(),
-                arguments: serde_json::from_str(&a.args_json).unwrap_or(serde_json::Value::Null),
-            },
-            commit_reason: a.commit_reason.clone(),
-            status: a.status,
-            deny_reason: a.deny_reason.clone(),
-            created_at: a.created_at,
-        })
+        self.actions.get(id).map(ApprovalInfo::from)
     }
 
     /// Drain all pending notifications (for runner context injection).

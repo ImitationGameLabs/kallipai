@@ -204,6 +204,32 @@ pub struct ApprovalEntry {
     pub created_at: time::OffsetDateTime,
 }
 
+impl ApprovalEntry {
+    /// Construct an [`ApprovalEntry`] from an approval info snapshot and the owning agent id.
+    ///
+    /// Encapsulates the field-by-field mapping so callers don't need to
+    /// repeat the construction at every call site.
+    pub fn from_info(
+        id: String,
+        requested_by: AgentId,
+        content: ToolCallContent,
+        commit_reason: Option<String>,
+        status: ApprovalStatus,
+        deny_reason: Option<String>,
+        created_at: time::OffsetDateTime,
+    ) -> Self {
+        Self {
+            id,
+            requested_by,
+            content,
+            commit_reason,
+            status,
+            deny_reason,
+            created_at,
+        }
+    }
+}
+
 /// Response for listing approvals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListApprovalsResponse {

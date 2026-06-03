@@ -38,15 +38,15 @@ pub async fn list_approvals(
             if info.status == ApprovalStatus::Pending {
                 continue;
             }
-            entries.push(ApprovalEntry {
-                id: info.id,
-                requested_by: agent_id.clone(),
-                content: info.content,
-                commit_reason: info.commit_reason,
-                status: info.status,
-                deny_reason: info.deny_reason,
-                created_at: info.created_at,
-            });
+            entries.push(ApprovalEntry::from_info(
+                info.id,
+                agent_id.clone(),
+                info.content,
+                info.commit_reason,
+                info.status,
+                info.deny_reason,
+                info.created_at,
+            ));
         }
     }
     drop(registry);
@@ -89,15 +89,15 @@ pub async fn get_approval(
         let approvals = entry.agent.approvals.lock().await;
         if let Some(info) = approvals.get(&id) {
             registry.require_superior(auth.identity(), agent_id)?;
-            return Ok(Json(ApprovalEntry {
-                id: info.id,
-                requested_by: agent_id.clone(),
-                content: info.content,
-                commit_reason: info.commit_reason,
-                status: info.status,
-                deny_reason: info.deny_reason,
-                created_at: info.created_at,
-            }));
+            return Ok(Json(ApprovalEntry::from_info(
+                info.id,
+                agent_id.clone(),
+                info.content,
+                info.commit_reason,
+                info.status,
+                info.deny_reason,
+                info.created_at,
+            )));
         }
     }
     Err((StatusCode::NOT_FOUND, "approval not found".into()))
