@@ -5,11 +5,21 @@ mod args;
 use anyhow::Result;
 use clap::Parser;
 use futures_util::StreamExt;
-use just_agent_client::DaemonClient;
+use just_agent_client::{DaemonClient, PromoteDecision};
 use just_agent_common::agentid::AgentId;
 use just_agent_common::policy::PolicyDecision;
+use just_agent_common::promote::{NO_REASON_PROVIDED, SkillPromoteStatus};
 
-use args::{AgentCommand, ApprovalCommand, Cli, Commands, PolicyCommand, SkillCommand};
+/// Returns the deny reason string, or the placeholder when absent.
+/// Only meaningful when `status == Denied`.
+fn deny_reason_display(reason: &Option<String>) -> &str {
+    reason.as_deref().unwrap_or(NO_REASON_PROVIDED)
+}
+
+use args::{
+    AgentCommand, ApprovalCommand, Cli, Commands, PolicyCommand, PromoteRequestCommand,
+    SkillCommand,
+};
 
 fn build_client() -> DaemonClient {
     let url =
@@ -216,11 +226,81 @@ async fn main() -> Result<()> {
                     println!("description: {desc}");
                 }
             }
-            SkillCommand::Promote(args) => {
+        },
+        Commands::PromoteRequest(cmd) => match cmd {
+            PromoteRequestCommand::Submit(args) => {
                 let client = build_client();
                 let id = agent_id_from_env()?;
-                let resp = client.skill_promote(&id, &args.name, args.force).await?;
-                println!("promoted '{}' to {}", resp.name, resp.destination);
+                let resp = client.submit_promote_request(&id, &args.name).await?;
+                println!("Skill: {}", resp.skill_name);
+                println!("Request ID: {}", resp.request_id);
+                println!("Status: {}", resp.status);
+                if resp.has_existing {
+                    println!("Existing: shared skill will be overwritten on approval");
+                } else {
+                    println!("Existing: (new skill)");
+                }
+            }
+            PromoteRequestCommand::List { status } => {
+                let client = build_client();
+                let resp = client.list_promote_requests(status.as_deref()).await?;
+                if resp.items.is_empty() {
+                    println!("No promote requests.");
+                } else {
+                    for r in &resp.items {
+                        println!(
+                            "{}  {}  {}  by:{}  {}",
+                            r.id, r.skill_name, r.status, r.requested_by, r.created_at
+                        );
+                        if let Some(desc) = &r.description {
+                            println!("  description: {desc}");
+                        }
+                        if r.has_existing {
+                            println!("  has_existing: true");
+                        }
+                        if r.status == SkillPromoteStatus::Denied {
+                            println!("  deny_reason: {}", deny_reason_display(&r.deny_reason));
+                        }
+                    }
+                    println!("(total: {})", resp.total);
+                }
+            }
+            PromoteRequestCommand::Show { id } => {
+                let client = build_client();
+                let resp = client.show_promote_request(&id).await?;
+                println!("id: {}", resp.id);
+                println!("skill: {}", resp.skill_name);
+                println!("status: {}", resp.status);
+                println!("requested_by: {}", resp.requested_by);
+                println!("has_existing: {}", resp.has_existing);
+                if let Some(desc) = &resp.description {
+                    println!("description: {desc}");
+                }
+                if resp.status == SkillPromoteStatus::Denied {
+                    println!("deny_reason: {}", deny_reason_display(&resp.deny_reason));
+                }
+                if let Some(old) = &resp.old_content {
+                    println!("\n--- old content ---");
+                    println!("{old}");
+                } else {
+                    println!("\n--- old content: (none, new skill) ---");
+                }
+                println!("\n--- new content ---");
+                println!("{}", resp.new_content);
+            }
+            PromoteRequestCommand::Approve { id } => {
+                let client = build_client();
+                client
+                    .respond_promote_request(&id, PromoteDecision::Approve, None)
+                    .await?;
+                println!("Approved.");
+            }
+            PromoteRequestCommand::Deny { id, reason } => {
+                let client = build_client();
+                client
+                    .respond_promote_request(&id, PromoteDecision::Deny, reason.as_deref())
+                    .await?;
+                println!("Denied.");
             }
         },
     }

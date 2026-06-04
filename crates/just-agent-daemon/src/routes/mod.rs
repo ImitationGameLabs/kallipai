@@ -5,6 +5,7 @@ mod approval;
 mod context;
 mod message;
 mod skill;
+mod skill_promote;
 
 use axum::Router;
 use just_agent_common::protocol::{ListAgentsResponse, ListApprovalsQuery, MessageRequest};
@@ -58,7 +59,16 @@ pub fn router() -> Router<SharedState> {
             axum::routing::get(skill::skill_meta),
         )
         .route(
-            "/agents/{id}/skills/{name}/promote",
-            axum::routing::post(skill::skill_promote),
+            "/agents/{id}/skills/{name}/promote-request",
+            axum::routing::post(skill_promote::submit_promote_request),
+        )
+        .route(
+            "/skill-promote-requests",
+            axum::routing::get(skill_promote::list_promote_requests),
+        )
+        .route(
+            "/skill-promote-requests/{id}",
+            axum::routing::get(skill_promote::show_promote_request)
+                .post(skill_promote::respond_promote_request),
         )
 }

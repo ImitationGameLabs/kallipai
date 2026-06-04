@@ -10,6 +10,7 @@ just-agent-runtime = { workspace = true }
 just-agent-common = { workspace = true }
 just-llm-client = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
@@ -21,5 +22,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+time = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }

@@ -2,6 +2,7 @@ mod args;
 mod auth;
 mod bridge;
 mod routes;
+mod skill_promote;
 mod sse;
 mod state;
 

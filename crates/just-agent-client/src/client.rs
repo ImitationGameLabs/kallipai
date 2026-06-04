@@ -9,8 +9,9 @@ use crate::types::{ListApprovalsParams, MessageRequest};
 use crate::{
     AgentPermissionsResponse, AgentStatusResponse, AgentSummary, ApprovalDecisionBody,
     ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ListAgentsResponse,
-    ListApprovalsResponse, SkillMeta, SkillPathsResponse, SkillPromoteRequest,
-    SkillPromoteResponse, ToolPolicy,
+    ListApprovalsResponse, ListSkillPromoteRecordsResponse, PromoteDecision, SkillMeta,
+    SkillPathsResponse, SkillPromoteDecisionBody, SkillPromoteShowResponse,
+    SkillPromoteSubmitResponse, ToolPolicy,
 };
 
 struct Inner {
@@ -325,32 +326,96 @@ impl DaemonClient {
         Ok(resp)
     }
 
-    /// Promote a local skill to the shared skill directory.
-    ///
-    /// The skill name is URL-encoded so that nested paths like
-    /// `code/refactoring` survive as a single path segment.
-    pub async fn skill_promote(
+    // -----------------------------------------------------------------------
+    // Skill promote request (review-based promote flow)
+    // -----------------------------------------------------------------------
+
+    /// Submit a promote request for a local skill.
+    pub async fn submit_promote_request(
         &self,
         id: &AgentId,
         name: &str,
-        force: bool,
-    ) -> Result<SkillPromoteResponse> {
+    ) -> Result<SkillPromoteSubmitResponse> {
         let encoded = name.replace('/', "%2F");
         let resp = self
             .with_auth(
                 self.inner
                     .http
-                    .post(self.url(&format!("/agents/{id}/skills/{encoded}/promote")))
-                    .json(&SkillPromoteRequest { force }),
+                    .post(self.url(&format!("/agents/{id}/skills/{encoded}/promote-request"))),
             )
             .send()
             .await
-            .context("failed to promote skill")?
+            .context("failed to submit promote request")?
             .error_for_status()
             .context("daemon returned error")?
             .json()
             .await
-            .context("failed to parse skill promote response")?;
+            .context("failed to parse promote submit response")?;
         Ok(resp)
+    }
+
+    /// List promote requests, optionally filtered by status.
+    pub async fn list_promote_requests(
+        &self,
+        status: Option<&str>,
+    ) -> Result<ListSkillPromoteRecordsResponse> {
+        let mut req = self.inner.http.get(self.url("/skill-promote-requests"));
+        if let Some(s) = status {
+            req = req.query(&[("status", s)]);
+        }
+        let resp = self
+            .with_auth(req)
+            .send()
+            .await
+            .context("failed to list promote requests")?
+            .error_for_status()
+            .context("daemon returned error")?
+            .json()
+            .await
+            .context("failed to parse promote list response")?;
+        Ok(resp)
+    }
+
+    /// Show a promote request with full old/new content for diff review.
+    pub async fn show_promote_request(&self, id: &str) -> Result<SkillPromoteShowResponse> {
+        let resp = self
+            .with_auth(
+                self.inner
+                    .http
+                    .get(self.url(&format!("/skill-promote-requests/{id}"))),
+            )
+            .send()
+            .await
+            .context("failed to show promote request")?
+            .error_for_status()
+            .context("daemon returned error")?
+            .json()
+            .await
+            .context("failed to parse promote show response")?;
+        Ok(resp)
+    }
+
+    /// Approve or deny a promote request.
+    pub async fn respond_promote_request(
+        &self,
+        id: &str,
+        decision: PromoteDecision,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.with_auth(
+            self.inner
+                .http
+                .post(self.url(&format!("/skill-promote-requests/{id}")))
+                .json(&SkillPromoteDecisionBody {
+                    decision,
+                    reason: reason.map(|s| s.to_owned()),
+                }),
+        )
+        .send()
+        .await
+        .context("failed to respond to promote request")?
+        .error_for_status()
+        .context("daemon returned error")?;
+        Ok(())
     }
 }

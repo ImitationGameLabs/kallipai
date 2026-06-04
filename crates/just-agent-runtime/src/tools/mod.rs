@@ -13,7 +13,10 @@ pub mod context;
 pub mod shell;
 pub mod skill;
 
-pub use skill::{ensure_meta_skill, load_skill, promote_skill, skill_dir, skill_metadata};
+pub use skill::{
+    META_SKILL_NAME, ensure_meta_skill, load_skill, parse_frontmatter_meta, skill_dir,
+    skill_metadata, validate_skill_name,
+};
 
 /// Builds the tool registry exposed by `just-agent`.
 ///

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use crate::skill_promote::SkillPromoteStore;
 use axum::http::StatusCode;
 pub use just_agent_common::agentid::AgentId;
 use just_agent_common::command::UserInput;
@@ -21,6 +22,16 @@ pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
     pub registry: RwLock<AgentRegistry>,
+    pub skill_promote_store: Mutex<SkillPromoteStore>,
+    /// Serializes writes to the shared skill directory during promote-request
+    /// approval. Held across the consistency check and the actual write so
+    /// concurrent approve operations cannot interleave.
+    ///
+    /// **Lock order:** always acquired *inside* the `skill_promote_store` Mutex
+    /// (see `routes::skill_promote::handle_approve`). Never acquire in the
+    /// reverse order — the store lock is the coarse-grained gate, this lock
+    /// is the fine-grained skill-filesystem gate.
+    pub skill_write_lock: Mutex<()>,
     pub shutdown: CancellationToken,
     pub operator_token: String,
 }
@@ -69,6 +80,8 @@ impl AppState {
     pub fn new(operator_token: String) -> Self {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
+            skill_promote_store: Mutex::new(SkillPromoteStore::new()),
+            skill_write_lock: Mutex::new(()),
             shutdown: CancellationToken::new(),
             operator_token,
         }
@@ -215,6 +228,55 @@ impl AgentRegistry {
             StatusCode::FORBIDDEN,
             "not authorized to manage this agent".into(),
         ))
+    }
+
+    /// Caller must be the operator or a root agent (created_by is None).
+    /// Used for promote-request review operations.
+    pub fn require_root_or_operator(
+        &self,
+        identity: &crate::auth::Identity,
+    ) -> Result<(), (StatusCode, String)> {
+        match identity {
+            crate::auth::Identity::Operator => Ok(()),
+            crate::auth::Identity::Agent { id } => {
+                let entry = self
+                    .get(id)
+                    .ok_or((StatusCode::FORBIDDEN, "unknown agent".into()))?;
+                if entry.agent.config.created_by.is_none() {
+                    Ok(())
+                } else {
+                    Err((
+                        StatusCode::FORBIDDEN,
+                        "only root agents or operators can review promote requests".into(),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Caller must be the operator or the agent identified by `target_id`.
+    /// Used for promote-request submission (agents submit on their own behalf).
+    pub fn require_self_or_operator(
+        &self,
+        identity: &crate::auth::Identity,
+        target_id: &AgentId,
+    ) -> Result<(), (StatusCode, String)> {
+        match identity {
+            crate::auth::Identity::Operator => Ok(()),
+            crate::auth::Identity::Agent { id } if id == target_id => Ok(()),
+            _ => Err((
+                StatusCode::FORBIDDEN,
+                "only the agent itself or operator can submit promote requests".into(),
+            )),
+        }
+    }
+
+    /// Return all root agents (created_by is None).
+    pub fn root_agents(&self) -> Vec<(&AgentId, &AgentEntry)> {
+        self.agents
+            .iter()
+            .filter(|(_, e)| e.agent.config.created_by.is_none())
+            .collect()
     }
 }
 
@@ -449,5 +511,88 @@ mod tests {
             Err((status, _)) => assert_eq!(status, StatusCode::NOT_FOUND),
             Ok(_) => panic!("expected NOT_FOUND"),
         }
+    }
+
+    // -- Authorization: require_root_or_operator --
+
+    #[tokio::test]
+    async fn root_or_operator_allows_operator() {
+        let reg = AgentRegistry::new();
+        reg.require_root_or_operator(&Identity::Operator).unwrap();
+    }
+
+    #[tokio::test]
+    async fn root_or_operator_allows_root_agent() {
+        let mut reg = AgentRegistry::new();
+        let root = AgentId::random();
+        add_root(&mut reg, &root);
+        reg.require_root_or_operator(&Identity::Agent { id: root })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn root_or_operator_rejects_subagent() {
+        let mut reg = AgentRegistry::new();
+        let root = AgentId::random();
+        let child = AgentId::random();
+        add_root(&mut reg, &root);
+        add_sub(&mut reg, &child, &root);
+        match reg.require_root_or_operator(&Identity::Agent { id: child }) {
+            Err((status, msg)) => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert!(msg.contains("root agents"));
+            }
+            Ok(_) => panic!("expected FORBIDDEN"),
+        }
+    }
+
+    // -- Authorization: require_self_or_operator --
+
+    #[tokio::test]
+    async fn self_or_operator_allows_operator() {
+        let mut reg = AgentRegistry::new();
+        let id = AgentId::random();
+        add_root(&mut reg, &id);
+        reg.require_self_or_operator(&Identity::Operator, &id)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn self_or_operator_allows_self() {
+        let mut reg = AgentRegistry::new();
+        let id = AgentId::random();
+        add_root(&mut reg, &id);
+        reg.require_self_or_operator(&Identity::Agent { id: id.clone() }, &id)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn self_or_operator_rejects_other_agent() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        let b = AgentId::random();
+        add_root(&mut reg, &a);
+        add_root(&mut reg, &b);
+        match reg.require_self_or_operator(&Identity::Agent { id: b }, &a) {
+            Err((status, _)) => assert_eq!(status, StatusCode::FORBIDDEN),
+            Ok(_) => panic!("expected FORBIDDEN"),
+        }
+    }
+
+    // -- root_agents --
+
+    #[tokio::test]
+    async fn root_agents_returns_only_roots() {
+        let mut reg = AgentRegistry::new();
+        let root1 = AgentId::random();
+        let root2 = AgentId::random();
+        let child = AgentId::random();
+        add_root(&mut reg, &root1);
+        add_root(&mut reg, &root2);
+        add_sub(&mut reg, &child, &root1);
+        let roots: Vec<_> = reg.root_agents().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(roots.len(), 2);
+        assert!(roots.contains(&&root1));
+        assert!(roots.contains(&&root2));
     }
 }

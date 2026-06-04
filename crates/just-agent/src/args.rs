@@ -24,6 +24,9 @@ pub enum Commands {
     /// Skill discovery
     #[command(subcommand)]
     Skill(SkillCommand),
+    /// Manage skill promote requests (review-based promote flow)
+    #[command(subcommand)]
+    PromoteRequest(PromoteRequestCommand),
 }
 
 #[derive(Subcommand)]
@@ -151,8 +154,6 @@ pub enum SkillCommand {
     Paths(SkillPathsArgs),
     /// Show metadata for a specific skill
     Meta(SkillMetaArgs),
-    /// Promote a local skill to the shared directory
-    Promote(SkillPromoteArgs),
 }
 
 #[derive(Args)]
@@ -164,11 +165,42 @@ pub struct SkillMetaArgs {
     pub name: String,
 }
 
+// ---------------------------------------------------------------------------
+// Promote request commands (review-based promote flow)
+// ---------------------------------------------------------------------------
+
+/// Top-level promote-request commands used by agents via shell.
+#[derive(Subcommand)]
+pub enum PromoteRequestCommand {
+    /// Submit a promote request for the current agent's local skill.
+    Submit(PromoteRequestSubmitArgs),
+    /// List promote requests (open to all agents for visibility).
+    List {
+        /// Filter by status: pending, approved, denied.
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show old/new content of a promote request for diff review.
+    Show {
+        /// Request ID.
+        id: String,
+    },
+    /// Approve a pending promote request.
+    Approve {
+        /// Request ID.
+        id: String,
+    },
+    /// Deny a pending promote request.
+    Deny {
+        /// Request ID.
+        id: String,
+        /// Reason for denial.
+        reason: Option<String>,
+    },
+}
+
 #[derive(Args)]
-pub struct SkillPromoteArgs {
-    /// Skill name (supports nested paths like code/refactoring).
+pub struct PromoteRequestSubmitArgs {
+    /// Skill name to promote (supports nested paths like code/refactoring).
     pub name: String,
-    /// Overwrite if the skill already exists in the shared directory.
-    #[arg(long)]
-    pub force: bool,
 }
