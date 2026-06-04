@@ -28,7 +28,6 @@ just-agent-daemon = { path = "crates/just-agent-daemon" }
 anyhow = "1.0.102"
 async-trait = "0.1.89"
 async-stream = "0.3.6"
-dotenvy = "0.15.7"
 futures-core = "0.3.32"
 futures-util = "0.3.32"
 regex = "1.12.3"
