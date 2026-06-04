@@ -15,7 +15,7 @@ These variables select and configure the LLM backend. They are **required** for 
 | `JUST_LLM_OPENAI_COMPAT_API_KEY`  | conditional | —                | API key for the OpenAI-compatible provider. Required when `JUST_LLM_PROVIDER=openai-compatible`.          |
 | `JUST_LLM_OPENAI_COMPAT_BASE_URL` | conditional | `""`             | Override the default OpenAI-compatible API endpoint. Required when `JUST_LLM_PROVIDER=openai-compatible`. |
 
-Source: [`crates/just-agent-runtime/src/provider.rs`](../crates/just-agent-runtime/src/provider.rs).
+Source: [`crates/just-agent-runtime/src/provider.rs`](../../crates/just-agent-runtime/src/provider.rs).
 
 ## Agent Core
 
@@ -36,7 +36,7 @@ Runtime tuning parameters. All are optional with sensible defaults.
 | `JUST_AGENT_RETRY_BASE_DELAY_SECS` | `1`                             | > 0                                                    | Base delay in seconds for exponential retry backoff.                                                                                                                                                                                                              |
 | `JUST_AGENT_ALLOW_TOOLS`           | *(unset — uses default policy)* | Comma-separated tool names                             | Debug override: comma-separated list of tool names to force-allow. Disables `Classify` behavior for `shell_session_exec`; all unlisted tools default to `Ask`. Not a full policy language. Only affects root agents. Subagents inherit their supervisor's policy. |
 
-Source: [`crates/just-agent-runtime/src/config.rs`](../crates/just-agent-runtime/src/config.rs).
+Source: [`crates/just-agent-runtime/src/config.rs`](../../crates/just-agent-runtime/src/config.rs).
 
 ### Inter-variable constraints
 
@@ -55,7 +55,7 @@ These variables control the daemon server.
 | `JUST_AGENT_DAEMON_ADDR`   | no       | `127.0.0.1:3000`        | Listen address for the daemon HTTP server. Set to `0.0.0.0:3000` for container deployments.      |
 | `JUST_AGENT_ADVERTISE_URL` | no       | `http://127.0.0.1:3000` | URL that agents use to reach this daemon. Injected into PTY sessions as `JUST_AGENT_DAEMON_URL`. |
 
-Source: [`crates/just-agent-daemon/src/args.rs`](../crates/just-agent-daemon/src/args.rs).
+Source: [`crates/just-agent-daemon/src/args.rs`](../../crates/just-agent-daemon/src/args.rs).
 
 ### Variables injected into agent PTY sessions
 
@@ -83,7 +83,7 @@ In the common case (everything on localhost) they have the same value. They dive
 | `JUST_AGENT_DATA_DIR`    | no       | Platform data dir (`~/.local/share`) | Custom base directory for sessions, logs, and skills. The runtime appends `just-agent/sessions/` and `just-agent/skills/` subdirectories.  |
 | `JUST_AGENT_SKILLS_ROOT` | no       | `DATA_DIR/just-agent/skills/`        | Direct path to the shared skill directory. Used as-is (no suffix appended). Checked before `JUST_AGENT_DATA_DIR` and the platform default. |
 
-Source: [`crates/just-agent-runtime/src/persistence.rs`](../crates/just-agent-runtime/src/persistence.rs), [`crates/just-agent-runtime/src/tools/skill/mod.rs`](../crates/just-agent-runtime/src/tools/skill/mod.rs).
+Source: [`crates/just-agent-runtime/src/persistence.rs`](../../crates/just-agent-runtime/src/persistence.rs), [`crates/just-agent-runtime/src/tools/skill/mod.rs`](../../crates/just-agent-runtime/src/tools/skill/mod.rs).
 
 ## Logging
 

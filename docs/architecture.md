@@ -50,59 +50,9 @@ an `RwLock`; lookup is by UUID.
 3. **Delete** — `DELETE /agents/{id}` aborts both tokio tasks and removes the
    entry.
 
-## HTTP API
-
-| Method   | Path                     | Purpose                                                         |
-| -------- | ------------------------ | --------------------------------------------------------------- |
-| `POST`   | `/agents`                | Create a new agent instance                                     |
-| `GET`    | `/agents`                | List all running agents                                         |
-| `DELETE` | `/agents/{id}`           | Stop and remove an agent                                        |
-| `POST`   | `/agents/{id}/message`   | Send a message (returns `202 Accepted`)                         |
-| `GET`    | `/agents/{id}/events`    | Subscribe to agent events via SSE                               |
-| `GET`    | `/approvals`             | List approvals (supervisor-facing view of pending tool actions) |
-| `GET`    | `/approvals/{id}`        | Get a single approval                                           |
-| `POST`   | `/approvals/{id}`        | Approve or deny an approval                                     |
-| `GET`    | `/agents/{id}/status`    | Get context usage snapshot                                      |
-| `POST`   | `/agents/{id}/interrupt` | Interrupt current agent operation                               |
-
-`post_message` returns immediately (`202 Accepted`). Actual processing is async.
-Clients subscribe to the SSE endpoint to receive streamed results.
-
-## Authentication and authorization
-
-All endpoints require a `Bearer` token in the `Authorization` header. The
-daemon generates two categories of token:
-
-- **Operator token** — printed once at daemon startup. Grants full access:
-  create root agents, manage any agent, approve/deny approvals.
-- **Agent token** — generated per agent at creation, injected into the PTY as
-  `JUST_AGENT_AUTH_TOKEN`. Agents use this to call back to the daemon.
-
-Authorization rules:
-
-- **Supervisor** — the direct parent: the agent whose `created_by` field points
-  to the caller.
-- **Superior** — any ancestor in the `created_by` chain (supervisor,
-  grand-supervisor, etc.).
-
-| Endpoint                      | Operator | Supervisor | Superior | Any agent |
-| ----------------------------- | -------- | ---------- | -------- | --------- |
-| `POST /agents` (root)         | Yes      | -          | -        | -         |
-| `POST /agents` (subagent)     | Yes      | Yes        | -        | -         |
-| `GET /agents`                 | Yes      | -          | -        | Yes       |
-| `POST /agents/{id}/message`   | -        | -          | -        | Yes       |
-| `GET /agents/{id}/events`     | -        | -          | -        | Yes       |
-| `DELETE /agents/{id}`         | Yes      | -          | Yes      | -         |
-| `POST /agents/{id}/interrupt` | Yes      | -          | Yes      | -         |
-| `GET /approvals`              | Yes      | -          | Yes      | -         |
-| `GET /approvals/{id}`         | Yes      | -          | Yes      | -         |
-| `POST /approvals/{id}`        | Yes      | -          | Yes      | -         |
-| `GET /agents/{id}/status`     | Yes      | -          | -        | Yes       |
-
-Message, event, and status endpoints are peer-to-peer: any authenticated agent
-may access any other agent. Management endpoints (delete, interrupt, approval)
-require a superior relationship. Subagent creation requires the direct
-supervisor.
+The daemon exposes an HTTP API for managing agents and approvals. For the full
+endpoint reference, see [daemon-api.md](reference/daemon-api.md). For
+authentication and the authorization matrix, see [auth.md](reference/auth.md).
 
 ## Request flow
 

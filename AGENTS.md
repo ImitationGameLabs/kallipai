@@ -15,10 +15,14 @@ AI Agent working guide. This document provides code structure and decision rules
 │   ├── just-agent-daemon/    # HTTP API server hosting multiple agent instances
 │   └── just-agent-client/    # Daemon client library
 ├── docs/                      # Project documentation
-│   ├── architecture.md       # System architecture, daemon, API, policy
+│   ├── architecture.md       # System architecture, daemon design, policy
 │   ├── context-management.md # Agentic context management design
-│   ├── headless-cli.md       # Headless CLI reference and scripting
-│   └── agent-wizards/        # Step-by-step guides for common agent tasks
+│   ├── agent-wizards/        # Step-by-step guides for common agent tasks
+│   └── reference/            # Reference documentation
+│       ├── auth.md           # Authentication and authorization
+│       ├── daemon-api.md     # HTTP API endpoints
+│       ├── env.md            # Environment variable reference
+│       └── headless-cli.md   # Headless CLI usage and scripting
 └── nix/
       ├── common.nix           # Core config (crate paths, dependencies)
       └── dev/

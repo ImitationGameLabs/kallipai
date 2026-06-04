@@ -211,7 +211,7 @@ just-agent interrupt $AGENT_ID
 
 ## Environment variables
 
-`JUST_AGENT_AUTH_TOKEN` (required) and `JUST_AGENT_DAEMON_URL` (default `http://127.0.0.1:3000`) are the primary variables for headless CLI usage. For the complete reference including LLM provider configuration and agent tuning parameters, see [env-reference.md](env-reference.md).
+`JUST_AGENT_AUTH_TOKEN` (required) and `JUST_AGENT_DAEMON_URL` (default `http://127.0.0.1:3000`) are the primary variables for headless CLI usage. For the complete reference including LLM provider configuration and agent tuning parameters, see [env.md](env.md).
 
 ## Client library
 
