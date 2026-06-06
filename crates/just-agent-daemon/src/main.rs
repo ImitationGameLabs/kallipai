@@ -46,14 +46,56 @@ async fn main() -> Result<()> {
     println!("  - Or enter the token when prompted inside the TUI.");
     println!("─────────────────────────────────────────────────");
 
-    let state = Arc::new(AppState::new(operator_token));
+    anyhow::ensure!(
+        args.prompt_queue_size >= 1,
+        "JUST_AGENT_PROMPT_QUEUE_SIZE must be >= 1, got {}",
+        args.prompt_queue_size
+    );
+    anyhow::ensure!(
+        (1..=args::MAX_AGENTS_LIMIT).contains(&args.max_agents),
+        "JUST_AGENT_MAX_AGENTS must be 1..={}, got {}",
+        args::MAX_AGENTS_LIMIT,
+        args.max_agents
+    );
+    anyhow::ensure!(
+        (1..=args::MAX_SUBAGENTS_LIMIT).contains(&args.max_subagents),
+        "JUST_AGENT_MAX_SUBAGENTS must be 1..={}, got {}",
+        args::MAX_SUBAGENTS_LIMIT,
+        args.max_subagents
+    );
+    // 0 means "use axum default", so skip validation. Otherwise cap at 1 GB
+    // to prevent silent overflow when converting KB → bytes (* 1024).
+    if args.max_body_size_kb > 0 {
+        anyhow::ensure!(
+            args.max_body_size_kb <= 1_048_576,
+            "JUST_AGENT_MAX_BODY_SIZE_KB must be <= 1048576 (1 GB), got {}",
+            args.max_body_size_kb
+        );
+    }
+
+    let state = Arc::new(AppState::with_limits(
+        operator_token,
+        args.max_agents,
+        args.max_subagents,
+        args.prompt_queue_size,
+    ));
 
     // Restore persisted agents before accepting requests.
     routes::restore_sessions(&state).await;
 
-    let app = routes::router()
-        .with_state(state.clone())
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+    let app = routes::router().with_state(state.clone());
+
+    // Apply body size limit first (outermost layer), then tracing.
+    // When max_body_size_kb > 0, enforce the configured limit.
+    // When 0, axum's built-in default (2 MB) applies instead.
+    let app = if args.max_body_size_kb > 0 {
+        app.layer(axum::extract::DefaultBodyLimit::max(
+            args.max_body_size_kb * 1024,
+        ))
+    } else {
+        app
+    }
+    .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr).await?;
     info!(addr = %args.listen_addr, advertise = %args.advertise_url, "daemon listening");

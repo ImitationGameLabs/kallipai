@@ -191,8 +191,10 @@ async fn restore_one(
         events_tx,
         auth_token: auth_token.clone(),
         env,
-        shared_state,
+        shared_state: shared_state.clone(),
         tool_policy,
+        prompt_queue_size: shared_state.prompt_queue_size,
+        prompt_channel: None,
     })
     .await?;
 
@@ -204,6 +206,12 @@ async fn restore_one(
 /// Root agents (no supervisor) are restored first, then their children, and
 /// so on.  Siblings within each level are restored concurrently.  If an agent
 /// fails to restore, its entire subtree is skipped — no orphans are created.
+///
+/// **Exempt from resource limits:** `max_agents` and `max_subagents` are not
+/// enforced during restore. These agents were already running before the crash,
+/// so refusing to restore them would be counterproductive. After restore,
+/// `registry.len()` may exceed `max_agents`; new creation returns 503 until
+/// agents are deleted to make room.
 pub async fn restore_sessions(state: &SharedState) {
     let pending = persistence::scan_sessions();
     if pending.is_empty() {
@@ -333,5 +341,27 @@ pub async fn restore_sessions(state: &SharedState) {
             supervisor = ?p.meta.created_by,
             "skipping agent: ancestor was not restored"
         );
+    }
+
+    // Warn if restored agents exceed configured limits.
+    {
+        let registry = state.registry.read().await;
+        if registry.len() > state.max_agents {
+            tracing::warn!(
+                count = registry.len(),
+                max = state.max_agents,
+                "restored agent count exceeds max_agents; new creation will return 503 until agents are deleted"
+            );
+        }
+        for (id, entry) in registry.iter() {
+            if entry.subagent_ids.len() > state.max_subagents {
+                tracing::warn!(
+                    id = %id,
+                    count = entry.subagent_ids.len(),
+                    max = state.max_subagents,
+                    "restored agent exceeds max_subagents limit"
+                );
+            }
+        }
     }
 }

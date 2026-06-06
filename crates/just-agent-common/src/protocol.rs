@@ -177,6 +177,21 @@ pub struct MessageRequest {
     pub text: String,
 }
 
+/// Response body for sending a message to an agent.
+///
+/// Includes queue depth feedback so callers can gauge expected latency:
+/// - `queue_depth == 0`: agent will process the message immediately.
+/// - `queue_depth > 0`: message is queued behind existing messages; a
+///   warning is included.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageResponse {
+    /// Approximate number of messages queued ahead of this one (0 = immediate processing).
+    pub queue_depth: usize,
+    /// Human-readable note when queue is non-empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
 /// Response body for listing agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListAgentsResponse {

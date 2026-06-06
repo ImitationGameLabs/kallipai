@@ -21,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
+    /// Agent registry. **Lock order:** this RwLock must be acquired before
+    /// any `tool_policy` std::sync::RwLock inside agent entries.
     pub registry: RwLock<AgentRegistry>,
     pub skill_promote_store: Mutex<SkillPromoteStore>,
     /// Serializes writes to the shared skill directory during promote-request
@@ -34,6 +36,12 @@ pub struct AppState {
     pub skill_write_lock: Mutex<()>,
     pub shutdown: CancellationToken,
     pub operator_token: String,
+    /// Maximum number of concurrent agents.
+    pub max_agents: usize,
+    /// Maximum number of direct subagents per agent.
+    pub max_subagents: usize,
+    /// Message channel capacity per agent.
+    pub prompt_queue_size: usize,
 }
 
 /// Combined index: agent map + token→id lookup + subagent reverse pointers.
@@ -77,6 +85,8 @@ impl Agent {
 }
 
 impl AppState {
+    /// Test-only constructor with generous resource limits.
+    #[cfg(test)]
     pub fn new(operator_token: String) -> Self {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
@@ -84,6 +94,28 @@ impl AppState {
             skill_write_lock: Mutex::new(()),
             shutdown: CancellationToken::new(),
             operator_token,
+            max_agents: crate::args::MAX_AGENTS_LIMIT,
+            max_subagents: crate::args::MAX_SUBAGENTS_LIMIT,
+            prompt_queue_size: 5,
+        }
+    }
+
+    /// Production constructor with resource limits from CLI args.
+    pub fn with_limits(
+        operator_token: String,
+        max_agents: usize,
+        max_subagents: usize,
+        prompt_queue_size: usize,
+    ) -> Self {
+        Self {
+            registry: RwLock::new(AgentRegistry::new()),
+            skill_promote_store: Mutex::new(SkillPromoteStore::new()),
+            skill_write_lock: Mutex::new(()),
+            shutdown: CancellationToken::new(),
+            operator_token,
+            max_agents,
+            max_subagents,
+            prompt_queue_size,
         }
     }
 }
@@ -143,6 +175,18 @@ impl AgentRegistry {
         {
             supervisor.subagent_ids.push(id.clone());
         }
+        self.token_index.insert(auth_token, id.clone());
+        self.agents.insert(id, entry);
+    }
+
+    /// Like [`register`], but skips the subagent_ids push.
+    /// Used by `create_agent` which pre-reserves the slot before spawning.
+    pub fn register_no_subagent_push(
+        &mut self,
+        id: AgentId,
+        auth_token: String,
+        entry: AgentEntry,
+    ) {
         self.token_index.insert(auth_token, id.clone());
         self.agents.insert(id, entry);
     }
@@ -539,5 +583,22 @@ mod tests {
         assert_eq!(roots.len(), 2);
         assert!(roots.contains(&&root1));
         assert!(roots.contains(&&root2));
+    }
+
+    // -- Resource limits in AppState --
+
+    #[test]
+    fn with_limits_sets_max_agents() {
+        let state = AppState::with_limits("tok".into(), 50, 20, 5);
+        assert_eq!(state.max_agents, 50);
+        assert_eq!(state.max_subagents, 20);
+        assert_eq!(state.prompt_queue_size, 5);
+    }
+
+    #[test]
+    fn new_has_generous_limits() {
+        let state = AppState::new("tok".into());
+        assert_eq!(state.max_agents, crate::args::MAX_AGENTS_LIMIT);
+        assert_eq!(state.max_subagents, crate::args::MAX_SUBAGENTS_LIMIT);
     }
 }

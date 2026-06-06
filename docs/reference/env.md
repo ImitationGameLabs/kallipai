@@ -34,7 +34,7 @@ Runtime tuning parameters. All are optional with sensible defaults.
 | `JUST_AGENT_CONTEXT_THRESHOLDS`    | `50,60,70,80`                   | Comma-separated `1`–`99`, sorted ascending, ≥ 2 values | Context usage thresholds (percentage). The last value triggers auto-compact; preceding values are warnings.                                                                                                                                                       |
 | `JUST_AGENT_MAX_RETRIES`           | `3`                             | —                                                      | Maximum retries for LLM API calls.                                                                                                                                                                                                                                |
 | `JUST_AGENT_RETRY_BASE_DELAY_SECS` | `1`                             | > 0                                                    | Base delay in seconds for exponential retry backoff.                                                                                                                                                                                                              |
-| `JUST_AGENT_ALLOW_TOOLS`           | *(unset — uses default policy)* | Comma-separated tool names                             | Debug override: comma-separated list of tool names to force-allow. Disables `Classify` behavior for `shell_session_exec`; all unlisted tools default to `Ask`. Not a full policy language. Only affects root agents. Subagents inherit their supervisor's policy. |
+| `JUST_AGENT_ALLOW_TOOLS`           | _(unset — uses default policy)_ | Comma-separated tool names                             | Debug override: comma-separated list of tool names to force-allow. Disables `Classify` behavior for `shell_session_exec`; all unlisted tools default to `Ask`. Not a full policy language. Only affects root agents. Subagents inherit their supervisor's policy. |
 
 Source: [`crates/just-agent-runtime/src/config.rs`](../../crates/just-agent-runtime/src/config.rs).
 
@@ -50,10 +50,14 @@ Some variables have cross-validation rules enforced at startup:
 
 These variables control the daemon server.
 
-| Variable                   | Required | Default                 | Description                                                                                      |
-| -------------------------- | -------- | ----------------------- | ------------------------------------------------------------------------------------------------ |
-| `JUST_AGENT_DAEMON_ADDR`   | no       | `127.0.0.1:3000`        | Listen address for the daemon HTTP server. Set to `0.0.0.0:3000` for container deployments.      |
-| `JUST_AGENT_ADVERTISE_URL` | no       | `http://127.0.0.1:3000` | URL that agents use to reach this daemon. Injected into PTY sessions as `JUST_AGENT_DAEMON_URL`. |
+| Variable                       | Required | Default                 | Description                                                                                                       |
+| ------------------------------ | -------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `JUST_AGENT_DAEMON_ADDR`       | no       | `127.0.0.1:3000`        | Listen address for the daemon HTTP server. Set to `0.0.0.0:3000` for container deployments.                       |
+| `JUST_AGENT_ADVERTISE_URL`     | no       | `http://127.0.0.1:3000` | URL that agents use to reach this daemon. Injected into PTY sessions as `JUST_AGENT_DAEMON_URL`.                  |
+| `JUST_AGENT_PROMPT_QUEUE_SIZE` | no       | `5`                     | Max queued messages per agent (message channel capacity). When full, `send_message` returns 503.                  |
+| `JUST_AGENT_MAX_AGENTS`        | no       | `50`                    | Max concurrent agent instances. Range: 1..=1000. Creation returns 503 when at capacity. Restore is always exempt. |
+| `JUST_AGENT_MAX_SUBAGENTS`     | no       | `20`                    | Max direct subagents per agent. Range: 1..=100. Creation returns 503 when the supervisor is at capacity.          |
+| `JUST_AGENT_MAX_BODY_SIZE_KB`  | no       | `1024`                  | Max HTTP request body size in kilobytes. `0` = axum default (2 MB). Oversized requests return 413.                |
 
 Source: [`crates/just-agent-daemon/src/args.rs`](../../crates/just-agent-daemon/src/args.rs).
 
@@ -98,7 +102,7 @@ The PTY shell backend reads these from the process environment and passes them i
 | Variable | Fallback     | Purpose                                      |
 | -------- | ------------ | -------------------------------------------- |
 | `SHELL`  | `/bin/bash`  | User's login shell for PTY session creation. |
-| `HOME`   | *(required)* | User home directory.                         |
-| `PATH`   | *(required)* | System PATH.                                 |
+| `HOME`   | _(required)_ | User home directory.                         |
+| `PATH`   | _(required)_ | System PATH.                                 |
 
 The PTY backend also hardcodes `TERM=dumb`, `NO_COLOR=1`, `LS_COLORS=""`, `CLICOLOR="0"` into every session to suppress color output.

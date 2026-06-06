@@ -19,6 +19,9 @@ the full authorization matrix, see [auth.md](auth.md).
   `POST /agents`.
 - **Error responses**: plain text strings (not JSON-wrapped). For example,
   a `403` returns `"not a superior"`.
+- **Body size limit**: any endpoint that accepts a request body may return
+  `413 Payload Too Large` when the body exceeds `JUST_AGENT_MAX_BODY_SIZE_KB`
+  (default 1024 KB, configurable; `0` = axum built-in 2 MB).
 - **Timestamps**: RFC 3339 format (e.g. `2025-06-05T14:30:00Z`), except
   `recent_retries.timestamp` which is Unix epoch seconds (`u64`).
 - **Empty responses**: endpoints that return no body use the corresponding
@@ -26,27 +29,27 @@ the full authorization matrix, see [auth.md](auth.md).
 
 ## Endpoint Overview
 
-| Method   | Path                                          | Purpose                                  | Auth                    |
-| -------- | --------------------------------------------- | ---------------------------------------- | ----------------------- |
-| `POST`   | `/agents`                                     | Create a new agent instance              | operator / supervisor   |
-| `GET`    | `/agents`                                     | List all running agents                  | any                     |
-| `DELETE` | `/agents/{id}`                                | Stop and remove an agent                 | operator / superior     |
-| `POST`   | `/agents/{id}/interrupt`                      | Interrupt current agent operation        | operator / superior     |
-| `POST`   | `/agents/{id}/message`                        | Send a message                           | any (peer-to-peer)      |
-| `GET`    | `/agents/{id}/events`                         | Subscribe to agent events (SSE)          | any                     |
-| `GET`    | `/agents/{id}/status`                         | Get context usage and retry history      | any                     |
-| `GET`    | `/agents/{id}/permissions`                    | Get permission profile and tool policy   | any                     |
-| `GET`    | `/agents/{id}/policy`                         | Get tool policy                          | any                     |
-| `PUT`    | `/agents/{id}/policy`                         | Update tool policy                       | operator / superior     |
-| `GET`    | `/approvals`                                  | List approvals                           | any (filtered by scope) |
-| `GET`    | `/approvals/{id}`                             | Get a single approval                    | operator / superior     |
-| `POST`   | `/approvals/{id}`                             | Approve or deny an approval              | operator / superior     |
-| `GET`    | `/agents/{id}/skills/paths`                   | Get skill directory paths                | any                     |
-| `GET`    | `/agents/{id}/skills/{name}/meta`             | Get skill metadata                       | any                     |
-| `POST`   | `/agents/{id}/skills/{name}/promote-request`  | Submit a skill promote request           | self / operator         |
-| `GET`    | `/skill-promote-requests`                     | List promote requests                    | any                     |
-| `GET`    | `/skill-promote-requests/{id}`                | Show promote request with content diff   | any                     |
-| `POST`   | `/skill-promote-requests/{id}`                | Approve or deny a promote request        | operator / root agent   |
+| Method   | Path                                         | Purpose                                | Auth                    |
+| -------- | -------------------------------------------- | -------------------------------------- | ----------------------- |
+| `POST`   | `/agents`                                    | Create a new agent instance            | operator / supervisor   |
+| `GET`    | `/agents`                                    | List all running agents                | any                     |
+| `DELETE` | `/agents/{id}`                               | Stop and remove an agent               | operator / superior     |
+| `POST`   | `/agents/{id}/interrupt`                     | Interrupt current agent operation      | operator / superior     |
+| `POST`   | `/agents/{id}/message`                       | Send a message                         | any (peer-to-peer)      |
+| `GET`    | `/agents/{id}/events`                        | Subscribe to agent events (SSE)        | any                     |
+| `GET`    | `/agents/{id}/status`                        | Get context usage and retry history    | any                     |
+| `GET`    | `/agents/{id}/permissions`                   | Get permission profile and tool policy | any                     |
+| `GET`    | `/agents/{id}/policy`                        | Get tool policy                        | any                     |
+| `PUT`    | `/agents/{id}/policy`                        | Update tool policy                     | operator / superior     |
+| `GET`    | `/approvals`                                 | List approvals                         | any (filtered by scope) |
+| `GET`    | `/approvals/{id}`                            | Get a single approval                  | operator / superior     |
+| `POST`   | `/approvals/{id}`                            | Approve or deny an approval            | operator / superior     |
+| `GET`    | `/agents/{id}/skills/paths`                  | Get skill directory paths              | any                     |
+| `GET`    | `/agents/{id}/skills/{name}/meta`            | Get skill metadata                     | any                     |
+| `POST`   | `/agents/{id}/skills/{name}/promote-request` | Submit a skill promote request         | self / operator         |
+| `GET`    | `/skill-promote-requests`                    | List promote requests                  | any                     |
+| `GET`    | `/skill-promote-requests/{id}`               | Show promote request with content diff | any                     |
+| `POST`   | `/skill-promote-requests/{id}`               | Approve or deny a promote request      | operator / root agent   |
 
 ## Agent Management
 
@@ -64,7 +67,9 @@ Auth: operator (root agents) or direct supervisor (subagents). See
 ```json
 {
   "workspace_root": "string — filesystem path (optional)",
-  "skills": ["string — skill paths relative to skills root (e.g. \"code/refactoring\")"],
+  "skills": [
+    "string — skill paths relative to skills root (e.g. \"code/refactoring\")"
+  ],
   "prompt": "string — initial prompt (optional)",
   "created_by": "AgentId — supervisor ID; omit for root agents (optional)"
 }
@@ -80,16 +85,22 @@ Auth: operator (root agents) or direct supervisor (subagents). See
 
 Status: `201 Created`
 
-| Code | Condition |
-| ---- | --------- |
-| 400  | Invalid `workspace_root`, skill loading failure, or invalid skill name |
+| Code | Condition                                                                                                                 |
+| ---- | ------------------------------------------------------------------------------------------------------------------------- |
+| 400  | Invalid `workspace_root`, skill loading failure, or invalid skill name                                                    |
 | 403  | Not operator (root agents); supervisor has no remaining delegation depth; `workspace_root` outside supervisor's workspace |
-| 404  | Supervisor agent not found |
-| 500  | Session creation failure, agent spawn failure, or supervisor deleted during creation |
+| 404  | Supervisor agent not found                                                                                                |
+| 503  | Agent limit reached (`JUST_AGENT_MAX_AGENTS`), or supervisor already has max subagents (`JUST_AGENT_MAX_SUBAGENTS`)       |
+| 500  | Session creation failure, agent spawn failure, or supervisor deleted during creation                                      |
 
 > **Subagent constraints:** The supervisor must have remaining delegation depth
 > (`max_depth > 0`), and the subagent's `workspace_root` must be within the
 > supervisor's workspace. The tool policy is inherited from the supervisor.
+> Each supervisor may have at most `JUST_AGENT_MAX_SUBAGENTS` (default 20) direct subagents.
+>
+> **Crash recovery:** Restore is exempt from resource limits. After a daemon
+> restart, the agent count may temporarily exceed `JUST_AGENT_MAX_AGENTS`. New
+> creation requests will return 503 until agents are deleted to make room.
 
 ### `GET /agents` — List agents
 
@@ -123,12 +134,12 @@ Auth: operator or superior. See [auth.md](auth.md).
 
 Status: `204 No Content`
 
-| Code | Condition |
-| ---- | --------- |
-| 403  | Not a superior of the target agent |
-| 404  | Agent not found |
+| Code | Condition                                                                                          |
+| ---- | -------------------------------------------------------------------------------------------------- |
+| 403  | Not a superior of the target agent                                                                 |
+| 404  | Agent not found                                                                                    |
 | 409  | Agent is busy (interrupt it first), or agent has active subagents (delete or interrupt them first) |
-| 500  | Agent vanished during deletion |
+| 500  | Agent vanished during deletion                                                                     |
 
 ### `POST /agents/{id}/interrupt` — Interrupt agent
 
@@ -139,15 +150,16 @@ Auth: operator or superior. See [auth.md](auth.md).
 
 Status: `202 Accepted`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition                          |
+| ---- | ---------------------------------- |
 | 403  | Not a superior of the target agent |
-| 404  | Agent not found |
+| 404  | Agent not found                    |
 
 ### `POST /agents/{id}/message` — Send message
 
 Sends a message to the agent's input queue. The daemon accepts the message
-immediately and processes it asynchronously.
+immediately and processes it asynchronously. Returns queue depth feedback so
+callers can gauge expected latency.
 
 Auth: any authenticated identity. Inter-agent communication is peer-to-peer;
 no supervisor relationship is required. See [auth.md](auth.md).
@@ -160,17 +172,37 @@ no supervisor relationship is required. See [auth.md](auth.md).
 }
 ```
 
+**Response**
+
+```json
+{
+  "queue_depth": 0,
+  "warning": "string | null — present when messages are already queued"
+}
+```
+
+- `queue_depth == 0`: agent will process the message immediately.
+- `queue_depth > 0`: message is queued behind existing messages; `warning`
+  includes a human-readable note.
+
 Status: `202 Accepted`
 
-| Code | Condition |
-| ---- | --------- |
-| 404  | Agent not found |
-| 500  | Agent reactivation failure |
+| Code | Condition                                                                            |
+| ---- | ------------------------------------------------------------------------------------ |
+| 404  | Agent not found                                                                      |
+| 503  | Message queue is full (`JUST_AGENT_PROMPT_QUEUE_SIZE` messages pending); retry later |
+| 500  | Agent reactivation failure                                                           |
 
 > **Reactivation:** If the agent's task has terminated (channel closed), the
-> daemon attempts reactivation — respawning the agent from persisted state with
-> the message as the initial prompt. Existing context, approvals, and auth
-> token are preserved.
+> daemon creates a fresh message channel, pre-queues the incoming message, then
+> respawns the agent from persisted state. Existing context, approvals, and auth
+> token are preserved. If reactivation fails, the agent remains in a dead state
+> and the next message attempt will retry.
+>
+> **Backpressure:** The message queue has a configurable capacity
+> (`JUST_AGENT_PROMPT_QUEUE_SIZE`, default 5). When the queue is full, the
+> daemon returns `503` instead of accepting the message. Callers should wait
+> and retry.
 
 ### `GET /agents/{id}/events` — Subscribe to event stream
 
@@ -184,8 +216,8 @@ Each event is a JSON object with a `type` field. Keep-alive is enabled.
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition       |
+| ---- | --------------- |
 | 404  | Agent not found |
 
 > **Lagged messages:** If the client reads too slowly, lagged messages are
@@ -239,8 +271,8 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition       |
+| ---- | --------------- |
 | 404  | Agent not found |
 
 ### `GET /agents/{id}/permissions` — Agent permissions
@@ -268,8 +300,8 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition       |
+| ---- | --------------- |
 | 404  | Agent not found |
 
 ### `GET /agents/{id}/policy` — Get tool policy
@@ -292,8 +324,8 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition       |
+| ---- | --------------- |
 | 404  | Agent not found |
 
 ### `PUT /agents/{id}/policy` — Update tool policy
@@ -317,12 +349,12 @@ Auth: operator or superior. See [auth.md](auth.md).
 
 Status: `204 No Content`
 
-| Code | Condition |
-| ---- | --------- |
-| 403  | Not a superior of the target agent |
-| 404  | Agent not found |
+| Code | Condition                                                                                          |
+| ---- | -------------------------------------------------------------------------------------------------- |
+| 403  | Not a superior of the target agent                                                                 |
+| 404  | Agent not found                                                                                    |
 | 409  | Policy is less strict than parent, or a child agent's policy would be stricter than the new policy |
-| 500  | Parent/child not found, no session directory, or persist failure |
+| 500  | Parent/child not found, no session directory, or persist failure                                   |
 
 > **Strictness ordering:** `deny > ask > classify > allow`. Changes are
 > persisted to disk before the in-memory update.
@@ -339,13 +371,13 @@ approvals for agents where they are a superior. See [auth.md](auth.md).
 
 **Query parameters**
 
-| Parameter      | Type     | Default | Description                                                         |
-| -------------- | -------- | ------- | ------------------------------------------------------------------- |
-| `offset`       | `u64`    | `0`     | Number of items to skip                                             |
-| `limit`        | `u64`    | `5`     | Page size, clamped to `[1, 20]`                                    |
-| `requested_by` | `AgentId` | —       | Filter to approvals from a specific agent                           |
-| `status`       | `string` | —       | Filter by status: `committed`, `approved`, `denied`, `redeemed`, `cancelled` |
-| `order`        | `string` | `desc`  | Sort order by `created_at`: `asc` or `desc`                        |
+| Parameter      | Type      | Default | Description                                                                  |
+| -------------- | --------- | ------- | ---------------------------------------------------------------------------- |
+| `offset`       | `u64`     | `0`     | Number of items to skip                                                      |
+| `limit`        | `u64`     | `5`     | Page size, clamped to `[1, 20]`                                              |
+| `requested_by` | `AgentId` | —       | Filter to approvals from a specific agent                                    |
+| `status`       | `string`  | —       | Filter by status: `committed`, `approved`, `denied`, `redeemed`, `cancelled` |
+| `order`        | `string`  | `desc`  | Sort order by `created_at`: `asc` or `desc`                                  |
 
 **Response**
 
@@ -357,7 +389,7 @@ approvals for agents where they are a superior. See [auth.md](auth.md).
       "requested_by": "AgentId",
       "content": {
         "tool_name": "string",
-        "arguments": { }
+        "arguments": {}
       },
       "commit_reason": "string | null",
       "status": "committed | approved | denied | redeemed | cancelled",
@@ -371,8 +403,8 @@ approvals for agents where they are a superior. See [auth.md](auth.md).
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition              |
+| ---- | ---------------------- |
 | 400  | Invalid `offset` value |
 
 > **Visibility:** `pending` approvals are never visible — only `committed` and
@@ -388,10 +420,10 @@ Auth: operator or superior of the owning agent. See [auth.md](auth.md).
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition                          |
+| ---- | ---------------------------------- |
 | 403  | Not a superior of the owning agent |
-| 404  | Approval not found |
+| 404  | Approval not found                 |
 
 ### `POST /approvals/{id}` — Respond to approval
 
@@ -412,12 +444,12 @@ decisions — see note below.
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
-| 400  | `decision` is not `"approve"` or `"deny"` |
+| Code | Condition                                                                      |
+| ---- | ------------------------------------------------------------------------------ |
+| 400  | `decision` is not `"approve"` or `"deny"`                                      |
 | 403  | Not a superior, or (for approve) caller's own policy does not `allow` the tool |
-| 404  | Approval not found |
-| 409  | Approval is not in `committed` status |
+| 404  | Approval not found                                                             |
+| 409  | Approval is not in `committed` status                                          |
 
 > **Policy gate on approve:** Agent callers must have their own `ToolPolicy`
 > set to `allow` for the specific tool in question. This prevents superiors
@@ -444,8 +476,8 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition       |
+| ---- | --------------- |
 | 404  | Agent not found |
 
 ### `GET /agents/{id}/skills/{name}/meta` — Skill metadata
@@ -456,10 +488,10 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 **Path parameters**
 
-| Parameter | Type     | Description                          |
-| --------- | -------- | ------------------------------------ |
-| `id`      | `AgentId` | Agent UUID                           |
-| `name`    | `string` | Skill path relative to skills root (e.g. `code/refactoring`) |
+| Parameter | Type      | Description                                                  |
+| --------- | --------- | ------------------------------------------------------------ |
+| `id`      | `AgentId` | Agent UUID                                                   |
+| `name`    | `string`  | Skill path relative to skills root (e.g. `code/refactoring`) |
 
 **Response**
 
@@ -472,9 +504,9 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
-| 400  | Invalid skill name |
+| Code | Condition                           |
+| ---- | ----------------------------------- |
+| 400  | Invalid skill name                  |
 | 404  | Agent not found, or skill not found |
 
 > **Note:** `name` in the response is the display label from YAML frontmatter,
@@ -496,10 +528,10 @@ Auth: the agent itself or the operator. See [auth.md](auth.md).
 
 **Path parameters**
 
-| Parameter | Type     | Description                          |
-| --------- | -------- | ------------------------------------ |
-| `id`      | `AgentId` | Agent UUID                           |
-| `name`    | `string` | Skill path relative to skills root |
+| Parameter | Type      | Description                        |
+| --------- | --------- | ---------------------------------- |
+| `id`      | `AgentId` | Agent UUID                         |
+| `name`    | `string`  | Skill path relative to skills root |
 
 **Response**
 
@@ -514,15 +546,15 @@ Auth: the agent itself or the operator. See [auth.md](auth.md).
 
 Status: `201 Created`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition                                                                           |
+| ---- | ----------------------------------------------------------------------------------- |
 | 400  | Invalid skill name, no valid frontmatter, or attempting to promote the `meta` skill |
-| 403  | Not the agent itself or the operator |
-| 404  | Agent not found, no session directory, or local skill file does not exist |
-| 500  | File I/O failure |
+| 403  | Not the agent itself or the operator                                                |
+| 404  | Agent not found, no session directory, or local skill file does not exist           |
+| 500  | File I/O failure                                                                    |
 
 > **Notification:** All root agents are notified of the new request via their
-> prompt channels.
+> message channels.
 
 ### `GET /skill-promote-requests` — List promote requests
 
@@ -532,9 +564,9 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 **Query parameters**
 
-| Parameter | Type     | Default | Description                                        |
-| --------- | -------- | ------- | -------------------------------------------------- |
-| `status`  | `string` | —       | Filter: `pending`, `approved`, or `denied`         |
+| Parameter | Type     | Default | Description                                |
+| --------- | -------- | ------- | ------------------------------------------ |
+| `status`  | `string` | —       | Filter: `pending`, `approved`, or `denied` |
 
 **Response**
 
@@ -559,8 +591,8 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition                     |
+| ---- | ----------------------------- |
 | 400  | Invalid `status` filter value |
 
 ### `GET /skill-promote-requests/{id}` — Show promote request
@@ -581,8 +613,8 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
+| Code | Condition                 |
+| ---- | ------------------------- |
 | 404  | Promote request not found |
 
 ### `POST /skill-promote-requests/{id}` — Respond to promote request
@@ -603,12 +635,12 @@ Auth: operator or root agent. See [auth.md](auth.md).
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
-| 403  | Not the operator or a root agent |
-| 404  | Promote request not found |
+| Code | Condition                                                                              |
+| ---- | -------------------------------------------------------------------------------------- |
+| 403  | Not the operator or a root agent                                                       |
+| 404  | Promote request not found                                                              |
 | 409  | Request is not in `pending` status, or shared skill was modified concurrently (TOCTOU) |
-| 500  | File I/O failure |
+| 500  | File I/O failure                                                                       |
 
 > **TOCTOU protection:** On approve, the shared skill file is re-read and
 > compared with the snapshotted `old_content` from submission time. If it has
@@ -628,34 +660,34 @@ data: {"type":"assistantContentDelta","delta":"Hello, "}
 
 ### Text streaming
 
-| `type`                    | Fields                   | Description               |
-| ------------------------- | ------------------------ | ------------------------- |
-| `reasoning`               | `content: string`        | Full reasoning text       |
-| `reasoningDelta`          | `delta: string`          | Incremental reasoning chunk |
-| `assistantContent`        | `content: string`        | Full assistant content    |
-| `assistantContentDelta`   | `delta: string`          | Incremental content chunk |
+| `type`                  | Fields            | Description                 |
+| ----------------------- | ----------------- | --------------------------- |
+| `reasoning`             | `content: string` | Full reasoning text         |
+| `reasoningDelta`        | `delta: string`   | Incremental reasoning chunk |
+| `assistantContent`      | `content: string` | Full assistant content      |
+| `assistantContentDelta` | `delta: string`   | Incremental content chunk   |
 
 ### Tool execution
 
-| `type`       | Fields                      | Description          |
-| ------------ | --------------------------- | -------------------- |
-| `toolCall`   | `name: string, args: string` | Tool invocation     |
-| `toolResult` | `result: string`            | Tool execution result |
+| `type`       | Fields                       | Description           |
+| ------------ | ---------------------------- | --------------------- |
+| `toolCall`   | `name: string, args: string` | Tool invocation       |
+| `toolResult` | `result: string`             | Tool execution result |
 
 ### Terminal events
 
-| `type`              | Fields            | Description                        |
-| ------------------- | ----------------- | ---------------------------------- |
-| `finished`          | `content: string` | Agent completed successfully       |
-| `maxRoundsExceeded` | *(none)*          | Hit the max tool rounds limit      |
-| `error`             | `message: string` | Unrecoverable error                |
-| `cancelled`         | *(none)*          | Agent was interrupted              |
+| `type`              | Fields            | Description                   |
+| ------------------- | ----------------- | ----------------------------- |
+| `finished`          | `content: string` | Agent completed successfully  |
+| `maxRoundsExceeded` | _(none)_          | Hit the max tool rounds limit |
+| `error`             | `message: string` | Unrecoverable error           |
+| `cancelled`         | _(none)_          | Agent was interrupted         |
 
 ### State and notifications
 
-| `type`            | Fields                                           | Description                      |
-| ----------------- | ------------------------------------------------ | -------------------------------- |
-| `busy`            | *(none)*                                         | Agent transitioned to busy state |
-| `status`          | `message: string`                                | Informational status message     |
-| `approvalUpdated` | `id: string, status: "committed" \| "approved" \| "denied" \| "redeemed" \| "cancelled"` | Approval state changed |
-| `retrying`        | `attempt: u32, max_attempts: u32, error: string, delay_secs: f64` | LLM API retry in progress |
+| `type`            | Fields                                                                                   | Description                      |
+| ----------------- | ---------------------------------------------------------------------------------------- | -------------------------------- |
+| `busy`            | _(none)_                                                                                 | Agent transitioned to busy state |
+| `status`          | `message: string`                                                                        | Informational status message     |
+| `approvalUpdated` | `id: string, status: "committed" \| "approved" \| "denied" \| "redeemed" \| "cancelled"` | Approval state changed           |
+| `retrying`        | `attempt: u32, max_attempts: u32, error: string, delay_secs: f64`                        | LLM API retry in progress        |

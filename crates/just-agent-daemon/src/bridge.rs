@@ -258,13 +258,20 @@ async fn route_to_superior(
          Use `just-agent approval approve {approval_id}` to approve \
          or `just-agent approval deny {approval_id} <reason>` to deny."
     );
-    if ctx
-        .prompt_tx
-        .send(UserInput::Prompt(notification))
-        .await
-        .is_err()
-    {
-        warn!(id = %ctx.superior_id, "superior prompt channel closed, approval notification dropped");
+    // Non-blocking send: never stall the bridge task waiting for queue space.
+    // If the superior's message queue is full, drop the notification and log a
+    // warning — the superior can still query pending approvals via the API.
+    match ctx.prompt_tx.try_send(UserInput::Prompt(notification)) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            warn!(
+                id = %ctx.superior_id,
+                "superior message queue full, approval notification dropped (query pending approvals via API)"
+            );
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            warn!(id = %ctx.superior_id, "superior message channel closed, approval notification dropped");
+        }
     }
 }
 

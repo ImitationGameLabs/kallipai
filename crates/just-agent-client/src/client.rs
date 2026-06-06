@@ -76,22 +76,39 @@ impl DaemonClient {
         Ok(resp.id)
     }
 
-    /// Fire-and-forget message POST. Use when already consuming the SSE stream.
-    pub async fn post_message(&self, id: &AgentId, text: &str) -> Result<()> {
-        self.with_auth(
-            self.inner
-                .http
-                .post(self.url(&format!("/agents/{id}/message")))
-                .json(&MessageRequest {
-                    text: text.to_owned(),
-                }),
-        )
-        .send()
-        .await
-        .context("failed to send prompt")?
-        .error_for_status()
-        .context("daemon returned error")?;
-        Ok(())
+    /// Send a message to an agent. Returns queue depth feedback.
+    ///
+    /// - `queue_depth == 0`: agent will process the message immediately.
+    /// - `queue_depth > 0`: message is queued behind existing messages (warning included).
+    /// - Returns an error on 503 if the message queue is full.
+    pub async fn post_message(
+        &self,
+        id: &AgentId,
+        text: &str,
+    ) -> Result<crate::types::MessageResponse> {
+        let response = self
+            .with_auth(
+                self.inner
+                    .http
+                    .post(self.url(&format!("/agents/{id}/message")))
+                    .json(&MessageRequest {
+                        text: text.to_owned(),
+                    }),
+            )
+            .send()
+            .await
+            .context("failed to send message")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("daemon returned {status}: {body}"));
+        }
+
+        response
+            .json()
+            .await
+            .context("failed to parse message response")
     }
 
     /// List all agent instances.
