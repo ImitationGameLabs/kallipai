@@ -51,7 +51,7 @@ something interesting: **skills that emerge naturally.**
 
 When the agent accumulates experience — say, effective patterns for using a
 particular CLI tool or debugging a class of issues — it can distill that into a
-file (`.just-agent/skills/<name>/SKILL.md`). Later, when it encounters a
+file (`~/.local/share/just-agent/skills/<name>.md`). Later, when it encounters a
 matching situation, it reads the file and pins the content. No dedicated skill
 system is needed — file read + pin naturally forms skill management.
 

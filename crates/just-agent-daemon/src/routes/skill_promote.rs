@@ -75,8 +75,7 @@ pub async fn submit_promote_request(
 
         let src = session_dir
             .join("skills")
-            .join(&skill_name)
-            .join("SKILL.md");
+            .join(format!("{skill_name}.md"));
         if !src.exists() {
             return Err((
                 StatusCode::NOT_FOUND,
@@ -105,7 +104,7 @@ pub async fn submit_promote_request(
 
     // Snapshot old content from shared directory (no lock needed — read-only).
     let shared = skill_dir();
-    let shared_path = shared.join(&skill_name).join("SKILL.md");
+    let shared_path = shared.join(format!("{skill_name}.md"));
     let old_content = if shared_path.exists() {
         Some(std::fs::read_to_string(&shared_path).map_err(|e| {
             (
@@ -269,7 +268,8 @@ async fn handle_approve(
     // Step 2: Consistency check — re-read the current shared file and compare
     // with snapshotted old_content.
     let shared = skill_dir();
-    let shared_path = shared.join(&record.skill_name).join("SKILL.md");
+    let skill_name = &record.skill_name;
+    let shared_path = shared.join(format!("{skill_name}.md"));
 
     if record.old_content.is_some() {
         // Shared skill existed at submission time — verify it hasn't changed.

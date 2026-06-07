@@ -27,11 +27,12 @@ pub fn promote_skill_from_content(name: &str, content: &str, shared_root: &Path)
         );
     }
 
-    let dest_dir = shared_root.join(name);
-    let dest = dest_dir.join("SKILL.md");
+    let dest = shared_root.join(format!("{name}.md"));
 
-    std::fs::create_dir_all(&dest_dir)
-        .with_context(|| format!("failed to create directory {}", dest_dir.display()))?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
     crate::persistence::atomic_write(&dest, content)
         .with_context(|| format!("failed to write skill to {}", dest.display()))?;
 
@@ -48,7 +49,7 @@ mod tests {
         let content = "---\nname: my-skill\ndescription: test\n---\nBody\n";
 
         let dest = promote_skill_from_content("my-skill", content, shared.path()).unwrap();
-        assert!(dest.contains("my-skill"));
+        assert!(dest.ends_with("my-skill.md"));
         assert!(std::path::Path::new(&dest).exists());
 
         let written = std::fs::read_to_string(&dest).unwrap();
@@ -72,14 +73,11 @@ mod tests {
         // The function unconditionally overwrites; the caller is responsible
         // for the consistency check against the previous snapshot.
         let shared = tempfile::tempdir().unwrap();
-        let dest_dir = shared.path().join("existing");
-        std::fs::create_dir_all(&dest_dir).unwrap();
-        std::fs::write(dest_dir.join("SKILL.md"), "old content").unwrap();
+        std::fs::write(shared.path().join("existing.md"), "old content").unwrap();
 
         promote_skill_from_content("existing", "---\nname: existing\n---\nNew\n", shared.path())
             .unwrap();
-        let written =
-            std::fs::read_to_string(shared.path().join("existing").join("SKILL.md")).unwrap();
+        let written = std::fs::read_to_string(shared.path().join("existing.md")).unwrap();
         assert!(written.contains("New"));
     }
 
@@ -99,7 +97,7 @@ mod tests {
             shared.path(),
         )
         .unwrap();
-        assert!(dest.contains("code/refactor"));
+        assert!(dest.ends_with("code/refactor.md"));
         assert!(std::path::Path::new(&dest).exists());
     }
 }

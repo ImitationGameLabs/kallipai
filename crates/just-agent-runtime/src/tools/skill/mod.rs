@@ -7,7 +7,7 @@
 //!
 //! A skill is uniquely identified by its **path relative to the skills root**
 //! (e.g. `code/refactoring`). This path determines the on-disk layout
-//! (`<skills_root>/<path>/SKILL.md`) and is used for all lookups, routing,
+//! (`<skills_root>/<path>.md`) and is used for all lookups, routing,
 //! and promote operations. The `name` field in YAML frontmatter is a display
 //! label — it is returned by the metadata endpoint but is **not** used as an
 //! identifier and is not required to match the path.
@@ -53,13 +53,13 @@ You have access to a skill system for loading reference material and best practi
 ## Loading Skills
 
 Use `read_file_and_pin` to load a file into persistent context. Skill files
-are at `<skill_dir>/<name>/SKILL.md`. Use the label `skill:<name>` for skills.
+are at `<skill_dir>/<name>.md`. Use the label `skill:<name>` for skills.
 Use `context_unpin` to remove pinned items.
 
 ## Creating Skills
 
 Use `just-agent skill paths` to find your local directory, then write
-`<name>/SKILL.md` there with YAML frontmatter. Only write to your local
+`<name>.md` there with YAML frontmatter. Only write to your local
 directory — the shared directory is managed by operators.
 
     ---
@@ -112,7 +112,7 @@ pub fn skill_dir() -> std::path::PathBuf {
         .join("skills")
 }
 
-/// Parses YAML frontmatter from a SKILL.md file.
+/// Parses YAML frontmatter from a skill markdown file.
 ///
 /// Returns `None` if no frontmatter is present. Handles the simple
 /// `key: value` format used in skill files without requiring a YAML library.
@@ -151,7 +151,7 @@ pub fn parse_frontmatter_meta(content: &str) -> Option<SkillMeta> {
 fn resolve_skill_content(name: &str, session_dir: Option<&Path>) -> Result<String> {
     // Try agent-local first.
     if let Some(sd) = session_dir {
-        let local_path = sd.join("skills").join(name).join("SKILL.md");
+        let local_path = sd.join("skills").join(format!("{name}.md"));
         if local_path.exists() {
             return std::fs::read_to_string(&local_path)
                 .with_context(|| format!("failed to read local skill '{name}'"));
@@ -159,7 +159,7 @@ fn resolve_skill_content(name: &str, session_dir: Option<&Path>) -> Result<Strin
     }
 
     // Fall back to shared.
-    let path = skill_dir().join(name).join("SKILL.md");
+    let path = skill_dir().join(format!("{name}.md"));
     std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read skill '{name}' from {}", path.display()))
 }
@@ -208,22 +208,12 @@ pub fn load_skill(name: &str, session_dir: Option<&Path>) -> Result<String> {
     Ok(strip_frontmatter(&content).trim().to_owned())
 }
 
-/// Ensures the meta-skill exists on disk and returns its content.
+/// Returns the built-in meta-skill content (skill system usage and behavioral guidelines).
 ///
-/// Creates the file from the built-in default if it doesn't exist yet.
-/// The user can edit it afterward — it won't be overwritten.
-pub fn ensure_meta_skill() -> Result<String> {
-    let dir = skill_dir().join(META_SKILL_NAME);
-    let path = dir.join("SKILL.md");
-
-    if !path.exists() {
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create skill directory {}", dir.display()))?;
-        std::fs::write(&path, DEFAULT_META_SKILL)
-            .with_context(|| format!("failed to write meta-skill to {}", path.display()))?;
-    }
-
-    load_skill(META_SKILL_NAME, None)
+/// The meta-skill is compiled into the binary and never written to disk.
+/// It is appended to the system prompt at agent spawn time.
+pub fn meta_skill_content() -> &'static str {
+    strip_frontmatter(DEFAULT_META_SKILL).trim()
 }
 
 /// Strips YAML frontmatter (content between `---` delimiters).

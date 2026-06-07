@@ -18,7 +18,7 @@ use just_agent_runtime::persistence;
 use just_agent_runtime::policy::{AgentPolicy, AuthorizedToolExecutor};
 use just_agent_runtime::provider::client_from_env;
 use just_agent_runtime::session::{self, AgentContext};
-use just_agent_runtime::tools::{build_tool_dispatch, ensure_meta_skill, load_skill};
+use just_agent_runtime::tools::{build_tool_dispatch, load_skill, meta_skill_content};
 use just_llm_client::types::chat::ChatMessage;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -70,10 +70,10 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
     let cancel = args.shutdown_cancel.child_token();
 
     let client = {
-        let meta = ensure_meta_skill()?;
+        let meta = meta_skill_content();
         let mut sp = args.config.system_prompt.clone();
         sp.push_str("\n\n");
-        sp.push_str(&meta);
+        sp.push_str(meta);
         client_from_env(&sp)?
     };
 

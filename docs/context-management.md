@@ -83,7 +83,7 @@ Skills are a natural consequence of agentic context management:
 1. The agent accumulates experience — effective patterns for a CLI tool, debugging
    strategies, project-specific conventions.
 2. It distills that experience into a markdown file:
-   `<data-dir>/just-agent/skills/<name>/SKILL.md` (with optional YAML frontmatter).
+   `<data-dir>/just-agent/skills/<name>.md` (with optional YAML frontmatter).
 
    The data directory is determined by `JUST_AGENT_DATA_DIR` env var, or the
    platform default if unset:
@@ -105,8 +105,7 @@ content.
 
 ```
 <data-dir>/just-agent/skills/
-└── my-skill/
-    └── SKILL.md
+└── my-skill.md
 ```
 
 ```markdown
@@ -122,6 +121,7 @@ The YAML frontmatter is stripped on load; only the body is pinned into context.
 
 ### Meta-skill
 
-A built-in meta-skill called `bootstrap` is auto-created on first run. It
-teaches the agent how to discover, load, and create skills, along with
-behavioral guidelines for approaching unfamiliar situations.
+A built-in meta-skill called `bootstrap` is compiled into the binary and
+appended to the system prompt at agent spawn time. It teaches the agent how
+to discover, load, and create skills, along with behavioral guidelines for
+approaching unfamiliar situations.

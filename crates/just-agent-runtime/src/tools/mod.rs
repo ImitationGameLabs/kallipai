@@ -14,7 +14,7 @@ pub mod shell;
 pub mod skill;
 
 pub use skill::{
-    META_SKILL_NAME, ensure_meta_skill, load_skill, parse_frontmatter_meta, skill_dir,
+    META_SKILL_NAME, load_skill, meta_skill_content, parse_frontmatter_meta, skill_dir,
     skill_metadata, validate_skill_name,
 };
 
