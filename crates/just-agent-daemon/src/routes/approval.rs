@@ -199,7 +199,7 @@ pub async fn respond_approval(
 
         // Persist while still holding the lock so the agent loop's
         // concurrent persist() cannot interleave a stale write.
-        if let (Some(json), Some(dir)) = (json, entry.agent.session_dir.as_ref())
+        if let (Some(json), Some(dir)) = (json, entry.agent.agent_dir.as_ref())
             && let Err(e) = persistence::persist_approvals(&json, dir)
         {
             tracing::error!("approval persist after decision failed: {e:#}");

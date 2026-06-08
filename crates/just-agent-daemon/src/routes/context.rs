@@ -148,12 +148,12 @@ pub async fn update_policy(
     }
 
     // Persist first, then update in-memory.
-    let session_dir = entry
+    let agent_dir = entry
         .agent
-        .session_dir
+        .agent_dir
         .as_ref()
-        .ok_or_else(|| ApiError::internal("agent has no session directory"))?;
-    persistence::persist_policy(session_dir, &new_policy).map_err(ApiError::internal)?;
+        .ok_or_else(|| ApiError::internal("agent has no persistent directory"))?;
+    persistence::persist_policy(agent_dir, &new_policy).map_err(ApiError::internal)?;
 
     *entry
         .agent

@@ -13,7 +13,7 @@
 //! identifier and is not required to match the path.
 //!
 //! The [`load_skill`] function resolves skill files from the shared skill
-//! directory or an agent-local session directory. The [`FilePinTool`] LLM tool
+//! directory or an agent-local directory. The [`FilePinTool`] LLM tool
 //! exposes a general-purpose "read file and pin" operation to the agent.
 
 pub mod promote;
@@ -145,12 +145,12 @@ pub fn parse_frontmatter_meta(content: &str) -> Option<SkillMeta> {
 
 /// Resolves a skill file to its raw content.
 ///
-/// Checks the agent-local directory first (if `session_dir` is provided),
+/// Checks the agent-local directory first (if `agent_dir` is provided),
 /// then falls back to the shared skill directory. Returns the raw file
 /// content including frontmatter.
-fn resolve_skill_content(name: &str, session_dir: Option<&Path>) -> Result<String> {
+fn resolve_skill_content(name: &str, agent_dir: Option<&Path>) -> Result<String> {
     // Try agent-local first.
-    if let Some(sd) = session_dir {
+    if let Some(sd) = agent_dir {
         let local_path = sd.join("skills").join(format!("{name}.md"));
         if local_path.exists() {
             return std::fs::read_to_string(&local_path)
@@ -168,9 +168,9 @@ fn resolve_skill_content(name: &str, session_dir: Option<&Path>) -> Result<Strin
 ///
 /// If the file has no frontmatter, `name` defaults to the last path
 /// component of the skill name.
-pub fn skill_metadata(name: &str, session_dir: Option<&Path>) -> Result<SkillMeta> {
+pub fn skill_metadata(name: &str, agent_dir: Option<&Path>) -> Result<SkillMeta> {
     validate_skill_name(name)?;
-    let content = resolve_skill_content(name, session_dir)?;
+    let content = resolve_skill_content(name, agent_dir)?;
 
     Ok(parse_frontmatter_meta(&content).unwrap_or_else(|| {
         let default_name = name.rsplit('/').next().unwrap_or(name).to_owned();
@@ -199,12 +199,12 @@ pub fn validate_skill_name(name: &str) -> Result<()> {
 
 /// Reads a skill file, strips frontmatter, and returns the body.
 ///
-/// Checks the agent-local directory first (if `session_dir` is provided),
+/// Checks the agent-local directory first (if `agent_dir` is provided),
 /// then falls back to the shared skill directory. Local takes precedence
 /// on name collision.
-pub fn load_skill(name: &str, session_dir: Option<&Path>) -> Result<String> {
+pub fn load_skill(name: &str, agent_dir: Option<&Path>) -> Result<String> {
     validate_skill_name(name)?;
-    let content = resolve_skill_content(name, session_dir)?;
+    let content = resolve_skill_content(name, agent_dir)?;
     Ok(strip_frontmatter(&content).trim().to_owned())
 }
 

@@ -1,7 +1,7 @@
 mod agent;
 mod budget;
 mod restore;
-pub use restore::restore_sessions;
+pub use restore::restore_agents;
 #[cfg(test)]
 pub(crate) mod approval;
 #[cfg(not(test))]

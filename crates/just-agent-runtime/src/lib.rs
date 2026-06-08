@@ -1,3 +1,4 @@
+pub mod agent_task;
 pub mod approval;
 pub mod config;
 pub mod context;
@@ -8,7 +9,6 @@ pub mod policy;
 pub mod provider;
 pub mod retry;
 pub mod runner;
-pub mod session;
 mod stream_accumulator;
 pub mod token_budget;
 pub mod tools;

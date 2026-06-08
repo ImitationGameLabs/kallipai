@@ -1,6 +1,6 @@
 //! Context usage snapshot type.
 
-/// Cumulative token usage across all LLM calls in a session,
+/// Cumulative token usage across all LLM calls for an agent,
 /// accumulated from exact provider-reported `Usage` values.
 ///
 /// No `#[serde(default)]`: a partially-present object (e.g. new field added
@@ -40,7 +40,7 @@ pub struct ContextUsage {
     pub turn_tokens: usize,
     /// Exact prompt token count from the last provider response, if any.
     pub last_prompt_tokens: Option<u32>,
-    /// Cumulative token usage across all LLM calls in this session.
+    /// Cumulative token usage across all LLM calls for this agent.
     #[serde(default)]
     pub cumulative_usage: CumulativeUsage,
 }

@@ -93,7 +93,7 @@ pub async fn send_message(
             agent_id: id.clone(),
             store: entry.agent.store.clone(),
             approvals: entry.agent.approvals.clone(),
-            session_dir: entry.agent.session_dir.clone().unwrap_or_default(),
+            agent_dir: entry.agent.agent_dir.clone().unwrap_or_default(),
             config: entry.agent.config.clone(),
             initial_prompt: None, // message already pre-sent to the channel
             shutdown_cancel: state.shutdown.clone(),

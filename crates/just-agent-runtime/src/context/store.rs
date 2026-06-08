@@ -1,4 +1,4 @@
-//! Single source of truth for all context data in an agent session.
+//! Single source of truth for all context data in an agent.
 
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -52,7 +52,7 @@ pub trait AgenticContext: Send + Sync {
     fn reset_context_warnings(&mut self);
 }
 
-/// Single source of truth for all context data in an agent session.
+/// Single source of truth for all context data in an agent.
 ///
 /// Owns tool definitions, pinned messages, and conversation turns.
 /// Budget checking is handled by the main loop using ChatClient's
@@ -74,19 +74,19 @@ pub struct ContextStore {
     summary_tokens: usize,
     /// Exact prompt token count from the last provider response.
     last_prompt_tokens: Option<u32>,
-    /// Cumulative token usage across all LLM calls in this session.
+    /// Cumulative token usage across all LLM calls for this agent.
     #[serde(default)]
     cumulative_usage: CumulativeUsage,
     /// The next turn ID to assign.
     next_turn_id: u64,
-    /// Historical retry records, persisted across session restarts.
+    /// Historical retry records, persisted across agent restarts.
     /// Bounded by max_retries × max_tool_rounds (default 96 records).
     #[serde(default)]
     pub retry_log: Vec<RetryRecord>,
     /// Maximum tokens for the pinned layer. 0 = no limit.
     #[serde(skip)]
     pinned_token_budget: usize,
-    /// Highest warning threshold already fired in this session. Not persisted.
+    /// Highest warning threshold already fired for this agent. Not persisted.
     #[serde(skip)]
     highest_warned_pct: Option<u8>,
     /// Highest token-budget warning threshold already fired. Not persisted.
@@ -276,7 +276,7 @@ impl ContextStore {
     }
 
     /// Migrate legacy `summary` field to a pinned item.
-    /// Called during session restore. No-op if no legacy summary.
+    /// Called during agent restore. No-op if no legacy summary.
     pub fn migrate_legacy_summary(&mut self) {
         if let Some(summary) = self.summary.take() {
             if !summary.is_empty() {

@@ -1,6 +1,6 @@
 //! Append-only conversation history log.
 //!
-//! Each agent records every turn to a daily NDJSON file under its session
+//! Each agent records every turn to a daily NDJSON file under its agent
 //! directory. History files are append-only (O(1) per write) and survive
 //! context compaction — evicted turns remain accessible in history.
 
@@ -53,7 +53,7 @@ pub enum RecordKind {
     /// A normal conversation turn (user, assistant, tool calls, tool results).
     #[default]
     Turn,
-    /// A daemon/system event (session restore, compaction, etc.).
+    /// A daemon/system event (agent restore, compaction, etc.).
     System,
 }
 
@@ -62,8 +62,8 @@ pub enum RecordKind {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemEvent {
-    /// Session restored from a previous state on daemon restart.
-    SessionRestore,
+    /// Agent restored from a previous state on daemon restart.
+    AgentRestore,
     /// Context compaction summarized and evicted turns.
     CompactionSummary,
 }
@@ -74,17 +74,17 @@ pub enum SystemEvent {
 
 /// Append-only conversation history writer for a single agent.
 ///
-/// Owns the session directory path. All write operations go to
-/// `<session_dir>/history/YYYY-MM-DD.ndjson`. Not `Sync` — each agent runs as
+/// Owns the agent directory path. All write operations go to
+/// `<agent_dir>/history/YYYY-MM-DD.ndjson`. Not `Sync` — each agent runs as
 /// a single sequential task, so no concurrent access occurs.
 pub struct HistoryWriter {
-    session_dir: PathBuf,
+    agent_dir: PathBuf,
 }
 
 impl HistoryWriter {
-    /// Create a new writer targeting the given agent session directory.
-    pub fn new(session_dir: PathBuf) -> Self {
-        Self { session_dir }
+    /// Create a new writer targeting the given agent directory.
+    pub fn new(agent_dir: PathBuf) -> Self {
+        Self { agent_dir }
     }
 
     /// Append a record to today's NDJSON history file.
@@ -101,7 +101,7 @@ impl HistoryWriter {
         kind: RecordKind,
         event: Option<SystemEvent>,
     ) -> Result<()> {
-        let history_dir = ensure_history_dir(&self.session_dir)?;
+        let history_dir = ensure_history_dir(&self.agent_dir)?;
         let path = today_path(&history_dir);
 
         let record = HistoryRecord {
@@ -133,10 +133,10 @@ impl HistoryWriter {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Ensure the `history/` subdirectory exists under the session directory.
+/// Ensure the `history/` subdirectory exists under the agent directory.
 /// Lazy — only created on first write. `create_dir_all` is idempotent.
-fn ensure_history_dir(session_dir: &std::path::Path) -> Result<PathBuf> {
-    let history_dir = session_dir.join("history");
+fn ensure_history_dir(agent_dir: &std::path::Path) -> Result<PathBuf> {
+    let history_dir = agent_dir.join("history");
     std::fs::create_dir_all(&history_dir)?;
     Ok(history_dir)
 }
@@ -157,13 +157,13 @@ fn today_path(history_dir: &std::path::Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn tmp_session_dir() -> tempfile::TempDir {
+    fn tmp_agent_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("create temp dir")
     }
 
     #[test]
     fn turn_record_roundtrip() {
-        let dir = tmp_session_dir();
+        let dir = tmp_agent_dir();
         let writer = HistoryWriter::new(dir.path().to_owned());
 
         let msgs = vec![ChatMessage::user("hello, world")];
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn system_record_roundtrip() {
-        let dir = tmp_session_dir();
+        let dir = tmp_agent_dir();
         let writer = HistoryWriter::new(dir.path().to_owned());
 
         let msgs = vec![ChatMessage::assistant("summary of turns 1-5")];
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn multiple_records_append() {
-        let dir = tmp_session_dir();
+        let dir = tmp_agent_dir();
         let writer = HistoryWriter::new(dir.path().to_owned());
 
         writer
@@ -243,7 +243,7 @@ mod tests {
                 &[ChatMessage::user("restored")],
                 32,
                 RecordKind::System,
-                Some(SystemEvent::SessionRestore),
+                Some(SystemEvent::AgentRestore),
             )
             .unwrap();
 
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn lazy_directory_creation() {
-        let dir = tmp_session_dir();
+        let dir = tmp_agent_dir();
         // No history/ dir before any writes.
         assert!(!dir.path().join("history").exists());
 
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn multi_line_tool_result_preserves_line_boundary() {
-        let dir = tmp_session_dir();
+        let dir = tmp_agent_dir();
         let writer = HistoryWriter::new(dir.path().to_owned());
 
         // Tool result with embedded newlines — must NOT break NDJSON line boundary.

@@ -7,10 +7,10 @@ use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::agent_task::AgentContext;
 use crate::approval::format_approval_notifications;
 use crate::context::{AgenticContext, compose_context};
 use crate::event::{AgentEvent, AgentOutcome};
-use crate::session::AgentContext;
 use just_llm_client::types::chat::{
     ChatMessage, ChatToolCall, StreamOptions, ToolCallsMessage, ToolChoice, ToolChoiceMode,
 };
@@ -614,7 +614,7 @@ async fn check_token_budget_warnings(
 }
 
 /// Compact context if it exceeds the budget.
-/// Called at agent startup for restored sessions.
+/// Called at agent startup for restored agents.
 pub async fn compact_if_needed(ctx: &AgentContext) -> Result<bool> {
     let effective_budget = ctx.config.effective_budget();
     let total_tokens = {

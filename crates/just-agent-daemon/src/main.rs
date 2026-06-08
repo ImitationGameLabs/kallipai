@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     ));
 
     // Restore persisted agents before accepting requests.
-    routes::restore_sessions(&state).await;
+    routes::restore_agents(&state).await;
 
     let app = routes::router().with_state(state.clone());
 

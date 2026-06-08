@@ -1,6 +1,6 @@
 //! Runtime-internal event and outcome types.
 //!
-//! These types carry information between the agent runner/session modules
+//! These types carry information between the agent runner/agent_task modules
 //! and the daemon bridge. They are not serialized over the wire -- the
 //! bridge converts them to the SSE wire-format events defined in
 //! `just_agent_common::protocol::SseEvent`.

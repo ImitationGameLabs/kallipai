@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use just_llm_client::types::chat::ChatMessage;
 
-/// Stable unique identifier for a turn within a session.
+/// Stable unique identifier for a turn within an agent's lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TurnId(pub u64);
 

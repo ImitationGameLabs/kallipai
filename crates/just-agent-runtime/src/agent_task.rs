@@ -1,4 +1,4 @@
-//! Agent session orchestration: shared context, round execution, command handling.
+//! Agent task orchestration: shared context, round execution, command handling.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,9 +25,9 @@ pub struct AgentContext {
     pub executor: AuthorizedToolExecutor,
     pub summarizer: ContextSummarizer,
     pub config: AgentConfig,
-    /// Session directory for persistence.
-    pub session_dir: Option<PathBuf>,
-    /// Append-only conversation history writer. `Some` when `session_dir` is `Some`.
+    /// Agent directory for persistence.
+    pub agent_dir: Option<PathBuf>,
+    /// Append-only conversation history writer. `Some` when `agent_dir` is `Some`.
     pub history: Option<HistoryWriter>,
     /// Cancellation signal for graceful interruption.
     pub cancel: CancellationToken,
@@ -39,7 +39,7 @@ pub struct AgentContext {
 impl AgentContext {
     /// Persist context and approval state to disk. Logs warnings on failure.
     pub async fn persist(&self) {
-        let Some(ref dir) = self.session_dir else {
+        let Some(ref dir) = self.agent_dir else {
             return;
         };
 
@@ -100,7 +100,7 @@ pub async fn agent_task(
     mut prompt_rx: tokio::sync::mpsc::Receiver<UserInput>,
     agent_tx: tokio::sync::mpsc::Sender<AgentEvent>,
 ) {
-    // Pre-loop compaction: handle context overflow from restored sessions.
+    // Pre-loop compaction: handle context overflow from restored agents.
     if let Err(e) = runner::compact_if_needed(&ctx).await {
         tracing::warn!("pre-loop compaction failed: {e:#}");
     }

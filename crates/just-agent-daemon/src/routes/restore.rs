@@ -1,6 +1,6 @@
-//! Session persistence restoration.
+//! Agent persistence restoration.
 //!
-//! Restores persisted agent sessions top-down, level by level. Root agents
+//! Restores persisted agents top-down, level by level. Root agents
 //! (no supervisor) are restored first, then their children, and so on.
 //! Siblings within each level are restored concurrently. If an agent fails
 //! to restore, its entire subtree is skipped — no orphans are created.
@@ -23,21 +23,21 @@ use crate::state::{Agent, AgentEntry, SharedState};
 /// One node in a supervisor chain, fully loaded from disk.
 struct ChainNode {
     agent_id: AgentId,
-    meta: persistence::SessionMeta,
+    meta: persistence::AgentMeta,
     policy: ToolPolicy,
 }
 
-/// Pre-loaded session data for all agents being restored.
+/// Pre-loaded data for all agents being restored.
 /// Eliminates redundant disk reads during supervisor chain validation
 /// by caching meta and policy loaded during the scan phase.
 struct RestoreIndex {
-    meta: HashMap<AgentId, persistence::SessionMeta>,
+    meta: HashMap<AgentId, persistence::AgentMeta>,
     policy: HashMap<AgentId, ToolPolicy>,
 }
 
 impl RestoreIndex {
-    /// Look up session metadata. Falls back to disk read on cache miss.
-    fn get_meta(&self, id: &AgentId) -> anyhow::Result<persistence::SessionMeta> {
+    /// Look up agent metadata. Falls back to disk read on cache miss.
+    fn get_meta(&self, id: &AgentId) -> anyhow::Result<persistence::AgentMeta> {
         match self.meta.get(id) {
             Some(m) => Ok(m.clone()),
             None => persistence::read_meta(id),
@@ -49,7 +49,7 @@ impl RestoreIndex {
         match self.policy.get(id) {
             Some(p) => Ok(p.clone()),
             None => {
-                let dir = persistence::session_dir(id).context("cannot resolve session dir")?;
+                let dir = persistence::agent_dir(id).context("cannot resolve agent dir")?;
                 persistence::load_policy(&dir).context("failed to load policy")
             }
         }
@@ -148,14 +148,14 @@ fn validate_policy_from_chain(
     Ok(())
 }
 
-/// Restore a single persisted session to a running agent.
+/// Restore a single persisted agent to a running agent.
 async fn restore_one(
     p: persistence::PendingRestore,
     shutdown: CancellationToken,
     shared_state: SharedState,
     index: &RestoreIndex,
 ) -> anyhow::Result<(AgentId, String, Agent)> {
-    let sess = persistence::restore_session(&p.agent_id, &p.session_dir)?;
+    let restored = persistence::restore_agent(&p.agent_id, &p.agent_dir)?;
 
     let mut config = AgentConfig::load(None, vec![], Some(p.meta.workspace_root.clone()))?;
     config.agent_id = Some(p.agent_id.clone());
@@ -171,8 +171,8 @@ async fn restore_one(
         validate_policy_from_chain(&p.agent_id, &tool_policy, &chain)?;
     }
 
-    let store = Arc::new(tokio::sync::Mutex::new(sess.store));
-    let approvals = Arc::new(tokio::sync::Mutex::new(sess.approvals));
+    let store = Arc::new(tokio::sync::Mutex::new(restored.store));
+    let approvals = Arc::new(tokio::sync::Mutex::new(restored.approvals));
     let (events_tx, _) = broadcast::channel(256);
 
     let auth_token = uuid::Uuid::new_v4().to_string();
@@ -184,7 +184,7 @@ async fn restore_one(
         agent_id: p.agent_id.clone(),
         store,
         approvals,
-        session_dir: sess.session_dir,
+        agent_dir: restored.agent_dir,
         config,
         initial_prompt: None,
         shutdown_cancel: shutdown,
@@ -198,10 +198,10 @@ async fn restore_one(
     })
     .await?;
 
-    Ok((sess.agent_id, auth_token, agent))
+    Ok((restored.agent_id, auth_token, agent))
 }
 
-/// Restore persisted sessions top-down, level by level.
+/// Restore persisted agents top-down, level by level.
 ///
 /// Root agents (no supervisor) are restored first, then their children, and
 /// so on.  Siblings within each level are restored concurrently.  If an agent
@@ -212,21 +212,20 @@ async fn restore_one(
 /// so refusing to restore them would be counterproductive. After restore,
 /// `registry.len()` may exceed `max_agents`; new creation returns 503 until
 /// agents are deleted to make room.
-pub async fn restore_sessions(state: &SharedState) {
-    let pending = persistence::scan_sessions();
+pub async fn restore_agents(state: &SharedState) {
+    let pending = persistence::scan_agents();
     if pending.is_empty() {
         return;
     }
 
-    // Use "agents" in logs to avoid confusing users with the internal "session" concept.
     info!(count = pending.len(), "restoring agents");
 
-    // Build index: meta from scan, policy loaded once per session.
+    // Build index: meta from scan, policy loaded once per agent.
     let mut meta_map = HashMap::new();
     let mut policy_map = HashMap::new();
     for p in &pending {
         meta_map.insert(p.agent_id.clone(), p.meta.clone());
-        if let Ok(policy) = persistence::load_policy(&p.session_dir) {
+        if let Ok(policy) = persistence::load_policy(&p.agent_dir) {
             policy_map.insert(p.agent_id.clone(), policy);
         }
     }

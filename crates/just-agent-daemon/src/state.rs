@@ -66,7 +66,7 @@ pub struct Agent {
     pub agent_handle: JoinHandle<()>,
     pub bridge_handle: JoinHandle<()>,
     pub store: Arc<Mutex<ContextStore>>,
-    pub session_dir: Option<PathBuf>,
+    pub agent_dir: Option<PathBuf>,
     pub cancel: CancellationToken,
     pub state: Arc<AtomicU8>,
     pub auth_token: String,

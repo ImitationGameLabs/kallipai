@@ -12,6 +12,7 @@ use just_agent_common::command::UserInput;
 use just_agent_common::policy::ToolPolicy;
 use just_agent_common::protocol::ApiError;
 use just_agent_common::protocol::SseEvent;
+use just_agent_runtime::agent_task::{self, AgentContext};
 use just_agent_runtime::approval::ApprovalStore;
 use just_agent_runtime::config::{AgentConfig, PermissionProfile, tool_policy_from_env};
 use just_agent_runtime::context::{AgenticContext, ContextStore, ContextSummarizer};
@@ -19,7 +20,6 @@ use just_agent_runtime::history::HistoryWriter;
 use just_agent_runtime::persistence;
 use just_agent_runtime::policy::{AgentPolicy, AuthorizedToolExecutor};
 use just_agent_runtime::provider::client_from_env;
-use just_agent_runtime::session::{self, AgentContext};
 use just_agent_runtime::tools::{build_tool_dispatch, load_skill, meta_skill_content};
 use just_llm_client::types::chat::ChatMessage;
 use tokio::sync::broadcast;
@@ -36,7 +36,7 @@ pub(crate) struct SpawnArgs {
     pub agent_id: AgentId,
     pub store: Arc<tokio::sync::Mutex<ContextStore>>,
     pub approvals: Arc<tokio::sync::Mutex<ApprovalStore>>,
-    pub session_dir: PathBuf,
+    pub agent_dir: PathBuf,
     pub config: AgentConfig,
     pub initial_prompt: Option<String>,
     pub shutdown_cancel: CancellationToken,
@@ -50,7 +50,7 @@ pub(crate) struct SpawnArgs {
     /// `prompt_queue_size` is ignored and both ends are used as-is.
     /// The sender is already installed in the registry entry; spawn_agent
     /// only stores it in the Agent struct and passes the receiver to the
-    /// session task.
+    /// agent task.
     pub prompt_channel: Option<(
         tokio::sync::mpsc::Sender<UserInput>,
         tokio::sync::mpsc::Receiver<UserInput>,
@@ -107,13 +107,13 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
         executor,
         summarizer,
         config: args.config.clone(),
-        session_dir: Some(args.session_dir.clone()),
-        history: Some(HistoryWriter::new(args.session_dir.clone())),
+        agent_dir: Some(args.agent_dir.clone()),
+        history: Some(HistoryWriter::new(args.agent_dir.clone())),
         cancel: cancel.clone(),
         token_budget: token_budget.clone(),
     };
 
-    let agent_handle = tokio::spawn(session::agent_task(
+    let agent_handle = tokio::spawn(agent_task::agent_task(
         ctx,
         args.initial_prompt,
         prompt_rx,
@@ -138,7 +138,7 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
         agent_handle,
         bridge_handle,
         store: args.store,
-        session_dir: Some(args.session_dir),
+        agent_dir: Some(args.agent_dir),
         cancel,
         state,
         auth_token: args.auth_token,
@@ -147,15 +147,15 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
     })
 }
 
-/// Abort agent/bridge handles and remove session dir (best-effort).
+/// Abort agent/bridge handles and remove agent dir (best-effort).
 /// Used when a spawned agent cannot be registered.
 pub(crate) fn abort_agent(agent: &crate::state::Agent) {
     agent.agent_handle.abort();
     agent.bridge_handle.abort();
-    if let Some(ref dir) = agent.session_dir
+    if let Some(ref dir) = agent.agent_dir
         && let Err(e) = std::fs::remove_dir_all(dir)
     {
-        tracing::warn!(path = %dir.display(), "failed to clean up session dir: {e:#}");
+        tracing::warn!(path = %dir.display(), "failed to clean up agent dir: {e:#}");
     }
 }
 
@@ -214,14 +214,14 @@ pub async fn create_agent(
     let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
     let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
 
-    // Create session directory before loading skills so that agent-local
-    // skills can be resolved from the session dir.
-    let session_dir =
-        persistence::create_session(&id, &config.workspace_root, config.created_by.as_ref())
+    // Create agent directory before loading skills so that agent-local
+    // skills can be resolved from the agent dir.
+    let agent_dir =
+        persistence::create_agent_dir(&id, &config.workspace_root, config.created_by.as_ref())
             .map_err(ApiError::internal)?;
 
     for skill_name in &config.skills {
-        let content = load_skill(skill_name, Some(session_dir.as_path()))
+        let content = load_skill(skill_name, Some(agent_dir.as_path()))
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         store
             .lock()
@@ -235,7 +235,7 @@ pub async fn create_agent(
     }
 
     persistence::persist_policy(
-        &session_dir,
+        &agent_dir,
         &tool_policy.read().unwrap_or_else(|e| e.into_inner()),
     )
     .map_err(ApiError::internal)?;
@@ -244,12 +244,12 @@ pub async fn create_agent(
     let log_ws = config.workspace_root.display().to_string();
     let log_depth = config.permissions.max_depth;
     let (events_tx, _) = broadcast::channel(256);
-    let session_dir_clone = session_dir.clone();
+    let agent_dir_clone = agent_dir.clone();
     let agent = match spawn_agent(SpawnArgs {
         agent_id: id.clone(),
         store,
         approvals,
-        session_dir,
+        agent_dir,
         config,
         initial_prompt: prompt,
         shutdown_cancel: state.shutdown.clone(),
@@ -272,9 +272,9 @@ pub async fn create_agent(
                     supervisor.subagent_ids.retain(|sid| sid != &id);
                 }
             }
-            // Clean up session dir (created before spawn).
-            if let Err(e) = std::fs::remove_dir_all(&session_dir_clone) {
-                tracing::warn!(path = %session_dir_clone.display(), "failed to clean up session dir: {e:#}");
+            // Clean up agent dir (created before spawn).
+            if let Err(e) = std::fs::remove_dir_all(&agent_dir_clone) {
+                tracing::warn!(path = %agent_dir_clone.display(), "failed to clean up agent dir: {e:#}");
             }
             return Err(ApiError::internal(e));
         }
@@ -380,8 +380,8 @@ pub async fn delete_agent(
     entry.agent.agent_handle.abort();
     entry.agent.bridge_handle.abort();
 
-    if let Err(e) = persistence::cleanup_session(&id) {
-        info!(id = %id, "session cleanup failed: {e:#}");
+    if let Err(e) = persistence::cleanup_agent_dir(&id) {
+        info!(id = %id, "agent dir cleanup failed: {e:#}");
     }
     info!(id = %id, "deleted agent");
     Ok(StatusCode::NO_CONTENT)

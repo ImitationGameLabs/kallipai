@@ -63,7 +63,7 @@ pub fn make_entry_with_rx(
             agent_handle: tokio::spawn(async {}),
             bridge_handle: tokio::spawn(async {}),
             store: Arc::new(Mutex::new(ContextStore::new())),
-            session_dir: None,
+            agent_dir: None,
             cancel: CancellationToken::new(),
             state: Arc::new(AtomicU8::new(AgentState::IDLE)),
             auth_token,

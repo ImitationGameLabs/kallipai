@@ -122,11 +122,11 @@ analyze shell commands:
 
 ## Crate responsibilities
 
-| Crate                | Role                                                                                            |
-| -------------------- | ----------------------------------------------------------------------------------------------- |
-| `just-agent-common`  | Shared types and command parsing. Used by all crates.                                           |
-| `just-agent-runtime` | Agent runtime: session loop, context management, tool dispatch, policy engine. No network code. |
-| `just-agent-daemon`  | HTTP server hosting agent instances. Uses `just-agent-runtime` internally.                      |
-| `just-agent`         | Headless CLI binary. Thin wrapper over `just-agent-client`. No agent logic.                     |
-| `just-agent-tui`     | Interactive terminal UI. Same client library, adds ratatui rendering.                           |
-| `just-agent-client`  | Async HTTP client for the daemon API. Used by both CLI and TUI.                                 |
+| Crate                | Role                                                                                          |
+| -------------------- | --------------------------------------------------------------------------------------------- |
+| `just-agent-common`  | Shared types and command parsing. Used by all crates.                                         |
+| `just-agent-runtime` | Agent runtime: agent loop, context management, tool dispatch, policy engine. No network code. |
+| `just-agent-daemon`  | HTTP server hosting agent instances. Uses `just-agent-runtime` internally.                    |
+| `just-agent`         | Headless CLI binary. Thin wrapper over `just-agent-client`. No agent logic.                   |
+| `just-agent-tui`     | Interactive terminal UI. Same client library, adds ratatui rendering.                         |
+| `just-agent-client`  | Async HTTP client for the daemon API. Used by both CLI and TUI.                               |

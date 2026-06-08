@@ -58,19 +58,19 @@ pub async fn submit_promote_request(
         )));
     }
 
-    // Extract session_dir and snapshot content under registry read lock.
+    // Extract agent_dir and snapshot content under registry read lock.
     let (content, meta) = {
         let registry = state.registry.read().await;
         let entry = registry
             .get(&id)
             .ok_or_else(|| ApiError::not_found("agent not found"))?;
-        let session_dir = entry
+        let agent_dir = entry
             .agent
-            .session_dir
+            .agent_dir
             .clone()
-            .ok_or_else(|| ApiError::not_found("agent has no session directory"))?;
+            .ok_or_else(|| ApiError::not_found("agent has no persistent directory"))?;
 
-        let src = session_dir.join("skills").join(format!("{skill_name}.md"));
+        let src = agent_dir.join("skills").join(format!("{skill_name}.md"));
         if !src.exists() {
             return Err(ApiError::not_found(format!(
                 "local skill '{skill_name}' not found at {}",

@@ -1,8 +1,8 @@
-//! Session persistence: atomic JSON serialization to disk.
+//! Agent persistence: atomic JSON serialization to disk.
 //!
-//! Writes context and approval state to per-agent session directories.
+//! Writes context and approval state to per-agent directories.
 //! All writes use atomic rename (temp file + rename) to prevent corruption
-//! on crash. On daemon restart, [`scan_sessions`] scans for sessions
+//! on crash. On daemon restart, [`scan_agents`] scans for agents
 //! that can be recovered.
 
 use std::fs;
@@ -19,31 +19,31 @@ use crate::context::ContextStore;
 use just_agent_common::AgentId;
 use just_llm_client::types::chat::ChatMessage;
 
-/// Resolve the base sessions directory.
-fn sessions_base() -> Result<PathBuf> {
+/// Resolve the base agents directory.
+fn agents_base() -> Result<PathBuf> {
     let base = if let Ok(dir) = std::env::var("JUST_AGENT_DATA_DIR") {
         PathBuf::from(dir)
     } else {
         dirs::data_dir().context("could not determine platform data directory")?
     };
-    Ok(base.join("just-agent").join("sessions"))
+    Ok(base.join("just-agent").join("agents"))
 }
 
-/// Session directory for a given agent.
-pub fn session_dir(agent_id: &AgentId) -> Result<PathBuf> {
-    Ok(sessions_base()?.join(agent_id.as_ref()))
+/// Agent directory for a given agent.
+pub fn agent_dir(agent_id: &AgentId) -> Result<PathBuf> {
+    Ok(agents_base()?.join(agent_id.as_ref()))
 }
 
-/// Create session directory and write initial meta.json.
-pub fn create_session(
+/// Create agent directory and write initial meta.json.
+pub fn create_agent_dir(
     agent_id: &AgentId,
     workspace_root: &Path,
     created_by: Option<&AgentId>,
 ) -> Result<PathBuf> {
-    let dir = session_dir(agent_id)?;
+    let dir = agent_dir(agent_id)?;
     std::fs::create_dir_all(&dir)?;
 
-    let meta = SessionMeta {
+    let meta = AgentMeta {
         workspace_root: workspace_root.to_path_buf(),
         last_restored_at: None,
         consecutive_restart_count: 0,
@@ -57,13 +57,13 @@ pub fn create_session(
     Ok(dir)
 }
 
-/// Remove a session directory.
+/// Remove an agent directory.
 ///
 /// Deletes the entire directory including `context.json`, `approvals.json`,
 /// `policy.toml`, `skills/`, and `history/`. History is intentionally tied
-/// to the session lifecycle — once an agent is deleted, its history is gone.
-pub fn cleanup_session(agent_id: &AgentId) -> Result<()> {
-    let dir = session_dir(agent_id)?;
+/// to the agent lifecycle — once an agent is deleted, its history is gone.
+pub fn cleanup_agent_dir(agent_id: &AgentId) -> Result<()> {
+    let dir = agent_dir(agent_id)?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }
@@ -108,9 +108,9 @@ pub fn load_policy(dir: &Path) -> Result<ToolPolicy> {
 // Restore (read path)
 // ---------------------------------------------------------------------------
 
-/// Minimal metadata persisted per session.
+/// Minimal metadata persisted per agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionMeta {
+pub struct AgentMeta {
     pub workspace_root: PathBuf,
     /// Time of the last successful restore.
     #[serde(default, with = "time::serde::rfc3339::option")]
@@ -123,18 +123,18 @@ pub struct SessionMeta {
     pub created_by: Option<AgentId>,
 }
 
-/// Read a session's meta.json without side effects.
+/// Read an agent's meta.json without side effects.
 /// Used for validating supervisor chains at restore time.
-pub fn read_meta(agent_id: &AgentId) -> Result<SessionMeta> {
-    let path = session_dir(agent_id)?.join("meta.json");
+pub fn read_meta(agent_id: &AgentId) -> Result<AgentMeta> {
+    let path = agent_dir(agent_id)?.join("meta.json");
     let json = fs::read_to_string(&path).context("reading meta.json")?;
     serde_json::from_str(&json).context("parsing meta.json")
 }
 
-/// Read a session's meta.json directly from its session directory.
+/// Read an agent's meta.json directly from its directory.
 /// Use when the directory path is already known (e.g., budget updates)
 /// to avoid re-deriving the path from the agent ID.
-pub fn read_meta_from_dir(dir: &Path) -> Result<SessionMeta> {
+pub fn read_meta_from_dir(dir: &Path) -> Result<AgentMeta> {
     let json = fs::read_to_string(dir.join("meta.json")).context("reading meta.json")?;
     serde_json::from_str(&json).context("parsing meta.json")
 }
@@ -144,30 +144,30 @@ const MAX_CONSECUTIVE_RESTARTS: u32 = 3;
 /// Window in which restarts are considered consecutive.
 const CONSECUTIVE_RESTART_WINDOW: TimeDuration = TimeDuration::seconds(60);
 
-/// Lightweight handle produced by scanning the sessions directory.
+/// Lightweight handle produced by scanning the agents directory.
 pub struct PendingRestore {
     pub agent_id: AgentId,
-    pub session_dir: PathBuf,
-    pub meta: SessionMeta,
+    pub agent_dir: PathBuf,
+    pub meta: AgentMeta,
 }
 
-/// A session fully deserialized and ready to resume.
-pub struct RestorableSession {
+/// An agent fully deserialized and ready to resume.
+pub struct RestorableAgent {
     pub agent_id: AgentId,
-    pub session_dir: PathBuf,
+    pub agent_dir: PathBuf,
     pub store: ContextStore,
     pub approvals: ApprovalStore,
 }
 
-/// Scan the sessions directory and return sessions eligible for restore.
+/// Scan the agents directory and return agents eligible for restore.
 ///
-/// Reads only `meta.json` per session (lightweight). Skips sessions that
+/// Reads only `meta.json` per agent (lightweight). Skips agents that
 /// fail crash-loop detection, logging warnings.
-pub fn scan_sessions() -> Vec<PendingRestore> {
-    let base = match sessions_base() {
+pub fn scan_agents() -> Vec<PendingRestore> {
+    let base = match agents_base() {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!("cannot resolve sessions base: {e:#}");
+            tracing::warn!("cannot resolve agents base: {e:#}");
             return Vec::new();
         }
     };
@@ -193,11 +193,11 @@ pub fn scan_sessions() -> Vec<PendingRestore> {
         match check_meta(&path) {
             Ok(meta) => pending.push(PendingRestore {
                 agent_id,
-                session_dir: path,
+                agent_dir: path,
                 meta,
             }),
             Err(e) => {
-                tracing::warn!(id = %agent_id, "skipping session: {e:#}");
+                tracing::warn!(id = %agent_id, "skipping agent: {e:#}");
             }
         }
     }
@@ -205,9 +205,9 @@ pub fn scan_sessions() -> Vec<PendingRestore> {
 }
 
 /// Read, validate, and update meta.json for crash-loop detection.
-fn check_meta(dir: &Path) -> Result<SessionMeta> {
+fn check_meta(dir: &Path) -> Result<AgentMeta> {
     let meta_json = fs::read_to_string(dir.join("meta.json")).context("reading meta.json")?;
-    let mut meta: SessionMeta = serde_json::from_str(&meta_json).context("parsing meta.json")?;
+    let mut meta: AgentMeta = serde_json::from_str(&meta_json).context("parsing meta.json")?;
 
     let now = OffsetDateTime::now_utc();
     let is_consecutive = meta.last_restored_at.is_some_and(|prev| {
@@ -223,7 +223,7 @@ fn check_meta(dir: &Path) -> Result<SessionMeta> {
 
     if meta.consecutive_restart_count > MAX_CONSECUTIVE_RESTARTS {
         anyhow::bail!(
-            "session exceeded {MAX_CONSECUTIVE_RESTARTS} consecutive restarts, \
+            "agent exceeded {MAX_CONSECUTIVE_RESTARTS} consecutive restarts, \
              refusing restore to break crash loop"
         );
     }
@@ -237,11 +237,11 @@ fn check_meta(dir: &Path) -> Result<SessionMeta> {
     Ok(meta)
 }
 
-/// Deserialize a single session from its directory.
+/// Deserialize a single agent from its directory.
 ///
 /// Reads context.json and approvals.json, fixes incomplete turns, and
 /// injects the restart message.
-pub fn restore_session(agent_id: &AgentId, dir: &Path) -> Result<RestorableSession> {
+pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> {
     let mut store: ContextStore = match fs::read_to_string(dir.join("context.json")) {
         Ok(json) => serde_json::from_str(&json).context("parsing context.json")?,
         Err(_) => ContextStore::new(),
@@ -260,7 +260,7 @@ pub fn restore_session(agent_id: &AgentId, dir: &Path) -> Result<RestorableSessi
     let restart_msgs = vec![ChatMessage::user(RESTART_MESSAGE)];
     let (_, estimated_tokens) = store.push_turn(restart_msgs.clone());
 
-    // Record session restore event in history.
+    // Record agent restore event in history.
     // Uses direct HistoryWriter (no AgentContext exists at restore time).
     {
         let history = crate::history::HistoryWriter::new(dir.to_owned());
@@ -269,15 +269,15 @@ pub fn restore_session(agent_id: &AgentId, dir: &Path) -> Result<RestorableSessi
             &restart_msgs,
             estimated_tokens,
             crate::history::RecordKind::System,
-            Some(crate::history::SystemEvent::SessionRestore),
+            Some(crate::history::SystemEvent::AgentRestore),
         ) {
             tracing::warn!("history restore record failed: {e:#}");
         }
     }
 
-    Ok(RestorableSession {
+    Ok(RestorableAgent {
         agent_id: agent_id.clone(),
-        session_dir: dir.to_owned(),
+        agent_dir: dir.to_owned(),
         store,
         approvals,
     })
@@ -303,13 +303,13 @@ fn fix_incomplete_turn(store: &mut ContextStore) {
 
     if incomplete {
         store.drain_turns(count - 1..count);
-        tracing::info!("removed incomplete last turn from restored session");
+        tracing::info!("removed incomplete last turn from restored agent");
     }
 }
 
 const RESTART_MESSAGE: &str = concat!(
     "[system]\n",
-    "Session restored from a previous state. Shell sessions have been reset \u{2014}\n",
+    "Agent restored from a previous state. Shell sessions have been reset \u{2014}\n",
     "environment variables, working directory, and background processes are no\n",
     "longer available. Review the current state of the project and re-establish\n",
     "any necessary conditions before continuing."

@@ -271,7 +271,7 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 - `pinned_items`: per-item breakdown of `[label, estimated_tokens]`.
 - `last_prompt_tokens`: exact prompt token count from the last provider
   response; `null` if no LLM call has been made.
-- `cumulative_usage`: totals across all LLM calls in the session. Present but
+- `cumulative_usage`: totals across all LLM calls for the agent. Present but
   zeroed if no calls have been made.
 - `recent_retries`: last 20 retry records, newest first. Empty if no retries
   have occurred.
@@ -363,7 +363,7 @@ Status: `204 No Content`
 | 403  | Not a superior of the target agent                                                                 |
 | 404  | Agent not found                                                                                    |
 | 409  | Policy is less strict than parent, or a child agent's policy would be stricter than the new policy |
-| 500  | Parent/child not found, no session directory, or persist failure                                   |
+| 500  | Parent/child not found, no persistent directory, or persist failure                                |
 
 > **Strictness ordering:** `deny > ask > classify > allow`. Changes are
 > persisted to disk before the in-memory update.
@@ -552,7 +552,7 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 ```json
 {
   "shared": "/path/to/shared/skills",
-  "local": "/path/to/session/skills | null"
+  "local": "/path/to/agent/skills | null"
 }
 ```
 
@@ -632,7 +632,7 @@ Status: `201 Created`
 | ---- | ----------------------------------------------------------------------------------- |
 | 400  | Invalid skill name, no valid frontmatter, or attempting to promote the `meta` skill |
 | 403  | Not the agent itself or the operator                                                |
-| 404  | Agent not found, no session directory, or local skill file does not exist           |
+| 404  | Agent not found, no persistent directory, or local skill file does not exist        |
 | 500  | File I/O failure                                                                    |
 
 > **Notification:** All root agents are notified of the new request via their

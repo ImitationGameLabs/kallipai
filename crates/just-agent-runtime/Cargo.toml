@@ -1,6 +1,6 @@
 [package]
 name = "just-agent-runtime"
-description = "Agent runtime: session management, context, policy, and tool dispatch (daemon-only)"
+description = "Agent runtime: agent context, policy, and tool dispatch (daemon-only)"
 edition = "2024"
 version.workspace = true
 license.workspace = true

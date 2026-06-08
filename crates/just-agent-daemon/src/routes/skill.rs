@@ -23,7 +23,7 @@ pub async fn skill_paths(
     let shared = skill_dir().to_string_lossy().into_owned();
     let local = entry
         .agent
-        .session_dir
+        .agent_dir
         .as_ref()
         .map(|d| d.join("skills").to_string_lossy().into_owned());
 
@@ -41,8 +41,8 @@ pub async fn skill_meta(
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
 
-    let session_dir = entry.agent.session_dir.as_deref();
-    let meta = skill_metadata(&skill_name, session_dir).map_err(|e| {
+    let agent_dir = entry.agent.agent_dir.as_deref();
+    let meta = skill_metadata(&skill_name, agent_dir).map_err(|e| {
         if e.to_string().contains("invalid skill name") {
             ApiError::bad_request(e.to_string())
         } else {
