@@ -51,21 +51,6 @@ let
   # so we can reuse all of that work (e.g. via cachix) when running in CI
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-  # mapToAbsolute is a function that converts relative crate paths to absolute paths.
-  # Takes an attrset like { just-agent-runtime = "crates/just-agent-runtime"; }
-  # and returns { just-agent-runtime = /absolute/path/to/crates/just-agent-runtime; }
-  mapToAbsolute = lib.mapAttrs (_: path: root + "/${path}");
-
-  # Library-only crates (only needed for fileset dependencies, not built separately)
-  # Add your library crates here
-  libraryCratePaths = mapToAbsolute {
-    just-agent = "crates/just-agent";
-    just-agent-common = "crates/just-agent-common";
-    just-agent-runtime = "crates/just-agent-runtime";
-    just-agent-client = "crates/just-agent-client";
-    just-agent-tui = "crates/just-agent-tui";
-    just-agent-daemon = "crates/just-agent-daemon";
-  };
 in
 {
   inherit
@@ -74,6 +59,5 @@ in
     commonArgs
     cargoArtifacts
     gitVersion
-    libraryCratePaths
     ;
 }
