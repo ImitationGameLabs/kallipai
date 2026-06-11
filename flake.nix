@@ -50,9 +50,13 @@
             inherit pkgs common;
             inherit (inputs) advisory-db;
           };
+
+          packages = import ./nix/packages/tarball.nix {
+            inherit pkgs lib common;
+          };
         in
         {
-          inherit checks;
+          inherit checks packages;
 
           devShells.default = import ./nix/dev/shell.nix {
             inherit pkgs common checks;
