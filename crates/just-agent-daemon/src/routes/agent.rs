@@ -32,6 +32,9 @@ use super::ListAgentsResponse;
 use crate::bridge::bridge_task;
 use crate::state::{Agent, AgentEntry, AgentState, AgentSummary, SharedState};
 
+/// Maximum time to wait for a single agent to persist before force-aborting on deletion.
+const DELETE_AGENT_SHUTDOWN_TIMEOUT_SECS: u64 = 10;
+
 pub(crate) struct SpawnArgs {
     pub agent_id: AgentId,
     pub store: Arc<tokio::sync::Mutex<ContextStore>>,
@@ -389,9 +392,12 @@ pub async fn delete_agent(
     // Signal graceful cancellation.
     entry.agent.cancel.cancel();
 
-    // Wait briefly for the agent to persist and exit.
+    // Wait for the agent to detect cancellation and persist.
     // Since JoinHandle is not Clone, we sleep and then abort.
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(
+        DELETE_AGENT_SHUTDOWN_TIMEOUT_SECS,
+    ))
+    .await;
     entry.agent.agent_handle.abort();
     entry.agent.bridge_handle.abort();
 

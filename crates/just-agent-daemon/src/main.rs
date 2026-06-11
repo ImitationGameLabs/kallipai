@@ -106,7 +106,6 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal(shutdown_token))
         .await?;
 
-    // After HTTP server stops: give agents a brief window to persist.
     graceful_agent_shutdown(&state).await;
 
     Ok(())
@@ -128,7 +127,13 @@ async fn shutdown_signal(token: CancellationToken) {
     token.cancel();
 }
 
-/// Give in-flight agent tasks a brief window to persist, then abort.
+/// Maximum time to wait for agents to persist before force-aborting.
+///
+/// Agent tasks detect cancellation, persist state, and exit on their own. This
+/// deadline is a safety net for stuck agents (slow disk, unresponsive LLM stream).
+const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+
+/// Wait for in-flight agent tasks to save state; force-abort any remaining after the timeout.
 async fn graceful_agent_shutdown(state: &AppState) {
     let registry = state.registry.read().await;
     if registry.is_empty() {
@@ -136,8 +141,10 @@ async fn graceful_agent_shutdown(state: &AppState) {
     }
     info!(count = registry.len(), "waiting for agents to persist");
 
-    // Allow agents a few seconds to finish persisting after cancellation.
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(
+        GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+    ))
+    .await;
 
     for entry in registry.values() {
         entry.agent.agent_handle.abort();
