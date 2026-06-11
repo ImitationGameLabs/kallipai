@@ -1,0 +1,22 @@
+# Quick verification against harbor/hello-world.
+#
+# Usage:
+#   ./harbor-integration/harbor-test.sh
+#   harbor run --config harbor-integration/configs/hello-world.yaml
+
+# Output directory for job results (Harbor default: "jobs").
+# Redirected to keep the project root clean.
+jobs_dir: harbor-integration/jobs
+
+agents:
+  - import_path: just_agent_harbor:JustAgentAdapter
+    model_name: deepseek/deepseek-v4-flash
+
+datasets:
+  - name: harbor/hello-world
+
+# Keep containers alive after trial for debugging.
+environment:
+  delete: false
+  kwargs:
+    keep_containers: true

@@ -1,0 +1,13 @@
+[project]
+name = "just-agent-harbor"
+version = "0.1.0"
+description = "Harbor benchmarking adapter for just-agent"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["just_agent_harbor*"]

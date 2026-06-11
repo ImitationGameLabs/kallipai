@@ -1,0 +1,18 @@
+# Full terminal-bench evaluation.
+#
+# Usage:
+#   ./harbor-integration/harbor-test.sh terminal-bench-2
+#   harbor run --config harbor-integration/configs/terminal-bench-2.yaml
+
+# Output directory for job results (Harbor default: "jobs").
+# Redirected to keep the project root clean.
+jobs_dir: harbor-integration/jobs
+
+agents:
+  - import_path: just_agent_harbor:JustAgentAdapter
+    model_name: deepseek/deepseek-v4-flash
+    kwargs:
+      max_rounds: 50
+
+datasets:
+  - name: terminal-bench/terminal-bench-2

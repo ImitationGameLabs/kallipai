@@ -16,3 +16,12 @@
 
 # pre-commit
 /.pre-commit-config.yaml
+
+# Python
+__pycache__/
+*.pyc
+harbor-integration/.venv/
+harbor-integration/*.egg-info/
+
+# Harbor job outputs
+harbor-integration/jobs/
