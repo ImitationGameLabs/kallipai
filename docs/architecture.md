@@ -58,7 +58,7 @@ authentication and the authorization matrix, see [auth.md](reference/auth.md).
 ## Request flow
 
 1. Client sends `POST /agents/{id}/message` with the message text.
-2. Daemon forwards the text as `UserInput::Prompt` to the agent's `mpsc` channel.
+2. Daemon forwards the text as a `String` to the agent's `mpsc` channel.
 3. Agent task receives the input, pushes it as a turn, and calls `run_agent_rounds`.
 4. Agent composes context, streams the LLM request, and executes any tool calls.
 5. Agent emits `AgentEvent`s (reasoning, content, tool calls, finished) to its
@@ -126,7 +126,7 @@ analyze shell commands:
 
 | Crate                | Role                                                                                          |
 | -------------------- | --------------------------------------------------------------------------------------------- |
-| `just-agent-common`  | Shared types and command parsing. Used by all crates.                                         |
+| `just-agent-common`  | Shared types, slash command definitions, and protocol types. Used by all crates.              |
 | `just-agent-runtime` | Agent runtime: agent loop, context management, tool dispatch, policy engine. No network code. |
 | `just-agent-daemon`  | HTTP server hosting agent instances. Uses `just-agent-runtime` internally.                    |
 | `just-agent`         | Headless CLI for agents. Thin wrapper over `just-agent-client`. No agent logic.               |

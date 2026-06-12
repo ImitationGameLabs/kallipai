@@ -4,7 +4,6 @@ use std::sync::atomic::Ordering;
 
 use just_agent_common::agentid::AgentId;
 use just_agent_common::approval::ApprovalStatus;
-use just_agent_common::command::UserInput;
 use just_agent_common::policy::PolicyDecision;
 use just_agent_common::protocol::{AgentState, SseEvent};
 use just_agent_runtime::event::AgentEvent;
@@ -132,7 +131,7 @@ async fn route_to_superior(
     // Collect all data inside the lock so we don't hold it across the async send.
     struct SuperiorContext {
         superior_id: AgentId,
-        prompt_tx: tokio::sync::mpsc::Sender<UserInput>,
+        prompt_tx: tokio::sync::mpsc::Sender<String>,
         superior_decision: PolicyDecision,
         /// Nearest upper-level superior with `Allow` for this tool.
         allow_superior_id: Option<AgentId>,
@@ -265,7 +264,7 @@ async fn route_to_superior(
     // Non-blocking send: never stall the bridge task waiting for queue space.
     // If the superior's message queue is full, drop the notification and log a
     // warning — the superior can still query pending approvals via the API.
-    match ctx.prompt_tx.try_send(UserInput::Prompt(notification)) {
+    match ctx.prompt_tx.try_send(notification) {
         Ok(()) => {}
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             warn!(
@@ -282,16 +281,14 @@ async fn route_to_superior(
 #[cfg(test)]
 mod tests {
     use just_agent_common::agentid::AgentId;
-    use just_agent_common::command::UserInput;
     use just_agent_common::policy::PolicyDecision;
 
     use crate::test_helpers::*;
 
     /// Helper: receive a notification from the prompt channel within a timeout.
-    async fn recv_notification(rx: &mut tokio::sync::mpsc::Receiver<UserInput>) -> String {
+    async fn recv_notification(rx: &mut tokio::sync::mpsc::Receiver<String>) -> String {
         match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
-            Ok(Some(UserInput::Prompt(text))) => text,
-            Ok(Some(_)) => panic!("expected UserInput::Prompt, got a different variant"),
+            Ok(Some(text)) => text,
             Ok(None) => panic!("prompt channel closed unexpectedly"),
             Err(_) => panic!("timed out waiting for notification"),
         }

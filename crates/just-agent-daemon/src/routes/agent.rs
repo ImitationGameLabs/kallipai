@@ -8,7 +8,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use just_agent_common::agentid::AgentId;
-use just_agent_common::command::UserInput;
 use just_agent_common::policy::ToolPolicy;
 use just_agent_common::protocol::ApiError;
 use just_agent_common::protocol::SseEvent;
@@ -55,8 +54,8 @@ pub(crate) struct SpawnArgs {
     /// only stores it in the Agent struct and passes the receiver to the
     /// agent task.
     pub prompt_channel: Option<(
-        tokio::sync::mpsc::Sender<UserInput>,
-        tokio::sync::mpsc::Receiver<UserInput>,
+        tokio::sync::mpsc::Sender<String>,
+        tokio::sync::mpsc::Receiver<String>,
     )>,
 }
 

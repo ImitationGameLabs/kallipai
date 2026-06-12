@@ -1,4 +1,4 @@
-//! Agent task orchestration: shared context, round execution, command handling.
+//! Agent task orchestration: shared context, round execution, prompt processing.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,11 +7,10 @@ use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{AgentEvent, AgentOutcome};
-use just_agent_common::command::{SlashCommand, UserInput};
 
 use crate::approval::ApprovalStore;
 use crate::config::AgentConfig;
-use crate::context::{AgenticContext, ContextStore, ContextSummarizer, TurnId};
+use crate::context::{ContextStore, ContextSummarizer, TurnId};
 use crate::history::{HistoryWriter, RecordKind};
 use crate::policy::AuthorizedToolExecutor;
 use crate::runner;
@@ -100,7 +99,7 @@ impl AgentContext {
 pub async fn agent_task(
     mut ctx: AgentContext,
     initial_prompt: Option<String>,
-    mut prompt_rx: tokio::sync::mpsc::Receiver<UserInput>,
+    mut prompt_rx: tokio::sync::mpsc::Receiver<String>,
     agent_tx: tokio::sync::mpsc::Sender<AgentEvent>,
 ) {
     // Pre-loop compaction: handle context overflow from restored agents.
@@ -125,14 +124,11 @@ pub async fn agent_task(
         tokio::select! {
             input = prompt_rx.recv() => {
                 match input {
-                    Some(UserInput::Prompt(text)) => {
+                    Some(text) => {
                         ctx.record_turn(vec![ChatMessage::user(&text)]).await;
                         if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await.is_some() {
                             break;
                         }
-                    }
-                    Some(UserInput::Command(cmd)) => {
-                        handle_command(&cmd, &mut ctx, &agent_tx).await;
                     }
                     None => break,
                 }
@@ -161,26 +157,11 @@ pub async fn agent_task(
     }
 }
 
-/// Handle a slash command that requires agent-side resources.
-async fn handle_command(
-    cmd: &SlashCommand,
-    ctx: &mut AgentContext,
-    agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
-) {
-    if let SlashCommand::Status = cmd {
-        let usage = ctx.store.lock().await.usage_snapshot();
-        agent_tx
-            .send(AgentEvent::Status(usage.format_summary()))
-            .await
-            .ok();
-    }
-}
-
 /// Run agent rounds for one prompt and send results via channel.
 pub async fn run_and_report(
     ctx: &mut AgentContext,
     agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
-    prompt_rx: &mut tokio::sync::mpsc::Receiver<UserInput>,
+    prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
 ) -> Option<AgentOutcome> {
     agent_tx.send(AgentEvent::Busy).await.ok();
     match runner::run_agent_rounds(ctx, agent_tx, prompt_rx).await {

@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
-use just_agent_common::command::UserInput;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -127,7 +126,7 @@ async fn consume_stream(
 pub async fn run_agent_rounds(
     ctx: &mut AgentContext,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
-    prompt_rx: &mut tokio::sync::mpsc::Receiver<UserInput>,
+    prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
 ) -> Result<AgentOutcome> {
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
     let context_window = ctx.config.context_window_tokens;
@@ -136,16 +135,8 @@ pub async fn run_agent_rounds(
         // -- Interjection draining: consume queued prompts/commands --
         {
             let mut interjected = Vec::new();
-            loop {
-                match prompt_rx.try_recv() {
-                    Ok(UserInput::Prompt(text)) => interjected.push(text),
-                    Ok(UserInput::Command(_)) => {
-                        // Discard: slash commands are handled in the outer
-                        // agent_task loop. Mid-round commands like Quit/Clear
-                        // are not actionable here; Status is handled outside.
-                    }
-                    Err(_) => break,
-                }
+            while let Ok(text) = prompt_rx.try_recv() {
+                interjected.push(text);
             }
             if !interjected.is_empty() {
                 let msg = interjected

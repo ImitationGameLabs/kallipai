@@ -2,7 +2,6 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use just_agent_common::command::UserInput;
 use just_agent_common::protocol::{ApiError, MessageResponse};
 use tracing::{error, info, warn};
 
@@ -81,12 +80,10 @@ pub async fn send_message(
         // channel instead of a closed one, so they try_enqueue normally.
         let (prompt_tx, prompt_rx) = tokio::sync::mpsc::channel(state.prompt_queue_size);
         // Pre-send the message so it's already queued when the agent starts.
-        prompt_tx
-            .try_send(UserInput::Prompt(req.text.clone()))
-            .map_err(|e| {
-                error!(id = %id, "fresh channel rejected pre-send: {e}");
-                ApiError::internal("failed to pre-send message")
-            })?;
+        prompt_tx.try_send(req.text.clone()).map_err(|e| {
+            error!(id = %id, "fresh channel rejected pre-send: {e}");
+            ApiError::internal("failed to pre-send message")
+        })?;
         entry.agent.prompt_tx = prompt_tx;
 
         SpawnArgs {
@@ -181,7 +178,7 @@ enum EnqueueResult {
 
 /// Try to enqueue a message into the agent's channel without blocking.
 /// Returns queue depth feedback on success.
-fn try_enqueue(tx: &tokio::sync::mpsc::Sender<UserInput>, text: &str) -> EnqueueResult {
+fn try_enqueue(tx: &tokio::sync::mpsc::Sender<String>, text: &str) -> EnqueueResult {
     // Sender exposes capacity() (available slots) and max_capacity() (total).
     // Queue depth = max_capacity - capacity.
     let capacity = tx.capacity();
@@ -192,7 +189,7 @@ fn try_enqueue(tx: &tokio::sync::mpsc::Sender<UserInput>, text: &str) -> Enqueue
         return EnqueueResult::Full;
     }
 
-    match tx.try_send(UserInput::Prompt(text.to_owned())) {
+    match tx.try_send(text.to_owned()) {
         Ok(()) => {
             let warning = if queue_depth > 0 {
                 let plural = if queue_depth == 1 { "" } else { "s" };
@@ -219,7 +216,7 @@ mod tests {
     /// A newly created channel accepts a message with queue_depth == 0 and no warning.
     #[tokio::test]
     async fn try_enqueue_empty_channel_accepted() {
-        let (tx, _rx) = tokio::sync::mpsc::channel::<UserInput>(5);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(5);
         let result = try_enqueue(&tx, "hello");
         match result {
             EnqueueResult::Accepted(resp) => {
@@ -233,7 +230,7 @@ mod tests {
     /// Filling the channel produces Full result.
     #[tokio::test]
     async fn try_enqueue_full_channel_rejected() {
-        let (tx, _rx) = tokio::sync::mpsc::channel::<UserInput>(3);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(3);
         // Fill the channel.
         for i in 0..3 {
             try_enqueue(&tx, &format!("msg-{i}"));
@@ -248,7 +245,7 @@ mod tests {
     /// Partially filled channel returns queue_depth > 0 with a warning.
     #[tokio::test]
     async fn try_enqueue_partial_channel_warns() {
-        let (tx, _rx) = tokio::sync::mpsc::channel::<UserInput>(5);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(5);
         // Send one message to partially fill.
         try_enqueue(&tx, "first");
         // Second message should see queue_depth == 1.
@@ -265,7 +262,7 @@ mod tests {
     /// Closed channel returns Closed result.
     #[tokio::test]
     async fn try_enqueue_closed_channel() {
-        let (tx, rx) = tokio::sync::mpsc::channel::<UserInput>(5);
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(5);
         drop(rx); // Close the receiving end.
         match try_enqueue(&tx, "hello") {
             EnqueueResult::Closed => {}

@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::skill_promote::SkillPromoteStore;
 pub use just_agent_common::agentid::AgentId;
-use just_agent_common::command::UserInput;
 use just_agent_common::policy::ToolPolicy;
 pub use just_agent_common::protocol::AgentState;
 pub use just_agent_common::protocol::AgentSummary;
@@ -59,7 +58,7 @@ pub struct AgentEntry {
 }
 
 pub struct Agent {
-    pub prompt_tx: mpsc::Sender<UserInput>,
+    pub prompt_tx: mpsc::Sender<String>,
     pub events_tx: broadcast::Sender<SseEvent>,
     pub approvals: Arc<Mutex<ApprovalStore>>,
     pub config: AgentConfig,

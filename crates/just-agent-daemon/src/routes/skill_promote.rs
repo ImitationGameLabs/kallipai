@@ -12,7 +12,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use just_agent_common::agentid::AgentId;
-use just_agent_common::command::UserInput;
 use just_agent_common::promote::{CreatePromoteRequest, NO_REASON_PROVIDED, SkillPromoteStatus};
 use just_agent_common::protocol::{
     ApiError, ListSkillPromoteRecordsResponse, PromoteDecision, SkillPromoteDecisionBody,
@@ -129,11 +128,7 @@ pub async fn submit_promote_request(
              or `just-agent promote-request deny {request_id} <reason>` to deny."
         );
         for (root_id, entry) in registry.root_agents() {
-            if let Err(e) = entry
-                .agent
-                .prompt_tx
-                .try_send(UserInput::Prompt(notification.clone()))
-            {
+            if let Err(e) = entry.agent.prompt_tx.try_send(notification.clone()) {
                 warn!(root_id = %root_id, "failed to notify root agent of promote request: {e}");
             }
         }
@@ -342,11 +337,7 @@ async fn handle_deny(
 async fn notify_requesting_agent(state: &SharedState, agent_id: &AgentId, message: &str) {
     let registry = state.registry.read().await;
     if let Some(entry) = registry.get(agent_id) {
-        if let Err(e) = entry
-            .agent
-            .prompt_tx
-            .try_send(UserInput::Prompt(message.to_owned()))
-        {
+        if let Err(e) = entry.agent.prompt_tx.try_send(message.to_owned()) {
             warn!(id = %agent_id, "failed to notify agent: {e}");
         }
     } else {

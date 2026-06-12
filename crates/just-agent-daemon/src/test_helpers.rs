@@ -30,10 +30,7 @@ pub fn make_entry(created_by: Option<AgentId>, auth_token: String) -> AgentEntry
 pub fn make_entry_with_rx(
     created_by: Option<AgentId>,
     auth_token: String,
-) -> (
-    AgentEntry,
-    mpsc::Receiver<just_agent_common::command::UserInput>,
-) {
+) -> (AgentEntry, mpsc::Receiver<String>) {
     let (prompt_tx, prompt_rx) = mpsc::channel(16);
     let (events_tx, _) = broadcast::channel(1);
     let config = AgentConfig {
@@ -92,10 +89,7 @@ pub fn make_entry_with_policy_rx(
     created_by: Option<AgentId>,
     auth_token: String,
     policy: ToolPolicy,
-) -> (
-    AgentEntry,
-    mpsc::Receiver<just_agent_common::command::UserInput>,
-) {
+) -> (AgentEntry, mpsc::Receiver<String>) {
     let (mut entry, rx) = make_entry_with_rx(created_by, auth_token);
     entry.agent.tool_policy = Arc::new(std::sync::RwLock::new(policy));
     (entry, rx)
