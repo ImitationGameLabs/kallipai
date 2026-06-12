@@ -14,7 +14,7 @@ use just_agent_common::protocol::SseEvent;
 use just_agent_runtime::approval::ApprovalStore;
 use just_agent_runtime::config::AgentConfig;
 use just_agent_runtime::context::ContextStore;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -68,6 +68,9 @@ pub struct Agent {
     pub store: Arc<Mutex<ContextStore>>,
     pub agent_dir: Option<PathBuf>,
     pub cancel: CancellationToken,
+    /// Wake signal triggered by external events (e.g. approval notifications).
+    /// The agent task awaits this in the outer loop; callers signal via `notify_one()`.
+    pub notify: Arc<Notify>,
     pub state: Arc<AtomicU8>,
     pub auth_token: String,
     /// Environment variables injected into PTY sessions (JUST_AGENT_ID, JUST_AGENT_AUTH_TOKEN, etc.).

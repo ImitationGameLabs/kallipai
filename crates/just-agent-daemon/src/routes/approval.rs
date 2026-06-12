@@ -205,6 +205,12 @@ pub async fn respond_approval(
             tracing::error!("approval persist after decision failed: {e:#}");
         }
 
+        // Wake the agent so it can drain the notification and act on the
+        // approval/denial.  The approval lock is still held here but will be
+        // dropped on return; the agent task will briefly contend on the lock
+        // and then proceed.
+        entry.agent.notify.notify_one();
+
         return Ok(axum::http::StatusCode::OK);
     }
 

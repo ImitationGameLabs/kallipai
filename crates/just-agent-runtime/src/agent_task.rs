@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{AgentEvent, AgentOutcome};
@@ -31,6 +31,9 @@ pub struct AgentContext {
     pub history: Option<HistoryWriter>,
     /// Cancellation signal for graceful interruption.
     pub cancel: CancellationToken,
+    /// Wake signal triggered by external events (e.g. approval notifications).
+    /// The agent task awaits this in the outer loop; callers signal via `notify_one()`.
+    pub notify: Arc<Notify>,
     /// Daemon-wide token budget shared by all agents.
     /// Cloned from `AppState` — same underlying Arc counters across all agents.
     pub token_budget: crate::token_budget::TokenBudget,
@@ -139,6 +142,20 @@ pub async fn agent_task(
                 ctx.persist().await;
                 agent_tx.send(AgentEvent::Cancelled).await.ok();
                 break;
+            }
+            _ = ctx.notify.notified() => {
+                // Guard: drain may have already consumed the notification during
+                // the previous round.  Skip the LLM call if nothing is pending.
+                // NOTE: This guard assumes all notify_one() producers push data
+                // to ApprovalStore::notifications.  If additional wakeup sources
+                // are added, either use a separate Notify or update this check.
+                if ctx.approvals.lock().await.has_notifications()
+                    && run_and_report(&mut ctx, &agent_tx, &mut prompt_rx)
+                        .await
+                        .is_some()
+                {
+                    break;
+                }
             }
         }
     }

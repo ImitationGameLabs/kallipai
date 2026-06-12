@@ -22,7 +22,7 @@ use just_agent_runtime::policy::{AgentPolicy, AuthorizedToolExecutor};
 use just_agent_runtime::provider::client_from_env;
 use just_agent_runtime::tools::{build_tool_dispatch, load_skill, meta_skill_content};
 use just_llm_client::types::chat::ChatMessage;
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -73,6 +73,7 @@ impl SpawnArgs {
 /// Reconstruct runtime resources shared by create and restore.
 pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
     let cancel = args.shutdown_cancel.child_token();
+    let notify = Arc::new(Notify::new());
 
     let client = {
         let meta = meta_skill_content();
@@ -113,6 +114,7 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
         agent_dir: Some(args.agent_dir.clone()),
         history: Some(HistoryWriter::new(args.agent_dir.clone())),
         cancel: cancel.clone(),
+        notify: notify.clone(),
         token_budget: token_budget.clone(),
     };
 
@@ -143,6 +145,7 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
         store: args.store,
         agent_dir: Some(args.agent_dir),
         cancel,
+        notify,
         state,
         auth_token: args.auth_token,
         env: args.env,

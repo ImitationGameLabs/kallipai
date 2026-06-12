@@ -282,6 +282,12 @@ impl ApprovalStore {
     pub fn drain_notifications(&mut self) -> Vec<ApprovalNotification> {
         self.notifications.drain(..).collect()
     }
+
+    /// Returns `true` if there are pending notifications.
+    /// Non-destructive — does not drain.
+    pub fn has_notifications(&self) -> bool {
+        !self.notifications.is_empty()
+    }
 }
 
 /// Format an approval-deferred tool result JSON returned to the LLM.
@@ -521,6 +527,41 @@ mod tests {
         let id = q.enqueue("t", "{}");
         assert!(q.contains(&id));
         assert!(!q.contains("nonexistent"));
+    }
+
+    #[test]
+    fn has_notifications_false_when_empty() {
+        let q = ApprovalStore::new();
+        assert!(!q.has_notifications());
+    }
+
+    #[test]
+    fn has_notifications_true_after_approve() {
+        let mut q = ApprovalStore::new();
+        let id = q.enqueue("t", "{}");
+        q.commit(&id, "justification").unwrap();
+        q.approve(&id).unwrap();
+        assert!(q.has_notifications());
+    }
+
+    #[test]
+    fn has_notifications_false_after_drain() {
+        let mut q = ApprovalStore::new();
+        let id = q.enqueue("t", "{}");
+        q.commit(&id, "justification").unwrap();
+        q.approve(&id).unwrap();
+        assert!(q.has_notifications());
+        q.drain_notifications();
+        assert!(!q.has_notifications());
+    }
+
+    #[test]
+    fn has_notifications_true_after_deny() {
+        let mut q = ApprovalStore::new();
+        let id = q.enqueue("t", "{}");
+        q.commit(&id, "justification").unwrap();
+        q.deny(&id, "unsafe").unwrap();
+        assert!(q.has_notifications());
     }
 
     #[test]

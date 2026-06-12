@@ -65,6 +65,7 @@ pub fn make_entry_with_rx(
             store: Arc::new(Mutex::new(ContextStore::new())),
             agent_dir: None,
             cancel: CancellationToken::new(),
+            notify: Arc::new(tokio::sync::Notify::new()),
             state: Arc::new(AtomicU8::new(AgentState::IDLE)),
             auth_token,
             env: std::collections::HashMap::new(),
