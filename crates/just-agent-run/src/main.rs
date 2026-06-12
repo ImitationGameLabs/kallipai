@@ -1,9 +1,13 @@
-//! just-agent-run: one-shot agent runner for scripting and benchmarking.
+//! just-agent-run: agent runner for scripting and benchmarking.
 //!
 //! Non-interactive CLI that creates an agent via the daemon, streams progress
 //! to stderr, prints the final result to stdout, and exits with a semantic
 //! exit code. Designed for scripted and automated workflows where the caller
 //! needs machine-readable output and exit-status-driven control flow.
+//!
+//! By default the agent is **preserved** after completion so that logs,
+//! history, and token usage remain available for auditing. Pass `--delete`
+//! to remove the agent and all associated data after the run finishes.
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -30,6 +34,11 @@ struct Cli {
     /// Overrides the daemon default (unlimited unless JUST_AGENT_MAX_TOOL_ROUNDS is set).
     #[arg(long)]
     max_rounds: Option<usize>,
+    /// Delete the agent (including logs, history, and token usage) after completion.
+    /// By default the agent is preserved for auditing and can be deleted later
+    /// with `just-agent stop <ID>`.
+    #[arg(long)]
+    delete: bool,
 }
 
 /// Semantic exit codes for `just-agent-run`.
@@ -81,9 +90,13 @@ async fn run() -> Result<ExitCode> {
 
     let exit = consume_stream(&client, &id).await;
 
-    // Clean up the agent regardless of outcome.
-    if let Err(e) = client.stop_agent(&id).await {
-        eprintln!("warning: failed to stop agent {id}: {e}");
+    if cli.delete {
+        // Delete the agent and all associated data.
+        if let Err(e) = client.stop_agent(&id).await {
+            eprintln!("warning: failed to delete agent {id}: {e}");
+        }
+    } else {
+        eprintln!("agent {id} finished (kept). Use `just-agent stop {id}` to delete.");
     }
 
     Ok(exit.into())
@@ -196,7 +209,7 @@ async fn consume_stream(client: &DaemonClient, id: &AgentId) -> RunExit {
                 eprintln!("token budget exceeded (consumed: {consumed}, budget: {budget})");
                 return RunExit::BudgetExceeded;
             }
-            // Suppress noise for one-shot mode.
+            // Suppress verbose events not needed for scripted usage.
             SseEvent::Busy
             | SseEvent::Status { .. }
             | SseEvent::ApprovalUpdated { .. }

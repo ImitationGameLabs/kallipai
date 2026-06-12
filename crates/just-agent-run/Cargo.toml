@@ -1,6 +1,6 @@
 [package]
 name = "just-agent-run"
-description = "One-shot agent runner: create, stream output, print result, clean up"
+description = "Agent runner for scripting and benchmarking: create, stream output, print result"
 edition = "2024"
 version.workspace = true
 license.workspace = true
