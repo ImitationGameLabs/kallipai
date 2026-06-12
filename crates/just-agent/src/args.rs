@@ -34,8 +34,8 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum AgentCommand {
-    /// Start a new agent via daemon
-    Start(StartArgs),
+    /// Spawn a new agent via daemon
+    Spawn(SpawnArgs),
     /// Send message to agent
     Send(SendArgs),
     /// List all agents
@@ -53,7 +53,7 @@ pub enum AgentCommand {
 }
 
 #[derive(Args)]
-pub struct StartArgs {
+pub struct SpawnArgs {
     /// Working directory for the agent.
     #[arg(long)]
     pub workspace_root: Option<String>,

@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Agent(cmd) => match cmd {
-            AgentCommand::Start(args) => {
+            AgentCommand::Spawn(args) => {
                 let id = client
                     .spawn(just_agent_common::protocol::CreateAgentRequest {
                         workspace_root: args.workspace_root,

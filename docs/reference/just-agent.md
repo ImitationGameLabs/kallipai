@@ -8,17 +8,17 @@ All subcommands use `JUST_AGENT_AUTH_TOKEN` (mandatory) and `JUST_AGENT_DAEMON_U
 
 ## Subcommands
 
-### `start` — Spawn a new agent
+### `spawn` — Spawn a new agent
 
 ```bash
-just-agent start [--workspace-root <DIR>] [--skill <name>] [--prompt <text>]
+just-agent spawn [--workspace-root <DIR>] [--skill <name>] [--prompt <text>]
 ```
 
 Creates a new agent instance on the daemon. Prints the agent ID (a UUID) to
 stdout and exits.
 
 ```bash
-$ just-agent start --workspace-root /projects/frontend --skill code-review
+$ just-agent spawn --workspace-root /projects/frontend --skill code-review
 a3f1b2c4-5678-90ab-cdef-1234567890ab
 ```
 
@@ -33,7 +33,7 @@ immediately (202 Accepted) and processes it asynchronously. Subscribe to
 `events` to observe results.
 
 ```bash
-$ AGENT_ID=$(just-agent start --workspace-root /projects/api)
+$ AGENT_ID=$(just-agent spawn --workspace-root /projects/api)
 $ just-agent send "$AGENT_ID" "List all TODO comments in src/"
 ```
 
@@ -144,7 +144,7 @@ $ just-agent approval deny "ap_a1b2c3d4..." "too risky"
 ### Send and monitor
 
 ```bash
-AGENT_ID=$(just-agent start --workspace-root /my/project)
+AGENT_ID=$(just-agent spawn --workspace-root /my/project)
 just-agent send "$AGENT_ID" "Summarize the project structure"
 # Observe results via events stream
 just-agent events "$AGENT_ID" | jq -c 'select(.type == "Content")'
@@ -173,8 +173,8 @@ host agents across multiple projects simultaneously.
 
 ```bash
 # Spawn agents for two projects
-FRONTEND=$(just-agent start --workspace-root /projects/frontend --skill code-review)
-BACKEND=$(just-agent start --workspace-root /projects/backend --skill security-review)
+FRONTEND=$(just-agent spawn --workspace-root /projects/frontend --skill code-review)
+BACKEND=$(just-agent spawn --workspace-root /projects/backend --skill security-review)
 
 # Send work to both
 just-agent send "$FRONTEND" "Review the latest changes for performance issues" &
