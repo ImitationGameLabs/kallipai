@@ -27,9 +27,9 @@ AI Agent working guide. This document provides code structure and decision rules
 │       └── just-agent-run.md # `just-agent-run` agent runner for scripting
 └── nix/
       ├── common.nix           # Core config (crate paths, dependencies)
-      └── dev/
-            ├── shell.nix      # Development environment
-            └── checks.nix     # CI checks
+      ├── checks.nix           # CI checks
+      └── packages/
+            └── tarball.nix    # Release tarball builder
 ```
 
 ## Common Tasks
