@@ -68,6 +68,10 @@ After modifying TOML files:
 
 - `taplo fmt <toml file>` - Format specific file (never use bare `taplo fmt` — it ignores .gitignore and formats everything)
 
+After modifying Markdown files:
+
+- `prettier -w <markdown file>` - Format specific file (run individually for each modified file)
+
 After modifying Rust code:
 
 - `cargo fmt` - Format check
