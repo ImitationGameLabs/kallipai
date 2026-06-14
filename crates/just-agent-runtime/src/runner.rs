@@ -127,6 +127,7 @@ pub async fn run_agent_rounds(
     ctx: &mut AgentContext,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
+    round_cancel: &CancellationToken,
 ) -> Result<AgentOutcome> {
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
     let context_window = ctx.config.context_window_tokens;
@@ -185,7 +186,7 @@ pub async fn run_agent_rounds(
                         0
                     }
                 },
-                _ = ctx.cancel.cancelled() => return Ok(AgentOutcome::Cancelled),
+                _ = round_cancel.cancelled() => return Ok(AgentOutcome::Cancelled),
             }
         };
 
@@ -210,7 +211,7 @@ pub async fn run_agent_rounds(
                     }
                     Err(e) => warn!("summarize_and_evict failed: {e:#}"),
                 }
-                if ctx.cancel.is_cancelled() {
+                if round_cancel.is_cancelled() {
                     return Ok(AgentOutcome::Cancelled);
                 }
             }
@@ -246,11 +247,11 @@ pub async fn run_agent_rounds(
                 tx,
                 &mut retry_records,
                 prior_retries,
-                ctx.cancel.clone(),
+                round_cancel.clone(),
             );
             tokio::select! {
                 result = stream_fut => result,
-                _ = ctx.cancel.cancelled() => {
+                _ = round_cancel.cancelled() => {
                     if !retry_records.is_empty() {
                         ctx.store.lock().await.retry_log.extend(retry_records);
                         ctx.persist().await;
@@ -263,10 +264,22 @@ pub async fn run_agent_rounds(
             ctx.store.lock().await.retry_log.extend(retry_records);
             ctx.persist().await;
         }
-        let stream = stream_result?;
+        let stream = match stream_result {
+            Ok(s) => s,
+            Err(e) => {
+                // `stream_with_retry` returns Err on cancel-during-retry-backoff; a real
+                // cancel must surface as `Cancelled`, not as an error event. (A genuine
+                // error coinciding with a cancel is also mapped to `Cancelled` — the round
+                // is being aborted anyway, and the next prompt re-issues the request.)
+                if round_cancel.is_cancelled() {
+                    return Ok(AgentOutcome::Cancelled);
+                }
+                return Err(e);
+            }
+        };
 
         // -- Stream consumption --
-        let consumed = match consume_stream(stream, tx, &ctx.cancel).await {
+        let consumed = match consume_stream(stream, tx, round_cancel).await {
             StreamOutcome::Cancelled => return Ok(AgentOutcome::Cancelled),
             StreamOutcome::Completed(c) => c,
         };
@@ -342,7 +355,7 @@ pub async fn run_agent_rounds(
                             tool_timeout.as_secs()
                         ),
                     },
-                    _ = ctx.cancel.cancelled() => {
+                    _ = round_cancel.cancelled() => {
                         tracing::info!(tool = %call.function.name, "tool execution cancelled");
                         return Ok(AgentOutcome::Cancelled);
                     }

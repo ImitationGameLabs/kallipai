@@ -80,8 +80,9 @@ Prints context token usage and recent retry history for the agent.
 just-agent interrupt <ID>
 ```
 
-Gracefully interrupts the agent's current operation. The agent persists its
-state and stops processing. Use `delete` to remove the agent entirely.
+Gracefully interrupts the agent's current operation: aborts the current round
+(the agent stays alive and returns to idle, ready for the next prompt; a no-op if
+the agent is already idle). Use `delete` to remove the agent entirely.
 
 ### `approval` — Manage approvals
 

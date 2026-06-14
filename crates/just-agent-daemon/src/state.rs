@@ -11,6 +11,7 @@ pub use just_agent_common::protocol::AgentState;
 pub use just_agent_common::protocol::AgentSummary;
 use just_agent_common::protocol::ApiError;
 use just_agent_common::protocol::SseEvent;
+use just_agent_runtime::agent_task::RoundToken;
 use just_agent_runtime::approval::ApprovalStore;
 use just_agent_runtime::config::AgentConfig;
 use just_agent_runtime::context::ContextStore;
@@ -68,6 +69,10 @@ pub struct Agent {
     pub store: Arc<Mutex<ContextStore>>,
     pub agent_dir: Option<PathBuf>,
     pub cancel: CancellationToken,
+    /// The current round's cancellation token, reachable by `interrupt_agent`. `Some` only
+    /// while a round is running; cancelling it aborts the round without terminating the
+    /// task. Shared (same `Arc`) with the agent task's `AgentContext::round_cancel`.
+    pub round_cancel: Arc<std::sync::Mutex<Option<RoundToken>>>,
     /// Wake signal triggered by external events (e.g. approval notifications).
     /// The agent task awaits this in the outer loop; callers signal via `notify_one()`.
     pub notify: Arc<Notify>,
@@ -386,6 +391,46 @@ mod tests {
         // `make_entry` spawns two instantly-completing tasks.
         let entry = make_entry(None, "tok".into());
         assert!(entry.agent.shutdown(Duration::from_secs(1)).await);
+    }
+
+    // -- interrupt: cancels the round token, never the lifecycle token --
+
+    /// The core invariant: interrupt cancels only the current round token, so the
+    /// agent task returns to its outer loop instead of terminating.
+    #[tokio::test]
+    async fn interrupt_cancels_round_not_lifecycle() {
+        let entry = make_entry(None, "tok".into());
+        let round = RoundToken::new(&entry.agent.cancel);
+        // Simulate a round in flight: publish the round token into the slot.
+        *entry.agent.round_cancel.lock().unwrap() = Some(round.clone());
+
+        // Mirror `interrupt_agent`'s logic: cancel the slot's token, not the lifecycle.
+        if let Some(rc) = entry.agent.round_cancel.lock().unwrap().clone() {
+            rc.cancel();
+        }
+
+        assert!(
+            round.handle().is_cancelled(),
+            "round token cancelled by interrupt"
+        );
+        assert!(
+            !entry.agent.cancel.is_cancelled(),
+            "lifecycle token must NOT be cancelled by interrupt"
+        );
+    }
+
+    /// With no round in flight the slot is `None`, so interrupt is a clean no-op.
+    #[tokio::test]
+    async fn interrupt_when_idle_is_noop() {
+        let entry = make_entry(None, "tok".into());
+        assert!(entry.agent.round_cancel.lock().unwrap().is_none());
+
+        if let Some(rc) = entry.agent.round_cancel.lock().unwrap().clone() {
+            rc.cancel();
+        }
+
+        assert!(!entry.agent.cancel.is_cancelled());
+        assert!(entry.agent.round_cancel.lock().unwrap().is_none());
     }
 
     // -- Registry consistency: agents + token_index + subagent_ids stay in sync --

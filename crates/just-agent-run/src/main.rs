@@ -342,6 +342,16 @@ where
                     assistant,
                 };
             }
+            // The round was interrupted; the daemon-side agent stays alive, but this
+            // one-shot run will not produce a `Finished`. Treat like Cancelled.
+            SseEvent::Interrupted => {
+                end_reasoning(&mut in_reasoning);
+                eprintln!("interrupted");
+                return Outcome {
+                    exit: RunExit::Cancelled,
+                    assistant,
+                };
+            }
             SseEvent::TokenBudgetExceeded { consumed, budget } => {
                 end_reasoning(&mut in_reasoning);
                 eprintln!("token budget exceeded (consumed: {consumed}, budget: {budget})");

@@ -19,20 +19,24 @@ use crate::state::SharedState;
 /// # Lifecycle
 ///
 /// The bridge owns the agent's event-stream receiver and exits when that stream
-/// ends — i.e. when the agent task drops its sender. This **channel-closed** path
-/// is the primary exit and covers per-agent cancellation (delete / interrupt):
-/// cancelling the agent makes its task persist, emit its terminal `Cancelled`
-/// event, then return and drop the sender — so the bridge forwards that final
-/// event and then observes `recv() == None` and exits, all in milliseconds.
+/// ends — i.e. when the agent task drops its sender. The channel closes only on a
+/// **lifecycle** end: `delete`, daemon shutdown, or a task panic. The agent task
+/// emits its terminal `Cancelled` event on the way out, the bridge forwards it,
+/// then observes `recv() == None` and exits.
+///
+/// **Interrupt** does *not* close the channel: it cancels only the current round
+/// token, so the task aborts the round, emits `Interrupted`, and returns to its
+/// outer loop — the bridge forwards `Interrupted` (setting state `IDLE`) and keeps
+/// looping. The agent is still alive.
 ///
 /// The `cancel` token is a secondary, *forced* exit for daemon-wide shutdown: it
 /// preempts the bridge even if the agent task is mid-operation. It is the
 /// daemon-wide parent token, **not** the agent's child, deliberately. The bridge
 /// must outlive the agent task's terminal `Cancelled` emit so it can forward it;
-/// if the bridge watched the child token its cancel arm would fire the instant
-/// per-agent cancellation is signalled — before the agent task has emitted
-/// `Cancelled` — and that terminal event would be lost. Keying the bridge off the
-/// channel (not the child token) is precisely what preserves it. See
+/// if the bridge watched the child token its cancel arm would fire the instant a
+/// per-agent cancel is signalled — before the agent task has emitted `Cancelled` —
+/// and that terminal event would be lost. Keying the bridge off the channel (not
+/// the child token) is precisely what preserves it. See
 /// `bridge_delivers_terminal_cancelled_before_exit`.
 pub async fn bridge_task(
     agent_id: AgentId,
@@ -68,6 +72,7 @@ pub async fn bridge_task(
                             | AgentEvent::MaxRoundsExceeded
                             | AgentEvent::Error(_)
                             | AgentEvent::Cancelled
+                            | AgentEvent::Interrupted
                             | AgentEvent::TokenBudgetExceeded { .. } => {
                                 state.store(AgentState::IDLE, Ordering::Relaxed)
                             }
@@ -143,6 +148,7 @@ fn convert_event(event: AgentEvent) -> Option<SseEvent> {
             delay_secs,
         }),
         AgentEvent::Cancelled => Some(SseEvent::Cancelled),
+        AgentEvent::Interrupted => Some(SseEvent::Interrupted),
         AgentEvent::TokenBudgetExceeded { consumed, budget } => {
             Some(SseEvent::TokenBudgetExceeded { consumed, budget })
         }
@@ -436,6 +442,52 @@ mod tests {
             }
         }
         assert!(saw_cancelled, "terminal Cancelled event was not delivered");
+    }
+
+    /// On `AgentEvent::Interrupted` the bridge sets state IDLE and **stays alive** —
+    /// `Interrupted` is non-terminal: the bridge forwards it, sets state IDLE, and keeps
+    /// looping — proven by it then forwarding a subsequent `Finished` on the same channel.
+    #[tokio::test]
+    async fn bridge_interrupted_keeps_looping() {
+        let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+        let (events_tx, mut events_rx) = broadcast::channel::<SseEvent>(16);
+        let cancel = CancellationToken::new();
+        let state = Arc::new(AtomicU8::new(AgentState::BUSY));
+
+        let _bridge = tokio::spawn(super::bridge_task(
+            AgentId::random(),
+            agent_rx,
+            events_tx,
+            cancel,
+            state.clone(),
+            make_state(),
+        ));
+
+        agent_tx.send(AgentEvent::Interrupted).await.unwrap();
+        agent_tx
+            .send(AgentEvent::Finished("done".into()))
+            .await
+            .unwrap();
+
+        // Drain forwarded events until both are seen (the bridge looped past Interrupted).
+        let mut saw_interrupted = false;
+        let mut saw_finished = false;
+        while !(saw_interrupted && saw_finished) {
+            match tokio::time::timeout(Duration::from_millis(200), events_rx.recv()).await {
+                Ok(Ok(SseEvent::Interrupted)) => saw_interrupted = true,
+                Ok(Ok(SseEvent::Finished { .. })) => saw_finished = true,
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => break, // channel closed
+                Err(_) => break,     // timeout
+            }
+        }
+        assert!(saw_interrupted, "Interrupted was not forwarded");
+        assert!(
+            saw_finished,
+            "Finished was not forwarded — bridge did not keep looping after Interrupted"
+        );
+        assert_eq!(state.load(Ordering::Relaxed), AgentState::IDLE);
+        drop(agent_tx);
     }
 
     #[tokio::test]

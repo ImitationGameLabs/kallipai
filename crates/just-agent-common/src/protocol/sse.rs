@@ -49,6 +49,9 @@ pub enum SseEvent {
         delay_secs: f64,
     },
     Cancelled,
+    /// The current round was interrupted; the agent stays alive and idle, ready for the
+    /// next prompt. Distinct from `Cancelled`, which is terminal (delete/shutdown).
+    Interrupted,
     TokenBudgetExceeded {
         consumed: u64,
         budget: u64,

@@ -111,6 +111,14 @@ impl App {
                 self.streaming_reasoning = false;
                 self.auto_scroll = true;
             }
+            SseEvent::Interrupted => {
+                self.chat_lines
+                    .push(ChatLine::System("Operation interrupted".into()));
+                self.agent_busy = false;
+                self.streaming_content = false;
+                self.streaming_reasoning = false;
+                self.auto_scroll = true;
+            }
             SseEvent::TokenBudgetExceeded { consumed, budget } => {
                 self.chat_lines.push(ChatLine::Error(format!(
                     "Token budget exceeded: {} / {}",

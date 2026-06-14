@@ -71,6 +71,10 @@ impl SpawnArgs {
 pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
     let cancel = args.shutdown_cancel.child_token();
     let notify = Arc::new(Notify::new());
+    // Round-scoped interrupt slot: `Some` only while a round runs. Shared with the agent
+    // task so `interrupt_agent` can cancel the current round without terminating the task.
+    let round_cancel: Arc<std::sync::Mutex<Option<just_agent_runtime::agent_task::RoundToken>>> =
+        Arc::new(std::sync::Mutex::new(None));
 
     let client = {
         let meta = meta_skill_content();
@@ -111,6 +115,7 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
         agent_dir: Some(args.agent_dir.clone()),
         history: Some(HistoryWriter::new(args.agent_dir.clone())),
         cancel: cancel.clone(),
+        round_cancel: round_cancel.clone(),
         notify: notify.clone(),
         token_budget: token_budget.clone(),
     };
@@ -142,6 +147,7 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
         store: args.store,
         agent_dir: Some(args.agent_dir),
         cancel,
+        round_cancel,
         notify,
         state,
         auth_token: args.auth_token,
@@ -414,12 +420,29 @@ pub async fn interrupt_agent(
     auth: crate::auth::AuthIdentity,
     Path(id): Path<AgentId>,
 ) -> Result<StatusCode, ApiError> {
-    let registry = state.registry.read().await;
-    registry.require_superior(auth.identity(), &id)?;
-    let Some(entry) = registry.get(&id) else {
-        return Err(ApiError::not_found("agent not found"));
+    // Interrupt = cancel the current round only (the task stays alive and returns to its
+    // outer loop). Cancels the round token if a round is in flight; a clean no-op when the
+    // agent is idle (no round to abort). Distinct from `delete_agent`, which cancels the
+    // lifecycle token and terminates the task.
+    //
+    // Clone the shared slot Arc under the registry read-lock, then release it before
+    // touching the inner std Mutex — so the async registry guard is never held across the
+    // (sync) round-cancel lock.
+    let round_cancel = {
+        let registry = state.registry.read().await;
+        registry.require_superior(auth.identity(), &id)?;
+        let Some(entry) = registry.get(&id) else {
+            return Err(ApiError::not_found("agent not found"));
+        };
+        entry.agent.round_cancel.clone()
     };
-    entry.agent.cancel.cancel();
+    if let Some(round) = round_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        round.cancel();
+    }
     Ok(StatusCode::ACCEPTED)
 }
 

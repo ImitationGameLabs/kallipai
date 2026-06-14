@@ -164,8 +164,9 @@ Status: `204 No Content`
 
 ### `POST /agents/{id}/interrupt` — Interrupt agent
 
-Sends a graceful cancellation signal to the agent. The agent persists its state
-and stops processing. Use `DELETE` to remove the agent entirely.
+Aborts the agent's current round: the agent stays alive and returns to idle, ready
+for the next prompt. If the agent is already idle this is a no-op. Use `DELETE` to
+remove the agent entirely.
 
 Auth: operator or superior. See [auth.md](auth.md).
 
@@ -772,15 +773,20 @@ data: {"type":"assistantContentDelta","delta":"Hello, "}
 | `toolCall`   | `name: string, args: string` | Tool invocation       |
 | `toolResult` | `result: string`             | Tool execution result |
 
-### Terminal events
+### Round-outcome events
 
-| `type`                | Fields                       | Description                          |
-| --------------------- | ---------------------------- | ------------------------------------ |
-| `finished`            | `content: string`            | Agent completed successfully         |
-| `maxRoundsExceeded`   | _(none)_                     | Hit the max tool rounds limit        |
-| `error`               | `message: string`            | Unrecoverable error                  |
-| `cancelled`           | _(none)_                     | Agent was interrupted                |
-| `tokenBudgetExceeded` | `consumed: u64, budget: u64` | Token budget exhausted — agent stops |
+These signal the end of the current assistant turn. Except for `cancelled`, the agent
+**stays alive** and returns to idle — more events will follow on the next prompt. Only
+`cancelled` (a lifecycle cancel from delete / daemon shutdown) ends the stream.
+
+| `type`                | Fields                       | Description                                                 |
+| --------------------- | ---------------------------- | ----------------------------------------------------------- |
+| `finished`            | `content: string`            | Agent completed the turn successfully                       |
+| `maxRoundsExceeded`   | _(none)_                     | Hit the max tool rounds limit for this turn                 |
+| `error`               | `message: string`            | Turn failed with an error; agent stays alive                |
+| `interrupted`         | _(none)_                     | Round aborted via interrupt; agent stays alive and idle     |
+| `tokenBudgetExceeded` | `consumed: u64, budget: u64` | Token budget hit; agent stays idle until the budget is raised |
+| `cancelled`           | _(none)_                     | Lifecycle cancel (delete / shutdown) — agent stops, stream ends |
 
 ### State and notifications
 

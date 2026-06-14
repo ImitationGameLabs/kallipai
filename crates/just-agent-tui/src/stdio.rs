@@ -187,6 +187,10 @@ fn handle_sse_event(event: SseEvent, busy: &mut bool) {
             eprintln!("[cancelled]");
             *busy = false;
         }
+        SseEvent::Interrupted => {
+            eprintln!("[interrupted]");
+            *busy = false;
+        }
         SseEvent::TokenBudgetExceeded { consumed, budget } => {
             eprintln!(
                 "[token-budget-exceeded] consumed {} of {}",
