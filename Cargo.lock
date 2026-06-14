@@ -1332,6 +1332,8 @@ dependencies = [
  "futures-util",
  "just-agent-client",
  "just-agent-common",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

@@ -12,3 +12,5 @@ just-agent-common = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
