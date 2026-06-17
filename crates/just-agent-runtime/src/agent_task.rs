@@ -169,7 +169,7 @@ pub async fn agent_task(
     agent_tx: tokio::sync::mpsc::Sender<AgentEvent>,
 ) {
     // Pre-loop compaction: handle context overflow from restored agents.
-    if let Err(e) = runner::compact_if_needed(&ctx).await {
+    if let Err(e) = crate::context::compact_if_needed(&ctx).await {
         tracing::warn!("pre-loop compaction failed: {e:#}");
     }
 

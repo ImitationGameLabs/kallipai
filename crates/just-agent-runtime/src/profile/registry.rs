@@ -91,28 +91,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    /// Test-only [`BackendSource`] backed by a static map.
-    struct MapSource(HashMap<String, Arc<dyn LlmBackend>>);
-    impl BackendSource for MapSource {
-        fn get(&self, endpoint_id: &str) -> Result<Arc<dyn LlmBackend>> {
-            self.0
-                .get(endpoint_id)
-                .cloned()
-                .with_context(|| format!("unknown endpoint '{endpoint_id}'"))
-        }
-    }
-
-    /// A real DeepSeek backend for fixtures — network-free construction via `LlmBackend::new`.
-    /// The runtime never constructs backends in production; tests build one upstream-style.
-    fn ds_backend() -> Arc<dyn LlmBackend> {
-        use just_llm_client::LlmBackend;
-        just_llm_client::provider::DeepSeekBackend::new(
-            reqwest::Client::builder().use_rustls_tls(),
-            "fake",
-            None,
-        )
-        .expect("deepseek backend constructs without network")
-    }
+    use crate::test_support::{MapSource, ds_backend};
 
     /// A single tier whose active profile uses the "ds" endpoint + `deepseek-test` model.
     fn single_tier_registry() -> ProfileRegistry {

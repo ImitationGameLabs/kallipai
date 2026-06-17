@@ -1,38 +1,35 @@
 //! Agent round execution loop.
+//!
+//! Owns the per-round orchestration: drain interjections, gate the context budget, acquire the
+//! LLM stream (with within-tier failover), consume it, and execute tool calls. The context-budget
+//! primitives (estimation, warning injection, compaction) live in [`crate::context`]; the
+//! [`crate::failover::FailoverState`] state machine and the low-level [`ToolCallAccumulator`] are
+//! kept pure in their own modules — this module only drives them.
 
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Error, Result, bail};
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::agent_task::AgentContext;
 use crate::approval::format_approval_notifications;
-use crate::context::{AgenticContext, compose_context};
+use crate::context::{
+    CompactOutcome, check_progressive_warnings, check_token_budget_warnings, compose_context,
+    estimate_context_tokens, summarize_and_evict,
+};
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::failover::FailoverOutcome;
+use crate::stream_accumulator::ToolCallAccumulator;
+use just_agent_common::protocol::FailoverChainExhaustion;
 use just_llm_client::types::chat::{
     ChatMessage, ChatToolCall, StreamOptions, ToolCallsMessage, ToolChoice, ToolChoiceMode,
     ToolDefinition,
 };
 
-use crate::stream_accumulator::ToolCallAccumulator;
-use just_agent_common::protocol::FailoverChainExhaustion;
-use just_agent_common::tokens::format_tokens_m;
-
-/// Outcome of context compaction via [`summarize_and_evict`].
-pub(crate) enum CompactOutcome {
-    /// Some turns were summarized and evicted.
-    Compacted,
-    /// No turns to compact (context already within budget).
-    NothingToCompact,
-    /// Token budget exceeded during summarization.
-    BudgetExceeded { consumed: u64, budget: u64 },
-}
-
 // ---------------------------------------------------------------------------
-// Stream consumption types
+// Stream consumption
 // ---------------------------------------------------------------------------
 
 /// Outcome of consuming an LLM response stream.
@@ -122,11 +119,44 @@ async fn consume_stream(
 }
 
 // ---------------------------------------------------------------------------
+// Round-loop control-flow signals
+// ---------------------------------------------------------------------------
+
+/// A budget-gate phase's verdict on whether the round loop should proceed. Makes a phase's
+/// early-exit contract (`continue` / `return`) explicit at the call site.
+enum BudgetAction {
+    /// Re-compose context and re-enter the loop (a warning was injected or context was compacted).
+    Recompose,
+    /// Exit the loop with this terminal outcome.
+    Return(AgentOutcome),
+    /// Fall through to the next phase.
+    Proceed,
+}
+
+/// Outcome of the within-tier failover acquisition loop.
+enum AcquireResult {
+    /// A live stream was acquired — proceed to consume it.
+    Stream(just_llm_client::ChatCompletionStream),
+    /// A terminal round outcome (chain exhausted / cancelled / budget exceeded).
+    Outcome(AgentOutcome),
+    /// A request-level error — the round errors.
+    Error(Error),
+}
+
+/// Outcome of executing the assistant's tool calls.
+enum ToolExecResult {
+    /// The assembled turn messages (the assistant tool-call message + tool results).
+    Messages(Vec<ChatMessage>),
+    /// Cancelled mid-execution; partial results are dropped (mirrors the original early-return).
+    Cancelled,
+}
+
+// ---------------------------------------------------------------------------
 // Agent round loop
 // ---------------------------------------------------------------------------
 
 /// Run the agent round loop until completion or max rounds.
-pub async fn run_agent_rounds(
+pub(crate) async fn run_agent_rounds(
     ctx: &mut AgentContext,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
@@ -134,23 +164,8 @@ pub async fn run_agent_rounds(
 ) -> Result<AgentOutcome> {
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
 
-    for _round in 0..ctx.config.max_tool_rounds {
-        // -- Interjection draining: consume queued prompts/commands --
-        {
-            let mut interjected = Vec::new();
-            while let Ok(text) = prompt_rx.try_recv() {
-                interjected.push(text);
-            }
-            if !interjected.is_empty() {
-                let msg = interjected
-                    .iter()
-                    .map(|t| format!("[Interjected message]\n{t}\n[/Interjected message]"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                ctx.record_turn(vec![ChatMessage::user(&msg)]).await;
-                info!(count = interjected.len(), "injected interjected messages");
-            }
-        }
+    for round in 0..ctx.config.max_tool_rounds {
+        drain_interjections(ctx, prompt_rx).await;
 
         // -- Pre-call token budget check (shared tree-wide counter) --
         let snap = ctx.token_budget.snapshot();
@@ -168,15 +183,9 @@ pub async fn run_agent_rounds(
             ctx.record_turn(vec![ChatMessage::user(&msg)]).await;
         }
 
-        // -- Context composition and LLM request --
-        let mut messages = compose_context(ctx.store.clone()).await;
+        // -- Context composition and token estimation --
+        let messages = compose_context(ctx.store.clone()).await;
         let tools = ctx.store.lock().await.tool_definitions().to_vec();
-
-        // -- Token budget check --
-        // Incremental when possible (anchored to the last response's authoritative
-        // `last_prompt_tokens` + the delta since), full otherwise. No throwaway request is built
-        // here: the estimator takes the composed messages/tools/system prompt directly. The SEND
-        // request is built per profile inside the failover loop below.
         let prompt_tokens = {
             let system_prompt = ctx.client.system_prompt().map(str::to_owned);
             let estimate = estimate_context_tokens(
@@ -198,173 +207,18 @@ pub async fn run_agent_rounds(
             }
         };
 
-        if prompt_tokens > 0 {
-            let effective_budget = ctx.config.effective_budget();
-            let usage_pct = prompt_tokens * 100 / effective_budget;
-
-            // Phase 1: Progressive warnings.
-            if check_progressive_warnings(ctx, usage_pct, effective_budget).await {
-                continue;
-            }
-
-            // Phase 2: Auto-compact at the highest threshold.
-            let auto_threshold = ctx.config.auto_compact_threshold() as usize;
-            if usage_pct >= auto_threshold {
-                info!(
-                    prompt_tokens,
-                    context_window = ctx.config.context_window_tokens,
-                    "context exceeds budget"
-                );
-                match summarize_and_evict(ctx).await {
-                    Ok(CompactOutcome::Compacted) => continue,
-                    Ok(CompactOutcome::NothingToCompact) => {} // fall through
-                    Ok(CompactOutcome::BudgetExceeded { consumed, budget }) => {
-                        return Ok(AgentOutcome::TokenBudgetExceeded { consumed, budget });
-                    }
-                    Err(e) => warn!("summarize_and_evict failed: {e:#}"),
-                }
-                if round_cancel.is_cancelled() {
-                    return Ok(AgentOutcome::Cancelled);
-                }
-            }
+        match enforce_pre_call_budget(ctx, prompt_tokens, round_cancel).await {
+            BudgetAction::Recompose => continue,
+            BudgetAction::Return(outcome) => return Ok(outcome),
+            BudgetAction::Proceed => {}
         }
 
-        // -- Within-tier failover loop --
-        // The request is rebuilt per profile (each profile has its own model + endpoint). On a
-        // `Failover` outcome (endpoint-level failure, or transient retries exhausted) the runner
-        // advances to the next profile in the tier, rebuilds the client, and retries the same
-        // turn. On `Fatal` (request-level) it errors the round. `profile_idx` only moves forward
-        // and sticks for the agent's lifetime (resets to 0 on spawn/restore).
-        let mut retry_records = Vec::new();
-        let stream = loop {
-            let endpoint_id = ctx.failover.current_profile().endpoint.clone();
-            // Per-endpoint retry budget: rate limits are endpoint-scoped, so only this endpoint's
-            // recent retries (within retry_timeout, across rounds) count. Two profiles sharing one
-            // endpoint share one budget — so after advancing, a successor on the same endpoint
-            // counts its predecessor's in-window retries too (correct: both draw on the same rate-
-            // limit quota).
-            let prior_retries = {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let window_secs = ctx.config.retry_policy.retry_timeout.as_secs();
-                ctx.store
-                    .lock()
-                    .await
-                    .retry_log
-                    .iter()
-                    .filter(|r| {
-                        r.endpoint.as_deref() == Some(endpoint_id.as_str())
-                            && r.timestamp + window_secs > now
-                    })
-                    .count() as u32
-            };
-            let request = ctx
-                .client
-                .create_request(messages.clone())
-                .with_tools(tools.clone())
-                .with_tool_choice(ToolChoice::Mode(ToolChoiceMode::Auto));
-            let mut request = request;
-            request.stream = Some(true);
-            request.stream_options = Some(StreamOptions {
-                include_usage: Some(true),
-            });
-
-            let result = {
-                let fut = crate::retry::stream_with_retry(
-                    crate::retry::RetryCall {
-                        client: &ctx.client,
-                        request,
-                        policy: &ctx.config.retry_policy,
-                        round: _round,
-                        prior_retries,
-                        endpoint_id: &endpoint_id,
-                    },
-                    tx,
-                    &mut retry_records,
-                    round_cancel.clone(),
-                );
-                tokio::select! {
-                    result = fut => result,
-                    _ = round_cancel.cancelled() => {
-                        if !retry_records.is_empty() {
-                            ctx.store.lock().await.retry_log.extend(retry_records);
-                            ctx.persist().await;
-                        }
-                        return Ok(AgentOutcome::Cancelled);
-                    }
-                }
-            };
-            match result {
-                Ok(stream) => break stream,
-                Err(crate::retry::RequestFailure::Fatal(e)) => {
-                    if !retry_records.is_empty() {
-                        ctx.store.lock().await.retry_log.extend(retry_records);
-                        ctx.persist().await;
-                    }
-                    return Err(e.into());
-                }
-                Err(crate::retry::RequestFailure::Failover(e)) => {
-                    // Flush this endpoint's retries (tagged with its endpoint id for per-endpoint
-                    // budget scoping) before advancing.
-                    if !retry_records.is_empty() {
-                        ctx.store
-                            .lock()
-                            .await
-                            .retry_log
-                            .extend(std::mem::take(&mut retry_records));
-                        ctx.persist().await;
-                    }
-                    // Capture the trigger reason before `e` moves into advance_failover.
-                    let reason = format!("{e:#}");
-                    match advance_failover(ctx, messages, e.into(), round_cancel).await {
-                        FailoverOutcome::Advanced {
-                            from,
-                            to,
-                            messages: new_messages,
-                        } => {
-                            messages = new_messages;
-                            // Under skip, `from`→`to` may jump over unbuildable intermediates;
-                            // those are warned inside advance_failover (not surfaced here).
-                            info!(
-                                from = %from, to = %to, reason = %reason,
-                                "within-tier failover"
-                            );
-                            tx.send(AgentEvent::Failover { from, to, reason })
-                                .await
-                                .ok();
-                        }
-                        FailoverOutcome::ChainExhausted { reason, trigger } => {
-                            // Chain exhaustion is a defined round-end (sibling of
-                            // MaxRoundsExceeded), surfaced as a distinguishable terminal outcome
-                            // rather than a generic `Err`. `run_and_report` emits the event.
-                            return Ok(AgentOutcome::FailoverChainExhausted {
-                                reason,
-                                detail: format!("{trigger:#}"),
-                            });
-                        }
-                        FailoverOutcome::Cancelled => return Ok(AgentOutcome::Cancelled),
-                        FailoverOutcome::BudgetExceeded { consumed, budget } => {
-                            return Ok(AgentOutcome::TokenBudgetExceeded { consumed, budget });
-                        }
-                    }
-                }
-                Err(crate::retry::RequestFailure::Cancelled) => {
-                    // Cancel surfaced from within a retry backoff — flush this endpoint's
-                    // retries and short-circuit to a cancelled round. Mirrors the Fatal arm's flush.
-                    if !retry_records.is_empty() {
-                        ctx.store.lock().await.retry_log.extend(retry_records);
-                        ctx.persist().await;
-                    }
-                    return Ok(AgentOutcome::Cancelled);
-                }
-            }
+        // -- Within-tier failover acquisition --
+        let stream = match acquire_stream(ctx, messages, tools, tx, round_cancel, round).await {
+            AcquireResult::Stream(s) => s,
+            AcquireResult::Outcome(outcome) => return Ok(outcome),
+            AcquireResult::Error(e) => return Err(e),
         };
-        if !retry_records.is_empty() {
-            ctx.store.lock().await.retry_log.extend(retry_records);
-            ctx.persist().await;
-        }
 
         // -- Stream consumption --
         let consumed = match consume_stream(stream, tx, round_cancel).await {
@@ -372,29 +226,13 @@ pub async fn run_agent_rounds(
             StreamOutcome::Completed(c) => c,
         };
 
-        // -- Post-stream: usage accumulation and token budget check --
-        if let Some(usage) = consumed.usage {
-            ctx.store.lock().await.accumulate_usage(&usage);
-            ctx.token_budget
-                .record_usage(usage.prompt_tokens as u64, usage.completion_tokens as u64);
+        match enforce_post_stream_budget(ctx, consumed.usage.as_ref()).await {
+            BudgetAction::Recompose => continue,
+            BudgetAction::Return(outcome) => return Ok(outcome),
+            BudgetAction::Proceed => {}
         }
 
-        // Reload budget — the operator may have increased it via API mid-round.
-        let snap = ctx.token_budget.snapshot();
-
-        // Token budget warning injection (before exhaustion check).
-        if check_token_budget_warnings(ctx, &snap).await {
-            continue;
-        }
-
-        // Token budget exhaustion check (shared tree-wide counter).
-        if snap.is_exceeded() {
-            return Ok(AgentOutcome::TokenBudgetExceeded {
-                consumed: snap.consumed,
-                budget: snap.budget,
-            });
-        }
-
+        // -- Finished? --
         if consumed.tool_calls.is_empty() {
             if !consumed.content.is_empty() {
                 return Ok(AgentOutcome::Finished {
@@ -404,89 +242,363 @@ pub async fn run_agent_rounds(
             bail!("assistant returned neither tool calls nor final content");
         }
 
-        // -- Tool execution loop --
-        let mut turn_messages = vec![ChatMessage::ToolCalls(ToolCallsMessage {
-            role: "assistant".into(),
-            content: if consumed.content.is_empty() {
-                None
-            } else {
-                Some(consumed.content)
-            },
-            name: None,
-            tool_calls: consumed.tool_calls.clone(),
-            reasoning_content: if consumed.reasoning.is_empty() {
-                None
-            } else {
-                Some(consumed.reasoning)
-            },
-        })];
-
-        for call in consumed.tool_calls {
-            tx.send(AgentEvent::ToolCall {
-                name: call.function.name.clone(),
-                args: call.function.arguments.clone(),
-            })
-            .await
-            .ok();
-            let result = {
-                let tool_fut = tokio::time::timeout(
-                    tool_timeout,
-                    ctx.executor
-                        .execute(&call.function.name, &call.function.arguments),
-                );
-                tokio::select! {
-                    result = tool_fut => match result {
-                        Ok(output) => output,
-                        Err(_) => format!(
-                            "tool '{}' timed out after {}s",
-                            call.function.name,
-                            tool_timeout.as_secs()
-                        ),
-                    },
-                    _ = round_cancel.cancelled() => {
-                        tracing::info!(tool = %call.function.name, "tool execution cancelled");
-                        return Ok(AgentOutcome::Cancelled);
-                    }
-                }
+        // -- Tool execution --
+        let turn_messages =
+            match execute_tool_calls(ctx, tx, consumed, tool_timeout, round_cancel).await {
+                ToolExecResult::Cancelled => return Ok(AgentOutcome::Cancelled),
+                ToolExecResult::Messages(msgs) => msgs,
             };
-
-            // Check approval state transitions (single lock acquisition).
-            let (committed, redeemed, cancelled) = {
-                let mut d = ctx.approvals.lock().await;
-                (
-                    d.take_last_committed(),
-                    d.take_last_redeemed(),
-                    d.take_last_cancelled(),
-                )
-            };
-            if let Some(info) = committed {
-                let arguments =
-                    serde_json::from_str(&info.args_json).unwrap_or(serde_json::Value::Null);
-                tx.send(AgentEvent::ApprovalCommitted {
-                    id: info.id,
-                    tool_name: info.tool_name,
-                    arguments,
-                    commit_reason: info.commit_reason,
-                })
-                .await
-                .ok();
-            }
-            if let Some(id) = redeemed {
-                tx.send(AgentEvent::ApprovalRedeemed { id }).await.ok();
-            }
-            if let Some(id) = cancelled {
-                tx.send(AgentEvent::ApprovalCancelled { id }).await.ok();
-            }
-
-            tx.send(AgentEvent::ToolResult(result.clone())).await.ok();
-            turn_messages.push(ChatMessage::tool_result(result, call.id));
-        }
 
         ctx.record_turn(turn_messages).await;
         ctx.persist().await;
     }
 
     Ok(AgentOutcome::MaxRoundsExceeded)
+}
+
+/// Consume queued interjections (prompts/commands) and record them as a single turn.
+async fn drain_interjections(
+    ctx: &mut AgentContext,
+    prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
+) {
+    let mut interjected = Vec::new();
+    while let Ok(text) = prompt_rx.try_recv() {
+        interjected.push(text);
+    }
+    if !interjected.is_empty() {
+        let msg = interjected
+            .iter()
+            .map(|t| format!("[Interjected message]\n{t}\n[/Interjected message]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ctx.record_turn(vec![ChatMessage::user(&msg)]).await;
+        info!(count = interjected.len(), "injected interjected messages");
+    }
+}
+
+/// Progressive-warning + auto-compact gate run before the LLM request. `Recompose` when a warning
+/// was injected or context was compacted (the loop re-composes); `Return` on budget exhaustion or
+/// a raced-in cancel; `Proceed` to send the request.
+async fn enforce_pre_call_budget(
+    ctx: &mut AgentContext,
+    prompt_tokens: usize,
+    round_cancel: &CancellationToken,
+) -> BudgetAction {
+    if prompt_tokens == 0 {
+        return BudgetAction::Proceed;
+    }
+    let effective_budget = ctx.config.effective_budget();
+    let usage_pct = prompt_tokens * 100 / effective_budget;
+
+    // Phase 1: Progressive warnings.
+    if check_progressive_warnings(ctx, usage_pct, effective_budget).await {
+        return BudgetAction::Recompose;
+    }
+
+    // Phase 2: Auto-compact at the highest threshold.
+    let auto_threshold = ctx.config.auto_compact_threshold() as usize;
+    if usage_pct >= auto_threshold {
+        info!(
+            prompt_tokens,
+            context_window = ctx.config.context_window_tokens,
+            "context exceeds budget"
+        );
+        match summarize_and_evict(ctx).await {
+            Ok(CompactOutcome::Compacted) => return BudgetAction::Recompose,
+            Ok(CompactOutcome::NothingToCompact) => {} // fall through
+            Ok(CompactOutcome::BudgetExceeded { consumed, budget }) => {
+                return BudgetAction::Return(AgentOutcome::TokenBudgetExceeded {
+                    consumed,
+                    budget,
+                });
+            }
+            Err(e) => warn!("summarize_and_evict failed: {e:#}"),
+        }
+        if round_cancel.is_cancelled() {
+            return BudgetAction::Return(AgentOutcome::Cancelled);
+        }
+    }
+
+    BudgetAction::Proceed
+}
+
+/// Within-tier failover acquisition: rebuild the request per profile, retry, and on a `Failover`
+/// outcome advance the chain. Self-contained — owns `retry_records` and flushes them on every
+/// early-exit arm and after a successful break.
+///
+/// On `Failover` (endpoint-level failure, or transient retries exhausted) the runner advances to
+/// the next profile in the tier, rebuilds the client, and retries the same turn. On `Fatal`
+/// (request-level) it errors the round. `profile_idx` only moves forward and sticks for the
+/// agent's lifetime (resets to 0 on spawn/restore). The inner `tokio::select!` cancel arm stays
+/// inside this function so a cancel during the retry backoff flushes and short-circuits here.
+async fn acquire_stream(
+    ctx: &mut AgentContext,
+    mut messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    round_cancel: &CancellationToken,
+    round: usize,
+) -> AcquireResult {
+    let mut retry_records = Vec::new();
+    let stream = loop {
+        let endpoint_id = ctx.failover.current_profile().endpoint.clone();
+        // Per-endpoint retry budget: rate limits are endpoint-scoped, so only this endpoint's
+        // recent retries (within retry_timeout, across rounds) count. Two profiles sharing one
+        // endpoint share one budget — so after advancing, a successor on the same endpoint
+        // counts its predecessor's in-window retries too (correct: both draw on the same rate-
+        // limit quota).
+        let prior_retries = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let window_secs = ctx.config.retry_policy.retry_timeout.as_secs();
+            ctx.store
+                .lock()
+                .await
+                .retry_log
+                .iter()
+                .filter(|r| {
+                    r.endpoint.as_deref() == Some(endpoint_id.as_str())
+                        && r.timestamp + window_secs > now
+                })
+                .count() as u32
+        };
+        let request = ctx
+            .client
+            .create_request(messages.clone())
+            .with_tools(tools.clone())
+            .with_tool_choice(ToolChoice::Mode(ToolChoiceMode::Auto));
+        let mut request = request;
+        request.stream = Some(true);
+        request.stream_options = Some(StreamOptions {
+            include_usage: Some(true),
+        });
+
+        let result = {
+            let fut = crate::retry::stream_with_retry(
+                crate::retry::RetryCall {
+                    client: &ctx.client,
+                    request,
+                    policy: &ctx.config.retry_policy,
+                    round,
+                    prior_retries,
+                    endpoint_id: &endpoint_id,
+                },
+                tx,
+                &mut retry_records,
+                round_cancel.clone(),
+            );
+            tokio::select! {
+                result = fut => result,
+                _ = round_cancel.cancelled() => {
+                    if !retry_records.is_empty() {
+                        ctx.store.lock().await.retry_log.extend(retry_records);
+                        ctx.persist().await;
+                    }
+                    return AcquireResult::Outcome(AgentOutcome::Cancelled);
+                }
+            }
+        };
+        match result {
+            Ok(stream) => break stream,
+            Err(crate::retry::RequestFailure::Fatal(e)) => {
+                if !retry_records.is_empty() {
+                    ctx.store.lock().await.retry_log.extend(retry_records);
+                    ctx.persist().await;
+                }
+                return AcquireResult::Error(e.into());
+            }
+            Err(crate::retry::RequestFailure::Failover(e)) => {
+                // Flush this endpoint's retries (tagged with its endpoint id for per-endpoint
+                // budget scoping) before advancing.
+                if !retry_records.is_empty() {
+                    ctx.store
+                        .lock()
+                        .await
+                        .retry_log
+                        .extend(std::mem::take(&mut retry_records));
+                    ctx.persist().await;
+                }
+                // Capture the trigger reason before `e` moves into advance_failover.
+                let reason = format!("{e:#}");
+                match advance_failover(ctx, messages, e.into(), round_cancel).await {
+                    FailoverOutcome::Advanced {
+                        from,
+                        to,
+                        messages: new_messages,
+                    } => {
+                        messages = new_messages;
+                        // Under skip, `from`→`to` may jump over unbuildable intermediates;
+                        // those are warned inside advance_failover (not surfaced here).
+                        info!(
+                            from = %from, to = %to, reason = %reason,
+                            "within-tier failover"
+                        );
+                        tx.send(AgentEvent::Failover { from, to, reason })
+                            .await
+                            .ok();
+                    }
+                    FailoverOutcome::ChainExhausted { reason, trigger } => {
+                        // Chain exhaustion is a defined round-end (sibling of
+                        // MaxRoundsExceeded), surfaced as a distinguishable terminal outcome
+                        // rather than a generic `Err`. `run_and_report` emits the event.
+                        return AcquireResult::Outcome(AgentOutcome::FailoverChainExhausted {
+                            reason,
+                            detail: format!("{trigger:#}"),
+                        });
+                    }
+                    FailoverOutcome::Cancelled => {
+                        return AcquireResult::Outcome(AgentOutcome::Cancelled);
+                    }
+                    FailoverOutcome::BudgetExceeded { consumed, budget } => {
+                        return AcquireResult::Outcome(AgentOutcome::TokenBudgetExceeded {
+                            consumed,
+                            budget,
+                        });
+                    }
+                }
+            }
+            Err(crate::retry::RequestFailure::Cancelled) => {
+                // Cancel surfaced from within a retry backoff — flush this endpoint's
+                // retries and short-circuit to a cancelled round. Mirrors the Fatal arm's flush.
+                if !retry_records.is_empty() {
+                    ctx.store.lock().await.retry_log.extend(retry_records);
+                    ctx.persist().await;
+                }
+                return AcquireResult::Outcome(AgentOutcome::Cancelled);
+            }
+        }
+    };
+    if !retry_records.is_empty() {
+        ctx.store.lock().await.retry_log.extend(retry_records);
+        ctx.persist().await;
+    }
+    AcquireResult::Stream(stream)
+}
+
+/// Post-stream budget gate: accumulate usage, inject budget warnings, and check exhaustion.
+/// `Recompose` when a warning was injected; `Return` on exhaustion; `Proceed` to handle tool calls.
+async fn enforce_post_stream_budget(
+    ctx: &mut AgentContext,
+    usage: Option<&just_llm_client::types::chat::Usage>,
+) -> BudgetAction {
+    if let Some(usage) = usage {
+        ctx.store.lock().await.accumulate_usage(usage);
+        ctx.token_budget
+            .record_usage(usage.prompt_tokens as u64, usage.completion_tokens as u64);
+    }
+
+    // Reload budget — the operator may have increased it via API mid-round.
+    let snap = ctx.token_budget.snapshot();
+
+    // Token budget warning injection (before exhaustion check).
+    if check_token_budget_warnings(ctx, &snap).await {
+        return BudgetAction::Recompose;
+    }
+
+    // Token budget exhaustion check (shared tree-wide counter).
+    if snap.is_exceeded() {
+        return BudgetAction::Return(AgentOutcome::TokenBudgetExceeded {
+            consumed: snap.consumed,
+            budget: snap.budget,
+        });
+    }
+
+    BudgetAction::Proceed
+}
+
+/// Execute the assistant's tool calls, emitting events and assembling the turn messages. On a
+/// mid-call cancel returns `Cancelled` *before* the approval-state drain (mirrors the original),
+/// dropping any partial results — the caller does not record the turn.
+///
+/// The assistant `ToolCalls` message clones `tool_calls` before the move-iterate loop consumes
+/// them, so both the recorded assistant turn and the per-call dispatch see the full set.
+async fn execute_tool_calls(
+    ctx: &mut AgentContext,
+    tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    consumed: StreamConsumed,
+    tool_timeout: Duration,
+    round_cancel: &CancellationToken,
+) -> ToolExecResult {
+    let mut turn_messages = vec![ChatMessage::ToolCalls(ToolCallsMessage {
+        role: "assistant".into(),
+        content: if consumed.content.is_empty() {
+            None
+        } else {
+            Some(consumed.content)
+        },
+        name: None,
+        tool_calls: consumed.tool_calls.clone(),
+        reasoning_content: if consumed.reasoning.is_empty() {
+            None
+        } else {
+            Some(consumed.reasoning)
+        },
+    })];
+
+    for call in consumed.tool_calls {
+        tx.send(AgentEvent::ToolCall {
+            name: call.function.name.clone(),
+            args: call.function.arguments.clone(),
+        })
+        .await
+        .ok();
+        let result = {
+            let tool_fut = tokio::time::timeout(
+                tool_timeout,
+                ctx.executor
+                    .execute(&call.function.name, &call.function.arguments),
+            );
+            tokio::select! {
+                result = tool_fut => match result {
+                    Ok(output) => output,
+                    Err(_) => format!(
+                        "tool '{}' timed out after {}s",
+                        call.function.name,
+                        tool_timeout.as_secs()
+                    ),
+                },
+                _ = round_cancel.cancelled() => {
+                    tracing::info!(tool = %call.function.name, "tool execution cancelled");
+                    return ToolExecResult::Cancelled;
+                }
+            }
+        };
+
+        // Check approval state transitions (single lock acquisition).
+        let (committed, redeemed, cancelled) = {
+            let mut d = ctx.approvals.lock().await;
+            (
+                d.take_last_committed(),
+                d.take_last_redeemed(),
+                d.take_last_cancelled(),
+            )
+        };
+        if let Some(info) = committed {
+            let arguments =
+                serde_json::from_str(&info.args_json).unwrap_or(serde_json::Value::Null);
+            tx.send(AgentEvent::ApprovalCommitted {
+                id: info.id,
+                tool_name: info.tool_name,
+                arguments,
+                commit_reason: info.commit_reason,
+            })
+            .await
+            .ok();
+        }
+        if let Some(id) = redeemed {
+            tx.send(AgentEvent::ApprovalRedeemed { id }).await.ok();
+        }
+        if let Some(id) = cancelled {
+            tx.send(AgentEvent::ApprovalCancelled { id }).await.ok();
+        }
+
+        tx.send(AgentEvent::ToolResult(result.clone())).await.ok();
+        turn_messages.push(ChatMessage::tool_result(result, call.id));
+    }
+
+    ToolExecResult::Messages(turn_messages)
 }
 
 // ---------------------------------------------------------------------------
@@ -512,7 +624,7 @@ pub async fn run_agent_rounds(
 /// an mpsc sender. `summarize_and_evict` has no internal cancel select, so a cancel fired *during*
 /// compaction completes it and returns `Advanced` (the cancel is observed on the next loop
 /// iteration); this is pre-existing behavior, inherited from the inline arm.
-pub(crate) async fn advance_failover(
+async fn advance_failover(
     ctx: &mut AgentContext,
     prior_messages: Vec<ChatMessage>,
     trigger: anyhow::Error,
@@ -633,469 +745,21 @@ async fn reapply_window(ctx: &mut AgentContext, from: &str) {
     store.mark_needs_full_estimate();
 }
 
-// ---------------------------------------------------------------------------
-// Token estimation
-// ---------------------------------------------------------------------------
-
-/// Estimate the prompt-token size of the next request.
-///
-/// **Incremental** (normal round, no prefix change since the last response): the authoritative
-/// `last_prompt_tokens` from the last provider response — which already counts system prompt +
-/// tools + pinned + turns[0..anchor] — plus a chars/4 render-estimate of *only* the turns added
-/// since that response (the assistant turn just completed, its tool results, and the next user
-/// prompt). Exact base + a small approximated delta: cheaper than a full render and more accurate
-/// than re-estimating the whole history.
-///
-/// **Full** (first round ever, after any prefix-mutating op, after failover, or after restore):
-/// a chars/4 render of `system_prompt + messages + tools`. Required whenever the persisted anchor
-/// can't be trusted — e.g. a restore following an agent-version upgrade may have changed the
-/// system prompt or tool set (see `ContextStore::needs_full_estimate`). `messages` is the
-/// `compose_context` output (`pinned ++ turns`, no system prompt); the system prompt is rendered
-/// separately so the full estimate matches what the provider receives.
-async fn estimate_context_tokens(
-    client: &crate::profile::ChatClient,
-    store: &tokio::sync::Mutex<crate::context::ContextStore>,
-    messages: &[ChatMessage],
-    tools: &[ToolDefinition],
-    system_prompt: Option<&str>,
-) -> Result<usize> {
-    let g = store.lock().await;
-    match (g.last_prompt_tokens(), g.needs_full_estimate()) {
-        (Some(base), false) => {
-            // Incremental: only the turns added since the anchor.
-            let turns_len = g.turns().len();
-            let anchored = g.anchored_turn_count();
-            debug_assert!(
-                anchored <= turns_len,
-                "anchor out of range — a needs_full_estimate flag-set was missed"
-            );
-            if anchored > turns_len {
-                warn!(
-                    anchored,
-                    turns_len, "estimate anchor clamped to turns length"
-                );
-            }
-            let delta: Vec<ChatMessage> = g
-                .turns()
-                .iter()
-                .skip(anchored.min(turns_len))
-                .flat_map(|t| t.messages.iter().cloned())
-                .collect();
-            drop(g);
-            Ok(base as usize + client.render_messages(&delta)?.chars().count() / 4)
-        }
-        _ => {
-            // Full: system + messages + tools (the historical behavior).
-            drop(g);
-            let mut rendered = String::new();
-            if let Some(sp) = system_prompt {
-                rendered.push_str(&client.render_messages(&[ChatMessage::system(sp)])?);
-            }
-            rendered.push_str(&client.render_messages(messages)?);
-            rendered.push_str(&client.render_tools(tools)?);
-            Ok(rendered.chars().count() / 4)
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Context compaction
-// ---------------------------------------------------------------------------
-
-/// Summarize turns to bring context within budget.
-///
-/// Loops in bounded passes: each pass summarizes the oldest turns that fit
-/// in the summarizer input budget, accumulates into the existing summary,
-/// and evicts the summarized turns. Repeats until context fits or no
-/// progress can be made.
-pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOutcome> {
-    let effective_budget = ctx.config.effective_budget();
-    let summarizer_input_budget =
-        effective_budget.saturating_sub(ctx.summarizer.max_tokens as usize);
-    let mut any_summarized = false;
-
-    loop {
-        // Read phase: snapshot under single lock.
-        let (window, existing_summary) = {
-            let guard = ctx.store.lock().await;
-            if guard.turn_count() == 0 {
-                break;
-            }
-            if guard.total_estimated_tokens() <= effective_budget {
-                break;
-            }
-            let existing_summary = guard
-                .pinned()
-                .iter()
-                .find(|p| p.label == "context_summary")
-                .and_then(|p| p.message.content().map(|c| c.to_owned()));
-
-            // Take oldest turns that fit in summarizer_input_budget.
-            let mut budget = summarizer_input_budget;
-            let mut window = Vec::new();
-            for turn in guard.turns().iter() {
-                if turn.estimated_tokens > budget {
-                    break;
-                }
-                budget -= turn.estimated_tokens;
-                window.push(turn.clone());
-            }
-            if window.is_empty() {
-                break;
-            }
-            (window, existing_summary)
-        };
-
-        // LLM call — lock released during this potentially long await.
-        let (result, usage) = ctx
-            .summarizer
-            .summarize(
-                &window,
-                existing_summary.as_deref(),
-                effective_budget,
-                &ctx.client,
-            )
-            .await?;
-
-        // Write phase: replace summary + evict turns — single lock, no await.
-        {
-            let mut guard = ctx.store.lock().await;
-            guard.replace_pin("context_summary", ChatMessage::assistant(&result.text))?;
-            guard.evict_turns(result.source_turns);
-            guard.reset_context_warnings();
-            info!(
-                source_turns = result.source_turns,
-                estimated_tokens = result.estimated_tokens,
-                "summarize pass completed"
-            );
-        }
-
-        // Record compaction event in history.
-        let summary_msg = vec![ChatMessage::assistant(&result.text)];
-        ctx.append_history(
-            None,
-            &summary_msg,
-            result.estimated_tokens,
-            crate::history::RecordKind::System,
-            Some(crate::history::SystemEvent::CompactionSummary),
-        );
-
-        // Accumulate usage from the summarization LLM call WITHOUT re-anchoring: the summarizer
-        // runs over a different message set (oldest turns + SUMMARIZE_PROMPT), so its
-        // `prompt_tokens` does not reflect the main conversation. Bumping `cumulative_usage`
-        // (operator budget) is correct; moving the prompt anchor would poison the next estimate.
-        if let Some(u) = &usage {
-            ctx.store.lock().await.accumulate_usage_no_anchor(u);
-            ctx.token_budget
-                .record_usage(u.prompt_tokens as u64, u.completion_tokens as u64);
-        }
-
-        // Check token budget after accumulating summarization usage.
-        let snap = ctx.token_budget.snapshot();
-        if snap.is_exceeded() {
-            ctx.persist().await;
-            return Ok(CompactOutcome::BudgetExceeded {
-                consumed: snap.consumed,
-                budget: snap.budget,
-            });
-        }
-
-        any_summarized = true;
-    }
-
-    if any_summarized {
-        ctx.persist().await;
-    }
-
-    Ok(if any_summarized {
-        CompactOutcome::Compacted
-    } else {
-        CompactOutcome::NothingToCompact
-    })
-}
-
-/// Check progressive warning thresholds and inject a [system] message if crossed.
-/// Returns `true` if a warning was injected (caller should continue to re-compose).
-async fn check_progressive_warnings(
-    ctx: &mut AgentContext,
-    usage_pct: usize,
-    effective_budget: usize,
-) -> bool {
-    let warnings = ctx.config.warning_thresholds();
-    if warnings.is_empty() {
-        return false;
-    }
-
-    let mut guard = ctx.store.lock().await;
-
-    // If usage is below the lowest threshold, reset warning state.
-    let lowest = warnings[0] as usize;
-    if usage_pct < lowest {
-        guard.reset_context_warnings();
-        return false;
-    }
-
-    // Find the highest crossed threshold that hasn't been warned yet.
-    let Some(threshold) = warnings
-        .iter()
-        .rev()
-        .find(|&&t| usage_pct >= t as usize && guard.should_warn(t))
-        .copied()
-    else {
-        return false;
-    };
-
-    let msg = format!(
-        "[system]\nContext usage is at {}% ({} / {} tokens). \
-         Use context_status to review current turns, then context_evict with a \
-         summary to evict all turns while preserving key facts.",
-        threshold,
-        effective_budget * threshold as usize / 100,
-        effective_budget
-    );
-
-    guard.mark_warned(threshold);
-    let msgs = vec![ChatMessage::user(&msg)];
-    let (turn_id, estimated_tokens) = guard.push_turn(msgs.clone());
-    drop(guard);
-    ctx.append_history(
-        Some(turn_id.0),
-        &msgs,
-        estimated_tokens,
-        crate::history::RecordKind::Turn,
-        None,
-    );
-    info!(threshold, "injected context warning");
-    true
-}
-
-/// Check token budget warning thresholds and inject a [system] message if crossed.
-/// Returns `true` if a warning was injected (caller should continue to re-compose).
-async fn check_token_budget_warnings(
-    ctx: &mut AgentContext,
-    snap: &crate::token_budget::TokenBudgetSnapshot,
-) -> bool {
-    let warnings = &ctx.config.token_budget_warnings;
-    if warnings.is_empty() {
-        return false;
-    }
-
-    let pct = snap.usage_pct();
-    // usage_pct() returns 0 when budget is 0, so no warnings fire.
-    if pct == 0 {
-        return false;
-    }
-
-    let mut guard = ctx.store.lock().await;
-
-    // Find the highest crossed threshold that hasn't been warned yet.
-    let Some(threshold) = warnings
-        .iter()
-        .rev()
-        .find(|&&t| pct >= t && guard.should_warn_budget(t))
-        .copied()
-    else {
-        return false;
-    };
-
-    let msg = format!(
-        "[system]\nToken budget usage is at {}% ({} consumed, {} remaining of {}). \
-         Wrap up your current work concisely.",
-        threshold,
-        format_tokens_m(snap.consumed),
-        format_tokens_m(snap.remaining()),
-        format_tokens_m(snap.budget)
-    );
-
-    guard.mark_budget_warned(threshold);
-    let msgs = vec![ChatMessage::user(&msg)];
-    let (turn_id, estimated_tokens) = guard.push_turn(msgs.clone());
-    drop(guard);
-    ctx.append_history(
-        Some(turn_id.0),
-        &msgs,
-        estimated_tokens,
-        crate::history::RecordKind::Turn,
-        None,
-    );
-    info!(
-        threshold,
-        consumed = snap.consumed,
-        budget = snap.budget,
-        "injected token budget warning"
-    );
-    true
-}
-
-/// Compact context if it exceeds the budget.
-/// Called at agent startup for restored agents.
-pub async fn compact_if_needed(ctx: &AgentContext) -> Result<bool> {
-    let effective_budget = ctx.config.effective_budget();
-    let total_tokens = {
-        let guard = ctx.store.lock().await;
-        guard.total_estimated_tokens()
-    };
-
-    if total_tokens <= effective_budget {
-        return Ok(false);
-    }
-
-    info!(total_tokens, effective_budget, "pre-loop compaction needed");
-    match summarize_and_evict(ctx).await? {
-        CompactOutcome::Compacted => Ok(true),
-        CompactOutcome::NothingToCompact => Ok(false),
-        // Budget exceeded during pre-loop compaction — log and proceed.
-        // The pre-call budget check at the top of the first round will catch it.
-        CompactOutcome::BudgetExceeded { consumed, budget } => {
-            warn!(
-                consumed,
-                budget, "token budget exceeded during pre-loop compaction"
-            );
-            Ok(true)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
 
-    use anyhow::Context;
-    use just_llm_client::{LlmBackend, ToolDispatcher};
-    use tokio_util::sync::CancellationToken;
+    use just_llm_client::LlmBackend;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
 
-    use crate::approval::ApprovalStore;
-    use crate::config::{AgentConfig, PermissionProfile, default_tool_policy};
-    use crate::context::{ContextStore, ContextSummarizer};
-    use crate::failover::{FailoverOutcome, FailoverState};
-    use crate::policy::{AgentPolicy, AuthorizedToolExecutor};
-    use crate::profile::{BackendSource, Profile, ProfileRegistry, Tier};
-    use crate::token_budget::TokenBudget;
-
-    // --- fixtures (mirror profile/registry.rs tests; duplicated to keep this module self-contained) ---
-
-    /// Network-free DeepSeek backend (construction touches no network).
-    fn ds_backend() -> Arc<dyn just_llm_client::LlmBackend> {
-        just_llm_client::provider::DeepSeekBackend::new(
-            reqwest::Client::builder().use_rustls_tls(),
-            "fake",
-            None,
-        )
-        .expect("deepseek backend constructs without network")
-    }
-
-    /// Test [`BackendSource`]: endpoint id → backend. A missing endpoint yields `Err`, used to
-    /// simulate an unbuildable failover candidate (the skip path).
-    struct MapSource(HashMap<String, Arc<dyn just_llm_client::LlmBackend>>);
-    impl BackendSource for MapSource {
-        fn get(&self, endpoint_id: &str) -> anyhow::Result<Arc<dyn just_llm_client::LlmBackend>> {
-            self.0
-                .get(endpoint_id)
-                .cloned()
-                .with_context(|| format!("unknown endpoint '{endpoint_id}'"))
-        }
-    }
-
-    fn profile(id: &str, endpoint: &str, window: usize) -> Profile {
-        Profile {
-            id: id.into(),
-            endpoint: endpoint.into(),
-            model: format!("{id}-model"),
-            max_context_window: window,
-        }
-    }
-
-    /// Minimal valid `AgentConfig` for failover tests (mirrors `config.rs` fixtures).
-    fn test_config() -> AgentConfig {
-        AgentConfig {
-            prompt: None,
-            system_prompt: String::new(),
-            max_tool_rounds: 1,
-            workspace_root: PathBuf::from("/tmp"),
-            context_window_tokens: 500_000,
-            output_reserve_tokens: 8_192,
-            summary_max_tokens: 1_200,
-            tool_timeout_secs: 120,
-            skills: vec![],
-            retry_policy: crate::retry::RetryPolicy::default(),
-            pinned_budget_ratio: 0.25,
-            context_thresholds: vec![50, 80],
-            token_budget_warnings: vec![80, 95],
-            agent_id: None,
-            created_by: None,
-            permissions: PermissionProfile::new(PathBuf::from("/tmp")),
-        }
-    }
-
-    /// Build an `AgentContext` over `profiles` backed by `source`, with `retry_policy`. The store
-    /// starts empty (seed a user turn for `run_agent_rounds` tests); `summarize_and_evict` no-ops
-    /// on it. `profiles[0]` must be buildable (its client is constructed here).
-    async fn ctx_from_source(
-        profiles: Vec<Profile>,
-        source: Arc<dyn BackendSource>,
-        retry_policy: crate::retry::RetryPolicy,
-    ) -> AgentContext {
-        let mut config = test_config();
-        config.retry_policy = retry_policy;
-        let tier = Tier { profiles };
-        let registry = Arc::new(ProfileRegistry::new(vec![tier.clone()], source).unwrap());
-        let failover = FailoverState::new(tier, registry, Some("sys".into()));
-        let client = failover
-            .build_client(failover.current_profile())
-            .expect("active profile is buildable");
-        let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
-        let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
-        let executor = AuthorizedToolExecutor::new(
-            ToolDispatcher::new(),
-            AgentPolicy::new(Arc::new(RwLock::new(default_tool_policy()))),
-            approvals.clone(),
-        );
-        {
-            let mut guard = store.lock().await;
-            guard.set_tool_definitions(executor.tool_definitions());
-            guard.set_pinned_budget(config.pinned_budget());
-        }
-        AgentContext {
-            client,
-            failover,
-            store,
-            approvals,
-            executor,
-            summarizer: ContextSummarizer::new(config.summary_max_tokens),
-            config,
-            agent_dir: None,
-            history: None,
-            cancel: CancellationToken::new(),
-            round_cancel: Arc::new(std::sync::Mutex::new(None)),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            token_budget: TokenBudget::new(1_000_000, 0),
-        }
-    }
-
-    /// A `MapSource` of network-free DeepSeek backends for `endpoints` (unit-test convenience).
-    fn map_source(endpoints: &[&str]) -> Arc<dyn BackendSource> {
-        let mut map = HashMap::new();
-        for ep in endpoints {
-            map.insert((*ep).into(), ds_backend());
-        }
-        Arc::new(MapSource(map))
-    }
-
-    async fn make_ctx(profiles: Vec<Profile>, endpoints: &[&str]) -> AgentContext {
-        ctx_from_source(
-            profiles,
-            map_source(endpoints),
-            crate::retry::RetryPolicy::default(),
-        )
-        .await
-    }
+    use crate::agent_task::RoundToken;
+    use crate::profile::BackendSource;
+    use crate::test_support::{MapSource, ctx_from_source, make_ctx, profile};
 
     fn no_cancel() -> CancellationToken {
         CancellationToken::new()
@@ -1294,91 +958,6 @@ mod tests {
         );
     }
 
-    // --- estimate_context_tokens (incremental, anchored to provider usage) ---
-
-    fn usage(prompt_tokens: u32) -> just_llm_client::types::chat::Usage {
-        just_llm_client::types::chat::Usage {
-            prompt_tokens,
-            completion_tokens: 0,
-            prompt_cache_hit_tokens: None,
-            prompt_cache_miss_tokens: None,
-            total_tokens: prompt_tokens,
-            completion_tokens_details: None,
-        }
-    }
-
-    /// With an anchor and no turns added since, the incremental estimate equals the authoritative
-    /// base exactly (empty delta → +0). Pins the incremental path and the anchor mechanic.
-    #[tokio::test]
-    async fn incremental_estimate_equals_base_with_no_new_turns() {
-        let ctx = make_ctx(vec![profile("p1", "ep1", 500_000)], &["ep1"]).await;
-        {
-            let mut s = ctx.store.lock().await;
-            s.push_turn(vec![ChatMessage::user("first turn")]);
-            s.push_turn(vec![ChatMessage::user("second turn")]);
-            s.accumulate_usage(&usage(5_000));
-        }
-        let est = estimate_context_tokens(&ctx.client, &ctx.store, &[], &[], None)
-            .await
-            .unwrap();
-        assert_eq!(est, 5_000, "anchored + empty delta → base exactly");
-    }
-
-    /// A turn added after the anchor is reflected as a positive delta on top of the base.
-    #[tokio::test]
-    async fn incremental_estimate_grows_with_new_turn() {
-        let ctx = make_ctx(vec![profile("p1", "ep1", 500_000)], &["ep1"]).await;
-        {
-            let mut s = ctx.store.lock().await;
-            s.push_turn(vec![ChatMessage::user("first")]);
-            s.accumulate_usage(&usage(5_000));
-        }
-        let before = estimate_context_tokens(&ctx.client, &ctx.store, &[], &[], None)
-            .await
-            .unwrap();
-        ctx.store.lock().await.push_turn(vec![ChatMessage::user(
-            "a brand new turn with some content",
-        )]);
-        let after = estimate_context_tokens(&ctx.client, &ctx.store, &[], &[], None)
-            .await
-            .unwrap();
-        assert!(
-            after > before,
-            "delta of the new turn is added: {after} > {before}"
-        );
-    }
-
-    /// A prefix-mutating op (evict) forces full mode: the estimate drops from the anchored base
-    /// to a fresh full render, proving the flag flips the path off the (stale) anchor.
-    #[tokio::test]
-    async fn evict_forces_full_estimate_off_the_anchor() {
-        let ctx = make_ctx(vec![profile("p1", "ep1", 500_000)], &["ep1"]).await;
-        {
-            let mut s = ctx.store.lock().await;
-            s.push_turn(vec![ChatMessage::user("turn one")]);
-            s.push_turn(vec![ChatMessage::user("turn two")]);
-            // A huge authoritative base; the incremental path would report ~the base.
-            s.accumulate_usage(&usage(5_000_000));
-        }
-        let incremental = estimate_context_tokens(&ctx.client, &ctx.store, &[], &[], None)
-            .await
-            .unwrap();
-        assert!(
-            incremental >= 5_000_000,
-            "incremental path used before evict, got {incremental}"
-        );
-
-        // Evict invalidates the anchor → full mode recomputes a fresh render.
-        ctx.store.lock().await.evict_turns(1);
-        let full = estimate_context_tokens(&ctx.client, &ctx.store, &[], &[], None)
-            .await
-            .unwrap();
-        assert!(
-            full < 5_000_000,
-            "evict forces full mode (fresh render), got {full}"
-        );
-    }
-
     // --- run_agent_rounds integration tests (wiremock, one MockServer per profile) ---
 
     /// Fast retry policy so the wiremock suite stays snappy.
@@ -1436,7 +1015,7 @@ mod tests {
             "respond with the single word: done",
         )])
         .await;
-        let round = crate::agent_task::RoundToken::new(&ctx.cancel);
+        let round = RoundToken::new(&ctx.cancel);
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
         let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
         let outcome = run_agent_rounds(ctx, &tx, &mut prompt_rx, round.handle()).await;

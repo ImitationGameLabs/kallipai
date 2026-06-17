@@ -10,8 +10,10 @@ pub mod persistence;
 pub mod policy;
 pub mod profile;
 pub mod retry;
-pub mod runner;
+pub(crate) mod runner;
 mod stream_accumulator;
+#[cfg(test)]
+mod test_support;
 pub mod token_budget;
 pub mod tools;
 
