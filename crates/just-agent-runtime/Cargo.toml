@@ -10,6 +10,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 just-agent-common = { workspace = true }
 just-llm-client = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rable = { workspace = true }
@@ -29,3 +30,4 @@ toml = { workspace = true }
 [dev-dependencies]
 temp-env = { workspace = true }
 tempfile = { workspace = true }
+wiremock = { workspace = true }

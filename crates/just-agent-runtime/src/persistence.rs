@@ -254,8 +254,19 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
 
     fix_incomplete_turn(&mut store);
 
+    // Backfill the pinned-token cache for items deserialized from a pre-caching format (default
+    // 0), before any budget computation or migration reads it.
+    store.backfill_pinned_token_cache();
+
     // Migrate legacy summary field to pinned item.
     store.migrate_legacy_summary();
+
+    // A restore may follow an agent-version upgrade that changed the system prompt or tool set,
+    // invalidating the persisted `last_prompt_tokens` anchor. Force a full estimate on the first
+    // post-restore round so the gate recomputes from the current config rather than trusting a
+    // cross-version anchor. (migrate/pin/unpin above also set the flag; this is the canonical
+    // restore statement and covers the clean-restore case.) See ContextStore::needs_full_estimate.
+    store.mark_needs_full_estimate();
 
     let restart_msgs = vec![ChatMessage::user(RESTART_MESSAGE)];
     let (_, estimated_tokens) = store.push_turn(restart_msgs.clone());
@@ -314,3 +325,34 @@ const RESTART_MESSAGE: &str = concat!(
     "longer available. Review the current state of the project and re-establish\n",
     "any necessary conditions before continuing."
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_meta_round_trips() {
+        let meta = AgentMeta {
+            workspace_root: PathBuf::from("/app"),
+            last_restored_at: None,
+            consecutive_restart_count: 0,
+            created_by: None,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: AgentMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.workspace_root, PathBuf::from("/app"));
+    }
+
+    #[test]
+    fn agent_meta_loads_legacy_file_without_optional_fields() {
+        // A meta.json written before optional fields existed still restores.
+        let legacy = r#"{
+            "workspace_root": "/app",
+            "last_restored_at": null,
+            "consecutive_restart_count": 0,
+            "created_by": null
+        }"#;
+        let meta: AgentMeta = serde_json::from_str(legacy).unwrap();
+        assert_eq!(meta.workspace_root, PathBuf::from("/app"));
+    }
+}

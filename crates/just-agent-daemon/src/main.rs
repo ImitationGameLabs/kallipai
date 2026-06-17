@@ -1,5 +1,6 @@
 mod args;
 mod auth;
+mod backend;
 mod bridge;
 mod error;
 mod routes;
@@ -11,8 +12,9 @@ mod state;
 #[cfg(test)]
 mod test_helpers;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
+use just_agent_runtime::profile::ProfileRegistry;
 use state::AppState;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -76,11 +78,23 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Load profile config once at startup (config file or implicit env profile), then build one
+    // backend per referenced endpoint and assemble the registry before restoring agents —
+    // restored agents resolve their profile from here too. The daemon owns reqwest + backend
+    // construction; the runtime holds the pre-built backends and does selection (plus reuse of
+    // `reqwest` types for HTTP-shape retry classification). A
+    // misconfigured endpoint (unknown family, bad config) fails fast here at startup.
+    let cfg = just_agent_runtime::profile::load().context("failed to load model profiles")?;
+    let factory = just_llm_client::client::BackendFactory::new();
+    let source = backend::build_backends(&cfg, factory).context("failed to build LLM backends")?;
+    let profiles = Arc::new(ProfileRegistry::new(cfg.tiers, source)?);
+
     let state = Arc::new(AppState::with_limits(
         operator_token,
         args.max_agents,
         args.max_subagents,
         args.prompt_queue_size,
+        profiles,
     ));
 
     // Restore persisted agents before accepting requests.

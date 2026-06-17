@@ -31,6 +31,17 @@ pub enum ChatLine {
         error: String,
         delay_secs: f64,
     },
+    /// Within-tier failover hop. Non-terminal (the agent stays busy and continues the turn).
+    Failover {
+        from: String,
+        to: String,
+        reason: String,
+    },
+    /// Failover chain exhausted. Terminal for the turn (the agent goes idle but stays alive).
+    FailoverExhausted {
+        reason: String,
+        detail: String,
+    },
 }
 
 /// Active TUI view.

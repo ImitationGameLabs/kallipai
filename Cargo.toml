@@ -19,7 +19,7 @@ license = "MIT"
 name = "just-agent"
 
 [workspace.dependencies]
-just-llm-client = "0.1.0"
+just-llm-client = "0.2.0"
 
 just-agent-common = { path = "crates/just-agent-common", default-features = false }
 just-agent-runtime = { path = "crates/just-agent-runtime" }
@@ -73,3 +73,4 @@ time = { version = "0.3", features = ["serde-well-known"] }
 toml = "1"
 temp-env = "0.3"
 tempfile = "3"
+wiremock = "0.6.5"

@@ -19,7 +19,6 @@ use just_agent_runtime::context::{AgenticContext, ContextStore, ContextSummarize
 use just_agent_runtime::history::HistoryWriter;
 use just_agent_runtime::persistence;
 use just_agent_runtime::policy::{AgentPolicy, AuthorizedToolExecutor};
-use just_agent_runtime::provider::client_from_env;
 use just_agent_runtime::tools::{build_tool_dispatch, load_skill, meta_skill_content};
 use just_llm_client::types::chat::ChatMessage;
 use tokio::sync::{Notify, broadcast};
@@ -46,6 +45,10 @@ pub(crate) struct SpawnArgs {
     pub shared_state: SharedState,
     pub tool_policy: Arc<std::sync::RwLock<ToolPolicy>>,
     pub prompt_queue_size: usize,
+    /// The resolved model tier (selected by the caller). The active profile is
+    /// `tier.profiles[0]`; the rest form the within-tier failover chain. Owned so the
+    /// runtime can carry the chain without re-touching the registry.
+    pub tier: just_agent_runtime::profile::Tier,
     /// Pre-created prompt channel for reactivation. When provided,
     /// `prompt_queue_size` is ignored and both ends are used as-is.
     /// The sender is already installed in the registry entry; spawn_agent
@@ -68,7 +71,7 @@ impl SpawnArgs {
 }
 
 /// Reconstruct runtime resources shared by create and restore.
-pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
+pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
     let cancel = args.shutdown_cancel.child_token();
     let notify = Arc::new(Notify::new());
     // Round-scoped interrupt slot: `Some` only while a round runs. Shared with the agent
@@ -76,12 +79,23 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
     let round_cancel: Arc<std::sync::Mutex<Option<just_agent_runtime::agent_task::RoundToken>>> =
         Arc::new(std::sync::Mutex::new(None));
 
-    let client = {
+    let system_prompt = {
         let meta = meta_skill_content();
         let mut sp = args.config.system_prompt.clone();
         sp.push_str("\n\n");
         sp.push_str(meta);
-        client_from_env(&sp)?
+        sp
+    };
+    let client = {
+        // Install the active profile's declared context window (authoritative on both paths — the
+        // implicit env profile derives it from JUST_AGENT_CONTEXT_WINDOW_TOKENS), then build the
+        // client. The tier's remaining profiles are the within-tier failover chain, walked by the
+        // runner on `RequestFailure::Failover`.
+        let profile = args.tier.active_profile();
+        args.config.set_context_window(profile.max_context_window)?;
+        args.shared_state
+            .profiles
+            .build_client(profile, Some(system_prompt.clone()))?
     };
 
     let dispatch = build_tool_dispatch(args.store.clone(), args.env.clone()).await?;
@@ -98,15 +112,21 @@ pub(crate) async fn spawn_agent(args: SpawnArgs) -> anyhow::Result<Agent> {
     );
     let tool_defs = executor.tool_definitions();
     args.store.lock().await.set_tool_definitions(tool_defs);
-    let pinned_budget =
-        (args.config.effective_budget() as f64 * args.config.pinned_budget_ratio) as usize;
-    args.store.lock().await.set_pinned_budget(pinned_budget);
+    args.store
+        .lock()
+        .await
+        .set_pinned_budget(args.config.pinned_budget());
     let summarizer = ContextSummarizer::new(args.config.summary_max_tokens);
 
     let token_budget = args.shared_state.token_budget.clone();
 
     let ctx = AgentContext {
         client,
+        failover: just_agent_runtime::FailoverState::new(
+            args.tier,
+            args.shared_state.profiles.clone(),
+            Some(system_prompt),
+        ),
         store: args.store.clone(),
         approvals: args.approvals.clone(),
         executor,
@@ -235,6 +255,11 @@ pub async fn create_agent(
     };
     let tool_policy = Arc::new(std::sync::RwLock::new(tool_policy));
 
+    // Resolve the model tier purely by depth (positional tiers — no name/override). Carry the
+    // tier into SpawnArgs for failover.
+    let depth = config.permissions.depth();
+    let tier = state.profiles.select_profile(depth).clone();
+
     let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
     let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
 
@@ -284,6 +309,7 @@ pub async fn create_agent(
         tool_policy: tool_policy.clone(),
         prompt_queue_size: state.prompt_queue_size,
         prompt_channel: None,
+        tier,
     })
     .await
     {

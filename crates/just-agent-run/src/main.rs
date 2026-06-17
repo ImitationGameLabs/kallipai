@@ -61,7 +61,7 @@ struct Cli {
 ///
 /// Mapped to process exit codes via `#[repr(u8)]`:
 /// 0 = success, 1 = error, 2 = max rounds exceeded,
-/// 3 = cancelled, 4 = token budget exceeded.
+/// 3 = cancelled, 4 = token budget exceeded, 5 = failover chain exhausted.
 ///
 /// Serialized to the JSON `"exit"` field as a snake_case string
 /// (`"success"`, `"max_rounds"`, …) via [`serde::Serialize`].
@@ -74,6 +74,7 @@ enum RunExit {
     MaxRounds = 2,
     Cancelled = 3,
     BudgetExceeded = 4,
+    FailoverChainExhausted = 5,
 }
 
 impl From<RunExit> for ExitCode {
@@ -173,6 +174,7 @@ async fn run() -> Result<ExitCode> {
                 RunExit::MaxRounds => "hit max rounds (kept)",
                 RunExit::Cancelled => "cancelled (kept)",
                 RunExit::BudgetExceeded => "exceeded token budget (kept)",
+                RunExit::FailoverChainExhausted => "failover chain exhausted (kept)",
                 RunExit::Error => "errored (kept)",
             };
             eprintln!(
@@ -306,6 +308,12 @@ where
                     );
                 }
             }
+            SseEvent::Failover { from, to, reason } => {
+                end_reasoning(&mut in_reasoning);
+                if verbose {
+                    eprintln!("[failover] {from} → {to}: {reason}");
+                }
+            }
             SseEvent::Finished { content } => {
                 end_reasoning(&mut in_reasoning);
                 if !json && !content.is_empty() {
@@ -360,6 +368,14 @@ where
                     assistant,
                 };
             }
+            SseEvent::FailoverChainExhausted { reason, detail } => {
+                end_reasoning(&mut in_reasoning);
+                eprintln!("failover chain exhausted ({reason}): {detail}");
+                return Outcome {
+                    exit: RunExit::FailoverChainExhausted,
+                    assistant,
+                };
+            }
             // Suppress state-transition/informational events.
             SseEvent::Busy | SseEvent::Status { .. } | SseEvent::ApprovalUpdated { .. } => {}
         }
@@ -376,6 +392,7 @@ where
 mod tests {
     use super::*;
     use futures_util::stream;
+    use just_agent_common::protocol::FailoverChainExhaustion;
 
     // Convenience alias: the stream items are `Result<SseEvent, E>` for any
     // `E: Display`; tests use `std::io::Error` as a stand-in error type.
@@ -428,7 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_events_map_to_correct_exit() {
-        let cases: [(SseEvent, RunExit); 5] = [
+        let cases: [(SseEvent, RunExit); 6] = [
             (
                 SseEvent::Finished {
                     content: String::new(),
@@ -449,6 +466,13 @@ mod tests {
                     budget: 1,
                 },
                 RunExit::BudgetExceeded,
+            ),
+            (
+                SseEvent::FailoverChainExhausted {
+                    reason: FailoverChainExhaustion::NoFailoverConfigured,
+                    detail: String::new(),
+                },
+                RunExit::FailoverChainExhausted,
             ),
         ];
         for (event, expected) in cases {

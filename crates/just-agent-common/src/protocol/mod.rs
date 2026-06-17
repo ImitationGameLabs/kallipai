@@ -23,4 +23,4 @@ pub use skill::{
     SkillPromoteDecisionBody, SkillPromoteRecordEntry, SkillPromoteShowResponse,
     SkillPromoteSubmitResponse,
 };
-pub use sse::SseEvent;
+pub use sse::{FailoverChainExhaustion, SseEvent};

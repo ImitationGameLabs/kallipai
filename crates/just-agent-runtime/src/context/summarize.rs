@@ -4,8 +4,8 @@
 //! [`ContextSummarizer`] summarizes old turns via an LLM call,
 //! pins the summary, and the caller evicts the summarized turns.
 
+use crate::profile::ChatClient;
 use anyhow::{Result, bail};
-use just_llm_client::ChatClient;
 use just_llm_client::types::chat::ChatMessage;
 
 use super::turn::Turn;
@@ -80,9 +80,11 @@ impl ContextSummarizer {
 
         messages.push(ChatMessage::user(&self.prompt));
 
-        let request = client.request(messages).with_max_tokens(self.max_tokens);
+        let request = client
+            .create_request(messages)
+            .with_max_tokens(self.max_tokens);
 
-        let response = client.create_chat_completion(request).await?;
+        let response = client.chat_completion(request).await?;
         let usage = response.usage.clone();
 
         let text = match response

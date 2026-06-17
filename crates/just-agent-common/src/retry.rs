@@ -17,4 +17,9 @@ pub struct RetryRecord {
     pub error: String,
     /// Backoff delay in seconds before the next attempt.
     pub delay_secs: f64,
+    /// Endpoint id this retry was against (`None` on legacy records). Scopes the per-endpoint
+    /// retry budget during within-tier failover: the budget is endpoint-keyed because rate
+    /// limits are endpoint-scoped (two profiles sharing one endpoint share one budget).
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }

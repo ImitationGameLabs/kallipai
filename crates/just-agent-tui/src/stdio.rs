@@ -183,6 +183,13 @@ fn handle_sse_event(event: SseEvent, busy: &mut bool) {
         } => {
             eprintln!("[retry {attempt}/{max_attempts}] {error} — waiting {delay_secs:.1}s");
         }
+        SseEvent::Failover { from, to, reason } => {
+            eprintln!("[failover] {from} → {to}: {reason}");
+        }
+        SseEvent::FailoverChainExhausted { reason, detail } => {
+            eprintln!("[failover exhausted] {reason}: {detail}");
+            *busy = false;
+        }
         SseEvent::Cancelled => {
             eprintln!("[cancelled]");
             *busy = false;

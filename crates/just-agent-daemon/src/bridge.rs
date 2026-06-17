@@ -73,7 +73,8 @@ pub async fn bridge_task(
                             | AgentEvent::Error(_)
                             | AgentEvent::Cancelled
                             | AgentEvent::Interrupted
-                            | AgentEvent::TokenBudgetExceeded { .. } => {
+                            | AgentEvent::TokenBudgetExceeded { .. }
+                            | AgentEvent::FailoverChainExhausted { .. } => {
                                 state.store(AgentState::IDLE, Ordering::Relaxed)
                             }
                             _ => {}
@@ -147,6 +148,10 @@ fn convert_event(event: AgentEvent) -> Option<SseEvent> {
             error,
             delay_secs,
         }),
+        AgentEvent::Failover { from, to, reason } => Some(SseEvent::Failover { from, to, reason }),
+        AgentEvent::FailoverChainExhausted { reason, detail } => {
+            Some(SseEvent::FailoverChainExhausted { reason, detail })
+        }
         AgentEvent::Cancelled => Some(SseEvent::Cancelled),
         AgentEvent::Interrupted => Some(SseEvent::Interrupted),
         AgentEvent::TokenBudgetExceeded { consumed, budget } => {

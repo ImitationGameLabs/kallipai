@@ -15,6 +15,7 @@ use just_agent_runtime::agent_task::RoundToken;
 use just_agent_runtime::approval::ApprovalStore;
 use just_agent_runtime::config::AgentConfig;
 use just_agent_runtime::context::ContextStore;
+use just_agent_runtime::profile::ProfileRegistry;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -45,6 +46,9 @@ pub struct AppState {
     pub prompt_queue_size: usize,
     /// Daemon-wide token budget shared by all agents.
     pub token_budget: just_agent_runtime::token_budget::TokenBudget,
+    /// Profile registry loaded once at startup (config file or implicit env profile).
+    /// Shared so the pre-built backends survive across agents.
+    pub profiles: Arc<ProfileRegistry>,
 }
 
 /// Combined index: agent map + token→id lookup + subagent reverse pointers.
@@ -123,7 +127,7 @@ impl Agent {
 impl AppState {
     /// Test-only constructor with generous resource limits.
     #[cfg(test)]
-    pub fn new(operator_token: String) -> Self {
+    pub fn new(operator_token: String, profiles: Arc<ProfileRegistry>) -> Self {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
             skill_promote_store: Mutex::new(SkillPromoteStore::new()),
@@ -137,6 +141,7 @@ impl AppState {
                 just_agent_common::protocol::DEFAULT_TOKEN_BUDGET,
                 0,
             ),
+            profiles,
         }
     }
 
@@ -146,6 +151,7 @@ impl AppState {
         max_agents: usize,
         max_subagents: usize,
         prompt_queue_size: usize,
+        profiles: Arc<ProfileRegistry>,
     ) -> Self {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
@@ -160,6 +166,7 @@ impl AppState {
                 just_agent_common::protocol::DEFAULT_TOKEN_BUDGET,
                 0,
             ),
+            profiles,
         }
     }
 }
@@ -692,7 +699,7 @@ mod tests {
 
     #[test]
     fn with_limits_sets_max_agents() {
-        let state = AppState::with_limits("tok".into(), 50, 20, 5);
+        let state = AppState::with_limits("tok".into(), 50, 20, 5, make_profile_registry());
         assert_eq!(state.max_agents, 50);
         assert_eq!(state.max_subagents, 20);
         assert_eq!(state.prompt_queue_size, 5);
@@ -700,7 +707,7 @@ mod tests {
 
     #[test]
     fn new_has_generous_limits() {
-        let state = AppState::new("tok".into());
+        let state = AppState::new("tok".into(), make_profile_registry());
         assert_eq!(state.max_agents, crate::args::MAX_AGENTS_LIMIT);
         assert_eq!(state.max_subagents, crate::args::MAX_SUBAGENTS_LIMIT);
     }

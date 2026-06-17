@@ -103,6 +103,21 @@ impl App {
                 });
                 self.auto_scroll = true;
             }
+            SseEvent::Failover { from, to, reason } => {
+                self.chat_lines
+                    .push(ChatLine::Failover { from, to, reason });
+                self.auto_scroll = true;
+            }
+            SseEvent::FailoverChainExhausted { reason, detail } => {
+                self.chat_lines.push(ChatLine::FailoverExhausted {
+                    reason: reason.to_string(),
+                    detail,
+                });
+                self.agent_busy = false;
+                self.streaming_content = false;
+                self.streaming_reasoning = false;
+                self.auto_scroll = true;
+            }
             SseEvent::Cancelled => {
                 self.chat_lines
                     .push(ChatLine::System("Operation cancelled".into()));

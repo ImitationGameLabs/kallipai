@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
+use crate::env_util::{DEFAULT_CONTEXT_WINDOW_TOKENS, parse_env, parse_env_list};
 use crate::retry::RetryPolicy;
 use just_agent_common::AgentId;
 use just_agent_common::policy::{PolicyDecision, ToolPolicy};
@@ -13,7 +14,6 @@ const DEFAULT_SYSTEM_PROMPT: &str = "You are a minimal coding agent. Use shell_s
 /// guard against a degenerate "tool calls with no progress" loop.
 const DEFAULT_MAX_TOOL_ROUNDS: usize = usize::MAX;
 const DEFAULT_SUMMARY_MAX_TOKENS: u32 = 1_200;
-const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 128_000;
 const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 8_192;
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_MAX_RETRIES: u32 = 3;
@@ -252,27 +252,15 @@ impl AgentConfig {
         if max_tool_rounds == 0 {
             bail!("JUST_AGENT_MAX_TOOL_ROUNDS must be greater than zero");
         }
-        if context_window_tokens == 0 {
-            bail!("JUST_AGENT_CONTEXT_WINDOW_TOKENS must be greater than zero");
-        }
-        if output_reserve_tokens >= context_window_tokens {
-            bail!(
-                "JUST_AGENT_OUTPUT_RESERVE_TOKENS ({output_reserve_tokens}) must be less than \
-                 JUST_AGENT_CONTEXT_WINDOW_TOKENS ({context_window_tokens})"
-            );
-        }
         if !(0.0..1.0).contains(&pinned_budget_ratio) {
             bail!("JUST_AGENT_PINNED_BUDGET_RATIO must be between 0.0 and 1.0 (exclusive)");
         }
-        let effective_budget = context_window_tokens.saturating_sub(output_reserve_tokens);
-        let pinned_budget = (effective_budget as f64 * pinned_budget_ratio) as usize;
-        if summary_max_tokens as usize > pinned_budget {
-            bail!(
-                "JUST_AGENT_SUMMARY_MAX_TOKENS ({summary_max_tokens}) exceeds pinned budget \
-                 ({pinned_budget} = effective_budget {effective_budget} × ratio {pinned_budget_ratio}). \
-                 Increase PINNED_BUDGET_RATIO or CONTEXT_WINDOW_TOKENS, or reduce SUMMARY_MAX_TOKENS."
-            );
-        }
+        check_context_budget(
+            context_window_tokens,
+            output_reserve_tokens,
+            summary_max_tokens,
+            pinned_budget_ratio,
+        )?;
         if context_thresholds.len() < 2 {
             bail!(
                 "JUST_AGENT_CONTEXT_THRESHOLDS must have at least 2 values (warnings + auto-compact)"
@@ -334,6 +322,14 @@ impl AgentConfig {
             .saturating_sub(self.output_reserve_tokens)
     }
 
+    /// Pinned-context budget: the slice of [`effective_budget`](Self::effective_budget) reserved
+    /// for pinned items, per `pinned_budget_ratio`. Single source of truth for the formula used
+    /// at spawn (daemon) and on within-tier failover (runtime). The private `check_context_budget`
+    /// recomputes the same value from raw args because it runs before an `AgentConfig` exists.
+    pub fn pinned_budget(&self) -> usize {
+        (self.effective_budget() as f64 * self.pinned_budget_ratio) as usize
+    }
+
     /// Override `max_tool_rounds` with a per-request value.
     ///
     /// Takes precedence over both the default and the env var.
@@ -343,6 +339,69 @@ impl AgentConfig {
             self.max_tool_rounds = value;
         }
     }
+
+    /// Install `tokens` as the active context window after validating the window-dependent budget
+    /// invariants. The single installer: every window — including the implicit env profile's
+    /// (`profile::from_env` reads `JUST_AGENT_CONTEXT_WINDOW_TOKENS` into `max_context_window`) —
+    /// flows through here at spawn, and within-tier failover re-applies the advanced profile's
+    /// window via `runner::reapply_window`. `context_window_tokens` is thus a derived snapshot of
+    /// the active profile's declared window, not an independent config knob.
+    ///
+    /// Validates **before** mutating: on an invariant violation the field is left untouched and
+    /// `Err` is returned, so a caller that treats the failure as "keep the prior window" gets
+    /// exactly that. Failover pre-checks with `try_context_window` instead and *skips* an
+    /// infeasible candidate before committing the advance (see `runner::advance_failover`).
+    pub fn set_context_window(&mut self, tokens: usize) -> Result<()> {
+        self.try_context_window(tokens)?;
+        self.context_window_tokens = tokens;
+        Ok(())
+    }
+
+    /// Check whether `tokens` would satisfy the window-dependent budget invariants **without
+    /// mutating**. The pre-advance probe used by within-tier failover: `advance_to` is forward-only
+    /// and cannot roll back, so an infeasible candidate must be rejected *before* committing. The
+    /// same invariants as [`set_context_window`](Self::set_context_window) / [`load`](Self::load),
+    /// via the shared private `check_context_budget`.
+    pub(crate) fn try_context_window(&self, tokens: usize) -> Result<()> {
+        check_context_budget(
+            tokens,
+            self.output_reserve_tokens,
+            self.summary_max_tokens,
+            self.pinned_budget_ratio,
+        )
+    }
+}
+
+/// Validate the context-window-dependent budget invariants. Shared by [`AgentConfig::load`]
+/// (env values) and [`AgentConfig::set_context_window`] (profile override) so the two paths
+/// cannot drift. `pinned_budget` is recomputed locally here because `ContextStore`'s
+/// `set_pinned_budget` runs later and independently (at spawn via the daemon, and on within-tier
+/// failover via `runner::reapply_window`).
+fn check_context_budget(
+    context_window_tokens: usize,
+    output_reserve_tokens: usize,
+    summary_max_tokens: u32,
+    pinned_budget_ratio: f64,
+) -> Result<()> {
+    if context_window_tokens == 0 {
+        bail!("context_window_tokens must be greater than zero");
+    }
+    if output_reserve_tokens >= context_window_tokens {
+        bail!(
+            "output_reserve_tokens ({output_reserve_tokens}) must be less than \
+             context_window_tokens ({context_window_tokens})"
+        );
+    }
+    let effective_budget = context_window_tokens.saturating_sub(output_reserve_tokens);
+    let pinned_budget = (effective_budget as f64 * pinned_budget_ratio) as usize;
+    if summary_max_tokens as usize > pinned_budget {
+        bail!(
+            "summary_max_tokens ({summary_max_tokens}) exceeds pinned budget ({pinned_budget} = \
+             effective_budget {effective_budget} × ratio {pinned_budget_ratio}). \
+             Increase the context window or pinned_budget_ratio, or reduce summary_max_tokens."
+        );
+    }
+    Ok(())
 }
 
 /// Permission profile controlling agent delegation capabilities.
@@ -369,41 +428,133 @@ impl PermissionProfile {
             workspace_root,
         }
     }
-}
 
-/// Parse a comma-separated list env var into a Vec<T>.
-fn parse_env_list<T: std::str::FromStr>(name: &str) -> Result<Option<Vec<T>>> {
-    let Some(value) = std::env::var(name).ok() else {
-        return Ok(None);
-    };
-    if value.is_empty() {
-        return Ok(Some(Vec::new()));
+    /// Delegation depth as a tier-selection index: root (`max_depth == DEFAULT_MAX_DEPTH`) → 0,
+    /// each delegation level decrements. Single source of truth for the depth formula used by
+    /// tier selection. This consumes `max_depth` (set at spawn or recomputed from the chain on
+    /// restore); it does not participate in setting it.
+    pub fn depth(&self) -> usize {
+        DEFAULT_MAX_DEPTH.saturating_sub(self.max_depth) as usize
     }
-    let items: Result<Vec<T>, _> = value.split(',').map(|s| s.trim().parse()).collect();
-    let items = items.map_err(|_| {
-        anyhow::anyhow!(
-            "{name} must be a comma-separated list of {}",
-            std::any::type_name::<T>()
-        )
-    })?;
-    Ok(Some(items))
-}
-
-fn parse_env<T: std::str::FromStr>(name: &str) -> Result<Option<T>> {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            value.parse::<T>().map_err(|_| {
-                anyhow::anyhow!("{name} must be a valid {}", std::any::type_name::<T>())
-            })
-        })
-        .transpose()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use just_agent_common::policy::PolicyDecision;
+
+    #[test]
+    fn check_context_budget_rejects_zero_window() {
+        assert!(check_context_budget(0, 100, 50, 0.25).is_err());
+    }
+
+    #[test]
+    fn check_context_budget_rejects_reserve_ge_window() {
+        assert!(check_context_budget(1000, 1000, 100, 0.25).is_err()); // equal
+        assert!(check_context_budget(1000, 1001, 100, 0.25).is_err()); // greater
+    }
+
+    #[test]
+    fn check_context_budget_rejects_summary_exceeding_pinned() {
+        // effective = 1000 − 200 = 800; pinned = 800 × 0.25 = 200.
+        assert!(check_context_budget(1000, 200, 201, 0.25).is_err()); // over
+        assert!(check_context_budget(1000, 200, 200, 0.25).is_ok()); // boundary ok
+    }
+
+    #[test]
+    fn set_context_window_leaves_field_unchanged_on_validation_failure() {
+        // A valid baseline: window 100k → pinned = (100k − 8192) × 0.25 = 22952 ≥ summary 1200.
+        let mut cfg = AgentConfig {
+            prompt: None,
+            system_prompt: String::new(),
+            max_tool_rounds: usize::MAX,
+            workspace_root: PathBuf::from("/tmp"),
+            context_window_tokens: 100_000,
+            output_reserve_tokens: 8_192,
+            summary_max_tokens: 1_200,
+            tool_timeout_secs: 120,
+            skills: vec![],
+            retry_policy: RetryPolicy::default(),
+            pinned_budget_ratio: 0.25,
+            context_thresholds: vec![50, 80],
+            token_budget_warnings: vec![80, 95],
+            agent_id: None,
+            created_by: None,
+            permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+        };
+        // A 10k window → pinned = (10k − 8192) × 0.25 = 452 < summary 1200 → rejected.
+        let err = cfg.set_context_window(10_000).unwrap_err();
+        assert!(
+            format!("{err}").contains("summary_max_tokens"),
+            "got: {err}"
+        );
+        // Validate-before-mutate: the rejected window must NOT have been adopted.
+        assert_eq!(cfg.context_window_tokens, 100_000);
+        // And a valid window is adopted.
+        cfg.set_context_window(200_000).unwrap();
+        assert_eq!(cfg.context_window_tokens, 200_000);
+    }
+
+    #[test]
+    fn try_context_window_validates_without_mutating() {
+        // The failover pre-advance probe: same rejections as `check_context_budget`, but it must
+        // NOT install the window (unlike `set_context_window`). Baseline 100k is feasible.
+        let cfg = AgentConfig {
+            prompt: None,
+            system_prompt: String::new(),
+            max_tool_rounds: usize::MAX,
+            workspace_root: PathBuf::from("/tmp"),
+            context_window_tokens: 100_000,
+            output_reserve_tokens: 8_192,
+            summary_max_tokens: 1_200,
+            tool_timeout_secs: 120,
+            skills: vec![],
+            retry_policy: RetryPolicy::default(),
+            pinned_budget_ratio: 0.25,
+            context_thresholds: vec![50, 80],
+            token_budget_warnings: vec![80, 95],
+            agent_id: None,
+            created_by: None,
+            permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+        };
+        assert!(cfg.try_context_window(0).is_err(), "zero window rejected");
+        assert!(
+            cfg.try_context_window(8_000).is_err(),
+            "output_reserve (8192) ≥ window rejected"
+        );
+        // 10k → pinned = (10k − 8192) × 0.25 = 452 < summary 1200 → infeasible (the failover skip).
+        assert!(cfg.try_context_window(10_000).is_err());
+        assert!(cfg.try_context_window(200_000).is_ok());
+        assert_eq!(
+            cfg.context_window_tokens, 100_000,
+            "try_context_window must not install the window"
+        );
+    }
+
+    #[test]
+    fn pinned_budget_matches_effective_times_ratio() {
+        // effective = 100000 − 8192 = 91808; pinned = 91808 × 0.25 = 22952.
+        let cfg = AgentConfig {
+            prompt: None,
+            system_prompt: String::new(),
+            max_tool_rounds: usize::MAX,
+            workspace_root: PathBuf::from("/tmp"),
+            context_window_tokens: 100_000,
+            output_reserve_tokens: 8_192,
+            summary_max_tokens: 1_200,
+            tool_timeout_secs: 120,
+            skills: vec![],
+            retry_policy: RetryPolicy::default(),
+            pinned_budget_ratio: 0.25,
+            context_thresholds: vec![50, 80],
+            token_budget_warnings: vec![80, 95],
+            agent_id: None,
+            created_by: None,
+            permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+        };
+        assert_eq!(cfg.effective_budget(), 91_808);
+        assert_eq!(cfg.pinned_budget(), 22_952);
+    }
 
     #[test]
     fn policy_preset_display_roundtrip() {

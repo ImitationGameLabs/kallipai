@@ -5,6 +5,8 @@
 //! bridge converts them to the SSE wire-format events defined in
 //! `just_agent_common::protocol::SseEvent`.
 
+use just_agent_common::protocol::FailoverChainExhaustion;
+
 /// Events emitted by the agent runner during execution.
 ///
 /// Sent over an internal mpsc channel from the runtime to the daemon bridge,
@@ -41,6 +43,13 @@ pub enum AgentEvent {
         error: String,
         delay_secs: f64,
     },
+    /// Within-tier failover: the active profile failed terminally and the runner advanced to the
+    /// next profile in the tier's chain.
+    Failover {
+        from: String,
+        to: String,
+        reason: String,
+    },
     ApprovalRedeemed {
         id: String,
     },
@@ -56,12 +65,34 @@ pub enum AgentEvent {
         consumed: u64,
         budget: u64,
     },
+    /// Within-tier failover chain exhausted (terminal for the turn). The runner reached a known
+    /// end-of-chain state — distinct from [`Error`](Self::Error), which is an undifferentiated
+    /// failure. Bridges to `SseEvent::FailoverChainExhausted`; emitted by `run_and_report`.
+    FailoverChainExhausted {
+        reason: FailoverChainExhaustion,
+        detail: String,
+    },
 }
 
 /// Outcome of running the agent round loop.
+#[derive(Debug)]
 pub enum AgentOutcome {
-    Finished { content: String },
+    Finished {
+        content: String,
+    },
     MaxRoundsExceeded,
     Cancelled,
-    TokenBudgetExceeded { consumed: u64, budget: u64 },
+    TokenBudgetExceeded {
+        consumed: u64,
+        budget: u64,
+    },
+    /// Within-tier failover chain exhausted — a defined non-success round-end (sibling of
+    /// `MaxRoundsExceeded`), not an `Err`. The active profile failed terminally and no buildable
+    /// backup remained; `reason` distinguishes the cause, `detail` is the original trigger's
+    /// `{:#}` display. The agent stays alive and idle (the operator may reconfigure failover and
+    /// re-prompt).
+    FailoverChainExhausted {
+        reason: FailoverChainExhaustion,
+        detail: String,
+    },
 }

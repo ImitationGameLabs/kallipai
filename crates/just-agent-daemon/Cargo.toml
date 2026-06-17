@@ -9,6 +9,7 @@ license.workspace = true
 just-agent-runtime = { workspace = true }
 just-agent-common = { workspace = true, features = ["axum"] }
 just-llm-client = { workspace = true }
+reqwest = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }

@@ -86,12 +86,20 @@ pub async fn send_message(
         })?;
         entry.agent.prompt_tx = prompt_tx;
 
+        // Resolve the tier purely by depth (positional tiers) — reactivation re-derives the same
+        // way restore does.
+        let config = entry.agent.config.clone();
+        let tier = state
+            .profiles
+            .select_profile(config.permissions.depth())
+            .clone();
+
         SpawnArgs {
             agent_id: id.clone(),
             store: entry.agent.store.clone(),
             approvals: entry.agent.approvals.clone(),
             agent_dir: entry.agent.agent_dir.clone().unwrap_or_default(),
-            config: entry.agent.config.clone(),
+            config,
             initial_prompt: None, // message already pre-sent to the channel
             shutdown_cancel: state.shutdown.clone(),
             events_tx: entry.agent.events_tx.clone(),
@@ -101,6 +109,7 @@ pub async fn send_message(
             tool_policy: entry.agent.tool_policy.clone(),
             prompt_queue_size: state.prompt_queue_size,
             prompt_channel: Some((entry.agent.prompt_tx.clone(), prompt_rx)),
+            tier,
         }
     }; // Write lock released. Concurrent requests see open channel.
 

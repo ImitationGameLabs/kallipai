@@ -297,6 +297,19 @@ impl App {
                             .italic(),
                     ]));
                 }
+                ChatLine::Failover { from, to, reason } => {
+                    lines.push(Line::from(vec![
+                        "\u{21C4} ".dim().fg(Color::Yellow),
+                        "[failover] ".dim().fg(Color::Yellow),
+                        format!("{from} \u{2192} {to}: {reason}").dim(),
+                    ]));
+                }
+                ChatLine::FailoverExhausted { reason, detail } => {
+                    lines.push(Line::from(vec![
+                        "[failover exhausted] ".fg(Color::Red),
+                        format!("{reason}: {detail}").fg(Color::Red),
+                    ]));
+                }
             }
         }
         Text::from(lines)

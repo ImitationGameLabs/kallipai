@@ -77,7 +77,11 @@ impl CancelKind {
 
 /// Shared agent resources passed between modes.
 pub struct AgentContext {
-    pub client: just_llm_client::ChatClient,
+    pub client: crate::profile::ChatClient,
+    /// Within-tier failover state: the resolved capability tier, the profile registry (for
+    /// rebuilding the client on advance), the system prompt, and the sticky `profile_idx` (the
+    /// sole writer of which is `FailoverState::advance_to`). See `FailoverState`.
+    pub failover: crate::failover::FailoverState,
     pub store: Arc<Mutex<ContextStore>>,
     pub approvals: Arc<Mutex<ApprovalStore>>,
     pub executor: AuthorizedToolExecutor,
@@ -280,6 +284,17 @@ pub async fn run_and_report(
             // budget and succeeds once the operator raises it.
             agent_tx
                 .send(AgentEvent::TokenBudgetExceeded { consumed, budget })
+                .await
+                .ok();
+            false
+        }
+        Ok(AgentOutcome::FailoverChainExhausted { reason, detail }) => {
+            // Non-fatal: the task stays alive. The failover chain ran out — the operator may
+            // reconfigure failover (or fix backup credentials) and re-prompt. No turn to record
+            // (no assistant content) and no extra persist (the failover arm already flushed the
+            // endpoint's retry records before exhausting the chain).
+            agent_tx
+                .send(AgentEvent::FailoverChainExhausted { reason, detail })
                 .await
                 .ok();
             false

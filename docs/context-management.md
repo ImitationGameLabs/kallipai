@@ -74,6 +74,10 @@ At the start of each agent round:
 5. If compaction has nothing to compact, fall through (the round proceeds
    anyway).
 
+Here `context_window` is the active profile's declared `max_context_window` (per-profile; see
+[Model Profiles](./reference/env.md#model-profiles)), while `output_reserve` and the rest of the
+budget shape are global env policy.
+
 If summarize_and_evict fails, the store is unchanged — no data loss on failure.
 
 ## Emergent skills
@@ -93,6 +97,7 @@ Skills are a natural consequence of agentic context management:
    | Linux    | `~/.local/share/just-agent`                |
    | macOS    | `~/Library/Application Support/just-agent` |
    | Windows  | `%APPDATA%\just-agent`                     |
+
 3. When it encounters a matching situation later, it reads the file and pins
    the content into context.
 4. When the skill is no longer needed, `context_unpin` removes it.

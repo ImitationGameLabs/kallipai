@@ -155,7 +155,40 @@ pub async fn enqueue_committed_approval(
     id
 }
 
+/// Minimal single-profile registry for tests that need an `AppState` but won't spawn real
+/// agents. No declared window (env-path semantics).
+pub fn make_profile_registry() -> Arc<just_agent_runtime::profile::ProfileRegistry> {
+    use just_agent_runtime::profile::{Endpoint, Profile, ProfileConfig, ProfileRegistry, Tier};
+    use just_llm_client::family;
+    use std::collections::HashMap;
+    let mut endpoints = HashMap::new();
+    endpoints.insert(
+        "test".into(),
+        Endpoint {
+            id: "test".into(),
+            family: family::DEEPSEEK.into(),
+            api_key: "test".into(),
+            base_url: None,
+        },
+    );
+    let cfg = ProfileConfig {
+        tiers: vec![Tier {
+            profiles: vec![Profile {
+                id: "test".into(),
+                endpoint: "test".into(),
+                model: "test".into(),
+                max_context_window: 128_000,
+            }],
+        }],
+        endpoints,
+    };
+    let source =
+        crate::backend::build_backends(&cfg, just_llm_client::client::BackendFactory::new())
+            .expect("test backends build");
+    Arc::new(ProfileRegistry::new(cfg.tiers, source).expect("valid test registry"))
+}
+
 /// Create a fresh `SharedState` for testing.
 pub fn make_state() -> SharedState {
-    Arc::new(AppState::new("op-token".into()))
+    Arc::new(AppState::new("op-token".into(), make_profile_registry()))
 }

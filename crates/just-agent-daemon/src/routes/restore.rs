@@ -171,6 +171,19 @@ async fn restore_one(
         validate_policy_from_chain(&p.agent_id, &tool_policy, &chain)?;
     }
 
+    // Resolve the model tier purely by depth (positional tiers — no persisted binding). Warn if
+    // the agent's depth exceeds the tier list: it clamps to the lowest-capability tier.
+    let depth = config.permissions.depth();
+    let tier_count = shared_state.profiles.tiers().len();
+    if depth >= tier_count {
+        tracing::warn!(
+            depth,
+            tier_count,
+            "agent depth exceeds tier count; clamping to the lowest tier"
+        );
+    }
+    let tier = shared_state.profiles.select_profile(depth).clone();
+
     let store = Arc::new(tokio::sync::Mutex::new(restored.store));
     let approvals = Arc::new(tokio::sync::Mutex::new(restored.approvals));
     let (events_tx, _) = broadcast::channel(256);
@@ -195,6 +208,7 @@ async fn restore_one(
         tool_policy,
         prompt_queue_size: shared_state.prompt_queue_size,
         prompt_channel: None,
+        tier,
     })
     .await?;
 
