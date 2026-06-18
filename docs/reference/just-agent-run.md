@@ -8,8 +8,8 @@ flow.
 
 By default the agent is **preserved** after completion so that logs, history,
 and token usage remain available for auditing, and so it can be resumed with
-`--agent`. Pass `--delete` to remove the agent and all associated data after
-the run finishes.
+`--agent`. Pass `--remove` to archive the agent (history and usage preserved)
+after the run finishes.
 
 ```bash
 just-agent-run [OPTIONS] --prompt <PROMPT>
@@ -20,15 +20,15 @@ Uses `JUST_AGENT_AUTH_TOKEN` (mandatory) and `JUST_AGENT_DAEMON_URL`
 
 ## Options
 
-| Flag                     | Description                                                     |
-| ------------------------ | --------------------------------------------------------------- |
-| `--prompt <PROMPT>`      | The prompt to send to the agent (required)                      |
-| `--workspace-root <DIR>` | Working directory for the agent (spawn only)                    |
-| `--max-rounds <N>`       | Maximum tool-call rounds (spawn only; overrides daemon default) |
-| `--agent <ID>`           | Resume an existing agent by id instead of spawning              |
-| `--json`                 | Emit a single JSON object on stdout (see Output)                |
-| `--verbose`              | Stream the agent's procedure (reasoning, tool calls) to stderr  |
-| `--delete`               | Delete the agent and all associated data after completion       |
+| Flag                     | Description                                                      |
+| ------------------------ | ---------------------------------------------------------------- |
+| `--prompt <PROMPT>`      | The prompt to send to the agent (required)                       |
+| `--workspace-root <DIR>` | Working directory for the agent (spawn only)                     |
+| `--max-rounds <N>`       | Maximum tool-call rounds (spawn only; overrides daemon default)  |
+| `--agent <ID>`           | Resume an existing agent by id instead of spawning               |
+| `--json`                 | Emit a single JSON object on stdout (see Output)                 |
+| `--verbose`              | Stream the agent's procedure (reasoning, tool calls) to stderr   |
+| `--remove`               | Archive the agent (history and usage preserved) after completion |
 
 `--workspace-root` and `--max-rounds` apply only when spawning a new agent and
 are ignored when `--agent` is given.
@@ -53,8 +53,8 @@ history, so by default the runner is **minimal**: just the final reply.
 | -------- | ----------- | ------------------------------------- | ----------------------------------------------------------------------- |
 |          |             | final assistant reply                 | completion hint (agent id + how to continue)                            |
 |          | `--verbose` | final assistant reply                 | the procedure (`[reasoning]`/`[tool]`/`[tool-result]`/`[retry]`) + hint |
-| `--json` |             | `{agentId, assistant, exit, deleted}` | diagnostics                                                             |
-| `--json` | `--verbose` | `{agentId, assistant, exit, deleted}` | procedure stream + diagnostics                                          |
+| `--json` |             | `{agentId, assistant, exit, removed}` | diagnostics                                                             |
+| `--json` | `--verbose` | `{agentId, assistant, exit, removed}` | procedure stream + diagnostics                                          |
 
 - The final assistant reply always goes to **stdout**; it is never streamed to
   stderr. In `--verbose` mode the reasoning/tools stream **live** to stderr and
@@ -62,8 +62,8 @@ history, so by default the runner is **minimal**: just the final reply.
   should wait for the run to finish to see the reply.
 - The JSON object **never contains `reasoning`**. `--verbose --json` streams
   the procedure to stderr but leaves the object unchanged.
-- Warnings and errors always go to stderr, so a failed `--delete` is not silent
-  (also reflected in the `deleted` field).
+- Warnings and errors always go to stderr, so a failed `--remove` is not silent
+  (also reflected in the `removed` field).
 
 `--json` example:
 
@@ -72,12 +72,12 @@ history, so by default the runner is **minimal**: just the final reply.
   "agentId": "a3f1b2c4-5678-90ab-cdef-1234567890ab",
   "assistant": "The project is a …",
   "exit": "success",
-  "deleted": false
+  "removed": false
 }
 ```
 
 `exit` is one of `success`, `error`, `max_rounds`, `cancelled`,
-`budget_exceeded`. `deleted` is `true` only when `--delete` removed the agent
+`budget_exceeded`. `removed` is `true` only when `--remove` archived the agent
 after the run. On a terminal error, `assistant` reflects whatever was emitted
 before the failure (may be partial). If the daemon is unreachable, the agent id
 is unknown, or `post_message` fails, no JSON object is emitted — the error is
@@ -113,10 +113,10 @@ disk on startup. Resuming against a different daemon (or one that has not
 restored the agent) returns an error. `--agent` does not validate the id
 format; an unknown id surfaces as a daemon error.
 
-Use `--delete` to clean up the agent immediately after the run:
+Use `--remove` to archive the agent immediately after the run:
 
 ```bash
-just-agent-run --delete --prompt "Summarize the project"
+just-agent-run --remove --prompt "Summarize the project"
 ```
 
 For the complete environment variable reference including LLM provider

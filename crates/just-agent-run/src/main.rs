@@ -5,12 +5,12 @@
 //! and exits with a semantic exit code. Pass `--verbose` to stream the
 //! agent's procedure (reasoning, tool calls) to stderr, or `--json` for a
 //! single machine-readable object (`agentId`, `assistant`, `exit`,
-//! `deleted`). Designed for scripted and automated workflows.
+//! `removed`). Designed for scripted and automated workflows.
 //!
 //! By default the agent is **preserved** after completion so that logs,
 //! history, and token usage remain available for auditing, and so it can be
-//! resumed with `--agent`. Pass `--delete` to remove the agent and all
-//! associated data after the run finishes.
+//! resumed with `--agent`. Pass `--remove` to archive the agent (history and
+//! usage preserved) after the run finishes.
 
 use std::process::ExitCode;
 
@@ -42,7 +42,7 @@ struct Cli {
     /// Resume an existing agent by id instead of spawning a new one.
     #[arg(long)]
     agent: Option<AgentId>,
-    /// Emit a single JSON object on stdout: {agentId, assistant, exit, deleted}.
+    /// Emit a single JSON object on stdout: {agentId, assistant, exit, removed}.
     /// Diagnostics still go to stderr.
     #[arg(long)]
     json: bool,
@@ -51,10 +51,10 @@ struct Cli {
     /// --json, the procedure streams to stderr; the JSON object is unchanged.
     #[arg(long)]
     verbose: bool,
-    /// Delete the agent (including logs, history, and token usage) after completion.
+    /// Archive the agent (history and usage preserved) after completion.
     /// By default the agent is preserved and can be resumed with `--agent`.
     #[arg(long)]
-    delete: bool,
+    remove: bool,
 }
 
 /// Semantic exit codes for `just-agent-run`.
@@ -133,14 +133,14 @@ async fn run() -> Result<ExitCode> {
         (id, consume_stream(stream, json, verbose).await)
     };
 
-    let deleted = if cli.delete {
-        match client.delete_agent(&id).await {
+    let removed = if cli.remove {
+        match client.remove_agent(&id).await {
             Ok(()) => true,
             Err(e) => {
                 // Diagnostics belong on stderr regardless of --json: a failed
-                // delete must not be silent (the JSON `deleted` field is the
+                // remove must not be silent (the JSON `removed` field is the
                 // machine-readable signal, this is the human one).
-                eprintln!("warning: failed to delete agent {id}: {e}");
+                eprintln!("warning: failed to remove agent {id}: {e}");
                 false
             }
         }
@@ -153,7 +153,7 @@ async fn run() -> Result<ExitCode> {
             agent_id: &id,
             assistant: &outcome.assistant,
             exit: outcome.exit,
-            deleted,
+            removed,
         };
         println!("{}", serde_json::to_string(&obj)?);
     } else {
@@ -161,11 +161,11 @@ async fn run() -> Result<ExitCode> {
         // separates it from the streamed procedure in --verbose mode; in the
         // minimal default the reply is on stdout, so no separator is needed.
         let sep = if verbose { "\n" } else { "" };
-        if cli.delete {
-            let msg = if deleted {
-                "deleted"
+        if cli.remove {
+            let msg = if removed {
+                "archived"
             } else {
-                "delete failed (see warning above)"
+                "remove failed (see warning above)"
             };
             eprintln!("{sep}agent {id} {msg}.");
         } else {
@@ -210,7 +210,7 @@ struct JsonObject<'a> {
     agent_id: &'a AgentId,
     assistant: &'a str,
     exit: RunExit,
-    deleted: bool,
+    removed: bool,
 }
 
 /// Consume the agent's SSE stream until a terminal event arrives.
