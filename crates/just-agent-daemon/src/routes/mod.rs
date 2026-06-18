@@ -32,7 +32,7 @@ pub fn router() -> Router<SharedState> {
             "/agents/{id}/events",
             axum::routing::get(message::sse_events),
         )
-        .route("/agents/{id}", axum::routing::delete(agent::delete_agent))
+        .route("/agents/{id}", axum::routing::delete(agent::remove_agent))
         .route(
             "/agents/{id}/interrupt",
             axum::routing::post(agent::interrupt_agent),

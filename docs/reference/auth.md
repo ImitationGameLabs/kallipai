@@ -36,29 +36,29 @@ generates two categories of token:
 
 Message and event endpoints are peer-to-peer: any authenticated identity
 (including the operator) may communicate with any other agent. Management
-endpoints (delete, interrupt)
+endpoints (remove, interrupt)
 require a superior relationship. Subagent creation requires the direct
 supervisor.
 
 ### Context and policy
 
-| Endpoint                      | Operator | Superior | Any agent |
-| ----------------------------- | -------- | -------- | --------- |
-| `GET /agents/{id}/status`     | Yes      | —        | Yes       |
-| `GET /agents/{id}/permissions`| Yes      | —        | Yes       |
-| `GET /agents/{id}/policy`     | Yes      | —        | Yes       |
-| `PUT /agents/{id}/policy`     | Yes      | Yes      | —         |
+| Endpoint                       | Operator | Superior | Any agent |
+| ------------------------------ | -------- | -------- | --------- |
+| `GET /agents/{id}/status`      | Yes      | —        | Yes       |
+| `GET /agents/{id}/permissions` | Yes      | —        | Yes       |
+| `GET /agents/{id}/policy`      | Yes      | —        | Yes       |
+| `PUT /agents/{id}/policy`      | Yes      | Yes      | —         |
 
 Read-only context endpoints are accessible to any authenticated identity.
 Policy mutation requires operator or superior.
 
 ### Approvals
 
-| Endpoint              | Operator | Superior | Any agent | Notes                                  |
-| --------------------- | -------- | -------- | --------- | -------------------------------------- |
-| `GET /approvals`      | Yes      | —        | Yes       | Results filtered to superior's scope   |
-| `GET /approvals/{id}` | Yes      | Yes      | —         | Must be superior of the owning agent   |
-| `POST /approvals/{id}`| Yes      | Yes      | —         | Approve has additional policy gate     |
+| Endpoint               | Operator | Superior | Any agent | Notes                                |
+| ---------------------- | -------- | -------- | --------- | ------------------------------------ |
+| `GET /approvals`       | Yes      | —        | Yes       | Results filtered to superior's scope |
+| `GET /approvals/{id}`  | Yes      | Yes      | —         | Must be superior of the owning agent |
+| `POST /approvals/{id}` | Yes      | Yes      | —         | Approve has additional policy gate   |
 
 For **approve** decisions, an additional policy gate applies: the caller's own
 `ToolPolicy` must set the specific tool to `allow`. This prevents superiors from
@@ -67,22 +67,22 @@ operator identity is exempt. **Deny** decisions have no policy gate.
 
 ### Skills
 
-| Endpoint                                       | Operator | Any agent | Self |
-| ---------------------------------------------- | -------- | --------- | ---- |
-| `GET /agents/{id}/skills/paths`                | Yes      | Yes       | —    |
-| `GET /agents/{id}/skills/{name}/meta`          | Yes      | Yes       | —    |
-| `POST /agents/{id}/skills/{name}/promote-request` | Yes   | —         | Yes  |
+| Endpoint                                          | Operator | Any agent | Self |
+| ------------------------------------------------- | -------- | --------- | ---- |
+| `GET /agents/{id}/skills/paths`                   | Yes      | Yes       | —    |
+| `GET /agents/{id}/skills/{name}/meta`             | Yes      | Yes       | —    |
+| `POST /agents/{id}/skills/{name}/promote-request` | Yes      | —         | Yes  |
 
 Skill discovery endpoints are open to any authenticated identity. Promote
 request submission is restricted to the agent itself or the operator.
 
 ### Skill promote requests
 
-| Endpoint                         | Operator | Any agent | Root agent |
-| -------------------------------- | -------- | --------- | ---------- |
-| `GET /skill-promote-requests`    | Yes      | Yes       | —          |
-| `GET /skill-promote-requests/{id}` | Yes    | Yes       | —          |
-| `POST /skill-promote-requests/{id}` | Yes   | —         | Yes        |
+| Endpoint                            | Operator | Any agent | Root agent |
+| ----------------------------------- | -------- | --------- | ---------- |
+| `GET /skill-promote-requests`       | Yes      | Yes       | —          |
+| `GET /skill-promote-requests/{id}`  | Yes      | Yes       | —          |
+| `POST /skill-promote-requests/{id}` | Yes      | —         | Yes        |
 
 Listing and viewing promote requests is open to any authenticated identity.
 Responding (approve/deny) is restricted to the operator or root agents.

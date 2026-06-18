@@ -19,7 +19,7 @@ use crate::state::{AgentEntry, AppState};
 /// returns (dropping its sender), and the bridge exits on channel-close (see
 /// [`crate::bridge::bridge_task`]) — both finish in milliseconds. This is a
 /// safety net for stuck tasks, not the expected wait.
-pub(crate) const DELETE_AGENT_SHUTDOWN_TIMEOUT_SECS: u64 = 10;
+pub(crate) const REMOVE_AGENT_SHUTDOWN_TIMEOUT_SECS: u64 = 10;
 
 /// Maximum time to wait for all agents to persist before force-abort at exit.
 ///

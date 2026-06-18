@@ -341,12 +341,12 @@ pub async fn create_agent(
             }
             abort_agent(&agent);
             return Err(ApiError::unavailable(format!(
-                "agent limit reached ({}/{max}), delete agents to create new ones",
+                "agent limit reached ({}/{max}), remove agents to create new ones",
                 registry.len(),
                 max = state.max_agents
             )));
         }
-        // Re-verify supervisor was not deleted during agent spawn.
+        // Re-verify supervisor was not removed during agent spawn.
         if let Some(ref supervisor_id) = req.created_by
             && !registry.contains_key(supervisor_id)
         {
@@ -354,7 +354,7 @@ pub async fn create_agent(
             // (unregistering the supervisor removes it from the map entirely).
             abort_agent(&agent);
             return Err(ApiError::internal(
-                "supervisor agent was deleted during creation",
+                "supervisor agent was removed during creation",
             ));
         }
         registry.register_no_subagent_push(
@@ -390,7 +390,7 @@ pub async fn list_agents(
     Json(ListAgentsResponse { agents: summaries })
 }
 
-pub async fn delete_agent(
+pub async fn remove_agent(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
     Path(id): Path<AgentId>,
@@ -407,7 +407,7 @@ pub async fn delete_agent(
         }
         if !entry.subagent_ids.is_empty() {
             return Err(ApiError::conflict(
-                "agent has active subagents, delete or interrupt them first",
+                "agent has active subagents, remove or interrupt them first",
             ));
         }
         // Unregister under the same write lock — should always succeed since
@@ -416,7 +416,7 @@ pub async fn delete_agent(
         match registry.unregister(&id) {
             Some(e) => e,
             None => {
-                return Err(ApiError::internal("agent vanished during deletion"));
+                return Err(ApiError::internal("agent vanished during removal"));
             }
         }
     };
@@ -428,15 +428,15 @@ pub async fn delete_agent(
     // persists and returns (dropping its sender), and the bridge exits on
     // channel-close (see `crate::bridge::bridge_task`). Await real completion
     // under a bound; force-abort only if a task is stuck.
-    let bound = Duration::from_secs(crate::shutdown::DELETE_AGENT_SHUTDOWN_TIMEOUT_SECS);
+    let bound = Duration::from_secs(crate::shutdown::REMOVE_AGENT_SHUTDOWN_TIMEOUT_SECS);
     if !entry.agent.shutdown(bound).await {
         warn!(id = %id, "agent did not shut down in time, force-aborted");
     }
 
-    if let Err(e) = persistence::cleanup_agent_dir(&id) {
-        info!(id = %id, "agent dir cleanup failed: {e:#}");
+    if let Err(e) = persistence::archive_agent_dir(&id) {
+        info!(id = %id, "agent dir archive failed: {e:#}");
     }
-    info!(id = %id, "deleted agent");
+    info!(id = %id, "archived agent");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -448,7 +448,7 @@ pub async fn interrupt_agent(
 ) -> Result<StatusCode, ApiError> {
     // Interrupt = cancel the current round only (the task stays alive and returns to its
     // outer loop). Cancels the round token if a round is in flight; a clean no-op when the
-    // agent is idle (no round to abort). Distinct from `delete_agent`, which cancels the
+    // agent is idle (no round to abort). Distinct from `remove_agent`, which cancels the
     // lifecycle token and terminates the task.
     //
     // Clone the shared slot Arc under the registry read-lock, then release it before

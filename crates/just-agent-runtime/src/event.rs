@@ -59,7 +59,7 @@ pub enum AgentEvent {
     Cancelled,
     /// The current round was interrupted (`interrupt_agent`); the task stays alive
     /// and returns to the outer loop for the next prompt. Distinct from `Cancelled`,
-    /// which is terminal (delete/shutdown).
+    /// which is terminal (remove/shutdown).
     Interrupted,
     TokenBudgetExceeded {
         consumed: u64,

@@ -48,8 +48,9 @@ an `RwLock`; lookup is by UUID.
 
 1. **Create** — `POST /agents` spawns both tasks, returns the agent ID.
 2. **Interact** — send messages, stream events, approve or deny pending actions.
-3. **Delete** — `DELETE /agents/{id}` aborts both tokio tasks and removes the
-   entry.
+3. **Remove** — `DELETE /agents/{id}` aborts both tokio tasks, then moves the
+   agent directory to `archived/` (history and usage preserved) and drops the
+   registry entry.
 
 The daemon exposes an HTTP API for managing agents and approvals. For the full
 endpoint reference, see [daemon-api.md](reference/daemon-api.md). For

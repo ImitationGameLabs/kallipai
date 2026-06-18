@@ -20,7 +20,7 @@ use crate::state::SharedState;
 ///
 /// The bridge owns the agent's event-stream receiver and exits when that stream
 /// ends — i.e. when the agent task drops its sender. The channel closes only on a
-/// **lifecycle** end: `delete`, daemon shutdown, or a task panic. The agent task
+/// **lifecycle** end: `remove`, daemon shutdown, or a task panic. The agent task
 /// emits its terminal `Cancelled` event on the way out, the bridge forwards it,
 /// then observes `recv() == None` and exits.
 ///
@@ -345,11 +345,11 @@ mod tests {
     // -- Lifecycle: exit on channel close (primary) and on cancel (forced) --
 
     /// Regression: the bridge must exit when the agent task drops its sender
-    /// (per-agent delete / interrupt), not park waiting for the daemon-wide
+    /// (per-agent remove / interrupt), not park waiting for the daemon-wide
     /// cancel token. Before the fix, `recv()` resolving to `None` disabled the
     /// `Some` branch while the `cancel` arm stayed Pending, so the bridge hung
     /// until the shutdown bound force-aborted it — the "agent did not shut down
-    /// in time" warning on delete.
+    /// in time" warning on remove.
     #[tokio::test]
     async fn bridge_exits_when_agent_channel_closes() {
         let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);

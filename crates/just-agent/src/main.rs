@@ -61,12 +61,12 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            AgentCommand::Delete(args) => {
-                if let Err(e) = client.delete_agent(&args.id).await {
+            AgentCommand::Remove(args) => {
+                if let Err(e) = client.remove_agent(&args.id).await {
                     let msg = e.to_string();
                     if msg.contains("409") || msg.contains("busy") || msg.contains("subagent") {
                         eprintln!(
-                            "Cannot delete agent: {}. \
+                            "Cannot remove agent: {}. \
                              Try: just-agent interrupt {}",
                             msg.to_lowercase(),
                             args.id
@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
                     }
                     return Err(e);
                 }
-                println!("Agent {} deleted.", args.id);
+                println!("Agent {} archived.", args.id);
             }
             AgentCommand::Events(args) => {
                 let mut stream = client.event_stream(&args.id).await?;

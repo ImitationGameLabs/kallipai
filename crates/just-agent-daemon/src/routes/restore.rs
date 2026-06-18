@@ -225,7 +225,7 @@ async fn restore_one(
 /// enforced during restore. These agents were already running before the crash,
 /// so refusing to restore them would be counterproductive. After restore,
 /// `registry.len()` may exceed `max_agents`; new creation returns 503 until
-/// agents are deleted to make room.
+/// agents are removed to make room.
 pub async fn restore_agents(state: &SharedState) {
     let pending = persistence::scan_agents();
     if pending.is_empty() {
@@ -271,7 +271,7 @@ pub async fn restore_agents(state: &SharedState) {
                     .push(id.clone());
             }
             Some(supervisor_id) => {
-                // Supervisor not in restore set (crash-loop or deleted).
+                // Supervisor not in restore set (crash-loop or removed).
                 // This agent and its descendants will not be restored.
                 tracing::error!(
                     id = %id,
@@ -363,7 +363,7 @@ pub async fn restore_agents(state: &SharedState) {
             tracing::warn!(
                 count = registry.len(),
                 max = state.max_agents,
-                "restored agent count exceeds max_agents; new creation will return 503 until agents are deleted"
+                "restored agent count exceeds max_agents; new creation will return 503 until agents are removed"
             );
         }
         for (id, entry) in registry.iter() {

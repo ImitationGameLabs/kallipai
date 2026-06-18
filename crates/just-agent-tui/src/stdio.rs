@@ -215,7 +215,7 @@ async fn handle_command(cmd: SlashCommand, session: &Session, pending: &mut Pend
             print!("{}", command::help_text());
         }
         SlashCommand::Quit => {
-            eprint!("[quit] [1] Keep agent running and quit  [2] Delete agent and quit: ");
+            eprint!("[quit] [1] Keep agent running and quit  [2] Remove agent and quit: ");
             io::stderr().flush().ok();
             *pending = PendingPrompt::QuitConfirm;
         }
@@ -277,7 +277,7 @@ fn handle_stdin_line(line: &str, pending: &mut PendingPrompt) -> StdinAction {
                 StdinAction::Quit { kill: true }
             }
             _ => {
-                eprint!("[quit] [1] Keep agent running and quit  [2] Delete agent and quit: ");
+                eprint!("[quit] [1] Keep agent running and quit  [2] Remove agent and quit: ");
                 io::stderr().flush().ok();
                 StdinAction::None
             }

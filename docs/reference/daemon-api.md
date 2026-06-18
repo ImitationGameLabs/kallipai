@@ -112,7 +112,7 @@ Status: `201 Created`
 | 403  | Not operator (root agents); supervisor has no remaining delegation depth; `workspace_root` outside supervisor's workspace |
 | 404  | Supervisor agent not found                                                                                                |
 | 503  | Agent limit reached (`JUST_AGENT_MAX_AGENTS`), or supervisor already has max subagents (`JUST_AGENT_MAX_SUBAGENTS`)       |
-| 500  | Session creation failure, agent spawn failure, or supervisor deleted during creation                                      |
+| 500  | Session creation failure, agent spawn failure, or supervisor removed during creation                                      |
 
 > **Subagent constraints:** The supervisor must have remaining delegation depth
 > (`max_depth > 0`), and the subagent's `workspace_root` must be within the
@@ -121,7 +121,7 @@ Status: `201 Created`
 >
 > **Crash recovery:** Restore is exempt from resource limits. After a daemon
 > restart, the agent count may temporarily exceed `JUST_AGENT_MAX_AGENTS`. New
-> creation requests will return 503 until agents are deleted to make room.
+> creation requests will return 503 until agents are removed to make room.
 
 ### `GET /agents` — List agents
 
@@ -146,10 +146,17 @@ Auth: any authenticated identity. Response contains no secrets. See [auth.md](au
 
 Status: `200 OK`
 
-### `DELETE /agents/{id}` — Delete agent
+### `DELETE /agents/{id}` — Remove agent
 
 Stops and removes an agent instance. The agent must be idle and have no active
 subagents.
+
+Removal **archives** the agent: its directory is moved to `archived/<id>/`
+(history, cumulative usage, and all persisted state preserved) rather than
+destroyed. `scan_agents` ignores `archived/`, so an archived agent is absent
+from the live registry and is not restored on daemon restart. There is **no
+purge mechanism yet** — archived data (which may contain secrets/PII) persists
+indefinitely; a purge command/TTL is a tracked pre-production requirement.
 
 Auth: operator or superior. See [auth.md](auth.md).
 
@@ -159,8 +166,8 @@ Status: `204 No Content`
 | ---- | -------------------------------------------------------------------------------------------------- |
 | 403  | Not a superior of the target agent                                                                 |
 | 404  | Agent not found                                                                                    |
-| 409  | Agent is busy (interrupt it first), or agent has active subagents (delete or interrupt them first) |
-| 500  | Agent vanished during deletion                                                                     |
+| 409  | Agent is busy (interrupt it first), or agent has active subagents (remove or interrupt them first) |
+| 500  | Agent vanished during removal                                                                      |
 
 ### `POST /agents/{id}/interrupt` — Interrupt agent
 
@@ -777,7 +784,7 @@ data: {"type":"assistantContentDelta","delta":"Hello, "}
 
 These signal the end of the current assistant turn. Except for `cancelled`, the agent
 **stays alive** and returns to idle — more events will follow on the next prompt. Only
-`cancelled` (a lifecycle cancel from delete / daemon shutdown) ends the stream.
+`cancelled` (a lifecycle cancel from remove / daemon shutdown) ends the stream.
 
 | `type`                   | Fields                                                                                                                               | Description                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -787,7 +794,7 @@ These signal the end of the current assistant turn. Except for `cancelled`, the 
 | `failoverChainExhausted` | `reason: "noFailoverConfigured" \| "allBackupsExhausted" \| "allCandidatesUnbuildable" \| "allCandidatesInfeasible", detail: string` | Within-tier failover chain exhausted — every profile in the tier is unavailable; `reason` distinguishes the cause (`allCandidatesInfeasible` = every candidate's declared window violated the budget shape — tune `SUMMARY_MAX_TOKENS` / `PINNED_BUDGET_RATIO` or raise the window), `detail` is the original trigger. Agent stays alive and idle |
 | `interrupted`            | _(none)_                                                                                                                             | Round aborted via interrupt; agent stays alive and idle                                                                                                                                                                                                                                                                                           |
 | `tokenBudgetExceeded`    | `consumed: u64, budget: u64`                                                                                                         | Token budget hit; agent stays idle until the budget is raised                                                                                                                                                                                                                                                                                     |
-| `cancelled`              | _(none)_                                                                                                                             | Lifecycle cancel (delete / shutdown) — agent stops, stream ends                                                                                                                                                                                                                                                                                   |
+| `cancelled`              | _(none)_                                                                                                                             | Lifecycle cancel (remove / shutdown) — agent stops, stream ends                                                                                                                                                                                                                                                                                   |
 
 ### State and notifications
 

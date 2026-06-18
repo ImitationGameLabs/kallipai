@@ -20,7 +20,7 @@ use just_llm_client::types::chat::ChatMessage;
 /// token ([`AgentContext::cancel`]). Cancelled by `interrupt_agent` to abort the current
 /// round without terminating the task.
 ///
-/// Because it is a child, a lifecycle cancel (delete / daemon shutdown) propagates to it —
+/// Because it is a child, a lifecycle cancel (remove / daemon shutdown) propagates to it —
 /// so **lifecycle-cancelled ⟹ round-cancelled**. The converse (round cancelled but
 /// lifecycle not) is exactly what distinguishes an interrupt from a lifecycle cancel. This
 /// holds iff the token is always minted via [`RoundToken::new`] from the lifecycle token;
@@ -54,7 +54,7 @@ impl RoundToken {
 /// lifecycle token — see [`RoundToken`].
 #[derive(Debug, PartialEq, Eq)]
 enum CancelKind {
-    /// The lifecycle token was cancelled (delete / shutdown) → terminate the task.
+    /// The lifecycle token was cancelled (remove / shutdown) → terminate the task.
     Lifecycle,
     /// Only the round token was cancelled (interrupt) → keep the task alive.
     Interrupt,
@@ -196,7 +196,7 @@ pub async fn agent_task(
                     None => break,
                 }
             }
-            // Lifecycle cancel (delete / daemon shutdown): terminate the task.
+            // Lifecycle cancel (remove / daemon shutdown): terminate the task.
             // Per-agent interrupt never reaches here — it cancels only the current
             // round token inside `run_and_report`, not the lifecycle token.
             _ = ctx.cancel.cancelled() => {
@@ -222,7 +222,7 @@ pub async fn agent_task(
 
 /// Persist context + approval state and emit the terminal [`AgentEvent::Cancelled`].
 ///
-/// The single exit path for a lifecycle cancel (delete / daemon shutdown), shared by the
+/// The single exit path for a lifecycle cancel (remove / daemon shutdown), shared by the
 /// outer-loop cancel arm (idle) and `run_and_report`'s mid-round lifecycle-cancel branch.
 async fn terminate_cancelled(ctx: &AgentContext, agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>) {
     ctx.persist().await;
@@ -326,7 +326,7 @@ mod tests {
         assert!(!lifecycle.is_cancelled());
         assert_eq!(CancelKind::classify(&lifecycle), CancelKind::Interrupt);
 
-        // Lifecycle cancel (delete / shutdown): propagates to the round token (child).
+        // Lifecycle cancel (remove / shutdown): propagates to the round token (child).
         let lifecycle = CancellationToken::new();
         let round = RoundToken::new(&lifecycle);
         lifecycle.cancel();

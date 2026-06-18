@@ -138,9 +138,9 @@ pub async fn send_message(
     {
         let mut registry = state.registry.write().await;
         let Some(entry) = registry.get_mut(&id) else {
-            // Agent was deleted while we were spawning.
+            // Agent was removed while we were spawning.
             abort_agent(&agent);
-            return Err(ApiError::not_found("agent deleted during reactivation"));
+            return Err(ApiError::not_found("agent removed during reactivation"));
         };
         // No try_enqueue double-check needed: the sender we installed in
         // Phase 1 is still there, and the new Agent's prompt_tx is the same

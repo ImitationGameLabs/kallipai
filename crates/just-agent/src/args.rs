@@ -40,8 +40,8 @@ pub enum AgentCommand {
     Send(SendArgs),
     /// List all agents
     List,
-    /// Delete an agent
-    Delete(IdArgs),
+    /// Remove an agent
+    Remove(IdArgs),
     /// Stream agent events
     Events(IdArgs),
     /// Show agent context usage
