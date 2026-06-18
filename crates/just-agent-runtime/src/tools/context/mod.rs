@@ -8,6 +8,11 @@ mod pin;
 mod status;
 mod unpin;
 
+pub use evict::ContextEvictTool;
+pub use pin::ContextPinTool;
+pub use status::ContextStatusTool;
+pub use unpin::ContextUnpinTool;
+
 use std::sync::Arc;
 
 use tokio::sync::Mutex;

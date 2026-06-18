@@ -129,6 +129,7 @@ analyze shell commands:
 | -------------------- | --------------------------------------------------------------------------------------------- |
 | `just-agent-common`  | Shared types, slash command definitions, and protocol types. Used by all crates.              |
 | `just-agent-runtime` | Agent runtime: agent loop, context management, tool dispatch, policy engine. No network code. |
+| `just-agent-shell`   | Provider-neutral shell/session tools for LLM applications. Used by the runtime.               |
 | `just-agent-daemon`  | HTTP server hosting agent instances. Uses `just-agent-runtime` internally.                    |
 | `just-agent`         | Headless CLI for agents. Thin wrapper over `just-agent-client`. No agent logic.               |
 | `just-agent-tui`     | Interactive terminal UI. Same client library, adds ratatui rendering.                         |

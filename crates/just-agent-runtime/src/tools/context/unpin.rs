@@ -20,6 +20,9 @@ pub struct ContextUnpinTool {
 }
 
 impl ContextUnpinTool {
+    /// Tool name exposed to the LLM and referenced by the policy layer.
+    pub const NAME: &str = "context_unpin";
+
     pub fn new(ctx: Arc<Mutex<dyn AgenticContext>>) -> Self {
         Self { ctx }
     }
@@ -28,7 +31,7 @@ impl ContextUnpinTool {
 #[async_trait]
 impl LlmTool for ContextUnpinTool {
     fn name(&self) -> &str {
-        "context_unpin"
+        Self::NAME
     }
 
     fn description(&self) -> &str {

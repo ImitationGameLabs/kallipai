@@ -25,6 +25,9 @@ pub struct ContextEvictTool {
 }
 
 impl ContextEvictTool {
+    /// Tool name exposed to the LLM and referenced by the policy layer.
+    pub const NAME: &str = "context_evict";
+
     pub fn new(ctx: Arc<Mutex<dyn AgenticContext>>) -> Self {
         Self { ctx }
     }
@@ -33,7 +36,7 @@ impl ContextEvictTool {
 #[async_trait]
 impl LlmTool for ContextEvictTool {
     fn name(&self) -> &str {
-        "context_evict"
+        Self::NAME
     }
 
     fn description(&self) -> &str {

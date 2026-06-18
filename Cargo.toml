@@ -2,6 +2,7 @@
 members = [
   "crates/just-agent-common",
   "crates/just-agent-runtime",
+  "crates/just-agent-shell",
   "crates/just-agent",
   "crates/just-agent-tui",
   "crates/just-agent-daemon",
@@ -23,6 +24,7 @@ just-llm-client = "0.2.0"
 
 just-agent-common = { path = "crates/just-agent-common", default-features = false }
 just-agent-runtime = { path = "crates/just-agent-runtime" }
+just-agent-shell = { path = "crates/just-agent-shell" }
 just-agent-client = { path = "crates/just-agent-client" }
 just-agent-daemon = { path = "crates/just-agent-daemon" }
 

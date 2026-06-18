@@ -22,6 +22,9 @@ pub struct ContextPinTool {
 }
 
 impl ContextPinTool {
+    /// Tool name exposed to the LLM and referenced by the policy layer.
+    pub const NAME: &str = "context_pin";
+
     pub fn new(ctx: Arc<Mutex<dyn AgenticContext>>) -> Self {
         Self { ctx }
     }
@@ -30,7 +33,7 @@ impl ContextPinTool {
 #[async_trait]
 impl LlmTool for ContextPinTool {
     fn name(&self) -> &str {
-        "context_pin"
+        Self::NAME
     }
 
     fn description(&self) -> &str {

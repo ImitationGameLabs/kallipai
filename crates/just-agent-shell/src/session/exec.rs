@@ -57,7 +57,7 @@ impl<B: ShellBackend> ShellSessionExec<B> {
 #[async_trait]
 impl<B: ShellBackend + Send + Sync + 'static> LlmTool for ShellSessionExec<B> {
     fn name(&self) -> &str {
-        "shell_session_exec"
+        super::names::EXEC
     }
 
     fn description(&self) -> &str {
@@ -118,7 +118,7 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for ShellSessionExec<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::shell::{MockShellBackend, ShellError};
+    use crate::{MockShellBackend, ShellError};
 
     fn create_tool_with_mock() -> (
         ShellSessionExec<MockShellBackend>,

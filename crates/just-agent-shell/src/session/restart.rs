@@ -43,7 +43,7 @@ impl<B: ShellBackend> ShellSessionRestart<B> {
 #[async_trait]
 impl<B: ShellBackend + Send + Sync + 'static> LlmTool for ShellSessionRestart<B> {
     fn name(&self) -> &str {
-        "shell_session_restart"
+        super::names::RESTART
     }
 
     fn description(&self) -> &str {
@@ -83,7 +83,7 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for ShellSessionRestart<B>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::shell::{MockShellBackend, ShellError};
+    use crate::{MockShellBackend, ShellError};
 
     #[tokio::test]
     async fn restart_session_resets_session() {

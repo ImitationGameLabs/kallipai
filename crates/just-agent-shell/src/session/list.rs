@@ -37,7 +37,7 @@ impl<B: ShellBackend> ShellSessionList<B> {
 #[async_trait]
 impl<B: ShellBackend + Send + Sync + 'static> LlmTool for ShellSessionList<B> {
     fn name(&self) -> &str {
-        "shell_session_list"
+        super::names::LIST
     }
 
     fn description(&self) -> &str {
@@ -68,7 +68,7 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for ShellSessionList<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::shell::MockShellBackend;
+    use crate::MockShellBackend;
 
     #[tokio::test]
     async fn list_sessions_returns_current_session() {

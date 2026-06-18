@@ -14,6 +14,9 @@ pub struct ContextStatusTool {
 }
 
 impl ContextStatusTool {
+    /// Tool name exposed to the LLM and referenced by the policy layer.
+    pub const NAME: &str = "context_status";
+
     pub fn new(ctx: Arc<Mutex<dyn AgenticContext>>) -> Self {
         Self { ctx }
     }
@@ -22,7 +25,7 @@ impl ContextStatusTool {
 #[async_trait]
 impl LlmTool for ContextStatusTool {
     fn name(&self) -> &str {
-        "context_status"
+        Self::NAME
     }
 
     fn description(&self) -> &str {

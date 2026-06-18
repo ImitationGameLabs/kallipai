@@ -4,8 +4,13 @@ use anyhow::{Context, Result, bail};
 
 use crate::env_util::{DEFAULT_CONTEXT_WINDOW_TOKENS, parse_env, parse_env_list};
 use crate::retry::RetryPolicy;
+use crate::tools::context::{
+    ContextEvictTool, ContextPinTool, ContextStatusTool, ContextUnpinTool,
+};
+use crate::tools::skill::FilePinTool;
 use just_agent_common::AgentId;
 use just_agent_common::policy::{PolicyDecision, ToolPolicy};
+use just_agent_shell::session::names;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a minimal coding agent. Use shell_session_exec for shell commands. Use shell_session_create to create persistent shell sessions, shell_session_list to inspect them, shell_session_capture to inspect recent output, and shell_session_restart or shell_session_kill when session lifecycle control is necessary. Keep answers concise and prefer the least risky tool that can accomplish the task.\n\nUse read_file_and_pin to load a file into persistent context (e.g. skills or reference documents). Use context_unpin to remove pinned items.\n\nWhen a tool returns {\"pending_approval\": true, \"id\": \"...\"}, the action was deferred and is pending authorization. Continue with other work. When you see an approval notification in context, call approval_redeem with the id to execute. Call approval_list to check status, approval_cancel if you no longer need a pending approval.\n\nUse `just-agent promote-request submit <name>` to request promotion of a local skill to the shared directory. The request is reviewed by the root agent. You will be notified when the decision is made.";
 /// Effectively unlimited — the real safety net is the daemon-wide token budget.
@@ -58,22 +63,24 @@ impl std::str::FromStr for PolicyPreset {
 
 /// Default tool policy matching the current hardcoded behavior.
 ///
-/// Lives in the runtime crate because it encodes knowledge of specific tool
-/// names defined by the runtime's tool registry.
+/// Tool names are referenced via each tool's `NAME` constant (context/skill
+/// tools, local) and the `just_agent_shell::session::names` module (shell
+/// tools) rather than duplicated string literals, keeping this map in
+/// lockstep with the tool registry.
 pub fn default_tool_policy() -> ToolPolicy {
     use std::collections::BTreeMap;
     let mut tools = BTreeMap::new();
-    tools.insert("shell_session_list".into(), PolicyDecision::Allow);
-    tools.insert("shell_session_capture".into(), PolicyDecision::Allow);
-    tools.insert("shell_session_create".into(), PolicyDecision::Allow);
-    tools.insert("shell_session_kill".into(), PolicyDecision::Ask);
-    tools.insert("shell_session_restart".into(), PolicyDecision::Ask);
-    tools.insert("shell_session_exec".into(), PolicyDecision::Classify);
-    tools.insert("context_pin".into(), PolicyDecision::Allow);
-    tools.insert("context_unpin".into(), PolicyDecision::Allow);
-    tools.insert("context_status".into(), PolicyDecision::Allow);
-    tools.insert("context_evict".into(), PolicyDecision::Allow);
-    tools.insert("read_file_and_pin".into(), PolicyDecision::Allow);
+    tools.insert(names::LIST.into(), PolicyDecision::Allow);
+    tools.insert(names::CAPTURE.into(), PolicyDecision::Allow);
+    tools.insert(names::CREATE.into(), PolicyDecision::Allow);
+    tools.insert(names::KILL.into(), PolicyDecision::Ask);
+    tools.insert(names::RESTART.into(), PolicyDecision::Ask);
+    tools.insert(names::EXEC.into(), PolicyDecision::Classify);
+    tools.insert(ContextPinTool::NAME.into(), PolicyDecision::Allow);
+    tools.insert(ContextUnpinTool::NAME.into(), PolicyDecision::Allow);
+    tools.insert(ContextStatusTool::NAME.into(), PolicyDecision::Allow);
+    tools.insert(ContextEvictTool::NAME.into(), PolicyDecision::Allow);
+    tools.insert(FilePinTool::NAME.into(), PolicyDecision::Allow);
     ToolPolicy {
         default: PolicyDecision::Ask,
         tools,
@@ -442,6 +449,31 @@ impl PermissionProfile {
 mod tests {
     use super::*;
     use just_agent_common::policy::PolicyDecision;
+
+    #[test]
+    fn default_system_prompt_names_every_mentioned_tool() {
+        // The system prompt names tools by their string form. Guard against
+        // drift: if any of these NAMEs change, this fails unless the prompt is
+        // updated too. Only the tools the prompt actually references are
+        // asserted — `switch` and the context status/evict/pin tools are
+        // introduced elsewhere, so they are intentionally absent here.
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        for name in [
+            names::EXEC,
+            names::CREATE,
+            names::LIST,
+            names::CAPTURE,
+            names::RESTART,
+            names::KILL,
+            ContextUnpinTool::NAME,
+            FilePinTool::NAME,
+        ] {
+            assert!(
+                prompt.contains(name),
+                "DEFAULT_SYSTEM_PROMPT must mention '{name}'"
+            );
+        }
+    }
 
     #[test]
     fn check_context_budget_rejects_zero_window() {

@@ -20,6 +20,7 @@ switch between, and coordinate multiple agent instances across projects.
 | -------------------- | ------------------------------------------------------------------------------------- |
 | `just-agent-common`  | Shared types and command parsing                                                      |
 | `just-agent-runtime` | Agent runtime: agent context management, policy engine, tool dispatch                 |
+| `just-agent-shell`   | Provider-neutral shell/session tools for LLM applications (used by the runtime)       |
 | `just-agent-daemon`  | HTTP API server hosting multiple agent instances                                      |
 | `just-agent-client`  | Async client library for the daemon HTTP API                                          |
 | `just-agent`         | Headless CLI — designed for agents to call, so an agent can manage other agents       |

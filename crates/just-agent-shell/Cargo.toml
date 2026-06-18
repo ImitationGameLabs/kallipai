@@ -1,0 +1,23 @@
+[package]
+name = "just-agent-shell"
+description = "Provider-neutral shell/session tools for LLM applications"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+just-llm-client = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+portable-pty = { workspace = true }
+strip-ansi-escapes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[features]
+# Testing utilities for downstream crates: exposes `MockShellBackend` (and
+# future test helpers) so consumers can drive shell-tool tests without a real
+# PTY. Off by default to keep test-only code out of production builds.
+testutils = []

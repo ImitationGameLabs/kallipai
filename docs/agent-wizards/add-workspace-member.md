@@ -53,6 +53,7 @@ cargo new crates/<name> --lib
 ```
 
 This automatically creates:
+
 - `crates/<name>/Cargo.toml`
 - `crates/<name>/src/main.rs` (binary) or `crates/<name>/src/lib.rs` (library)
 
@@ -79,41 +80,21 @@ members = [
 
 ---
 
-## Step 4: Check Nix Registration
+## Step 4: Nix Registration (automatic)
 
-Check `nix/common.nix` for the crate entry:
+`nix/common.nix` builds the **entire workspace** at once via
+`craneLib.cleanCargoSource` + `buildDepsOnly`, and every check in
+`nix/checks.nix` runs at workspace granularity (clippy, doc, fmt, audit,
+deny). There is **no per-crate registry** to edit — crane auto-discovers any
+crate listed in the root `Cargo.toml` `[workspace] members`.
 
-**For binary crate** - check `binaryCratePaths`:
+Once Step 3 is done:
 
-```bash
-grep -q '<name>.*=.*"crates/<name>"' nix/common.nix
-```
-
-- If found → Skip to Step 5
-- If not found → Add to `binaryCratePaths`:
-
-```nix
-binaryCratePaths = mapToAbsolute {
-  # ... existing entries ...
-  <name> = "crates/<name>";
-};
-```
-
-**For library crate** - check `libraryCratePaths`:
-
-```bash
-grep -q '<name>.*=.*"crates/<name>"' nix/common.nix
-```
-
-- If found → Skip to Step 5
-- If not found → Add to `libraryCratePaths`:
-
-```nix
-libraryCratePaths = mapToAbsolute {
-  # ... existing entries ...
-  <name> = "crates/<name>";
-};
-```
+- **Library crate**: nothing more to do here. It is compiled as a dependency of
+  the workspace build and does not produce its own package.
+- **Binary crate**: it is built as part of the workspace. Register an explicit
+  package only if you need a standalone `nix build .#<name>` output — see
+  `nix/packages/tarball.nix` for the existing release-tarball pattern.
 
 ---
 
@@ -145,10 +126,10 @@ commonArgs = {
 
 ## Quick Reference
 
-| Crate Type | cargo new flag | Nix Registry | Generates Package |
-| ---------- | -------------- | ------------ | ----------------- |
-| Binary     | (default)      | `binaryCratePaths` | Yes |
-| Library    | `--lib`        | `libraryCratePaths` | No (dep tracking only) |
+| Crate Type | cargo new flag | Nix registration           | Generates package                                     |
+| ---------- | -------------- | -------------------------- | ----------------------------------------------------- |
+| Binary     | (default)      | automatic (workspace scan) | As part of workspace; explicit package only if needed |
+| Library    | `--lib`        | automatic (workspace scan) | No (dep tracking only)                                |
 
 ## Verification
 

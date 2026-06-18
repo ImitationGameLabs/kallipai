@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use just_agent_common::policy::{PolicyDecision, ToolPolicy};
 
-use crate::tools::shell::session::{ExecArgs, KillArgs};
+use just_agent_shell::session::{ExecArgs, KillArgs, names};
 
 use super::ToolDecision;
 use super::classifier;
@@ -27,7 +27,7 @@ impl AgentPolicy {
 
     pub fn evaluate(&self, tool_name: &str, args_json: &str) -> Result<ToolDecision> {
         // Safety override: main session kill always denied.
-        if tool_name == "shell_session_kill" {
+        if tool_name == names::KILL {
             let args: KillArgs = serde_json::from_str(args_json)?;
             if args.name == "main" {
                 return Ok(ToolDecision::Deny {
@@ -48,7 +48,7 @@ impl AgentPolicy {
             }),
             PolicyDecision::Ask => Ok(ToolDecision::Ask),
             PolicyDecision::Classify => {
-                if tool_name == "shell_session_exec" {
+                if tool_name == names::EXEC {
                     let args: ExecArgs = serde_json::from_str(args_json)?;
                     Ok(classifier::classify_command(&args.command))
                 } else {
@@ -71,9 +71,7 @@ mod tests {
     #[test]
     fn denies_killing_main_session() {
         let policy = make_policy();
-        let decision = policy
-            .evaluate("shell_session_kill", r#"{"name":"main"}"#)
-            .unwrap();
+        let decision = policy.evaluate(names::KILL, r#"{"name":"main"}"#).unwrap();
         assert!(matches!(decision, ToolDecision::Deny { .. }));
     }
 
@@ -81,11 +79,11 @@ mod tests {
     fn allows_list_and_capture() {
         let policy = make_policy();
         assert!(matches!(
-            policy.evaluate("shell_session_list", "{}").unwrap(),
+            policy.evaluate(names::LIST, "{}").unwrap(),
             ToolDecision::Allow
         ));
         assert!(matches!(
-            policy.evaluate("shell_session_capture", "{}").unwrap(),
+            policy.evaluate(names::CAPTURE, "{}").unwrap(),
             ToolDecision::Allow
         ));
     }
@@ -95,7 +93,7 @@ mod tests {
         let policy = make_policy();
         // "ls" is on the read-only allowlist → Allow via classifier.
         let decision = policy
-            .evaluate("shell_session_exec", r#"{"name":"main","command":"ls"}"#)
+            .evaluate(names::EXEC, r#"{"name":"main","command":"ls"}"#)
             .unwrap();
         assert!(matches!(decision, ToolDecision::Allow));
     }
@@ -114,20 +112,19 @@ mod tests {
 
         // Default: shell_session_list is allow.
         assert!(matches!(
-            policy.evaluate("shell_session_list", "{}").unwrap(),
+            policy.evaluate(names::LIST, "{}").unwrap(),
             ToolDecision::Allow
         ));
 
         // Update policy: set shell_session_list to deny.
         {
             let mut p = shared.write().unwrap();
-            p.tools
-                .insert("shell_session_list".into(), PolicyDecision::Deny);
+            p.tools.insert(names::LIST.into(), PolicyDecision::Deny);
         }
 
         // Now it should be denied.
         assert!(matches!(
-            policy.evaluate("shell_session_list", "{}").unwrap(),
+            policy.evaluate(names::LIST, "{}").unwrap(),
             ToolDecision::Deny { .. }
         ));
     }

@@ -92,7 +92,7 @@ pub fn create_agent_dir(
 /// exists — agent ids are `Uuid::new_v4()`, so a pre-existing destination is an
 /// anomaly (backup restore / tampering / bug), not a collision; surfacing it
 /// loudly beats silently overwriting a prior archive. The same-filesystem
-/// guarantee from [`data_dir_root`] makes the `rename` atomic.
+/// guarantee from `data_dir_root` makes the `rename` atomic.
 ///
 /// Rollback of never-alive agents (spawn/abort failure) stays a direct
 /// [`std::fs::remove_dir_all`] at the call site — those agents never produced

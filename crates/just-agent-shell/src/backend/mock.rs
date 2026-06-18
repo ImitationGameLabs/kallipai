@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::Path,
-    sync::Arc,
     time::Duration,
 };
 
@@ -10,7 +9,7 @@ use async_trait::async_trait;
 use super::super::error::ShellError;
 use super::{SessionInfo, ShellBackend, ShellOutput};
 
-/// In-memory shell backend used by unit tests.
+/// In-memory shell backend for tests; available behind the `testutils` feature.
 #[derive(Debug, Default)]
 pub struct MockShellBackend {
     sessions: HashMap<String, MockSession>,
@@ -131,6 +130,18 @@ impl MockShellBackend {
         self.sessions.len()
     }
 
+    /// Returns the commands executed in `session`, in invocation order.
+    ///
+    /// Empty if the session does not exist or has run no commands. The primary
+    /// assertion hook for tests driving shell tools: verify *what* an agent
+    /// actually ran — or that a denied/pending command never reached the backend.
+    pub fn executed_commands(&self, session: &str) -> Vec<String> {
+        self.sessions
+            .get(session)
+            .map(|s| s.history.clone())
+            .unwrap_or_default()
+    }
+
     /// Sets the pending output lines for a specific session (used by [`capture_output`](ShellBackend::capture_output)).
     pub fn set_session_output(&mut self, session: &str, lines: Vec<&str>) -> &mut Self {
         if let Some(session) = self.sessions.get_mut(session) {
@@ -152,6 +163,8 @@ impl ShellBackend for MockShellBackend {
             return Err(ShellError::session_not_found(&self.current));
         }
 
+        // Record before the timeout/background short-circuits — see
+        // `executed_commands_tracks_invocations_per_session` for why both count.
         if let Some(session) = self.sessions.get_mut(&self.current) {
             session.history.push(command.to_owned());
         }
@@ -263,7 +276,8 @@ impl ShellBackend for MockShellBackend {
         if !self.sessions.contains_key(name) {
             return Err(ShellError::session_not_found(name));
         }
-
+        // `history` is accumulated invocation state and resets on every restart,
+        // mirroring PtyBackend's kill+recreate; only `env` is gated by `clean_env`.
         if let Some(session) = self.sessions.get_mut(name) {
             session.history.clear();
             if clean_env {
@@ -281,6 +295,7 @@ impl ShellBackend for MockShellBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
 
     #[tokio::test]
@@ -302,5 +317,59 @@ mod tests {
             .execute("echo ok", Duration::from_secs(1), false)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn executed_commands_tracks_invocations_per_session() {
+        let mut backend = MockShellBackend::new();
+        backend.add_session("worker");
+        backend
+            .execute("ls", Duration::from_secs(1), false)
+            .await
+            .unwrap();
+        backend
+            .execute("echo hi", Duration::from_secs(1), false)
+            .await
+            .unwrap();
+        backend.switch_session("worker").await.unwrap();
+        backend
+            .execute("pwd", Duration::from_secs(1), false)
+            .await
+            .unwrap();
+
+        // Per-session attribution, no cross-talk.
+        assert_eq!(
+            backend.executed_commands("main"),
+            vec!["ls".to_owned(), "echo hi".to_owned()]
+        );
+        assert_eq!(backend.executed_commands("worker"), vec!["pwd".to_owned()]);
+
+        // Timed-out and background commands are still recorded: they reached
+        // the backend (the real PtyBackend writes each command to the PTY
+        // before short-circuiting).
+        backend.set_should_timeout(true);
+        backend
+            .execute("sleep 999", Duration::from_secs(1), false)
+            .await
+            .unwrap();
+        backend
+            .execute("long-running", Duration::from_secs(1), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.executed_commands("worker"),
+            vec![
+                "pwd".to_owned(),
+                "sleep 999".to_owned(),
+                "long-running".to_owned(),
+            ]
+        );
+
+        // Unknown session returns an empty Vec (no panic).
+        assert!(backend.executed_commands("nope").is_empty());
+
+        // restart clears history unconditionally (clean_env only gates env).
+        backend.restart_session("worker", false).await.unwrap();
+        assert!(backend.executed_commands("worker").is_empty());
     }
 }

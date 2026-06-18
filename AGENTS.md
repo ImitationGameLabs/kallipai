@@ -10,6 +10,7 @@ AI Agent working guide. This document provides code structure and decision rules
 ├── crates/                    # Rust workspace members
 │   ├── just-agent-common/    # Shared types and command parsing
 │   ├── just-agent-runtime/   # Agent runtime: agent context, policy, tool dispatch (daemon-only)
+│   ├── just-agent-shell/     # Reusable shell/session tools for LLM applications
 │   ├── just-agent/           # Headless CLI for agent (daemon client)
 │   ├── just-agent-tui/       # Interactive TUI client
 │   ├── just-agent-daemon/    # HTTP API server hosting multiple agent instances

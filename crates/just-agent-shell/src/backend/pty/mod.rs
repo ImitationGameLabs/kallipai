@@ -17,9 +17,9 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use strip_ansi_escapes::strip as strip_ansi;
 use tokio::time::{sleep, timeout};
 
-use super::super::compat::strip_common_prefix;
 use super::super::error::ShellError;
 use super::{SessionInfo, ShellBackend, ShellOutput};
+use crate::compat::strip_common_prefix;
 
 pub use builder::PtyBuilder;
 use scrollback::ScrollbackBuffer;

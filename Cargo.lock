@@ -1459,15 +1459,14 @@ dependencies = [
  "dirs",
  "futures-util",
  "just-agent-common",
+ "just-agent-shell",
  "just-llm-client",
- "portable-pty",
  "rable",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
  "serial_test",
- "strip-ansi-escapes",
  "temp-env",
  "tempfile",
  "thiserror 2.0.18",
@@ -1478,6 +1477,21 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "just-agent-shell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "just-llm-client",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "strip-ansi-escapes",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

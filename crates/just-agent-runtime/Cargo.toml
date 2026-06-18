@@ -9,6 +9,7 @@ license.workspace = true
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 just-agent-common = { workspace = true }
+just-agent-shell = { workspace = true }
 just-llm-client = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -20,8 +21,6 @@ uuid = { workspace = true }
 dirs = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
-portable-pty = { workspace = true }
-strip-ansi-escapes = { workspace = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }

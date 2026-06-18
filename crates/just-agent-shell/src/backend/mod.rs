@@ -2,11 +2,13 @@
 
 mod pty;
 
-#[cfg(test)]
+/// In-memory backend for tests; available with the `testutils` feature (and
+/// during this crate's own tests).
+#[cfg(any(test, feature = "testutils"))]
 #[allow(missing_docs)]
-mod mock;
+pub mod mock;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testutils"))]
 pub use mock::MockShellBackend;
 pub use pty::{PtyBackend, PtyBuilder};
 

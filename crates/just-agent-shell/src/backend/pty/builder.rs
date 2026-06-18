@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::PtyBackend;
-use crate::tools::shell::error::ShellError;
+use crate::error::ShellError;
 
 // Default values matching previous hardcoded constants.
 pub(super) const DEFAULT_ROWS: u16 = 24;
@@ -40,7 +40,7 @@ pub(super) const DEFAULT_FALLBACK_SHELL: &str = "/bin/bash";
 ///
 /// ```ignore
 /// use std::time::Duration;
-/// use just_llm_client::tools::shell::PtyBuilder;
+/// use just_agent_shell::PtyBuilder;
 ///
 /// let backend = PtyBuilder::new("main")
 ///     .dimensions(40, 1000)

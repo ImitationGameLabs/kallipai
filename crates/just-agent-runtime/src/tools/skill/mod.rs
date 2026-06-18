@@ -259,6 +259,9 @@ pub struct FilePinTool {
 }
 
 impl FilePinTool {
+    /// Tool name exposed to the LLM and referenced by the policy layer.
+    pub const NAME: &str = "read_file_and_pin";
+
     pub fn new(ctx: Arc<Mutex<dyn AgenticContext>>) -> Self {
         Self { ctx }
     }
@@ -267,7 +270,7 @@ impl FilePinTool {
 #[async_trait]
 impl LlmTool for FilePinTool {
     fn name(&self) -> &str {
-        "read_file_and_pin"
+        Self::NAME
     }
 
     fn description(&self) -> &str {

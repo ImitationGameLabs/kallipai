@@ -40,7 +40,7 @@ impl<B: ShellBackend> ShellSessionSwitch<B> {
 #[async_trait]
 impl<B: ShellBackend + Send + Sync + 'static> LlmTool for ShellSessionSwitch<B> {
     fn name(&self) -> &str {
-        "shell_session_switch"
+        super::names::SWITCH
     }
 
     fn description(&self) -> &str {
@@ -76,7 +76,7 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for ShellSessionSwitch<B> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::shell::{MockShellBackend, ShellError};
+    use crate::{MockShellBackend, ShellError};
 
     #[tokio::test]
     async fn switch_session_changes_focus() {

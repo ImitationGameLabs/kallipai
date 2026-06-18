@@ -42,7 +42,7 @@ impl<B: ShellBackend> ShellSessionKill<B> {
 #[async_trait]
 impl<B: ShellBackend + Send + Sync + 'static> LlmTool for ShellSessionKill<B> {
     fn name(&self) -> &str {
-        "shell_session_kill"
+        super::names::KILL
     }
 
     fn description(&self) -> &str {
@@ -80,7 +80,7 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for ShellSessionKill<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::shell::{MockShellBackend, ShellError};
+    use crate::{MockShellBackend, ShellError};
 
     #[tokio::test]
     async fn kill_session_removes_session() {

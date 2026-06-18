@@ -2,15 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use just_agent_shell::{PtyBuilder, shell_tool_set};
 use just_llm_client::ToolDispatcher;
 use just_llm_client::types::chat::{FunctionDefinition, ToolDefinition, ToolType};
 use serde_json::json;
-use shell::{PtyBuilder, shell_tool_set};
 use tokio::sync::Mutex;
 
 use crate::context::{AgenticContext, ContextStore};
 pub mod context;
-pub mod shell;
 pub mod skill;
 
 pub use skill::{
