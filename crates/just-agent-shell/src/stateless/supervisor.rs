@@ -1,0 +1,436 @@
+//! Background-process supervisor (Claude-Code style).
+//!
+//! Each background task is its own `bash` process writing merged stdout/stderr
+//! to a file; a watcher task polls it to detect exit, run a stall watchdog
+//! (quiescence + tail regex) and a size watchdog, and drive a two-phase kill
+//! on cancel. Modeled on the daemon's agent registry (`state.rs`).
+
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use regex::Regex;
+use tokio::process::{Child, Command};
+use tokio_util::sync::CancellationToken;
+
+use crate::error::ShellError;
+use crate::stateless::{env_snapshot, pgroup};
+
+/// LLM-facing identifier for a background task (UUID v4 string).
+pub(super) type TaskId = String;
+
+const WATCH_POLL: Duration = Duration::from_millis(200);
+/// Stall requires this much output-quiescence before the tail regex is trusted,
+/// so a build log printing `Compiling foo:` can't trip it (R6).
+const STALL_QUIESCENCE: Duration = Duration::from_secs(3);
+/// Tail size examined for interactive-prompt lockups.
+const STALL_TAIL: u64 = 4 * 1024;
+/// Bounded wait for a watcher task to finish after cancel.
+const KILL_JOIN: Duration = Duration::from_secs(5);
+
+const EXIT_NONE: i32 = -1;
+const STATE_RUNNING: u8 = 0;
+const STATE_EXITED: u8 = 1;
+const STATE_KILLED: u8 = 2;
+
+/// Visible task state (serialized for the LLM as a string).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskState {
+    Running,
+    Exited,
+    Killed,
+}
+
+impl TaskState {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Exited,
+            2 => Self::Killed,
+            _ => Self::Running,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Exited => "exited",
+            Self::Killed => "killed",
+        }
+    }
+}
+
+/// Result of reading a background task's accumulated output.
+#[derive(Debug)]
+pub struct BgReadOutput {
+    /// Tail of the merged stdout/stderr file.
+    pub output: String,
+    /// Current task state.
+    pub state: TaskState,
+    /// Exit code once the task has exited, else `None`.
+    pub exit_code: Option<i32>,
+    /// `true` if the task appears stalled on an interactive prompt.
+    pub stalled: bool,
+    /// Total bytes written so far.
+    pub bytes: usize,
+}
+
+struct BackgroundTask {
+    output_path: PathBuf,
+    /// Process-group leader pid (PGID == pid); used to force-kill the whole
+    /// group on registry drop, since `Drop` can't await the watcher.
+    pid: Option<u32>,
+    state: Arc<AtomicU8>,
+    exit_code: Arc<AtomicI32>,
+    stalled: Arc<AtomicBool>,
+    bytes: Arc<AtomicUsize>,
+    cancel: CancellationToken,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Shared mutable state observed by both the watcher task and read/kill.
+struct Watched {
+    state: Arc<AtomicU8>,
+    exit_code: Arc<AtomicI32>,
+    stalled: Arc<AtomicBool>,
+    bytes: Arc<AtomicUsize>,
+}
+
+/// Registry of background tasks by id.
+pub(super) struct BackgroundRegistry {
+    tasks: HashMap<TaskId, BackgroundTask>,
+    shell: OsString,
+    snapshot: PathBuf,
+    data_dir: PathBuf,
+    max_bg_bytes: usize,
+    env: HashMap<OsString, OsString>,
+}
+
+impl BackgroundRegistry {
+    pub(super) fn new(
+        shell: OsString,
+        snapshot: PathBuf,
+        data_dir: PathBuf,
+        max_bg_bytes: usize,
+        env: HashMap<OsString, OsString>,
+    ) -> Self {
+        Self {
+            tasks: HashMap::new(),
+            shell,
+            snapshot,
+            data_dir,
+            max_bg_bytes,
+            env,
+        }
+    }
+
+    /// Spawn `command` as a background task; returns its id.
+    pub(super) fn spawn(&mut self, command: &str) -> Result<TaskId, ShellError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let task_dir = self.data_dir.join("bg").join(&id);
+        std::fs::create_dir_all(&task_dir)?;
+        let output_path = task_dir.join("out.log");
+
+        // Create the output file so the redirect target exists before spawn.
+        let output = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&output_path)?;
+
+        let wrapper_path = task_dir.join("cmd.sh");
+        // Background wrapper: no cwd EXIT trap (background must not touch the
+        // shared sticky cwd — M9).
+        let wrapper = super::backend::build_wrapper(command, &self.snapshot, None);
+        std::fs::write(&wrapper_path, wrapper)?;
+
+        let mut cmd = Command::new(&self.shell);
+        cmd.arg(&wrapper_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(output.try_clone()?))
+            .stderr(Stdio::from(output))
+            .process_group(0)
+            .kill_on_drop(true);
+        // Apply builder env (parity with foreground exec) + color suppression.
+        for (key, value) in &self.env {
+            cmd.env(key, value);
+        }
+        for (key, value) in env_snapshot::COLOR_VARS {
+            cmd.env(key, value);
+        }
+        let child = cmd.spawn()?;
+        let pid = child.id();
+
+        let state = Arc::new(AtomicU8::new(STATE_RUNNING));
+        let exit_code = Arc::new(AtomicI32::new(EXIT_NONE));
+        let stalled = Arc::new(AtomicBool::new(false));
+        let bytes = Arc::new(AtomicUsize::new(0));
+        let cancel = CancellationToken::new();
+
+        let handle = tokio::spawn(watch(
+            child,
+            output_path.clone(),
+            Watched {
+                state: state.clone(),
+                exit_code: exit_code.clone(),
+                stalled: stalled.clone(),
+                bytes: bytes.clone(),
+            },
+            cancel.clone(),
+            self.max_bg_bytes,
+        ));
+
+        self.tasks.insert(
+            id.clone(),
+            BackgroundTask {
+                output_path,
+                pid,
+                state,
+                exit_code,
+                stalled,
+                bytes,
+                cancel,
+                handle: Some(handle),
+            },
+        );
+        Ok(id)
+    }
+
+    /// Read a background task's accumulated output and status.
+    pub(super) fn read(&self, id: &str, tail_bytes: usize) -> Result<BgReadOutput, ShellError> {
+        let task = self
+            .tasks
+            .get(id)
+            .ok_or_else(|| ShellError::task_not_found(id))?;
+        let bytes = task.bytes.load(Ordering::Relaxed);
+        let output = read_tail(&task.output_path, tail_bytes)?;
+        let code = task.exit_code.load(Ordering::Relaxed);
+        Ok(BgReadOutput {
+            output,
+            state: TaskState::from_u8(task.state.load(Ordering::Relaxed)),
+            exit_code: (code != EXIT_NONE).then_some(code),
+            stalled: task.stalled.load(Ordering::Relaxed),
+            bytes,
+        })
+    }
+
+    /// Cancel and reap a background task, then remove its on-disk output dir.
+    pub(super) async fn kill(&mut self, id: &str) -> Result<(), ShellError> {
+        let mut task = self
+            .tasks
+            .remove(id)
+            .ok_or_else(|| ShellError::task_not_found(id))?;
+        task.cancel.cancel();
+        if let Some(handle) = task.handle.take() {
+            let _ = tokio::time::timeout(KILL_JOIN, handle).await;
+        }
+        // The agent killed it explicitly — drop the output dir.
+        if let Some(dir) = task.output_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for BackgroundRegistry {
+    fn drop(&mut self) {
+        // For each task: force-kill the whole process group (sync — `Drop`
+        // can't await the watcher) and remove its output dir. `kill_on_drop`
+        // alone would only signal the leader, orphaning its children.
+        for (_, task) in self.tasks.drain() {
+            task.cancel.cancel();
+            if let Some(pid) = task.pid {
+                pgroup::force_kill_group(pid as i32);
+            }
+            if let Some(dir) = task.output_path.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+}
+
+/// Watcher loop: detect exit, run the size + stall watchdogs, and drive a
+/// two-phase kill on cancel.
+async fn watch(
+    mut child: Child,
+    output_path: PathBuf,
+    watched: Watched,
+    cancel: CancellationToken,
+    max_bg_bytes: usize,
+) {
+    let Watched {
+        state,
+        exit_code,
+        stalled,
+        bytes,
+    } = watched;
+    let mut last_size: u64 = 0;
+    let mut quiescent_since: Option<tokio::time::Instant> = None;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                let _ = pgroup::kill_tree(&mut child).await;
+                state.store(STATE_KILLED, Ordering::Relaxed);
+                return;
+            }
+            _ = tokio::time::sleep(WATCH_POLL) => {}
+        }
+
+        let size = std::fs::metadata(&output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        bytes.store(size as usize, Ordering::Relaxed);
+
+        // Size watchdog: unbounded output fills the disk (the 768GB lesson).
+        if (size as usize) > max_bg_bytes {
+            let _ = pgroup::kill_tree(&mut child).await;
+            state.store(STATE_KILLED, Ordering::Relaxed);
+            return;
+        }
+
+        // Exit detection.
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_code.store(status.code().unwrap_or(EXIT_NONE), Ordering::Relaxed);
+                state.store(STATE_EXITED, Ordering::Relaxed);
+                return;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                state.store(STATE_EXITED, Ordering::Relaxed);
+                return;
+            }
+        }
+
+        // Stall watchdog: requires quiescence, then a tail-regex match (R6).
+        if size == last_size {
+            let since = quiescent_since.get_or_insert_with(tokio::time::Instant::now);
+            if since.elapsed() >= STALL_QUIESCENCE && tail_matches_prompt(&output_path) {
+                stalled.store(true, Ordering::Relaxed);
+            }
+        } else {
+            quiescent_since = None;
+            stalled.store(false, Ordering::Relaxed);
+        }
+        last_size = size;
+    }
+}
+
+/// Interactive-prompt lockup patterns (kept conservative to avoid false positives).
+fn stall_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?im)(password|passphrase|are you sure|confirm)").expect("valid regex")
+    })
+}
+
+fn tail_matches_prompt(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = file.seek(SeekFrom::Start(len.saturating_sub(STALL_TAIL)));
+    let mut buf = Vec::new();
+    let _ = file.read_to_end(&mut buf);
+    stall_regex().is_match(&String::from_utf8_lossy(&buf))
+}
+
+fn read_tail(path: &Path, tail_bytes: usize) -> Result<String, ShellError> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let _ = file.seek(SeekFrom::Start(len.saturating_sub(tail_bytes as u64)));
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    fn registry() -> BackgroundRegistry {
+        let dir = std::env::temp_dir().join(format!(
+            "ja-sup-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Minimal snapshot so the wrapper's `source` is a no-op.
+        let snap = dir.join("env.sh");
+        std::fs::write(&snap, "").unwrap();
+        BackgroundRegistry::new(
+            OsString::from("bash"),
+            snap,
+            dir,
+            10 * 1024 * 1024,
+            HashMap::new(),
+        )
+    }
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[tokio::test]
+    async fn spawn_then_read_exited_task() {
+        let mut reg = registry();
+        let id = reg.spawn("echo hello").unwrap();
+        // Wait for the task to exit and the watcher to notice.
+        for _ in 0..50 {
+            let out = reg.read(&id, 4096).unwrap();
+            if out.state == TaskState::Exited {
+                assert!(out.output.contains("hello"));
+                assert_eq!(out.exit_code, Some(0));
+                return;
+            }
+            tokio::time::sleep(WATCH_POLL).await;
+        }
+        panic!("task did not exit in time");
+    }
+
+    #[tokio::test]
+    async fn kill_stops_a_long_task() {
+        let mut reg = registry();
+        let id = reg.spawn("sleep 30").unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        reg.kill(&id).await.unwrap();
+        let err = reg.read(&id, 4096).unwrap_err();
+        assert!(matches!(err, ShellError::TaskNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn read_unknown_task_errors() {
+        let reg = registry();
+        let err = reg.read("nope", 4096).unwrap_err();
+        assert!(matches!(err, ShellError::TaskNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn size_watchdog_kills_overflow() {
+        let mut reg = {
+            let dir = std::env::temp_dir().join(format!(
+                "ja-sup-size-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let snap = dir.join("env.sh");
+            std::fs::write(&snap, "").unwrap();
+            BackgroundRegistry::new(OsString::from("bash"), snap, dir, 4096, HashMap::new()) // tiny cap
+        };
+        let id = reg.spawn("yes hello").unwrap();
+        for _ in 0..100 {
+            let out = reg.read(&id, 1024).unwrap();
+            if out.state == TaskState::Killed {
+                return;
+            }
+            tokio::time::sleep(WATCH_POLL).await;
+        }
+        panic!("size watchdog did not kill the overflowing task");
+    }
+}

@@ -26,6 +26,13 @@
 //! This crate provides shell tool *mechanism* only. Deciding whether a command
 //! is safe to run (e.g. dangerous-command detection) is application policy and
 //! is intentionally NOT bundled here; consumers wire their own classifier.
+//!
+//! # Platform
+//!
+//! Unix-only in practice: the stateless backend (`stateless::pgroup`) uses
+//! `nix` process-group signals, and the daemon/runtime build only on unix.
+//! There is no Windows build path today; reintroduce `#[cfg(unix)]` gating if
+//! cross-platform support is ever added.
 
 mod backend;
 // Private helper module for the PTY backend. `strip_common_prefix` is exposed
@@ -33,6 +40,7 @@ mod backend;
 mod compat;
 mod error;
 pub mod session;
+pub mod stateless;
 
 use std::sync::Arc;
 
@@ -41,6 +49,14 @@ use tokio::sync::Mutex;
 
 pub use backend::{PtyBackend, PtyBuilder, SessionInfo, ShellBackend, ShellOutput};
 pub use error::ShellError;
+pub use stateless::backend::{ProcessBackend, StatelessBackend, StatelessOutput};
+pub use stateless::builder::StatelessBuilder;
+pub use stateless::tools::{BashExec, BashExecOutput, BgKill, BgRead};
+
+// The stateless mock is public API behind the `testutils` feature, mirroring the
+// PTY mock.
+#[cfg(any(test, feature = "testutils"))]
+pub use stateless::mock::MockStatelessBackend;
 
 // The mock backend is public API behind the `testutils` feature so downstream
 // crates can drive shell-tool tests without a real PTY. It is also compiled
@@ -76,6 +92,34 @@ pub fn mock_shell_tool_set() -> (Vec<Box<dyn LlmTool>>, Arc<Mutex<MockShellBacke
     (tools, backend)
 }
 
+/// Creates a ready-to-register set of **stateless** shell tools backed by the
+/// same [`StatelessBackend`].
+///
+/// Returns three [`LlmTool`] implementations: `bash_exec`,
+/// `bash_background_read`, `bash_background_kill`. This is **additive** alongside
+/// [`shell_tool_set`]: the running agent still uses [`shell_tool_set`]; this set
+/// is built for head-to-head comparison and a future swap-over. It is not wired
+/// into `just-agent-runtime`.
+pub fn bash_exec_tool_set<B: StatelessBackend + Send + Sync + 'static>(
+    backend: Arc<Mutex<B>>,
+) -> Vec<Box<dyn LlmTool>> {
+    vec![
+        Box::new(BashExec::new(backend.clone())),
+        Box::new(BgRead::new(backend.clone())),
+        Box::new(BgKill::new(backend)),
+    ]
+}
+
+/// Creates a stateless tool set backed by the in-memory mock backend for tests.
+///
+/// Available with the `testutils` feature (and during this crate's own tests).
+#[cfg(any(test, feature = "testutils"))]
+pub fn mock_bash_exec_tool_set() -> (Vec<Box<dyn LlmTool>>, Arc<Mutex<MockStatelessBackend>>) {
+    let backend = Arc::new(Mutex::new(MockStatelessBackend::new()));
+    let tools = bash_exec_tool_set(backend.clone());
+    (tools, backend)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +128,11 @@ mod tests {
     fn shell_tool_set_contains_all_tools() {
         let (tools, _) = mock_shell_tool_set();
         assert_eq!(tools.len(), 7);
+    }
+
+    #[test]
+    fn bash_exec_tool_set_contains_three_tools() {
+        let (tools, _) = mock_bash_exec_tool_set();
+        assert_eq!(tools.len(), 3);
     }
 }
