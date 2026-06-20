@@ -8,6 +8,7 @@ mod shutdown;
 mod skill_promote;
 mod sse;
 mod state;
+mod token;
 
 #[cfg(test)]
 mod test_helpers;
@@ -36,17 +37,27 @@ async fn main() -> Result<()> {
         std::env::set_var("JUST_AGENT_DAEMON_URL", &args.advertise_url);
     }
 
-    let operator_token = std::env::var("JUST_AGENT_OPERATOR_TOKEN")
-        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    // Mint the operator token: honor JUST_AGENT_OPERATOR_TOKEN if set (back-compat
+    // for automation), otherwise generate a fresh 256-bit `sk-operator-…` token.
+    // Only the SHA-256 hash is retained by AppState; the plaintext is printed below
+    // then dropped at end of scope.
+    let operator = match std::env::var("JUST_AGENT_OPERATOR_TOKEN") {
+        Ok(s) => token::MintedToken::from_secret(s),
+        Err(_) => token::MintedToken::generate(token::TokenKind::Operator),
+    };
+    anyhow::ensure!(
+        !operator.secret().trim().is_empty(),
+        "JUST_AGENT_OPERATOR_TOKEN must not be empty"
+    );
     println!("─────────────────────────────────────────────────");
     println!("  Operator Token:");
-    println!("  {operator_token}");
+    println!("  {}", operator.secret());
     println!();
     println!("  WARNING: Do not leak this token.");
     println!();
     println!("  To authenticate, either:");
     println!("  - Set env and launch TUI:");
-    println!("      export JUST_AGENT_AUTH_TOKEN={operator_token}");
+    println!("      export JUST_AGENT_AUTH_TOKEN={}", operator.secret());
     println!("      just-agent-tui");
     println!("  - Or enter the token when prompted inside the TUI.");
     println!("─────────────────────────────────────────────────");
@@ -90,7 +101,7 @@ async fn main() -> Result<()> {
     let profiles = Arc::new(ProfileRegistry::new(cfg.tiers, source)?);
 
     let state = Arc::new(AppState::with_limits(
-        operator_token,
+        operator.hash().clone(),
         args.max_agents,
         args.max_subagents,
         args.prompt_queue_size,

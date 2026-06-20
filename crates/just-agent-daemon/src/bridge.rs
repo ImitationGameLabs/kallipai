@@ -509,7 +509,7 @@ mod tests {
         );
         {
             let mut reg = state.registry.write().await;
-            reg.register(parent.clone(), format!("tok-{parent}"), parent_entry);
+            reg.register(parent.clone(), parent_entry);
             add_sub(&mut reg, &child, &parent);
         }
 
@@ -545,7 +545,7 @@ mod tests {
         {
             let mut reg = state.registry.write().await;
             add_root_with_policy(&mut reg, &root, policy_allow_tool("dangerous_tool"));
-            reg.register(parent.clone(), format!("tok-{parent}"), parent_entry);
+            reg.register(parent.clone(), parent_entry);
             add_sub(&mut reg, &child, &parent);
         }
 
@@ -585,7 +585,7 @@ mod tests {
                 &root,
                 policy_for_tool("dangerous_tool", PolicyDecision::Deny),
             );
-            reg.register(parent.clone(), format!("tok-{parent}"), parent_entry);
+            reg.register(parent.clone(), parent_entry);
             add_sub(&mut reg, &child, &parent);
         }
 
@@ -644,7 +644,7 @@ mod tests {
         );
         {
             let mut reg = state.registry.write().await;
-            reg.register(root.clone(), format!("tok-{root}"), root_entry);
+            reg.register(root.clone(), root_entry);
             add_sub(&mut reg, &child, &root);
         }
 

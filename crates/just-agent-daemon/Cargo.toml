@@ -26,3 +26,9 @@ uuid = { workspace = true }
 time = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
+# Auth-token hardening: 256-bit CSPRNG generation, base64url encoding, SHA-256
+# at-rest hashing, and constant-time operator comparison.
+base64 = { workspace = true }
+getrandom = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }

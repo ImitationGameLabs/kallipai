@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::state::{Agent, AgentEntry, AgentRegistry, AppState, SharedState};
+use crate::token::TokenHash;
 
 /// Construct a full `AgentEntry` with real channels and default policy.
 pub fn make_entry(created_by: Option<AgentId>, auth_token: String) -> AgentEntry {
@@ -65,7 +66,7 @@ pub fn make_entry_with_rx(
             round_cancel: Arc::new(std::sync::Mutex::new(None)),
             notify: Arc::new(tokio::sync::Notify::new()),
             state: Arc::new(AtomicU8::new(AgentState::IDLE)),
-            auth_token,
+            auth_token_hash: TokenHash::of(&auth_token),
             env: std::collections::HashMap::new(),
             tool_policy: Arc::new(std::sync::RwLock::new(default_tool_policy())),
         },
@@ -98,26 +99,21 @@ pub fn make_entry_with_policy_rx(
 
 /// Register a root agent (no `created_by`).
 pub fn add_root(registry: &mut AgentRegistry, id: &AgentId) {
-    let token = format!("tok-{id}");
-    registry.register(id.clone(), token, make_entry(None, format!("agent-{id}")));
+    registry.register(id.clone(), make_entry(None, format!("agent-{id}")));
 }
 
 /// Register a sub-agent under a supervisor.
 pub fn add_sub(registry: &mut AgentRegistry, id: &AgentId, supervisor: &AgentId) {
-    let token = format!("tok-{id}");
     registry.register(
         id.clone(),
-        token,
         make_entry(Some(supervisor.clone()), format!("agent-{id}")),
     );
 }
 
 /// Register a root agent with a custom policy.
 pub fn add_root_with_policy(registry: &mut AgentRegistry, id: &AgentId, policy: ToolPolicy) {
-    let token = format!("tok-{id}");
     registry.register(
         id.clone(),
-        token,
         make_entry_with_policy(None, format!("agent-{id}"), policy),
     );
 }
@@ -188,7 +184,11 @@ pub fn make_profile_registry() -> Arc<just_agent_runtime::profile::ProfileRegist
     Arc::new(ProfileRegistry::new(cfg.tiers, source).expect("valid test registry"))
 }
 
-/// Create a fresh `SharedState` for testing.
+/// Create a fresh `SharedState` for testing. The operator token plaintext is
+/// `"op-token"` (hashed into `AppState`); tests present it as a bearer token.
 pub fn make_state() -> SharedState {
-    Arc::new(AppState::new("op-token".into(), make_profile_registry()))
+    Arc::new(AppState::new(
+        TokenHash::of("op-token"),
+        make_profile_registry(),
+    ))
 }

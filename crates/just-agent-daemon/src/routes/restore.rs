@@ -19,6 +19,7 @@ use tracing::info;
 
 use super::agent::{SpawnArgs, spawn_agent};
 use crate::state::{Agent, AgentEntry, SharedState};
+use crate::token::{MintedToken, TokenKind};
 
 /// One node in a supervisor chain, fully loaded from disk.
 struct ChainNode {
@@ -154,7 +155,7 @@ async fn restore_one(
     shutdown: CancellationToken,
     shared_state: SharedState,
     index: &RestoreIndex,
-) -> anyhow::Result<(AgentId, String, Agent)> {
+) -> anyhow::Result<(AgentId, Agent)> {
     let restored = persistence::restore_agent(&p.agent_id, &p.agent_dir)?;
 
     let mut config = AgentConfig::load(None, vec![], Some(p.meta.workspace_root.clone()))?;
@@ -188,8 +189,10 @@ async fn restore_one(
     let approvals = Arc::new(tokio::sync::Mutex::new(restored.approvals));
     let (events_tx, _) = broadcast::channel(256);
 
-    let auth_token = uuid::Uuid::new_v4().to_string();
-    let env = SpawnArgs::default_env(&p.agent_id, &auth_token);
+    // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the PTY env;
+    // only its SHA-256 is indexed for auth lookup.
+    let token = MintedToken::generate(TokenKind::Agent);
+    let env = SpawnArgs::default_env(&p.agent_id, token.secret());
 
     let tool_policy = Arc::new(std::sync::RwLock::new(tool_policy));
 
@@ -202,7 +205,7 @@ async fn restore_one(
         initial_prompt: None,
         shutdown_cancel: shutdown,
         events_tx,
-        auth_token: auth_token.clone(),
+        auth_token_hash: token.hash().clone(),
         env,
         shared_state: shared_state.clone(),
         tool_policy,
@@ -212,7 +215,7 @@ async fn restore_one(
     })
     .await?;
 
-    Ok((restored.agent_id, auth_token, agent))
+    Ok((restored.agent_id, agent))
 }
 
 /// Restore persisted agents top-down, level by level.
@@ -302,7 +305,7 @@ pub async fn restore_agents(state: &SharedState) {
             .collect();
 
         // Restore all siblings concurrently.
-        type RestoreOutcome = (AgentId, String, Agent);
+        type RestoreOutcome = (AgentId, Agent);
         let results: Vec<(AgentId, anyhow::Result<RestoreOutcome>)> =
             futures_util::future::join_all(tasks.into_iter().map(|(id, p)| async {
                 let result = restore_one(p, state.shutdown.clone(), state.clone(), &index).await;
@@ -315,8 +318,8 @@ pub async fn restore_agents(state: &SharedState) {
         let mut successes = Vec::new();
         for (id, result) in results {
             match result {
-                Ok((registered_id, auth_token, agent)) => {
-                    successes.push((registered_id, auth_token, agent));
+                Ok((registered_id, agent)) => {
+                    successes.push((registered_id, agent));
                     if let Some(children) = children_of.get(&id) {
                         next_level.extend(children.iter().cloned());
                     }
@@ -331,10 +334,9 @@ pub async fn restore_agents(state: &SharedState) {
 
         if !successes.is_empty() {
             let mut registry = state.registry.write().await;
-            for (id, auth_token, agent) in successes {
+            for (id, agent) in successes {
                 registry.register(
                     id,
-                    auth_token,
                     AgentEntry {
                         agent,
                         subagent_ids: vec![],

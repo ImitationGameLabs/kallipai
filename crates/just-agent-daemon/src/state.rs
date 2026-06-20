@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use crate::skill_promote::SkillPromoteStore;
+use crate::token::TokenHash;
 pub use just_agent_common::agentid::AgentId;
 use just_agent_common::policy::ToolPolicy;
 pub use just_agent_common::protocol::AgentState;
@@ -37,7 +38,9 @@ pub struct AppState {
     /// is the fine-grained skill-filesystem gate.
     pub skill_write_lock: Mutex<()>,
     pub shutdown: CancellationToken,
-    pub operator_token: String,
+    /// SHA-256 of the operator token. The plaintext is printed once at startup and
+    /// never retained; this hash is what incoming bearer tokens are compared against.
+    pub operator_token_hash: TokenHash,
     /// Maximum number of concurrent agents.
     pub max_agents: usize,
     /// Maximum number of direct subagents per agent.
@@ -51,11 +54,15 @@ pub struct AppState {
     pub profiles: Arc<ProfileRegistry>,
 }
 
-/// Combined index: agent map + token→id lookup + subagent reverse pointers.
+/// Combined index: agent map + token-hash→id lookup + subagent reverse pointers.
 /// All mutations go through methods that maintain invariants atomically.
 pub struct AgentRegistry {
     agents: HashMap<AgentId, AgentEntry>,
-    token_index: HashMap<String, AgentId>,
+    /// SHA-256 of each agent's auth token → its id. Keyed by hash so agent auth
+    /// shares the operator's `TokenHash::of` → hash-compare path (consistency) — not
+    /// for secret protection, since the plaintext still lives in [`Agent::env`] for
+    /// PTY injection.
+    token_index: HashMap<TokenHash, AgentId>,
 }
 
 pub struct AgentEntry {
@@ -81,9 +88,12 @@ pub struct Agent {
     /// The agent task awaits this in the outer loop; callers signal via `notify_one()`.
     pub notify: Arc<Notify>,
     pub state: Arc<AtomicU8>,
-    pub auth_token: String,
+    /// SHA-256 of the agent's auth token. The plaintext is injected into [`env`]
+    /// (`JUST_AGENT_AUTH_TOKEN`) for PTY use; only this hash is retained for lookup.
+    pub auth_token_hash: TokenHash,
     /// Environment variables injected into PTY sessions (JUST_AGENT_ID, JUST_AGENT_AUTH_TOKEN, etc.).
-    /// Preserved across reactivation so the agent retains its identity.
+    /// Preserved across reactivation so the agent retains its identity. This is the
+    /// sole home of the auth-token plaintext.
     pub env: HashMap<String, String>,
     /// Shared tool policy. The daemon updates this via API; the runtime reads it in evaluate().
     pub tool_policy: Arc<std::sync::RwLock<ToolPolicy>>,
@@ -127,13 +137,13 @@ impl Agent {
 impl AppState {
     /// Test-only constructor with generous resource limits.
     #[cfg(test)]
-    pub fn new(operator_token: String, profiles: Arc<ProfileRegistry>) -> Self {
+    pub fn new(operator_token_hash: TokenHash, profiles: Arc<ProfileRegistry>) -> Self {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
             skill_promote_store: Mutex::new(SkillPromoteStore::new()),
             skill_write_lock: Mutex::new(()),
             shutdown: CancellationToken::new(),
-            operator_token,
+            operator_token_hash,
             max_agents: crate::args::MAX_AGENTS_LIMIT,
             max_subagents: crate::args::MAX_SUBAGENTS_LIMIT,
             prompt_queue_size: 5,
@@ -147,7 +157,7 @@ impl AppState {
 
     /// Production constructor with resource limits from CLI args.
     pub fn with_limits(
-        operator_token: String,
+        operator_token_hash: TokenHash,
         max_agents: usize,
         max_subagents: usize,
         prompt_queue_size: usize,
@@ -158,7 +168,7 @@ impl AppState {
             skill_promote_store: Mutex::new(SkillPromoteStore::new()),
             skill_write_lock: Mutex::new(()),
             shutdown: CancellationToken::new(),
-            operator_token,
+            operator_token_hash,
             max_agents,
             max_subagents,
             prompt_queue_size,
@@ -201,14 +211,14 @@ impl AgentRegistry {
         self.agents.iter()
     }
 
-    pub fn get_agent_id_by_token(&self, token: &str) -> Option<&AgentId> {
-        self.token_index.get(token)
+    pub fn get_agent_id_by_token(&self, hash: &TokenHash) -> Option<&AgentId> {
+        self.token_index.get(hash)
     }
 
     // -- write helpers --
 
-    /// Insert agent, register token, update supervisor's subagent_ids.
-    pub fn register(&mut self, id: AgentId, auth_token: String, entry: AgentEntry) {
+    /// Insert agent, index its token hash, update supervisor's subagent_ids.
+    pub fn register(&mut self, id: AgentId, entry: AgentEntry) {
         // Eagerly link: if the supervisor is already registered, update its
         // subagent_ids now. This always succeeds in the create path
         // (supervisor is validated before we get here) and in the restore
@@ -218,26 +228,23 @@ impl AgentRegistry {
         {
             supervisor.subagent_ids.push(id.clone());
         }
-        self.token_index.insert(auth_token, id.clone());
+        self.token_index
+            .insert(entry.agent.auth_token_hash.clone(), id.clone());
         self.agents.insert(id, entry);
     }
 
     /// Like [`Self::register`], but skips the subagent_ids push.
     /// Used by `create_agent` which pre-reserves the slot before spawning.
-    pub fn register_no_subagent_push(
-        &mut self,
-        id: AgentId,
-        auth_token: String,
-        entry: AgentEntry,
-    ) {
-        self.token_index.insert(auth_token, id.clone());
+    pub fn register_no_subagent_push(&mut self, id: AgentId, entry: AgentEntry) {
+        self.token_index
+            .insert(entry.agent.auth_token_hash.clone(), id.clone());
         self.agents.insert(id, entry);
     }
 
-    /// Remove agent, unregister token, update supervisor's subagent_ids.
+    /// Remove agent, unregister its token hash, update supervisor's subagent_ids.
     pub fn unregister(&mut self, id: &AgentId) -> Option<AgentEntry> {
         let entry = self.agents.remove(id)?;
-        self.token_index.remove(&entry.agent.auth_token);
+        self.token_index.remove(&entry.agent.auth_token_hash);
         if let Some(ref supervisor_id) = entry.agent.config.created_by
             && let Some(supervisor) = self.agents.get_mut(supervisor_id)
         {
@@ -371,6 +378,7 @@ mod tests {
     use super::*;
     use crate::auth::Identity;
     use crate::test_helpers::*;
+    use crate::token::TokenHash;
 
     // -- Agent::shutdown: bounded graceful task drain --
 
@@ -446,16 +454,17 @@ mod tests {
     async fn register_unregister_syncs_token_index() {
         let mut reg = AgentRegistry::new();
         let id = AgentId::random();
-        // In production, the registry token and agent.auth_token are always identical.
+        // The registry indexes by the agent's token hash, derived inside make_entry.
         let token = "test-token";
-        reg.register(id.clone(), token.into(), make_entry(None, token.into()));
+        let hash = TokenHash::of(token);
+        reg.register(id.clone(), make_entry(None, token.into()));
         assert!(reg.contains_key(&id));
-        assert_eq!(reg.get_agent_id_by_token(token), Some(&id));
+        assert_eq!(reg.get_agent_id_by_token(&hash), Some(&id));
 
         let removed = reg.unregister(&id).unwrap();
-        assert_eq!(removed.agent.auth_token, token);
+        assert_eq!(removed.agent.auth_token_hash, hash);
         assert!(!reg.contains_key(&id));
-        assert!(reg.get_agent_id_by_token(token).is_none());
+        assert!(reg.get_agent_id_by_token(&hash).is_none());
     }
 
     #[tokio::test]
@@ -500,12 +509,8 @@ mod tests {
         let mut reg = AgentRegistry::new();
         let a = AgentId::random();
         let b = AgentId::random();
-        reg.register(
-            a.clone(),
-            "ta".into(),
-            make_entry(Some(b.clone()), "aa".into()),
-        );
-        reg.register(b, "tb".into(), make_entry(Some(a.clone()), "ab".into()));
+        reg.register(a.clone(), make_entry(Some(b.clone()), "aa".into()));
+        reg.register(b, make_entry(Some(a.clone()), "ab".into()));
         match reg.walk_supervisor_chain(&a) {
             Err(e) => {
                 assert_eq!(e.status, 403);
@@ -520,7 +525,7 @@ mod tests {
         let mut reg = AgentRegistry::new();
         let a = AgentId::random();
         let ghost = AgentId::random();
-        reg.register(a.clone(), "t".into(), make_entry(Some(ghost), "a".into()));
+        reg.register(a.clone(), make_entry(Some(ghost), "a".into()));
         match reg.walk_supervisor_chain(&a) {
             Err(e) => assert_eq!(e.status, 403),
             Ok(_) => panic!("expected broken chain error"),
@@ -699,7 +704,7 @@ mod tests {
 
     #[test]
     fn with_limits_sets_max_agents() {
-        let state = AppState::with_limits("tok".into(), 50, 20, 5, make_profile_registry());
+        let state = AppState::with_limits(TokenHash::of("tok"), 50, 20, 5, make_profile_registry());
         assert_eq!(state.max_agents, 50);
         assert_eq!(state.max_subagents, 20);
         assert_eq!(state.prompt_queue_size, 5);
@@ -707,7 +712,7 @@ mod tests {
 
     #[test]
     fn new_has_generous_limits() {
-        let state = AppState::new("tok".into(), make_profile_registry());
+        let state = AppState::new(TokenHash::of("tok"), make_profile_registry());
         assert_eq!(state.max_agents, crate::args::MAX_AGENTS_LIMIT);
         assert_eq!(state.max_subagents, crate::args::MAX_SUBAGENTS_LIMIT);
     }

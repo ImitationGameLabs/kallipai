@@ -30,6 +30,7 @@ use just_agent_common::protocol::{CreateAgentRequest, CreateAgentResponse};
 use super::ListAgentsResponse;
 use crate::bridge::bridge_task;
 use crate::state::{Agent, AgentEntry, AgentState, AgentSummary, SharedState};
+use crate::token::{MintedToken, TokenHash, TokenKind};
 
 pub(crate) struct SpawnArgs {
     pub agent_id: AgentId,
@@ -40,7 +41,7 @@ pub(crate) struct SpawnArgs {
     pub initial_prompt: Option<String>,
     pub shutdown_cancel: CancellationToken,
     pub events_tx: broadcast::Sender<SseEvent>,
-    pub auth_token: String,
+    pub auth_token_hash: TokenHash,
     pub env: HashMap<String, String>,
     pub shared_state: SharedState,
     pub tool_policy: Arc<std::sync::RwLock<ToolPolicy>>,
@@ -170,7 +171,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
         round_cancel,
         notify,
         state,
-        auth_token: args.auth_token,
+        auth_token_hash: args.auth_token_hash,
         env: args.env,
         tool_policy: args.tool_policy,
     })
@@ -199,7 +200,9 @@ pub async fn create_agent(
     }
 
     let id = AgentId::random();
-    let auth_token = uuid::Uuid::new_v4().to_string();
+    // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the PTY env
+    // (`JUST_AGENT_AUTH_TOKEN`); only its SHA-256 is indexed for auth lookup.
+    let token = MintedToken::generate(TokenKind::Agent);
 
     let mut config = {
         let ws = req.workspace_root.map(std::path::PathBuf::from);
@@ -222,7 +225,7 @@ pub async fn create_agent(
             }
         }
     }
-    let env = SpawnArgs::default_env(&id, &auth_token);
+    let env = SpawnArgs::default_env(&id, token.secret());
 
     // Subagent: validate supervisor and delegation constraints, or use default policy.
     // Pre-reserve the subagent slot under write lock to eliminate TOCTOU.
@@ -303,7 +306,7 @@ pub async fn create_agent(
         initial_prompt: prompt,
         shutdown_cancel: state.shutdown.clone(),
         events_tx,
-        auth_token: auth_token.clone(),
+        auth_token_hash: token.hash().clone(),
         env,
         shared_state: state.clone(),
         tool_policy: tool_policy.clone(),
@@ -359,7 +362,6 @@ pub async fn create_agent(
         }
         registry.register_no_subagent_push(
             id.clone(),
-            auth_token,
             AgentEntry {
                 agent,
                 subagent_ids: vec![],

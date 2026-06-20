@@ -10,6 +10,15 @@ generates two categories of token:
 - **Agent token** — generated per agent at creation, injected into the PTY as
   `JUST_AGENT_AUTH_TOKEN`. Agents use this to call back to the daemon.
 
+Both tokens are 256-bit CSPRNG secrets with a type-tag prefix (`sk-operator-…` /
+`sk-agent-…`), so the kind is self-describing and secret scanners can flag leaks. The
+daemon **never stores a token in plaintext on long-lived state**: only its SHA-256 hash
+is retained (`AppState` and the agent registry index). Incoming bearer tokens are
+hashed and compared by hash. Because an attacker cannot steer a SHA-256 output,
+variable comparison/lookup time over hashes leaks nothing about the secret — timing is
+not a practical vector even off-localhost (e.g. a `0.0.0.0` bind). The single operator
+comparison additionally uses a constant-time compare.
+
 ## Roles
 
 - **Supervisor** — the direct parent: the agent whose `created_by` field points to

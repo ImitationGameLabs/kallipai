@@ -103,7 +103,9 @@ pub async fn send_message(
             initial_prompt: None, // message already pre-sent to the channel
             shutdown_cancel: state.shutdown.clone(),
             events_tx: entry.agent.events_tx.clone(),
-            auth_token: entry.agent.auth_token.clone(),
+            // Hash preserved across reactivation → token_index stays consistent
+            // (same id, same hash), so the reactivated agent needs no re-registration.
+            auth_token_hash: entry.agent.auth_token_hash.clone(),
             env: entry.agent.env.clone(),
             shared_state: state.clone(),
             tool_policy: entry.agent.tool_policy.clone(),

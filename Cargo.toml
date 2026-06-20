@@ -61,6 +61,10 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["trace"] }
 tokio-stream = "0.1"
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+getrandom = "0.4"
+sha2 = "0.11"
+subtle = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rable = "0.2.0"
