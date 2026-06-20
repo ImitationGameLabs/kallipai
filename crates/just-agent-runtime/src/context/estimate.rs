@@ -11,23 +11,24 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use super::store::ContextStore;
+use super::tokens::estimate_text;
 use crate::profile::ChatClient;
 
 /// Estimate the prompt-token size of the next request.
 ///
 /// **Incremental** (normal round, no prefix change since the last response): the authoritative
 /// `last_prompt_tokens` from the last provider response — which already counts system prompt +
-/// tools + pinned + turns[0..anchor] — plus a chars/4 render-estimate of *only* the turns added
-/// since that response (the assistant turn just completed, its tool results, and the next user
-/// prompt). Exact base + a small approximated delta: cheaper than a full render and more accurate
-/// than re-estimating the whole history.
+/// tools + pinned + turns[0..anchor] — plus a tokenx render-estimate (`context::tokens`) of
+/// *only* the turns added since that response (the assistant turn just completed, its tool
+/// results, and the next user prompt). Exact base + a small approximated delta: cheaper than a
+/// full render and more accurate than re-estimating the whole history.
 ///
 /// **Full** (first round ever, after any prefix-mutating op, after failover, or after restore):
-/// a chars/4 render of `system_prompt + messages + tools`. Required whenever the persisted anchor
+/// a tokenx render of `system_prompt + messages + tools`. Required whenever the persisted anchor
 /// can't be trusted — e.g. a restore following an agent-version upgrade may have changed the
 /// system prompt or tool set (see `ContextStore::needs_full_estimate`). `messages` is the
-/// `compose_context` output (`pinned ++ turns`, no system prompt); the system prompt is rendered
-/// separately so the full estimate matches what the provider receives.
+/// `compose_context` output (pinned turns first, then conversation; no system prompt); the
+/// system prompt is rendered separately so the full estimate matches what the provider receives.
 pub(crate) async fn estimate_context_tokens(
     client: &ChatClient,
     store: &Mutex<ContextStore>,
@@ -58,7 +59,14 @@ pub(crate) async fn estimate_context_tokens(
                 .flat_map(|t| t.messages.iter().cloned())
                 .collect();
             drop(g);
-            Ok(base as usize + client.render_messages(&delta)?.chars().count() / 4)
+            // An empty delta (no turns added since the anchor) contributes 0 tokens; skip the
+            // render so the `[]` envelope doesn't add a spurious token.
+            let delta_tokens = if delta.is_empty() {
+                0
+            } else {
+                estimate_text(&client.render_messages(&delta)?)
+            };
+            Ok(base as usize + delta_tokens)
         }
         _ => {
             // Full: system + messages + tools (the historical behavior).
@@ -69,7 +77,7 @@ pub(crate) async fn estimate_context_tokens(
             }
             rendered.push_str(&client.render_messages(messages)?);
             rendered.push_str(&client.render_tools(tools)?);
-            Ok(rendered.chars().count() / 4)
+            Ok(estimate_text(&rendered))
         }
     }
 }

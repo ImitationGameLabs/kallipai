@@ -25,6 +25,7 @@ regex = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 toml = { workspace = true }
+tokenx-rs = { workspace = true }
 
 [dev-dependencies]
 temp-env = { workspace = true }

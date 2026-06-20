@@ -299,16 +299,17 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
 
     fix_incomplete_turn(&mut store);
 
-    // Backfill the pinned-token cache for legacy pinned items deserialized from a pre-caching
-    // format (default 0), before folding them into turns.
-    store.backfill_pinned_token_cache();
-
     // Fold the legacy `pinned` vec (pre-unification format) into pinned turns at the front of
     // `turns`. No-op for new-format stores.
     store.migrate_legacy_pinned();
 
     // Migrate legacy summary field to a pinned turn.
     store.migrate_legacy_summary();
+
+    // Recompute every cached token estimate via the current estimator, so persisted estimates
+    // (possibly from a prior estimator version, e.g. the old char/4 heuristic or stale legacy
+    // pins) are brought up to date. Idempotent.
+    store.reestimate_cached_tokens();
 
     // A restore may follow an agent-version upgrade that changed the system prompt or tool set,
     // invalidating the persisted `last_prompt_tokens` anchor. Force a full estimate on the first

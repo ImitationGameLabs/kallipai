@@ -9,7 +9,8 @@ use just_llm_client::types::chat::{ChatMessage, ToolDefinition};
 
 use just_agent_common::retry::RetryRecord;
 
-use super::turn::{Turn, TurnId, TurnKind, estimate_message_tokens};
+use super::tokens::estimate_message_tokens;
+use super::turn::{Turn, TurnId, TurnKind};
 
 /// Legacy pinned-item shape from the pre-unification format. Deserialized from old `context.json`
 /// `pinned` entries and converted to pinned [`Turn`]s by [`ContextStore::migrate_legacy_pinned`]
@@ -418,19 +419,21 @@ impl ContextStore {
         }
     }
 
-    /// Backfill `estimated_tokens` for legacy pinned items deserialized from a pre-caching format
-    /// (which default to 0 via `#[serde(default)]`). Targets the legacy `pinned` vec, before
-    /// [`Self::migrate_legacy_pinned`] folds them into turns. Idempotent.
-    pub fn backfill_pinned_token_cache(&mut self) {
-        for p in &mut self.legacy_pinned {
-            if p.estimated_tokens == 0 {
-                p.estimated_tokens = estimate_message_tokens(&p.message);
-            }
+    /// Recompute every cached token estimate (all turns) via the current estimator. Called once
+    /// per restore so persisted estimates — which may be from a prior estimator version (e.g.
+    /// the old `char/4` heuristic, or legacy pins with unset caches) — are brought up to date.
+    ///
+    /// O(turns): every turn is re-rendered and re-scored. A future optimization could gate this
+    /// on a persisted estimator-version stamp so same-version restarts skip it; for now the cost
+    /// is paid once per restore.
+    pub fn reestimate_cached_tokens(&mut self) {
+        for turn in &mut self.turns {
+            turn.estimated_tokens = Turn::estimate_tokens(&turn.messages);
         }
     }
 
     /// Fold the legacy `pinned` vec (pre-unification format) into pinned turns at the front of
-    /// `turns`. Called on restore after [`Self::backfill_pinned_token_cache`]. No-op for new-format
+    /// `turns`. Called on restore before [`Self::reestimate_cached_tokens`]. No-op for new-format
     /// stores (the legacy vec is empty). Preserves legacy order; TurnIds are assigned monotonic
     /// from `next_turn_id`.
     pub fn migrate_legacy_pinned(&mut self) {
@@ -574,18 +577,21 @@ mod tests {
     #[test]
     fn pinned_budget_enforced() {
         let mut store = ContextStore::new();
-        store.set_pinned_budget(80);
-        // Each ChatMessage::user("a") estimates to 16 tokens (1/4 + 16).
-        store.pin("a", ChatMessage::user("a")).unwrap();
-        store.pin("b", ChatMessage::user("b")).unwrap();
-        store.pin("c", ChatMessage::user("c")).unwrap();
-        store.pin("d", ChatMessage::user("d")).unwrap();
-        store.pin("e", ChatMessage::user("e")).unwrap();
-        // Sixth pin exceeds 80-token budget (96 > 80).
-        assert!(store.pin("f", ChatMessage::user("f")).is_err());
+        // Derive the budget from the same estimator the production path uses, so the test is
+        // robust to any estimator: 5 pins fill the budget exactly, the 6th must be rejected.
+        let per_pin = estimate_message_tokens(&ChatMessage::user("a"));
+        let budget = per_pin.checked_mul(5).expect("non-zero per-pin estimate");
+        store.set_pinned_budget(budget);
+        for label in ["a", "b", "c", "d", "e"] {
+            store.pin(label, ChatMessage::user("a")).unwrap();
+        }
+        assert!(
+            store.pin("f", ChatMessage::user("a")).is_err(),
+            "6th pin must exceed the {budget}-token budget (per-pin = {per_pin})"
+        );
         // Unpin frees budget.
         store.unpin("a").unwrap();
-        assert!(store.pin("f", ChatMessage::user("f")).is_ok());
+        assert!(store.pin("f", ChatMessage::user("a")).is_ok());
     }
 
     #[test]
@@ -712,9 +718,9 @@ mod tests {
     }
 
     #[test]
-    fn backfill_then_migrate_legacy_pinned() {
+    fn reestimate_recomputes_cached_tokens() {
         let mut store = new_store();
-        // Simulate a legacy pin deserialized without the cache (estimated_tokens == 0).
+        // A legacy pinned item folded in carrying a stale (0) estimate.
         let msg = ChatMessage::user("legacy content from a pre-caching format");
         let real = estimate_message_tokens(&msg);
         store.legacy_pinned.push(PinnedItem {
@@ -722,18 +728,19 @@ mod tests {
             message: msg,
             estimated_tokens: 0,
         });
-        assert_eq!(
-            store.pinned_tokens_total(),
-            0,
-            "legacy pin not yet folded into turns"
-        );
-        store.backfill_pinned_token_cache();
         store.migrate_legacy_pinned();
         assert_eq!(store.pinned_turns().count(), 1);
         assert_eq!(
+            store.pinned_turns().next().unwrap().estimated_tokens,
+            0,
+            "migrated turn carries the stale legacy estimate before reestimate"
+        );
+        // reestimate brings every turn up to the current estimator.
+        store.reestimate_cached_tokens();
+        assert_eq!(
             store.pinned_tokens_total(),
             real,
-            "backfill + migrate recomputes"
+            "reestimate recomputes via the current estimator"
         );
         assert_eq!(store.pinned_labels(), vec!["legacy"]);
         assert_invariant(&store);

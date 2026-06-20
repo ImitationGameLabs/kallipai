@@ -66,32 +66,14 @@ impl Turn {
         }
     }
 
-    /// Estimate the token count for a slice of messages using a
-    /// char-div-4 heuristic with per-message overhead.
+    /// Estimate the token count for a slice of messages via the crate's token-estimation seam
+    /// (`context::tokens`).
     pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
-        messages.iter().map(estimate_message_tokens).sum()
+        messages
+            .iter()
+            .map(super::tokens::estimate_message_tokens)
+            .sum()
     }
-}
-
-/// Per-message token estimate: content chars / 4 + tool-call args / 4 +
-/// per-call overhead + per-message overhead.
-pub(crate) fn estimate_message_tokens(message: &ChatMessage) -> usize {
-    let content_tokens = message
-        .content()
-        .map(|c| c.chars().count() / 4)
-        .unwrap_or_default();
-
-    let tool_tokens = message
-        .tool_calls()
-        .map(|calls| {
-            calls
-                .iter()
-                .map(|tc| tc.function.arguments.chars().count() / 4 + 24)
-                .sum::<usize>()
-        })
-        .unwrap_or_default();
-
-    content_tokens + tool_tokens + 16
 }
 
 #[cfg(test)]

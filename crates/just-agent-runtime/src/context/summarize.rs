@@ -19,8 +19,8 @@ const SUMMARIZE_PROMPT: &str = "Summarize the key facts from our conversation so
 pub struct Summary {
     /// Summary text, pinned as a `context_summary` pinned item.
     pub text: String,
-    /// Heuristic token estimate (chars/4 + 16). For diagnostic logging only;
-    /// the pinned item's tokens are tracked via `estimate_message_tokens`.
+    /// Token estimate via `context::tokens`. For diagnostic logging only;
+    /// the pinned turn's tokens are tracked via `estimate_message_tokens`.
     pub estimated_tokens: usize,
     /// Number of source turns this summary covers.
     pub source_turns: usize,
@@ -61,7 +61,8 @@ impl ContextSummarizer {
 
         if let Some(existing) = existing_summary {
             let msg = ChatMessage::assistant(format!("[Previous context summary]\n{existing}"));
-            input_budget = input_budget.saturating_sub(super::turn::estimate_message_tokens(&msg));
+            input_budget =
+                input_budget.saturating_sub(super::tokens::estimate_message_tokens(&msg));
             messages.push(msg);
         }
 
@@ -95,7 +96,8 @@ impl ContextSummarizer {
             Some(s) => s.to_owned(),
             None => bail!("summarization: LLM returned empty summary"),
         };
-        let estimated_tokens = super::turn::estimate_message_tokens(&ChatMessage::assistant(&text));
+        let estimated_tokens =
+            super::tokens::estimate_message_tokens(&ChatMessage::assistant(&text));
 
         Ok((
             Summary {
