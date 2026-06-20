@@ -16,7 +16,15 @@ struct PinArgs {
     content: String,
 }
 
-/// Pins arbitrary content into the agent's persistent context.
+/// Tool that injects caller-provided content into the agent's persistent context.
+///
+/// `context_pin` is **content-based**: the agent supplies the full text to persist, which is
+/// stored verbatim as a new persistent entry prepended to the context. It does *not* reference
+/// an existing conversation turn.
+///
+/// Re-stating important content to pin it is intentional — it doubles as attention
+/// reinforcement for a generative agent. By-reference pinning was considered and rejected: it
+/// would need fragile turn addressing prone to off-by-one and stale-index errors.
 pub struct ContextPinTool {
     ctx: Arc<Mutex<dyn AgenticContext>>,
 }
@@ -40,7 +48,8 @@ impl LlmTool for ContextPinTool {
         "Pin content into the agent's persistent context. Pinned content is \
          included in every LLM request until explicitly removed with context_unpin. \
          Use this to keep important instructions, constraints, or reference material \
-         available throughout the conversation."
+         available. Provide the complete content to persist — it is stored verbatim, \
+         not as a reference to earlier messages."
     }
 
     fn parameters_schema(&self) -> Value {
