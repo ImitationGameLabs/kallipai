@@ -1,7 +1,7 @@
 //! Sticky working-directory resolution after a command (Fork B: pwd roundtrip).
 //!
 //! The per-call wrapper writes `pwd -P` to a tmpfile via an `EXIT` trap (so it
-//! runs on normal exit, `exit`, and SIGTERM). [`resolve`] reads it back,
+//! runs on normal exit, `exit`, and SIGTERM). `resolve` reads it back,
 //! NFC-normalizes (macOS APFS stores decomposed NFD), and `canonicalize`s — the
 //! guard that makes cwd honest: if the command `rmdir`'d its own cwd, the
 //! canonicalize fails and we fall back rather than report a stale value.

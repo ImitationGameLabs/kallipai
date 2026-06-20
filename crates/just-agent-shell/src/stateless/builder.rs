@@ -1,4 +1,4 @@
-//! Builder for [`ProcessBackend`](super::backend::ProcessBackend).
+//! Builder for [`ProcessBackend`].
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -14,7 +14,7 @@ const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024; // 1 MiB
 /// Output cap for a background task before the size watchdog kills it.
 const DEFAULT_MAX_BG_BYTES: usize = 100 * 1024 * 1024; // 100 MiB
 
-/// Builder for [`ProcessBackend`](super::backend::ProcessBackend).
+/// Builder for [`ProcessBackend`].
 ///
 /// Construct with [`StatelessBuilder::new`], chain setters to override defaults,
 /// then [`build`](Self::build) to capture the env snapshot and create the

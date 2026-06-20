@@ -8,9 +8,9 @@
 //! `.draft/design/shell-execution-stateless-redesign.md`).
 //!
 //! This module is **additive**: it lives alongside the existing persistent-PTY
-//! backend ([`crate::backend::pty`]) and the seven [`crate::session`] tools,
+//! backend (`crate::backend::pty`) and the seven [`crate::session`] tools,
 //! which remain the tools the running agent uses. The stateless set is built
-//! here for head-to-head comparison ([`compare`]) and a future swap-over; it is
+//! here for head-to-head comparison (`compare`) and a future swap-over; it is
 //! intentionally **not** wired into `just-agent-runtime`.
 //!
 //! # Why stateless
