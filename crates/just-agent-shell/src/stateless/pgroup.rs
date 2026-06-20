@@ -9,9 +9,10 @@
 //!
 //! Uses `nix` for typed, `unsafe`-free signal delivery (`Pid`, `Signal`).
 //!
-//! Unix-only: nix is unix-only, and every caller of this module is unix-only
-//! today (the daemon/runtime build only on unix). If cross-platform support is
-//! ever added, reintroduce `#[cfg(unix)]` gating here.
+//! Intentionally Unix-only: `nix` is Unix-only, and every caller of this module
+//! is Unix-only today (the daemon/runtime build only on Unix). `#[cfg(unix)]`
+//! gating is deliberately omitted and will be added only if cross-platform
+//! support is actually needed in the future.
 
 use std::time::Duration;
 

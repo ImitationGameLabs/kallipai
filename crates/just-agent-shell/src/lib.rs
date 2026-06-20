@@ -29,10 +29,11 @@
 //!
 //! # Platform
 //!
-//! Unix-only in practice: the stateless backend (`stateless::pgroup`) uses
-//! `nix` process-group signals, and the daemon/runtime build only on unix.
-//! There is no Windows build path today; reintroduce `#[cfg(unix)]` gating if
-//! cross-platform support is ever added.
+//! Intentionally Unix-only: the stateless backend (`stateless::pgroup`) uses
+//! `nix` process-group signals, and the daemon/runtime build only on Unix.
+//! There is no Windows build path today. This is deliberate, not a gap —
+//! `#[cfg(unix)]` gating is omitted on purpose and will be added only if/when
+//! cross-platform support is actually needed.
 
 mod backend;
 // Private helper module for the PTY backend. `strip_common_prefix` is exposed
