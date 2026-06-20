@@ -29,3 +29,13 @@ unicode-normalization = { workspace = true }
 # future test helpers) so consumers can drive shell-tool tests without a real
 # PTY. Off by default to keep test-only code out of production builds.
 testutils = []
+
+[dev-dependencies]
+# Dev-only: the `spawn` benchmark measures per-command spawn cost across the
+# stateless backend, the PTY backend, and a bare `bash -c` floor. Not pulled by
+# runtime/daemon (dev-dependencies are non-transitive).
+criterion = { workspace = true }
+
+[[bench]]
+name = "spawn"
+harness = false

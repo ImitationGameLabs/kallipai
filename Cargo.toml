@@ -80,3 +80,5 @@ temp-env = "0.3"
 tempfile = "3"
 wiremock = "0.6.5"
 serial_test = "3.5.0"
+# Dev-only: the `spawn` benchmark in just-agent-shell (criterion). Not a runtime dep.
+criterion = "0.8.2"
