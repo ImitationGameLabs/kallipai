@@ -299,11 +299,15 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
 
     fix_incomplete_turn(&mut store);
 
-    // Backfill the pinned-token cache for items deserialized from a pre-caching format (default
-    // 0), before any budget computation or migration reads it.
+    // Backfill the pinned-token cache for legacy pinned items deserialized from a pre-caching
+    // format (default 0), before folding them into turns.
     store.backfill_pinned_token_cache();
 
-    // Migrate legacy summary field to pinned item.
+    // Fold the legacy `pinned` vec (pre-unification format) into pinned turns at the front of
+    // `turns`. No-op for new-format stores.
+    store.migrate_legacy_pinned();
+
+    // Migrate legacy summary field to a pinned turn.
     store.migrate_legacy_summary();
 
     // A restore may follow an agent-version upgrade that changed the system prompt or tool set,

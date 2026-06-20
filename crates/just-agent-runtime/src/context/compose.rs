@@ -9,22 +9,15 @@ use super::store::ContextStore;
 
 /// Build the context for the next LLM call.
 ///
-/// Layers are filled in priority order: pinned → turns.
-/// Returns all messages without budget filtering — the caller is
-/// responsible for estimating tokens and triggering summarize_and_evict.
+/// `turns` are stored `[pinned…][conversation…]` (see `ContextStore::pinned_turn_count`), so a
+/// single iteration yields persistent pinned context first, then the conversation in order.
+/// Returns all messages without budget filtering — the caller is responsible for estimating
+/// tokens and triggering summarize_and_evict.
 pub async fn compose_context(store: Arc<Mutex<ContextStore>>) -> Vec<ChatMessage> {
     let guard = store.lock().await;
     let mut messages = Vec::new();
-
-    // Layer 1: Pinned items (always included).
-    for item in guard.pinned() {
-        messages.push(item.message.clone());
-    }
-
-    // Layer 2: All turns (oldest to newest).
     for turn in guard.turns() {
         messages.extend(turn.messages.iter().cloned());
     }
-
     messages
 }

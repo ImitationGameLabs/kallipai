@@ -9,16 +9,17 @@ use just_llm_client::types::chat::{ChatMessage, ToolDefinition};
 
 use just_agent_common::retry::RetryRecord;
 
-use super::turn::{Turn, TurnId, estimate_message_tokens};
+use super::turn::{Turn, TurnId, TurnKind, estimate_message_tokens};
 
-/// A pinned context item with a label for identification and lifecycle.
+/// Legacy pinned-item shape from the pre-unification format. Deserialized from old `context.json`
+/// `pinned` entries and converted to pinned [`Turn`]s by [`ContextStore::migrate_legacy_pinned`]
+/// on restore. Not constructed by new code.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PinnedItem {
     pub label: String,
     pub message: ChatMessage,
-    /// Cached `estimate_message_tokens(&message)`, computed once on creation (mirrors
-    /// `Turn.estimated_tokens`). `#[serde(default)]` so legacy pins (pre-caching) deserialize
-    /// as 0 and are backfilled on restore.
+    /// Cached `estimate_message_tokens(&message)`. `#[serde(default)]` so legacy pins
+    /// (pre-caching) deserialize as 0 and are backfilled on restore.
     #[serde(default)]
     pub estimated_tokens: usize,
 }
@@ -28,7 +29,7 @@ pub struct PinnedItem {
 pub struct EvictResult {
     /// Number of turns actually evicted.
     pub evicted: usize,
-    /// Turns remaining after eviction.
+    /// Conversation (non-pinned) turns remaining after eviction.
     pub remaining_turns: usize,
     /// Estimated tokens freed by eviction.
     pub freed_tokens: usize,
@@ -49,7 +50,7 @@ pub trait AgenticContext: Send + Sync {
     fn pinned_labels(&self) -> Vec<String>;
     /// Return a snapshot of current context layer breakdown.
     fn usage_snapshot(&self) -> ContextUsage;
-    /// Evict the oldest `count` turns. Returns actual count evicted.
+    /// Evict the oldest `count` conversation (non-pinned) turns. Returns actual count evicted.
     fn evict_turns(&mut self, count: usize) -> EvictResult;
     /// Reset context-window progressive warning state. Called after compaction
     /// or eviction. Does **not** reset token-budget warnings — those track
@@ -59,19 +60,25 @@ pub trait AgenticContext: Send + Sync {
 
 /// Single source of truth for all context data in an agent.
 ///
-/// Owns tool definitions, pinned messages, and conversation turns.
-/// Budget checking is handled by the main loop using ChatClient's
+/// Owns tool definitions and conversation turns. Pinned persistent context (compaction
+/// summaries, skills, notes) is stored as `TurnKind::Pinned` turns at the front of `turns`,
+/// keeping a single collection. Budget checking is handled by the main loop using ChatClient's
 /// accurate token estimation pipeline.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ContextStore {
     /// Tool definitions: reconstructed on restore, not persisted.
     #[serde(skip)]
     tool_definitions: Vec<ToolDefinition>,
-    /// Pinned items: always included, never evicted.
-    pinned: Vec<PinnedItem>,
-    /// Logical conversation turns in chronological order (newest at back).
+    /// Logical conversation turns in chronological order. Always ordered
+    /// `[pinned turns…][conversation turns…]` (see [`Self::pinned_turn_count`]); pinned turns
+    /// live at the front and are never evicted.
     turns: VecDeque<Turn>,
-    /// Legacy field: migrated to pinned item on restore.
+    /// Legacy pinned items from the pre-unification format. Deserialized from the old `pinned`
+    /// JSON key and folded into pinned turns by [`Self::migrate_legacy_pinned`] on restore.
+    /// Never written by new code (`skip_serializing`).
+    #[serde(default, skip_serializing, rename = "pinned")]
+    legacy_pinned: Vec<PinnedItem>,
+    /// Legacy field: migrated to a pinned turn on restore.
     #[serde(default, skip_serializing)]
     summary: Option<String>,
     /// Legacy field: migrated alongside summary.
@@ -125,7 +132,7 @@ pub struct ContextStore {
 
 impl AgenticContext for ContextStore {
     fn pin(&mut self, label: &str, message: ChatMessage) -> Result<()> {
-        if self.pinned.iter().any(|p| p.label == label) {
+        if self.pinned_turns().any(|t| t.label() == Some(label)) {
             bail!("pinned item '{label}' already exists");
         }
         let msg_tokens = estimate_message_tokens(&message);
@@ -136,40 +143,57 @@ impl AgenticContext for ContextStore {
                 self.pinned_token_budget
             );
         }
-        self.pinned.push(PinnedItem {
-            label: label.to_owned(),
-            estimated_tokens: msg_tokens,
-            message,
-        });
+        let id = TurnId(self.next_turn_id);
+        self.next_turn_id += 1;
+        self.turns.insert(
+            self.pinned_turn_count(),
+            Turn {
+                id,
+                messages: vec![message],
+                estimated_tokens: msg_tokens,
+                kind: TurnKind::Pinned {
+                    label: label.to_owned(),
+                },
+            },
+        );
         self.needs_full_estimate = true;
         Ok(())
     }
 
     fn unpin(&mut self, label: &str) -> Result<()> {
         let idx = self
-            .pinned
+            .turns
             .iter()
-            .position(|p| p.label == label)
+            .position(|t| t.is_pinned() && t.label() == Some(label))
             .ok_or_else(|| anyhow::anyhow!("pinned item '{label}' not found"))?;
-        self.pinned.remove(idx);
+        self.turns.remove(idx);
         self.needs_full_estimate = true;
         Ok(())
     }
 
     fn pinned_labels(&self) -> Vec<String> {
-        self.pinned.iter().map(|p| p.label.clone()).collect()
+        self.pinned_turns()
+            .filter_map(|t| t.label().map(str::to_owned))
+            .collect()
     }
 
     fn usage_snapshot(&self) -> ContextUsage {
-        let pinned_items: Vec<(String, usize)> = self
-            .pinned
-            .iter()
-            .map(|p| (p.label.clone(), p.estimated_tokens))
-            .collect();
-        let turn_tokens: usize = self.turns.iter().map(|t| t.estimated_tokens).sum();
+        let mut pinned_items = Vec::new();
+        let mut turn_count = 0usize;
+        let mut turn_tokens = 0usize;
+        for turn in &self.turns {
+            if turn.is_pinned() {
+                if let Some(label) = turn.label() {
+                    pinned_items.push((label.to_owned(), turn.estimated_tokens));
+                }
+            } else {
+                turn_count += 1;
+                turn_tokens += turn.estimated_tokens;
+            }
+        }
         ContextUsage {
             pinned_items,
-            turn_count: self.turns.len(),
+            turn_count,
             turn_tokens,
             last_prompt_tokens: self.last_prompt_tokens,
             cumulative_usage: self.cumulative_usage,
@@ -177,27 +201,35 @@ impl AgenticContext for ContextStore {
     }
 
     fn evict_turns(&mut self, count: usize) -> EvictResult {
-        let to_evict = count.min(self.turns.len());
+        // Evict only from the conversation partition (the suffix after the pinned block).
+        // Pinned turns at the front are structurally outside the drain range.
+        let pinned = self.pinned_turn_count();
+        let convo_len = self.turns.len().saturating_sub(pinned);
+        let to_evict = count.min(convo_len);
         let freed_tokens: usize = self
             .turns
             .iter()
+            .skip(pinned)
             .take(to_evict)
             .map(|t| t.estimated_tokens)
             .sum();
-        self.turns.drain(0..to_evict);
+        self.turns.drain(pinned..pinned + to_evict);
         self.needs_full_estimate = true;
         EvictResult {
             evicted: to_evict,
-            remaining_turns: self.turns.len(),
+            remaining_turns: self.turns.len().saturating_sub(self.pinned_turn_count()),
             freed_tokens,
         }
     }
 
     fn replace_pin(&mut self, label: &str, message: ChatMessage) -> Result<()> {
         let msg_tokens = estimate_message_tokens(&message);
-        let existing_idx = self.pinned.iter().position(|p| p.label == label);
+        let existing_idx = self
+            .turns
+            .iter()
+            .position(|t| t.is_pinned() && t.label() == Some(label));
         let old_tokens = existing_idx
-            .map(|i| self.pinned[i].estimated_tokens)
+            .map(|i| self.turns[i].estimated_tokens)
             .unwrap_or(0);
         let base_tokens = self.pinned_tokens_total() - old_tokens;
 
@@ -210,14 +242,23 @@ impl AgenticContext for ContextStore {
         }
 
         if let Some(idx) = existing_idx {
-            self.pinned[idx].message = message;
-            self.pinned[idx].estimated_tokens = msg_tokens;
+            // In-place update keeps the turn's position and id; only content/tokens change.
+            self.turns[idx].messages = vec![message];
+            self.turns[idx].estimated_tokens = msg_tokens;
         } else {
-            self.pinned.push(PinnedItem {
-                label: label.to_owned(),
-                estimated_tokens: msg_tokens,
-                message,
-            });
+            let id = TurnId(self.next_turn_id);
+            self.next_turn_id += 1;
+            self.turns.insert(
+                self.pinned_turn_count(),
+                Turn {
+                    id,
+                    messages: vec![message],
+                    estimated_tokens: msg_tokens,
+                    kind: TurnKind::Pinned {
+                        label: label.to_owned(),
+                    },
+                },
+            );
         }
         self.needs_full_estimate = true;
         Ok(())
@@ -238,8 +279,8 @@ impl ContextStore {
     pub fn new() -> Self {
         Self {
             tool_definitions: Vec::new(),
-            pinned: Vec::new(),
             turns: VecDeque::new(),
+            legacy_pinned: Vec::new(),
             summary: None,
             summary_tokens: 0,
             last_prompt_tokens: None,
@@ -320,7 +361,7 @@ impl ContextStore {
         &self.cumulative_usage
     }
 
-    /// Append a new turn from the given messages.
+    /// Append a new conversation turn from the given messages.
     /// Returns the assigned turn ID and the estimated token count.
     pub fn push_turn(&mut self, messages: Vec<ChatMessage>) -> (TurnId, usize) {
         let estimated_tokens = Turn::estimate_tokens(&messages);
@@ -330,21 +371,28 @@ impl ContextStore {
             id,
             messages,
             estimated_tokens,
+            kind: TurnKind::Conversation,
         });
         (id, estimated_tokens)
     }
 
-    /// Immutable access to the pinned items.
-    pub fn pinned(&self) -> &[PinnedItem] {
-        &self.pinned
+    /// Number of pinned turns at the front of `turns` (the partition split index). O(pinned).
+    /// Relies on the `[pinned…][conversation…]` ordering invariant.
+    fn pinned_turn_count(&self) -> usize {
+        self.turns.iter().take_while(|t| t.is_pinned()).count()
     }
 
-    /// Immutable access to conversation turns.
+    /// Iterator over the pinned turns.
+    pub fn pinned_turns(&self) -> impl Iterator<Item = &Turn> {
+        self.turns.iter().filter(|t| t.is_pinned())
+    }
+
+    /// Immutable access to all turns (pinned first, then conversation).
     pub fn turns(&self) -> &VecDeque<Turn> {
         &self.turns
     }
 
-    /// Number of turns stored.
+    /// Total number of turns stored (pinned + conversation).
     pub fn turn_count(&self) -> usize {
         self.turns.len()
     }
@@ -356,7 +404,7 @@ impl ContextStore {
         drained
     }
 
-    /// Migrate legacy `summary` field to a pinned item.
+    /// Migrate legacy `summary` field to a pinned turn.
     /// Called during agent restore. No-op if no legacy summary.
     pub fn migrate_legacy_summary(&mut self) {
         if let Some(summary) = self.summary.take() {
@@ -370,15 +418,40 @@ impl ContextStore {
         }
     }
 
-    /// Backfill `estimated_tokens` for pinned items deserialized from a pre-caching format (which
-    /// default to 0 via `#[serde(default)]`). Called on restore, before any budget computation or
-    /// migration reads the cache. Idempotent: a real pinned message always estimates to ≥16 (the
-    /// per-message overhead), so `== 0` identifies only legacy uncached entries.
+    /// Backfill `estimated_tokens` for legacy pinned items deserialized from a pre-caching format
+    /// (which default to 0 via `#[serde(default)]`). Targets the legacy `pinned` vec, before
+    /// [`Self::migrate_legacy_pinned`] folds them into turns. Idempotent.
     pub fn backfill_pinned_token_cache(&mut self) {
-        for p in &mut self.pinned {
+        for p in &mut self.legacy_pinned {
             if p.estimated_tokens == 0 {
                 p.estimated_tokens = estimate_message_tokens(&p.message);
             }
+        }
+    }
+
+    /// Fold the legacy `pinned` vec (pre-unification format) into pinned turns at the front of
+    /// `turns`. Called on restore after [`Self::backfill_pinned_token_cache`]. No-op for new-format
+    /// stores (the legacy vec is empty). Preserves legacy order; TurnIds are assigned monotonic
+    /// from `next_turn_id`.
+    pub fn migrate_legacy_pinned(&mut self) {
+        let legacy = std::mem::take(&mut self.legacy_pinned);
+        let mut inserted = 0usize;
+        for item in legacy {
+            let id = TurnId(self.next_turn_id);
+            self.next_turn_id += 1;
+            self.turns.insert(
+                inserted,
+                Turn {
+                    id,
+                    messages: vec![item.message],
+                    estimated_tokens: item.estimated_tokens,
+                    kind: TurnKind::Pinned { label: item.label },
+                },
+            );
+            inserted += 1;
+        }
+        if inserted > 0 {
+            self.needs_full_estimate = true;
         }
     }
 
@@ -388,14 +461,14 @@ impl ContextStore {
         self.pinned_token_budget = budget;
     }
 
-    /// Sum estimated tokens across all pinned items (reads the cached `estimated_tokens`).
+    /// Sum estimated tokens across all pinned turns (reads the cached `estimated_tokens`).
     pub fn pinned_tokens_total(&self) -> usize {
-        self.pinned.iter().map(|p| p.estimated_tokens).sum()
+        self.pinned_turns().map(|t| t.estimated_tokens).sum()
     }
 
-    /// Total estimated tokens: pinned items + all turns.
+    /// Total estimated tokens across all turns (pinned + conversation).
     pub fn total_estimated_tokens(&self) -> usize {
-        self.pinned_tokens_total() + self.turns.iter().map(|t| t.estimated_tokens).sum::<usize>()
+        self.turns.iter().map(|t| t.estimated_tokens).sum()
     }
 
     /// Check if a warning at the given threshold should fire.
@@ -429,6 +502,23 @@ mod tests {
         ContextStore::new()
     }
 
+    /// Assert the `[pinned…][conversation…]` ordering invariant and that every pinned turn has a
+    /// label. Called at the end of mutating tests.
+    fn assert_invariant(store: &ContextStore) {
+        let mut seen_conversation = false;
+        for t in store.turns() {
+            if t.is_pinned() {
+                assert!(t.label().is_some(), "pinned turn must have a label");
+                assert!(
+                    !seen_conversation,
+                    "pinned turn must precede all conversation turns"
+                );
+            } else {
+                seen_conversation = true;
+            }
+        }
+    }
+
     #[test]
     fn push_turn_assigns_sequential_ids() {
         let mut store = new_store();
@@ -455,8 +545,9 @@ mod tests {
     fn pinned_items_are_tracked() {
         let mut store = new_store();
         store.pin("test", ChatMessage::user("important")).unwrap();
-        assert_eq!(store.pinned().len(), 1);
+        assert_eq!(store.pinned_turns().count(), 1);
         assert_eq!(store.pinned_labels(), vec!["test"]);
+        assert_invariant(&store);
     }
 
     #[test]
@@ -471,7 +562,7 @@ mod tests {
         let mut store = new_store();
         store.pin("x", ChatMessage::user("a")).unwrap();
         store.unpin("x").unwrap();
-        assert!(store.pinned().is_empty());
+        assert_eq!(store.pinned_turns().count(), 0);
     }
 
     #[test]
@@ -600,30 +691,33 @@ mod tests {
         );
     }
 
-    // --- PinnedItem token caching ---
+    // --- pinned-turn token caching ---
 
     #[test]
-    fn pinned_item_caches_estimated_tokens() {
+    fn pinned_turn_caches_estimated_tokens() {
         let mut store = new_store();
         let msg = ChatMessage::user("hello world");
         let expected = estimate_message_tokens(&msg);
         store.pin("x", msg).unwrap();
-        assert_eq!(store.pinned()[0].estimated_tokens, expected);
+        let pinned = store.pinned_turns().next().unwrap();
+        assert_eq!(pinned.estimated_tokens, expected);
         assert_eq!(store.pinned_tokens_total(), expected);
-        // replace_pin updates the cache.
+        // replace_pin updates the cache in place.
         let msg2 = ChatMessage::user("goodbye world and more content here");
         let expected2 = estimate_message_tokens(&msg2);
         store.replace_pin("x", msg2).unwrap();
-        assert_eq!(store.pinned()[0].estimated_tokens, expected2);
+        let pinned = store.pinned_turns().next().unwrap();
+        assert_eq!(pinned.estimated_tokens, expected2);
+        assert_invariant(&store);
     }
 
     #[test]
-    fn pinned_token_cache_backfilled() {
+    fn backfill_then_migrate_legacy_pinned() {
         let mut store = new_store();
         // Simulate a legacy pin deserialized without the cache (estimated_tokens == 0).
         let msg = ChatMessage::user("legacy content from a pre-caching format");
         let real = estimate_message_tokens(&msg);
-        store.pinned.push(PinnedItem {
+        store.legacy_pinned.push(PinnedItem {
             label: "legacy".into(),
             message: msg,
             estimated_tokens: 0,
@@ -631,14 +725,48 @@ mod tests {
         assert_eq!(
             store.pinned_tokens_total(),
             0,
-            "legacy pin reads as 0 before backfill"
+            "legacy pin not yet folded into turns"
         );
         store.backfill_pinned_token_cache();
+        store.migrate_legacy_pinned();
+        assert_eq!(store.pinned_turns().count(), 1);
         assert_eq!(
             store.pinned_tokens_total(),
             real,
-            "backfill recomputes the cache"
+            "backfill + migrate recomputes"
         );
+        assert_eq!(store.pinned_labels(), vec!["legacy"]);
+        assert_invariant(&store);
+    }
+
+    #[test]
+    fn migrate_legacy_pinned_preserves_order_and_ids() {
+        let mut store = new_store();
+        // Two conversation turns already in the store.
+        store.push_turn(vec![ChatMessage::user("c1")]);
+        store.push_turn(vec![ChatMessage::user("c2")]);
+        let base_next = store.next_turn_id;
+        // Inject three legacy pinned items in a known order.
+        for label in ["sum", "skill:foo", "note"] {
+            store.legacy_pinned.push(PinnedItem {
+                label: label.into(),
+                message: ChatMessage::user(label),
+                estimated_tokens: 5,
+            });
+        }
+        store.migrate_legacy_pinned();
+
+        // Pinned turns at front in original order, conversation turns after.
+        let labels: Vec<&str> = store.turns().iter().filter_map(|t| t.label()).collect();
+        assert_eq!(labels, vec!["sum", "skill:foo", "note"]);
+        assert_eq!(store.turn_count(), 5);
+        // Conversation turns still at the back.
+        assert_eq!(store.pinned_turn_count(), 3);
+        // TurnIds unique and advanced past the migrated block.
+        let ids: std::collections::HashSet<TurnId> = store.turns().iter().map(|t| t.id).collect();
+        assert_eq!(ids.len(), 5, "all turn ids unique");
+        assert_eq!(store.next_turn_id, base_next + 3);
+        assert_invariant(&store);
     }
 
     #[test]
@@ -659,5 +787,71 @@ mod tests {
         let legacy = serde_json::to_string(&v).unwrap();
         let legacy_rt: PinnedItem = serde_json::from_str(&legacy).unwrap();
         assert_eq!(legacy_rt.estimated_tokens, 0, "missing field defaults to 0");
+    }
+
+    // --- F1/F3 safety: eviction skips pinned; ordering invariants ---
+
+    #[test]
+    fn evict_turns_skips_pinned() {
+        let mut store = new_store();
+        store
+            .pin("context_summary", ChatMessage::assistant("sum"))
+            .unwrap();
+        store.push_turn(vec![ChatMessage::user("c1")]);
+        store.push_turn(vec![ChatMessage::user("c2")]);
+        store.push_turn(vec![ChatMessage::user("c3")]);
+
+        let res = store.evict_turns(3);
+        assert_eq!(res.evicted, 3, "all conversation turns evicted");
+        assert_eq!(res.remaining_turns, 0, "no conversation turns remain");
+        assert_eq!(
+            store.pinned_turns().count(),
+            1,
+            "pinned summary survives eviction"
+        );
+        assert_eq!(store.pinned_labels(), vec!["context_summary"]);
+        assert_eq!(store.turn_count(), 1, "only the pinned turn remains");
+
+        // Over-evict: pinned still survives, evicted capped at conversation count (already 0).
+        let res = store.evict_turns(99);
+        assert_eq!(res.evicted, 0);
+        assert_eq!(store.pinned_turns().count(), 1);
+        assert_invariant(&store);
+    }
+
+    #[test]
+    fn pin_inserts_after_pinned_partition() {
+        let mut store = new_store();
+        store.pin("a", ChatMessage::user("a")).unwrap();
+        store.push_turn(vec![ChatMessage::user("convo")]);
+        store.pin("b", ChatMessage::user("b")).unwrap();
+        // Ordering: [a(pinned), b(pinned), convo] — b inserted after the pinned block, not at back.
+        let labels: Vec<Option<&str>> = store.turns().iter().map(|t| t.label()).collect();
+        assert_eq!(
+            labels,
+            vec![Some("a"), Some("b"), None],
+            "pinned turns stay before conversation turns"
+        );
+        assert_invariant(&store);
+    }
+
+    #[test]
+    fn replace_pin_updates_in_place_keeps_position() {
+        let mut store = new_store();
+        store.pin("a", ChatMessage::user("a-original")).unwrap();
+        store.pin("b", ChatMessage::user("b")).unwrap();
+        store.push_turn(vec![ChatMessage::user("convo")]);
+
+        let new_msg = ChatMessage::user("a-replaced-longer-content");
+        let new_tokens = estimate_message_tokens(&new_msg);
+        store.replace_pin("a", new_msg).unwrap();
+
+        let first = &store.turns()[0];
+        assert_eq!(first.label(), Some("a"), "position unchanged");
+        assert_eq!(first.estimated_tokens, new_tokens);
+        // b and convo remain in place.
+        assert_eq!(store.turns()[1].label(), Some("b"));
+        assert!(!store.turns()[2].is_pinned());
+        assert_invariant(&store);
     }
 }

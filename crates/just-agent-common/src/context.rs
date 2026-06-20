@@ -32,11 +32,11 @@ impl CumulativeUsage {
 /// Layer breakdowns use heuristic estimates for informational purposes.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ContextUsage {
-    /// Per-item breakdown: (label, estimated_tokens).
+    /// Per-pinned-turn breakdown: (label, estimated_tokens).
     pub pinned_items: Vec<(String, usize)>,
-    /// Number of stored conversation turns.
+    /// Number of stored conversation (non-pinned) turns.
     pub turn_count: usize,
-    /// Estimated tokens across all turns.
+    /// Estimated tokens across all conversation (non-pinned) turns.
     pub turn_tokens: usize,
     /// Exact prompt token count from the last provider response, if any.
     pub last_prompt_tokens: Option<u32>,

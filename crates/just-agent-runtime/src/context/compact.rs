@@ -44,15 +44,17 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
                 break;
             }
             let existing_summary = guard
-                .pinned()
-                .iter()
-                .find(|p| p.label == "context_summary")
-                .and_then(|p| p.message.content().map(|c| c.to_owned()));
+                .pinned_turns()
+                .find(|t| t.label() == Some("context_summary"))
+                .and_then(|t| t.messages.first())
+                .and_then(|m| m.content().map(|c| c.to_owned()));
 
-            // Take oldest turns that fit in summarizer_input_budget.
+            // Take oldest CONVERSATION turns (skip pinned) that fit in summarizer_input_budget.
+            // Pinned turns are never summarized — excluding them here also prevents an infinite
+            // loop: a pinned turn that survives eviction must not re-enter the window each pass.
             let mut budget = summarizer_input_budget;
             let mut window = Vec::new();
-            for turn in guard.turns().iter() {
+            for turn in guard.turns().iter().filter(|t| !t.is_pinned()) {
                 if turn.estimated_tokens > budget {
                     break;
                 }
@@ -75,6 +77,13 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
                 &ctx.client,
             )
             .await?;
+
+        // If the summarizer couldn't fit even one turn alongside the existing summary, stop —
+        // evicting 0 turns would leave the same window and loop forever.
+        if result.source_turns == 0 {
+            warn!("summarizer made no progress; stopping compaction");
+            break;
+        }
 
         // Write phase: replace summary + evict turns — single lock, no await.
         {
