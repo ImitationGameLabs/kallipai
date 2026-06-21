@@ -23,6 +23,21 @@ use just_llm_client::family;
 /// differently inside [`build_one`].
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Default `User-Agent` for outbound LLM HTTP calls: `just-agent/<daemon-version>`, with the version
+/// inlined at compile time from this crate's `Cargo.toml` (`env!("CARGO_PKG_VERSION")`). Override
+/// per-process with `JUST_AGENT_LLM_API_USER_AGENT`.
+pub(crate) const DEFAULT_USER_AGENT: &str = concat!("just-agent/", env!("CARGO_PKG_VERSION"));
+
+/// Resolve the effective `User-Agent`: a non-empty `provided` value (forwarded verbatim, leading/
+/// trailing whitespace included) wins; otherwise the built-in default. The `.trim()` only decides
+/// fallback — it does not trim the returned value. Borrows `provided` (or returns the `'static`
+/// default), so callers needing ownership copy as needed.
+pub(crate) fn resolve_user_agent(provided: Option<&str>) -> &str {
+    provided
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DEFAULT_USER_AGENT)
+}
+
 /// Validate every endpoint referenced by `cfg`'s tiers (active **and** failover): the endpoint
 /// exists, its family is registered with `factory`, and an openai-compatible endpoint declares a
 /// `base_url`. Cheap — no construction — so misconfiguration fails fast at startup, before any
@@ -56,12 +71,25 @@ fn validate_endpoints(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<(
     Ok(())
 }
 
-/// Build one backend for `endpoint` via the factory: a fresh `reqwest::Client` (rustls TLS + the
-/// default timeout) with credentials passed into the backend's constructor.
-fn build_one(factory: &BackendFactory, endpoint: &Endpoint) -> Result<Arc<dyn LlmBackend>> {
+/// Build one backend for `endpoint` via the factory: a fresh `reqwest::Client` (rustls TLS, the default
+/// timeout, and the resolved `User-Agent`) with credentials passed into the constructor.
+///
+/// The `User-Agent` survives upstream today because `BackendFactory::create` forwards our builder
+/// verbatim and `just-common::build_client` injects only `Authorization`/`Accept` — it sets no UA of
+/// its own. This is an implementation-level property, not a contract: migrate to a
+/// `ChatClientOptions`-level UA API if upstream ever adds one. An override containing characters
+/// illegal in a header value (e.g. CR/LF, control bytes) fails fast here —
+/// `reqwest::ClientBuilder::build` rejects it and the error bubbles up to the caller — at startup
+/// for the active set, lazily on first failover use otherwise.
+fn build_one(
+    factory: &BackendFactory,
+    endpoint: &Endpoint,
+    user_agent: &str,
+) -> Result<Arc<dyn LlmBackend>> {
     let builder = reqwest::Client::builder()
         .timeout(DEFAULT_HTTP_TIMEOUT)
-        .use_rustls_tls();
+        .use_rustls_tls()
+        .user_agent(user_agent);
     factory
         .create(
             &endpoint.family,
@@ -78,6 +106,7 @@ fn build_one(factory: &BackendFactory, endpoint: &Endpoint) -> Result<Arc<dyn Ll
 pub fn build_backends(
     cfg: &ProfileConfig,
     factory: BackendFactory,
+    user_agent: &str,
 ) -> Result<Arc<dyn BackendSource>> {
     validate_endpoints(cfg, &factory)?;
 
@@ -93,12 +122,16 @@ pub fn build_backends(
                 active.id, active.endpoint
             )
         })?;
-        cache.insert(active.endpoint.clone(), build_one(&factory, endpoint)?);
+        cache.insert(
+            active.endpoint.clone(),
+            build_one(&factory, endpoint, user_agent)?,
+        );
     }
 
     Ok(Arc::new(DaemonBackendSource {
         endpoints: cfg.endpoints.clone(),
         factory,
+        user_agent: user_agent.to_string(),
         cache: std::sync::Mutex::new(cache),
     }))
 }
@@ -109,6 +142,7 @@ pub fn build_backends(
 pub struct DaemonBackendSource {
     endpoints: HashMap<String, Endpoint>,
     factory: BackendFactory,
+    user_agent: String,
     cache: std::sync::Mutex<HashMap<String, Arc<dyn LlmBackend>>>,
 }
 
@@ -131,7 +165,7 @@ impl BackendSource for DaemonBackendSource {
             .endpoints
             .get(endpoint_id)
             .with_context(|| format!("unknown endpoint '{endpoint_id}'"))?;
-        let backend = build_one(&self.factory, endpoint)?;
+        let backend = build_one(&self.factory, endpoint, &self.user_agent)?;
         // Re-lock to publish; a racing builder may have inserted first — reuse theirs. Poison is
         // recovered (the map is still valid data), so a prior panic doesn't propagate.
         let mut cache = self
@@ -150,6 +184,7 @@ impl BackendSource for DaemonBackendSource {
 mod tests {
     use super::*;
     use just_agent_runtime::profile::{Profile, Tier};
+    use just_llm_client::types::chat::{ChatCompletionRequest, ChatMessage};
 
     /// One deepseek endpoint + a single-profile tier referencing it.
     fn ds_cfg() -> ProfileConfig {
@@ -183,7 +218,7 @@ mod tests {
 
     #[test]
     fn active_endpoint_pre_built_and_lookup_succeeds() {
-        let source = build_backends(&ds_cfg(), BackendFactory::new()).unwrap();
+        let source = build_backends(&ds_cfg(), BackendFactory::new(), DEFAULT_USER_AGENT).unwrap();
         // The active endpoint is pre-built, so lookup succeeds without lazy construction.
         assert!(source.get("ds").is_ok());
     }
@@ -208,7 +243,7 @@ mod tests {
             max_context_window: 500_000,
         });
 
-        let source = build_backends(&cfg, BackendFactory::new()).unwrap();
+        let source = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT).unwrap();
         // The failover endpoint is validated but not pre-built — its lookup builds it lazily.
         assert!(
             source.get("backup").is_ok(),
@@ -229,14 +264,14 @@ mod tests {
                 base_url: None,
             },
         );
-        assert!(build_backends(&cfg, BackendFactory::new()).is_ok());
+        assert!(build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT).is_ok());
     }
 
     #[test]
     fn unknown_family_referenced_errors() {
         let mut cfg = ds_cfg();
         cfg.endpoints.get_mut("ds").unwrap().family = "anthropic".into();
-        let err = build_backends(&cfg, BackendFactory::new())
+        let err = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT)
             .err()
             .expect("unregistered family should error");
         let msg = format!("{err}");
@@ -266,10 +301,53 @@ mod tests {
             }],
             endpoints,
         };
-        let err = build_backends(&cfg, BackendFactory::new())
+        let err = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT)
             .err()
             .expect("openai-compatible without base_url should error");
         let msg = format!("{err}");
         assert!(msg.contains("requires a base_url"), "got: {msg}");
+    }
+
+    /// The resolved `User-Agent` reaches the provider on the wire. reqwest applies client default
+    /// headers (including `User-Agent`) at `execute` time, not at `Request::build`, so this must send
+    /// a real request and assert the header at a mock server — it cannot be inspected on the prepared
+    /// `reqwest::Request`. Guards against an upstream `just-common::build_client` change silently
+    /// overwriting our UA.
+    async fn assert_user_agent_sent(user_agent: &str) {
+        use wiremock::matchers::{header, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header("user-agent", user_agent))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // openai-compatible so the request targets `{base_url}/chat/completions`.
+        let endpoint = Endpoint {
+            id: "ua".into(),
+            family: family::OPENAI_COMPATIBLE.into(),
+            api_key: "test".into(),
+            base_url: Some(server.uri()),
+        };
+        let factory = BackendFactory::new();
+        let backend = build_one(&factory, &endpoint, user_agent).expect("backend builds");
+        let request = ChatCompletionRequest::new("m", vec![ChatMessage::user("hi")]);
+        let prepared = backend.prepare(request).expect("prepare serializes");
+        // `send` does not parse — a bare 200 satisfies it. The mock's `.and(header(...))` is the
+        // assertion: a non-matching UA means zero hits, failing `.expect(1)` when `server` drops.
+        backend.send(prepared).await.expect("send succeeds");
+    }
+
+    #[tokio::test]
+    async fn default_user_agent_reaches_provider() {
+        assert_user_agent_sent(DEFAULT_USER_AGENT).await;
+    }
+
+    #[tokio::test]
+    async fn override_user_agent_reaches_provider() {
+        assert_user_agent_sent("acme-bot/9").await;
     }
 }

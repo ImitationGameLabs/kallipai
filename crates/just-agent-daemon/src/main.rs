@@ -97,7 +97,9 @@ async fn main() -> Result<()> {
     // misconfigured endpoint (unknown family, bad config) fails fast here at startup.
     let cfg = just_agent_runtime::profile::load().context("failed to load model profiles")?;
     let factory = just_llm_client::client::BackendFactory::new();
-    let source = backend::build_backends(&cfg, factory).context("failed to build LLM backends")?;
+    let user_agent = backend::resolve_user_agent(args.llm_api_user_agent.as_deref());
+    let source = backend::build_backends(&cfg, factory, user_agent)
+        .context("failed to build LLM backends")?;
     let profiles = Arc::new(ProfileRegistry::new(cfg.tiers, source)?);
 
     let state = Arc::new(AppState::with_limits(

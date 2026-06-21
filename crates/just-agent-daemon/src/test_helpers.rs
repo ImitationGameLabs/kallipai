@@ -178,9 +178,12 @@ pub fn make_profile_registry() -> Arc<just_agent_runtime::profile::ProfileRegist
         }],
         endpoints,
     };
-    let source =
-        crate::backend::build_backends(&cfg, just_llm_client::client::BackendFactory::new())
-            .expect("test backends build");
+    let source = crate::backend::build_backends(
+        &cfg,
+        just_llm_client::client::BackendFactory::new(),
+        crate::backend::DEFAULT_USER_AGENT,
+    )
+    .expect("test backends build");
     Arc::new(ProfileRegistry::new(cfg.tiers, source).expect("valid test registry"))
 }
 

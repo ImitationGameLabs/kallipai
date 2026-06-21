@@ -34,4 +34,7 @@ pub struct Args {
     /// Max HTTP request body size in kilobytes. 0 = axum default (2 MB).
     #[arg(long, env = "JUST_AGENT_MAX_BODY_SIZE_KB", default_value = "1024")]
     pub max_body_size_kb: usize,
+    /// User-Agent sent on outbound LLM HTTP calls. Unset = `just-agent/<daemon-version>`.
+    #[arg(long, env = "JUST_AGENT_LLM_API_USER_AGENT")]
+    pub llm_api_user_agent: Option<String>,
 }

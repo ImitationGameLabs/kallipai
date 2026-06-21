@@ -32,3 +32,10 @@ base64 = { workspace = true }
 getrandom = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
+
+[dev-dependencies]
+# Wire-level assertion that the resolved User-Agent reaches the provider. reqwest applies client
+# default headers (including User-Agent) at `execute` time, not at `Request::build`, so the UA cannot
+# be read off a prepared `reqwest::Request` — only a real request to a mock server proves it (and
+# catches an upstream `just-common::build_client` change that silently overwrites our UA).
+wiremock = { workspace = true }
