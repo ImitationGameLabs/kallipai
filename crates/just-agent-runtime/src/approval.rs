@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn enqueue_commit_approve_redeem() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("shell_session_exec", r#"{"command":"rm -rf /tmp"}"#);
+        let id = q.enqueue("bash_exec", r#"{"command":"rm -rf /tmp"}"#);
         assert!(id.starts_with("ap_"));
 
         let info = q.list(None);
@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(q.list(None)[0].status, ApprovalStatus::Approved);
 
         let action = q.take_for_redeem(&id).unwrap();
-        assert_eq!(action.tool_name, "shell_session_exec");
+        assert_eq!(action.tool_name, "bash_exec");
         assert_eq!(q.list(None)[0].status, ApprovalStatus::Redeemed);
     }
 
@@ -567,9 +567,9 @@ mod tests {
     #[test]
     fn info_has_tool_call_content() {
         let mut q = ApprovalStore::new();
-        q.enqueue("shell_session_exec", r#"{"command":"ls"}"#);
+        q.enqueue("bash_exec", r#"{"command":"ls"}"#);
         let info = &q.list(None)[0];
-        assert_eq!(info.content.tool_name, "shell_session_exec");
+        assert_eq!(info.content.tool_name, "bash_exec");
         assert_eq!(info.content.arguments["command"], "ls");
     }
 }

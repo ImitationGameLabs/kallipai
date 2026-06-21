@@ -350,6 +350,112 @@ mod tests {
         );
     }
 
+    /// The env snapshot is `source`d by every exec wrapper (after `shopt -s
+    /// expand_aliases`), so an alias defined in it expands in the command.
+    #[tokio::test]
+    async fn env_snapshot_sources_alias() {
+        let dir = test_dir();
+        let mut backend = StatelessBuilder::new()
+            .data_dir(dir.clone())
+            .build()
+            .await
+            .unwrap();
+        // Override the snapshot captured at build with a known alias.
+        std::fs::write(
+            dir.join("env.sh"),
+            "shopt -s expand_aliases\nalias m3say='echo M3_ALIAS'\n",
+        )
+        .unwrap();
+        let out = backend
+            .exec("m3say", Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(out.stdout.trim(), "M3_ALIAS");
+    }
+
+    /// An `export` in the snapshot is visible to the command (proves the snapshot
+    /// is sourced, not just present).
+    #[tokio::test]
+    async fn env_snapshot_sources_export() {
+        let dir = test_dir();
+        let mut backend = StatelessBuilder::new()
+            .data_dir(dir.clone())
+            .build()
+            .await
+            .unwrap();
+        std::fs::write(dir.join("env.sh"), "export JA_M3_EXPORT=ok\n").unwrap();
+        // `${VAR:?unset}` fails (non-zero) if the var is absent, so this also
+        // catches a regression where the snapshot stops being sourced.
+        let out = backend
+            .exec("echo \"${JA_M3_EXPORT:?unset}\"", Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(out.stdout.trim(), "ok");
+    }
+
+    /// A non-zero exit still fires the EXIT trap, so the sticky cwd roundtrip
+    /// reports the post-command directory (the existing `exit 7` test never
+    /// asserted cwd).
+    #[tokio::test]
+    async fn exit_n_traps_and_reports_cwd() {
+        let dir = test_dir();
+        let mut backend = StatelessBuilder::new()
+            .data_dir(dir.clone())
+            .build()
+            .await
+            .unwrap();
+        let dir_a = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir_b = std::fs::canonicalize(&dir).unwrap();
+        backend
+            .exec(
+                &format!("cd '{}'", dir_a.display()),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        let out = backend
+            .exec(
+                &format!("cd '{}' ; exit 42", dir_b.display()),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, Some(42));
+        assert_eq!(out.cwd, dir_b);
+        // Sticky cwd persists to the next call.
+        let out = backend.exec("pwd", Duration::from_secs(10)).await.unwrap();
+        assert_eq!(out.cwd, dir_b);
+    }
+
+    /// If a command removes its own cwd, the trap's `pwd` write targets a gone
+    /// directory and `cwd::resolve`'s canonicalize guard falls back rather than
+    /// reporting a stale path.
+    #[tokio::test]
+    async fn deleted_cwd_falls_back() {
+        let dir = test_dir();
+        let mut backend = StatelessBuilder::new()
+            .data_dir(dir.clone())
+            .build()
+            .await
+            .unwrap();
+        let doomed = dir.join("doomed");
+        std::fs::create_dir_all(&doomed).unwrap();
+        let out = backend
+            .exec(
+                &format!("cd '{}' && rmdir '{}'", doomed.display(), doomed.display()),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert!(
+            out.cwd.exists(),
+            "cwd should fall back to an existing dir, not the deleted one; got {}",
+            out.cwd.display()
+        );
+    }
+
     fn test_dir() -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

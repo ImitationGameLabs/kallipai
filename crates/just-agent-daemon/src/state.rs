@@ -61,7 +61,7 @@ pub struct AgentRegistry {
     /// SHA-256 of each agent's auth token → its id. Keyed by hash so agent auth
     /// shares the operator's `TokenHash::of` → hash-compare path (consistency) — not
     /// for secret protection, since the plaintext still lives in [`Agent::env`] for
-    /// PTY injection.
+    /// shell injection.
     token_index: HashMap<TokenHash, AgentId>,
 }
 
@@ -89,9 +89,9 @@ pub struct Agent {
     pub notify: Arc<Notify>,
     pub state: Arc<AtomicU8>,
     /// SHA-256 of the agent's auth token. The plaintext is injected into [`env`]
-    /// (`JUST_AGENT_AUTH_TOKEN`) for PTY use; only this hash is retained for lookup.
+    /// (`JUST_AGENT_AUTH_TOKEN`) for shell injection; only this hash is retained for lookup.
     pub auth_token_hash: TokenHash,
-    /// Environment variables injected into PTY sessions (JUST_AGENT_ID, JUST_AGENT_AUTH_TOKEN, etc.).
+    /// Environment variables injected into agent shell sessions (JUST_AGENT_ID, JUST_AGENT_AUTH_TOKEN, etc.).
     /// Preserved across reactivation so the agent retains its identity. This is the
     /// sole home of the auth-token plaintext.
     pub env: HashMap<String, String>,

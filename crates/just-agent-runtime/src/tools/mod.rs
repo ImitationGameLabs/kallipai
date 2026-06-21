@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use just_agent_shell::{PtyBuilder, shell_tool_set};
+use just_agent_shell::{StatelessBuilder, bash_exec_tool_set};
 use just_llm_client::ToolDispatcher;
 use just_llm_client::types::chat::{FunctionDefinition, ToolDefinition, ToolType};
 use serde_json::json;
@@ -19,20 +19,32 @@ pub use skill::{
 
 /// Builds the tool registry exposed by `just-agent`.
 ///
-/// Spawns bash via [`PtyBuilder`], preserving full shell session state.
-/// The shell's working directory is the process current directory (set by
-/// the caller via `std::env::set_current_dir`).
+/// Spawns a fresh isolated `bash` per command via [`StatelessBuilder`] (the stateless
+/// one-shot backend). The working directory is read fresh from `pwd` after each command and
+/// reported in the tool result — it does not persist implicitly across calls. A background task
+/// that finishes delivers a completion notice through `notice_sink` (the daemon wires it to the agent's
+/// prompt channel, so the LLM learns without polling `bash_background_read`).
 ///
 /// Context tools share the same `ContextStore` as the main loop.
 pub async fn build_tool_dispatch(
     ctx: Arc<Mutex<ContextStore>>,
     env: HashMap<String, String>,
+    notice_sink: Arc<dyn Fn(String) + Send + Sync>,
 ) -> Result<ToolDispatcher> {
-    let backend = PtyBuilder::new("main").envs(env).build().await?;
+    let backend = StatelessBuilder::new()
+        .envs(env)
+        // The exit code is intentionally omitted from the notice — the agent reads it
+        // (and the output) via `bash_background_read`. Keeping the notice minimal avoids
+        // duplicating state the agent will fetch anyway.
+        .on_terminal(move |id, state, _code| {
+            notice_sink(format!("[Background task {id} {}]", state.as_str()));
+        })
+        .build()
+        .await?;
     let backend = Arc::new(Mutex::new(backend));
 
     let mut dispatch = ToolDispatcher::new();
-    dispatch.add_tools(shell_tool_set(backend))?;
+    dispatch.add_tools(bash_exec_tool_set(backend))?;
     let ctx_dyn: Arc<Mutex<dyn AgenticContext>> = ctx;
     dispatch.add_tools(context::context_tool_set(ctx_dyn.clone()))?;
     dispatch.add_tools(skill::file_pin_tool_set(ctx_dyn))?;

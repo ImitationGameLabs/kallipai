@@ -10,9 +10,9 @@ use crate::tools::context::{
 use crate::tools::skill::FilePinTool;
 use just_agent_common::AgentId;
 use just_agent_common::policy::{PolicyDecision, ToolPolicy};
-use just_agent_shell::session::names;
+use just_agent_shell::stateless::tools::names;
 
-const DEFAULT_SYSTEM_PROMPT: &str = "You are a minimal coding agent. Use shell_session_exec for shell commands. Use shell_session_create to create persistent shell sessions, shell_session_list to inspect them, shell_session_capture to inspect recent output, and shell_session_restart or shell_session_kill when session lifecycle control is necessary. Keep answers concise and prefer the least risky tool that can accomplish the task.\n\nUse read_file_and_pin to load a file into persistent context (e.g. skills or reference documents). Use context_unpin to remove pinned items.\n\nWhen a tool returns {\"pending_approval\": true, \"id\": \"...\"}, the action was deferred and is pending authorization. Continue with other work. When you see an approval notification in context, call approval_redeem with the id to execute. Call approval_list to check status, approval_cancel if you no longer need a pending approval.\n\nUse `just-agent promote-request submit <name>` to request promotion of a local skill to the shared directory. The request is reviewed by the root agent. You will be notified when the decision is made.";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are a minimal coding agent. Use bash_exec to run a shell command in a fresh, isolated bash process; it returns stdout, stderr, exit_code, and the working directory after the command. The working directory does not persist implicitly — to operate in a directory, prepend `cd <dir> &&` to your command and read the returned cwd. bash_exec takes an optional timeout (seconds, default 120) and an optional background flag; with background:true it starts a long-running task and returns a task_id immediately. Use bash_background_read to poll a background task's output and state (running/exited/killed); a stalled:true state means it is likely waiting on an interactive prompt — kill it. Use bash_background_kill to cancel a background task. When a background task finishes, you receive a [Background task <id> <state>] notice — call bash_background_read to collect its output (including exit code). Keep answers concise and prefer the least risky tool that can accomplish the task.\n\nUse read_file_and_pin to load a file into persistent context (e.g. skills or reference documents). Use context_unpin to remove pinned items.\n\nWhen a tool returns {\"pending_approval\": true, \"id\": \"...\"}, the action was deferred and is pending authorization. Continue with other work. When you see an approval notification in context, call approval_redeem with the id to execute. Call approval_list to check status, approval_cancel if you no longer need a pending approval.\n\nUse `just-agent promote-request submit <name>` to request promotion of a local skill to the shared directory. The request is reviewed by the root agent. You will be notified when the decision is made.";
 /// Effectively unlimited — the real safety net is the daemon-wide token budget.
 /// Individual rounds are bounded by LLM response length; the loop as a whole is
 /// bounded by token consumption. This constant only serves as a last-resort
@@ -64,18 +64,15 @@ impl std::str::FromStr for PolicyPreset {
 /// Default tool policy matching the current hardcoded behavior.
 ///
 /// Tool names are referenced via each tool's `NAME` constant (context/skill
-/// tools, local) and the `just_agent_shell::session::names` module (shell
-/// tools) rather than duplicated string literals, keeping this map in
+/// tools, local) and the `just_agent_shell::stateless::tools::names` module
+/// (shell tools) rather than duplicated string literals, keeping this map in
 /// lockstep with the tool registry.
 pub fn default_tool_policy() -> ToolPolicy {
     use std::collections::BTreeMap;
     let mut tools = BTreeMap::new();
-    tools.insert(names::LIST.into(), PolicyDecision::Allow);
-    tools.insert(names::CAPTURE.into(), PolicyDecision::Allow);
-    tools.insert(names::CREATE.into(), PolicyDecision::Allow);
-    tools.insert(names::KILL.into(), PolicyDecision::Ask);
-    tools.insert(names::RESTART.into(), PolicyDecision::Ask);
-    tools.insert(names::EXEC.into(), PolicyDecision::Classify);
+    tools.insert(names::BG_READ.into(), PolicyDecision::Allow);
+    tools.insert(names::BG_KILL.into(), PolicyDecision::Ask);
+    tools.insert(names::BASH_EXEC.into(), PolicyDecision::Classify);
     tools.insert(ContextPinTool::NAME.into(), PolicyDecision::Allow);
     tools.insert(ContextUnpinTool::NAME.into(), PolicyDecision::Allow);
     tools.insert(ContextStatusTool::NAME.into(), PolicyDecision::Allow);
@@ -135,7 +132,7 @@ fn tool_policy_from_env_inner() -> ToolPolicy {
 /// 3. Hardcoded [`default_tool_policy`] — fallback.
 ///
 /// `Classify` is not expressible via presets — it is a per-tool behavior
-/// unique to the default policy. When a preset is active, `shell_session_exec`
+/// unique to the default policy. When a preset is active, `bash_exec`
 /// resolves to the preset's default decision instead.
 ///
 /// Only affects root agents at creation time. Subagents inherit their
@@ -459,12 +456,9 @@ mod tests {
         // introduced elsewhere, so they are intentionally absent here.
         let prompt = DEFAULT_SYSTEM_PROMPT;
         for name in [
-            names::EXEC,
-            names::CREATE,
-            names::LIST,
-            names::CAPTURE,
-            names::RESTART,
-            names::KILL,
+            names::BASH_EXEC,
+            names::BG_READ,
+            names::BG_KILL,
             ContextUnpinTool::NAME,
             FilePinTool::NAME,
         ] {
@@ -609,10 +603,7 @@ mod tests {
         assert_eq!(policy.default, PolicyDecision::Allow);
         assert!(policy.tools.is_empty());
         // decision_for falls back to default.
-        assert_eq!(
-            policy.decision_for("shell_session_exec"),
-            PolicyDecision::Allow
-        );
+        assert_eq!(policy.decision_for("bash_exec"), PolicyDecision::Allow);
         assert_eq!(policy.decision_for("unknown_tool"), PolicyDecision::Allow);
     }
 
@@ -621,10 +612,7 @@ mod tests {
         let policy = tool_policy_from_preset(PolicyPreset::AskAll);
         assert_eq!(policy.default, PolicyDecision::Ask);
         assert!(policy.tools.is_empty());
-        assert_eq!(
-            policy.decision_for("shell_session_exec"),
-            PolicyDecision::Ask
-        );
+        assert_eq!(policy.decision_for("bash_exec"), PolicyDecision::Ask);
         assert_eq!(policy.decision_for("unknown_tool"), PolicyDecision::Ask);
     }
 
@@ -676,7 +664,7 @@ mod tests {
         temp_env::with_vars(
             [
                 ("JUST_AGENT_POLICY_PRESET", Some("ask-all")),
-                ("JUST_AGENT_ALLOW_TOOLS", Some("shell_session_exec")),
+                ("JUST_AGENT_ALLOW_TOOLS", Some("bash_exec")),
             ],
             || {
                 let policy = tool_policy_from_env();
@@ -709,15 +697,12 @@ mod tests {
         temp_env::with_vars(
             [
                 ("JUST_AGENT_POLICY_PRESET", None::<&str>),
-                ("JUST_AGENT_ALLOW_TOOLS", Some("shell_session_exec")),
+                ("JUST_AGENT_ALLOW_TOOLS", Some("bash_exec")),
             ],
             || {
                 let policy = tool_policy_from_env();
                 assert_eq!(policy.default, PolicyDecision::Ask);
-                assert_eq!(
-                    policy.decision_for("shell_session_exec"),
-                    PolicyDecision::Allow
-                );
+                assert_eq!(policy.decision_for("bash_exec"), PolicyDecision::Allow);
             },
         );
     }
@@ -728,7 +713,7 @@ mod tests {
         temp_env::with_vars(
             [
                 ("JUST_AGENT_POLICY_PRESET", Some("gibberish")),
-                ("JUST_AGENT_ALLOW_TOOLS", Some("shell_session_exec")),
+                ("JUST_AGENT_ALLOW_TOOLS", Some("bash_exec")),
             ],
             || {
                 let _ = tool_policy_from_env();

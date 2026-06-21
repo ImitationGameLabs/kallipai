@@ -39,7 +39,7 @@ Each agent is a pair of tokio tasks with completely isolated state:
 | `ContextStore`                                   | Yes        |
 | `ApprovalStore`                                  | Yes        |
 | `AgentConfig` (workspace, skills, system prompt) | Yes        |
-| PTY shell backend                                | Yes        |
+| Stateless shell backend                          | Yes        |
 
 Agents do not share any runtime state. The daemon holds them in a `Vec` behind
 an `RwLock`; lookup is by UUID.
@@ -89,13 +89,13 @@ Tools go through a three-layer policy before execution:
 
 **Layer 1 — `AgentPolicy`** routes by tool name:
 
-| Tool                                          | Decision                              |
-| --------------------------------------------- | ------------------------------------- |
-| `shell_session_list`, `shell_session_capture` | Allow (read-only)                     |
-| `shell_session_create`                        | Allow if cwd is within workspace root |
-| `shell_session_exec`                          | Delegate to AST classifier            |
-| Context tools, skill tools                    | Allow                                 |
-| Unknown tools                                 | Ask                                   |
+| Tool                       | Decision                   |
+| -------------------------- | -------------------------- |
+| `bash_background_read`     | Allow (read-only)          |
+| `bash_background_kill`     | Ask                        |
+| `bash_exec`                | Delegate to AST classifier |
+| Context tools, skill tools | Allow                      |
+| Unknown tools              | Ask                        |
 
 **Layer 2 — `AuthorizedToolExecutor`** enforces the decision:
 

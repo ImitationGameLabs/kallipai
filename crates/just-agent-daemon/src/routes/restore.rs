@@ -189,7 +189,7 @@ async fn restore_one(
     let approvals = Arc::new(tokio::sync::Mutex::new(restored.approvals));
     let (events_tx, _) = broadcast::channel(256);
 
-    // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the PTY env;
+    // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the agent shell env;
     // only its SHA-256 is indexed for auth lookup.
     let token = MintedToken::generate(TokenKind::Agent);
     let env = SpawnArgs::default_env(&p.agent_id, token.secret());

@@ -1,7 +1,7 @@
 //! Auth-token generation, formatting, and SHA-256 hashing for in-memory comparison.
 //!
 //! Honest scope: the agent token's plaintext is unavoidably present in
-//! [`crate::state::Agent::env`] (`JUST_AGENT_AUTH_TOKEN`) — the PTY must inject it so
+//! [`crate::state::Agent::env`] (`JUST_AGENT_AUTH_TOKEN`) — the agent shell must inject it so
 //! the agent can authenticate back, so hashing the agent index is *not* primary
 //! secret protection. The solid reason to hash it anyway is **consistency**: both
 //! token kinds resolve through the *same* path — `TokenHash::of(incoming)` compared
@@ -20,7 +20,7 @@ use subtle::ConstantTimeEq;
 
 /// Type-tag prefix for operator tokens (full-access, printed at startup).
 const OPERATOR_PREFIX: &str = "sk-operator-";
-/// Type-tag prefix for agent tokens (per-agent, injected into the PTY).
+/// Type-tag prefix for agent tokens (per-agent, injected into the agent shell).
 const AGENT_PREFIX: &str = "sk-agent-";
 /// Entropy budget: 32 bytes = 256 bits.
 const SECRET_BYTES: usize = 32;

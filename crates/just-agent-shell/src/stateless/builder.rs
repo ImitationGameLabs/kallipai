@@ -3,9 +3,14 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::error::ShellError;
-use crate::stateless::{backend::ProcessBackend, env_snapshot::EnvSnapshot, supervisor};
+use crate::stateless::{
+    backend::ProcessBackend,
+    env_snapshot::EnvSnapshot,
+    supervisor::{self, TaskState, TerminalObserver},
+};
 
 const DEFAULT_FALLBACK_CWD: &str = "/tmp";
 const DEFAULT_FALLBACK_SHELL: &str = "/bin/bash";
@@ -40,6 +45,7 @@ pub struct StatelessBuilder {
     pub(super) max_output_bytes: usize,
     pub(super) max_bg_bytes: usize,
     pub(super) data_dir: Option<PathBuf>,
+    pub(super) on_terminal: Option<TerminalObserver>,
 }
 
 impl StatelessBuilder {
@@ -54,6 +60,7 @@ impl StatelessBuilder {
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_bg_bytes: DEFAULT_MAX_BG_BYTES,
             data_dir: None,
+            on_terminal: None,
         }
     }
 
@@ -97,6 +104,19 @@ impl StatelessBuilder {
     /// `$JUST_AGENT_DATA_DIR` or the platform data dir).
     pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(dir.into());
+        self
+    }
+
+    /// Registers an observer invoked when a background task reaches a terminal
+    /// state (exited/killed). Called as `(task_id, state, exit_code)`; `exit_code`
+    /// is `None` for killed / watcher-error cases. Best-effort: may not fire on
+    /// registry `Drop` (the runtime may be shutting down and the watcher cannot
+    /// be awaited synchronously).
+    pub fn on_terminal<F>(mut self, cb: F) -> Self
+    where
+        F: Fn(&str, TaskState, Option<i32>) + Send + Sync + 'static,
+    {
+        self.on_terminal = Some(TerminalObserver(Arc::new(cb)));
         self
     }
 
@@ -173,6 +193,7 @@ impl StatelessBuilder {
             data_dir.clone(),
             self.max_bg_bytes,
             self.env.clone(),
+            self.on_terminal.clone().map(|o| o.0),
         );
 
         Ok(ProcessBackend {

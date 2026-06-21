@@ -15,7 +15,7 @@ pub struct Args {
     /// Address to listen on.
     #[arg(long, env = "JUST_AGENT_DAEMON_ADDR", default_value = "127.0.0.1:3000")]
     pub listen_addr: String,
-    /// URL that agents use to reach this daemon (injected into PTY env).
+    /// URL that agents use to reach this daemon (injected into the agent shell env).
     #[arg(
         long,
         env = "JUST_AGENT_ADVERTISE_URL",

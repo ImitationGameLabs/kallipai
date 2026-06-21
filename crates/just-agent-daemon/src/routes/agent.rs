@@ -99,12 +99,24 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
             .build_client(profile, Some(system_prompt.clone()))?
     };
 
-    let dispatch = build_tool_dispatch(args.store.clone(), args.env.clone()).await?;
-
-    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(256);
+    // Mint the prompt channel before building the tool dispatch so a background
+    // task can push a completion notice onto it (the dispatch wires `notify` into
+    // the stateless backend's terminal-state observer). `try_send` drops silently
+    // on a full/dead channel — the agent then falls back to polling
+    // `bash_background_read`, so a dropped notice is never a correctness loss.
     let (prompt_tx, prompt_rx) = args
         .prompt_channel
         .unwrap_or_else(|| tokio::sync::mpsc::channel(args.prompt_queue_size));
+    let notice_sink: Arc<dyn Fn(String) + Send + Sync> = {
+        let prompt_tx = prompt_tx.clone();
+        Arc::new(move |text| {
+            let _ = prompt_tx.try_send(text);
+        })
+    };
+
+    let dispatch = build_tool_dispatch(args.store.clone(), args.env.clone(), notice_sink).await?;
+
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(256);
 
     let executor = AuthorizedToolExecutor::new(
         dispatch,
@@ -200,7 +212,7 @@ pub async fn create_agent(
     }
 
     let id = AgentId::random();
-    // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the PTY env
+    // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the agent shell env
     // (`JUST_AGENT_AUTH_TOKEN`); only its SHA-256 is indexed for auth lookup.
     let token = MintedToken::generate(TokenKind::Agent);
 

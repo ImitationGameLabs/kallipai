@@ -349,8 +349,8 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 {
   "default": "ask",
   "tools": {
-    "shell_session_list": "allow",
-    "shell_session_exec": "classify"
+    "bash_background_read": "allow",
+    "bash_exec": "classify"
   }
 }
 ```

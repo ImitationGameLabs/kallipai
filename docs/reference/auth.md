@@ -7,7 +7,7 @@ generates two categories of token:
 
 - **Operator token** — printed once at daemon startup. Grants full access: create
   root agents, manage any agent, approve/deny approvals.
-- **Agent token** — generated per agent at creation, injected into the PTY as
+- **Agent token** — generated per agent at creation, injected into the agent's shell as
   `JUST_AGENT_AUTH_TOKEN`. Agents use this to call back to the daemon.
 
 Both tokens are 256-bit CSPRNG secrets with a type-tag prefix (`sk-operator-…` /

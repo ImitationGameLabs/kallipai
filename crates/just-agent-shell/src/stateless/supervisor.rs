@@ -65,6 +65,24 @@ impl TaskState {
     }
 }
 
+/// Observer invoked when a background task reaches a terminal state. Receives
+/// `(task_id, state, exit_code)`; `exit_code` is `None` for killed / watcher-error
+/// cases. Best-effort: may not fire on registry `Drop` — the runtime may be
+/// shutting down and the watcher cannot be awaited synchronously, so callers must
+/// tolerate a missed notification (equivalent to the task being reclaimed).
+pub type OnTaskTerminal = Arc<dyn Fn(&str, TaskState, Option<i32>) + Send + Sync>;
+
+/// Owned terminal-state observer with a `Debug` impl (trait objects have none),
+/// so it can live in a `#[derive(Debug)]` struct like `StatelessBuilder`.
+#[derive(Clone)]
+pub(super) struct TerminalObserver(pub(super) OnTaskTerminal);
+
+impl std::fmt::Debug for TerminalObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalObserver").finish_non_exhaustive()
+    }
+}
+
 /// Result of reading a background task's accumulated output.
 #[derive(Debug)]
 pub struct BgReadOutput {
@@ -109,6 +127,7 @@ pub(super) struct BackgroundRegistry {
     data_dir: PathBuf,
     max_bg_bytes: usize,
     env: HashMap<OsString, OsString>,
+    on_terminal: Option<OnTaskTerminal>,
 }
 
 impl BackgroundRegistry {
@@ -118,6 +137,7 @@ impl BackgroundRegistry {
         data_dir: PathBuf,
         max_bg_bytes: usize,
         env: HashMap<OsString, OsString>,
+        on_terminal: Option<OnTaskTerminal>,
     ) -> Self {
         Self {
             tasks: HashMap::new(),
@@ -126,6 +146,7 @@ impl BackgroundRegistry {
             data_dir,
             max_bg_bytes,
             env,
+            on_terminal,
         }
     }
 
@@ -183,6 +204,8 @@ impl BackgroundRegistry {
             },
             cancel.clone(),
             self.max_bg_bytes,
+            id.clone(),
+            self.on_terminal.clone(),
         ));
 
         self.tasks.insert(
@@ -262,6 +285,8 @@ async fn watch(
     watched: Watched,
     cancel: CancellationToken,
     max_bg_bytes: usize,
+    id: String,
+    on_terminal: Option<OnTaskTerminal>,
 ) {
     let Watched {
         state,
@@ -277,6 +302,7 @@ async fn watch(
             _ = cancel.cancelled() => {
                 let _ = pgroup::kill_tree(&mut child).await;
                 state.store(STATE_KILLED, Ordering::Relaxed);
+                fire_terminal(&on_terminal, &id, TaskState::Killed, None);
                 return;
             }
             _ = tokio::time::sleep(WATCH_POLL) => {}
@@ -291,19 +317,23 @@ async fn watch(
         if (size as usize) > max_bg_bytes {
             let _ = pgroup::kill_tree(&mut child).await;
             state.store(STATE_KILLED, Ordering::Relaxed);
+            fire_terminal(&on_terminal, &id, TaskState::Killed, None);
             return;
         }
 
         // Exit detection.
         match child.try_wait() {
             Ok(Some(status)) => {
-                exit_code.store(status.code().unwrap_or(EXIT_NONE), Ordering::Relaxed);
+                let code = status.code();
+                exit_code.store(code.unwrap_or(EXIT_NONE), Ordering::Relaxed);
                 state.store(STATE_EXITED, Ordering::Relaxed);
+                fire_terminal(&on_terminal, &id, TaskState::Exited, code);
                 return;
             }
             Ok(None) => {}
             Err(_) => {
                 state.store(STATE_EXITED, Ordering::Relaxed);
+                fire_terminal(&on_terminal, &id, TaskState::Exited, None);
                 return;
             }
         }
@@ -319,6 +349,19 @@ async fn watch(
             stalled.store(false, Ordering::Relaxed);
         }
         last_size = size;
+    }
+}
+
+/// Invoke the terminal-state observer, if registered. A panic in the callback
+/// propagates through the watcher task (surfaced by tokio's default handler).
+fn fire_terminal(
+    on_terminal: &Option<OnTaskTerminal>,
+    id: &str,
+    state: TaskState,
+    exit_code: Option<i32>,
+) {
+    if let Some(cb) = on_terminal {
+        cb(id, state, exit_code);
     }
 }
 
@@ -355,6 +398,9 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
 
+    /// Recorded terminal event `(task_id, state, exit_code)` for the on_terminal tests.
+    type CapturedTerminal = Option<(String, TaskState, Option<i32>)>;
+
     fn registry() -> BackgroundRegistry {
         let dir = std::env::temp_dir().join(format!(
             "ja-sup-{}-{}",
@@ -371,6 +417,7 @@ mod tests {
             dir,
             10 * 1024 * 1024,
             HashMap::new(),
+            None,
         )
     }
 
@@ -421,7 +468,14 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             let snap = dir.join("env.sh");
             std::fs::write(&snap, "").unwrap();
-            BackgroundRegistry::new(OsString::from("bash"), snap, dir, 4096, HashMap::new()) // tiny cap
+            BackgroundRegistry::new(
+                OsString::from("bash"),
+                snap,
+                dir,
+                4096,
+                HashMap::new(),
+                None,
+            ) // tiny cap
         };
         let id = reg.spawn("yes hello").unwrap();
         for _ in 0..100 {
@@ -432,5 +486,75 @@ mod tests {
             tokio::time::sleep(WATCH_POLL).await;
         }
         panic!("size watchdog did not kill the overflowing task");
+    }
+
+    /// Build a registry whose terminal-state observer records the last
+    /// `(task_id, state, exit_code)` into the returned shared slot.
+    fn tracking_registry(
+        label: &str,
+        max_bg_bytes: usize,
+    ) -> (BackgroundRegistry, Arc<std::sync::Mutex<CapturedTerminal>>) {
+        use std::sync::Mutex;
+        let received: Arc<Mutex<CapturedTerminal>> = Arc::new(Mutex::new(None));
+        let captured = received.clone();
+        let dir = std::env::temp_dir().join(format!(
+            "ja-sup-{label}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snap = dir.join("env.sh");
+        std::fs::write(&snap, "").unwrap();
+        let reg = BackgroundRegistry::new(
+            OsString::from("bash"),
+            snap,
+            dir,
+            max_bg_bytes,
+            HashMap::new(),
+            Some(Arc::new(move |id, state, code| {
+                *captured.lock().unwrap() = Some((id.to_string(), state, code));
+            })),
+        );
+        (reg, received)
+    }
+
+    #[tokio::test]
+    async fn on_terminal_fires_on_exit() {
+        let (mut reg, received) = tracking_registry("cb", 10 * 1024 * 1024);
+        let id = reg.spawn("exit 7").unwrap();
+        for _ in 0..50 {
+            if received.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(WATCH_POLL).await;
+        }
+        let (cb_id, cb_state, cb_code) = received
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("on_terminal did not fire on exit");
+        assert_eq!(cb_id, id);
+        assert_eq!(cb_state, TaskState::Exited);
+        assert_eq!(cb_code, Some(7));
+    }
+
+    #[tokio::test]
+    async fn on_terminal_fires_on_size_watchdog() {
+        // tiny cap → the size watchdog kills quickly.
+        let (mut reg, received) = tracking_registry("cbsize", 4096);
+        let id = reg.spawn("yes hello").unwrap();
+        for _ in 0..100 {
+            if received.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(WATCH_POLL).await;
+        }
+        let (cb_id, cb_state, _cb_code) = received
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("on_terminal did not fire on size-watchdog kill");
+        assert_eq!(cb_id, id);
+        assert_eq!(cb_state, TaskState::Killed);
     }
 }
