@@ -55,9 +55,10 @@ pub struct StatelessOutput {
 /// Narrow abstraction for a stateless command runner.
 ///
 /// A sibling to [`crate::backend::ShellBackend`]: there are no sessions, no
-/// scrollback, no "current session". Both [`ProcessBackend`] and
-/// [`MockStatelessBackend`](crate::MockStatelessBackend) implement it so
-/// the `bash_exec` tool is generic over either.
+/// scrollback, no "current session". [`ProcessBackend`] is the concrete
+/// implementation; an in-memory mock is available behind the `testutils`
+/// feature for downstream tests, so the `bash_exec` tool stays generic over
+/// its backend.
 #[async_trait]
 pub trait StatelessBackend: Send + Sync {
     /// Run `command`, returning its output and the post-command cwd.
