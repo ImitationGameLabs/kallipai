@@ -69,18 +69,25 @@ in
     inherit src;
   };
 
-  # TODO: Re-enable once integration tests are separated from unit tests.
-  # The Nix sandbox lacks CA certificates, so reqwest fails to build HTTPS
-  # clients at construction time. Even with cacert added, integration tests
-  # need network access and API keys which are unavailable in the sandbox.
-  #
-  # "${project}-nextest" = craneLib.cargoNextest (
-  #   commonArgs
-  #   // {
-  #     inherit cargoArtifacts;
-  #     partitions = 1;
-  #     partitionType = "count";
-  #     cargoNextestPartitionsExtraArgs = "--no-tests=pass";
-  #   }
-  # );
+  # Run the test suite. Sandbox env deps are scoped here (not in commonArgs,
+  # which the package build and buildDepsOnly also consume):
+  # - procps: provides `pgrep` for the process-group reap tests (kill is already
+  #   in coreutils).
+  # - cacert + SSL_CERT_FILE: reqwest's rustls-platform-verifier loads the system
+  #   CA store at client construction; the sandbox has none, so point it at the
+  #   nix bundle.
+  "${project}-nextest" = craneLib.cargoNextest (
+    commonArgs
+    // {
+      inherit cargoArtifacts;
+      nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ]) ++ [
+        pkgs.cacert
+        pkgs.procps
+      ];
+      SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+      partitions = 1;
+      partitionType = "count";
+      cargoNextestPartitionsExtraArgs = "--no-tests=pass";
+    }
+  );
 }
