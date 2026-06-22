@@ -10,7 +10,7 @@ use just_agent_common::protocol::SseEvent;
 use just_agent_common::tokens::format_tokens_m;
 use tokio::sync::mpsc;
 
-use crate::session::Session;
+use crate::session::{Session, StreamEnd};
 
 /// Pending interactive prompt waiting for the next stdin line.
 enum PendingPrompt {
@@ -76,6 +76,10 @@ pub async fn run_stdio(session: Session) -> Result<()> {
     let mut should_quit = false;
     let mut kill_on_exit = false;
     let mut pending = PendingPrompt::None;
+    // Filled when the daemon event stream ends; breaks the loop and is surfaced
+    // after cleanup. Without this, a dead stream leaves stdio silently waiting
+    // on stdin forever.
+    let mut stream_end: Option<StreamEnd> = None;
 
     loop {
         if should_quit {
@@ -112,16 +116,17 @@ pub async fn run_stdio(session: Session) -> Result<()> {
             }
 
             // SSE events
-            Some(result) = event_stream.next() => {
-                match result {
-                    Ok(event) => {
-                        handle_sse_event(event, &mut busy);
-                    }
-                    Err(e) => {
-                        eprintln!("[error] SSE: {e}");
-                    }
+            event = event_stream.next() => match event {
+                Some(Ok(event)) => handle_sse_event(event, &mut busy),
+                None => {
+                    stream_end = Some(StreamEnd::Graceful);
+                    break;
                 }
-            }
+                Some(Err(e)) => {
+                    stream_end = Some(StreamEnd::Failed(e.into()));
+                    break;
+                }
+            },
 
             // Background action results are logged inside the spawned task
             else => break,
@@ -130,7 +135,10 @@ pub async fn run_stdio(session: Session) -> Result<()> {
 
     session.cleanup(kill_on_exit).await;
 
-    Ok(())
+    match stream_end {
+        Some(end) => Err(end.into_error()),
+        None => Ok(()),
+    }
 }
 
 fn handle_sse_event(event: SseEvent, busy: &mut bool) {

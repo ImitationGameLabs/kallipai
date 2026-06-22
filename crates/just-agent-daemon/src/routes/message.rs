@@ -171,7 +171,7 @@ pub async fn sse_events(
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
     let rx = entry.agent.events_tx.subscribe();
-    Ok(sse_stream(rx))
+    Ok(sse_stream(rx, state.shutdown.clone()))
 }
 
 // -- Helpers --

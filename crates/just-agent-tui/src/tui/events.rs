@@ -6,12 +6,6 @@ use just_agent_common::tokens::format_tokens_m;
 use super::{App, AppMode, ChatLine};
 
 impl App {
-    /// Push an error into chat lines.
-    pub fn push_error(&mut self, msg: String) {
-        self.chat_lines.push(ChatLine::Error(msg));
-        self.auto_scroll = true;
-    }
-
     /// Handle an SSE event from the daemon.
     pub fn handle_sse_event(&mut self, event: SseEvent) {
         match event {

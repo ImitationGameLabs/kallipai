@@ -107,6 +107,10 @@ async fn run_tui(session: Session) -> Result<()> {
         ratatui::crossterm::event::EnableMouseCapture
     )?;
     let mut app = tui::App::new();
+    // Filled when the daemon event stream ends; breaks the loop and is surfaced
+    // after the terminal is restored. Without this, a dead stream leaves the TUI
+    // silently frozen — no events, prompts vanish.
+    let mut stream_end: Option<session::StreamEnd> = None;
 
     loop {
         terminal.draw(|frame| app.render(frame))?;
@@ -127,14 +131,17 @@ async fn run_tui(session: Session) -> Result<()> {
                     _ => {}
                 }
             }
-            Some(result) = event_stream.next() => {
-                match result {
-                    Ok(event) => app.handle_sse_event(event),
-                    Err(e) => {
-                        app.push_error(format!("SSE error: {e}"));
-                    }
+            event = event_stream.next() => match event {
+                Some(Ok(event)) => app.handle_sse_event(event),
+                None => {
+                    stream_end = Some(session::StreamEnd::Graceful);
+                    break;
                 }
-            }
+                Some(Err(e)) => {
+                    stream_end = Some(session::StreamEnd::Failed(e.into()));
+                    break;
+                }
+            },
             _ = tokio::time::sleep(std::time::Duration::from_millis(33)) => {}
         }
     }
@@ -148,5 +155,10 @@ async fn run_tui(session: Session) -> Result<()> {
 
     session.cleanup(app.kill_on_exit).await;
 
-    Ok(())
+    // Resolve the stream end *after* the terminal is restored so the message is
+    // not garbled by the alt-screen / raw mode.
+    match stream_end {
+        Some(end) => Err(end.into_error()),
+        None => Ok(()),
+    }
 }
