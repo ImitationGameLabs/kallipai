@@ -14,6 +14,8 @@ Instead of a top-down orchestration layer, just-agent is designed to be driven
 **agenticly through a headless CLI**: the agent itself decides when to spawn,
 switch between, and coordinate multiple agent instances across projects.
 
+For planned direction, see the [roadmap](docs/roadmap.md).
+
 ## Architecture
 
 | Crate                | Description                                                                           |

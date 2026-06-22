@@ -4,6 +4,8 @@ just-agent is a **daemon-centric** agent runtime. Unlike most coding agents
 where the UI process _is_ the agent, here the daemon is the long-lived host and
 all clients are thin surfaces.
 
+For planned direction, see [roadmap.md](roadmap.md).
+
 The daemon (`just-agent-daemon`) is the center: it hosts multiple isolated agent
 instances, each running as a pair of tokio tasks (agent task + bridge task)
 behind an HTTP API. Clients — the headless CLI (`just-agent`), the runner
