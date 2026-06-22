@@ -23,11 +23,28 @@ in
     }
   );
 
-  # Build docs
+  # Build docs (default features)
   "${project}-doc" = craneLib.cargoDoc (
     commonArgs
     // {
       inherit cargoArtifacts;
+      env.RUSTDOCFLAGS = "--deny warnings";
+    }
+  );
+
+  # Docs with all features: catches broken intra-doc links inside feature-gated
+  # modules (e.g. stateless::mock behind `testutils`), which the default-feature
+  # check above can't see (those modules aren't compiled then). Keep both: the
+  # default check catches links in always-compiled code that point to gated
+  # items; this one catches links inside the gated modules.
+  "${project}-doc-all-features" = craneLib.cargoDoc (
+    commonArgs
+    // {
+      inherit cargoArtifacts;
+      # Repeat `--locked`: overriding cargoExtraArgs replaces crane's default
+      # ("--locked"), so it must be re-stated here. --locked asserts Cargo.lock
+      # is current (fails instead of silently updating it) for hermetic builds.
+      cargoExtraArgs = "--locked --all-features";
       env.RUSTDOCFLAGS = "--deny warnings";
     }
   );
