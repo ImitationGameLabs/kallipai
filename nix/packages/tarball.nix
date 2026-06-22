@@ -12,10 +12,16 @@ let
     ;
 
   # Build the entire workspace at once, then pick the binaries we need.
+  # Packaging only: doCheck = false HERE so `nix build` doesn't run `cargo test`
+  # (whose sandbox-env deps — CA roots, pgrep/kill — would pollute the package).
+  # NB: do NOT hoist this into commonArgs. crane's cargoNextest and buildDepsOnly
+  # both do `args.doCheck or true`, so a shared doCheck = false would silently skip
+  # nextest's checkPhase AND drop buildDepsOnly's dev-dep caching. Keep it here.
   workspace = craneLib.buildPackage (
     commonArgs
     // {
       inherit cargoArtifacts;
+      doCheck = false;
     }
   );
 
