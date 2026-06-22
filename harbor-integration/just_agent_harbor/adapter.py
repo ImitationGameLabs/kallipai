@@ -35,18 +35,11 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from just_agent_harbor.daemon import (
-    BIN_DIR,
-    INSTALL_DIR,
-    LOGS_DIR,
+    PACKAGES,
     RUN_BIN,
     RUN_LOG,
     DaemonManager,
 )
-
-# Path to the tarball on the host machine.
-# Override via environment variable for non-default locations.
-DEFAULT_PACKAGE_PATH = Path("./just-agent-linux-x86_64.tar.gz")
-PACKAGE_PATH_ENV = "JUST_AGENT_PACKAGE_PATH"
 
 
 class JustAgentAdapter(BaseInstalledAgent):
@@ -126,26 +119,58 @@ class JustAgentAdapter(BaseInstalledAgent):
     # ------------------------------------------------------------------
 
     async def install(self, environment: BaseEnvironment) -> None:
-        """Install just-agent binaries and start the daemon inside the container."""
-        # 1. Upload the tarball from the host.
-        tar_path = Path(os.environ.get(PACKAGE_PATH_ENV, str(DEFAULT_PACKAGE_PATH)))
-        await environment.upload_file(
-            source_path=tar_path,
-            target_path="/tmp/just-agent.tar.gz",
-        )
-
-        # 2. Install CA certificates (required by rustls-platform-verifier)
-        #    and unpack the tarball.
+        """Install just-agent (+ aifed) binaries and start the daemon."""
+        # 1. CA certificates for reqwest TLS verification (installed once).
         await self.exec_as_root(
             environment,
-            command=(
-                "apt-get update -qq && apt-get install -y -qq ca-certificates"
-                f" && mkdir -p {INSTALL_DIR}"
-                f" && tar xzf /tmp/just-agent.tar.gz -C {INSTALL_DIR}"
-                f" && chmod +x {BIN_DIR}/*"
-                f" && rm /tmp/just-agent.tar.gz"
-            ),
+            command="apt-get update -qq && apt-get install -y -qq ca-certificates",
         )
+
+        # 2. Deploy each package: upload -> unpack under target -> chmod.
+        #    on_path packages are symlinked into /usr/local/bin so the agent
+        #    can invoke them by bare name (aifed auto-spawns aifed-daemon too).
+        #    Optional packages (default=None) are skipped when their env var is unset.
+        deployed_path_bins: list[str] = []
+        for pkg in PACKAGES:
+            src = os.environ.get(pkg.env)
+            if src is None and pkg.default is None:
+                self.logger.info(
+                    "skipping optional package %s (%s unset)",
+                    pkg.target.name,
+                    pkg.env,
+                )
+                continue
+            src_path = Path(src) if src is not None else pkg.default
+            tmp = f"/tmp/{pkg.target.name}.tar.gz"
+
+            await environment.upload_file(source_path=src_path, target_path=tmp)
+
+            parts = [
+                f"mkdir -p {pkg.target}",
+                f"tar xzf {tmp} -C {pkg.target}",
+                f"chmod +x {pkg.target}/bin/*",
+            ]
+            if pkg.on_path:
+                parts.extend(
+                    f"ln -sf {pkg.target}/bin/{b} /usr/local/bin/{b}"
+                    for b in pkg.bins
+                )
+            parts.append(f"rm {tmp}")
+            await self.exec_as_root(
+                environment,
+                command=" && ".join(parts),
+            )
+            if pkg.on_path:
+                deployed_path_bins.extend(pkg.bins)
+
+        #    Self-check: assert on_path bins are reachable by bare name, so a
+        #    broken symlink or tarball-layout mismatch fails loudly. The agent
+        #    may not otherwise exercise aifed, so the wiring must self-verify.
+        if deployed_path_bins:
+            await self.exec_as_root(
+                environment,
+                command=" && ".join(f"command -v {b}" for b in deployed_path_bins),
+            )
 
         # 3. Resolve the operator token — use the host-provided value if set,
         #    otherwise generate a fresh random UUID per trial.

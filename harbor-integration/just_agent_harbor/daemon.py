@@ -12,6 +12,7 @@ container operations without inheriting from Harbor's base classes.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -20,6 +21,7 @@ INSTALL_DIR = Path("/opt/just-agent")
 BIN_DIR = INSTALL_DIR / "bin"
 DAEMON_BIN = BIN_DIR / "just-agent-daemon"
 RUN_BIN = BIN_DIR / "just-agent-run"
+AIFED_DIR = Path("/opt/aifed")
 PID_FILE = Path("/tmp/just-agent-daemon.pid")
 
 # Logs are written under /logs/agent (bind-mounted to the host) so
@@ -27,6 +29,44 @@ PID_FILE = Path("/tmp/just-agent-daemon.pid")
 LOGS_DIR = Path("/logs/agent")
 DAEMON_LOG = LOGS_DIR / "daemon.log"
 RUN_LOG = LOGS_DIR / "run.log"
+
+
+@dataclass(frozen=True)
+class Package:
+    """A tarball deployed into the container at install time.
+
+    Each package is uploaded from the host, unpacked under ``target``, and its
+    binaries are made executable. ``on_path`` packages are also symlinked into
+    ``/usr/local/bin`` so they can be invoked by bare name.
+    """
+
+    env: str  # host env var holding the tarball path
+    default: Path | None  # default path if env unset; None -> skip if unset
+    target: Path  # container dir the tarball is unpacked into
+    bins: tuple[str, ...]  # binaries to chmod +x (and symlink into /usr/local/bin if on_path)
+    on_path: bool  # symlink bins into /usr/local/bin for bare-name lookup
+
+
+# Packages deployed into the container at install time. just-agent is always
+# installed (default path); aifed is opt-in via AIFED_PACKAGE_PATH. aifed is
+# on_path because the agent shells out to `aifed` by bare name, and aifed
+# itself auto-spawns `aifed-daemon` from PATH -- both must be discoverable.
+PACKAGES: tuple[Package, ...] = (
+    Package(
+        env="JUST_AGENT_PACKAGE_PATH",
+        default=Path("./just-agent-linux-x86_64.tar.gz"),
+        target=INSTALL_DIR,
+        bins=("just-agent", "just-agent-daemon", "just-agent-run"),
+        on_path=False,
+    ),
+    Package(
+        env="AIFED_PACKAGE_PATH",
+        default=None,
+        target=AIFED_DIR,
+        bins=("aifed", "aifed-daemon"),
+        on_path=True,
+    ),
+)
 
 
 class _ExecContext(Protocol):

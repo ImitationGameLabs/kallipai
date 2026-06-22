@@ -79,15 +79,22 @@ if [[ "$_use_cargo" == "1" ]]; then
   tar -czf "$tarball_dir/just-agent-${version}-linux-x86_64.tar.gz" -C "$tarball_dir" bin/
   pkg_path="$tarball_dir/just-agent-${version}-linux-x86_64.tar.gz"
 else
-  echo "==> Building tarball (nix)..."
-  nix build .#just-agent-tarball
+  echo "==> Building tarballs (nix)..."
+  nix build .#just-agent-tarball --out-link result-just-agent
+  nix build .#aifed-tarball      --out-link result-aifed
 
-  pkg_path="$(readlink -f result/*.tar.gz)"
+  pkg_path="$(readlink -f result-just-agent/*.tar.gz)"
+  aifed_pkg_path="$(readlink -f result-aifed/*.tar.gz)"
 fi
 
 activate="harbor-integration/.venv/bin/activate"
-sed -i '/^export JUST_AGENT_PACKAGE_PATH=/d' "$activate" 2>/dev/null || true
+sed -i '/^export JUST_AGENT_PACKAGE_PATH=/d; /^export AIFED_PACKAGE_PATH=/d' "$activate" 2>/dev/null || true
 printf 'export JUST_AGENT_PACKAGE_PATH="%s"\n' "$pkg_path" >> "$activate"
+# aifed-tarball is only built in the nix path; leave AIFED_PACKAGE_PATH unset
+# in cargo mode and the adapter skips it (optional package).
+if [[ -n "${aifed_pkg_path:-}" ]]; then
+  printf 'export AIFED_PACKAGE_PATH="%s"\n' "$aifed_pkg_path" >> "$activate"
+fi
 
 # -- Activate and run --------------------------------------------------------
 

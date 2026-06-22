@@ -22,8 +22,8 @@ Both `just-agent-daemon` and `just-agent-run` run inside the container so the ag
 ## Setup
 
 ```bash
-# Build tarball + create venv + install adapter and harbor
-./harbor-integration/setup.sh
+# Create venv + install adapter and harbor (tarball is built by harbor-test.sh)
+./harbor-integration/setup-venv.sh
 
 # Activate the environment (includes JUST_AGENT_PACKAGE_PATH)
 source harbor-integration/.venv/bin/activate
@@ -39,13 +39,24 @@ pip install -e ./harbor-integration
 export JUST_AGENT_PACKAGE_PATH=./result/just-agent-*-linux-x86_64.tar.gz
 ```
 
-The tarball contains:
+`harbor-test.sh` builds and injects **two** tarballs (both pinned by one `flake.lock`):
+
+**`just-agent-tarball`** (always installed):
 
 | Binary              | Purpose                                       |
 | ------------------- | --------------------------------------------- |
 | `just-agent`        | Headless CLI for agent-to-agent orchestration |
 | `just-agent-daemon` | HTTP server hosting agent instances           |
 | `just-agent-run`    | One-shot runner for scripting/benchmarking    |
+
+**`aifed-tarball`** (opt-in via `AIFED_PACKAGE_PATH`; aifed is just-agent's intended file-editing dependency — runtime adoption pending — `x86_64-linux` only):
+
+| Binary         | Purpose                                          |
+| -------------- | ------------------------------------------------ |
+| `aifed`        | AI-first file editor (read/edit/outline/lsp)     |
+| `aifed-daemon` | Background LSP service (auto-spawned by `aifed`) |
+
+`aifed`/`aifed-daemon` are symlinked into `/usr/local/bin` for bare-name lookup, and the adapter `command -v`-checks them at install time. If `AIFED_PACKAGE_PATH` is unset (e.g. cargo build fallback), the adapter skips aifed.
 
 ## Environment Variables
 
