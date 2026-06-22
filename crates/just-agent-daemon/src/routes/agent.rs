@@ -405,7 +405,7 @@ pub async fn create_agent(
             },
         );
     }
-    info!(id = %id, supervisor = ?req.created_by, ws = %log_ws, depth = log_depth, "created agent");
+    info!(id = %id, supervisor = ?req.created_by, role = ?req.role, ws = %log_ws, depth = log_depth, "created agent");
 
     Ok((StatusCode::CREATED, Json(CreateAgentResponse { id })))
 }

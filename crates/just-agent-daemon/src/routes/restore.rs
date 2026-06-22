@@ -308,24 +308,43 @@ pub async fn restore_agents(state: &SharedState) {
 
         // Restore all siblings concurrently.
         type RestoreOutcome = (AgentId, Agent);
-        let results: Vec<(AgentId, anyhow::Result<RestoreOutcome>)> =
-            futures_util::future::join_all(tasks.into_iter().map(|(id, p)| async {
-                let result = restore_one(p, state.shutdown.clone(), state.clone(), &index).await;
-                (id, result)
-            }))
-            .await;
+        // Tuple slots: (agent_id, created_by, role, restore result). `created_by`
+        // and `role` are cloned before `p` moves into `restore_one` so the
+        // `restored agent` log (below, post-`join_all`) can identify roots.
+        let results: Vec<(
+            AgentId,
+            Option<AgentId>,
+            String,
+            anyhow::Result<RestoreOutcome>,
+        )> = futures_util::future::join_all(tasks.into_iter().map(|(id, p)| {
+            let created_by = p.meta.created_by.clone();
+            let role = p.meta.role.clone();
+            // Bind a reference so the `async move` block captures `&RestoreIndex`
+            // (Copy) instead of moving the loop-owned `index` on every iteration.
+            let index = &index;
+            async move {
+                let result = restore_one(p, state.shutdown.clone(), state.clone(), index).await;
+                (id, created_by, role, result)
+            }
+        }))
+        .await;
 
         // Batch-register successes under a single lock, collect children.
         let mut next_level = Vec::new();
         let mut successes = Vec::new();
-        for (id, result) in results {
+        for (id, created_by, role, result) in results {
             match result {
                 Ok((registered_id, agent)) => {
                     successes.push((registered_id, agent));
                     if let Some(children) = children_of.get(&id) {
                         next_level.extend(children.iter().cloned());
                     }
-                    info!(id = %id, "restored agent");
+                    info!(
+                        id = %id,
+                        supervisor = ?created_by,
+                        role = ?role,
+                        "restored agent"
+                    );
                 }
                 Err(e) => {
                     // Subtree is implicitly pruned — children not queued.
