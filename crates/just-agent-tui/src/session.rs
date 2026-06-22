@@ -2,6 +2,16 @@ use anyhow::Result;
 use just_agent_client::DaemonClient;
 use just_agent_common::agentid::AgentId;
 
+/// Role for the root agent the TUI auto-creates. Labels the top-level agent
+/// that supervises all subagents and holds the highest policy privileges, so
+/// it stands out in logs/lists next to its subordinates rather than blending
+/// in as a bare UUID.
+const ROOT_ROLE: &str = "root";
+
+/// Default description for the auto-created root agent.
+const ROOT_DESCRIPTION: &str =
+    "Top-level agent: supervises all subagents and holds the highest policy privileges.";
+
 /// Holds the daemon connection and agent identity.
 pub(crate) struct Session {
     pub client: DaemonClient,
@@ -28,7 +38,8 @@ impl Session {
     /// Connect to (or create) a root agent.
     ///
     /// Reuses an existing root agent (`created_by == None`) if one exists,
-    /// otherwise spawns a new one.
+    /// otherwise spawns a new one labelled with the default [`ROOT_ROLE`] /
+    /// [`ROOT_DESCRIPTION`] so it is identifiable in logs and the agent list.
     pub async fn connect(client: DaemonClient) -> Result<Self> {
         let agents = client.list_agents(None).await?;
         if let Some(root) = agents.into_iter().find(|a| a.created_by.is_none()) {
@@ -44,8 +55,8 @@ impl Session {
                 skills: vec![],
                 prompt: None,
                 created_by: None,
-                role: String::new(),
-                description: String::new(),
+                role: ROOT_ROLE.to_string(),
+                description: ROOT_DESCRIPTION.to_string(),
                 max_tool_rounds: None,
             })
             .await?;
