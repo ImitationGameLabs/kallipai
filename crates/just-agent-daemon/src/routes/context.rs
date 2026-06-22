@@ -21,6 +21,8 @@ pub async fn agent_status(
     let entry = registry
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
+    // Take the brief std activity snapshot before the async store lock — no nesting.
+    let activity = entry.agent.activity_snapshot();
     let store = entry.agent.store.lock().await;
     let context = store.usage_snapshot();
     let recent_retries = store
@@ -37,6 +39,7 @@ pub async fn agent_status(
         recent_retries,
         token_budget: snap.budget,
         token_consumed: snap.consumed,
+        activity,
     }))
 }
 

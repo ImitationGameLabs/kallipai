@@ -30,29 +30,31 @@ the full authorization matrix, see [auth.md](auth.md).
 
 ## Endpoint Overview
 
-| Method   | Path                                         | Purpose                                | Auth                    |
-| -------- | -------------------------------------------- | -------------------------------------- | ----------------------- |
-| `POST`   | `/agents`                                    | Create a new agent instance            | operator / supervisor   |
-| `GET`    | `/agents`                                    | List all running agents                | any                     |
-| `DELETE` | `/agents/{id}`                               | Stop and remove an agent               | operator / superior     |
-| `POST`   | `/agents/{id}/interrupt`                     | Interrupt current agent operation      | operator / superior     |
-| `POST`   | `/agents/{id}/message`                       | Send a message                         | any (peer-to-peer)      |
-| `GET`    | `/agents/{id}/events`                        | Subscribe to agent events (SSE)        | any                     |
-| `GET`    | `/agents/{id}/status`                        | Get context usage and retry history    | any                     |
-| `GET`    | `/agents/{id}/permissions`                   | Get permission profile and tool policy | any                     |
-| `GET`    | `/agents/{id}/policy`                        | Get tool policy                        | any                     |
-| `PUT`    | `/agents/{id}/policy`                        | Update tool policy                     | operator / superior     |
-| `GET`    | `/budget`                                    | Get daemon-wide token budget status    | any                     |
-| `POST`   | `/budget`                                    | Adjust or set daemon-wide token budget | operator                |
-| `GET`    | `/approvals`                                 | List approvals                         | any (filtered by scope) |
-| `GET`    | `/approvals/{id}`                            | Get a single approval                  | operator / superior     |
-| `POST`   | `/approvals/{id}`                            | Approve or deny an approval            | operator / superior     |
-| `GET`    | `/agents/{id}/skills/paths`                  | Get skill directory paths              | any                     |
-| `GET`    | `/agents/{id}/skills/{name}/meta`            | Get skill metadata                     | any                     |
-| `POST`   | `/agents/{id}/skills/{name}/promote-request` | Submit a skill promote request         | self / operator         |
-| `GET`    | `/skill-promote-requests`                    | List promote requests                  | any                     |
-| `GET`    | `/skill-promote-requests/{id}`               | Show promote request with content diff | any                     |
-| `POST`   | `/skill-promote-requests/{id}`               | Approve or deny a promote request      | operator / root agent   |
+| Method   | Path                                         | Purpose                                | Auth                         |
+| -------- | -------------------------------------------- | -------------------------------------- | ---------------------------- |
+| `POST`   | `/agents`                                    | Create a new agent instance            | operator / supervisor        |
+| `GET`    | `/agents`                                    | List running agents (`?created_by=`)   | any                          |
+| `DELETE` | `/agents/{id}`                               | Stop and remove an agent               | operator / superior          |
+| `POST`   | `/agents/{id}/interrupt`                     | Interrupt current agent operation      | operator / superior          |
+| `POST`   | `/agents/{id}/message`                       | Send a message                         | any (peer-to-peer)           |
+| `GET`    | `/agents/{id}/events`                        | Subscribe to agent events (SSE)        | any                          |
+| `GET`    | `/agents/{id}/status`                        | Get context usage and retry history    | any                          |
+| `GET`    | `/agents/{id}/permissions`                   | Get permission profile and tool policy | any                          |
+| `GET`    | `/agents/{id}/policy`                        | Get tool policy                        | any                          |
+| `PUT`    | `/agents/{id}/policy`                        | Update tool policy                     | operator / superior          |
+| `PUT`    | `/agents/{id}/metadata`                      | Update role / description              | direct supervisor / operator |
+| `PUT`    | `/agents/{id}/activity`                      | Report current activity (self)         | self / operator              |
+| `GET`    | `/budget`                                    | Get daemon-wide token budget status    | any                          |
+| `POST`   | `/budget`                                    | Adjust or set daemon-wide token budget | operator                     |
+| `GET`    | `/approvals`                                 | List approvals                         | any (filtered by scope)      |
+| `GET`    | `/approvals/{id}`                            | Get a single approval                  | operator / superior          |
+| `POST`   | `/approvals/{id}`                            | Approve or deny an approval            | operator / superior          |
+| `GET`    | `/agents/{id}/skills/paths`                  | Get skill directory paths              | any                          |
+| `GET`    | `/agents/{id}/skills/{name}/meta`            | Get skill metadata                     | any                          |
+| `POST`   | `/agents/{id}/skills/{name}/promote-request` | Submit a skill promote request         | self / operator              |
+| `GET`    | `/skill-promote-requests`                    | List promote requests                  | any                          |
+| `GET`    | `/skill-promote-requests/{id}`               | Show promote request with content diff | any                          |
+| `POST`   | `/skill-promote-requests/{id}`               | Approve or deny a promote request      | operator / root agent        |
 
 ## Agent Management
 
@@ -75,9 +77,17 @@ Auth: operator (root agents) or direct supervisor (subagents). See
   ],
   "prompt": "string — initial prompt (optional)",
   "created_by": "AgentId — supervisor ID; omit for root agents (optional)",
+  "role": "string — short display label, e.g. \"researcher\" (optional; required non-empty for subagents)",
+  "description": "string — longer prose, what this agent is for (optional)",
   "max_tool_rounds": "null — use daemon default (see below)"
 }
 ```
+
+**`role` / `description`** — display metadata, supervisor-owned. A subagent spawn
+(`created_by` present) **requires a non-empty `role`** (fleet discipline so a
+superior can tell its subagents apart); a root/operator spawn may omit it. Both
+default to `""` and are never used as an address — `AgentId` is canonical.
+Mutable later via `PUT /agents/{id}/metadata`.
 
 **`max_tool_rounds`** — override the default/env-configured max tool-call rounds for this agent. Omit or `null` to use the daemon default (`JUST_AGENT_MAX_TOOL_ROUNDS` env var, or unlimited). To set an explicit value:
 
@@ -108,7 +118,7 @@ Status: `201 Created`
 
 | Code | Condition                                                                                                                 |
 | ---- | ------------------------------------------------------------------------------------------------------------------------- |
-| 400  | Invalid `workspace_root`, skill loading failure, or invalid skill name                                                    |
+| 400  | Invalid `workspace_root`, skill loading failure, invalid skill name, or subagent spawn with an empty `role`               |
 | 403  | Not operator (root agents); supervisor has no remaining delegation depth; `workspace_root` outside supervisor's workspace |
 | 404  | Supervisor agent not found                                                                                                |
 | 503  | Agent limit reached (`JUST_AGENT_MAX_AGENTS`), or supervisor already has max subagents (`JUST_AGENT_MAX_SUBAGENTS`)       |
@@ -125,9 +135,17 @@ Status: `201 Created`
 
 ### `GET /agents` — List agents
 
-Lists all running agents with their workspace root, state, and supervisor.
+Lists running agents with their workspace root, state, supervisor, and display
+metadata (`role`/`description`/`activity`). Optional `?created_by=<AgentId>`
+restricts the result to a superior's direct subagents.
 
 Auth: any authenticated identity. Response contains no secrets. See [auth.md](auth.md).
+
+**Query params**
+
+| Param        | Description                                                                                                                                                                                   |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `created_by` | `AgentId` — only list the direct subagents of this superior. Omit to list all. Any string is accepted (AgentId is not UUID-validated); a value that matches no superior yields an empty list. |
 
 **Response**
 
@@ -138,11 +156,19 @@ Auth: any authenticated identity. Response contains no secrets. See [auth.md](au
       "id": "AgentId",
       "workspace_root": "string",
       "state": "idle | busy",
-      "created_by": "AgentId | null"
+      "created_by": "AgentId | null",
+      "role": "string — short display label (omitted when empty)",
+      "description": "string — longer prose (omitted when empty)",
+      "activity": "string — agent self-reported current activity (omitted when empty / idle)"
     }
   ]
 }
 ```
+
+`role`/`description` are supervisor-owned and persistent; `activity` is ephemeral,
+agent-self-reported via `PUT /agents/{id}/activity` (the `just-agent activity`
+CLI), and cleared on terminal events (empty while idle). All three are omitted
+from the JSON when empty.
 
 Status: `200 OK`
 
@@ -288,10 +314,14 @@ Auth: any authenticated identity. See [auth.md](auth.md).
     }
   ],
   "token_budget": 100000000,
-  "token_consumed": 23500000
+  "token_consumed": 23500000,
+  "activity": "reading docs/architecture.md"
 }
 ```
 
+- `activity`: ephemeral, agent-self-reported current activity (via
+  `PUT /agents/{id}/activity` / `just-agent activity`). Empty/omitted while idle
+  (cleared on terminal events).
 - `pinned_items`: per-item breakdown of `[label, estimated_tokens]`.
 - `last_prompt_tokens`: exact prompt token count from the last provider
   response; `null` if no LLM call has been made.
@@ -391,6 +421,86 @@ Status: `204 No Content`
 
 > **Strictness ordering:** `deny > ask > classify > allow`. Changes are
 > persisted to disk before the in-memory update.
+
+### `PUT /agents/{id}/metadata` — Update role / description
+
+Updates the agent's `role` and/or `description` (the supervisor-owned display
+metadata). `None`/omitted fields are left unchanged; `Some(value)` sets the
+field. `role` is **change-only** — `role: Some(s)` must be non-empty (it cannot
+be cleared). `description` may be cleared with `Some("")`. At least one field
+must be provided.
+
+Auth: **direct supervisor** or operator (a grandparent may not relabel a
+grandchild). See [auth.md](auth.md).
+
+**Request body**
+
+```json
+{
+  "role": "string — new role (optional; non-empty if present, cannot be cleared)",
+  "description": "string — new description (optional; empty string clears it)"
+}
+```
+
+**Response** — the updated [`AgentSummary`](#get-agents--list-agents):
+
+```json
+{
+  "id": "AgentId",
+  "workspace_root": "string",
+  "state": "idle | busy",
+  "created_by": "AgentId | null",
+  "role": "string",
+  "description": "string",
+  "activity": "string"
+}
+```
+
+Status: `200 OK`
+
+| Code | Condition                                                             |
+| ---- | --------------------------------------------------------------------- |
+| 400  | `role` provided but empty, or neither `role` nor `description` set    |
+| 403  | Caller is not the direct supervisor (or operator) of the target agent |
+| 404  | Agent not found                                                       |
+| 500  | No on-disk directory, or `meta.json` read/write failure               |
+
+> **Persist ordering & locking:** `meta.json` is rewritten before the in-memory
+> `AgentConfig` update, both under one registry write-lock. The lock serializes
+> the whole op — necessary because `meta.json` rewrite is a read-modify-write,
+> so without it two concurrent PUTs (or a concurrent remove) could lose an
+> update. A crash leaves disk as the source of truth and restore self-heals.
+
+### `PUT /agents/{id}/activity` — Report current activity
+
+Sets the agent's ephemeral `activity` (free text, e.g. `"reading docs/x.md"`).
+Self-reported: an agent sets **its own** activity via the `just-agent activity`
+CLI (which reads `JUST_AGENT_ID`); a supervisor observes activity via
+[`GET /agents`](#get-agents--list-agents), it does not write it. An empty string
+clears it (the bridge also auto-clears on terminal events). Truncated to 256 chars.
+
+Auth: **the agent itself** or operator (`require_self_or_operator`). See [auth.md](auth.md).
+
+**Request body**
+
+```json
+{
+  "activity": "string — what the agent is doing right now"
+}
+```
+
+Status: `204 No Content`
+
+| Code | Condition                                    |
+| ---- | -------------------------------------------- |
+| 403  | Caller is not the target agent (or operator) |
+| 404  | Agent not found                              |
+
+> **Policy:** an agent reports activity by running `just-agent activity` through
+> `bash_exec`. `just-agent` is allow-listed in the command classifier, so this
+> classifies as `Allow` under the default policy — same as every other
+> `just-agent` management command. (The uncommon `ask-all` debug preset gates
+> all commands uniformly; activity is no different from `spawn`/`list` there.)
 
 ## Token Budget
 

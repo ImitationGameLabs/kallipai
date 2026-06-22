@@ -11,5 +11,6 @@ pub use just_agent_common::protocol::{
     ListApprovalsResponse, ListSkillPromoteRecordsResponse, MessageResponse, PromoteDecision,
     SkillMeta, SkillPathsResponse, SkillPromoteDecisionBody, SkillPromoteShowResponse,
     SkillPromoteSubmitResponse, TokenBudgetResponse, TokenBudgetUpdateRequest,
+    UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 pub use types::ListApprovalsParams;

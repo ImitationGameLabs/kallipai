@@ -12,6 +12,7 @@ use crate::{
     ListApprovalsResponse, ListSkillPromoteRecordsResponse, PromoteDecision, SkillMeta,
     SkillPathsResponse, SkillPromoteDecisionBody, SkillPromoteShowResponse,
     SkillPromoteSubmitResponse, TokenBudgetResponse, TokenBudgetUpdateRequest, ToolPolicy,
+    UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 
 struct Inner {
@@ -172,18 +173,60 @@ impl DaemonClient {
         .await
     }
 
-    /// List all agent instances.
-    pub async fn list_agents(&self) -> Result<Vec<AgentSummary>> {
+    /// List agent instances. Pass `created_by = Some(sup)` to list only a
+    /// superior's direct subagents; `None` lists all agents.
+    pub async fn list_agents(&self, created_by: Option<&AgentId>) -> Result<Vec<AgentSummary>> {
+        let mut req = self.with_auth(self.inner.http.get(self.url("/agents")));
+        if let Some(sup) = created_by {
+            req = req.query(&[("created_by", sup.to_string())]);
+        }
         let resp: ListAgentsResponse = self
             .handle_response(
-                self.with_auth(self.inner.http.get(self.url("/agents")))
-                    .send()
-                    .await
-                    .context("failed to connect to daemon")?,
+                req.send().await.context("failed to connect to daemon")?,
                 "failed to parse response",
             )
             .await?;
         Ok(resp.agents)
+    }
+
+    /// Update an agent's `role` and/or `description`. Caller must be the agent's
+    /// direct supervisor (or operator). `None` fields are left unchanged.
+    pub async fn update_agent_metadata(
+        &self,
+        id: &AgentId,
+        body: UpdateAgentMetadataRequest,
+    ) -> Result<AgentSummary> {
+        self.handle_response(
+            self.with_auth(
+                self.inner
+                    .http
+                    .put(self.url(&format!("/agents/{id}/metadata")))
+                    .json(&body),
+            )
+            .send()
+            .await
+            .context("failed to connect to daemon")?,
+            "failed to parse response",
+        )
+        .await
+    }
+
+    /// Report an agent's current activity. Caller must be the agent itself (or
+    /// operator) — activity is self-reported. An empty `activity` clears it.
+    pub async fn update_activity(&self, id: &AgentId, body: UpdateActivityRequest) -> Result<()> {
+        self.ensure_success(
+            self.with_auth(
+                self.inner
+                    .http
+                    .put(self.url(&format!("/agents/{id}/activity")))
+                    .json(&body),
+            )
+            .send()
+            .await
+            .context("failed to connect to daemon")?,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Remove an agent instance.

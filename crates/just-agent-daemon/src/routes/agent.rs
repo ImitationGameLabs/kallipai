@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicU8;
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use just_agent_common::agentid::AgentId;
@@ -25,7 +25,10 @@ use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use just_agent_common::protocol::{CreateAgentRequest, CreateAgentResponse};
+use just_agent_common::protocol::{
+    CreateAgentRequest, CreateAgentResponse, ListAgentsQuery, UpdateActivityRequest,
+    UpdateAgentMetadataRequest,
+};
 
 use super::ListAgentsResponse;
 use crate::bridge::bridge_task;
@@ -114,6 +117,11 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
         })
     };
 
+    // Live activity cell: written by `PUT /agents/{id}/activity` (self-report),
+    // cleared by the bridge on terminal events, read by list/status. Rides on
+    // the returned `Agent`.
+    let activity = Arc::new(std::sync::Mutex::new(String::new()));
+
     let dispatch = build_tool_dispatch(args.store.clone(), args.env.clone(), notice_sink).await?;
 
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(256);
@@ -167,6 +175,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
         args.events_tx.clone(),
         args.shutdown_cancel.clone(),
         state.clone(),
+        activity.clone(),
         args.shared_state.clone(),
     ));
 
@@ -183,6 +192,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
         round_cancel,
         notify,
         state,
+        activity,
         auth_token_hash: args.auth_token_hash,
         env: args.env,
         tool_policy: args.tool_policy,
@@ -237,6 +247,16 @@ pub async fn create_agent(
             }
         }
     }
+    config.role = req.role.clone();
+    config.description = req.description.clone();
+    // Fleet discipline: a subagent spawn must carry a non-empty role so a
+    // superior can tell its subagents apart. Root/operator spawns may leave it
+    // unset (backward-compatible with clients that don't send `role`).
+    if req.created_by.is_some() && config.role.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "subagent requires a non-empty 'role'",
+        ));
+    }
     let env = SpawnArgs::default_env(&id, token.secret());
 
     // Subagent: validate supervisor and delegation constraints, or use default policy.
@@ -280,9 +300,14 @@ pub async fn create_agent(
 
     // Create agent directory before loading skills so that agent-local
     // skills can be resolved from the agent dir.
-    let agent_dir =
-        persistence::create_agent_dir(&id, &config.workspace_root, config.created_by.as_ref())
-            .map_err(ApiError::internal)?;
+    let agent_dir = persistence::create_agent_dir(
+        &id,
+        &config.workspace_root,
+        config.created_by.as_ref(),
+        &config.role,
+        &config.description,
+    )
+    .map_err(ApiError::internal)?;
 
     for skill_name in &config.skills {
         let content = load_skill(skill_name, Some(agent_dir.as_path()))
@@ -387,21 +412,124 @@ pub async fn create_agent(
 
 /// Any authenticated identity (operator or agent) may list agents.
 /// The response contains no secrets (only IDs, workspace paths, and state).
+/// `?created_by=<id>` optionally restricts the result to a superior's direct
+/// subagents. Today the unfiltered list is already unrestricted (any identity
+/// sees every agent), so this filter adds no new leakage; revisit the exposure
+/// if listing is ever scoped per-caller.
 pub async fn list_agents(
     State(state): State<SharedState>,
     _auth: crate::auth::AuthIdentity,
+    Query(query): Query<ListAgentsQuery>,
 ) -> Json<ListAgentsResponse> {
     let registry = state.registry.read().await;
     let summaries: Vec<AgentSummary> = registry
         .iter()
-        .map(|(id, entry)| AgentSummary {
-            id: id.clone(),
-            workspace_root: entry.agent.config.workspace_root.display().to_string(),
-            state: entry.agent.get_state(),
-            created_by: entry.agent.config.created_by.clone(),
+        .filter(|(_, entry)| {
+            query
+                .created_by
+                .as_ref()
+                .is_none_or(|sup| entry.agent.config.created_by.as_ref() == Some(sup))
         })
+        .map(|(id, entry)| entry.summary(id))
         .collect();
     Json(ListAgentsResponse { agents: summaries })
+}
+
+/// `PUT /agents/{id}/metadata` — update `role` and/or `description`.
+///
+/// Caller must be the direct supervisor (or operator); a grandparent cannot
+/// relabel a grandchild. `None` fields are left unchanged; `role: Some(s)` must
+/// be non-empty (role can be changed but not cleared — `description` can be
+/// cleared with `Some("")`).
+///
+/// Persist-first-then-memory, both under one registry **write-lock**. The lock
+/// serializes the whole op, which is what makes it correct: `rewrite_meta` is a
+/// read-modify-write of `meta.json`, so without the write-lock two concurrent
+/// PUTs (e.g. one setting role, one setting description) would lose an update,
+/// and a concurrent `remove_agent` could archive the dir mid-write. The
+/// write-lock held across one tiny JSON `atomic_write` briefly stalls concurrent
+/// readers; that is acceptable for a rare mutation. Crash-safe — restore reads
+/// meta as the source of truth.
+pub async fn update_metadata(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+    Json(body): Json<UpdateAgentMetadataRequest>,
+) -> Result<Json<AgentSummary>, ApiError> {
+    // An explicit role set must not be empty (role is change-only, never clearable).
+    if let Some(role) = &body.role
+        && role.trim().is_empty()
+    {
+        return Err(ApiError::bad_request("'role' must not be empty"));
+    }
+    if body.role.is_none() && body.description.is_none() {
+        return Err(ApiError::bad_request("no fields to update"));
+    }
+
+    let mut registry = state.registry.write().await;
+    registry.require_direct_supervisor(auth.identity(), &id)?;
+    let entry = registry
+        .get_mut(&id)
+        .ok_or_else(|| ApiError::not_found("agent not found"))?;
+    let agent_dir = entry
+        .agent
+        .agent_dir
+        .clone()
+        .ok_or_else(|| ApiError::internal("agent has no on-disk directory to update"))?;
+
+    // Persist first (disk is the source of truth across restarts), then memory.
+    persistence::rewrite_meta(
+        &agent_dir,
+        body.role.as_deref(),
+        body.description.as_deref(),
+    )
+    .map_err(ApiError::internal)?;
+    if let Some(role) = &body.role {
+        entry.agent.config.role = role.clone();
+    }
+    if let Some(desc) = &body.description {
+        entry.agent.config.description = desc.clone();
+    }
+    Ok(Json(entry.summary(&id)))
+}
+
+/// `PUT /agents/{id}/activity` — the agent reports its current activity.
+///
+/// Self-only (or operator): the agent sets its own activity; a supervisor does
+/// not (it observes via `list`). Writes the live cell — a registry **read-lock**
+/// is enough because the cell is an interior-mutable `Arc<Mutex<String>>`.
+/// Truncated to [`MAX_ACTIVITY_CHARS`] on a char boundary; an empty string
+/// clears it (the bridge also auto-clears on terminal events).
+pub async fn update_activity(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+    Json(body): Json<UpdateActivityRequest>,
+) -> Result<StatusCode, ApiError> {
+    let registry = state.registry.read().await;
+    registry.require_self_or_operator(auth.identity(), &id)?;
+    let entry = registry
+        .get(&id)
+        .ok_or_else(|| ApiError::not_found("agent not found"))?;
+    let mut activity = body.activity;
+    truncate_chars(&mut activity, MAX_ACTIVITY_CHARS);
+    *entry
+        .agent
+        .activity
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = activity;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Maximum activity length (chars). Longer inputs are truncated, not rejected,
+/// so a report never fails the agent's turn.
+const MAX_ACTIVITY_CHARS: usize = 256;
+
+/// Truncate `s` to at most `max` chars in place, on a char boundary.
+fn truncate_chars(s: &mut String, max: usize) {
+    if s.chars().count() > max {
+        s.truncate(s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len()));
+    }
 }
 
 pub async fn remove_agent(
@@ -525,4 +653,37 @@ fn validate_subagent_request(
         .clone();
 
     Ok((permissions, tool_policy))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_ACTIVITY_CHARS, truncate_chars};
+
+    #[test]
+    fn truncate_keeps_short_strings() {
+        let mut s = String::from("abc");
+        truncate_chars(&mut s, 10);
+        assert_eq!(s, "abc");
+        let mut s = String::new();
+        truncate_chars(&mut s, 10);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn truncate_caps_on_char_boundary() {
+        // "héllo" is 5 chars (é is one char, two bytes); cap at 2 → "hé".
+        let mut s = String::from("héllo");
+        truncate_chars(&mut s, 2);
+        assert_eq!(s, "hé");
+        let mut s = String::from("abcdef");
+        truncate_chars(&mut s, 3);
+        assert_eq!(s, "abc");
+    }
+
+    #[test]
+    fn truncate_caps_to_max_activity_chars() {
+        let mut s = "x".repeat(MAX_ACTIVITY_CHARS + 100);
+        truncate_chars(&mut s, MAX_ACTIVITY_CHARS);
+        assert_eq!(s.chars().count(), MAX_ACTIVITY_CHARS);
+    }
 }

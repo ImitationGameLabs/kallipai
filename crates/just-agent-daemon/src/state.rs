@@ -88,6 +88,12 @@ pub struct Agent {
     /// The agent task awaits this in the outer loop; callers signal via `notify_one()`.
     pub notify: Arc<Notify>,
     pub state: Arc<AtomicU8>,
+    /// Ephemeral, agent-self-reported current activity ("reading docs/x.md").
+    /// Written by `PUT /agents/{id}/activity` (the agent reports its own, via the
+    /// `just-agent activity` CLI), cleared by the bridge on terminal events, read
+    /// by `list_agents`/`agent_status`. Not persisted — `AgentMeta` holds only the
+    /// durable identity fields (`role`/`description`).
+    pub activity: Arc<std::sync::Mutex<String>>,
     /// SHA-256 of the agent's auth token. The plaintext is injected into [`env`]
     /// (`JUST_AGENT_AUTH_TOKEN`) for shell injection; only this hash is retained for lookup.
     pub auth_token_hash: TokenHash,
@@ -105,6 +111,16 @@ impl Agent {
             AgentState::BUSY => AgentState::Busy,
             _ => AgentState::Idle,
         }
+    }
+
+    /// Snapshot the ephemeral activity string. Poison-tolerant (`into_inner`)
+    /// so a prior panic in any cell holder cannot brick `list_agents` /
+    /// `agent_status` for this agent — matches the `tool_policy` pattern.
+    pub fn activity_snapshot(&self) -> String {
+        self.activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Await both background tasks, bounded by `timeout`; force-abort on overrun.
@@ -131,6 +147,23 @@ impl Agent {
             self.bridge_handle.abort();
         }
         graceful
+    }
+}
+
+impl AgentEntry {
+    /// Build the wire [`AgentSummary`] for this entry. The single construction
+    /// site for list / metadata responses; centralizes the poison-tolerant
+    /// activity read.
+    pub fn summary(&self, id: &AgentId) -> AgentSummary {
+        AgentSummary {
+            id: id.clone(),
+            workspace_root: self.agent.config.workspace_root.display().to_string(),
+            state: self.agent.get_state(),
+            created_by: self.agent.config.created_by.clone(),
+            role: self.agent.config.role.clone(),
+            description: self.agent.config.description.clone(),
+            activity: self.agent.activity_snapshot(),
+        }
     }
 }
 
@@ -325,6 +358,33 @@ impl AgentRegistry {
         Err(ApiError::forbidden("not authorized to manage this agent"))
     }
 
+    /// Caller must be the operator or the **direct** supervisor of the target
+    /// (`target.created_by == Some(caller)`). Stricter than [`Self::require_superior`]
+    /// — grandparents may not relabel a grandchild without going through the parent.
+    /// Used by `PUT /agents/{id}/metadata`: the entity that assigned the role at
+    /// spawn is the entity that may change it. A root target (`created_by = None`)
+    /// has no supervisor, so only the operator may relabel it.
+    pub fn require_direct_supervisor(
+        &self,
+        identity: &crate::auth::Identity,
+        target_id: &AgentId,
+    ) -> Result<(), ApiError> {
+        let target = self
+            .get(target_id)
+            .ok_or_else(|| ApiError::not_found(format!("agent {target_id} not found")))?;
+        match identity {
+            crate::auth::Identity::Operator => Ok(()),
+            crate::auth::Identity::Agent { id: caller_id } => {
+                match &target.agent.config.created_by {
+                    Some(parent) if parent == caller_id => Ok(()),
+                    _ => Err(ApiError::forbidden(
+                        "only the direct supervisor may change this agent's metadata",
+                    )),
+                }
+            }
+        }
+    }
+
     /// Caller must be the operator or a root agent (created_by is None).
     /// Used for promote-request review operations.
     pub fn require_root_or_operator(
@@ -349,7 +409,9 @@ impl AgentRegistry {
     }
 
     /// Caller must be the operator or the agent identified by `target_id`.
-    /// Used for promote-request submission (agents submit on their own behalf).
+    /// Used for self-only actions: promote-request submission, activity
+    /// self-report. (A supervisor manages a subagent's `role`/`description` via
+    /// [`Self::require_direct_supervisor`]; this is the complementary self-write.)
     pub fn require_self_or_operator(
         &self,
         identity: &crate::auth::Identity,
@@ -359,7 +421,7 @@ impl AgentRegistry {
             crate::auth::Identity::Operator => Ok(()),
             crate::auth::Identity::Agent { id } if id == target_id => Ok(()),
             _ => Err(ApiError::forbidden(
-                "only the agent itself or operator can submit promote requests",
+                "only the agent itself or operator is authorized for this action",
             )),
         }
     }
@@ -582,6 +644,83 @@ mod tests {
         }
     }
 
+    // -- Authorization: require_direct_supervisor (PUT /metadata) --
+
+    #[tokio::test]
+    async fn direct_supervisor_operator_bypasses() {
+        let mut reg = AgentRegistry::new();
+        let target = AgentId::random();
+        add_root(&mut reg, &target);
+        reg.require_direct_supervisor(&Identity::Operator, &target)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_supervisor_accepts_direct_parent() {
+        let mut reg = AgentRegistry::new();
+        let parent = AgentId::random();
+        let child = AgentId::random();
+        add_root(&mut reg, &parent);
+        add_sub(&mut reg, &child, &parent);
+        reg.require_direct_supervisor(&Identity::Agent { id: parent }, &child)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_supervisor_rejects_grandparent() {
+        // require_superior allows ancestors; require_direct_supervisor does not.
+        let mut reg = AgentRegistry::new();
+        let grandparent = AgentId::random();
+        let parent = AgentId::random();
+        let child = AgentId::random();
+        add_root(&mut reg, &grandparent);
+        add_sub(&mut reg, &parent, &grandparent);
+        add_sub(&mut reg, &child, &parent);
+        match reg.require_direct_supervisor(&Identity::Agent { id: grandparent }, &child) {
+            Err(e) => assert_eq!(e.status, 403),
+            Ok(_) => panic!("expected FORBIDDEN"),
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_supervisor_rejects_unrelated() {
+        let mut reg = AgentRegistry::new();
+        let parent = AgentId::random();
+        let child = AgentId::random();
+        let other = AgentId::random();
+        add_root(&mut reg, &parent);
+        add_sub(&mut reg, &child, &parent);
+        add_root(&mut reg, &other);
+        match reg.require_direct_supervisor(&Identity::Agent { id: other }, &child) {
+            Err(e) => assert_eq!(e.status, 403),
+            Ok(_) => panic!("expected FORBIDDEN"),
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_supervisor_root_target_only_operator() {
+        // A root agent (created_by None) has no supervisor → only the operator.
+        let mut reg = AgentRegistry::new();
+        let root = AgentId::random();
+        let other = AgentId::random();
+        add_root(&mut reg, &root);
+        add_root(&mut reg, &other);
+        match reg.require_direct_supervisor(&Identity::Agent { id: other }, &root) {
+            Err(e) => assert_eq!(e.status, 403),
+            Ok(_) => panic!("expected FORBIDDEN"),
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_supervisor_missing_target_is_not_found() {
+        let reg = AgentRegistry::new();
+        let ghost = AgentId::random();
+        match reg.require_direct_supervisor(&Identity::Operator, &ghost) {
+            Err(e) => assert_eq!(e.status, 404),
+            Ok(_) => panic!("expected NOT_FOUND"),
+        }
+    }
+
     // -- Authorization: require_supervisor --
 
     #[tokio::test]
@@ -678,6 +817,22 @@ mod tests {
         add_root(&mut reg, &a);
         add_root(&mut reg, &b);
         match reg.require_self_or_operator(&Identity::Agent { id: b }, &a) {
+            Err(e) => assert_eq!(e.status, 403),
+            Ok(_) => panic!("expected FORBIDDEN"),
+        }
+    }
+
+    #[tokio::test]
+    async fn self_or_operator_rejects_supervisor_of_target() {
+        // Pins the self-only invariant for `PUT /agents/{id}/activity`: a parent
+        // (supervisor) must NOT write a subagent's activity — only the agent
+        // itself. Guards against a future swap to `require_direct_supervisor`.
+        let mut reg = AgentRegistry::new();
+        let parent = AgentId::random();
+        let child = AgentId::random();
+        add_root(&mut reg, &parent);
+        add_sub(&mut reg, &child, &parent);
+        match reg.require_self_or_operator(&Identity::Agent { id: parent }, &child) {
             Err(e) => assert_eq!(e.status, 403),
             Ok(_) => panic!("expected FORBIDDEN"),
         }

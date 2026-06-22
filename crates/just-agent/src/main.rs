@@ -43,6 +43,8 @@ async fn main() -> Result<()> {
                         skills: args.skills,
                         prompt: args.prompt,
                         created_by: std::env::var("JUST_AGENT_ID").ok().map(AgentId::from),
+                        role: args.role.unwrap_or_default(),
+                        description: args.description.unwrap_or_default(),
                         max_tool_rounds: None,
                     })
                     .await?;
@@ -51,13 +53,29 @@ async fn main() -> Result<()> {
             AgentCommand::Send(args) => {
                 client.post_message(&args.id, &args.message).await?;
             }
-            AgentCommand::List => {
-                let agents = client.list_agents().await?;
+            AgentCommand::List(args) => {
+                let agents = client.list_agents(args.created_by.as_ref()).await?;
                 if agents.is_empty() {
                     println!("No agents running.");
                 } else {
                     for a in &agents {
-                        println!("{}  {}  ws={}", a.id, a.state, a.workspace_root);
+                        // Fall back to the id when no role is set so every row is identifiable.
+                        let label = if a.role.is_empty() {
+                            a.id.to_string()
+                        } else {
+                            a.role.clone()
+                        };
+                        let mut line = format!("{}  {}  ws={}", label, a.state, a.workspace_root);
+                        if !a.description.is_empty() {
+                            line.push_str("  ");
+                            line.push_str(&a.description);
+                        }
+                        if !a.activity.is_empty() {
+                            line.push_str("  [");
+                            line.push_str(&a.activity);
+                            line.push(']');
+                        }
+                        println!("{line}");
                     }
                 }
             }
@@ -125,6 +143,44 @@ async fn main() -> Result<()> {
             AgentCommand::Interrupt(args) => {
                 client.interrupt_agent(&args.id).await?;
                 println!("Agent {} interrupted.", args.id);
+            }
+            AgentCommand::Metadata(args) => {
+                let updated = client
+                    .update_agent_metadata(
+                        &args.id,
+                        just_agent_common::protocol::UpdateAgentMetadataRequest {
+                            role: args.role,
+                            description: args.description,
+                        },
+                    )
+                    .await?;
+                println!(
+                    "{}  role={}  description={}",
+                    updated.id,
+                    if updated.role.is_empty() {
+                        "(unset)"
+                    } else {
+                        &updated.role
+                    },
+                    if updated.description.is_empty() {
+                        "(unset)"
+                    } else {
+                        &updated.description
+                    },
+                );
+            }
+            AgentCommand::Activity(args) => {
+                // Activity is self-reported: the target is always the calling
+                // agent (JUST_AGENT_ID), like `spawn` reads `created_by` from env.
+                let id = agent_id_from_env()?;
+                client
+                    .update_activity(
+                        &id,
+                        just_agent_common::protocol::UpdateActivityRequest {
+                            activity: args.activity,
+                        },
+                    )
+                    .await?;
             }
         },
         Commands::Approval(cmd) => match cmd {

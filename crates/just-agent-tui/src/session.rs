@@ -30,7 +30,7 @@ impl Session {
     /// Reuses an existing root agent (`created_by == None`) if one exists,
     /// otherwise spawns a new one.
     pub async fn connect(client: DaemonClient) -> Result<Self> {
-        let agents = client.list_agents().await?;
+        let agents = client.list_agents(None).await?;
         if let Some(root) = agents.into_iter().find(|a| a.created_by.is_none()) {
             return Ok(Self {
                 client,
@@ -44,6 +44,8 @@ impl Session {
                 skills: vec![],
                 prompt: None,
                 created_by: None,
+                role: String::new(),
+                description: String::new(),
                 max_tool_rounds: None,
             })
             .await?;

@@ -63,6 +63,8 @@ pub fn create_agent_dir(
     agent_id: &AgentId,
     workspace_root: &Path,
     created_by: Option<&AgentId>,
+    role: &str,
+    description: &str,
 ) -> Result<PathBuf> {
     let dir = agent_dir(agent_id)?;
     std::fs::create_dir_all(&dir)?;
@@ -72,6 +74,8 @@ pub fn create_agent_dir(
         last_restored_at: None,
         consecutive_restart_count: 0,
         created_by: created_by.cloned(),
+        role: role.to_owned(),
+        description: description.to_owned(),
     };
     atomic_write(
         &dir.join("meta.json"),
@@ -79,6 +83,32 @@ pub fn create_agent_dir(
     )?;
 
     Ok(dir)
+}
+
+/// Read-modify-write `meta.json` to update `role` and/or `description`.
+///
+/// Used by `PUT /agents/{id}/metadata`. Reads the current meta, applies the
+/// closures' values, and atomically rewrites — preserving
+/// `last_restored_at` / `consecutive_restart_count` / `created_by` (the same
+/// read-modify-write pattern `check_meta` uses for its restart counters).
+/// `None` leaves a field unchanged; `Some(s)` sets it.
+///
+/// Call this outside the registry lock (file I/O); the caller then updates the
+/// in-memory `AgentConfig` under the lock — persist-first-then-memory, mirroring
+/// `routes::context::update_policy`. `check_meta` is startup-only, so the two
+/// meta writers never run concurrently.
+pub fn rewrite_meta(dir: &Path, role: Option<&str>, description: Option<&str>) -> Result<()> {
+    let path = dir.join("meta.json");
+    let json = fs::read_to_string(&path).context("reading meta.json")?;
+    let mut meta: AgentMeta = serde_json::from_str(&json).context("parsing meta.json")?;
+    if let Some(r) = role {
+        meta.role = r.to_owned();
+    }
+    if let Some(d) = description {
+        meta.description = d.to_owned();
+    }
+    atomic_write(&path, &serde_json::to_string_pretty(&meta)?)?;
+    Ok(())
 }
 
 /// Move a lived agent's directory from `agents/` to `archived/` on remove.
@@ -166,6 +196,13 @@ pub struct AgentMeta {
     /// Supervisor agent ID (for subagents).
     #[serde(default, rename = "created_by")]
     pub created_by: Option<AgentId>,
+    /// Short display label ("researcher"). Supervisor-owned; mirrored from
+    /// [`AgentConfig`](crate::config::AgentConfig). Empty means unset.
+    #[serde(default)]
+    pub role: String,
+    /// Longer prose ("gathers sources for the plan"). Supervisor-owned.
+    #[serde(default)]
+    pub description: String,
 }
 
 /// Read an agent's meta.json without side effects.
@@ -391,10 +428,14 @@ mod tests {
             last_restored_at: None,
             consecutive_restart_count: 0,
             created_by: None,
+            role: "researcher".into(),
+            description: "gathers sources".into(),
         };
         let json = serde_json::to_string(&meta).unwrap();
         let back: AgentMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(back.workspace_root, PathBuf::from("/app"));
+        assert_eq!(back.role, "researcher");
+        assert_eq!(back.description, "gathers sources");
     }
 
     #[test]
@@ -408,6 +449,9 @@ mod tests {
         }"#;
         let meta: AgentMeta = serde_json::from_str(legacy).unwrap();
         assert_eq!(meta.workspace_root, PathBuf::from("/app"));
+        // New fields default to empty.
+        assert_eq!(meta.role, "");
+        assert_eq!(meta.description, "");
     }
 
     // ----- archive-on-remove tests -----
@@ -424,7 +468,7 @@ mod tests {
     fn archive_moves_dir_and_preserves_contents() {
         with_data_dir(|tmp| {
             let id = AgentId::from("archive-rt-1".to_owned());
-            let dir = create_agent_dir(&id, Path::new("/app"), None).unwrap();
+            let dir = create_agent_dir(&id, Path::new("/app"), None, "", "").unwrap();
 
             // One history record (as the live writer would produce).
             HistoryWriter::new(dir.clone())
@@ -467,7 +511,7 @@ mod tests {
     fn scan_agents_ignores_archived() {
         with_data_dir(|_| {
             let id = AgentId::from("scan-ignores-1".to_owned());
-            create_agent_dir(&id, Path::new("/app"), None).unwrap();
+            create_agent_dir(&id, Path::new("/app"), None, "", "").unwrap();
             archive_agent_dir(&id).unwrap();
 
             let pending = scan_agents();
@@ -483,7 +527,7 @@ mod tests {
     fn rollback_remove_leaves_no_archive_residue() {
         with_data_dir(|_| {
             let id = AgentId::from("rollback-1".to_owned());
-            let dir = create_agent_dir(&id, Path::new("/app"), None).unwrap();
+            let dir = create_agent_dir(&id, Path::new("/app"), None, "", "").unwrap();
             // Rollback of a never-alive agent removes the live dir directly,
             // never archiving (the abort/create-rollback call sites).
             std::fs::remove_dir_all(&dir).unwrap();
@@ -509,7 +553,7 @@ mod tests {
     fn archive_bails_when_destination_exists() {
         with_data_dir(|_| {
             let id = AgentId::from("collision-1".to_owned());
-            let dir = create_agent_dir(&id, Path::new("/app"), None).unwrap();
+            let dir = create_agent_dir(&id, Path::new("/app"), None, "", "").unwrap();
             // Pre-create the archived destination (an anomaly: UUIDs should not collide).
             std::fs::create_dir_all(archived_dir(&id).unwrap()).unwrap();
 

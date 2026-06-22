@@ -126,6 +126,8 @@ async fn run() -> Result<ExitCode> {
                 skills: vec![],
                 prompt: Some(cli.prompt),
                 created_by: std::env::var("JUST_AGENT_ID").ok().map(AgentId::from),
+                role: String::new(),
+                description: String::new(),
                 max_tool_rounds: cli.max_rounds.map(MaxToolRounds::Limited),
             })
             .await?;

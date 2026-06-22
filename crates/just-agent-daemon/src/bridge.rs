@@ -44,6 +44,7 @@ pub async fn bridge_task(
     events_tx: broadcast::Sender<SseEvent>,
     cancel: CancellationToken,
     state: Arc<std::sync::atomic::AtomicU8>,
+    activity: Arc<std::sync::Mutex<String>>,
     shared_state: SharedState,
 ) {
     loop {
@@ -75,7 +76,13 @@ pub async fn bridge_task(
                             | AgentEvent::Interrupted
                             | AgentEvent::TokenBudgetExceeded { .. }
                             | AgentEvent::FailoverChainExhausted { .. } => {
-                                state.store(AgentState::IDLE, Ordering::Relaxed)
+                                state.store(AgentState::IDLE, Ordering::Relaxed);
+                                // Turn end / terminal: clear the ephemeral activity
+                                // so a stale "reading docs" doesn't persist while idle.
+                                activity
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clear();
                             }
                             _ => {}
                         }
@@ -88,6 +95,10 @@ pub async fn bridge_task(
                 },
                 None => {
                     state.store(AgentState::IDLE, Ordering::Relaxed);
+                    activity
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clear();
                     info!("bridge task: agent channel closed, exiting");
                     break;
                 }
@@ -98,6 +109,10 @@ pub async fn bridge_task(
             // bridge via the channel-closed path above — see the lifecycle note.
             _ = cancel.cancelled() => {
                 state.store(AgentState::IDLE, Ordering::Relaxed);
+                activity
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clear();
                 while let Ok(event) = agent_rx.try_recv() {
                     if let Some(sse) = convert_event(event) {
                         events_tx.send(sse).ok();
@@ -365,6 +380,7 @@ mod tests {
             events_tx,
             cancel,
             state.clone(),
+            Arc::new(std::sync::Mutex::new(String::new())),
             make_state(),
         ));
 
@@ -379,6 +395,44 @@ mod tests {
             .is_ok();
         assert!(exited, "bridge did not exit after the agent channel closed");
         assert_eq!(state.load(Ordering::Relaxed), AgentState::IDLE);
+    }
+
+    /// A terminal event clears the ephemeral activity cell, so a stale "reading
+    /// docs" does not persist while the agent is idle.
+    #[tokio::test]
+    async fn bridge_clears_activity_on_terminal_event() {
+        let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+        let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+        let cancel = CancellationToken::new();
+        let state = Arc::new(AtomicU8::new(AgentState::BUSY));
+        let activity = Arc::new(std::sync::Mutex::new("reading docs".to_owned()));
+
+        let bridge = tokio::spawn(super::bridge_task(
+            AgentId::random(),
+            agent_rx,
+            events_tx,
+            cancel,
+            state.clone(),
+            activity.clone(),
+            make_state(),
+        ));
+
+        // Drive a terminal event, then close the channel so the bridge exits.
+        agent_tx
+            .send(AgentEvent::Finished("done".into()))
+            .await
+            .ok();
+        drop(agent_tx);
+        let exited = tokio::time::timeout(Duration::from_millis(200), bridge)
+            .await
+            .is_ok();
+        assert!(exited, "bridge did not exit");
+
+        assert_eq!(state.load(Ordering::Relaxed), AgentState::IDLE);
+        assert!(
+            activity.lock().unwrap().is_empty(),
+            "activity must be cleared on terminal event"
+        );
     }
 
     /// Forced shutdown via the daemon-wide cancel (preserved shutdown path). The
@@ -397,6 +451,7 @@ mod tests {
             events_tx,
             cancel.clone(),
             state.clone(),
+            Arc::new(std::sync::Mutex::new(String::new())),
             make_state(),
         ));
 
@@ -428,6 +483,7 @@ mod tests {
             events_tx,
             cancel,
             state.clone(),
+            Arc::new(std::sync::Mutex::new(String::new())),
             make_state(),
         ));
 
@@ -465,6 +521,7 @@ mod tests {
             events_tx,
             cancel,
             state.clone(),
+            Arc::new(std::sync::Mutex::new(String::new())),
             make_state(),
         ));
 

@@ -74,6 +74,8 @@ pub(crate) fn test_config() -> AgentConfig {
         agent_id: None,
         created_by: None,
         permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+        role: String::new(),
+        description: String::new(),
     }
 }
 

@@ -51,6 +51,15 @@ pub struct CreateAgentRequest {
     pub skills: Vec<String>,
     pub prompt: Option<String>,
     pub created_by: Option<AgentId>,
+    /// Short display label for the agent ("researcher"). Required non-empty for
+    /// subagent spawns (`created_by = Some`); optional for root/operator spawns.
+    /// Never a unique address — `AgentId` is canonical. Empty means unset.
+    #[serde(default)]
+    pub role: String,
+    /// Longer prose: what this agent is for ("gathers sources for the plan").
+    /// Optional, may be empty. Supervisor-owned.
+    #[serde(default)]
+    pub description: String,
     /// Override the default/env-configured max tool-call rounds for this agent.
     ///
     /// - `None` → use daemon default (`JUST_AGENT_MAX_TOOL_ROUNDS` or unlimited).
@@ -73,12 +82,53 @@ pub struct AgentSummary {
     pub workspace_root: String,
     pub state: AgentState,
     pub created_by: Option<AgentId>,
+    /// Short display label ("researcher"). Empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    /// Longer prose ("gathers sources for the plan"). Empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Ephemeral, agent-self-reported current activity ("reading docs/x.md").
+    /// Empty when idle (the bridge clears it on terminal events). Not persisted.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub activity: String,
 }
 
 /// Response body for listing agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListAgentsResponse {
     pub agents: Vec<AgentSummary>,
+}
+
+/// Query params for `GET /agents`. Omit `created_by` to list all agents (the
+/// default); set it to list only the direct subagents of a given superior.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ListAgentsQuery {
+    #[serde(default)]
+    pub created_by: Option<AgentId>,
+}
+
+/// Request body for `PUT /agents/{id}/metadata` — update `role` and/or
+/// `description`.
+///
+/// `None` fields are left unchanged; `Some(s)` sets the field. `role: Some(s)`
+/// must be non-empty (the handler validates this — an explicit set must not be
+/// empty). Only the direct supervisor (or operator) may call this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAgentMetadataRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Request body for `PUT /agents/{id}/activity` — the agent reports its current
+/// activity as free text. Only the agent itself (or operator) may call this.
+/// An empty string clears the activity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateActivityRequest {
+    #[serde(default)]
+    pub activity: String,
 }
 
 /// Combined agent status: lifecycle state + context usage + recent retry history.
@@ -91,6 +141,9 @@ pub struct AgentStatusResponse {
     pub token_budget: u64,
     /// Cumulative daemon-wide tokens consumed toward the budget.
     pub token_consumed: u64,
+    /// Ephemeral, agent-self-reported current activity. Empty when idle.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub activity: String,
 }
 
 /// Request body for sending a message to an agent.

@@ -193,6 +193,14 @@ pub struct AgentConfig {
     pub agent_id: Option<AgentId>,
     pub created_by: Option<AgentId>,
     pub permissions: PermissionProfile,
+    /// Short display label ("researcher"). Supervisor-owned; set at spawn (and
+    /// via `PUT /agents/{id}/metadata`), persisted in `AgentMeta`. Required
+    /// non-empty for subagent spawns. Not read by the runtime — pure display
+    /// metadata, grouped here with the other identity fields (`agent_id`,
+    /// `created_by`) per the `AgentMeta` precedent.
+    pub role: String,
+    /// Longer prose ("gathers sources for the plan"). Supervisor-owned, optional.
+    pub description: String,
 }
 
 impl AgentConfig {
@@ -306,6 +314,10 @@ impl AgentConfig {
             agent_id: None,
             created_by: None,
             permissions: PermissionProfile::new(workspace_root),
+            // Set by the daemon at spawn (CreateAgentRequest) / restore (AgentMeta),
+            // like `agent_id` / `created_by` above.
+            role: String::new(),
+            description: String::new(),
         })
     }
 
@@ -507,6 +519,8 @@ mod tests {
             agent_id: None,
             created_by: None,
             permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+            role: String::new(),
+            description: String::new(),
         };
         // A 10k window → pinned = (10k − 8192) × 0.25 = 452 < summary 1200 → rejected.
         let err = cfg.set_context_window(10_000).unwrap_err();
@@ -542,6 +556,8 @@ mod tests {
             agent_id: None,
             created_by: None,
             permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+            role: String::new(),
+            description: String::new(),
         };
         assert!(cfg.try_context_window(0).is_err(), "zero window rejected");
         assert!(
@@ -577,6 +593,8 @@ mod tests {
             agent_id: None,
             created_by: None,
             permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+            role: String::new(),
+            description: String::new(),
         };
         assert_eq!(cfg.effective_budget(), 91_808);
         assert_eq!(cfg.pinned_budget(), 22_952);

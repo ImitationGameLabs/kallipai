@@ -38,8 +38,8 @@ pub enum AgentCommand {
     Spawn(SpawnArgs),
     /// Send message to agent
     Send(SendArgs),
-    /// List all agents
-    List,
+    /// List agents (optionally only a superior's direct subagents)
+    List(ListArgs),
     /// Remove an agent
     Remove(IdArgs),
     /// Stream agent events
@@ -50,6 +50,10 @@ pub enum AgentCommand {
     Permissions(IdArgs),
     /// Interrupt current agent operation
     Interrupt(IdArgs),
+    /// Update an agent's role and/or description (direct supervisor only)
+    Metadata(MetadataArgs),
+    /// Report this agent's current activity (self-only; reads JUST_AGENT_ID)
+    Activity(ActivityArgs),
 }
 
 #[derive(Args)]
@@ -63,6 +67,38 @@ pub struct SpawnArgs {
     /// Optional initial prompt for the agent.
     #[arg(long)]
     pub prompt: Option<String>,
+    /// Short display label ("researcher"). Required for subagent spawns.
+    #[arg(long)]
+    pub role: Option<String>,
+    /// Longer prose: what this agent is for.
+    #[arg(long)]
+    pub description: Option<String>,
+}
+
+#[derive(Args, Default)]
+pub struct ListArgs {
+    /// Only list the direct subagents of this superior agent.
+    #[arg(long)]
+    pub created_by: Option<AgentId>,
+}
+
+#[derive(Args)]
+pub struct MetadataArgs {
+    /// Agent ID.
+    pub id: AgentId,
+    /// New role. Must be non-empty if provided.
+    #[arg(long)]
+    pub role: Option<String>,
+    /// New description. Use the empty string to clear.
+    #[arg(long)]
+    pub description: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ActivityArgs {
+    /// Current activity, in a short phrase (e.g. "reading docs/x.md"). Pass an
+    /// empty string to clear. Field name matches `UpdateActivityRequest::activity`.
+    pub activity: String,
 }
 
 #[derive(Args)]

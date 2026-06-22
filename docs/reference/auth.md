@@ -42,12 +42,16 @@ comparison additionally uses a constant-time compare.
 | `POST /agents/{id}/interrupt` | Yes      | —          | Yes      | —         | —    |
 | `POST /agents/{id}/message`   | Yes      | —          | —        | Yes       | —    |
 | `GET /agents/{id}/events`     | Yes      | —          | —        | Yes       | —    |
+| `PUT /agents/{id}/metadata`   | Yes      | Yes        | —        | —         | —    |
+| `PUT /agents/{id}/activity`   | Yes      | —          | —        | —         | Yes  |
 
 Message and event endpoints are peer-to-peer: any authenticated identity
 (including the operator) may communicate with any other agent. Management
 endpoints (remove, interrupt)
 require a superior relationship. Subagent creation requires the direct
-supervisor.
+supervisor. Metadata (`role`/`description`) is edited by the **direct
+supervisor**; activity is **self**-reported (the agent itself, not its
+supervisor).
 
 ### Context and policy
 

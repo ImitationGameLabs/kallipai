@@ -161,6 +161,8 @@ async fn restore_one(
     let mut config = AgentConfig::load(None, vec![], Some(p.meta.workspace_root.clone()))?;
     config.agent_id = Some(p.agent_id.clone());
     config.created_by = p.meta.created_by.clone();
+    config.role = p.meta.role.clone();
+    config.description = p.meta.description.clone();
 
     let tool_policy = index
         .get_policy(&p.agent_id)

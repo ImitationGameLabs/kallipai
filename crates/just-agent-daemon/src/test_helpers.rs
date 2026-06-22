@@ -51,6 +51,8 @@ pub fn make_entry_with_rx(
         agent_id: None,
         created_by,
         permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+        role: String::new(),
+        description: String::new(),
     };
     let entry = AgentEntry {
         agent: Agent {
@@ -66,6 +68,7 @@ pub fn make_entry_with_rx(
             round_cancel: Arc::new(std::sync::Mutex::new(None)),
             notify: Arc::new(tokio::sync::Notify::new()),
             state: Arc::new(AtomicU8::new(AgentState::IDLE)),
+            activity: Arc::new(std::sync::Mutex::new(String::new())),
             auth_token_hash: TokenHash::of(&auth_token),
             env: std::collections::HashMap::new(),
             tool_policy: Arc::new(std::sync::RwLock::new(default_tool_policy())),
