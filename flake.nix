@@ -99,7 +99,7 @@
                 taplo
 
                 # Markdown formatter
-                nodePackages.prettier
+                prettier
 
                 # Temporary workaround for copilot-cli direnv integration bug
                 # See: https://github.com/github/copilot-cli/issues/731
