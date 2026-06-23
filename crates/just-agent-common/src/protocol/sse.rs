@@ -45,8 +45,8 @@ pub enum FailoverChainExhaustion {
 }
 
 impl std::fmt::Display for FailoverChainExhaustion {
-    /// Operator-readable lowercase prose, shared by the TUI, stdio, and `just-agent-run` so all
-    /// three surfaces render the same cause identically.
+    /// Operator-readable lowercase prose, shared by the TUI and `just-agent-run` so
+    /// both surfaces render the same cause identically.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::NoFailoverConfigured => "no failover configured",

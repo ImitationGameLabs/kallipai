@@ -1,7 +1,6 @@
 mod args;
 mod command;
 mod session;
-mod stdio;
 mod tui;
 
 use anyhow::Result;
@@ -57,11 +56,7 @@ async fn main() -> Result<()> {
 
     let session = Session::connect(client).await?;
 
-    if args.stdio {
-        stdio::run_stdio(session).await
-    } else {
-        run_tui(session).await
-    }
+    run_tui(session).await
 }
 
 /// Fire-and-forget prompt delivery. Results arrive via SSE.
