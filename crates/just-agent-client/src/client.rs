@@ -8,7 +8,7 @@ use just_llm_client::JsonEventStream;
 use crate::types::{ListApprovalsParams, MessageRequest};
 use crate::{
     AgentPermissionsResponse, AgentStatusResponse, AgentSummary, ApprovalDecisionBody,
-    ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ListAgentsResponse,
+    ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ExecPolicy, ListAgentsResponse,
     ListApprovalsResponse, ListSkillPromoteRecordsResponse, PromoteDecision, SkillMeta,
     SkillPathsResponse, SkillPromoteDecisionBody, SkillPromoteShowResponse,
     SkillPromoteSubmitResponse, TokenBudgetResponse, TokenBudgetUpdateRequest, ToolPolicy,
@@ -394,6 +394,39 @@ impl DaemonClient {
             .send()
             .await
             .context("failed to update agent policy")?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Get the `bash_exec` command-policy overrides for an agent.
+    pub async fn get_exec_policy(&self, id: &AgentId) -> Result<ExecPolicy> {
+        self.handle_response(
+            self.with_auth(
+                self.inner
+                    .http
+                    .get(self.url(&format!("/agents/{id}/exec-policy"))),
+            )
+            .send()
+            .await
+            .context("failed to get agent exec policy")?,
+            "failed to parse exec policy response",
+        )
+        .await
+    }
+
+    /// Update the `bash_exec` command-policy overrides for an agent.
+    pub async fn update_exec_policy(&self, id: &AgentId, policy: &ExecPolicy) -> Result<()> {
+        self.ensure_success(
+            self.with_auth(
+                self.inner
+                    .http
+                    .put(self.url(&format!("/agents/{id}/exec-policy")))
+                    .json(policy),
+            )
+            .send()
+            .await
+            .context("failed to update agent exec policy")?,
         )
         .await?;
         Ok(())

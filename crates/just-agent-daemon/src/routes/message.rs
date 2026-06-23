@@ -109,6 +109,7 @@ pub async fn send_message(
             env: entry.agent.env.clone(),
             shared_state: state.clone(),
             tool_policy: entry.agent.tool_policy.clone(),
+            exec_policy: entry.agent.exec_policy.clone(),
             prompt_queue_size: state.prompt_queue_size,
             prompt_channel: Some((entry.agent.prompt_tx.clone(), prompt_rx)),
             tier,

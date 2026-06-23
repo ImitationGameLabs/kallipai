@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use just_agent_common::agentid::AgentId;
-use just_agent_common::policy::ToolPolicy;
+use just_agent_common::policy::{ExecPolicy, ToolPolicy};
 use just_agent_runtime::config::AgentConfig;
 use just_agent_runtime::persistence;
+use just_agent_runtime::policy::classifier;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -26,6 +27,7 @@ struct ChainNode {
     agent_id: AgentId,
     meta: persistence::AgentMeta,
     policy: ToolPolicy,
+    exec_policy: ExecPolicy,
 }
 
 /// Pre-loaded data for all agents being restored.
@@ -34,6 +36,7 @@ struct ChainNode {
 struct RestoreIndex {
     meta: HashMap<AgentId, persistence::AgentMeta>,
     policy: HashMap<AgentId, ToolPolicy>,
+    exec: HashMap<AgentId, ExecPolicy>,
 }
 
 impl RestoreIndex {
@@ -52,6 +55,18 @@ impl RestoreIndex {
             None => {
                 let dir = persistence::agent_dir(id).context("cannot resolve agent dir")?;
                 persistence::load_policy(&dir).context("failed to load policy")
+            }
+        }
+    }
+
+    /// Look up exec policy. Falls back to disk read on cache miss (missing file
+    /// yields the default empty policy).
+    fn get_exec_policy(&self, id: &AgentId) -> anyhow::Result<ExecPolicy> {
+        match self.exec.get(id) {
+            Some(p) => Ok(p.clone()),
+            None => {
+                let dir = persistence::agent_dir(id).context("cannot resolve agent dir")?;
+                persistence::load_exec_policy(&dir).context("failed to load exec_policy")
             }
         }
     }
@@ -80,12 +95,16 @@ fn load_supervisor_chain(
         let policy = index
             .get_policy(&current_id)
             .context("cannot load supervisor policy")?;
+        let exec_policy = index
+            .get_exec_policy(&current_id)
+            .context("cannot load supervisor exec_policy")?;
 
         let parent_id = meta.created_by.clone();
         chain.push(ChainNode {
             agent_id: current_id,
             meta,
             policy,
+            exec_policy,
         });
 
         match parent_id {
@@ -149,6 +168,41 @@ fn validate_policy_from_chain(
     Ok(())
 }
 
+/// Validate that `exec_policy` is at least as strict as every ancestor's
+/// exec policy in the pre-loaded chain, comparing *effective* decisions against
+/// the static catalog baseline. Mirrors [`validate_policy_from_chain`].
+fn validate_exec_policy_from_chain(
+    agent_id: &AgentId,
+    exec_policy: &ExecPolicy,
+    chain: &[ChainNode],
+) -> anyhow::Result<()> {
+    if let Some(supervisor) = chain.first() {
+        exec_policy
+            .validate_at_least_as_strict_as(&supervisor.exec_policy, classifier::exec_baseline)
+            .map_err(|violations| {
+                anyhow::anyhow!(
+                    "agent {agent_id}: exec_policy is less strict than supervisor: {}",
+                    violations.join("; ")
+                )
+            })?;
+    }
+
+    for window in chain.windows(2) {
+        window[0]
+            .exec_policy
+            .validate_at_least_as_strict_as(&window[1].exec_policy, classifier::exec_baseline)
+            .map_err(|violations| {
+                anyhow::anyhow!(
+                    "agent {}: exec_policy is less strict than supervisor: {}",
+                    window[0].agent_id,
+                    violations.join("; ")
+                )
+            })?;
+    }
+
+    Ok(())
+}
+
 /// Restore a single persisted agent to a running agent.
 async fn restore_one(
     p: persistence::PendingRestore,
@@ -167,11 +221,15 @@ async fn restore_one(
     let tool_policy = index
         .get_policy(&p.agent_id)
         .context("failed to load policy")?;
+    let exec_policy = index
+        .get_exec_policy(&p.agent_id)
+        .context("failed to load exec_policy")?;
 
     if let Some(ref supervisor_id) = p.meta.created_by {
         let chain = load_supervisor_chain(supervisor_id, index)?;
         config.permissions.max_depth = validate_depth_from_chain(&p.meta.workspace_root, &chain)?;
         validate_policy_from_chain(&p.agent_id, &tool_policy, &chain)?;
+        validate_exec_policy_from_chain(&p.agent_id, &exec_policy, &chain)?;
     }
 
     // Resolve the model tier purely by depth (positional tiers — no persisted binding). Warn if
@@ -197,6 +255,7 @@ async fn restore_one(
     let env = SpawnArgs::default_env(&p.agent_id, token.secret());
 
     let tool_policy = Arc::new(std::sync::RwLock::new(tool_policy));
+    let exec_policy = Arc::new(std::sync::RwLock::new(exec_policy));
 
     let agent = spawn_agent(SpawnArgs {
         agent_id: p.agent_id.clone(),
@@ -211,6 +270,7 @@ async fn restore_one(
         env,
         shared_state: shared_state.clone(),
         tool_policy,
+        exec_policy,
         prompt_queue_size: shared_state.prompt_queue_size,
         prompt_channel: None,
         tier,
@@ -242,15 +302,20 @@ pub async fn restore_agents(state: &SharedState) {
     // Build index: meta from scan, policy loaded once per agent.
     let mut meta_map = HashMap::new();
     let mut policy_map = HashMap::new();
+    let mut exec_map = HashMap::new();
     for p in &pending {
         meta_map.insert(p.agent_id.clone(), p.meta.clone());
         if let Ok(policy) = persistence::load_policy(&p.agent_dir) {
             policy_map.insert(p.agent_id.clone(), policy);
         }
+        if let Ok(exec) = persistence::load_exec_policy(&p.agent_dir) {
+            exec_map.insert(p.agent_id.clone(), exec);
+        }
     }
     let index = RestoreIndex {
         meta: meta_map,
         policy: policy_map,
+        exec: exec_map,
     };
 
     // Build restore tree from created_by relationships.

@@ -7,7 +7,7 @@ use clap::Parser;
 use futures_util::StreamExt;
 use just_agent_client::{DaemonClient, PromoteDecision};
 use just_agent_common::agentid::AgentId;
-use just_agent_common::policy::PolicyDecision;
+use just_agent_common::policy::{ExecDecision, PolicyDecision};
 use just_agent_common::promote::{NO_REASON_PROVIDED, SkillPromoteStatus};
 use just_agent_common::tokens::parse_token_amount;
 
@@ -243,6 +243,28 @@ async fn main() -> Result<()> {
                 policy.tools.insert(args.tool.clone(), decision);
                 client.update_policy(&args.id, &policy).await?;
                 println!("Updated {} = {}.", args.tool, decision);
+            }
+            PolicyCommand::ExecGet(args) => {
+                let policy = client.get_exec_policy(&args.id).await?;
+                if policy.overrides.is_empty() {
+                    println!("(no per-command overrides; static catalog applies)");
+                } else {
+                    for (command, decision) in &policy.overrides {
+                        println!("{command}: {decision}");
+                    }
+                }
+            }
+            PolicyCommand::ExecSet(args) => {
+                let decision: ExecDecision = args
+                    .decision
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("invalid decision: {e}"))?;
+                let mut policy = client.get_exec_policy(&args.id).await?;
+                policy
+                    .overrides
+                    .insert(args.command.to_ascii_lowercase(), decision);
+                client.update_exec_policy(&args.id, &policy).await?;
+                println!("Updated {} = {}.", args.command, decision);
             }
         },
         Commands::Skill(cmd) => match cmd {

@@ -175,6 +175,10 @@ pub enum PolicyCommand {
     Get(IdArgs),
     /// Modify a single tool policy rule
     Set(PolicySetArgs),
+    /// Show agent bash_exec command-policy overrides
+    ExecGet(IdArgs),
+    /// Set a per-command bash_exec override (superior-only)
+    ExecSet(ExecSetArgs),
 }
 
 #[derive(Args)]
@@ -184,6 +188,16 @@ pub struct PolicySetArgs {
     /// Tool name.
     pub tool: String,
     /// Decision: allow, ask, deny, classify.
+    pub decision: String,
+}
+
+#[derive(Args)]
+pub struct ExecSetArgs {
+    /// Agent ID.
+    pub id: AgentId,
+    /// Command name (e.g. cargo, sudo).
+    pub command: String,
+    /// Decision: allow, ask, deny.
     pub decision: String,
 }
 

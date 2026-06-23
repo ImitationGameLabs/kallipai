@@ -7,12 +7,13 @@
 
 use rable::Node;
 
+use super::ClassifyCtx;
 use super::Safety;
-use super::catalog::{self, CommandSpec};
+use super::catalog;
 use super::{util, walker};
 
 pub(super) fn classify_interpreter_delegate(
-    catalog: &'static [CommandSpec],
+    ctx: &ClassifyCtx<'_>,
     cmd_name: &str,
     words: &[Node],
 ) -> Option<Safety> {
@@ -27,7 +28,7 @@ pub(super) fn classify_interpreter_delegate(
     let inner_source = strip_quotes(&inner_source);
 
     match rable::parse(&inner_source, false) {
-        Ok(nodes) => Some(walker::classify_nodes(catalog, &nodes)),
+        Ok(nodes) => Some(walker::classify_nodes(ctx, &nodes)),
         Err(_) => Some(Safety::Reject {
             reason: "failed to parse inner command for interpreter delegate".into(),
         }),

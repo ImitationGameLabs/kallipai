@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use just_agent_common::policy::ToolPolicy;
+use just_agent_common::policy::{ExecPolicy, ToolPolicy};
 use serde::{Deserialize, Serialize};
 use time::{Duration as TimeDuration, OffsetDateTime};
 
@@ -177,6 +177,34 @@ pub fn load_policy(dir: &Path) -> Result<ToolPolicy> {
     let path = dir.join("policy.toml");
     let content = fs::read_to_string(&path).context("reading policy.toml")?;
     toml::from_str(&content).context("parsing policy.toml")
+}
+
+/// Serialize and write the `bash_exec` exec-policy overrides to exec_policy.toml.
+pub fn persist_exec_policy(dir: &Path, policy: &ExecPolicy) -> Result<()> {
+    let toml_str = toml::to_string_pretty(policy).context("serializing exec_policy.toml")?;
+    atomic_write(&dir.join("exec_policy.toml"), &toml_str)
+}
+
+/// Load exec-policy overrides from exec_policy.toml.
+///
+/// Returns the default (empty) policy when the file is absent: agents created
+/// before this feature shipped have no exec_policy.toml, and restore must not
+/// fail for them. Hard read/parse failures still error.
+///
+/// Keys are normalized to lowercase on load (the file is an untrusted boundary,
+/// like `meta.json`): command names are matched case-insensitively by the
+/// classifier, so a mixed-case or hand-edited key would otherwise silently never
+/// match. This mirrors the PUT handler's `lowercase_keys`.
+pub fn load_exec_policy(dir: &Path) -> Result<ExecPolicy> {
+    let path = dir.join("exec_policy.toml");
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ExecPolicy::default()),
+        Err(e) => return Err(e).context("reading exec_policy.toml"),
+    };
+    let mut policy: ExecPolicy = toml::from_str(&content).context("parsing exec_policy.toml")?;
+    policy.lowercase_keys();
+    Ok(policy)
 }
 
 // ---------------------------------------------------------------------------

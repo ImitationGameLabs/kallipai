@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
+use just_agent_common::policy::ExecPolicy;
 use just_agent_shell::{StatelessBuilder, bash_exec_tool_set};
 use just_llm_client::ToolDispatcher;
 use just_llm_client::types::chat::{FunctionDefinition, ToolDefinition, ToolType};
@@ -30,6 +31,7 @@ pub async fn build_tool_dispatch(
     ctx: Arc<Mutex<ContextStore>>,
     env: HashMap<String, String>,
     notice_sink: Arc<dyn Fn(String) + Send + Sync>,
+    exec_policy: Arc<RwLock<ExecPolicy>>,
 ) -> Result<ToolDispatcher> {
     let backend = StatelessBuilder::new()
         .envs(env)
@@ -46,7 +48,7 @@ pub async fn build_tool_dispatch(
     let mut dispatch = ToolDispatcher::new();
     dispatch.add_tools(bash_exec_tool_set(backend))?;
     let ctx_dyn: Arc<Mutex<dyn AgenticContext>> = ctx;
-    dispatch.add_tools(context::context_tool_set(ctx_dyn.clone()))?;
+    dispatch.add_tools(context::context_tool_set(ctx_dyn.clone(), exec_policy))?;
     dispatch.add_tools(skill::file_pin_tool_set(ctx_dyn))?;
 
     Ok(dispatch)

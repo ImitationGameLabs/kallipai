@@ -3,8 +3,9 @@
 
 use rable::{Node, NodeKind};
 
+use super::ClassifyCtx;
 use super::Safety;
-use super::catalog::{self, CommandSpec};
+use super::catalog;
 use super::util;
 
 /// Return the stricter of two decisions: Reject > NeedsApproval > ReadOnly.
@@ -20,33 +21,33 @@ pub(super) fn stricter(a: Safety, b: Safety) -> Safety {
 
 /// Merge decisions from required nodes, an optional node, and redirects.
 pub(super) fn classify_multi(
-    catalog: &'static [CommandSpec],
+    ctx: &ClassifyCtx<'_>,
     required: &[&Node],
     optional: Option<&Node>,
     redirects: &[Node],
 ) -> Safety {
     let mut dec = required
         .iter()
-        .map(|n| super::walker::classify_node_ref(catalog, n))
+        .map(|n| super::walker::classify_node_ref(ctx, n))
         .fold(Safety::ReadOnly, stricter);
     if let Some(opt) = optional {
-        dec = stricter(dec, super::walker::classify_node_ref(catalog, opt));
+        dec = stricter(dec, super::walker::classify_node_ref(ctx, opt));
     }
-    stricter(dec, classify_redirects(catalog, redirects))
+    stricter(dec, classify_redirects(ctx, redirects))
 }
 
 // ---------------------------------------------------------------------------
 // Redirect classification
 // ---------------------------------------------------------------------------
 
-pub(super) fn classify_redirects(catalog: &'static [CommandSpec], redirects: &[Node]) -> Safety {
+pub(super) fn classify_redirects(ctx: &ClassifyCtx<'_>, redirects: &[Node]) -> Safety {
     redirects
         .iter()
-        .map(|n| classify_redirect_node(catalog, n))
+        .map(|n| classify_redirect_node(ctx, n))
         .fold(Safety::ReadOnly, stricter)
 }
 
-pub(super) fn classify_redirect_node(catalog: &'static [CommandSpec], node: &Node) -> Safety {
+pub(super) fn classify_redirect_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
     match &node.kind {
         NodeKind::Redirect { op, target, .. } => {
             let op_dec = match op.as_str() {
@@ -54,10 +55,10 @@ pub(super) fn classify_redirect_node(catalog: &'static [CommandSpec], node: &Nod
                 ">" | ">>" | ">|" | "<>" | "&>" | "&>>" => Safety::NeedsApproval,
                 _ => Safety::NeedsApproval,
             };
-            stricter(op_dec, super::walker::classify_node_ref(catalog, target))
+            stricter(op_dec, super::walker::classify_node_ref(ctx, target))
         }
         NodeKind::HereDoc { .. } => Safety::NeedsApproval,
-        _ => super::walker::classify_node_ref(catalog, node),
+        _ => super::walker::classify_node_ref(ctx, node),
     }
 }
 
@@ -69,17 +70,14 @@ pub(super) fn classify_redirect_node(catalog: &'static [CommandSpec], node: &Nod
 ///
 /// Checks both the variable name (sensitive env vars like PATH) and the
 /// value parts (which may contain command substitutions).
-pub(super) fn classify_assignments(
-    catalog: &'static [CommandSpec],
-    assignments: &[Node],
-) -> Safety {
+pub(super) fn classify_assignments(ctx: &ClassifyCtx<'_>, assignments: &[Node]) -> Safety {
     assignments
         .iter()
         .map(|a| {
             let name_dec = classify_assignment_name(a);
             let parts_dec = match &a.kind {
                 NodeKind::Word { parts, .. } if !parts.is_empty() => {
-                    classify_word_parts(catalog, parts)
+                    classify_word_parts(ctx, parts)
                 }
                 _ => Safety::ReadOnly,
             };
@@ -106,18 +104,18 @@ fn classify_assignment_name(assignment: &Node) -> Safety {
 // Word expansion classification
 // ---------------------------------------------------------------------------
 
-pub(super) fn classify_word_expansions(catalog: &'static [CommandSpec], words: &[Node]) -> Safety {
+pub(super) fn classify_word_expansions(ctx: &ClassifyCtx<'_>, words: &[Node]) -> Safety {
     words
         .iter()
         .skip(1)
-        .map(|n| super::walker::classify_node_ref(catalog, n))
+        .map(|n| super::walker::classify_node_ref(ctx, n))
         .fold(Safety::ReadOnly, stricter)
 }
 
-pub(super) fn classify_word_parts(catalog: &'static [CommandSpec], parts: &[Node]) -> Safety {
+pub(super) fn classify_word_parts(ctx: &ClassifyCtx<'_>, parts: &[Node]) -> Safety {
     parts
         .iter()
-        .map(|n| super::walker::classify_node_ref(catalog, n))
+        .map(|n| super::walker::classify_node_ref(ctx, n))
         .fold(Safety::ReadOnly, stricter)
 }
 

@@ -561,3 +561,112 @@ fn catalog_has_no_duplicate_names() {
         );
     }
 }
+
+// ===========================================================================
+// Exec-policy overrides (ClassifyCtx)
+// ===========================================================================
+
+use super::catalog::READ_ONLY_CATALOG;
+use just_agent_common::policy::{ExecDecision, ExecPolicy};
+
+/// Classify with an override map against the default catalog.
+fn cls_with(command: &str, overrides: &[(&str, ExecDecision)]) -> Safety {
+    let mut policy = ExecPolicy::default();
+    for (name, dec) in overrides {
+        policy.overrides.insert((*name).to_string(), *dec);
+    }
+    Classifier::DEFAULT.classify_with(command, &policy)
+}
+
+#[test]
+fn allow_override_widens_absent_command() {
+    // `cargo` is absent from the catalog → Allow override widens it to read-only.
+    assert_eq!(
+        cls_with("cargo --version", &[("cargo", ExecDecision::Allow)]),
+        Safety::ReadOnly
+    );
+    assert_eq!(
+        Classifier::DEFAULT.classify("cargo --version"),
+        Safety::NeedsApproval
+    );
+}
+
+#[test]
+fn allow_override_does_not_widen_catalog_constraints() {
+    // Listed commands keep the catalog verdict: constraints stay authoritative.
+    assert_eq!(
+        cls_with("find . -delete", &[("find", ExecDecision::Allow)]),
+        Safety::NeedsApproval
+    );
+    assert_eq!(
+        cls_with("git push", &[("git", ExecDecision::Allow)]),
+        Safety::NeedsApproval
+    );
+    assert_eq!(
+        cls_with("env -S 'rm -rf /'", &[("env", ExecDecision::Allow)]),
+        Safety::NeedsApproval
+    );
+}
+
+#[test]
+fn deny_override_rejects_named_command() {
+    match cls_with("ls", &[("ls", ExecDecision::Deny)]) {
+        Safety::Reject { reason } => assert!(
+            reason.contains("ls"),
+            "deny reason should name the command: {reason}"
+        ),
+        other => panic!("expected Reject, got {other:?}"),
+    }
+}
+
+#[test]
+fn override_composes_with_or_fold() {
+    // `rm`→deny must deny the whole list even though `ls` is read-only.
+    assert!(matches!(
+        cls_with("ls && rm -rf /", &[("rm", ExecDecision::Deny)]),
+        Safety::Reject { .. }
+    ));
+    // And inside a pipeline.
+    assert!(matches!(
+        cls_with("ls | rm", &[("rm", ExecDecision::Deny)]),
+        Safety::Reject { .. }
+    ));
+}
+
+#[test]
+fn override_does_not_silence_structural_rules() {
+    // `sudo`→allow still defers because of the `>` redirect, not the override.
+    assert!(matches!(
+        cls_with("sudo > file", &[("sudo", ExecDecision::Allow)]),
+        Safety::NeedsApproval
+    ));
+}
+
+#[test]
+fn catalog_summary_lists_commands_and_constraints() {
+    let summary = super::default_catalog_summary();
+    let names: Vec<&str> = summary.iter().map(|e| e.name).collect();
+    assert!(names.contains(&"ls"), "ls should be in the catalog");
+    let git = summary.iter().find(|e| e.name == "git").unwrap();
+    assert!(
+        git.constraints
+            .iter()
+            .any(|c| c.contains("read-only subcommands")),
+        "git should summarize its subcommand constraint"
+    );
+    // READ_ONLY_CATALOG and the summary must agree on membership/count.
+    assert_eq!(summary.len(), READ_ONLY_CATALOG.len());
+}
+
+#[test]
+fn interpreter_names_are_rejected_as_override_keys() {
+    use super::is_valid_override_key;
+    for name in ["bash", "sh", "eval", "source", ".", "zsh"] {
+        assert!(
+            is_valid_override_key(name).is_err(),
+            "{name} should be rejected as an override key"
+        );
+    }
+    assert!(is_valid_override_key("cargo").is_ok());
+    assert!(is_valid_override_key("ls").is_ok());
+}

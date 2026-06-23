@@ -99,7 +99,10 @@ pub(crate) async fn ctx_from_source(
     let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
     let executor = AuthorizedToolExecutor::new(
         ToolDispatcher::new(),
-        AgentPolicy::new(Arc::new(RwLock::new(default_tool_policy()))),
+        AgentPolicy::new(
+            Arc::new(RwLock::new(default_tool_policy())),
+            Arc::new(RwLock::new(just_agent_common::policy::ExecPolicy::default())),
+        ),
         approvals.clone(),
     );
     {

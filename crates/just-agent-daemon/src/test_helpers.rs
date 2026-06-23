@@ -72,6 +72,9 @@ pub fn make_entry_with_rx(
             auth_token_hash: TokenHash::of(&auth_token),
             env: std::collections::HashMap::new(),
             tool_policy: Arc::new(std::sync::RwLock::new(default_tool_policy())),
+            exec_policy: Arc::new(std::sync::RwLock::new(
+                just_agent_common::policy::ExecPolicy::default(),
+            )),
         },
         subagent_ids: vec![],
     };

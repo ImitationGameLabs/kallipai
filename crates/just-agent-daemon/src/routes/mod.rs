@@ -50,6 +50,10 @@ pub fn router() -> Router<SharedState> {
             axum::routing::get(context::get_policy).put(context::update_policy),
         )
         .route(
+            "/agents/{id}/exec-policy",
+            axum::routing::get(context::get_exec_policy).put(context::update_exec_policy),
+        )
+        .route(
             "/agents/{id}/metadata",
             axum::routing::put(agent::update_metadata),
         )

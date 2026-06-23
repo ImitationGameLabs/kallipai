@@ -1,5 +1,5 @@
 mod agent;
-mod classifier;
+pub mod classifier;
 mod executor;
 
 /// Authorization decision for a tool invocation.

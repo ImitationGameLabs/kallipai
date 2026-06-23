@@ -9,7 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use just_agent_common::agentid::AgentId;
-use just_agent_common::policy::ToolPolicy;
+use just_agent_common::policy::{ExecPolicy, ToolPolicy};
 use just_agent_common::protocol::ApiError;
 use just_agent_common::protocol::SseEvent;
 use just_agent_runtime::agent_task::{self, AgentContext};
@@ -48,6 +48,7 @@ pub(crate) struct SpawnArgs {
     pub env: HashMap<String, String>,
     pub shared_state: SharedState,
     pub tool_policy: Arc<std::sync::RwLock<ToolPolicy>>,
+    pub exec_policy: Arc<std::sync::RwLock<ExecPolicy>>,
     pub prompt_queue_size: usize,
     /// The resolved model tier (selected by the caller). The active profile is
     /// `tier.profiles[0]`; the rest form the within-tier failover chain. Owned so the
@@ -122,13 +123,19 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
     // the returned `Agent`.
     let activity = Arc::new(std::sync::Mutex::new(String::new()));
 
-    let dispatch = build_tool_dispatch(args.store.clone(), args.env.clone(), notice_sink).await?;
+    let dispatch = build_tool_dispatch(
+        args.store.clone(),
+        args.env.clone(),
+        notice_sink,
+        args.exec_policy.clone(),
+    )
+    .await?;
 
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(256);
 
     let executor = AuthorizedToolExecutor::new(
         dispatch,
-        AgentPolicy::new(args.tool_policy.clone()),
+        AgentPolicy::new(args.tool_policy.clone(), args.exec_policy.clone()),
         args.approvals.clone(),
     );
     let tool_defs = executor.tool_definitions();
@@ -196,6 +203,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
         auth_token_hash: args.auth_token_hash,
         env: args.env,
         tool_policy: args.tool_policy,
+        exec_policy: args.exec_policy,
     })
 }
 
@@ -261,9 +269,9 @@ pub async fn create_agent(
 
     // Subagent: validate supervisor and delegation constraints, or use default policy.
     // Pre-reserve the subagent slot under write lock to eliminate TOCTOU.
-    let tool_policy = if let Some(ref supervisor_id) = req.created_by {
+    let (tool_policy, exec_policy) = if let Some(ref supervisor_id) = req.created_by {
         let mut registry = state.registry.write().await;
-        let (permissions, policy) = validate_subagent_request(
+        let (permissions, policy, exec) = validate_subagent_request(
             &registry,
             auth.identity(),
             supervisor_id,
@@ -284,11 +292,12 @@ pub async fn create_agent(
         supervisor.subagent_ids.push(id.clone());
         config.created_by = Some(supervisor_id.clone());
         config.permissions = permissions;
-        policy
+        (policy, exec)
     } else {
-        tool_policy_from_env()
+        (tool_policy_from_env(), ExecPolicy::default())
     };
     let tool_policy = Arc::new(std::sync::RwLock::new(tool_policy));
+    let exec_policy = Arc::new(std::sync::RwLock::new(exec_policy));
 
     // Resolve the model tier purely by depth (positional tiers — no name/override). Carry the
     // tier into SpawnArgs for failover.
@@ -329,6 +338,12 @@ pub async fn create_agent(
     )
     .map_err(ApiError::internal)?;
 
+    persistence::persist_exec_policy(
+        &agent_dir,
+        &exec_policy.read().unwrap_or_else(|e| e.into_inner()),
+    )
+    .map_err(ApiError::internal)?;
+
     let prompt = config.prompt.take();
     let log_ws = config.workspace_root.display().to_string();
     let log_depth = config.permissions.max_depth;
@@ -347,6 +362,7 @@ pub async fn create_agent(
         env,
         shared_state: state.clone(),
         tool_policy: tool_policy.clone(),
+        exec_policy: exec_policy.clone(),
         prompt_queue_size: state.prompt_queue_size,
         prompt_channel: None,
         tier,
@@ -616,17 +632,19 @@ pub async fn interrupt_agent(
 
 /// Validate supervisor constraints for a subagent creation request.
 ///
-/// Returns `(PermissionProfile, ToolPolicy)` for the new subagent if valid.
+/// Returns `(PermissionProfile, ToolPolicy, ExecPolicy)` for the new subagent if
+/// valid. The subagent inherits the supervisor's exec-policy overrides (cloned),
+/// so monotonic strictness holds at creation.
 ///
 /// Lock ordering: `registry` RwLock is held when calling this function.
-/// Inside, `tool_policy.read()` acquires `std::sync::RwLock<ToolPolicy>`.
-/// Never acquire these in reverse order.
+/// Inside, `tool_policy.read()` / `exec_policy.read()` acquire the per-agent
+/// `std::sync::RwLock`s. Never acquire these in reverse order.
 fn validate_subagent_request(
     registry: &crate::state::AgentRegistry,
     identity: &crate::auth::Identity,
     supervisor_id: &AgentId,
     workspace_root: &std::path::Path,
-) -> Result<(PermissionProfile, ToolPolicy), ApiError> {
+) -> Result<(PermissionProfile, ToolPolicy, ExecPolicy), ApiError> {
     let supervisor = registry.require_supervisor(identity, supervisor_id)?;
 
     let supervisor_perms = &supervisor.agent.config.permissions;
@@ -645,14 +663,19 @@ fn validate_subagent_request(
     }
 
     let permissions = PermissionProfile::subagent(subagent_ws, supervisor_perms.max_depth);
+    let supervisor = &supervisor.agent;
     let tool_policy = supervisor
-        .agent
         .tool_policy
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    let exec_policy = supervisor
+        .exec_policy
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
-    Ok((permissions, tool_policy))
+    Ok((permissions, tool_policy, exec_policy))
 }
 
 #[cfg(test)]

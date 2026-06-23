@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::skill_promote::SkillPromoteStore;
 use crate::token::TokenHash;
 pub use just_agent_common::agentid::AgentId;
-use just_agent_common::policy::ToolPolicy;
+use just_agent_common::policy::{ExecPolicy, ToolPolicy};
 pub use just_agent_common::protocol::AgentState;
 pub use just_agent_common::protocol::AgentSummary;
 use just_agent_common::protocol::ApiError;
@@ -103,6 +103,12 @@ pub struct Agent {
     pub env: HashMap<String, String>,
     /// Shared tool policy. The daemon updates this via API; the runtime reads it in evaluate().
     pub tool_policy: Arc<std::sync::RwLock<ToolPolicy>>,
+    /// Shared `bash_exec` command-policy overrides. The daemon updates this via
+    /// API; the runtime reads it in evaluate() for `Classify` + `bash_exec`.
+    /// Independent lock class from `tool_policy`: see the lock-order note on the
+    /// policy PUT handlers (`routes/context.rs`). If a handler ever acquires
+    /// both, acquire `tool_policy` before `exec_policy`.
+    pub exec_policy: Arc<std::sync::RwLock<ExecPolicy>>,
 }
 
 impl Agent {

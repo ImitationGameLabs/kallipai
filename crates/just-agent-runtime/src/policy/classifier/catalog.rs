@@ -203,21 +203,43 @@ pub(super) static SENSITIVE_ENV_VARS: &[&str] = &[
 ];
 
 // ---------------------------------------------------------------------------
+// Rendering (for the agent self-query tool / CLI)
+// ---------------------------------------------------------------------------
+
+/// Render a spec's constraints to human-readable strings.
+pub(super) fn summarize_constraints(constraints: &[Constraint]) -> Vec<String> {
+    constraints
+        .iter()
+        .map(|c| match c {
+            Constraint::Subcommands(subs) => {
+                format!("read-only subcommands: {}", subs.join(", "))
+            }
+            Constraint::MutatingFlags(flags) => {
+                format!("asks on flags: {}", flags.join(", "))
+            }
+            Constraint::MutatingPredicate(_) => "subject to a runtime guard".to_string(),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Lookup
 // ---------------------------------------------------------------------------
 
 /// Look up `name` in `catalog` and apply its constraints.
 ///
-/// Commands absent from the catalog are never auto-approved.
+/// Returns `None` when the command is absent from the catalog (the caller
+/// decides its fate, factoring in exec-policy overrides). A `Some` verdict
+/// already reflects the spec's constraints (e.g. `find -delete` → NeedsApproval).
 pub(super) fn classify_named_command(
     catalog: &'static [CommandSpec],
     name: &str,
     words: &[Node],
-) -> Safety {
-    match catalog.iter().find(|spec| spec.name == name) {
-        Some(spec) => spec.classify(words),
-        None => Safety::NeedsApproval,
-    }
+) -> Option<Safety> {
+    catalog
+        .iter()
+        .find(|spec| spec.name == name)
+        .map(|spec| spec.classify(words))
 }
 
 // ---------------------------------------------------------------------------

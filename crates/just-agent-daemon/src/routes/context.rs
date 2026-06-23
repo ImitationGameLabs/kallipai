@@ -3,10 +3,11 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use just_agent_common::agentid::AgentId;
-use just_agent_common::policy::ToolPolicy;
+use just_agent_common::policy::{ExecPolicy, ToolPolicy};
 use just_agent_common::protocol::{AgentPermissionsResponse, AgentStatusResponse, ApiError};
 use just_agent_runtime::context::AgenticContext;
 use just_agent_runtime::persistence;
+use just_agent_runtime::policy::classifier;
 
 use crate::state::SharedState;
 
@@ -161,6 +162,106 @@ pub async fn update_policy(
     *entry
         .agent
         .tool_policy
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = new_policy;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /agents/{id}/exec-policy — return the `bash_exec` command-policy overrides.
+pub async fn get_exec_policy(
+    State(state): State<SharedState>,
+    _auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+) -> Result<impl IntoResponse, ApiError> {
+    let registry = state.registry.read().await;
+    let entry = registry
+        .get(&id)
+        .ok_or_else(|| ApiError::not_found("agent not found"))?;
+    let exec_policy = entry
+        .agent
+        .exec_policy
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    Ok(Json(exec_policy))
+}
+
+/// PUT /agents/{id}/exec-policy — update the `bash_exec` overrides with
+/// monotonic-strictness validation.
+///
+/// # Lock ordering
+///
+/// Same discipline as [`update_policy`]: registry async read lock first, then
+/// per-agent `std::sync::RwLock<ExecPolicy>`. `exec_policy` and `tool_policy`
+/// are independent lock classes; a handler acquiring both must take
+/// `tool_policy` before `exec_policy`.
+pub async fn update_exec_policy(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+    Json(mut new_policy): Json<ExecPolicy>,
+) -> Result<StatusCode, ApiError> {
+    let registry = state.registry.read().await;
+    registry.require_superior(auth.identity(), &id)?;
+
+    let entry = registry
+        .get(&id)
+        .ok_or_else(|| ApiError::not_found("agent not found"))?;
+
+    // Normalize keys (command names are matched case-insensitively), then reject
+    // keys that would be silent no-ops (interpreter/eval names).
+    new_policy.lowercase_keys();
+    for name in new_policy.overrides.keys() {
+        classifier::is_valid_override_key(name).map_err(ApiError::bad_request)?;
+    }
+
+    // Strictness against parent — effective decisions vs the catalog baseline.
+    if let Some(ref parent_id) = entry.agent.config.created_by {
+        let parent_entry = registry
+            .get(parent_id)
+            .ok_or_else(|| ApiError::internal("parent agent not found"))?;
+        let parent_policy = parent_entry
+            .agent
+            .exec_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        new_policy
+            .validate_at_least_as_strict_as(&parent_policy, classifier::exec_baseline)
+            .map_err(|violations| {
+                ApiError::conflict(format!("exec_policy violations: {}", violations.join("; ")))
+            })?;
+    }
+
+    // Cascade: children must still be at least as strict.
+    for child_id in &entry.subagent_ids {
+        let child = registry
+            .get(child_id)
+            .ok_or_else(|| ApiError::internal(format!("child agent {child_id} not found")))?;
+        let child_policy = child
+            .agent
+            .exec_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        child_policy
+            .validate_at_least_as_strict_as(&new_policy, classifier::exec_baseline)
+            .map_err(|violations| {
+                ApiError::conflict(format!("child {child_id}: {}", violations.join("; ")))
+            })?;
+    }
+
+    // Persist first, then update in-memory.
+    let agent_dir = entry
+        .agent
+        .agent_dir
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("agent has no persistent directory"))?;
+    persistence::persist_exec_policy(agent_dir, &new_policy).map_err(ApiError::internal)?;
+
+    *entry
+        .agent
+        .exec_policy
         .write()
         .unwrap_or_else(|e| e.into_inner()) = new_policy;
 

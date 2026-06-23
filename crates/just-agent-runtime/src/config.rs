@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use crate::env_util::{DEFAULT_CONTEXT_WINDOW_TOKENS, parse_env, parse_env_list};
 use crate::retry::RetryPolicy;
 use crate::tools::context::{
-    ContextEvictTool, ContextPinTool, ContextStatusTool, ContextUnpinTool,
+    ContextEvictTool, ContextPinTool, ContextStatusTool, ContextUnpinTool, ExecPolicyTool,
 };
 use crate::tools::skill::FilePinTool;
 use just_agent_common::AgentId;
@@ -80,6 +80,7 @@ pub fn default_tool_policy() -> ToolPolicy {
     tools.insert(ContextStatusTool::NAME.into(), PolicyDecision::Allow);
     tools.insert(ContextEvictTool::NAME.into(), PolicyDecision::Allow);
     tools.insert(FilePinTool::NAME.into(), PolicyDecision::Allow);
+    tools.insert(ExecPolicyTool::NAME.into(), PolicyDecision::Allow);
     ToolPolicy {
         default: PolicyDecision::Ask,
         tools,

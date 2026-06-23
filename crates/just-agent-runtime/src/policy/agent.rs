@@ -3,7 +3,7 @@
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
-use just_agent_common::policy::{PolicyDecision, ToolPolicy};
+use just_agent_common::policy::{ExecPolicy, PolicyDecision, ToolPolicy};
 
 use just_agent_shell::stateless::tools::{BashExecArgs, names};
 
@@ -12,18 +12,21 @@ use super::classifier::{Classifier, Safety};
 
 /// Policy layer that gates every tool call.
 ///
-/// Wraps a shared `ToolPolicy` that can be updated at runtime by the daemon, and
-/// owns the `Classifier` used to resolve `Classify` decisions.
+/// Wraps a shared `ToolPolicy` (per-tool routing) and a shared `ExecPolicy`
+/// (per-command `bash_exec` overrides), both updatable at runtime by the daemon,
+/// and owns the `Classifier` used to resolve `Classify` decisions.
 #[derive(Clone, Debug)]
 pub struct AgentPolicy {
     policy: Arc<RwLock<ToolPolicy>>,
+    exec_policy: Arc<RwLock<ExecPolicy>>,
     classifier: Classifier,
 }
 
 impl AgentPolicy {
-    pub fn new(policy: Arc<RwLock<ToolPolicy>>) -> Self {
+    pub fn new(policy: Arc<RwLock<ToolPolicy>>, exec_policy: Arc<RwLock<ExecPolicy>>) -> Self {
         Self {
             policy,
+            exec_policy,
             classifier: Classifier::DEFAULT,
         }
     }
@@ -43,13 +46,21 @@ impl AgentPolicy {
             PolicyDecision::Classify => {
                 if tool_name == names::BASH_EXEC {
                     let args: BashExecArgs = serde_json::from_str(args_json)?;
+                    // Snapshot the exec-policy overrides for this one classification.
+                    let overrides = self
+                        .exec_policy
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
                     // Single boundary where the classifier's Safety decision is
                     // translated into the runtime's ToolDecision.
-                    Ok(match self.classifier.classify(&args.command) {
-                        Safety::ReadOnly => ToolDecision::Allow,
-                        Safety::NeedsApproval => ToolDecision::Ask,
-                        Safety::Reject { reason } => ToolDecision::Deny { reason },
-                    })
+                    Ok(
+                        match self.classifier.classify_with(&args.command, &overrides) {
+                            Safety::ReadOnly => ToolDecision::Allow,
+                            Safety::NeedsApproval => ToolDecision::Ask,
+                            Safety::Reject { reason } => ToolDecision::Deny { reason },
+                        },
+                    )
                 } else {
                     Ok(ToolDecision::Ask)
                 }
@@ -64,7 +75,10 @@ mod tests {
     use crate::config::default_tool_policy;
 
     fn make_policy() -> AgentPolicy {
-        AgentPolicy::new(Arc::new(RwLock::new(default_tool_policy())))
+        AgentPolicy::new(
+            Arc::new(RwLock::new(default_tool_policy())),
+            Arc::new(RwLock::new(ExecPolicy::default())),
+        )
     }
 
     #[test]
@@ -96,7 +110,7 @@ mod tests {
     #[test]
     fn policy_update_takes_effect() {
         let shared = Arc::new(RwLock::new(default_tool_policy()));
-        let policy = AgentPolicy::new(shared.clone());
+        let policy = AgentPolicy::new(shared.clone(), Arc::new(RwLock::new(ExecPolicy::default())));
 
         // Default: bash_background_read is allow.
         assert!(matches!(
