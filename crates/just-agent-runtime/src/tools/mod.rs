@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
@@ -29,6 +30,7 @@ pub use skill::{
 /// Context tools share the same `ContextStore` as the main loop.
 pub async fn build_tool_dispatch(
     ctx: Arc<Mutex<ContextStore>>,
+    workspace_root: PathBuf,
     env: HashMap<String, String>,
     notice_sink: Arc<dyn Fn(String) + Send + Sync>,
     exec_policy: Arc<RwLock<ExecPolicy>>,
@@ -49,7 +51,7 @@ pub async fn build_tool_dispatch(
     dispatch.add_tools(bash_exec_tool_set(backend))?;
     let ctx_dyn: Arc<Mutex<dyn AgenticContext>> = ctx;
     dispatch.add_tools(context::context_tool_set(ctx_dyn.clone(), exec_policy))?;
-    dispatch.add_tools(skill::file_pin_tool_set(ctx_dyn))?;
+    dispatch.add_tools(skill::file_pin_tool_set(ctx_dyn, workspace_root))?;
 
     Ok(dispatch)
 }

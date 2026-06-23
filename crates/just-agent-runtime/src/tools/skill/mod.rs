@@ -19,7 +19,7 @@
 pub mod promote;
 pub use promote::promote_skill_from_content;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -242,7 +242,8 @@ fn strip_frontmatter(content: &str) -> &str {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct FilePinArgs {
-    /// File path. Relative paths resolve against the workspace root.
+    /// File path. Absolute paths are used as-is; relative paths resolve against
+    /// the agent's workspace root.
     path: String,
     /// Label for the pinned item.
     label: String,
@@ -250,20 +251,24 @@ struct FilePinArgs {
 
 /// Reads a file from disk and pins its content into the agent's context.
 ///
-/// Strips YAML frontmatter if present. Relative paths resolve against the
-/// workspace root (current working directory). This is a general-purpose
-/// shortcut for the common pattern of reading a file and pinning it for
-/// cross-turn reference.
+/// Strips YAML frontmatter if present. An absolute path is used as-is; a
+/// relative path resolves against the agent's workspace root. This is a
+/// general-purpose shortcut for the common pattern of reading a file and
+/// pinning it for cross-turn reference.
 pub struct FilePinTool {
     ctx: Arc<Mutex<dyn AgenticContext>>,
+    workspace_root: PathBuf,
 }
 
 impl FilePinTool {
     /// Tool name exposed to the LLM and referenced by the policy layer.
     pub const NAME: &str = "read_file_and_pin";
 
-    pub fn new(ctx: Arc<Mutex<dyn AgenticContext>>) -> Self {
-        Self { ctx }
+    pub fn new(ctx: Arc<Mutex<dyn AgenticContext>>, workspace_root: PathBuf) -> Self {
+        Self {
+            ctx,
+            workspace_root,
+        }
     }
 }
 
@@ -286,7 +291,7 @@ impl LlmTool for FilePinTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path. Relative paths resolve against the workspace root."
+                    "description": "File path. Absolute paths are used as-is; relative paths resolve against the workspace root."
                 },
                 "label": {
                     "type": "string",
@@ -301,11 +306,9 @@ impl LlmTool for FilePinTool {
         let args: FilePinArgs =
             serde_json::from_str(args_json).context("read_file_and_pin: invalid arguments")?;
 
-        let path = std::path::Path::new(&args.path);
+        let path = Path::new(&args.path);
         let resolved = if path.is_relative() {
-            std::env::current_dir()
-                .context("failed to determine working directory")?
-                .join(path)
+            self.workspace_root.join(path)
         } else {
             path.to_path_buf()
         };
@@ -327,8 +330,11 @@ impl LlmTool for FilePinTool {
 }
 
 /// Creates the file-pin tool set.
-pub fn file_pin_tool_set(ctx: Arc<Mutex<dyn AgenticContext>>) -> Vec<Box<dyn LlmTool>> {
-    vec![Box::new(FilePinTool::new(ctx))]
+pub fn file_pin_tool_set(
+    ctx: Arc<Mutex<dyn AgenticContext>>,
+    workspace_root: PathBuf,
+) -> Vec<Box<dyn LlmTool>> {
+    vec![Box::new(FilePinTool::new(ctx, workspace_root))]
 }
 
 #[cfg(test)]

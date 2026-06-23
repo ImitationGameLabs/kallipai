@@ -125,6 +125,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
 
     let dispatch = build_tool_dispatch(
         args.store.clone(),
+        args.config.workspace_root.clone(),
         args.env.clone(),
         notice_sink,
         args.exec_policy.clone(),
