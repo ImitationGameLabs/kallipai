@@ -124,8 +124,8 @@ pub async fn submit_promote_request(
             "[Skill Promotion Request] Agent {id} requests to promote skill '{skill_name}' \
              to the shared directory.\n\
              Request ID: {request_id}\n\n\
-             Use `just-agent promote-request approve {request_id}` to approve\n\
-             or `just-agent promote-request deny {request_id} <reason>` to deny."
+             Use `just-agent skill promote approve {request_id}` to approve\n\
+             or `just-agent skill promote deny {request_id} <reason>` to deny."
         );
         for (root_id, entry) in registry.root_agents() {
             if let Err(e) = entry.agent.prompt_tx.try_send(notification.clone()) {

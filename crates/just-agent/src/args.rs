@@ -4,7 +4,7 @@ use just_agent_common::agentid::AgentId;
 #[derive(Parser)]
 #[command(
     name = "just-agent",
-    about = "Headless CLI to spawn, monitor, and orchestrate agents"
+    about = "Headless CLI for agents to coordinate with and manage other agents"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -18,41 +18,29 @@ pub enum Commands {
     /// Manage approvals
     #[command(subcommand)]
     Approval(ApprovalCommand),
-    /// Manage agent tool policy
+    /// Manage agent permissions and tool policy
     #[command(subcommand)]
     Policy(PolicyCommand),
-    /// Skill discovery
+    /// Skill discovery and promotion
     #[command(subcommand)]
     Skill(SkillCommand),
-    /// Manage skill promote requests (review-based promote flow)
-    #[command(subcommand)]
-    PromoteRequest(PromoteRequestCommand),
     /// Manage agent token budget
     #[command(subcommand)]
     Budget(BudgetCommand),
+    /// Manage this agent's direct subagents
+    #[command(subcommand)]
+    Aide(AideCommand),
 }
 
+/// Ungrouped per-agent ops, flattened into the top-level command list — they
+/// never appear as an "agent" group in `--help`.
 #[derive(Subcommand)]
 pub enum AgentCommand {
-    /// Spawn a new agent via daemon
-    Spawn(SpawnArgs),
-    /// Send message to agent
-    Send(SendArgs),
-    /// List agents (optionally only a superior's direct subagents)
-    List(ListArgs),
-    /// Remove an agent
-    Remove(IdArgs),
-    /// Stream agent events
-    Events(IdArgs),
+    /// Send a message to an agent
+    Message(MessageArgs),
     /// Show agent context usage
     Status(IdArgs),
-    /// Show agent permissions and tool policy
-    Permissions(IdArgs),
-    /// Interrupt current agent operation
-    Interrupt(IdArgs),
-    /// Update an agent's role and/or description (direct supervisor only)
-    Metadata(MetadataArgs),
-    /// Report this agent's current activity (self-only; reads JUST_AGENT_ID)
+    /// Report this agent's current activity (self-only)
     Activity(ActivityArgs),
 }
 
@@ -67,19 +55,13 @@ pub struct SpawnArgs {
     /// Optional initial prompt for the agent.
     #[arg(long)]
     pub prompt: Option<String>,
-    /// Short display label ("researcher"). Required for subagent spawns.
+    /// Short display label (e.g. "researcher"). Required by the daemon when
+    /// spawning a subordinate (the only spawn path: `aide spawn`).
     #[arg(long)]
     pub role: Option<String>,
     /// Longer prose: what this agent is for.
     #[arg(long)]
     pub description: Option<String>,
-}
-
-#[derive(Args, Default)]
-pub struct ListArgs {
-    /// Only list the direct subagents of this superior agent.
-    #[arg(long)]
-    pub created_by: Option<AgentId>,
 }
 
 #[derive(Args)]
@@ -102,7 +84,7 @@ pub struct ActivityArgs {
 }
 
 #[derive(Args)]
-pub struct SendArgs {
+pub struct MessageArgs {
     /// Agent ID.
     pub id: AgentId,
     /// Message to send.
@@ -171,7 +153,9 @@ pub struct ApprovalDenyArgs {
 
 #[derive(Subcommand)]
 pub enum PolicyCommand {
-    /// Show agent tool policy
+    /// Show full agent permissions and effective tool policy (a superset of `get`)
+    Show(IdArgs),
+    /// Show the bare agent tool-policy map (default decision + per-tool overrides)
     Get(IdArgs),
     /// Modify a single tool policy rule
     Set(PolicySetArgs),
@@ -207,6 +191,9 @@ pub enum SkillCommand {
     Paths(SkillPathsArgs),
     /// Show metadata for a specific skill
     Meta(SkillMetaArgs),
+    /// Manage skill promote requests (review-based promote flow)
+    #[command(subcommand)]
+    Promote(SkillPromoteCommand),
 }
 
 #[derive(Args)]
@@ -218,15 +205,11 @@ pub struct SkillMetaArgs {
     pub name: String,
 }
 
-// ---------------------------------------------------------------------------
-// Promote request commands (review-based promote flow)
-// ---------------------------------------------------------------------------
-
-/// Top-level promote-request commands used by agents via shell.
+/// Skill promotion requests (review-based promote flow).
 #[derive(Subcommand)]
-pub enum PromoteRequestCommand {
+pub enum SkillPromoteCommand {
     /// Submit a promote request for the current agent's local skill.
-    Submit(PromoteRequestSubmitArgs),
+    Submit(SkillPromoteSubmitArgs),
     /// List promote requests (open to all agents for visibility).
     List {
         /// Filter by status: pending, approved, denied.
@@ -253,7 +236,7 @@ pub enum PromoteRequestCommand {
 }
 
 #[derive(Args)]
-pub struct PromoteRequestSubmitArgs {
+pub struct SkillPromoteSubmitArgs {
     /// Skill name to promote (supports nested paths like code/refactoring).
     pub name: String,
 }
@@ -279,4 +262,25 @@ pub enum BudgetCommand {
 pub struct BudgetAmountArgs {
     /// Token amount (supports K, M, G suffixes, e.g. 100M, 500K, 1G).
     pub amount: String,
+}
+
+// ---------------------------------------------------------------------------
+// Aide commands — manage the current agent's (JUST_AGENT_ID) direct subagents
+// ---------------------------------------------------------------------------
+
+/// Manage the current agent's direct subagents. The acting superior is taken
+/// from the `JUST_AGENT_ID` env var, so these commands only make sense inside
+/// an agent context.
+#[derive(Subcommand)]
+pub enum AideCommand {
+    /// Spawn a direct subagent of the current agent
+    Spawn(SpawnArgs),
+    /// List the current agent's direct subagents
+    List,
+    /// Remove a direct subagent
+    Remove(IdArgs),
+    /// Interrupt a direct subagent's current operation
+    Interrupt(IdArgs),
+    /// Update a direct subagent's role and/or description
+    Metadata(MetadataArgs),
 }

@@ -71,6 +71,12 @@ directory — the shared directory is managed by operators.
 
 Keep skills concise — capture key decisions, pitfalls, and effective patterns.
 
+## Promoting Skills
+
+Use `just-agent skill promote submit <name>` to request promotion of a local
+skill to the shared directory. The request is reviewed by the root agent; you
+will be notified of the decision.
+
 # Behavioral Guidelines
 
 ## Gather Information

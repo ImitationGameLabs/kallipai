@@ -4,7 +4,6 @@ mod args;
 
 use anyhow::Result;
 use clap::Parser;
-use futures_util::StreamExt;
 use just_agent_client::{DaemonClient, PromoteDecision};
 use just_agent_common::agentid::AgentId;
 use just_agent_common::policy::{ExecDecision, PolicyDecision};
@@ -18,8 +17,8 @@ fn deny_reason_display(reason: &Option<String>) -> &str {
 }
 
 use args::{
-    AgentCommand, ApprovalCommand, BudgetCommand, Cli, Commands, PolicyCommand,
-    PromoteRequestCommand, SkillCommand,
+    AgentCommand, AideCommand, ApprovalCommand, BudgetCommand, Cli, Commands, PolicyCommand,
+    SkillCommand, SkillPromoteCommand,
 };
 
 /// Read agent ID from JUST_AGENT_ID env var.
@@ -36,72 +35,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Agent(cmd) => match cmd {
-            AgentCommand::Spawn(args) => {
-                let id = client
-                    .spawn(just_agent_common::protocol::CreateAgentRequest {
-                        workspace_root: args.workspace_root,
-                        skills: args.skills,
-                        prompt: args.prompt,
-                        created_by: std::env::var("JUST_AGENT_ID").ok().map(AgentId::from),
-                        role: args.role.unwrap_or_default(),
-                        description: args.description.unwrap_or_default(),
-                        max_tool_rounds: None,
-                    })
-                    .await?;
-                println!("{id}");
-            }
-            AgentCommand::Send(args) => {
+            AgentCommand::Message(args) => {
                 client.post_message(&args.id, &args.message).await?;
-            }
-            AgentCommand::List(args) => {
-                let agents = client.list_agents(args.created_by.as_ref()).await?;
-                if agents.is_empty() {
-                    println!("No agents running.");
-                } else {
-                    for a in &agents {
-                        // Fall back to the id when no role is set so every row is identifiable.
-                        let label = if a.role.is_empty() {
-                            a.id.to_string()
-                        } else {
-                            a.role.clone()
-                        };
-                        let mut line = format!("{}  {}  ws={}", label, a.state, a.workspace_root);
-                        if !a.description.is_empty() {
-                            line.push_str("  ");
-                            line.push_str(&a.description);
-                        }
-                        if !a.activity.is_empty() {
-                            line.push_str("  [");
-                            line.push_str(&a.activity);
-                            line.push(']');
-                        }
-                        println!("{line}");
-                    }
-                }
-            }
-            AgentCommand::Remove(args) => {
-                if let Err(e) = client.remove_agent(&args.id).await {
-                    let msg = e.to_string();
-                    if msg.contains("409") || msg.contains("busy") || msg.contains("subagent") {
-                        eprintln!(
-                            "Cannot remove agent: {}. \
-                             Try: just-agent interrupt {}",
-                            msg.to_lowercase(),
-                            args.id
-                        );
-                    }
-                    return Err(e);
-                }
-                println!("Agent {} archived.", args.id);
-            }
-            AgentCommand::Events(args) => {
-                let mut stream = client.event_stream(&args.id).await?;
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(event) => println!("{}", serde_json::to_string(&event)?),
-                        Err(e) => eprintln!("SSE error: {e}"),
-                    }
-                }
             }
             AgentCommand::Status(args) => {
                 let status = client.agent_status(&args.id).await?;
@@ -125,53 +60,10 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            AgentCommand::Permissions(args) => {
-                let perms = client.agent_permissions(&args.id).await?;
-                println!("max_depth: {}", perms.max_depth);
-                println!("workspace_root: {}", perms.workspace_root);
-                if let Some(sup) = &perms.created_by {
-                    println!("created_by: {sup}");
-                }
-                println!();
-                println!("default: {}", perms.tool_policy.default);
-                println!();
-                println!("tool policy:");
-                for (tool, decision) in &perms.tool_policy.tools {
-                    println!("  {tool}: {decision}");
-                }
-            }
-            AgentCommand::Interrupt(args) => {
-                client.interrupt_agent(&args.id).await?;
-                println!("Agent {} interrupted.", args.id);
-            }
-            AgentCommand::Metadata(args) => {
-                let updated = client
-                    .update_agent_metadata(
-                        &args.id,
-                        just_agent_common::protocol::UpdateAgentMetadataRequest {
-                            role: args.role,
-                            description: args.description,
-                        },
-                    )
-                    .await?;
-                println!(
-                    "{}  role={}  description={}",
-                    updated.id,
-                    if updated.role.is_empty() {
-                        "(unset)"
-                    } else {
-                        &updated.role
-                    },
-                    if updated.description.is_empty() {
-                        "(unset)"
-                    } else {
-                        &updated.description
-                    },
-                );
-            }
             AgentCommand::Activity(args) => {
                 // Activity is self-reported: the target is always the calling
-                // agent (JUST_AGENT_ID), like `spawn` reads `created_by` from env.
+                // agent (JUST_AGENT_ID); the daemon only accepts this from the
+                // agent itself or an operator.
                 let id = agent_id_from_env()?;
                 client
                     .update_activity(
@@ -183,6 +75,49 @@ async fn main() -> Result<()> {
                     .await?;
             }
         },
+        Commands::Aide(cmd) => {
+            let current = agent_id_from_env()?;
+            match cmd {
+                AideCommand::Spawn(args) => {
+                    let id = client
+                        .spawn(just_agent_common::protocol::CreateAgentRequest {
+                            workspace_root: args.workspace_root,
+                            skills: args.skills,
+                            prompt: args.prompt,
+                            created_by: Some(current),
+                            role: args.role.unwrap_or_default(),
+                            description: args.description.unwrap_or_default(),
+                            max_tool_rounds: None,
+                        })
+                        .await?;
+                    println!("{id}");
+                }
+                AideCommand::List => {
+                    let agents = client.list_agents(Some(&current)).await?;
+                    print_agent_list(&agents, "No direct subagents.");
+                }
+                AideCommand::Remove(args) => {
+                    annotate_remove_error(client.remove_agent(&args.id).await, &args.id)?;
+                    println!("Agent {} archived.", args.id);
+                }
+                AideCommand::Interrupt(args) => {
+                    client.interrupt_agent(&args.id).await?;
+                    println!("Agent {} interrupted.", args.id);
+                }
+                AideCommand::Metadata(args) => {
+                    let updated = client
+                        .update_agent_metadata(
+                            &args.id,
+                            just_agent_common::protocol::UpdateAgentMetadataRequest {
+                                role: args.role,
+                                description: args.description,
+                            },
+                        )
+                        .await?;
+                    print_agent_summary(&updated);
+                }
+            }
+        }
         Commands::Approval(cmd) => match cmd {
             ApprovalCommand::List(args) => {
                 let status = if args.all {
@@ -226,6 +161,21 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Policy(cmd) => match cmd {
+            PolicyCommand::Show(args) => {
+                let perms = client.agent_permissions(&args.id).await?;
+                println!("max_depth: {}", perms.max_depth);
+                println!("workspace_root: {}", perms.workspace_root);
+                if let Some(sup) = &perms.created_by {
+                    println!("created_by: {sup}");
+                }
+                println!();
+                println!("default: {}", perms.tool_policy.default);
+                println!();
+                println!("tool policy:");
+                for (tool, decision) in &perms.tool_policy.tools {
+                    println!("  {tool}: {decision}");
+                }
+            }
             PolicyCommand::Get(args) => {
                 let policy = client.get_policy(&args.id).await?;
                 println!("default: {}", policy.default);
@@ -284,77 +234,77 @@ async fn main() -> Result<()> {
                     println!("description: {desc}");
                 }
             }
-        },
-        Commands::PromoteRequest(cmd) => match cmd {
-            PromoteRequestCommand::Submit(args) => {
-                let id = agent_id_from_env()?;
-                let resp = client.submit_promote_request(&id, &args.name).await?;
-                println!("Skill: {}", resp.skill_name);
-                println!("Request ID: {}", resp.request_id);
-                println!("Status: {}", resp.status);
-                if resp.has_existing {
-                    println!("Existing: shared skill will be overwritten on approval");
-                } else {
-                    println!("Existing: (new skill)");
-                }
-            }
-            PromoteRequestCommand::List { status } => {
-                let resp = client.list_promote_requests(status.as_deref()).await?;
-                if resp.items.is_empty() {
-                    println!("No promote requests.");
-                } else {
-                    for r in &resp.items {
-                        println!(
-                            "{}  {}  {}  by:{}  {}",
-                            r.id, r.skill_name, r.status, r.requested_by, r.created_at
-                        );
-                        if let Some(desc) = &r.description {
-                            println!("  description: {desc}");
-                        }
-                        if r.has_existing {
-                            println!("  has_existing: true");
-                        }
-                        if r.status == SkillPromoteStatus::Denied {
-                            println!("  deny_reason: {}", deny_reason_display(&r.deny_reason));
-                        }
+            SkillCommand::Promote(cmd) => match cmd {
+                SkillPromoteCommand::Submit(args) => {
+                    let id = agent_id_from_env()?;
+                    let resp = client.submit_promote_request(&id, &args.name).await?;
+                    println!("Skill: {}", resp.skill_name);
+                    println!("Request ID: {}", resp.request_id);
+                    println!("Status: {}", resp.status);
+                    if resp.has_existing {
+                        println!("Existing: shared skill will be overwritten on approval");
+                    } else {
+                        println!("Existing: (new skill)");
                     }
-                    println!("(total: {})", resp.total);
                 }
-            }
-            PromoteRequestCommand::Show { id } => {
-                let resp = client.show_promote_request(&id).await?;
-                println!("id: {}", resp.id);
-                println!("skill: {}", resp.skill_name);
-                println!("status: {}", resp.status);
-                println!("requested_by: {}", resp.requested_by);
-                println!("has_existing: {}", resp.has_existing);
-                if let Some(desc) = &resp.description {
-                    println!("description: {desc}");
+                SkillPromoteCommand::List { status } => {
+                    let resp = client.list_promote_requests(status.as_deref()).await?;
+                    if resp.items.is_empty() {
+                        println!("No promote requests.");
+                    } else {
+                        for r in &resp.items {
+                            println!(
+                                "{}  {}  {}  by:{}  {}",
+                                r.id, r.skill_name, r.status, r.requested_by, r.created_at
+                            );
+                            if let Some(desc) = &r.description {
+                                println!("  description: {desc}");
+                            }
+                            if r.has_existing {
+                                println!("  has_existing: true");
+                            }
+                            if r.status == SkillPromoteStatus::Denied {
+                                println!("  deny_reason: {}", deny_reason_display(&r.deny_reason));
+                            }
+                        }
+                        println!("(total: {})", resp.total);
+                    }
                 }
-                if resp.status == SkillPromoteStatus::Denied {
-                    println!("deny_reason: {}", deny_reason_display(&resp.deny_reason));
+                SkillPromoteCommand::Show { id } => {
+                    let resp = client.show_promote_request(&id).await?;
+                    println!("id: {}", resp.id);
+                    println!("skill: {}", resp.skill_name);
+                    println!("status: {}", resp.status);
+                    println!("requested_by: {}", resp.requested_by);
+                    println!("has_existing: {}", resp.has_existing);
+                    if let Some(desc) = &resp.description {
+                        println!("description: {desc}");
+                    }
+                    if resp.status == SkillPromoteStatus::Denied {
+                        println!("deny_reason: {}", deny_reason_display(&resp.deny_reason));
+                    }
+                    if let Some(old) = &resp.old_content {
+                        println!("\n--- old content ---");
+                        println!("{old}");
+                    } else {
+                        println!("\n--- old content: (none, new skill) ---");
+                    }
+                    println!("\n--- new content ---");
+                    println!("{}", resp.new_content);
                 }
-                if let Some(old) = &resp.old_content {
-                    println!("\n--- old content ---");
-                    println!("{old}");
-                } else {
-                    println!("\n--- old content: (none, new skill) ---");
+                SkillPromoteCommand::Approve { id } => {
+                    client
+                        .respond_promote_request(&id, PromoteDecision::Approve, None)
+                        .await?;
+                    println!("Approved.");
                 }
-                println!("\n--- new content ---");
-                println!("{}", resp.new_content);
-            }
-            PromoteRequestCommand::Approve { id } => {
-                client
-                    .respond_promote_request(&id, PromoteDecision::Approve, None)
-                    .await?;
-                println!("Approved.");
-            }
-            PromoteRequestCommand::Deny { id, reason } => {
-                client
-                    .respond_promote_request(&id, PromoteDecision::Deny, reason.as_deref())
-                    .await?;
-                println!("Denied.");
-            }
+                SkillPromoteCommand::Deny { id, reason } => {
+                    client
+                        .respond_promote_request(&id, PromoteDecision::Deny, reason.as_deref())
+                        .await?;
+                    println!("Denied.");
+                }
+            },
         },
         Commands::Budget(cmd) => match cmd {
             BudgetCommand::Get => {
@@ -398,4 +348,69 @@ fn print_approval_entry(a: &just_agent_common::protocol::ApprovalEntry) {
         println!("deny_reason: {r}");
     }
     println!("created_at: {}", a.created_at);
+}
+
+/// Display label for an agent: its role, falling back to the id when no role
+/// is set so every row is identifiable.
+fn agent_label(a: &just_agent_common::protocol::AgentSummary) -> String {
+    if a.role.is_empty() {
+        a.id.to_string()
+    } else {
+        a.role.clone()
+    }
+}
+
+/// Print a list of agents one row per line, or `empty_msg` when there are none.
+fn print_agent_list(agents: &[just_agent_common::protocol::AgentSummary], empty_msg: &str) {
+    if agents.is_empty() {
+        println!("{empty_msg}");
+        return;
+    }
+    for a in agents {
+        let mut line = format!("{}  {}  ws={}", agent_label(a), a.state, a.workspace_root);
+        if !a.description.is_empty() {
+            line.push_str("  ");
+            line.push_str(&a.description);
+        }
+        if !a.activity.is_empty() {
+            line.push_str("  [");
+            line.push_str(&a.activity);
+            line.push(']');
+        }
+        println!("{line}");
+    }
+}
+
+/// Print an agent's role/description summary (e.g. after a metadata update).
+fn print_agent_summary(updated: &just_agent_common::protocol::AgentSummary) {
+    println!(
+        "{}  role={}  description={}",
+        updated.id,
+        if updated.role.is_empty() {
+            "(unset)"
+        } else {
+            &updated.role
+        },
+        if updated.description.is_empty() {
+            "(unset)"
+        } else {
+            &updated.description
+        },
+    );
+}
+
+/// Propagate a `remove_agent` result, printing a remediation hint to stderr
+/// first if the failure looks like the agent is busy or has subagents.
+fn annotate_remove_error(result: anyhow::Result<()>, id: &AgentId) -> anyhow::Result<()> {
+    if let Err(err) = &result {
+        let msg = err.to_string();
+        if msg.contains("409") || msg.contains("busy") || msg.contains("subagent") {
+            eprintln!(
+                "Cannot remove agent: {}. Try: just-agent aide interrupt {}",
+                msg.to_lowercase(),
+                id
+            );
+        }
+    }
+    result
 }

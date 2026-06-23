@@ -1562,7 +1562,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "futures-util",
  "just-agent-client",
  "just-agent-common",
  "serde_json",
