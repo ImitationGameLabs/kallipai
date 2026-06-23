@@ -9,7 +9,7 @@ use just_agent_common::agentid::AgentId;
 /// error and the client exits non-zero. Only the message differs.
 ///
 /// This lives with [`Session`] because it is a session-lifecycle outcome, the
-/// peer of [`Session::cleanup`](Self::cleanup).
+/// peer of [`Session::cleanup`].
 #[derive(Debug)]
 pub enum StreamEnd {
     /// The daemon closed the stream: graceful shutdown or agent removal.

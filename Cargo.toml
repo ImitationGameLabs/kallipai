@@ -75,7 +75,6 @@ pulldown-cmark = "0.13.3"
 comfy-table = "7.2.2"
 syntect = "5.3"
 dirs = "6"
-unicode-width = "0.2.2"
 unicode-normalization = "0.1"
 rpassword = "7.5"
 time = { version = "0.3", features = ["serde-well-known"] }
