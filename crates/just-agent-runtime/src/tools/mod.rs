@@ -36,6 +36,7 @@ pub async fn build_tool_dispatch(
     exec_policy: Arc<RwLock<ExecPolicy>>,
 ) -> Result<ToolDispatcher> {
     let backend = StatelessBuilder::new()
+        .initial_cwd(workspace_root.clone())
         .envs(env)
         // The exit code is intentionally omitted from the notice — the agent reads it
         // (and the output) via `bash_background_read`. Keeping the notice minimal avoids
