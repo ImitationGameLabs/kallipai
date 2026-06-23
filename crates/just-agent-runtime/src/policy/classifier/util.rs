@@ -16,7 +16,7 @@ pub(super) fn word_literal_value(word: &Node) -> Option<&str> {
     }
 }
 
-pub(super) fn is_literal_part(node: &Node) -> bool {
+fn is_literal_part(node: &Node) -> bool {
     matches!(&node.kind, rable::NodeKind::WordLiteral { .. })
 }
 
@@ -25,17 +25,25 @@ pub(super) fn extract_command_name(word: &Node) -> Option<&str> {
 }
 
 pub(super) fn has_any_flag(words: &[Node], flags: &[&str]) -> bool {
-    words
-        .iter()
-        .skip(1)
-        .any(|w| word_literal_value(w).is_some_and(|v| flags.contains(&v)))
+    words.iter().skip(1).any(|w| {
+        word_literal_value(w)
+            .map(strip_surrounding_quotes)
+            .is_some_and(|v| flags.contains(&v))
+    })
 }
 
-pub(super) fn has_subcommand_and_flag(words: &[Node], subcmd: &str, flag: &str) -> bool {
-    words.len() >= 3
-        && word_literal_value(&words[1]).is_some_and(|v| v == subcmd)
-        && words
-            .iter()
-            .skip(2)
-            .any(|w| word_literal_value(w).is_some_and(|v| v == flag))
+/// Strip one layer of surrounding matching quotes from a literal word value.
+///
+/// `rable` keeps quotes in `Word.value` (e.g. `'-delete'`), so flag matching must
+/// compare the unquoted form — otherwise a quoted mutating flag (`find '-delete'`)
+/// evades its constraint and auto-runs.
+fn strip_surrounding_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if s.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[s.len() - 1]);
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
 }

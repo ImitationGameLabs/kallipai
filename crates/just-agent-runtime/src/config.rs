@@ -71,7 +71,9 @@ pub fn default_tool_policy() -> ToolPolicy {
     use std::collections::BTreeMap;
     let mut tools = BTreeMap::new();
     tools.insert(names::BG_READ.into(), PolicyDecision::Allow);
-    tools.insert(names::BG_KILL.into(), PolicyDecision::Ask);
+    // The agent only kills background tasks it spawned itself (task_id-scoped),
+    // so there is no cross-agent or user-workspace risk worth gating on.
+    tools.insert(names::BG_KILL.into(), PolicyDecision::Allow);
     tools.insert(names::BASH_EXEC.into(), PolicyDecision::Classify);
     tools.insert(ContextPinTool::NAME.into(), PolicyDecision::Allow);
     tools.insert(ContextUnpinTool::NAME.into(), PolicyDecision::Allow);

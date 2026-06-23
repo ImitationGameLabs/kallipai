@@ -2,21 +2,23 @@
 //!
 //! rable treats `bash -c "sudo rm -rf /"` as a Command with opaque string
 //! arguments — the inner command is NOT recursively parsed. This module
-//! detects shell interpreters and eval-like commands, strips quotes from
-//! the string argument, re-parses it with rable, and classifies the inner AST.
+//! detects shell interpreters and eval-like commands, strips quotes from the
+//! string argument, re-parses it with rable, and classifies the inner AST.
 
 use rable::Node;
 
-use super::super::ToolDecision;
-use super::{lists, util};
+use super::Safety;
+use super::catalog::{self, CommandSpec};
+use super::{util, walker};
 
 pub(super) fn classify_interpreter_delegate(
+    catalog: &'static [CommandSpec],
     cmd_name: &str,
     words: &[Node],
-) -> Option<ToolDecision> {
-    let inner_source = if lists::SHELL_INTERPRETERS.contains(&cmd_name) {
+) -> Option<Safety> {
+    let inner_source = if catalog::SHELL_INTERPRETERS.contains(&cmd_name) {
         find_c_flag_argument(words)?
-    } else if lists::EVAL_COMMANDS.contains(&cmd_name) {
+    } else if catalog::EVAL_COMMANDS.contains(&cmd_name) {
         collect_remaining_args(words)?
     } else {
         return None;
@@ -25,8 +27,8 @@ pub(super) fn classify_interpreter_delegate(
     let inner_source = strip_quotes(&inner_source);
 
     match rable::parse(&inner_source, false) {
-        Ok(nodes) => Some(super::walker::classify_nodes(&nodes)),
-        Err(_) => Some(ToolDecision::Deny {
+        Ok(nodes) => Some(walker::classify_nodes(catalog, &nodes)),
+        Err(_) => Some(Safety::Reject {
             reason: "failed to parse inner command for interpreter delegate".into(),
         }),
     }
@@ -50,7 +52,7 @@ fn find_c_flag_argument(words: &[Node]) -> Option<String> {
         if found_c {
             return Some(val.to_owned());
         }
-        if lists::COMMAND_STRING_FLAGS.contains(&val) {
+        if catalog::COMMAND_STRING_FLAGS.contains(&val) {
             found_c = true;
         }
     }

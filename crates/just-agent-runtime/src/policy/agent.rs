@@ -8,19 +8,24 @@ use just_agent_common::policy::{PolicyDecision, ToolPolicy};
 use just_agent_shell::stateless::tools::{BashExecArgs, names};
 
 use super::ToolDecision;
-use super::classifier;
+use super::classifier::{Classifier, Safety};
 
 /// Policy layer that gates every tool call.
 ///
-/// Wraps a shared `ToolPolicy` that can be updated at runtime by the daemon.
+/// Wraps a shared `ToolPolicy` that can be updated at runtime by the daemon, and
+/// owns the `Classifier` used to resolve `Classify` decisions.
 #[derive(Clone, Debug)]
 pub struct AgentPolicy {
     policy: Arc<RwLock<ToolPolicy>>,
+    classifier: Classifier,
 }
 
 impl AgentPolicy {
     pub fn new(policy: Arc<RwLock<ToolPolicy>>) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            classifier: Classifier::DEFAULT,
+        }
     }
 
     pub fn evaluate(&self, tool_name: &str, args_json: &str) -> Result<ToolDecision> {
@@ -38,7 +43,13 @@ impl AgentPolicy {
             PolicyDecision::Classify => {
                 if tool_name == names::BASH_EXEC {
                     let args: BashExecArgs = serde_json::from_str(args_json)?;
-                    Ok(classifier::classify_command(&args.command))
+                    // Single boundary where the classifier's Safety decision is
+                    // translated into the runtime's ToolDecision.
+                    Ok(match self.classifier.classify(&args.command) {
+                        Safety::ReadOnly => ToolDecision::Allow,
+                        Safety::NeedsApproval => ToolDecision::Ask,
+                        Safety::Reject { reason } => ToolDecision::Deny { reason },
+                    })
                 } else {
                     Ok(ToolDecision::Ask)
                 }
@@ -68,7 +79,7 @@ mod tests {
     #[test]
     fn classify_delegates_to_classifier_for_bash_exec() {
         let policy = make_policy();
-        // "ls" is on the read-only allowlist → Allow via classifier.
+        // "ls" is in the read-only catalog → Allow via classifier.
         let decision = policy
             .evaluate(names::BASH_EXEC, r#"{"command":"ls"}"#)
             .unwrap();

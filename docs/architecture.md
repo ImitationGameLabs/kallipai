@@ -94,7 +94,7 @@ Tools go through a three-layer policy before execution:
 | Tool                       | Decision                   |
 | -------------------------- | -------------------------- |
 | `bash_background_read`     | Allow (read-only)          |
-| `bash_background_kill`     | Ask                        |
+| `bash_background_kill`     | Allow (agent-spawned task) |
 | `bash_exec`                | Delegate to AST classifier |
 | Context tools, skill tools | Allow                      |
 | Unknown tools              | Ask                        |
@@ -106,14 +106,29 @@ Tools go through a three-layer policy before execution:
 - **Ask** — enqueue in `ApprovalStore`, return a deferred reference. The LLM
   continues working and can redeem later after external approval.
 
-**Layer 3 — Shell command classifier** uses AST parsing (via `rable`) to
-analyze shell commands:
+**Layer 3 — Shell command classifier** (`policy/classifier`) is a self-contained
+module that parses commands via `rable` and returns its own `Safety` decision
+(`ReadOnly` / `NeedsApproval` / `Reject`), which the policy layer maps to
+`Allow` / `Ask` / `Deny`. It is fail-closed: unparseable input is `Reject`.
 
-- Recognizes dangerous commands (`sudo`, `dd`, `mkfs`, `rm -rf`, etc.)
-- Detects shell delegation (`bash -c`, `sh -c`) and re-parses inner commands
-- Handles pipelines, redirects, and variable assignments
-- Maintains an allowlist for read-only commands (`ls`, `cat`, `grep`, `find`,
-  etc.)
+- **Explicit read-only catalog.** A command is auto-approved only if it appears
+  in the catalog (`catalog::READ_ONLY_CATALOG`) and satisfies its constraints.
+  Anything not listed — including every mutating/dangerous command (`sudo`,
+  `dd`, `rm`, …) — defers to approval by default. There is no separate
+  "dangerous list".
+- **Per-command constraints.** Some catalog entries carry constraints: a flag
+  that breaks read-only-ness (`find -delete`, `sort -o`, `yq -i`), a predicate
+  (`env <cmd>`), or a read-only subcommand allowlist (`git log`/`status`/… are
+  read-only; other `git` subcommands defer).
+- **Composition is the OR of components.** A list (`&&`/`;`/`||`) or pipeline
+  (`|`) is read-only iff every component is. (Safe because the runtime shell is
+  a stateless one-shot process.) The background `&` operator is the exception:
+  any backgrounded item defers to approval, since the runtime can neither time
+  out nor observe it.
+- Detects shell delegation (`bash -c`, `sh -c`, `eval`, `exec`, `source`, `.`)
+  and re-parses the inner command.
+- Flags sensitive environment-variable overrides (`PATH`, `LD_PRELOAD`, …) and
+  write/append redirects (`>`, `>>`).
 
 ### Approval flow
 
