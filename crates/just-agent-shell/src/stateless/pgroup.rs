@@ -91,14 +91,21 @@ mod tests {
 
         kill_tree(&mut child).await.unwrap();
 
-        // The whole group (leader + the backgrounded sleep) must be gone.
-        // killpg(pgid, None) == signal 0; it returns ESRCH when no process
-        // remains in the group. Scoped to this group — no cross-test interference.
-        let result = killpg(pgid, None);
-        assert_eq!(
-            result,
-            Err(Errno::ESRCH),
-            "process group still has living members"
-        );
+        // SIGTERM terminates the backgrounded `sleep`, but it lingers as a zombie
+        // until the leader's exit reparents it to init (or the nearest subreaper),
+        // which reaps it a moment later. `killpg(signal 0)` still sees that zombie,
+        // so the group being empty must be polled for, not asserted instantaneously.
+        // Scoped to this group — no cross-test interference.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if matches!(killpg(pgid, None), Err(Errno::ESRCH)) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process group still has living members after grace period"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }
