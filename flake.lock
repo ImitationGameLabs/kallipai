@@ -47,11 +47,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1782087939,
-        "narHash": "sha256-Y+WnNEACvkT3gNQ+F2lQtP/yza77pgU1Cf4iV4rtBoA=",
+        "lastModified": 1782200283,
+        "narHash": "sha256-DBsCUJcLuZAbBFvnGv3EIWTtbxcH6iEr6u4WF92gDuc=",
         "owner": "ImitationGameLabs",
         "repo": "aifed",
-        "rev": "7619a6973abd3ceec95654f21abd78f1ef73381d",
+        "rev": "b7ed68bff15fa773b0105393890f2aa6ee0ebf43",
         "type": "github"
       },
       "original": {

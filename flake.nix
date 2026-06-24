@@ -17,8 +17,9 @@
     };
 
     # aifed: intended process-level dep (shell-out, not a Cargo dep); runtime
-    # adoption pending. devShell consumes packages.${system}.aifed; packages
-    # re-exports aifed-tarball where aifed provides it.
+    # adoption pending. Consumed via overlays.default, so pkgs.aifed is the
+    # single source of truth (identical store path to `nix build .#aifed`).
+    # packages re-exports aifed-tarball where aifed provides it.
     aifed = {
       url = "github:ImitationGameLabs/aifed";
       inputs = {
@@ -44,7 +45,10 @@
         let
           pkgs = import inputs.nixpkgs {
             inherit system;
-            overlays = [ (import inputs.rust-overlay) ];
+            overlays = [
+              (import inputs.rust-overlay)
+              inputs.aifed.overlays.default
+            ];
           };
 
           root = ./.;
@@ -107,9 +111,7 @@
                 bashInteractive
               ]
               # aifed is Linux-only; keep it out of the darwin devShell.
-              ++ lib.optionals pkgs.stdenv.isLinux [
-                inputs.aifed.packages.${system}.aifed
-              ];
+              ++ lib.optionals pkgs.stdenv.isLinux [ aifed ];
           };
         };
     };
