@@ -1,5 +1,6 @@
 mod agent;
 mod budget;
+mod dirlock;
 mod restore;
 pub use restore::restore_agents;
 #[cfg(test)]
@@ -61,6 +62,13 @@ pub fn router() -> Router<SharedState> {
             "/agents/{id}/activity",
             axum::routing::put(agent::update_activity),
         )
+        .route(
+            "/agents/{id}/dirlocks",
+            axum::routing::post(dirlock::acquire)
+                .delete(dirlock::release)
+                .get(dirlock::status),
+        )
+        .route("/dirlocks", axum::routing::get(dirlock::who))
         .route(
             "/budget",
             axum::routing::get(budget::get_budget).post(budget::update_budget),

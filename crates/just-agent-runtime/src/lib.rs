@@ -2,6 +2,7 @@ pub mod agent_task;
 pub mod approval;
 pub mod config;
 pub mod context;
+pub mod dirlock;
 mod env_util;
 pub mod event;
 mod failover;

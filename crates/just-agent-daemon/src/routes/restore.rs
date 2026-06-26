@@ -203,6 +203,50 @@ fn validate_exec_policy_from_chain(
     Ok(())
 }
 
+/// Validate the restored agent's `PermissionClass` against its tier ceiling and
+/// the supervisor chain (§2.3 ceiling invariant). Mirrors the policy/exec
+/// validators: the agent's class must not exceed its model tier's ceiling nor
+/// its immediate supervisor's, and the chain must be monotonic. This is the
+/// restore-side guard against a tampered `meta.json` elevating a child above
+/// its parent — depth monotonicity alone does NOT imply this (the tier 0/1 and
+/// 2/3 plateaus).
+fn validate_permission_class_from_chain(
+    agent_id: &AgentId,
+    class: just_agent_runtime::config::PermissionClass,
+    depth: usize,
+    chain: &[ChainNode],
+) -> anyhow::Result<()> {
+    use just_agent_runtime::config::PermissionClass;
+
+    let ceiling = PermissionClass::ceiling_for_tier(depth);
+    if class > ceiling {
+        anyhow::bail!(
+            "agent {agent_id}: permission class {class:?} exceeds its tier ceiling {ceiling:?}"
+        );
+    }
+    if let Some(supervisor) = chain.first() {
+        let supervisor_class = supervisor.meta.permissions_class;
+        if class > supervisor_class {
+            anyhow::bail!(
+                "agent {agent_id}: permission class {class:?} exceeds supervisor's {supervisor_class:?}"
+            );
+        }
+    }
+    for window in chain.windows(2) {
+        let (child, parent) = (
+            window[0].meta.permissions_class,
+            window[1].meta.permissions_class,
+        );
+        if child > parent {
+            anyhow::bail!(
+                "agent {}: permission class {child:?} exceeds its supervisor's {parent:?}",
+                window[0].agent_id
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Restore a single persisted agent to a running agent.
 async fn restore_one(
     p: persistence::PendingRestore,
@@ -217,6 +261,13 @@ async fn restore_one(
     config.created_by = p.meta.created_by.clone();
     config.role = p.meta.role.clone();
     config.description = p.meta.description.clone();
+    config.permissions_class = p.meta.permissions_class;
+
+    // Same data-dir overlap guard as `create_agent` (bidirectional, fail-closed).
+    // An agent persisted before this guard existed with an overlapping workspace
+    // is skipped here rather than restored into an unsafe configuration; its
+    // subtree is skipped too (see `restore_agents` semantics).
+    persistence::ensure_workspace_disjoint(&config.workspace_root)?;
 
     let tool_policy = index
         .get_policy(&p.agent_id)
@@ -228,6 +279,8 @@ async fn restore_one(
     if let Some(ref supervisor_id) = p.meta.created_by {
         let chain = load_supervisor_chain(supervisor_id, index)?;
         config.permissions.max_depth = validate_depth_from_chain(&p.meta.workspace_root, &chain)?;
+        let depth = config.permissions.depth();
+        validate_permission_class_from_chain(&p.agent_id, config.permissions_class, depth, &chain)?;
         validate_policy_from_chain(&p.agent_id, &tool_policy, &chain)?;
         validate_exec_policy_from_chain(&p.agent_id, &exec_policy, &chain)?;
     }

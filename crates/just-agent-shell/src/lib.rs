@@ -40,6 +40,19 @@ mod backend;
 // only as `pub(crate)`; keeping the module private prevents accidental leakage.
 mod compat;
 mod error;
+/// Linux-only landlock + mount-ns readonly-hole enforcement for spawned
+/// processes. A thin composition layer: [`landlock::apply`] wires the owning
+/// agent's directory-lock decision into the spawn-independent `prepare_*`/
+/// `install_*` primitives of the `libsandbox` crate (landlock ruleset + mount-ns
+/// readonly-holes), plus just-agent's own seccomp denylist as the last step.
+/// The stateless backend is the caller that composes it.
+#[cfg(all(target_os = "linux", feature = "landlock"))]
+pub mod landlock;
+/// Linux-only seccomp denylist (defense-in-depth on top of landlock): blocks a
+/// small set of rare high-risk syscalls. Sibling to `landlock`; layered on as
+/// the last `pre_exec` step by `landlock::apply` when the feature is on.
+#[cfg(all(target_os = "linux", feature = "seccomp"))]
+pub mod seccomp;
 pub mod session;
 pub mod stateless;
 

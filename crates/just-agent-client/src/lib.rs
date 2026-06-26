@@ -1,7 +1,7 @@
 pub mod client;
 pub mod types;
 
-pub use client::{DaemonClient, DaemonClientBuilder};
+pub use client::{DaemonClient, DaemonClientBuilder, DirLockAcquireResponse, DirLockWhoResponse};
 pub use just_agent_common::agentid::AgentId;
 pub use just_agent_common::approval::{ApprovalStatus, ToolCallContent};
 pub use just_agent_common::policy::{ExecDecision, ExecPolicy, PolicyDecision, ToolPolicy};

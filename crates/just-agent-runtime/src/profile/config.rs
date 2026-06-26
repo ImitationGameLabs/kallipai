@@ -144,6 +144,21 @@ fn config_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
 }
 
+/// The directory holding `profiles.toml` (and thus potentially API keys) — the
+/// path a sandbox hide-hole should overlay so a broad-read agent cannot read
+/// credentials. Mirrors the loader's path resolution: honors
+/// `JUST_AGENT_PROFILES_FILE` (hides its parent, covering custom locations) else
+/// the default `<config_dir>/just-agent`. Returns `None` only when neither
+/// `XDG_CONFIG_HOME` nor `HOME` is set.
+pub fn profiles_config_dir() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os(PROFILES_FILE_ENV) {
+        // Hide the directory containing the explicit file (covers custom locations
+        // a Guest could otherwise `cat`).
+        return PathBuf::from(p).parent().map(Path::to_path_buf);
+    }
+    config_dir().map(|d| d.join("just-agent"))
+}
+
 /// Warn (non-fatal) if the config file is readable by group/other — it holds API keys.
 fn check_file_mode(path: &Path) {
     #[cfg(unix)]

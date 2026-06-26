@@ -33,6 +33,12 @@ async-trait = "0.1.89"
 async-stream = "0.3.6"
 # `signal` transitively enables `process` (for `nix::unistd::Pid`).
 nix = { version = "0.31", features = ["signal"] }
+# Linux-first sandbox toolbox (landlock ruleset + mount-ns composable
+# `prepare_*`/`install_*` primitives). Used only behind the `landlock` feature of
+# just-agent-shell, which is Linux-only. `default-features = false` drops its
+# tokio proxy runtime — we only consume the spawn-independent primitives.
+libsandbox = { git = "https://github.com/ImitationGameLabs/libsandbox-rs.git", rev = "979de21ae3f8a05d7efa0ff891343380b3622473", default-features = false }
+libc = "0.2"
 futures-core = "0.3.32"
 futures-util = "0.3.32"
 regex = "1.12.3"

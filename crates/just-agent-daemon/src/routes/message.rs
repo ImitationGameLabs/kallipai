@@ -74,7 +74,11 @@ pub async fn send_message(
         info!(id = %id, "reactivating agent");
         entry.agent.agent_handle.abort();
         entry.agent.bridge_handle.abort();
-
+        // Release the dead incarnation's directory write-locks before re-spawn,
+        // so the new incarnation starts with an empty lock set and any peer it
+        // was blocking is freed. Reactivation does NOT auto-re-acquire the
+        // workspace lock (create-only auto-acquire — see the plan).
+        state.lock_manager.release_all(&id);
         // Create a fresh channel and install the sender immediately.
         // This "reserves" the reactivation: concurrent requests see an open
         // channel instead of a closed one, so they try_enqueue normally.
@@ -141,8 +145,12 @@ pub async fn send_message(
     {
         let mut registry = state.registry.write().await;
         let Some(entry) = registry.get_mut(&id) else {
-            // Agent was removed while we were spawning.
+            // Agent was removed while we were spawning. Release any locks the
+            // fresh incarnation may have acquired (defense-in-depth, mirroring
+            // the shutdown drain — the new task should not have run yet, but be
+            // explicit).
             abort_agent(&agent);
+            state.lock_manager.release_all(&id);
             return Err(ApiError::not_found("agent removed during reactivation"));
         };
         // No try_enqueue double-check needed: the sender we installed in

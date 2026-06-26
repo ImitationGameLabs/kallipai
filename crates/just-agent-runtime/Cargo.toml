@@ -27,6 +27,17 @@ time = { workspace = true }
 toml = { workspace = true }
 tokenx-rs = { workspace = true }
 
+[features]
+# Linux-only: enable landlock enforcement of `DirLockManager` write-locks in the
+# stateless shell backend. Off by default; the coordinator (`dirlock`) and its
+# HTTP/CLI surface are always built (advisory mode without this feature).
+landlock = ["just-agent-shell/landlock"]
+# Linux-only: install the seccomp denylist as the last step of every spawned
+# `bash`'s pre_exec (after landlock/mount-ns setup). Implies `landlock`, since
+# the install site lives in the landlock spawn path. Off by default; the daemon
+# enables it. See `just-agent-shell`'s `seccomp` feature.
+seccomp = ["landlock", "just-agent-shell/seccomp"]
+
 [dev-dependencies]
 temp-env = { workspace = true }
 tempfile = { workspace = true }

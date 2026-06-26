@@ -165,6 +165,27 @@ pub fn tool_policy_from_env() -> ToolPolicy {
     tool_policy_from_preset(preset)
 }
 
+/// Resolve the root agent's permission class from `JUST_AGENT_ROOT_AGENT_PERMISSION_CLASS`.
+///
+/// Root-only test knob, parallel to [`tool_policy_from_env`]: read in the
+/// daemon's root-create branch, never on the subagent or restore paths
+/// (subagents derive their class from `ceiling_for_tier`; restore uses the
+/// persisted `meta.json`). Accepts lowercase `"normal"` / `"guest"` — the env-var
+/// convention, distinct from the PascalCase serde form persisted in `meta.json`.
+/// Panics on an invalid value, matching [`tool_policy_from_env`]'s misconfig behavior.
+pub fn permission_class_from_env() -> PermissionClass {
+    let Ok(raw) = std::env::var("JUST_AGENT_ROOT_AGENT_PERMISSION_CLASS") else {
+        return PermissionClass::default();
+    };
+    match raw.trim() {
+        "normal" => PermissionClass::Normal,
+        "guest" => PermissionClass::Guest,
+        other => panic!(
+            "JUST_AGENT_ROOT_AGENT_PERMISSION_CLASS: invalid permission class '{other}' (expected normal or guest)"
+        ),
+    }
+}
+
 /// Hard-coded maximum delegation depth for top-level agents.
 ///
 /// Not configurable — hard-coding avoids the complexity of persisting and
@@ -174,6 +195,52 @@ pub fn tool_policy_from_env() -> ToolPolicy {
 /// increase to this constant will cover all reasonable delegation needs
 /// once the chain-walking restore path is sufficiently tested.
 pub const DEFAULT_MAX_DEPTH: u8 = 3;
+
+/// FS-access permission class — the static baseline axis of the agent sandbox
+/// (`.draft/design/agent-sandbox.md` §2.3).
+///
+/// Independent of model tier: tier only sets the *ceiling* via
+/// [`PermissionClass::ceiling_for_tier`]. `Ord` is derived (`Guest < Normal`) so the
+/// ceiling invariants `granted <= ceiling(tier)` and `ceiling(child) <=
+/// ceiling(parent)` are plain comparisons. Persisted on `AgentMeta` and
+/// re-validated on restore (a safety invariant, unlike display fields).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PermissionClass {
+    /// Guest: readonly — workspace RO, secret zero-access, no home write.
+    Guest,
+    /// Normal: home broad-write + workspace write. Default for root agents.
+    #[default]
+    Normal,
+}
+
+impl PermissionClass {
+    /// Ceiling table: depth 0/1 -> Normal, depth 2/3 -> Guest (§2.3). Depths
+    /// beyond the table clamp to the last entry (Guest), mirroring
+    /// `ProfileRegistry::select_profile`.
+    /// NOTE: depth monotonicity does NOT imply ceiling monotonicity (the 0/1 and
+    /// 2/3 plateaus), so `ceiling(child) <= ceiling(parent)` must be enforced
+    /// explicitly at spawn/restore — not derived from depth.
+    pub fn ceiling_for_tier(depth: usize) -> Self {
+        const CEILINGS: [PermissionClass; (DEFAULT_MAX_DEPTH as usize) + 1] = [
+            PermissionClass::Normal, // depth 0 (root)
+            PermissionClass::Normal, // depth 1
+            PermissionClass::Guest,  // depth 2
+            PermissionClass::Guest,  // depth 3
+        ];
+        CEILINGS[depth.min(CEILINGS.len() - 1)]
+    }
+}
 
 /// Runtime configuration for `just-agent`.
 #[derive(Clone, Debug)]
@@ -196,6 +263,11 @@ pub struct AgentConfig {
     pub agent_id: Option<AgentId>,
     pub created_by: Option<AgentId>,
     pub permissions: PermissionProfile,
+    /// FS-access permission class (Guest readonly / Normal home-rw) — the static
+    /// baseline axis of the sandbox (§2.3). Defaults to Normal; the daemon clamps
+    /// it to the model tier's ceiling at spawn and re-validates on restore. Unlike
+    /// `role`/`description`, this is a safety invariant, not display metadata.
+    pub permissions_class: PermissionClass,
     /// Short display label ("researcher"). Supervisor-owned; set at spawn (and
     /// via `PUT /agents/{id}/metadata`), persisted in `AgentMeta`. Required
     /// non-empty for subagent spawns. Not read by the runtime — pure display
@@ -317,6 +389,7 @@ impl AgentConfig {
             agent_id: None,
             created_by: None,
             permissions: PermissionProfile::new(workspace_root),
+            permissions_class: PermissionClass::default(),
             // Set by the daemon at spawn (CreateAgentRequest) / restore (AgentMeta),
             // like `agent_id` / `created_by` above.
             role: String::new(),
@@ -463,6 +536,27 @@ mod tests {
     use just_agent_common::policy::PolicyDecision;
 
     #[test]
+    fn permission_class_ceiling_matches_tier_table() {
+        // §2.3: tier 0/1 -> Normal, tier 2/3 -> Guest (the plateaus that mean depth
+        // monotonicity does NOT imply ceiling monotonicity).
+        assert_eq!(
+            PermissionClass::ceiling_for_tier(0),
+            PermissionClass::Normal
+        );
+        assert_eq!(
+            PermissionClass::ceiling_for_tier(1),
+            PermissionClass::Normal
+        );
+        assert_eq!(PermissionClass::ceiling_for_tier(2), PermissionClass::Guest);
+        assert_eq!(PermissionClass::ceiling_for_tier(3), PermissionClass::Guest);
+        // Beyond the table clamps to the last entry (Guest), like select_profile.
+        assert_eq!(
+            PermissionClass::ceiling_for_tier(99),
+            PermissionClass::Guest
+        );
+    }
+
+    #[test]
     fn default_system_prompt_names_every_mentioned_tool() {
         // The system prompt names tools by their string form. Guard against
         // drift: if any of these NAMEs change, this fails unless the prompt is
@@ -522,6 +616,7 @@ mod tests {
             agent_id: None,
             created_by: None,
             permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+            permissions_class: PermissionClass::default(),
             role: String::new(),
             description: String::new(),
         };
@@ -559,6 +654,7 @@ mod tests {
             agent_id: None,
             created_by: None,
             permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+            permissions_class: PermissionClass::default(),
             role: String::new(),
             description: String::new(),
         };
@@ -596,6 +692,7 @@ mod tests {
             agent_id: None,
             created_by: None,
             permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+            permissions_class: PermissionClass::default(),
             role: String::new(),
             description: String::new(),
         };

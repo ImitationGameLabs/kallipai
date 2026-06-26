@@ -128,6 +128,10 @@ pub(super) struct BackgroundRegistry {
     max_bg_bytes: usize,
     env: HashMap<OsString, OsString>,
     on_terminal: Option<OnTaskTerminal>,
+    /// When set (Linux + `landlock` feature), each background `bash` is
+    /// landlock-restricted to the owning agent's current access decision.
+    #[cfg(all(target_os = "linux", feature = "landlock"))]
+    access_source: Option<super::builder::AccessSource>,
 }
 
 impl BackgroundRegistry {
@@ -147,7 +151,17 @@ impl BackgroundRegistry {
             max_bg_bytes,
             env,
             on_terminal,
+            #[cfg(all(target_os = "linux", feature = "landlock"))]
+            access_source: None,
         }
+    }
+
+    /// Enable landlock enforcement on background tasks using the given
+    /// access-decision snapshot source (the owning agent's composed decision).
+    #[cfg(all(target_os = "linux", feature = "landlock"))]
+    pub(super) fn with_access_source(mut self, source: super::builder::AccessSource) -> Self {
+        self.access_source = Some(source);
+        self
     }
 
     /// Spawn `command` as a background task; returns its id.
@@ -183,6 +197,15 @@ impl BackgroundRegistry {
         }
         for (key, value) in env_snapshot::COLOR_VARS {
             cmd.env(key, value);
+        }
+        // Landlock-restrict the background bash to the agent's access decision
+        // (Linux + landlock). Compose the decision (lock-manager-backed snapshot
+        // + this registry's data dir) via `AccessSource`; `apply` is pure
+        // mechanism — it moves the prepared landlock/mount-hole state into the
+        // `pre_exec` closure held by `cmd` until `spawn()` consumes it.
+        #[cfg(all(target_os = "linux", feature = "landlock"))]
+        if let Some(source) = &self.access_source {
+            crate::landlock::apply(&mut cmd, &source.access_with_scratch(&self.data_dir)?)?;
         }
         let child = cmd.spawn()?;
         let pid = child.id();

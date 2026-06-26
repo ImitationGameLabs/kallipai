@@ -30,6 +30,9 @@ pub enum Commands {
     /// Manage this agent's direct subagents
     #[command(subcommand)]
     Aide(AideCommand),
+    /// Manage directory write-locks (mutual exclusion across agents)
+    #[command(subcommand)]
+    Dirlock(DirlockCommand),
 }
 
 /// Ungrouped per-agent ops, flattened into the top-level command list — they
@@ -283,4 +286,39 @@ pub enum AideCommand {
     Interrupt(IdArgs),
     /// Update a direct subagent's role and/or description
     Metadata(MetadataArgs),
+}
+
+// ---------------------------------------------------------------------------
+// Dirlock commands — directory write-locks (self-scoped via JUST_AGENT_ID)
+// ---------------------------------------------------------------------------
+
+/// Manage this agent's directory write-locks. The acting agent is taken from
+/// the `JUST_AGENT_ID` env var (self-only acquire/release/status); `who` is a
+/// global lookup. Agents drive these through `bash_exec`.
+#[derive(Subcommand)]
+pub enum DirlockCommand {
+    /// Acquire the write-lock on a directory (self). On conflict the daemon
+    /// returns the holder so you can peer-message it to coordinate.
+    Acquire(DirlockPathArgs),
+    /// Release the write-lock on a directory (self). Idempotent.
+    Release(DirlockPathArgs),
+    /// List the directories this agent currently holds write-locks on.
+    Status,
+    /// Show which agent holds the write-lock on a directory (or "unlocked").
+    Who(DirlockDirArgs),
+}
+
+#[derive(Args)]
+pub struct DirlockPathArgs {
+    /// Directory to lock/unlock (absolute or relative to cwd).
+    pub path: String,
+    /// How long (seconds) to retry on conflict before returning the holder.
+    #[arg(long)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Args)]
+pub struct DirlockDirArgs {
+    /// Directory to query.
+    pub dir: String,
 }

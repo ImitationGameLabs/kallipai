@@ -14,12 +14,17 @@ use just_agent_common::protocol::ApiError;
 use just_agent_common::protocol::SseEvent;
 use just_agent_runtime::agent_task::{self, AgentContext};
 use just_agent_runtime::approval::ApprovalStore;
-use just_agent_runtime::config::{AgentConfig, PermissionProfile, tool_policy_from_env};
+use just_agent_runtime::config::{
+    AgentConfig, PermissionClass, PermissionProfile, permission_class_from_env,
+    tool_policy_from_env,
+};
 use just_agent_runtime::context::{AgenticContext, ContextStore, ContextSummarizer};
 use just_agent_runtime::history::HistoryWriter;
 use just_agent_runtime::persistence;
 use just_agent_runtime::policy::{AgentPolicy, AuthorizedToolExecutor};
-use just_agent_runtime::tools::{build_tool_dispatch, load_skill, meta_skill_content};
+use just_agent_runtime::tools::{
+    ToolDispatchInputs, build_tool_dispatch, load_skill, meta_skill_content,
+};
 use just_llm_client::types::chat::ChatMessage;
 use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -123,13 +128,23 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
     // the returned `Agent`.
     let activity = Arc::new(std::sync::Mutex::new(String::new()));
 
-    let dispatch = build_tool_dispatch(
-        args.store.clone(),
-        args.config.workspace_root.clone(),
-        args.env.clone(),
+    // Ensure the agent's local-skills dir exists before any landlock apply. The
+    // sandbox baseline grants write on `agent_dir/skills` (so the agent can author
+    // local skills); landlock `PathBeneath` silently skips non-existent paths, so
+    // a missing dir would drop the grant and make skill authoring fail with EACCES.
+    // Idempotent; the dir already exists for restored agents.
+    std::fs::create_dir_all(args.agent_dir.join("skills")).map_err(ApiError::internal)?;
+
+    let dispatch = build_tool_dispatch(ToolDispatchInputs {
+        ctx: args.store.clone(),
+        config: &args.config,
+        env: args.env.clone(),
         notice_sink,
-        args.exec_policy.clone(),
-    )
+        exec_policy: args.exec_policy.clone(),
+        lock_manager: args.shared_state.lock_manager.clone(),
+        agent_id: args.agent_id.clone(),
+        agent_dir: args.agent_dir.clone(),
+    })
     .await?;
 
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(256);
@@ -208,16 +223,128 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
     })
 }
 
+/// Best-effort removal of an agent's on-disk directory on a create/rollback
+/// failure. Logs a warning on error and never returns `Err` — rollback must
+/// proceed regardless (a leftover dir beats aborting the error path).
+fn remove_agent_dir(dir: &std::path::Path) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        tracing::warn!(path = %dir.display(), "failed to clean up agent dir: {e:#}");
+    }
+}
+
+/// Roll back a create that failed before the agent was registered: drop the
+/// pre-reserved subagent slot (if this is a subagent) and remove the agent dir.
+///
+/// Used by the three pre-registration failure paths in `create_agent` (acquire
+/// `Busy`/`Err`, and `spawn_agent` failure). The workspace write-lock is NOT
+/// touched here — the acquire-failure paths never acquired it, and the
+/// spawn-failure path leaves it to `WorkspaceLockGuard`'s `Drop`.
+async fn rollback_unspawned_create(
+    state: &SharedState,
+    created_by: Option<&AgentId>,
+    id: &AgentId,
+    agent_dir: &std::path::Path,
+) {
+    if let Some(supervisor_id) = created_by {
+        let mut registry = state.registry.write().await;
+        if let Some(supervisor) = registry.get_mut(supervisor_id) {
+            supervisor.subagent_ids.retain(|sid| sid != id);
+        }
+    }
+    remove_agent_dir(agent_dir);
+}
+
 /// Abort agent/bridge handles and remove agent dir (best-effort).
 /// Used when a spawned agent cannot be registered.
 pub(crate) fn abort_agent(agent: &crate::state::Agent) {
     agent.agent_handle.abort();
     agent.bridge_handle.abort();
-    if let Some(ref dir) = agent.agent_dir
-        && let Err(e) = std::fs::remove_dir_all(dir)
-    {
-        tracing::warn!(path = %dir.display(), "failed to clean up agent dir: {e:#}");
+    if let Some(ref dir) = agent.agent_dir {
+        remove_agent_dir(dir);
     }
+}
+
+/// RAII guard for the workspace write-lock auto-acquired in `create_agent`.
+///
+/// Releases the lock on `Drop` (every `return Err` — and any panic — between
+/// acquire and successful registration) unless disarmed. The success path
+/// disarms it so the registered agent keeps the lock for its lifetime (it is
+/// released later by `remove_agent`/reactivation). This covers the panic case a
+/// manual `release_all` at each error return cannot reach.
+struct WorkspaceLockGuard<'a> {
+    state: &'a SharedState,
+    id: &'a AgentId,
+    armed: bool,
+}
+
+impl WorkspaceLockGuard<'_> {
+    /// Disarm so `Drop` no longer releases — call exactly once, on the success
+    /// path once the agent is registered and owns the lock.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for WorkspaceLockGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.lock_manager.release_all(self.id);
+        }
+    }
+}
+
+/// Auto-acquire the workspace write-lock for a Normal agent (Guests acquire
+/// nothing and get `None`). `chain` is the agent's delegation ancestors —
+/// computed by the caller under the registry read lock and passed in as owned
+/// ids, so a nested lock held under an ancestor is treated as delegation, not
+/// conflict (see [`DirLockManager::acquire`]). On conflict/error the agent dir
+/// is rolled back and an `Err` is returned. Extracted from `create_agent` so the
+/// acquire path is unit-testable without spawning the agent task.
+///
+/// [`DirLockManager::acquire`]: just_agent_runtime::dirlock::DirLockManager::acquire
+async fn acquire_workspace_lock<'a>(
+    state: &'a SharedState,
+    id: &'a AgentId,
+    config: &AgentConfig,
+    chain: &[AgentId],
+    created_by: Option<&AgentId>,
+    agent_dir: &std::path::Path,
+    log_ws: &str,
+) -> Result<Option<WorkspaceLockGuard<'a>>, ApiError> {
+    if config.permissions_class != PermissionClass::Normal {
+        return Ok(None);
+    }
+    let workspace_root = config.workspace_root.clone();
+    match state.lock_manager.acquire(id, &workspace_root, chain) {
+        Ok(just_agent_runtime::dirlock::AcquireOutcome::Acquired)
+        | Ok(just_agent_runtime::dirlock::AcquireOutcome::AlreadyHeld) => {}
+        Ok(just_agent_runtime::dirlock::AcquireOutcome::Busy { holder, conflict }) => {
+            // `agent_dir` was created before the acquire; roll it back so
+            // `scan_agents` doesn't pick up an orphan `meta.json` on restart.
+            rollback_unspawned_create(state, created_by, id, agent_dir).await;
+            // `conflict` is the canonical path of the overlapping lock (the
+            // workspace itself, or an ancestor/descendant another agent holds
+            // that is not a delegation ancestor). A nested-vs-existing-workspace
+            // collision 409s here.
+            return Err(ApiError::conflict(format!(
+                "workspace_root {log_ws} overlaps a write-lock on {} held by agent \
+                 {holder}; remove it or choose a non-overlapping workspace",
+                conflict.display()
+            )));
+        }
+        Err(e) => {
+            rollback_unspawned_create(state, created_by, id, agent_dir).await;
+            return Err(ApiError::bad_request(e.to_string()));
+        }
+    }
+    // Lock acquired (or already held): arm the guard so every failure path below
+    // — including a panic in `spawn_agent`/`build_client` — releases it. Disarmed
+    // on the single success path once the agent is registered.
+    Ok(Some(WorkspaceLockGuard {
+        state,
+        id,
+        armed: true,
+    }))
 }
 
 pub async fn create_agent(
@@ -266,13 +393,23 @@ pub async fn create_agent(
             "subagent requires a non-empty 'role'",
         ));
     }
+    // Reject any workspace that overlaps the daemon data tree (one contains the
+    // other). With the overlap eliminated, landlock alone enforces the data-dir
+    // integrity baseline: the agent's writable set never covers daemon data
+    // except its own `agents/<id>/skills/`. Bidirectional because either direction
+    // is dangerous — a workspace inside (or equal to) the data dir lets the agent
+    // reach peers' bookkeeping; a workspace containing it lets the broad write
+    // grant cover the whole tree. `conflict` (not `bad_request`) to match the
+    // neighboring workspace↔write-lock overlap at the acquire step below.
+    persistence::ensure_workspace_disjoint(&config.workspace_root)
+        .map_err(|e| ApiError::conflict(e.to_string()))?;
     let env = SpawnArgs::default_env(&id, token.secret());
 
     // Subagent: validate supervisor and delegation constraints, or use default policy.
     // Pre-reserve the subagent slot under write lock to eliminate TOCTOU.
     let (tool_policy, exec_policy) = if let Some(ref supervisor_id) = req.created_by {
         let mut registry = state.registry.write().await;
-        let (permissions, policy, exec) = validate_subagent_request(
+        let (permissions, policy, exec, permission_class) = validate_subagent_request(
             &registry,
             auth.identity(),
             supervisor_id,
@@ -293,8 +430,10 @@ pub async fn create_agent(
         supervisor.subagent_ids.push(id.clone());
         config.created_by = Some(supervisor_id.clone());
         config.permissions = permissions;
+        config.permissions_class = permission_class;
         (policy, exec)
     } else {
+        config.permissions_class = permission_class_from_env();
         (tool_policy_from_env(), ExecPolicy::default())
     };
     let tool_policy = Arc::new(std::sync::RwLock::new(tool_policy));
@@ -316,6 +455,7 @@ pub async fn create_agent(
         config.created_by.as_ref(),
         &config.role,
         &config.description,
+        config.permissions_class,
     )
     .map_err(ApiError::internal)?;
 
@@ -348,6 +488,39 @@ pub async fn create_agent(
     let prompt = config.prompt.take();
     let log_ws = config.workspace_root.display().to_string();
     let log_depth = config.permissions.max_depth;
+    // Compute the delegation ancestor chain under a registry read lock, then
+    // drop the guard before acquiring. `created_by` is immutable post-creation,
+    // so the owned id snapshot is stable; dropping the guard keeps the critical
+    // section minimal and lets a nested lock held under an ancestor be delegated
+    // (see `DirLockManager::acquire`). A supervisor removed in the tiny window
+    // between snapshot and acquire has its lock released by `release_all`, so a
+    // stale id never matches a live holder; a dangling `created_by` is caught
+    // downstream by the supervisor-still-registered re-check.
+    let chain: Vec<AgentId> = match config.created_by.as_ref() {
+        Some(supervisor_id) => {
+            let registry = state.registry.read().await;
+            registry.supervisor_chain_ids(supervisor_id)?
+        }
+        None => Vec::new(),
+    };
+    // Auto-acquire an exclusive write-lock on the workspace so no two agents edit
+    // the same workspace concurrently. **Normal only** — a Guest is readonly (its
+    // landlock writable set is the skills carve alone), so it neither needs nor
+    // holds a workspace write-lock (holding one would block writers and mislabel
+    // the Guest as the workspace's writer in the dirlock registry). Create-only —
+    // restore and reactivation deliberately do NOT auto-acquire (restart
+    // semantics). Done before spawn so enforcement is active for the first
+    // command; rolled back on every failure path below.
+    let mut workspace_lock = acquire_workspace_lock(
+        &state,
+        &id,
+        &config,
+        &chain,
+        req.created_by.as_ref(),
+        &agent_dir,
+        &log_ws,
+    )
+    .await?;
     let (events_tx, _) = broadcast::channel(256);
     let agent_dir_clone = agent_dir.clone();
     let agent = match spawn_agent(SpawnArgs {
@@ -372,17 +545,9 @@ pub async fn create_agent(
     {
         Ok(a) => a,
         Err(e) => {
-            // Rollback pre-reserved subagent slot.
-            if let Some(ref supervisor_id) = req.created_by {
-                let mut registry = state.registry.write().await;
-                if let Some(supervisor) = registry.get_mut(supervisor_id) {
-                    supervisor.subagent_ids.retain(|sid| sid != &id);
-                }
-            }
-            // Clean up agent dir (created before spawn).
-            if let Err(e) = std::fs::remove_dir_all(&agent_dir_clone) {
-                tracing::warn!(path = %agent_dir_clone.display(), "failed to clean up agent dir: {e:#}");
-            }
+            // The workspace lock is released by `workspace_lock`'s Drop on the
+            // `return Err` below; roll back the subagent slot + agent dir here.
+            rollback_unspawned_create(&state, req.created_by.as_ref(), &id, &agent_dir_clone).await;
             return Err(ApiError::internal(e));
         }
     };
@@ -397,6 +562,7 @@ pub async fn create_agent(
                 supervisor.subagent_ids.retain(|sid| sid != &id);
             }
             abort_agent(&agent);
+            // `workspace_lock` releases the workspace lock on `return Err`.
             return Err(ApiError::unavailable(format!(
                 "agent limit reached ({}/{max}), remove agents to create new ones",
                 registry.len(),
@@ -410,6 +576,7 @@ pub async fn create_agent(
             // Supervisor gone — the pre-reserved slot is already cleaned up
             // (unregistering the supervisor removes it from the map entirely).
             abort_agent(&agent);
+            // `workspace_lock` releases the workspace lock on `return Err`.
             return Err(ApiError::internal(
                 "supervisor agent was removed during creation",
             ));
@@ -422,9 +589,17 @@ pub async fn create_agent(
             },
         );
     }
+    // Registered: the Normal agent now owns the workspace lock for its lifetime —
+    // disarm the guard so its `Drop` does not release it. (Guest holds no lock.)
+    if let Some(lock) = workspace_lock.as_mut() {
+        lock.disarm();
+    }
     info!(id = %id, supervisor = ?req.created_by, role = ?req.role, ws = %log_ws, depth = log_depth, "created agent");
 
-    Ok((StatusCode::CREATED, Json(CreateAgentResponse { id })))
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateAgentResponse { id: id.clone() }),
+    ))
 }
 
 /// Any authenticated identity (operator or agent) may list agents.
@@ -580,6 +755,10 @@ pub async fn remove_agent(
         }
     };
 
+    // Release all of this agent's directory write-locks (coupled to task death,
+    // not registry removal — see DirLockManager invariants).
+    state.lock_manager.release_all(&id);
+
     // Signal graceful cancellation; the agent persists on its way out.
     entry.agent.cancel.cancel();
 
@@ -633,9 +812,11 @@ pub async fn interrupt_agent(
 
 /// Validate supervisor constraints for a subagent creation request.
 ///
-/// Returns `(PermissionProfile, ToolPolicy, ExecPolicy)` for the new subagent if
-/// valid. The subagent inherits the supervisor's exec-policy overrides (cloned),
-/// so monotonic strictness holds at creation.
+/// Returns `(PermissionProfile, ToolPolicy, ExecPolicy, PermissionClass)` for the
+/// new subagent if valid. The subagent inherits the supervisor's exec-policy
+/// overrides (cloned), so monotonic strictness holds at creation. The
+/// `PermissionClass` is the ceiling for the child's model tier, clamped by the
+/// supervisor's own class (the §2.3 ceiling invariant).
 ///
 /// Lock ordering: `registry` RwLock is held when calling this function.
 /// Inside, `tool_policy.read()` / `exec_policy.read()` acquire the per-agent
@@ -645,7 +826,7 @@ fn validate_subagent_request(
     identity: &crate::auth::Identity,
     supervisor_id: &AgentId,
     workspace_root: &std::path::Path,
-) -> Result<(PermissionProfile, ToolPolicy, ExecPolicy), ApiError> {
+) -> Result<(PermissionProfile, ToolPolicy, ExecPolicy, PermissionClass), ApiError> {
     let supervisor = registry.require_supervisor(identity, supervisor_id)?;
 
     let supervisor_perms = &supervisor.agent.config.permissions;
@@ -664,7 +845,23 @@ fn validate_subagent_request(
     }
 
     let permissions = PermissionProfile::subagent(subagent_ws, supervisor_perms.max_depth);
+
+    // Ceiling invariant (`.draft/design/agent-sandbox.md` §2.3): the child's
+    // granted permission class cannot exceed its model tier's ceiling, nor its
+    // supervisor's class. Depth monotonicity alone does NOT imply the latter
+    // (tier 0/1 share Normal, 2/3 share Guest), so this is an explicit check — the
+    // gate that keeps a weak model from ever being elevated. Default grant =
+    // ceiling (full power for the tier); an explicit downgrade interface is a
+    // later phase.
+    let granted = PermissionClass::ceiling_for_tier(permissions.depth());
     let supervisor = &supervisor.agent;
+    let supervisor_class = supervisor.config.permissions_class;
+    if granted > supervisor_class {
+        return Err(ApiError::forbidden(format!(
+            "subagent permission class {granted:?} would exceed supervisor's {supervisor_class:?}"
+        )));
+    }
+
     let tool_policy = supervisor
         .tool_policy
         .read()
@@ -676,12 +873,18 @@ fn validate_subagent_request(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
 
-    Ok((permissions, tool_policy, exec_policy))
+    Ok((permissions, tool_policy, exec_policy, granted))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_ACTIVITY_CHARS, truncate_chars};
+    use std::path::PathBuf;
+
+    use super::{
+        AgentConfig, AgentId, MAX_ACTIVITY_CHARS, PermissionClass, PermissionProfile,
+        acquire_workspace_lock, truncate_chars,
+    };
+    use crate::test_helpers::{make_entry, make_state};
 
     #[test]
     fn truncate_keeps_short_strings() {
@@ -709,5 +912,144 @@ mod tests {
         let mut s = "x".repeat(MAX_ACTIVITY_CHARS + 100);
         truncate_chars(&mut s, MAX_ACTIVITY_CHARS);
         assert_eq!(s.chars().count(), MAX_ACTIVITY_CHARS);
+    }
+
+    // -- acquire_workspace_lock (the :445 auto-acquire path, extracted) --
+
+    /// A Normal `AgentConfig` rooted at `ws`, reusing `make_entry`'s template so
+    /// every field is populated.
+    fn normal_config(ws: &std::path::Path) -> AgentConfig {
+        let mut config = make_entry(None, String::new()).agent.config;
+        config.workspace_root = ws.to_path_buf();
+        config.permissions = PermissionProfile::new(ws.to_path_buf());
+        config.permissions_class = PermissionClass::Normal;
+        config.created_by = None;
+        config
+    }
+
+    /// Unique existing temp dir (acquire canonicalizes the path).
+    fn ws_dir(label: &str) -> PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "ja-acquire-ws-test-{}-{label}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn acquire_workspace_lock_normal_root_acquires() {
+        let state = make_state();
+        let root = AgentId::from("root".to_owned());
+        let ws = ws_dir("root");
+        let cfg = normal_config(&ws);
+        let guard = acquire_workspace_lock(&state, &root, &cfg, &[], None, &ws, "ws").await;
+        let guard = guard.unwrap().expect("Normal root acquires its workspace");
+        // Lock is held and will release on drop.
+        assert_eq!(state.lock_manager.holder(&ws).unwrap(), Some(root.clone()));
+        drop(guard);
+        assert!(state.lock_manager.holder(&ws).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn acquire_workspace_lock_nested_child_no_longer_conflicts() {
+        // The original bug: a Normal root holding /proj made any Normal nested
+        // child's workspace acquire 409. With the chain, the child acquires.
+        let state = make_state();
+        let root = AgentId::from("root".to_owned());
+        let root_ws = ws_dir("proj");
+        let child_ws = root_ws.join("sub");
+        std::fs::create_dir_all(&child_ws).unwrap();
+
+        // Root holds /proj for the duration of the child acquire.
+        let root_guard = acquire_workspace_lock(
+            &state,
+            &root,
+            &normal_config(&root_ws),
+            &[],
+            None,
+            &root_ws,
+            "ws",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Child's chain contains root → delegation, not conflict.
+        let mut child_cfg = normal_config(&child_ws);
+        child_cfg.created_by = Some(root.clone());
+        let child = AgentId::from("child".to_owned());
+        let child_guard = acquire_workspace_lock(
+            &state,
+            &child,
+            &child_cfg,
+            std::slice::from_ref(&root),
+            Some(&root),
+            &child_ws,
+            "ws",
+        )
+        .await
+        .unwrap()
+        .expect("nested child acquires via delegation chain");
+        // Carve-out: the child's region appears read-only in the root's view.
+        let ro = state.lock_manager.readonly_paths(&root).unwrap();
+        assert_eq!(ro, vec![std::fs::canonicalize(&child_ws).unwrap()]);
+        drop(child_guard);
+        drop(root_guard);
+    }
+
+    #[tokio::test]
+    async fn acquire_workspace_lock_peer_without_chain_conflicts() {
+        // Same topology, but the acquirer is NOT a delegation descendant
+        // (empty chain) → Busy → Err(conflict), the pre-fix behavior.
+        let state = make_state();
+        let root = AgentId::from("root".to_owned());
+        let root_ws = ws_dir("proj2");
+        let nested = root_ws.join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let _root_guard = acquire_workspace_lock(
+            &state,
+            &root,
+            &normal_config(&root_ws),
+            &[],
+            None,
+            &root_ws,
+            "ws",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let peer = AgentId::from("peer".to_owned());
+        let err = acquire_workspace_lock(
+            &state,
+            &peer,
+            &normal_config(&nested),
+            &[],
+            None,
+            &nested,
+            "ws",
+        )
+        .await
+        .err()
+        .expect("peer without chain must conflict");
+        assert_eq!(err.status, 409);
+    }
+
+    #[tokio::test]
+    async fn acquire_workspace_lock_guest_acquires_nothing() {
+        let state = make_state();
+        let id = AgentId::from("guest".to_owned());
+        let ws = ws_dir("guest");
+        let mut cfg = normal_config(&ws);
+        cfg.permissions_class = PermissionClass::Guest;
+        let guard = acquire_workspace_lock(&state, &id, &cfg, &[], None, &ws, "ws")
+            .await
+            .unwrap();
+        assert!(guard.is_none());
+        assert!(state.lock_manager.holder(&ws).unwrap().is_none());
     }
 }

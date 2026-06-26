@@ -48,6 +48,10 @@ pub(crate) async fn graceful_agent_shutdown(state: &AppState) {
 
     let bound = Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
     join_all(entries.into_iter().map(|(id, entry)| async move {
+        // Defense-in-depth: release this agent's directory locks (the process
+        // is exiting, but explicit release keeps the coordinator consistent if
+        // shutdown ever runs without a full process exit).
+        state.lock_manager.release_all(&id);
         if !entry.agent.shutdown(bound).await {
             tracing::warn!(id = %id, "agent did not shut down in time, force-aborted");
         }

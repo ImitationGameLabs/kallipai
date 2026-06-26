@@ -51,6 +51,7 @@ pub fn make_entry_with_rx(
         agent_id: None,
         created_by,
         permissions: PermissionProfile::new(PathBuf::from("/tmp")),
+        permissions_class: Default::default(),
         role: String::new(),
         description: String::new(),
     };

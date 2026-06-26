@@ -6,7 +6,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-just-agent-runtime = { workspace = true }
+just-agent-runtime = { workspace = true, features = ["landlock", "seccomp"] }
 just-agent-common = { workspace = true, features = ["axum"] }
 just-llm-client = { workspace = true }
 reqwest = { workspace = true }

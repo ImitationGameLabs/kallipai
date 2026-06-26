@@ -52,6 +52,10 @@ pub struct AppState {
     /// Profile registry loaded once at startup (config file or implicit env profile).
     /// Shared so the pre-built backends survive across agents.
     pub profiles: Arc<ProfileRegistry>,
+    /// Daemon-wide directory write-lock coordinator. Shared across all agents so
+    /// one agent holding a dir's write-lock blocks another. The daemon build
+    /// enforces locks via landlock on Linux (mandatory); advisory elsewhere.
+    pub lock_manager: Arc<just_agent_runtime::dirlock::DirLockManager>,
 }
 
 /// Combined index: agent map + token-hash→id lookup + subagent reverse pointers.
@@ -191,6 +195,7 @@ impl AppState {
                 0,
             ),
             profiles,
+            lock_manager: Arc::new(just_agent_runtime::dirlock::DirLockManager::new()),
         }
     }
 
@@ -216,6 +221,7 @@ impl AppState {
                 0,
             ),
             profiles,
+            lock_manager: Arc::new(just_agent_runtime::dirlock::DirLockManager::new()),
         }
     }
 }
@@ -322,6 +328,37 @@ impl AgentRegistry {
             }
         }
         Ok(chain)
+    }
+
+    /// The strict delegation ancestors of an agent whose supervisor is
+    /// `start_supervisor_id` — i.e. the `created_by` chain `[start_supervisor_id,
+    /// …, root]` as owned [`AgentId`]s. Passed into
+    /// [`DirLockManager::acquire`](just_agent_runtime::dirlock::DirLockManager::acquire)
+    /// so a nested lock held under an ancestor is treated as delegation rather
+    /// than conflict. Mirrors [`Self::walk_supervisor_chain`]'s cycle detection;
+    /// returns owned ids so the caller may drop the registry read guard before
+    /// calling the (sync) lock manager.
+    pub fn supervisor_chain_ids(
+        &self,
+        start_supervisor_id: &AgentId,
+    ) -> Result<Vec<AgentId>, ApiError> {
+        let mut visited = HashSet::new();
+        let mut current_id = start_supervisor_id.clone();
+        let mut ids = Vec::new();
+        loop {
+            if !visited.insert(current_id.clone()) {
+                return Err(ApiError::forbidden("circular supervisor chain"));
+            }
+            let entry = self
+                .get(&current_id)
+                .ok_or_else(|| ApiError::forbidden("broken supervisor chain"))?;
+            ids.push(current_id.clone());
+            match &entry.agent.config.created_by {
+                Some(supervisor_id) => current_id = supervisor_id.clone(),
+                None => break,
+            }
+        }
+        Ok(ids)
     }
 
     /// Caller must be the operator or the direct supervisor of the subagent being created.

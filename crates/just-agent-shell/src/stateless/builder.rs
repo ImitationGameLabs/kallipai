@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+#[cfg(all(target_os = "linux", feature = "landlock"))]
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,6 +20,52 @@ const DEFAULT_FALLBACK_SHELL: &str = "/bin/bash";
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024; // 1 MiB
 /// Output cap for a background task before the size watchdog kills it.
 const DEFAULT_MAX_BG_BYTES: usize = 100 * 1024 * 1024; // 100 MiB
+
+/// Owned snapshot source of an agent's per-spawn [`AccessDecision`] (read
+/// policy + writable set + readonly holes), used by landlock/mount-ns
+/// enforcement (Linux + `landlock`). Wrapped so the closure can live in a
+/// `#[derive(Debug)]` builder. Agent-agnostic: the runtime composes the decision
+/// from its permission class + the dirlock coordinator and hands it to the shell
+/// here, keeping the shell decoupled from agent identity/tiers.
+/// Per-spawn access-decision snapshot closure. Aliased so the [`AccessSource`]
+/// newtype stays on one line (its inner type is long).
+#[cfg(all(target_os = "linux", feature = "landlock"))]
+pub(in crate::stateless) type AccessSourceFn =
+    Arc<dyn Fn() -> io::Result<crate::landlock::AccessDecision> + Send + Sync + 'static>;
+
+/// Owned snapshot source of an agent's per-spawn [`AccessDecision`] (read
+/// policy + writable set + readonly holes), used by landlock/mount-ns
+/// enforcement (Linux + `landlock`). Wrapped so the closure can live in a
+/// `#[derive(Debug)]` builder. Agent-agnostic: the runtime composes the decision
+/// from its permission class + the dirlock coordinator and hands it to the shell
+/// here, keeping the shell decoupled from agent identity/tiers.
+#[cfg(all(target_os = "linux", feature = "landlock"))]
+#[derive(Clone)]
+pub(in crate::stateless) struct AccessSource(pub(in crate::stateless) AccessSourceFn);
+
+#[cfg(all(target_os = "linux", feature = "landlock"))]
+impl std::fmt::Debug for AccessSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessSource").finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "landlock"))]
+impl AccessSource {
+    /// Snapshot the agent's access decision and append `scratch` (the backend's
+    /// data dir) to its writable set, returning the decision ready for
+    /// [`crate::landlock::apply`]. The snapshot error propagates (via `?`)
+    /// rather than silently producing an empty writable list, which would deny
+    /// all of the agent's writes.
+    pub(in crate::stateless) fn access_with_scratch(
+        &self,
+        scratch: &std::path::Path,
+    ) -> io::Result<crate::landlock::AccessDecision> {
+        let mut decision = (self.0)()?;
+        decision.writable.push(scratch.to_path_buf());
+        Ok(decision)
+    }
+}
 
 /// Builder for [`ProcessBackend`].
 ///
@@ -46,6 +94,15 @@ pub struct StatelessBuilder {
     pub(super) max_bg_bytes: usize,
     pub(super) data_dir: Option<PathBuf>,
     pub(super) on_terminal: Option<TerminalObserver>,
+    /// Optional source of this backend's agent's per-spawn access decision
+    /// (read policy + writable set + readonly holes). When set (and the
+    /// `landlock` feature is on, Linux), every spawned `bash` is restricted by a
+    /// landlock domain derived from the snapshot this closure returns. Kept
+    /// generic so the shell crate has no dependency on the lock coordinator.
+    /// `Result` is load-bearing: an error surfaces rather than silently denying
+    /// all writes.
+    #[cfg(all(target_os = "linux", feature = "landlock"))]
+    pub(super) access_source: Option<AccessSource>,
 }
 
 impl StatelessBuilder {
@@ -61,6 +118,8 @@ impl StatelessBuilder {
             max_bg_bytes: DEFAULT_MAX_BG_BYTES,
             data_dir: None,
             on_terminal: None,
+            #[cfg(all(target_os = "linux", feature = "landlock"))]
+            access_source: None,
         }
     }
 
@@ -139,6 +198,20 @@ impl StatelessBuilder {
         self
     }
 
+    /// Sets the source of this backend's agent's per-spawn access decision
+    /// (read policy + writable set + readonly holes), enabling landlock/mount-ns
+    /// enforcement on every spawned `bash` (Linux + `landlock` feature only).
+    /// The closure should return a point-in-time snapshot of the agent's
+    /// composed access decision.
+    #[cfg(all(target_os = "linux", feature = "landlock"))]
+    pub fn access_source<F>(mut self, source: F) -> Self
+    where
+        F: Fn() -> io::Result<crate::landlock::AccessDecision> + Send + Sync + 'static,
+    {
+        self.access_source = Some(AccessSource(Arc::new(source)));
+        self
+    }
+
     /// Resolve the per-backend data dir: explicit override, else
     /// `$JUST_AGENT_DATA_DIR`, else the platform data dir.
     fn resolve_data_dir(&self) -> Result<PathBuf, ShellError> {
@@ -195,6 +268,13 @@ impl StatelessBuilder {
             self.env.clone(),
             self.on_terminal.clone().map(|o| o.0),
         );
+        // Share the access-decision snapshot source with the background registry
+        // (cloned before `self` moves into `ProcessBackend.config`).
+        #[cfg(all(target_os = "linux", feature = "landlock"))]
+        let background = match &self.access_source {
+            Some(source) => background.with_access_source(source.clone()),
+            None => background,
+        };
 
         Ok(ProcessBackend {
             config: self,

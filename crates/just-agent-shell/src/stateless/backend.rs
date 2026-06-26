@@ -128,6 +128,16 @@ impl StatelessBackend for ProcessBackend {
         for (key, value) in &self.config.env {
             cmd.env(key, value);
         }
+        // Landlock-restrict this bash to the agent's current access decision
+        // (Linux + landlock). Compose the decision (lock-manager-backed snapshot
+        // + this backend's scratch dir) via `AccessSource`; `apply` is pure
+        // mechanism — it moves the prepared landlock/mount-hole state into the
+        // `pre_exec` closure, which `cmd` owns until `spawn()` consumes it, so
+        // the ruleset fd survives the fork and is read in the child.
+        #[cfg(all(target_os = "linux", feature = "landlock"))]
+        if let Some(source) = &self.config.access_source {
+            crate::landlock::apply(&mut cmd, &source.access_with_scratch(&self.data_dir)?)?;
+        }
 
         let mut child = cmd.spawn()?;
         // Clean up the per-call dir on every exit path (early `?`, panic, success).
