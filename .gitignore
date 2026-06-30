@@ -8,6 +8,9 @@
 # Local drafts
 /.draft/
 
+# Test scratch data (sandbox integration tests under just-agent-daemon)
+/.testdata/
+
 # Nix
 /result
 
