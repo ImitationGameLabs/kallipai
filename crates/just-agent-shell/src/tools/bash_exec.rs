@@ -1,4 +1,4 @@
-//! Stateless command-execution tool.
+//! Command-execution tool.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::stateless::backend::{DEFAULT_TIMEOUT_SECS, StatelessBackend};
+use crate::backend::{DEFAULT_TIMEOUT_SECS, ShellBackend};
 
 /// Arguments accepted by [`BashExec`].
 #[derive(Debug, Deserialize, Serialize)]
@@ -44,12 +44,12 @@ pub struct BashExecOutput {
     pub task_id: Option<String>,
 }
 
-/// Tool that executes commands against a [`StatelessBackend`].
-pub struct BashExec<B: StatelessBackend> {
+/// Tool that executes commands against a [`ShellBackend`].
+pub struct BashExec<B: ShellBackend> {
     backend: Arc<Mutex<B>>,
 }
 
-impl<B: StatelessBackend> BashExec<B> {
+impl<B: ShellBackend> BashExec<B> {
     /// Creates a new tool sharing `backend`.
     pub fn new(backend: Arc<Mutex<B>>) -> Self {
         Self { backend }
@@ -57,7 +57,7 @@ impl<B: StatelessBackend> BashExec<B> {
 }
 
 #[async_trait]
-impl<B: StatelessBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
+impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
     fn name(&self) -> &str {
         super::names::BASH_EXEC
     }

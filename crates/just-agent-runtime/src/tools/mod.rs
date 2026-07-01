@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use just_agent_common::AgentId;
 use just_agent_common::policy::ExecPolicy;
-use just_agent_shell::{StatelessBuilder, bash_exec_tool_set};
+use just_agent_shell::{ShellBuilder, shell_tool_set};
 use just_llm_client::ToolDispatcher;
 use just_llm_client::types::chat::{FunctionDefinition, ToolDefinition, ToolType};
 use serde_json::json;
@@ -50,8 +50,8 @@ pub struct ToolDispatchInputs<'a> {
 
 /// Builds the tool registry exposed by `just-agent`.
 ///
-/// Spawns a fresh isolated `bash` per command via [`StatelessBuilder`] (the stateless
-/// one-shot backend). The working directory is read fresh from `pwd` after each command and
+/// Spawns a fresh isolated `bash` per command via [`ShellBuilder`] (the one-shot
+/// backend). The working directory is read fresh from `pwd` after each command and
 /// reported in the tool result — it does not persist implicitly across calls. A background task
 /// that finishes delivers a completion notice through `notice_sink` (the daemon wires it to the agent's
 /// prompt channel, so the LLM learns without polling `bash_background_read`).
@@ -68,7 +68,7 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
         agent_id,
         agent_dir,
     } = inputs;
-    let builder = StatelessBuilder::new()
+    let builder = ShellBuilder::new()
         .initial_cwd(config.workspace_root.clone())
         .envs(env)
         // The exit code is intentionally omitted from the notice — the agent reads it
@@ -138,7 +138,7 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
     let backend = Arc::new(Mutex::new(backend));
 
     let mut dispatch = ToolDispatcher::new();
-    dispatch.add_tools(bash_exec_tool_set(backend))?;
+    dispatch.add_tools(shell_tool_set(backend))?;
     let ctx_dyn: Arc<Mutex<dyn AgenticContext>> = ctx;
     dispatch.add_tools(context::context_tool_set(ctx_dyn.clone(), exec_policy))?;
     dispatch.add_tools(skill::file_pin_tool_set(

@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use just_agent_common::policy::{ExecPolicy, PolicyDecision, ToolPolicy};
 
-use just_agent_shell::stateless::tools::{BashExecArgs, names};
+use just_agent_shell::tools::{BashExecArgs, names};
 
 use super::ToolDecision;
 use super::classifier::{Classifier, Safety};

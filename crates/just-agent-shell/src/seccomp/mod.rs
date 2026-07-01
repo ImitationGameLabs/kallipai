@@ -120,8 +120,8 @@ const X86_DENY: &[libc::c_long] = &[
 
 /// The compiled default-denylist seccomp filter, cached process-wide.
 ///
-/// Built once on first use and shared read-only thereafter: the stateless
-/// backend spawns one `bash` per command, so rebuilding a constant filter per
+/// Built once on first use and shared read-only thereafter: the backend spawns
+/// one `bash` per command, so rebuilding a constant filter per
 /// spawn is pure waste. `SeccompFilter` holds the compiled BPF program and is
 /// `Send + Sync`, safe to install concurrently from many spawn threads.
 ///

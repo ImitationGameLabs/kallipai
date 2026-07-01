@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::stateless::backend::StatelessBackend;
+use crate::backend::ShellBackend;
 
 /// Arguments accepted by [`BgKill`].
 #[derive(Debug, Deserialize, Serialize)]
@@ -24,11 +24,11 @@ pub struct BgKillOutput {
 }
 
 /// Tool that cancels and reaps a background task.
-pub struct BgKill<B: StatelessBackend> {
+pub struct BgKill<B: ShellBackend> {
     backend: Arc<Mutex<B>>,
 }
 
-impl<B: StatelessBackend> BgKill<B> {
+impl<B: ShellBackend> BgKill<B> {
     /// Creates a new tool sharing `backend`.
     pub fn new(backend: Arc<Mutex<B>>) -> Self {
         Self { backend }
@@ -36,7 +36,7 @@ impl<B: StatelessBackend> BgKill<B> {
 }
 
 #[async_trait]
-impl<B: StatelessBackend + Send + Sync + 'static> LlmTool for BgKill<B> {
+impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BgKill<B> {
     fn name(&self) -> &str {
         super::names::BG_KILL
     }

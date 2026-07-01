@@ -1,6 +1,6 @@
 [package]
 name = "just-agent-shell"
-description = "Provider-neutral shell/session tools for LLM applications"
+description = "Provider-neutral shell tools for LLM applications"
 edition = "2024"
 version.workspace = true
 license.workspace = true
@@ -9,14 +9,11 @@ license.workspace = true
 just-llm-client = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-portable-pty = { workspace = true }
-strip-ansi-escapes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-# Stateless backend (`stateless` module): process spawning, pgroup kill, sticky
-# cwd, background supervisor.
+# Shell backend: process spawning, pgroup kill, sticky cwd, background supervisor.
 tokio-util = { workspace = true }
 nix = { workspace = true }
 uuid = { workspace = true }
@@ -32,8 +29,9 @@ libc = { workspace = true }
 
 [features]
 # Testing utilities for downstream crates: exposes `MockShellBackend` (and
-# future test helpers) so consumers can drive shell-tool tests without a real
-# PTY. Off by default to keep test-only code out of production builds.
+# future test helpers) so consumers can drive shell-tool tests without spawning
+# a real process. Off by default to keep test-only code out of production
+# builds.
 testutils = []
 # Linux-only: restrict every spawned `bash` (foreground + background) to a
 # landlock filesystem domain + mount-ns readonly-holes derived from the owning
@@ -53,9 +51,9 @@ landlock = ["dep:libsandbox", "libsandbox/landlock"]
 seccomp = ["landlock"]
 
 [dev-dependencies]
-# Dev-only: the `spawn` benchmark measures per-command spawn cost across the
-# stateless backend, the PTY backend, and a bare `bash -c` floor. Not pulled by
-# runtime/daemon (dev-dependencies are non-transitive).
+# Dev-only: the `spawn` benchmark measures per-command spawn cost for the shell
+# backend against a bare `bash -c` floor. Not pulled by runtime/daemon
+# (dev-dependencies are non-transitive).
 criterion = { workspace = true }
 
 [[bench]]

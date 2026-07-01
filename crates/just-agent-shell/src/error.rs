@@ -10,14 +10,6 @@ pub enum ShellError {
     #[error("command timed out after {timeout}s")]
     Timeout { timeout: u64 },
 
-    /// No session with the given name exists.
-    #[error("session '{name}' not found")]
-    SessionNotFound { name: String },
-
-    /// A session with the given name already exists.
-    #[error("session '{name}' already exists")]
-    SessionExists { name: String },
-
     /// The shell command returned a non-zero exit or could not be started.
     #[error("command execution failed: {reason}")]
     ExecutionFailed { reason: String },
@@ -26,11 +18,7 @@ pub enum ShellError {
     #[error("backend error: {reason}")]
     BackendError { reason: String },
 
-    /// A new session could not be created.
-    #[error("failed to create session '{name}': {reason}")]
-    SessionCreateFailed { name: String, reason: String },
-
-    // -- stateless backend + background supervisor -------------------------
+    // -- background supervisor ----------------------------------------------
     /// A background task with the given id does not exist.
     #[error("background task '{task_id}' not found")]
     TaskNotFound { task_id: String },
@@ -62,16 +50,6 @@ impl ShellError {
         Self::Timeout { timeout: seconds }
     }
 
-    /// Creates a session-not-found error.
-    pub fn session_not_found(name: impl Into<String>) -> Self {
-        Self::SessionNotFound { name: name.into() }
-    }
-
-    /// Creates a duplicate-session error.
-    pub fn session_exists(name: impl Into<String>) -> Self {
-        Self::SessionExists { name: name.into() }
-    }
-
     /// Creates an execution-failed error.
     pub fn execution_failed(reason: impl Into<String>) -> Self {
         Self::ExecutionFailed {
@@ -82,14 +60,6 @@ impl ShellError {
     /// Creates a backend error.
     pub fn backend(reason: impl Into<String>) -> Self {
         Self::BackendError {
-            reason: reason.into(),
-        }
-    }
-
-    /// Creates a session-create-failed error.
-    pub fn session_create_failed(name: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::SessionCreateFailed {
-            name: name.into(),
             reason: reason.into(),
         }
     }
@@ -147,14 +117,6 @@ mod tests {
         assert!(matches!(
             ShellError::timeout(3),
             ShellError::Timeout { timeout: 3 }
-        ));
-        assert!(matches!(
-            ShellError::session_not_found("main"),
-            ShellError::SessionNotFound { name } if name == "main"
-        ));
-        assert!(matches!(
-            ShellError::session_exists("main"),
-            ShellError::SessionExists { name } if name == "main"
         ));
         assert!(matches!(
             ShellError::execution_failed("boom"),

@@ -1,4 +1,4 @@
-//! Process-group tree-kill for stateless command execution.
+//! Process-group tree-kill for command execution.
 //!
 //! [`tokio::process::Command::process_group`](tokio::process::Command::process_group)`(0)`
 //! makes the spawned child the leader of a fresh process group (PGID == child

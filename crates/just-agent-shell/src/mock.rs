@@ -1,9 +1,8 @@
-//! In-memory mock of [`StatelessBackend`] for tests (behind `testutils`).
+//! In-memory mock of [`ShellBackend`] for tests (behind `testutils`).
 //!
-//! Mirrors [`MockShellBackend`](crate::backend::MockShellBackend): queued
-//! outputs/exit codes, a timeout switch, and a recorded-command history. The
-//! background surface is stubbed (it can't really spawn). It is a **stub, not a
-//! simulation** — like the PTY mock, it does not track `cd`.
+//! Queued outputs/exit codes, a timeout switch, and a recorded-command history.
+//! The background surface is stubbed (it can't really spawn). It is a **stub,
+//! not a simulation** — it does not track `cd`.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -12,12 +11,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::backend::{ShellBackend, ShellOutput};
 use crate::error::ShellError;
-use crate::stateless::backend::{StatelessBackend, StatelessOutput};
-use crate::stateless::supervisor::{BgReadOutput, TaskState};
+use crate::supervisor::{BgReadOutput, TaskState};
 
-/// Test double for [`StatelessBackend`].
-pub struct MockStatelessBackend {
+/// Test double for [`ShellBackend`].
+pub struct MockShellBackend {
     cwd: PathBuf,
     outputs: VecDeque<String>,
     exit_codes: VecDeque<Option<i32>>,
@@ -27,7 +26,7 @@ pub struct MockStatelessBackend {
     next_bg: AtomicU64,
 }
 
-impl MockStatelessBackend {
+impl MockShellBackend {
     /// Creates an empty mock whose cwd is the process cwd (or `/tmp`).
     pub fn new() -> Self {
         Self {
@@ -65,24 +64,20 @@ impl MockStatelessBackend {
     }
 }
 
-impl Default for MockStatelessBackend {
+impl Default for MockShellBackend {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl StatelessBackend for MockStatelessBackend {
-    async fn exec(
-        &mut self,
-        command: &str,
-        _timeout: Duration,
-    ) -> Result<StatelessOutput, ShellError> {
+impl ShellBackend for MockShellBackend {
+    async fn exec(&mut self, command: &str, _timeout: Duration) -> Result<ShellOutput, ShellError> {
         self.commands.push(command.to_owned());
 
         if self.should_timeout {
             self.should_timeout = false;
-            return Ok(StatelessOutput {
+            return Ok(ShellOutput {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: Some(124),
@@ -94,7 +89,7 @@ impl StatelessBackend for MockStatelessBackend {
 
         let stdout = self.outputs.pop_front().unwrap_or_default();
         let exit_code = self.exit_codes.pop_front().flatten();
-        Ok(StatelessOutput {
+        Ok(ShellOutput {
             stdout,
             stderr: String::new(),
             exit_code,
@@ -145,7 +140,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_returns_queued_output_and_records_command() {
-        let mut backend = MockStatelessBackend::new();
+        let mut backend = MockShellBackend::new();
         backend.push_output("hello").push_exit_code(Some(0));
         let out = backend
             .exec("echo hello", Duration::from_secs(1))
@@ -159,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_returns_124() {
-        let mut backend = MockStatelessBackend::new();
+        let mut backend = MockShellBackend::new();
         backend.set_should_timeout();
         let out = backend
             .exec("sleep 999", Duration::from_millis(1))
@@ -171,7 +166,7 @@ mod tests {
 
     #[tokio::test]
     async fn background_round_trip() {
-        let mut backend = MockStatelessBackend::new();
+        let mut backend = MockShellBackend::new();
         let id = backend.spawn_background("build").await.unwrap();
         let read = backend.read_background(&id, 1024).await.unwrap();
         assert_eq!(read.state, TaskState::Running);

@@ -67,7 +67,7 @@ impl DaemonClient {
     /// missing, with guidance tailored to common scenarios:
     ///
     /// - **Agent running inside the daemon**: the token is embedded
-    ///   automatically in the PTY environment, this should not happen.
+    ///   automatically in the spawned agent's environment, this should not happen.
     /// - **Operator user**: copy the token from the daemon startup output and
     ///   `export JUST_AGENT_AUTH_TOKEN=<token>`.
     /// - **Automation**: set `JUST_AGENT_AUTH_TOKEN` to the same value as the

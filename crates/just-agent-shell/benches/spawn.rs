@@ -1,30 +1,27 @@
-//! Per-command spawn-cost benchmark for the shell backends.
+//! Per-command spawn-cost benchmark for the shell backend.
 //!
-//! Measures the **per-command cost the agent pays** for the three execution
-//! models, on an identical workload of simple read-only commands:
+//! Measures the **per-command cost the agent pays** for two execution models on
+//! an identical workload of simple read-only commands:
 //!
 //! - `raw_bash_c` — a bare `bash -c <cmd>` (null stdin, piped capture). The floor:
-//!   process-spawn cost with zero just-agent machinery. (The `stateless_exec`
-//!   gap over this floor is not "just logic" — stateless additionally pays for
+//!   process-spawn cost with zero just-agent machinery. (The `exec` gap over
+//!   this floor is not "just logic" — the backend additionally pays for
 //!   `process_group(0)`, file-input spawn `bash <wrapper>` vs `bash -c`, and the
 //!   wrapper's per-call `EXIT` trap.)
-//! - `stateless_exec` — the new stateless backend's `exec`: a fresh `bash` per
-//!   call (wrapper file + color-env injection + run + cwd trap + pgroup reap).
-//! - `pty_exec` — the original persistent-PTY backend's `execute`: no per-call
-//!   spawn, but a stability-poll (default 3 × 100 ms) gates every return.
+//! - `exec` — the shell backend's `exec`: a fresh `bash` per call (wrapper file
+//!   + color-env injection + run + cwd trap + pgroup reap).
 //!
 //! ## Methodology
 //!
-//! Only the **inner command execution** is timed. For the two session-based
-//! backends each iteration creates a fresh session (build, untimed), runs the
-//! command (timed), and tears the session down (untimed) — so thousands of
-//! criterion iterations never accumulate living sessions ("session explosion").
+//! Only the **inner command execution** is timed. Each iteration creates a fresh
+//! backend (build, untimed), runs the command (timed), and tears it down
+//! (untimed) — so thousands of criterion iterations never accumulate state.
 //!
 //! This relies on criterion's `iter_batched_ref`: per the criterion 0.8 source,
 //! the entire batch is filled by `setup` *before* the timed region starts and
-//! dropped *after* it ends — so neither session build nor `Drop` is charged to a
-//! sample, under any `BatchSize`. The current-thread tokio runtime is built
-//! *inside* each `bench_function` closure (on criterion's bench thread), because
+//! dropped *after* it ends — so neither build nor `Drop` is charged to a sample,
+//! under any `BatchSize`. The current-thread tokio runtime is built *inside*
+//! each `bench_function` closure (on criterion's bench thread), because
 //! `Runtime::block_on` only drives its drivers on the owning thread.
 //!
 //! Run with: `cargo bench -p just-agent-shell`.
@@ -34,14 +31,14 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use just_agent_shell::{PtyBuilder, ShellBackend, StatelessBackend, StatelessBuilder};
+use just_agent_shell::{ShellBackend, ShellBuilder};
 
 /// Generous timeout — none of the read-only pool commands approach it.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Fixed xorshift seed shared across all three benches so each runs the
-/// *identical* command sequence (apples-to-apples). Non-zero (xorshift requires
-/// it). Each bench holds its own `state` initialized from this constant.
+/// Fixed xorshift seed shared across both benches so each runs the *identical*
+/// command sequence (apples-to-apples). Non-zero (xorshift requires it). Each
+/// bench holds its own `state` initialized from this constant.
 const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 
 /// Simple, read-only, fast commands. Picked per iteration so the measured cost
@@ -69,7 +66,7 @@ fn pick(state: &mut u64) -> usize {
     (x as usize) % POOL.len()
 }
 
-/// The first `n` commands the shared workload picks — printed once so the three
+/// The first `n` commands the shared workload picks — printed once so the two
 /// benches can be eyeballed to agree on sequence.
 fn first_picks(n: usize) -> Vec<&'static str> {
     let mut state = SEED;
@@ -90,8 +87,7 @@ fn spawn_benches(c: &mut Criterion) {
         first_picks(5)
     );
 
-    // One group. `sample_size(20)` (criterion minimum is 10) bounds wall-clock for
-    // the ~300 ms/iter PTY bench; ample for the fast benches too.
+    // One group. `sample_size(20)` (criterion minimum is 10) bounds wall-clock.
     let mut group = c.benchmark_group("spawn");
     group.sample_size(20);
 
@@ -118,53 +114,29 @@ fn spawn_benches(c: &mut Criterion) {
         });
     });
 
-    // Stateless backend: rebuild the backend each iteration (untimed), time only
+    // Shell backend: rebuild the backend each iteration (untimed), time only
     // `exec` (timed), drop (untimed). `SmallInput` — each `ProcessBackend` holds
     // no resident child between calls, so there is no contention to avoid. A
     // shared data_dir is safe: execs run sequentially and each removes its own
     // per-call dir before returning.
-    let data_dir = std::env::temp_dir().join(format!("ja-bench-stateless-{}", std::process::id()));
-    group.bench_function("stateless_exec", |b| {
+    let data_dir = std::env::temp_dir().join(format!("ja-bench-shell-{}", std::process::id()));
+    group.bench_function("exec", |b| {
         let rt = runtime();
         let mut state = SEED;
         b.iter_batched_ref(
             || {
-                rt.block_on(StatelessBuilder::new().data_dir(data_dir.clone()).build())
-                    .expect("stateless backend build")
+                rt.block_on(ShellBuilder::new().data_dir(data_dir.clone()).build())
+                    .expect("shell backend build")
             },
             |backend| {
                 let cmd = POOL[pick(&mut state)];
-                let output = rt
-                    .block_on(backend.exec(cmd, TIMEOUT))
-                    .expect("stateless exec");
+                let output = rt.block_on(backend.exec(cmd, TIMEOUT)).expect("shell exec");
                 black_box(output);
             },
             BatchSize::SmallInput,
         );
     });
     let _ = std::fs::remove_dir_all(&data_dir);
-
-    // PTY backend (resident-session model): in real usage ONE long-lived session
-    // is built once and reused across many commands — so we build a single session
-    // (untimed, before the loop) and time `execute` reusing it. Plain `b.iter`,
-    // NOT `iter_batched_ref`: the session must persist across iterations, and a
-    // larger `BatchSize` builds *more separate sessions* (each used once), it does
-    // NOT reuse one. Execution is sequential either way.
-    group.bench_function("pty_exec", |b| {
-        let rt = runtime();
-        let mut state = SEED;
-        let mut session = rt
-            .block_on(PtyBuilder::new("bench").build())
-            .expect("pty backend build");
-        b.iter(|| {
-            let cmd = POOL[pick(&mut state)];
-            let output = rt
-                .block_on(session.execute(cmd, TIMEOUT, false))
-                .expect("pty execute");
-            black_box(output);
-        });
-        drop(session);
-    });
 
     group.finish();
 }

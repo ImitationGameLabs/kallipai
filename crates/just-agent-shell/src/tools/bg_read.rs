@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::stateless::backend::StatelessBackend;
+use crate::backend::ShellBackend;
 
 /// Default number of recent lines to return.
 const DEFAULT_LINES: usize = 200;
@@ -43,11 +43,11 @@ pub struct BgReadOutput {
 }
 
 /// Tool that reads a background task's accumulated output.
-pub struct BgRead<B: StatelessBackend> {
+pub struct BgRead<B: ShellBackend> {
     backend: Arc<Mutex<B>>,
 }
 
-impl<B: StatelessBackend> BgRead<B> {
+impl<B: ShellBackend> BgRead<B> {
     /// Creates a new tool sharing `backend`.
     pub fn new(backend: Arc<Mutex<B>>) -> Self {
         Self { backend }
@@ -55,7 +55,7 @@ impl<B: StatelessBackend> BgRead<B> {
 }
 
 #[async_trait]
-impl<B: StatelessBackend + Send + Sync + 'static> LlmTool for BgRead<B> {
+impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BgRead<B> {
     fn name(&self) -> &str {
         super::names::BG_READ
     }

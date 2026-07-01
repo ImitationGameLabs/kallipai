@@ -1,4 +1,4 @@
-//! Stateless one-shot command execution: a fresh `bash` process per call.
+//! One-shot command execution: a fresh `bash` process per call.
 //!
 //! Every [`ProcessBackend::exec`] spawns an isolated `bash <wrapper>` (piped
 //! stdout/stderr, `stdin` null, its own process group) and captures output until
@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 use crate::error::ShellError;
-use crate::stateless::{builder, cwd, output, pgroup, supervisor};
+use crate::{builder, capture, cwd, pgroup, supervisor};
 
 /// Exit code synthesized on timeout (matches GNU `timeout(1)`).
 const TIMEOUT_EXIT: i32 = 124;
@@ -46,9 +46,9 @@ impl Drop for RemoveOnDrop {
     }
 }
 
-/// Result of a stateless command execution.
+/// Result of a command execution.
 #[derive(Debug, Clone)]
-pub struct StatelessOutput {
+pub struct ShellOutput {
     /// Captured stdout (possibly clipped to a tail).
     pub stdout: String,
     /// Captured stderr (possibly clipped to a tail).
@@ -63,21 +63,17 @@ pub struct StatelessOutput {
     pub cwd: PathBuf,
 }
 
-/// Narrow abstraction for a stateless command runner.
+/// Abstraction for a one-shot command runner.
 ///
-/// A sibling to [`crate::backend::ShellBackend`]: there are no sessions, no
-/// scrollback, no "current session". [`ProcessBackend`] is the concrete
-/// implementation; an in-memory mock is available behind the `testutils`
-/// feature for downstream tests, so the `bash_exec` tool stays generic over
-/// its backend.
+/// There are no sessions, no scrollback, no "current session": every
+/// [`ShellBackend::exec`] spawns a fresh process. [`ProcessBackend`] is the
+/// concrete implementation; an in-memory mock is available behind the
+/// `testutils` feature for downstream tests, so the `bash_exec` tool stays
+/// generic over its backend.
 #[async_trait]
-pub trait StatelessBackend: Send + Sync {
+pub trait ShellBackend: Send + Sync {
     /// Run `command`, returning its output and the post-command cwd.
-    async fn exec(
-        &mut self,
-        command: &str,
-        timeout: Duration,
-    ) -> Result<StatelessOutput, ShellError>;
+    async fn exec(&mut self, command: &str, timeout: Duration) -> Result<ShellOutput, ShellError>;
     /// The current (sticky) working directory.
     fn cwd(&self) -> &Path;
     /// Spawn `command` as a background task; returns its id.
@@ -92,9 +88,9 @@ pub trait StatelessBackend: Send + Sync {
     async fn kill_background(&mut self, id: &str) -> Result<(), ShellError>;
 }
 
-/// Concrete stateless backend: one fresh process per call.
+/// Concrete backend: one fresh process per call.
 pub struct ProcessBackend {
-    pub(super) config: builder::StatelessBuilder,
+    pub(super) config: builder::ShellBuilder,
     pub(super) cwd: PathBuf,
     pub(super) data_dir: PathBuf,
     pub(super) next_call: u64,
@@ -102,7 +98,7 @@ pub struct ProcessBackend {
 }
 
 #[async_trait]
-impl StatelessBackend for ProcessBackend {
+impl ShellBackend for ProcessBackend {
     fn cwd(&self) -> &Path {
         &self.cwd
     }
@@ -111,7 +107,7 @@ impl StatelessBackend for ProcessBackend {
         &mut self,
         command: &str,
         timeout_dur: Duration,
-    ) -> Result<StatelessOutput, ShellError> {
+    ) -> Result<ShellOutput, ShellError> {
         // Resolve an existing spawn cwd; fall back if the cached one was deleted.
         let spawn_cwd =
             std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.config.fallback_cwd.clone());
@@ -160,8 +156,8 @@ impl StatelessBackend for ProcessBackend {
         let max = self.config.max_output_bytes;
         // Shared captures so partial output survives even if a pump is stuck
         // (a grandchild holding the pipe write-end) and has to be aborted.
-        let out_cap = Arc::new(Mutex::new(output::BoundedCapture::new(max)));
-        let err_cap = Arc::new(Mutex::new(output::BoundedCapture::new(max)));
+        let out_cap = Arc::new(Mutex::new(capture::BoundedCapture::new(max)));
+        let err_cap = Arc::new(Mutex::new(capture::BoundedCapture::new(max)));
         let out_task = tokio::spawn(pump(child.stdout.take(), out_cap.clone()));
         let err_task = tokio::spawn(pump(child.stderr.take(), err_cap.clone()));
 
@@ -182,7 +178,7 @@ impl StatelessBackend for ProcessBackend {
             exit_status.and_then(|s| s.code())
         };
 
-        Ok(StatelessOutput {
+        Ok(ShellOutput {
             stdout: out_cap.text,
             stderr: err_cap.text,
             exit_code,
@@ -227,7 +223,7 @@ async fn run_until_exit_or_timeout(
 }
 
 /// Pump a piped stream into a shared bounded capture until EOF or error.
-async fn pump(reader: Option<impl AsyncRead + Unpin>, cap: Arc<Mutex<output::BoundedCapture>>) {
+async fn pump(reader: Option<impl AsyncRead + Unpin>, cap: Arc<Mutex<capture::BoundedCapture>>) {
     if let Some(mut r) = reader {
         let mut buf = [0u8; 8 * 1024];
         loop {
@@ -248,8 +244,8 @@ async fn pump(reader: Option<impl AsyncRead + Unpin>, cap: Arc<Mutex<output::Bou
 /// and finalize whatever it buffered. Partial output survives.
 async fn finish_capture(
     handle: tokio::task::JoinHandle<()>,
-    cap: Arc<Mutex<output::BoundedCapture>>,
-) -> output::CaptureResult {
+    cap: Arc<Mutex<capture::BoundedCapture>>,
+) -> capture::CaptureResult {
     handle.abort();
     let _ = handle.await; // resolves promptly with Cancelled after abort
     let taken = std::mem::take(&mut *cap.lock().expect("capture lock poisoned"));
@@ -290,11 +286,11 @@ fn shell_quote(path: &Path) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::stateless::builder::StatelessBuilder;
+    use crate::builder::ShellBuilder;
 
     #[tokio::test]
     async fn exec_captures_stdout_and_exit_code() {
-        let mut backend = StatelessBuilder::new()
+        let mut backend = ShellBuilder::new()
             .data_dir(test_dir())
             .build()
             .await
@@ -310,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_cd_persists_across_calls() {
-        let mut backend = StatelessBuilder::new()
+        let mut backend = ShellBuilder::new()
             .data_dir(test_dir())
             .build()
             .await
@@ -326,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_timeout_kills_and_synthesizes_124() {
-        let mut backend = StatelessBuilder::new()
+        let mut backend = ShellBuilder::new()
             .data_dir(test_dir())
             .build()
             .await
@@ -341,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_timeout_reaps_process_group() {
-        let mut backend = StatelessBuilder::new()
+        let mut backend = ShellBuilder::new()
             .data_dir(test_dir())
             .build()
             .await
@@ -372,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn exit_n_traps_and_reports_cwd() {
         let dir = test_dir();
-        let mut backend = StatelessBuilder::new()
+        let mut backend = ShellBuilder::new()
             .data_dir(dir.clone())
             .build()
             .await
@@ -406,7 +402,7 @@ mod tests {
     #[tokio::test]
     async fn deleted_cwd_falls_back() {
         let dir = test_dir();
-        let mut backend = StatelessBuilder::new()
+        let mut backend = ShellBuilder::new()
             .data_dir(dir.clone())
             .build()
             .await
@@ -432,7 +428,7 @@ mod tests {
     /// applied — `TERM`/`NO_COLOR`/`CLICOLOR` set, `LS_COLORS` emptied.
     #[tokio::test]
     async fn color_vars_suppress_in_foreground() {
-        let mut backend = StatelessBuilder::new()
+        let mut backend = ShellBuilder::new()
             .data_dir(test_dir())
             .build()
             .await
@@ -455,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn build_does_not_write_env_sh() {
         let dir = test_dir();
-        let _backend = StatelessBuilder::new()
+        let _backend = ShellBuilder::new()
             .data_dir(dir.clone())
             .build()
             .await
@@ -467,7 +463,7 @@ mod tests {
     /// `Command::env` replace the removed snapshot).
     #[tokio::test]
     async fn builder_env_reaches_exec() {
-        let mut backend = StatelessBuilder::new()
+        let mut backend = ShellBuilder::new()
             .data_dir(test_dir())
             .env("JA_INHERIT_PROBE", "ok")
             .build()
@@ -487,6 +483,6 @@ mod tests {
     fn test_dir() -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir().join(format!("ja-stateless-test-{}-{n}", std::process::id()))
+        std::env::temp_dir().join(format!("ja-shell-test-{}-{n}", std::process::id()))
     }
 }

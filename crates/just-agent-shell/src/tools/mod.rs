@@ -1,9 +1,8 @@
-//! Stateless shell tools: `bash_exec` plus background read/kill.
+//! Shell tools: `bash_exec` plus background read/kill.
 //!
 //! Each tool is an [`LlmTool`](just_llm_client::tools::LlmTool) backed by a
-//! [`StatelessBackend`](super::backend::StatelessBackend). Unlike the
-//! [`crate::session`] tools there is no persistent session: every `bash_exec`
-//! call spawns a fresh `bash` process.
+//! [`ShellBackend`](super::backend::ShellBackend). There is no persistent
+//! session: every `bash_exec` call spawns a fresh `bash` process.
 
 mod bash_exec;
 mod bg_kill;
@@ -16,7 +15,7 @@ pub use bg_read::{BgRead, BgReadArgs, BgReadOutput};
 /// LLM-facing tool names — single source of truth.
 ///
 /// Free constants (not associated constants) so they can be referenced without
-/// a backend type parameter, mirroring [`crate::session::names`].
+/// a backend type parameter.
 pub mod names {
     /// Execute a command in a fresh, isolated `bash` process.
     pub const BASH_EXEC: &str = "bash_exec";

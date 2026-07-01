@@ -33,7 +33,7 @@ in
   );
 
   # Docs with all features: catches broken intra-doc links inside feature-gated
-  # modules (e.g. stateless::mock behind `testutils`), which the default-feature
+  # modules (e.g. mock behind `testutils`), which the default-feature
   # check above can't see (those modules aren't compiled then). Keep both: the
   # default check catches links in always-compiled code that point to gated
   # items; this one catches links inside the gated modules.

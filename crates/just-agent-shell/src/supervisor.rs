@@ -20,7 +20,7 @@ use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::ShellError;
-use crate::stateless::pgroup;
+use crate::pgroup;
 
 /// LLM-facing identifier for a background task (UUID v4 string).
 pub(super) type TaskId = String;
@@ -73,7 +73,7 @@ impl TaskState {
 pub type OnTaskTerminal = Arc<dyn Fn(&str, TaskState, Option<i32>) + Send + Sync>;
 
 /// Owned terminal-state observer with a `Debug` impl (trait objects have none),
-/// so it can live in a `#[derive(Debug)]` struct like `StatelessBuilder`.
+/// so it can live in a `#[derive(Debug)]` struct like `ShellBuilder`.
 #[derive(Clone)]
 pub(super) struct TerminalObserver(pub(super) OnTaskTerminal);
 

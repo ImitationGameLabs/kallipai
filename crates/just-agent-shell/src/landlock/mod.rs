@@ -12,18 +12,18 @@
 //! and the composable mount-ns primitives (user/mount-ns entry, directory
 //! self-bind remount, tmpfs overlay) — lives in the `libsandbox` crate's
 //! `prepare_*`/`install_*` pairs (`mount::child`). Callers compose them: the
-//! stateless shell backend
-//! ([`ProcessBackend`](crate::stateless::backend::ProcessBackend) foreground
-//! commands and the background supervisor) builds the writable list from the
-//! owning agent's **current** directory write-locks (coordinated by the runtime
-//! crate's directory-lock coordinator) plus its own scratch dir, then calls
+//! shell backend
+//! ([`ProcessBackend`](crate::backend::ProcessBackend) foreground commands and
+//! the background supervisor) builds the writable list from the owning agent's
+//! **current** directory write-locks (coordinated by the runtime crate's
+//! directory-lock coordinator) plus its own scratch dir, then calls
 //! [`crate::landlock::apply`]. landlock turns that advisory lock decision into a mandatory one —
 //! a process physically cannot write a directory not in its writable list.
 //!
 //! # Per-spawn snapshot
 //!
-//! The writable set is read fresh at each spawn (one `bash` per command in the
-//! stateless backend), so the domain always reflects the agent's locks *as of
+//! The writable set is read fresh at each spawn (one `bash` per command), so
+//! the domain always reflects the agent's locks *as of
 //! that command*. See the plan's "Known limitations": a one-command overlap
 //! window exists after release, and the snapshot is point-in-time.
 //!

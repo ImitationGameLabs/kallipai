@@ -110,7 +110,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
 
     // Mint the prompt channel before building the tool dispatch so a background
     // task can push a completion notice onto it (the dispatch wires `notify` into
-    // the stateless backend's terminal-state observer). `try_send` drops silently
+    // the shell backend's terminal-state observer). `try_send` drops silently
     // on a full/dead channel — the agent then falls back to polling
     // `bash_background_read`, so a dropped notice is never a correctness loss.
     let (prompt_tx, prompt_rx) = args

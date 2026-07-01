@@ -182,12 +182,11 @@ Source: [`crates/just-agent-runtime/src/persistence.rs`](../../crates/just-agent
 
 ## System environment variables
 
-The stateless shell backend reads these from the process environment and passes them into clean shell sessions:
+The shell backend reads these from the process environment and passes them into every spawned `bash`:
 
-| Variable | Fallback     | Purpose                                        |
-| -------- | ------------ | ---------------------------------------------- |
-| `SHELL`  | `/bin/bash`  | User's login shell for shell session creation. |
-| `HOME`   | _(required)_ | User home directory.                           |
-| `PATH`   | _(required)_ | System PATH.                                   |
+| Variable | Fallback     | Purpose              |
+| -------- | ------------ | -------------------- |
+| `HOME`   | _(required)_ | User home directory. |
+| `PATH`   | _(required)_ | System PATH.         |
 
-The stateless backend also hardcodes `TERM=dumb`, `NO_COLOR=1`, `LS_COLORS=""`, `CLICOLOR="0"` into every session to suppress color output.
+The backend also hardcodes `TERM=dumb`, `NO_COLOR=1`, `LS_COLORS=""`, `CLICOLOR="0"` into every spawned `bash` to suppress color output.

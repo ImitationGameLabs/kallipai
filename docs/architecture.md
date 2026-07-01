@@ -41,7 +41,7 @@ Each agent is a pair of tokio tasks with completely isolated state:
 | `ContextStore`                                   | Yes        |
 | `ApprovalStore`                                  | Yes        |
 | `AgentConfig` (workspace, skills, system prompt) | Yes        |
-| Stateless shell backend                          | Yes        |
+| Shell backend                                    | Yes        |
 
 Agents do not share any runtime state. The daemon holds them in a `Vec` behind
 an `RwLock`; lookup is by UUID.

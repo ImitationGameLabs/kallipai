@@ -2,7 +2,7 @@
 //!
 //! Spawns the **real** `just-agent-daemon` and `just-agent-run` binaries and drives
 //! a scripted agent whose LLM is a wiremock standing in for the OpenAI-compatible
-//! endpoint. Everything else -- profile loading, the stateless bash sandbox
+//! endpoint. Everything else -- profile loading, the bash sandbox
 //! (mount-ns + landlock + seccomp), the `DirLockManager`, subagent creation via
 //! the `just-agent` CLI, and append-only history -- runs exactly as in production.
 //! Only the LLM HTTP call is mocked.

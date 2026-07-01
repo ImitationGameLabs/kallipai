@@ -28,8 +28,8 @@ toml = { workspace = true }
 tokenx-rs = { workspace = true }
 
 [features]
-# Linux-only: enable landlock enforcement of `DirLockManager` write-locks in the
-# stateless shell backend. Off by default; the coordinator (`dirlock`) and its
+# Linux-only: enable landlock enforcement of `DirLockManager` write-locks in
+# the shell backend. Off by default; the coordinator (`dirlock`) and its
 # HTTP/CLI surface are always built (advisory mode without this feature).
 landlock = ["just-agent-shell/landlock"]
 # Linux-only: install the seccomp denylist as the last step of every spawned

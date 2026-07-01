@@ -7,11 +7,9 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::backend::ProcessBackend;
 use crate::error::ShellError;
-use crate::stateless::{
-    backend::ProcessBackend,
-    supervisor::{self, TaskState, TerminalObserver},
-};
+use crate::supervisor::{self, TaskState, TerminalObserver};
 
 const DEFAULT_FALLBACK_CWD: &str = "/tmp";
 /// In-memory tail retained per stream (stdout/stderr) before clipping.
@@ -28,7 +26,7 @@ const DEFAULT_MAX_BG_BYTES: usize = 100 * 1024 * 1024; // 100 MiB
 /// Per-spawn access-decision snapshot closure. Aliased so the [`AccessSource`]
 /// newtype stays on one line (its inner type is long).
 #[cfg(all(target_os = "linux", feature = "landlock"))]
-pub(in crate::stateless) type AccessSourceFn =
+pub(crate) type AccessSourceFn =
     Arc<dyn Fn() -> io::Result<crate::landlock::AccessDecision> + Send + Sync + 'static>;
 
 /// Owned snapshot source of an agent's per-spawn [`AccessDecision`] (read
@@ -39,7 +37,7 @@ pub(in crate::stateless) type AccessSourceFn =
 /// here, keeping the shell decoupled from agent identity/tiers.
 #[cfg(all(target_os = "linux", feature = "landlock"))]
 #[derive(Clone)]
-pub(in crate::stateless) struct AccessSource(pub(in crate::stateless) AccessSourceFn);
+pub(crate) struct AccessSource(pub(crate) AccessSourceFn);
 
 #[cfg(all(target_os = "linux", feature = "landlock"))]
 impl std::fmt::Debug for AccessSource {
@@ -55,7 +53,7 @@ impl AccessSource {
     /// [`crate::landlock::apply`]. The snapshot error propagates (via `?`)
     /// rather than silently producing an empty writable list, which would deny
     /// all of the agent's writes.
-    pub(in crate::stateless) fn access_with_scratch(
+    pub(crate) fn access_with_scratch(
         &self,
         scratch: &std::path::Path,
     ) -> io::Result<crate::landlock::AccessDecision> {
@@ -67,7 +65,7 @@ impl AccessSource {
 
 /// Builder for [`ProcessBackend`].
 ///
-/// Construct with [`StatelessBuilder::new`], chain setters to override defaults,
+/// Construct with [`ShellBuilder::new`], chain setters to override defaults,
 /// then [`build`](Self::build) to create the backend.
 ///
 /// # Defaults
@@ -80,7 +78,7 @@ impl AccessSource {
 /// | `max_bg_bytes`     | 100 MiB     | Background-task output cap before the size watchdog kills it   |
 /// | `data_dir`         | resolved    | Root for per-call wrappers and bg output                       |
 #[derive(Clone, Debug)]
-pub struct StatelessBuilder {
+pub struct ShellBuilder {
     pub(super) shell: OsString,
     pub(super) fallback_cwd: PathBuf,
     pub(super) initial_cwd: Option<PathBuf>,
@@ -100,7 +98,7 @@ pub struct StatelessBuilder {
     pub(super) access_source: Option<AccessSource>,
 }
 
-impl StatelessBuilder {
+impl ShellBuilder {
     /// Creates a builder with default settings.
     pub fn new() -> Self {
         Self {
@@ -265,7 +263,7 @@ impl StatelessBuilder {
     }
 }
 
-impl Default for StatelessBuilder {
+impl Default for ShellBuilder {
     fn default() -> Self {
         Self::new()
     }
