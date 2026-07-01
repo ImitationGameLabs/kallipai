@@ -7,7 +7,7 @@ mod render;
 mod wrap;
 
 use just_agent_common::protocol::ApprovalEntry;
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{TextArea, WrapMode};
 
 use completion::CompletionState;
 
@@ -109,6 +109,14 @@ impl App {
                 .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)),
         );
         textarea.set_placeholder_text("Type a message...");
+        // Wrap long input at word boundaries, falling back to glyph splitting for a
+        // single token wider than the viewport (e.g. a pasted URL). Without this,
+        // the textarea scrolls horizontally and stretches a single row to the right.
+        textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+        // Drop the default underline on the cursor line: it underlines every
+        // character on the active line and leaves underline residue after deletion.
+        // The caret itself (reversed block) stays visible via `cursor_style`.
+        textarea.set_cursor_line_style(ratatui::style::Style::default());
         Self {
             chat_lines: Vec::new(),
             textarea,

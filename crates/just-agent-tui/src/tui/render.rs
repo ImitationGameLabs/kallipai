@@ -80,6 +80,10 @@ impl App {
         if self.quit_confirm {
             self.render_quit_popup(frame, input_area);
         }
+        // Clear the textarea rect so stale per-line styling doesn't linger on
+        // cells that this frame's text spans don't cover. Defense-in-depth now
+        // that the cursor-line underline is disabled (see `App::new`).
+        frame.render_widget(Clear, input_area);
         frame.render_widget(&self.textarea, input_area);
     }
 
