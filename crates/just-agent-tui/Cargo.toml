@@ -23,3 +23,5 @@ futures-util = { workspace = true }
 rpassword = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
+tokenx-rs = { workspace = true }
+tempfile = { workspace = true }

@@ -8,6 +8,24 @@ use super::{App, AppMode, ChatLine};
 impl App {
     /// Handle an SSE event from the daemon.
     pub fn handle_sse_event(&mut self, event: SseEvent) {
+        // A "boundary" marks a point where the daemon can interject a queued
+        // prompt: a `ToolCall` (the assistant committed tool calls, ending this
+        // streamed message) or a terminal event. The daemon's
+        // `drain_interjections` runs at the top of the next round iteration
+        // (after the current tool batch), so flushing here lands the prompt in
+        // time. Transient `Failover`/`Retrying` are within-stream retries, not
+        // message boundaries.
+        let is_boundary = matches!(
+            event,
+            SseEvent::ToolCall { .. }
+                | SseEvent::Finished { .. }
+                | SseEvent::Cancelled
+                | SseEvent::Interrupted
+                | SseEvent::Error { .. }
+                | SseEvent::MaxRoundsExceeded
+                | SseEvent::FailoverChainExhausted { .. }
+                | SseEvent::TokenBudgetExceeded { .. }
+        );
         match event {
             SseEvent::Reasoning { content } => {
                 self.chat_lines.push(ChatLine::Reasoning(content));
@@ -140,6 +158,12 @@ impl App {
                 self.auto_scroll = true;
             }
         }
+
+        // After a boundary, hand any queued input to the main loop for sending.
+        // `request_flush` no-ops when nothing is pending or the outbox is busy.
+        if is_boundary {
+            self.request_flush();
+        }
     }
 
     /// Handle a mouse scroll event in the chat area.
@@ -159,5 +183,60 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use just_agent_common::protocol::SseEvent;
+
+    /// Assert a boundary event flushes pending input into the outbox.
+    fn assert_boundary_flushes(event: SseEvent) {
+        let mut app = App::new();
+        app.pending.push("queued".into());
+        app.handle_sse_event(event);
+        assert_eq!(app.outbox.as_deref(), Some("queued"));
+    }
+
+    /// Assert a non-boundary event leaves pending unflushed.
+    fn assert_non_boundary_keeps_pending(event: SseEvent) {
+        let mut app = App::new();
+        app.pending.push("queued".into());
+        app.handle_sse_event(event);
+        assert!(app.outbox.is_none(), "unexpected flush");
+        assert_eq!(app.pending, vec!["queued".to_string()]);
+    }
+
+    #[test]
+    fn tool_call_is_a_boundary() {
+        assert_boundary_flushes(SseEvent::ToolCall {
+            name: "cat".into(),
+            args: "{}".into(),
+        });
+    }
+
+    #[test]
+    fn finished_is_a_boundary() {
+        assert_boundary_flushes(SseEvent::Finished {
+            content: "done".into(),
+        });
+    }
+
+    #[test]
+    fn interrupted_is_a_boundary() {
+        assert_boundary_flushes(SseEvent::Interrupted);
+    }
+
+    #[test]
+    fn assistant_delta_is_not_a_boundary() {
+        assert_non_boundary_keeps_pending(SseEvent::AssistantContentDelta {
+            delta: "chunk".into(),
+        });
+    }
+
+    #[test]
+    fn busy_is_not_a_boundary() {
+        assert_non_boundary_keeps_pending(SseEvent::Busy);
     }
 }

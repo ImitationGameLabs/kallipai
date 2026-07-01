@@ -1,5 +1,4 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use tokio::sync::mpsc;
 
 use crate::command;
 use just_agent_client::DaemonClient;
@@ -7,7 +6,6 @@ use just_agent_client::ListApprovalsParams;
 use just_agent_common::agentid::AgentId;
 use just_agent_common::command::{BudgetOp, SlashCommand};
 
-use super::super::Action;
 use super::{App, AppMode, ApprovalPhase, ChatLine};
 
 impl App {
@@ -15,7 +13,6 @@ impl App {
     pub async fn handle_key_event(
         &mut self,
         key: KeyEvent,
-        action_tx: &mpsc::Sender<Action>,
         client: &DaemonClient,
         agent_id: &AgentId,
     ) {
@@ -151,23 +148,50 @@ impl App {
             }
 
             let text = self.textarea.lines().join("\n");
-            if !text.is_empty() && !self.agent_busy {
-                self.auto_scroll = true;
-                self.history.push(text.clone());
-                self.textarea.clear();
-                self.completion.hide();
 
-                match command::parse(&text) {
-                    None => {
-                        self.chat_lines.push(ChatLine::User(text.clone()));
-                        action_tx.try_send(Action::SendPrompt(text)).ok();
+            // Empty submit with queued input acts as a manual flush/retry trigger
+            // (e.g. resending after a failure once the agent is idle).
+            if text.is_empty() {
+                if !self.pending.is_empty() {
+                    self.request_flush();
+                }
+                return;
+            }
+
+            match command::parse(&text) {
+                None => {
+                    // Free-text prompt: queue it. While busy it merges with prior
+                    // queued input and is sent at the next daemon interjection
+                    // boundary; while idle it is flushed immediately as its own
+                    // turn. Rendering happens in the main loop when it drains the
+                    // outbox, so the user line lands after the boundary event
+                    // rather than interleaved with the in-progress stream.
+                    self.history.push(text.clone());
+                    self.textarea.clear();
+                    self.completion.hide();
+                    self.auto_scroll = true;
+                    self.pending.push(text);
+                    if !self.agent_busy {
+                        self.request_flush();
                     }
-                    Some(Ok(cmd)) => {
-                        self.dispatch_command(cmd, client, agent_id).await;
+                }
+                Some(Ok(cmd)) => {
+                    // Slash commands require an idle agent. While busy, reject
+                    // without touching chat_lines: pushing a line mid-stream would
+                    // split the in-progress assistant line (deltas append to
+                    // `last_mut`). Leave the text so the user can retry when idle.
+                    if self.agent_busy {
+                        return;
                     }
-                    Some(Err(msg)) => {
-                        self.chat_lines.push(ChatLine::Error(msg));
-                    }
+                    self.textarea.clear();
+                    self.completion.hide();
+                    self.dispatch_command(cmd, client, agent_id).await;
+                }
+                Some(Err(msg)) => {
+                    self.textarea.clear();
+                    self.completion.hide();
+                    self.chat_lines.push(ChatLine::Error(msg));
+                    self.auto_scroll = true;
                 }
             }
             return;
@@ -305,6 +329,11 @@ impl App {
             }
             SlashCommand::Clear => {
                 self.chat_lines.clear();
+                // Drop any queued input and pending state along with the view;
+                // otherwise a queued message would surface into the cleared chat.
+                self.pending.clear();
+                self.outbox = None;
+                self.pending_send_failed = false;
             }
             // Daemon query
             SlashCommand::Status => match client.agent_status(agent_id).await {

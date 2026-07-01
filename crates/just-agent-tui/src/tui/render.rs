@@ -84,7 +84,22 @@ impl App {
         // cells that this frame's text spans don't cover. Defense-in-depth now
         // that the cursor-line underline is disabled (see `App::new`).
         frame.render_widget(Clear, input_area);
+        self.apply_input_title();
         frame.render_widget(&self.textarea, input_area);
+    }
+
+    /// Refresh the textarea border title to reflect queued input / send state.
+    ///
+    /// Called every chat frame; the block itself is built by [`App::input_block`]
+    /// so only the title changes here.
+    fn apply_input_title(&mut self) {
+        let title = match (self.pending.len(), self.pending_send_failed) {
+            (0, false) => ">> ".to_owned(),
+            (0, true) => ">> send failed - Enter to retry ".to_owned(),
+            (n, false) => format!(">> queued: {n} "),
+            (n, true) => format!(">> queued: {n} (send failed - Enter to retry) "),
+        };
+        self.textarea.set_block(Self::input_block(title));
     }
 
     fn render_approvals(&mut self, frame: &mut Frame) {
