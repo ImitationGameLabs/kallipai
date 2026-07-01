@@ -97,9 +97,33 @@ async fn run_tui(session: Session) -> Result<()> {
 
     ratatui::try_init()?;
     let mut terminal = ratatui::init();
+
+    // Chain a panic hook so a panic pops the keyboard enhancement flags and
+    // disables mouse capture before ratatui's own hook restores the terminal.
+    // Without this, a panic would leak the Kitty keyboard-protocol mode into the
+    // user's shell, corrupting key reporting for subsequent programs until reset.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = ratatui::crossterm::execute!(
+            std::io::stdout(),
+            ratatui::crossterm::event::PopKeyboardEnhancementFlags,
+            ratatui::crossterm::event::DisableMouseCapture,
+        );
+        previous_hook(info);
+    }));
+
     ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::event::EnableMouseCapture
+    )?;
+    // Request modifier-augmented key reporting so Shift+Enter (and other modified
+    // keys) arrive as distinct events. Required for Shift+Enter to insert a newline
+    // instead of submitting. Ignored (no-op) on terminals that lack the protocol.
+    ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::PushKeyboardEnhancementFlags(
+            ratatui::crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        )
     )?;
     let mut app = tui::App::new();
     // Filled when the daemon event stream ends; breaks the loop and is surfaced
@@ -141,9 +165,14 @@ async fn run_tui(session: Session) -> Result<()> {
         }
     }
 
+    // Pop enhancement flags and disable mouse capture while still in the alternate
+    // screen, before `ratatui::restore()` leaves it. On non-Kitty terminals the pop
+    // writes an escape that only the alt buffer discards; leaving the screen first
+    // would leak it to the user's shell.
     ratatui::crossterm::execute!(
         std::io::stdout(),
-        ratatui::crossterm::event::DisableMouseCapture
+        ratatui::crossterm::event::PopKeyboardEnhancementFlags,
+        ratatui::crossterm::event::DisableMouseCapture,
     )
     .ok();
     ratatui::restore();
