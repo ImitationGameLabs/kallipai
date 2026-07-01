@@ -17,12 +17,23 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 use crate::error::ShellError;
-use crate::stateless::{builder, cwd, env_snapshot, output, pgroup, supervisor};
+use crate::stateless::{builder, cwd, output, pgroup, supervisor};
 
 /// Exit code synthesized on timeout (matches GNU `timeout(1)`).
 const TIMEOUT_EXIT: i32 = 124;
 /// Default per-call timeout when the caller omits one.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
+/// Color-suppression env vars applied to every spawned `bash` (foreground and
+/// background) so tool output is free of escape sequences. Injected via
+/// [`Command::env`] by both exec paths, rather than emitted into the wrapper,
+/// so the mechanism is uniform and survives any rc the shell sources.
+pub(super) const COLOR_VARS: &[(&str, &str)] = &[
+    ("TERM", "dumb"),
+    ("NO_COLOR", "1"),
+    ("LS_COLORS", ""),
+    ("CLICOLOR", "0"),
+];
 
 /// Removes a directory when dropped (best-effort), so a per-call working dir is
 /// cleaned up on every exit path — success, early `?` error, or panic.
@@ -86,7 +97,6 @@ pub struct ProcessBackend {
     pub(super) config: builder::StatelessBuilder,
     pub(super) cwd: PathBuf,
     pub(super) data_dir: PathBuf,
-    pub(super) env_snapshot: env_snapshot::EnvSnapshot,
     pub(super) next_call: u64,
     pub(super) background: supervisor::BackgroundRegistry,
 }
@@ -114,7 +124,7 @@ impl StatelessBackend for ProcessBackend {
         let wrapper_path = call_dir.join("cmd.sh");
         let pwd_file = call_dir.join("pwd");
 
-        let wrapper = build_wrapper(command, &self.env_snapshot.path, Some(&pwd_file));
+        let wrapper = build_wrapper(command, Some(&pwd_file));
         std::fs::write(&wrapper_path, wrapper)?;
 
         let mut cmd = Command::new(&self.config.shell);
@@ -126,6 +136,10 @@ impl StatelessBackend for ProcessBackend {
             .kill_on_drop(true)
             .current_dir(&spawn_cwd);
         for (key, value) in &self.config.env {
+            cmd.env(key, value);
+        }
+        // Color suppression (parity with the background spawn path).
+        for (key, value) in COLOR_VARS {
             cmd.env(key, value);
         }
         // Landlock-restrict this bash to the agent's current access decision
@@ -244,24 +258,15 @@ async fn finish_capture(
 
 /// Build the per-call (or per-background-task) wrapper script.
 ///
-/// Invoked as `bash <wrapper>` (file input, not `-c`) so `shopt -s
-/// expand_aliases` is active when the command's aliases are expanded. When
-/// `pwd_file` is `Some`, an `EXIT` trap records `pwd -P` so the sticky cwd is
-/// captured on normal exit, `exit`, and SIGTERM (on SIGKILL it doesn't fire and
-/// the caller falls back — honest). Background tasks pass `None` so they don't
-/// mutate the shared sticky cwd.
-pub(super) fn build_wrapper(command: &str, snapshot: &Path, pwd_file: Option<&Path>) -> String {
-    let snap_q = shell_quote(snapshot);
-    let mut s = String::with_capacity(256 + command.len());
-    s.push_str("shopt -s expand_aliases\n");
-    s.push_str(&format!("source {snap_q} 2>/dev/null || true\n"));
-    for (key, value) in env_snapshot::COLOR_VARS {
-        s.push_str("export ");
-        s.push_str(key);
-        s.push('=');
-        s.push_str(value);
-        s.push('\n');
-    }
+/// The wrapper does only two things: when `pwd_file` is `Some`, set an `EXIT`
+/// trap that records `pwd -P` so the sticky cwd is captured on normal exit,
+/// `exit`, and SIGTERM (on SIGKILL it doesn't fire and the caller falls back —
+/// honest); then run `command`. Everything else the child needs — env,
+/// `config.env`, and color suppression — is injected via [`Command::env`] by
+/// the caller, since the spawned bash inherits that env directly. Background
+/// tasks pass `None` so they don't mutate the shared sticky cwd.
+pub(super) fn build_wrapper(command: &str, pwd_file: Option<&Path>) -> String {
+    let mut s = String::with_capacity(128 + command.len());
     // EXIT trap writes the resolved cwd to a tmpfile the backend reads back.
     if let Some(pwd_file) = pwd_file {
         let pwd_q = shell_quote(pwd_file);
@@ -361,51 +366,6 @@ mod tests {
         );
     }
 
-    /// The env snapshot is `source`d by every exec wrapper (after `shopt -s
-    /// expand_aliases`), so an alias defined in it expands in the command.
-    #[tokio::test]
-    async fn env_snapshot_sources_alias() {
-        let dir = test_dir();
-        let mut backend = StatelessBuilder::new()
-            .data_dir(dir.clone())
-            .build()
-            .await
-            .unwrap();
-        // Override the snapshot captured at build with a known alias.
-        std::fs::write(
-            dir.join("env.sh"),
-            "shopt -s expand_aliases\nalias m3say='echo M3_ALIAS'\n",
-        )
-        .unwrap();
-        let out = backend
-            .exec("m3say", Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert_eq!(out.exit_code, Some(0));
-        assert_eq!(out.stdout.trim(), "M3_ALIAS");
-    }
-
-    /// An `export` in the snapshot is visible to the command (proves the snapshot
-    /// is sourced, not just present).
-    #[tokio::test]
-    async fn env_snapshot_sources_export() {
-        let dir = test_dir();
-        let mut backend = StatelessBuilder::new()
-            .data_dir(dir.clone())
-            .build()
-            .await
-            .unwrap();
-        std::fs::write(dir.join("env.sh"), "export JA_M3_EXPORT=ok\n").unwrap();
-        // `${VAR:?unset}` fails (non-zero) if the var is absent, so this also
-        // catches a regression where the snapshot stops being sourced.
-        let out = backend
-            .exec("echo \"${JA_M3_EXPORT:?unset}\"", Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert_eq!(out.exit_code, Some(0));
-        assert_eq!(out.stdout.trim(), "ok");
-    }
-
     /// A non-zero exit still fires the EXIT trap, so the sticky cwd roundtrip
     /// reports the post-command directory (the existing `exit 7` test never
     /// asserted cwd).
@@ -465,6 +425,63 @@ mod tests {
             "cwd should fall back to an existing dir, not the deleted one; got {}",
             out.cwd.display()
         );
+    }
+
+    /// Color-suppression env vars reach the spawned bash via `Command::env`
+    /// (the wrapper no longer emits them): all four `COLOR_VARS` entries are
+    /// applied — `TERM`/`NO_COLOR`/`CLICOLOR` set, `LS_COLORS` emptied.
+    #[tokio::test]
+    async fn color_vars_suppress_in_foreground() {
+        let mut backend = StatelessBuilder::new()
+            .data_dir(test_dir())
+            .build()
+            .await
+            .unwrap();
+        // Covers all four COLOR_VARS entries: TERM/NO_COLOR/CLICOLOR set,
+        // LS_COLORS emptied.
+        let out = backend
+            .exec(
+                "echo \"$TERM/$NO_COLOR/$CLICOLOR\"; test -z \"$LS_COLORS\" && echo empty",
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(out.stdout.trim(), "dumb/1/0\nempty");
+    }
+
+    /// The snapshot subsystem is gone: building a backend must NOT create
+    /// `env.sh` in the data dir.
+    #[tokio::test]
+    async fn build_does_not_write_env_sh() {
+        let dir = test_dir();
+        let _backend = StatelessBuilder::new()
+            .data_dir(dir.clone())
+            .build()
+            .await
+            .unwrap();
+        assert!(!dir.join("env.sh").exists(), "env.sh should not be created");
+    }
+
+    /// A var set via the builder reaches the command (process inheritance +
+    /// `Command::env` replace the removed snapshot).
+    #[tokio::test]
+    async fn builder_env_reaches_exec() {
+        let mut backend = StatelessBuilder::new()
+            .data_dir(test_dir())
+            .env("JA_INHERIT_PROBE", "ok")
+            .build()
+            .await
+            .unwrap();
+        let out = backend
+            .exec(
+                "echo \"${JA_INHERIT_PROBE:?unset}\"",
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(out.stdout.trim(), "ok");
     }
 
     fn test_dir() -> PathBuf {

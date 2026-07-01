@@ -173,9 +173,8 @@ base_url = "{child_url}"
 
 /// A scripted LLM reply: either one `bash_exec` tool call, or a final assistant
 /// content message that ends the run. Owns the command string so scenarios can
-/// interpolate absolute paths (the agent's `$PWD` is **not** the workspace --
-/// the env snapshot captures the daemon process's PWD, so commands must not rely
-/// on it).
+/// interpolate absolute paths (the agent's `$PWD` is the daemon process's cwd,
+/// not the workspace, so commands must not rely on it).
 pub enum Reply {
     Tool(String),
     End(&'static str),

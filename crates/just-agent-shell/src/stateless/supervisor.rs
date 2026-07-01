@@ -20,7 +20,7 @@ use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::ShellError;
-use crate::stateless::{env_snapshot, pgroup};
+use crate::stateless::pgroup;
 
 /// LLM-facing identifier for a background task (UUID v4 string).
 pub(super) type TaskId = String;
@@ -123,7 +123,6 @@ struct Watched {
 pub(super) struct BackgroundRegistry {
     tasks: HashMap<TaskId, BackgroundTask>,
     shell: OsString,
-    snapshot: PathBuf,
     data_dir: PathBuf,
     max_bg_bytes: usize,
     env: HashMap<OsString, OsString>,
@@ -137,7 +136,6 @@ pub(super) struct BackgroundRegistry {
 impl BackgroundRegistry {
     pub(super) fn new(
         shell: OsString,
-        snapshot: PathBuf,
         data_dir: PathBuf,
         max_bg_bytes: usize,
         env: HashMap<OsString, OsString>,
@@ -146,7 +144,6 @@ impl BackgroundRegistry {
         Self {
             tasks: HashMap::new(),
             shell,
-            snapshot,
             data_dir,
             max_bg_bytes,
             env,
@@ -181,7 +178,7 @@ impl BackgroundRegistry {
         let wrapper_path = task_dir.join("cmd.sh");
         // Background wrapper: no cwd EXIT trap (background must not touch the
         // shared sticky cwd — M9).
-        let wrapper = super::backend::build_wrapper(command, &self.snapshot, None);
+        let wrapper = super::backend::build_wrapper(command, None);
         std::fs::write(&wrapper_path, wrapper)?;
 
         let mut cmd = Command::new(&self.shell);
@@ -195,7 +192,7 @@ impl BackgroundRegistry {
         for (key, value) in &self.env {
             cmd.env(key, value);
         }
-        for (key, value) in env_snapshot::COLOR_VARS {
+        for (key, value) in super::backend::COLOR_VARS {
             cmd.env(key, value);
         }
         // Landlock-restrict the background bash to the agent's access decision
@@ -431,12 +428,8 @@ mod tests {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        // Minimal snapshot so the wrapper's `source` is a no-op.
-        let snap = dir.join("env.sh");
-        std::fs::write(&snap, "").unwrap();
         BackgroundRegistry::new(
             OsString::from("bash"),
-            snap,
             dir,
             10 * 1024 * 1024,
             HashMap::new(),
@@ -456,6 +449,27 @@ mod tests {
             if out.state == TaskState::Exited {
                 assert!(out.output.contains("hello"));
                 assert_eq!(out.exit_code, Some(0));
+                return;
+            }
+            tokio::time::sleep(WATCH_POLL).await;
+        }
+        panic!("task did not exit in time");
+    }
+
+    /// Color-suppression env vars reach a background task too (the `COLOR_VARS`
+    /// const is shared with the foreground path): all four entries are applied
+    /// — `TERM`/`NO_COLOR`/`CLICOLOR` set, `LS_COLORS` emptied.
+    #[tokio::test]
+    async fn spawn_applies_color_vars() {
+        let mut reg = registry();
+        let id = reg
+            .spawn("echo \"$TERM/$NO_COLOR/$CLICOLOR\"; test -z \"$LS_COLORS\" && echo empty")
+            .unwrap();
+        for _ in 0..50 {
+            let out = reg.read(&id, 4096).unwrap();
+            if out.state == TaskState::Exited {
+                assert_eq!(out.exit_code, Some(0));
+                assert_eq!(out.output.trim(), "dumb/1/0\nempty");
                 return;
             }
             tokio::time::sleep(WATCH_POLL).await;
@@ -489,16 +503,7 @@ mod tests {
                 COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir_all(&dir).unwrap();
-            let snap = dir.join("env.sh");
-            std::fs::write(&snap, "").unwrap();
-            BackgroundRegistry::new(
-                OsString::from("bash"),
-                snap,
-                dir,
-                4096,
-                HashMap::new(),
-                None,
-            ) // tiny cap
+            BackgroundRegistry::new(OsString::from("bash"), dir, 4096, HashMap::new(), None) // tiny cap
         };
         let id = reg.spawn("yes hello").unwrap();
         for _ in 0..100 {
@@ -526,11 +531,8 @@ mod tests {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let snap = dir.join("env.sh");
-        std::fs::write(&snap, "").unwrap();
         let reg = BackgroundRegistry::new(
             OsString::from("bash"),
-            snap,
             dir,
             max_bg_bytes,
             HashMap::new(),

@@ -2,9 +2,9 @@
 //!
 //! A parallel shell tool set that spawns a fresh `bash` process per command —
 //! piped stdout/stderr, process-group tree-kill on timeout, a sticky working
-//! directory recovered via a `pwd` roundtrip, an env snapshot replayed per call,
-//! and an optional background-process supervisor. This is the execution model
-//! used by Codex, Claude Code, and opencode (see
+//! directory recovered via a `pwd` roundtrip, color-suppression env vars applied
+//! per spawn, and an optional background-process supervisor. This is the
+//! execution model used by Codex, Claude Code, and opencode (see
 //! `.draft/design/shell-execution-stateless-redesign.md`).
 //!
 //! This module is **additive**: it lives alongside the existing persistent-PTY
@@ -25,7 +25,6 @@
 pub mod backend;
 pub mod builder;
 pub mod cwd;
-pub mod env_snapshot;
 pub mod output;
 pub mod pgroup;
 pub mod supervisor;

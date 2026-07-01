@@ -16,7 +16,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 # Stateless backend (`stateless` module): process spawning, pgroup kill, sticky
-# cwd, env snapshot, background supervisor.
+# cwd, background supervisor.
 tokio-util = { workspace = true }
 nix = { workspace = true }
 uuid = { workspace = true }

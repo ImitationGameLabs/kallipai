@@ -51,10 +51,6 @@ pub enum ShellError {
     #[error("cwd resolution failed: {reason}")]
     CwdResolutionFailed { reason: String },
 
-    /// The env snapshot could not be captured or read.
-    #[error("env snapshot error: {reason}")]
-    EnvSnapshot { reason: String },
-
     /// A low-level I/O error occurred.
     #[error("I/O error: {0}")]
     Io(String),
@@ -131,13 +127,6 @@ impl ShellError {
     /// Creates a cwd-resolution-failed error.
     pub fn cwd_resolution_failed(reason: impl Into<String>) -> Self {
         Self::CwdResolutionFailed {
-            reason: reason.into(),
-        }
-    }
-
-    /// Creates an env-snapshot error.
-    pub fn env_snapshot(reason: impl Into<String>) -> Self {
-        Self::EnvSnapshot {
             reason: reason.into(),
         }
     }

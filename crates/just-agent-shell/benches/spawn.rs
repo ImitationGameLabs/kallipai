@@ -7,9 +7,9 @@
 //!   process-spawn cost with zero just-agent machinery. (The `stateless_exec`
 //!   gap over this floor is not "just logic" — stateless additionally pays for
 //!   `process_group(0)`, file-input spawn `bash <wrapper>` vs `bash -c`, and the
-//!   wrapper's per-call `source env.sh` + `EXIT` trap.)
+//!   wrapper's per-call `EXIT` trap.)
 //! - `stateless_exec` — the new stateless backend's `exec`: a fresh `bash` per
-//!   call (wrapper file + env-snapshot `source` + run + cwd trap + pgroup reap).
+//!   call (wrapper file + color-env injection + run + cwd trap + pgroup reap).
 //! - `pty_exec` — the original persistent-PTY backend's `execute`: no per-call
 //!   spawn, but a stability-poll (default 3 × 100 ms) gates every return.
 //!
