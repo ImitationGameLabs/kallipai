@@ -1,26 +1,29 @@
-//! Sticky working-directory resolution after a command (Fork B: pwd roundtrip).
+//! Sticky working-directory resolution after a command.
 //!
-//! The per-call wrapper writes `pwd -P` to a tmpfile via an `EXIT` trap (so it
-//! runs on normal exit, `exit`, and SIGTERM). `resolve` reads it back,
-//! NFC-normalizes (macOS APFS stores decomposed NFD), and `canonicalize`s — the
-//! guard that makes cwd honest: if the command `rmdir`'d its own cwd, the
-//! canonicalize fails and we fall back rather than report a stale value.
+//! The foreground `exec` path recovers the post-command cwd from a marker the
+//! `bash -c` script's `EXIT` trap prints (to stderr) — the marker carries
+//! `pwd -P` as a payload. `resolve_str` takes that extracted string and
+//! resolves it honestly: NFC-normalize (macOS APFS stores decomposed NFD), then
+//! `canonicalize` — the guard that makes cwd honest: if the command `rmdir`'d
+//! its own cwd, the canonicalize fails and we fall back rather than report a
+//! stale value.
 
 use std::path::{Path, PathBuf};
 
 use unicode_normalization::UnicodeNormalization;
 
-use crate::error::ShellError;
-
-/// Read the post-command cwd from `pwd_file` and resolve it honestly.
+/// Resolve a post-command cwd string (the payload from the EXIT-trap marker)
+/// honestly.
 ///
-/// Returns `fallback` when the value is empty or the directory no longer exists
-/// — so the result is never stale, only an explicit "unknown → fallback".
-pub(super) fn resolve(pwd_file: &Path, fallback: &Path) -> Result<PathBuf, ShellError> {
-    let raw = std::fs::read(pwd_file).unwrap_or_default();
-    let trimmed = String::from_utf8_lossy(&raw).trim().to_owned();
+/// `raw` is trimmed (defensively — `pwd -P` is newline-terminated, and CRLF
+/// edges on some emulated environments should not leak), NFC-normalized so the
+/// same path compares equal across runs, and `canonicalize`d. Returns `fallback`
+/// when the value is empty or the directory no longer exists — so the result is
+/// never stale, only an explicit "unknown -> fallback".
+pub(super) fn resolve_str(raw: &str, fallback: &Path) -> PathBuf {
+    let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Ok(fallback.to_path_buf());
+        return fallback.to_path_buf();
     }
 
     // NFC-normalize so the same path compares equal across runs.
@@ -28,7 +31,7 @@ pub(super) fn resolve(pwd_file: &Path, fallback: &Path) -> Result<PathBuf, Shell
     let candidate = PathBuf::from(nfc);
 
     // canonicalize confirms the dir still exists and resolves symlinks.
-    Ok(std::fs::canonicalize(&candidate).unwrap_or_else(|_| fallback.to_path_buf()))
+    std::fs::canonicalize(&candidate).unwrap_or_else(|_| fallback.to_path_buf())
 }
 
 #[cfg(test)]
@@ -36,46 +39,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_reads_pwd_file() {
-        let dir = tempfile_dir();
-        let pwd = dir.join("pwd");
-        std::fs::write(&pwd, "/tmp\n").unwrap();
-        let resolved = resolve(&pwd, Path::new("/fallback")).unwrap();
+    fn resolve_str_reads_payload() {
+        let resolved = resolve_str("/tmp\n", Path::new("/fallback"));
         // /tmp canonicalizes to itself on most systems.
         assert!(resolved.ends_with("tmp") || resolved == Path::new("/tmp"));
     }
 
     #[test]
-    fn resolve_empty_falls_back() {
-        let dir = tempfile_dir();
-        let pwd = dir.join("pwd");
-        std::fs::write(&pwd, "   \n").unwrap();
-        let resolved = resolve(&pwd, Path::new("/fallback")).unwrap();
+    fn resolve_str_trims_crlf() {
+        // A trailing CR (CRLF edge) must not leak into the candidate path.
+        let resolved = resolve_str("/tmp\r\n", Path::new("/fallback"));
+        assert!(resolved.ends_with("tmp") || resolved == Path::new("/tmp"));
+    }
+
+    #[test]
+    fn resolve_str_empty_falls_back() {
+        let resolved = resolve_str("   \n", Path::new("/fallback"));
         assert_eq!(resolved, Path::new("/fallback"));
     }
 
     #[test]
-    fn resolve_missing_file_falls_back() {
-        let resolved = resolve(Path::new("/nonexistent/ja-pwd"), Path::new("/fallback")).unwrap();
+    fn resolve_str_blank_falls_back() {
+        let resolved = resolve_str("", Path::new("/fallback"));
         assert_eq!(resolved, Path::new("/fallback"));
     }
 
     #[test]
-    fn resolve_deleted_dir_falls_back() {
-        let dir = tempfile_dir();
-        let pwd = dir.join("pwd");
-        // A path that does not exist on disk → canonicalize fails → fallback.
-        std::fs::write(&pwd, "/this/should/not/exist/ja-cwd-test\n").unwrap();
-        let resolved = resolve(&pwd, Path::new("/fallback")).unwrap();
+    fn resolve_str_deleted_dir_falls_back() {
+        // A path that does not exist on disk -> canonicalize fails -> fallback.
+        let resolved = resolve_str("/this/should/not/exist/ja-cwd-test", Path::new("/fallback"));
         assert_eq!(resolved, Path::new("/fallback"));
-    }
-
-    fn tempfile_dir() -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let unique = std::env::temp_dir().join(format!("ja-cwd-{}-{n}", std::process::id()));
-        let _ = std::fs::create_dir_all(&unique);
-        unique
     }
 }

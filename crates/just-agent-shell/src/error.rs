@@ -39,6 +39,16 @@ pub enum ShellError {
     #[error("cwd resolution failed: {reason}")]
     CwdResolutionFailed { reason: String },
 
+    /// The inline command script exceeds the backend's size cap and was not
+    /// passed to `bash -c`. The cap is set well below the kernel's
+    /// `MAX_ARG_STRLEN` (128 KiB) on purpose, so that large content is routed
+    /// to a file instead of an argv string. Stage the script on disk and run it
+    /// as `bash <file>`.
+    #[error(
+        "inline command exceeds the {limit}-byte limit; write it to a file and run that instead"
+    )]
+    CommandTooLarge { limit: usize },
+
     /// A low-level I/O error occurred.
     #[error("I/O error: {0}")]
     Io(String),
@@ -99,6 +109,11 @@ impl ShellError {
         Self::CwdResolutionFailed {
             reason: reason.into(),
         }
+    }
+
+    /// Creates a command-too-large error for the given inline-script byte limit.
+    pub fn command_too_large(limit: usize) -> Self {
+        Self::CommandTooLarge { limit }
     }
 }
 

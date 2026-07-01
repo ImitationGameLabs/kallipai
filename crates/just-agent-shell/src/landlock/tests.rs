@@ -85,7 +85,7 @@ async fn write_outside_writable_is_denied() {
 
 /// Baseline device/temp paths (`/dev/null`, `$TMPDIR`, ...) must stay writable
 /// under landlock even with an empty `writable` set — every `bash` touches them
-/// (the per-call wrapper redirects `2>/dev/null`, shells temp into `$TMPDIR`).
+/// (a script redirects `2>/dev/null`, shells temp into `$TMPDIR`).
 /// `apply` folds `baseline_writable()` into the set; pre-fix `/dev/null` was
 /// absent and `2>/dev/null` hit `EACCES` on every spawn.
 #[tokio::test]

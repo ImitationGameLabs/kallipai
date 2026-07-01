@@ -109,6 +109,15 @@ struct BackgroundTask {
     bytes: Arc<AtomicUsize>,
     cancel: CancellationToken,
     handle: Option<tokio::task::JoinHandle<()>>,
+    /// The task's auto-cleaned output dir (`out.log` lives here). Held for its
+    /// `Drop` side-effect (the dir is removed when the task is dropped), never
+    /// read directly. The watcher task itself is a separate tokio task that may
+    /// outlive this struct, but its `out.log` reads are already fallible
+    /// (`unwrap_or(0)`/`read_tail`), so a dir removed mid-poll is tolerated —
+    /// identical to the old manual `remove_dir_all` cleanup, no new
+    /// dangling-read path. Drop order is irrelevant to that safety.
+    #[allow(dead_code)]
+    tmpdir: tempfile::TempDir,
 }
 
 /// Shared mutable state observed by both the watcher task and read/kill.
@@ -123,7 +132,6 @@ struct Watched {
 pub(super) struct BackgroundRegistry {
     tasks: HashMap<TaskId, BackgroundTask>,
     shell: OsString,
-    data_dir: PathBuf,
     max_bg_bytes: usize,
     env: HashMap<OsString, OsString>,
     on_terminal: Option<OnTaskTerminal>,
@@ -136,7 +144,6 @@ pub(super) struct BackgroundRegistry {
 impl BackgroundRegistry {
     pub(super) fn new(
         shell: OsString,
-        data_dir: PathBuf,
         max_bg_bytes: usize,
         env: HashMap<OsString, OsString>,
         on_terminal: Option<OnTaskTerminal>,
@@ -144,7 +151,6 @@ impl BackgroundRegistry {
         Self {
             tasks: HashMap::new(),
             shell,
-            data_dir,
             max_bg_bytes,
             env,
             on_terminal,
@@ -164,9 +170,10 @@ impl BackgroundRegistry {
     /// Spawn `command` as a background task; returns its id.
     pub(super) fn spawn(&mut self, command: &str) -> Result<TaskId, ShellError> {
         let id = uuid::Uuid::new_v4().to_string();
-        let task_dir = self.data_dir.join("bg").join(&id);
-        std::fs::create_dir_all(&task_dir)?;
-        let output_path = task_dir.join("out.log");
+        // Each task owns an auto-cleaned tmpdir holding its merged `out.log`.
+        // No cwd EXIT trap: background must not touch the shared sticky cwd.
+        let tmpdir = tempfile::TempDir::new()?;
+        let output_path = tmpdir.path().join("out.log");
 
         // Create the output file so the redirect target exists before spawn.
         let output = OpenOptions::new()
@@ -175,14 +182,9 @@ impl BackgroundRegistry {
             .truncate(true)
             .open(&output_path)?;
 
-        let wrapper_path = task_dir.join("cmd.sh");
-        // Background wrapper: no cwd EXIT trap (background must not touch the
-        // shared sticky cwd — M9).
-        let wrapper = super::backend::build_wrapper(command, None);
-        std::fs::write(&wrapper_path, wrapper)?;
-
         let mut cmd = Command::new(&self.shell);
-        cmd.arg(&wrapper_path)
+        cmd.arg("-c")
+            .arg(command)
             .stdin(Stdio::null())
             .stdout(Stdio::from(output.try_clone()?))
             .stderr(Stdio::from(output))
@@ -197,12 +199,12 @@ impl BackgroundRegistry {
         }
         // Landlock-restrict the background bash to the agent's access decision
         // (Linux + landlock). Compose the decision (lock-manager-backed snapshot
-        // + this registry's data dir) via `AccessSource`; `apply` is pure
-        // mechanism — it moves the prepared landlock/mount-hole state into the
-        // `pre_exec` closure held by `cmd` until `spawn()` consumes it.
+        // + this task's own tmpdir as scratch) via `AccessSource`; `apply` is
+        // pure mechanism — it moves the prepared landlock/mount-hole state into
+        // the `pre_exec` closure held by `cmd` until `spawn()` consumes it.
         #[cfg(all(target_os = "linux", feature = "landlock"))]
         if let Some(source) = &self.access_source {
-            crate::landlock::apply(&mut cmd, &source.access_with_scratch(&self.data_dir)?)?;
+            crate::landlock::apply(&mut cmd, &source.access_with_scratch(tmpdir.path())?)?;
         }
         let child = cmd.spawn()?;
         let pid = child.id();
@@ -239,6 +241,7 @@ impl BackgroundRegistry {
                 bytes,
                 cancel,
                 handle: Some(handle),
+                tmpdir,
             },
         );
         Ok(id)
@@ -262,7 +265,8 @@ impl BackgroundRegistry {
         })
     }
 
-    /// Cancel and reap a background task, then remove its on-disk output dir.
+    /// Cancel and reap a background task. Its `TempDir` (holding `out.log`) is
+    /// removed when the removed task drops, after the watcher has finished.
     pub(super) async fn kill(&mut self, id: &str) -> Result<(), ShellError> {
         let mut task = self
             .tasks
@@ -272,10 +276,9 @@ impl BackgroundRegistry {
         if let Some(handle) = task.handle.take() {
             let _ = tokio::time::timeout(KILL_JOIN, handle).await;
         }
-        // The agent killed it explicitly — drop the output dir.
-        if let Some(dir) = task.output_path.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+        // `task` drops here: its `TempDir` removes the output dir. The watcher
+        // has already finished (we awaited the handle above), so `out.log` is
+        // not read after removal.
         Ok(())
     }
 }
@@ -283,15 +286,15 @@ impl BackgroundRegistry {
 impl Drop for BackgroundRegistry {
     fn drop(&mut self) {
         // For each task: force-kill the whole process group (sync — `Drop`
-        // can't await the watcher) and remove its output dir. `kill_on_drop`
-        // alone would only signal the leader, orphaning its children.
+        // can't await the watcher); the task's `TempDir` removes its output dir
+        // when drained. `kill_on_drop` alone would only signal the leader,
+        // orphaning its children. The orphaned watcher's `out.log` reads are
+        // already fallible, so a dir removed mid-poll is tolerated (same as the
+        // old manual cleanup).
         for (_, task) in self.tasks.drain() {
             task.cancel.cancel();
             if let Some(pid) = task.pid {
                 pgroup::force_kill_group(pid as i32);
-            }
-            if let Some(dir) = task.output_path.parent() {
-                let _ = std::fs::remove_dir_all(dir);
             }
         }
     }
@@ -416,28 +419,18 @@ fn read_tail(path: &Path, tail_bytes: usize) -> Result<String, ShellError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU64;
 
     /// Recorded terminal event `(task_id, state, exit_code)` for the on_terminal tests.
     type CapturedTerminal = Option<(String, TaskState, Option<i32>)>;
 
     fn registry() -> BackgroundRegistry {
-        let dir = std::env::temp_dir().join(format!(
-            "ja-sup-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
         BackgroundRegistry::new(
             OsString::from("bash"),
-            dir,
             10 * 1024 * 1024,
             HashMap::new(),
             None,
         )
     }
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test]
     async fn spawn_then_read_exited_task() {
@@ -496,15 +489,12 @@ mod tests {
 
     #[tokio::test]
     async fn size_watchdog_kills_overflow() {
-        let mut reg = {
-            let dir = std::env::temp_dir().join(format!(
-                "ja-sup-size-{}-{}",
-                std::process::id(),
-                COUNTER.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-            BackgroundRegistry::new(OsString::from("bash"), dir, 4096, HashMap::new(), None) // tiny cap
-        };
+        let mut reg = BackgroundRegistry::new(
+            OsString::from("bash"),
+            4096, // tiny cap
+            HashMap::new(),
+            None,
+        );
         let id = reg.spawn("yes hello").unwrap();
         for _ in 0..100 {
             let out = reg.read(&id, 1024).unwrap();
@@ -519,21 +509,13 @@ mod tests {
     /// Build a registry whose terminal-state observer records the last
     /// `(task_id, state, exit_code)` into the returned shared slot.
     fn tracking_registry(
-        label: &str,
         max_bg_bytes: usize,
     ) -> (BackgroundRegistry, Arc<std::sync::Mutex<CapturedTerminal>>) {
         use std::sync::Mutex;
         let received: Arc<Mutex<CapturedTerminal>> = Arc::new(Mutex::new(None));
         let captured = received.clone();
-        let dir = std::env::temp_dir().join(format!(
-            "ja-sup-{label}-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
         let reg = BackgroundRegistry::new(
             OsString::from("bash"),
-            dir,
             max_bg_bytes,
             HashMap::new(),
             Some(Arc::new(move |id, state, code| {
@@ -545,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn on_terminal_fires_on_exit() {
-        let (mut reg, received) = tracking_registry("cb", 10 * 1024 * 1024);
+        let (mut reg, received) = tracking_registry(10 * 1024 * 1024);
         let id = reg.spawn("exit 7").unwrap();
         for _ in 0..50 {
             if received.lock().unwrap().is_some() {
@@ -566,7 +548,7 @@ mod tests {
     #[tokio::test]
     async fn on_terminal_fires_on_size_watchdog() {
         // tiny cap → the size watchdog kills quickly.
-        let (mut reg, received) = tracking_registry("cbsize", 4096);
+        let (mut reg, received) = tracking_registry(4096);
         let id = reg.spawn("yes hello").unwrap();
         for _ in 0..100 {
             if received.lock().unwrap().is_some() {

@@ -1,31 +1,17 @@
 //! Shell-backend behavior tests: cwd tracking, process-group kill, and
 //! interactive fail-fast.
 //!
-//! These exercise the real `ProcessBackend` (a fresh `bash` per call) end to
-//! end. The per-backend data dir is a unique `/tmp` path (the leak fix is
-//! deferred to the persistence refactor).
+//! These exercise the real `ProcessBackend` (a fresh `bash -c` per call) end to
+//! end. The backend is file-free, so the tests need no scratch dir.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use just_agent_shell::{ShellBackend, ShellBuilder};
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn test_dir(label: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("ja-shell-exec-{label}-{}-{n}", std::process::id()))
-}
-
 #[tokio::test]
 async fn cd_is_reflected_in_reported_cwd() {
-    // The backend reflects `cd` in the reported cwd via the `pwd` roundtrip.
-    let mut backend = ShellBuilder::new()
-        .data_dir(test_dir("cd"))
-        .build()
-        .await
-        .unwrap();
+    // The backend reflects `cd` in the reported cwd via the stderr marker.
+    let mut backend = ShellBuilder::new().build().await.unwrap();
     let target = std::env::temp_dir();
     let target = std::fs::canonicalize(&target).unwrap_or(target);
 
@@ -45,11 +31,7 @@ async fn cd_is_reflected_in_reported_cwd() {
 async fn timeout_kills_process_group_no_orphans() {
     // After a timeout, the orphaned `sleep` must be gone — the whole process
     // group is killed, not just the leader.
-    let mut backend = ShellBuilder::new()
-        .data_dir(test_dir("pgroup"))
-        .build()
-        .await
-        .unwrap();
+    let mut backend = ShellBuilder::new().build().await.unwrap();
     // A unique duration so `pgrep` doesn't match `sleep` spawned by other
     // concurrent tests (cross-test isolation).
     let _ = backend
@@ -75,11 +57,7 @@ async fn interactive_command_fails_fast_does_not_wedge() {
     // The backend bounds it by timeout at worst; here it should exit well before
     // the timeout with a non-zero code or a warning. Reaching the assert at all
     // means it did not hang.
-    let mut backend = ShellBuilder::new()
-        .data_dir(test_dir("vim"))
-        .build()
-        .await
-        .unwrap();
+    let mut backend = ShellBuilder::new().build().await.unwrap();
     let out = backend
         .exec("vim +qa", Duration::from_secs(15))
         .await

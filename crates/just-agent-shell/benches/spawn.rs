@@ -4,12 +4,10 @@
 //! an identical workload of simple read-only commands:
 //!
 //! - `raw_bash_c` — a bare `bash -c <cmd>` (null stdin, piped capture). The floor:
-//!   process-spawn cost with zero just-agent machinery. (The `exec` gap over
-//!   this floor is not "just logic" — the backend additionally pays for
-//!   `process_group(0)`, file-input spawn `bash <wrapper>` vs `bash -c`, and the
-//!   wrapper's per-call `EXIT` trap.)
-//! - `exec` — the shell backend's `exec`: a fresh `bash` per call (wrapper file
-//!   + color-env injection + run + cwd trap + pgroup reap).
+//!   process-spawn cost with zero just-agent machinery.
+//! - `exec` — the shell backend's `exec`: also a `bash -c` spawn, plus
+//!   `process_group(0)`, color-env injection, the EXIT-trap cwd marker, and
+//!   pgroup reap. (The gap over the floor is the just-agent machinery.)
 //!
 //! ## Methodology
 //!
@@ -116,16 +114,14 @@ fn spawn_benches(c: &mut Criterion) {
 
     // Shell backend: rebuild the backend each iteration (untimed), time only
     // `exec` (timed), drop (untimed). `SmallInput` — each `ProcessBackend` holds
-    // no resident child between calls, so there is no contention to avoid. A
-    // shared data_dir is safe: execs run sequentially and each removes its own
-    // per-call dir before returning.
-    let data_dir = std::env::temp_dir().join(format!("ja-bench-shell-{}", std::process::id()));
+    // no resident child between calls, so there is no contention to avoid. The
+    // backend is file-free, so there is no scratch dir to share or clean up.
     group.bench_function("exec", |b| {
         let rt = runtime();
         let mut state = SEED;
         b.iter_batched_ref(
             || {
-                rt.block_on(ShellBuilder::new().data_dir(data_dir.clone()).build())
+                rt.block_on(ShellBuilder::new().build())
                     .expect("shell backend build")
             },
             |backend| {
@@ -136,7 +132,6 @@ fn spawn_benches(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
-    let _ = std::fs::remove_dir_all(&data_dir);
 
     group.finish();
 }

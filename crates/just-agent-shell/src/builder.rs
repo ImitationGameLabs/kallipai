@@ -17,24 +17,19 @@ const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024; // 1 MiB
 /// Output cap for a background task before the size watchdog kills it.
 const DEFAULT_MAX_BG_BYTES: usize = 100 * 1024 * 1024; // 100 MiB
 
-/// Owned snapshot source of an agent's per-spawn [`AccessDecision`] (read
-/// policy + writable set + readonly holes), used by landlock/mount-ns
-/// enforcement (Linux + `landlock`). Wrapped so the closure can live in a
-/// `#[derive(Debug)]` builder. Agent-agnostic: the runtime composes the decision
-/// from its permission class + the dirlock coordinator and hands it to the shell
-/// here, keeping the shell decoupled from agent identity/tiers.
-/// Per-spawn access-decision snapshot closure. Aliased so the [`AccessSource`]
-/// newtype stays on one line (its inner type is long).
+/// The closure type inside [`AccessSource`]: a per-spawn snapshot of the
+/// owning agent's [`AccessDecision`]. Aliased so the newtype signature stays on
+/// one line.
 #[cfg(all(target_os = "linux", feature = "landlock"))]
 pub(crate) type AccessSourceFn =
     Arc<dyn Fn() -> io::Result<crate::landlock::AccessDecision> + Send + Sync + 'static>;
 
 /// Owned snapshot source of an agent's per-spawn [`AccessDecision`] (read
 /// policy + writable set + readonly holes), used by landlock/mount-ns
-/// enforcement (Linux + `landlock`). Wrapped so the closure can live in a
-/// `#[derive(Debug)]` builder. Agent-agnostic: the runtime composes the decision
-/// from its permission class + the dirlock coordinator and hands it to the shell
-/// here, keeping the shell decoupled from agent identity/tiers.
+/// enforcement (Linux + `landlock`). Wrapped in a newtype so the closure can
+/// live in a `#[derive(Debug)]` builder. Agent-agnostic: the runtime composes
+/// the decision from its permission class + the dirlock coordinator and hands it
+/// to the shell here, keeping the shell decoupled from agent identity/tiers.
 #[cfg(all(target_os = "linux", feature = "landlock"))]
 #[derive(Clone)]
 pub(crate) struct AccessSource(pub(crate) AccessSourceFn);
@@ -48,11 +43,20 @@ impl std::fmt::Debug for AccessSource {
 
 #[cfg(all(target_os = "linux", feature = "landlock"))]
 impl AccessSource {
-    /// Snapshot the agent's access decision and append `scratch` (the backend's
-    /// data dir) to its writable set, returning the decision ready for
-    /// [`crate::landlock::apply`]. The snapshot error propagates (via `?`)
+    /// Snapshot the agent's access decision as-is, ready for
+    /// [`crate::landlock::apply`]. Used by the foreground path, which writes no
+    /// scratch of its own (`baseline_writable` in `apply` already covers
+    /// `/tmp`, `/dev/null`, ...). The snapshot error propagates (via `?`)
     /// rather than silently producing an empty writable list, which would deny
     /// all of the agent's writes.
+    pub(crate) fn access(&self) -> io::Result<crate::landlock::AccessDecision> {
+        (self.0)()
+    }
+
+    /// Snapshot the agent's access decision and append `scratch` (a per-task
+    /// writable dir) to its writable set, returning the decision ready for
+    /// [`crate::landlock::apply`]. Used by the background path, whose `out.log`
+    /// lives in a per-task tmpdir. The snapshot error propagates (via `?`).
     pub(crate) fn access_with_scratch(
         &self,
         scratch: &std::path::Path,
@@ -76,7 +80,6 @@ impl AccessSource {
 /// | `fallback_cwd`     | `"/tmp"`   | cwd when `current_dir()` fails or a cached cwd was deleted     |
 /// | `max_output_bytes` | 1 MiB       | Per-stream in-memory tail before output is clipped             |
 /// | `max_bg_bytes`     | 100 MiB     | Background-task output cap before the size watchdog kills it   |
-/// | `data_dir`         | resolved    | Root for per-call wrappers and bg output                       |
 #[derive(Clone, Debug)]
 pub struct ShellBuilder {
     pub(super) shell: OsString,
@@ -85,7 +88,6 @@ pub struct ShellBuilder {
     pub(super) env: HashMap<OsString, OsString>,
     pub(super) max_output_bytes: usize,
     pub(super) max_bg_bytes: usize,
-    pub(super) data_dir: Option<PathBuf>,
     pub(super) on_terminal: Option<TerminalObserver>,
     /// Optional source of this backend's agent's per-spawn access decision
     /// (read policy + writable set + readonly holes). When set (and the
@@ -108,7 +110,6 @@ impl ShellBuilder {
             env: HashMap::new(),
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_bg_bytes: DEFAULT_MAX_BG_BYTES,
-            data_dir: None,
             on_terminal: None,
             #[cfg(all(target_os = "linux", feature = "landlock"))]
             access_source: None,
@@ -142,13 +143,6 @@ impl ShellBuilder {
     /// Overrides the background-task output cap (bytes). Default: 100 MiB.
     pub fn max_bg_bytes(mut self, bytes: usize) -> Self {
         self.max_bg_bytes = bytes;
-        self
-    }
-
-    /// Overrides the per-backend data directory (default: resolved from
-    /// `$JUST_AGENT_DATA_DIR` or the platform data dir).
-    pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.data_dir = Some(dir.into());
         self
     }
 
@@ -198,21 +192,6 @@ impl ShellBuilder {
         self
     }
 
-    /// Resolve the per-backend data dir: explicit override, else
-    /// `$JUST_AGENT_DATA_DIR`, else the platform data dir.
-    fn resolve_data_dir(&self) -> Result<PathBuf, ShellError> {
-        if let Some(dir) = &self.data_dir {
-            return Ok(dir.clone());
-        }
-        let base = match std::env::var("JUST_AGENT_DATA_DIR") {
-            Ok(dir) => PathBuf::from(dir),
-            Err(_) => dirs::data_dir().ok_or_else(|| {
-                ShellError::backend("could not determine platform data directory")
-            })?,
-        };
-        Ok(base.join("just-agent").join("stateless"))
-    }
-
     /// Validates the configuration.
     pub fn validate(&self) -> Result<(), ShellError> {
         if self.shell.is_empty() {
@@ -228,10 +207,13 @@ impl ShellBuilder {
     }
 
     /// Constructs a [`ProcessBackend`].
+    ///
+    /// The backend is file-free: foreground `exec` passes its script via `bash
+    /// -c` argv and recovers cwd from a stderr marker; background tasks each own
+    /// an auto-cleaned tmpdir. Nothing is resolved from or written under a data
+    /// dir.
     pub async fn build(self) -> Result<ProcessBackend, ShellError> {
         self.validate()?;
-        let data_dir = self.resolve_data_dir()?;
-        std::fs::create_dir_all(&data_dir)?;
 
         let initial_cwd = match &self.initial_cwd {
             Some(cwd) => cwd.clone(),
@@ -240,7 +222,6 @@ impl ShellBuilder {
 
         let background = supervisor::BackgroundRegistry::new(
             self.shell.clone(),
-            data_dir.clone(),
             self.max_bg_bytes,
             self.env.clone(),
             self.on_terminal.clone().map(|o| o.0),
@@ -256,8 +237,6 @@ impl ShellBuilder {
         Ok(ProcessBackend {
             config: self,
             cwd: initial_cwd,
-            data_dir,
-            next_call: 0,
             background,
         })
     }
