@@ -38,8 +38,8 @@ const MAX_SCRIPT_BYTES: usize = 8 * 1024;
 
 /// Color-suppression env vars applied to every spawned `bash` (foreground and
 /// background) so tool output is free of escape sequences. Injected via
-/// [`Command::env`] by both exec paths, rather than emitted into the wrapper,
-/// so the mechanism is uniform and survives any rc the shell sources.
+/// [`Command::env`] by both exec paths, rather than baked into the script, so
+/// the mechanism is uniform and survives any rc the shell sources.
 pub(super) const COLOR_VARS: &[(&str, &str)] = &[
     ("TERM", "dumb"),
     ("NO_COLOR", "1"),
@@ -172,8 +172,8 @@ impl ShellBackend for ProcessBackend {
         // to stderr; a command that persistently redirects fd 2 (e.g. `exec
         // 2>&1`) can move the marker onto stdout, so scan stdout as a fallback.
         // `exec 2>/dev/null` (or a SIGKILL before the trap, or a wedged pipe)
-        // loses the marker entirely -> fall back, matching the old empty-tmpfile
-        // honesty (never a stale path).
+        // loses the marker entirely -> fall back. The fallback is always an
+        // existing dir, never a stale path.
         let pwd = marker
             .extract_pwd(&err_cap.text)
             .or_else(|| marker.extract_pwd(&out_cap.text));
