@@ -243,10 +243,13 @@ impl App {
         for entry in &self.chat_lines {
             match entry {
                 ChatLine::User(text) => {
-                    lines.push(Line::from(vec![
-                        ">> ".bold().fg(Color::Green),
-                        text.clone().into(),
-                    ]));
+                    for (i, line) in text.lines().enumerate() {
+                        let prefix = if i == 0 { ">> " } else { "   " };
+                        lines.push(Line::from(vec![
+                            prefix.bold().fg(Color::Green),
+                            line.to_owned().into(),
+                        ]));
+                    }
                 }
                 ChatLine::Assistant(text) => {
                     lines.extend(super::markdown::render_markdown(text, term_width));
