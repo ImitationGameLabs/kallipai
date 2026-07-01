@@ -6,11 +6,18 @@
 //! `EXIT` trap prints to stderr. Output is captured until the child exits, then
 //! a final pipe drain is bounded in case a grandchild holds the write-end open.
 //! On timeout the whole process group is killed (SIGTERM -> grace -> SIGKILL)
-//! and exit code 124 is synthesized. The trap fires on normal exit, `exit`, and
-//! SIGTERM, so the sticky cwd is read fresh after every command. A SIGKILL
-//! before the trap, a wedged pipe, or `exec 2>/dev/null` loses the marker, in
-//! which case the caller falls back (never a stale path); `exec 2>&1` moves the
-//! marker onto stdout, where it is still recovered and stripped.
+//! and exit code 124 is synthesized. If the future is dropped before completion
+//! (the runtime cancels the tool call), a `GroupKillGuard` force-kills the
+//! whole group so grandchildren do not survive the leader. The trap fires on
+//! normal exit, `exit`, and SIGTERM, so the sticky cwd is read fresh after
+//! every command. A SIGKILL before the trap, a wedged pipe, or `exec
+//! 2>/dev/null` loses the marker, in which case the caller falls back (never a
+//! stale path); `exec 2>&1` moves the marker onto stdout, where it is still
+//! recovered and stripped. A grandchild that the command intentionally
+//! backgrounded and detached on the *normal* exit path (e.g. `sleep 99 &
+//! disown; exit`) is not killed -- that is an intentional non-goal (use
+//! `spawn_background` for durable background work); only the cancel path
+//! force-kills the group.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -151,6 +158,16 @@ impl ShellBackend for ProcessBackend {
         }
 
         let mut child = cmd.spawn()?;
+        // If this future is dropped while the child is still running (the
+        // runtime cancels the tool call), force-kill the whole process group so
+        // grandchildren do not survive the leader. `kill_on_drop(true)` on the
+        // `Child` (above) is retained as defense-in-depth but only signals the
+        // leader; this guard reaches the group, mirroring the background
+        // supervisor's registry `Drop`. Disarmed on the success path before
+        // returning, so a normal completion does not fire a redundant kill. On
+        // cancel, the detached pump tasks below self-terminate once the group
+        // kill closes the pipe (they see EOF) -- no separate cleanup.
+        let mut kill_guard = GroupKillGuard(child.id());
 
         let max = self.config.max_output_bytes;
         // Shared captures so partial output survives even if a pump is stuck
@@ -189,6 +206,11 @@ impl ShellBackend for ProcessBackend {
             exit_status.and_then(|s| s.code())
         };
 
+        // The child has settled (exited normally or kill_tree'd on timeout) and
+        // the pumps are drained -- disarm so the guard does not fire a redundant
+        // group kill when the future otherwise finishes dropping.
+        kill_guard.disarm();
+
         Ok(ShellOutput {
             stdout: marker.strip(&out_cap.text),
             stderr: marker.strip(&err_cap.text),
@@ -213,6 +235,33 @@ impl ShellBackend for ProcessBackend {
 
     async fn kill_background(&mut self, id: &str) -> Result<(), ShellError> {
         self.background.kill(id).await
+    }
+}
+
+/// Force-SIGKILL the child's process group on drop, unless disarmed.
+///
+/// Covers the cancellation path of `exec`: if the future is dropped while the
+/// child is still running (the runtime cancels the tool call), the whole group
+/// is killed so grandchildren do not survive the leader. `kill_on_drop` on the
+/// `Child` only signals the leader; this guard reaches the group via
+/// [`pgroup::force_kill_group`], mirroring `BackgroundRegistry::drop`. The pid
+/// is the PGID, since `process_group(0)` makes the child the group leader.
+/// Disarmed on the success path once the child has settled, so a normal return
+/// does not fire a redundant kill.
+struct GroupKillGuard(Option<u32>);
+
+impl GroupKillGuard {
+    /// Mark the child as settled; its drop becomes a no-op.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupKillGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            pgroup::force_kill_group(pid as i32);
+        }
     }
 }
 
@@ -467,6 +516,42 @@ mod tests {
             "orphaned `sleep 43` survived: {:?}",
             String::from_utf8_lossy(&pgrep.stdout)
         );
+    }
+
+    /// Dropping the `exec` future before its own timeout (the runtime's cancel
+    /// / tool-timeout path) must kill the whole process group, not just the
+    /// leader. The backend timeout (30s) outlasts the outer drop (500ms), so
+    /// the cancel path is exercised, not the backend's `kill_tree` timeout.
+    #[tokio::test]
+    async fn exec_cancel_kills_process_group_no_orphans() {
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let outer = tokio::time::timeout(
+            Duration::from_millis(500),
+            backend.exec("sleep 44 & wait", Duration::from_secs(30)),
+        )
+        .await;
+        // The outer timeout must fire (cancel path), not the backend's 30s one.
+        assert!(outer.is_err(), "outer timeout should have fired, not exec");
+        // The orphaned group is reaped asynchronously after the SIGKILL, so poll
+        // for it to be gone rather than asserting instantaneously (follows the
+        // polling shape of `pgroup::tests::kill_tree_reaps_orphaned_child`).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let pgrep = std::process::Command::new("pgrep")
+                .arg("-f")
+                .arg("sleep 44")
+                .output()
+                .unwrap();
+            if pgrep.stdout.is_empty() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "orphaned `sleep 44` survived cancel: {}",
+                String::from_utf8_lossy(&pgrep.stdout)
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// A non-zero exit still fires the EXIT trap, so the sticky cwd roundtrip
