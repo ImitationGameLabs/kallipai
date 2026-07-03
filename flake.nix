@@ -121,8 +121,6 @@
           inherit checks packages;
 
           devShells.default = craneLib.devShell {
-            inherit checks;
-
             # Extra inputs can be added here; cargo and rustc are provided by default.
             packages =
               with pkgs;
