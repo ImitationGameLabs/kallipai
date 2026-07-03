@@ -48,13 +48,12 @@ customers and taking on work as one entity._
 
 ## Technical considerations
 
-- **Dynamic sandbox** - agents need a sandbox whose filesystem read/write
-  permissions can change at runtime, so the runtime can dynamically scope each
-  agent's access: strict write limits and per-directory mutual exclusion (a
-  read/write lock - only one agent may hold write access to a directory at a
-  time) for multi-agent concurrency safety. No surveyed sandbox library meets
-  this requirement; an existing library is being extended to meet it, and
-  integration is deferred until that lands.
+- **Sandbox breadth** - the dynamic FS scoping and per-directory write-mutex
+  core (a read/write lock so only one agent may hold write access to a
+  directory at a time, for multi-agent concurrency safety) has landed,
+  enforced per spawned shell via landlock on Linux. Still-open isolation axes:
+  cgroup resource limits, network egress control, overlayfs copy-on-write
+  staging, and a secret-proxy tool.
 - **Tool-call metrics for harness refinement** - tool-call outcomes (command
   exit codes and the misuse they imply, success rates, failure patterns) are a
   feedback signal, not a model ranking: with the model held fixed, they show
