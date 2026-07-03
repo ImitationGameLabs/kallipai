@@ -68,8 +68,35 @@
           };
 
           packages =
-            (import ./nix/packages/tarball.nix {
-              inherit pkgs lib common;
+            let
+              # The crane-built workspace: every just-agent binary in one
+              # derivation. This is packages.default and the single source of
+              # truth consumed by the tarball and docker image packages.
+              workspace = import ./nix/packages/workspace.nix {
+                inherit lib common;
+              };
+            in
+            {
+              default = workspace;
+              just-agent-tarball = import ./nix/packages/tarball.nix {
+                inherit
+                  pkgs
+                  common
+                  workspace
+                  ;
+              };
+            }
+            # Container image: scratch + nix closure via dockerTools. Linux-only
+            # (the buildImage closure is Linux-native). Shares the same
+            # workspace derivation as packages.default.
+            // (lib.optionalAttrs pkgs.stdenv.isLinux {
+              just-agent-image = import ./nix/packages/container-image.nix {
+                inherit
+                  pkgs
+                  common
+                  workspace
+                  ;
+              };
             })
             # Re-export aifed's FHS tarball so the benchmark pins both in one lock.
             # Gate on aifed's actual availability: the pinned rev ships aifed-tarball

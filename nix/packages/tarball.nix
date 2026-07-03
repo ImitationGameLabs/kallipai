@@ -1,29 +1,12 @@
 {
   pkgs,
-  lib,
   common,
+  # The crane-built workspace derivation (packages.default). Shared so the
+  # tarball never rebuilds or duplicates it.
+  workspace,
 }:
 let
-  inherit (common)
-    craneLib
-    commonArgs
-    cargoArtifacts
-    gitVersion
-    ;
-
-  # Build the entire workspace at once, then pick the binaries we need.
-  # Packaging only: doCheck = false HERE so `nix build` doesn't run `cargo test`
-  # (whose sandbox-env deps — CA roots, pgrep/kill — would pollute the package).
-  # NB: do NOT hoist this into commonArgs. crane's cargoNextest and buildDepsOnly
-  # both do `args.doCheck or true`, so a shared doCheck = false would silently skip
-  # nextest's checkPhase AND drop buildDepsOnly's dev-dep caching. Keep it here.
-  workspace = craneLib.buildPackage (
-    commonArgs
-    // {
-      inherit cargoArtifacts;
-      doCheck = false;
-    }
-  );
+  inherit (common) gitVersion;
 
   # Standard FHS interpreter path used by most Linux distributions.
   fhs-interp = "/lib64/ld-linux-x86-64.so.2";
