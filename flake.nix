@@ -97,6 +97,16 @@
                   workspace
                   ;
               };
+              # Pre-built integration-test binaries + the agent binaries, for
+              # running the suite in a container (see arion-compose.nix test
+              # mode). Linux-only like the image.
+              just-agent-integration-tests = import ./nix/packages/integration-tests.nix {
+                inherit
+                  pkgs
+                  common
+                  workspace
+                  ;
+              };
             })
             # Re-export aifed's FHS tarball so the benchmark pins both in one lock.
             # Gate on aifed's actual availability: the pinned rev ships aifed-tarball

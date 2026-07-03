@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use assert_cmd::cargo::cargo_bin;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -54,17 +53,24 @@ fn userns_disabled() -> bool {
     )
 }
 
-/// The gitignored scratch root at the project root (`.testdata/`), used for the
-/// sandbox scenarios' `home`/`data`/`workspace` dirs. It MUST live outside
-/// libsandbox's baseline-writable set (`/tmp`, `/var/tmp`, `$TMPDIR`): the
-/// permission model treats those as writable for *every* agent, so a tempdir
-/// under `/tmp` would mask the real write-denial behavior under test. Placing
-/// the dirs under `.testdata/` (a real on-disk tree the agent's landlock domain
-/// has no baseline grant for) keeps the assertions honest. Resolved at compile
-/// time from the daemon crate's manifest dir => `<workspace>/.testdata`.
+/// The scratch root used for the sandbox scenarios' `home`/`data`/`workspace`
+/// dirs. It MUST live outside libsandbox's baseline-writable set (`/tmp`,
+/// `/var/tmp`, `$TMPDIR`): the permission model treats those as writable for
+/// *every* agent, so a tempdir under `/tmp` would mask the real write-denial
+/// behavior under test. Placing the dirs under a tree the agent's landlock
+/// domain has no baseline grant for keeps the assertions honest.
+///
+/// Defaults to the gitignored `<workspace>/.testdata` (resolved at compile
+/// time from the daemon crate's manifest dir). The container overrides this
+/// with `JUST_AGENT_TESTDATA_DIR` pointing at a tmpfs mounted at `/testdata`
+/// (also outside the baseline-writable set, so assertions stay honest there
+/// too).
 fn testdata_root() -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.testdata");
-    std::fs::create_dir_all(&dir).expect("create gitignored .testdata scratch root");
+    let dir = match std::env::var("JUST_AGENT_TESTDATA_DIR") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.testdata"),
+    };
+    std::fs::create_dir_all(&dir).expect("create testdata scratch root");
     dir
 }
 
@@ -99,10 +105,11 @@ impl World {
     /// and the `.gnupg`/`.aws` dirs (so Guest hide-holes resolve -- they require
     /// existing directories).
     pub fn setup() -> Self {
-        // All dirs go under the gitignored `.testdata/` root (outside the
-        // baseline-writable set) so write-denial assertions are honest -- see
-        // [`testdata_root`]. `TempDir::new_in` still auto-cleans each dir on
-        // drop; the `.testdata/` root itself persists (empty between runs).
+        // All dirs go under the [`testdata_root`] scratch root (outside the
+        // baseline-writable set) so write-denial assertions are honest.
+        // `TempDir::new_in` auto-cleans each dir on drop; the root itself is
+        // either the gitignored `<workspace>/.testdata` (persists, empty between
+        // runs) or the container's ephemeral `/testdata` tmpfs.
         let parent = testdata_root();
         let home = TempDir::new_in(&parent).expect("home tmpdir");
         let data = TempDir::new_in(&parent).expect("data tmpdir");
@@ -324,11 +331,47 @@ fn alloc_port() -> u16 {
     port
 }
 
-/// The target dir holding the just-built workspace binaries -- prepended to the
-/// daemon's PATH so the agent's bash can invoke the `just-agent` CLI (used by
-/// the normal/dirlock scenarios via `dirlock`/`aide`).
-fn target_dir() -> PathBuf {
-    cargo_bin("just-agent-daemon")
+/// Resolve a workspace binary by name. The lookup order is:
+///   1. `JUST_AGENT_BIN_DIR` -- the container states the buildEnv `bin/`
+///      explicitly (we cannot derive it from `current_exe`: `/proc/self/exe`
+///      resolves the buildEnv symlink into a sub-store path that holds only
+///      `sandbox`, not its siblings).
+///   2. `CARGO_BIN_EXE_<name>` -- cargo injects this for same-package binaries
+///      under `cargo test`.
+///   3. One level out of `deps/` -- under `cargo test` the test binary lives at
+///      `target/<profile>/deps/`, while the workspace binaries live at
+///      `target/<profile>/`.
+///   4. Bare name -- let the spawned process resolve it via PATH.
+fn resolve_bin(name: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var("JUST_AGENT_BIN_DIR")
+        && let p = Path::new(&dir).join(name)
+        && p.is_file()
+    {
+        return p;
+    }
+    let var = format!("CARGO_BIN_EXE_{name}");
+    if let Ok(p) = std::env::var(&var) {
+        return PathBuf::from(p);
+    }
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+        && exe_dir.ends_with("deps")
+        && let Some(profile_dir) = exe_dir.parent()
+    {
+        let in_target = profile_dir.join(name);
+        if in_target.is_file() {
+            return in_target;
+        }
+    }
+    PathBuf::from(name)
+}
+
+/// The dir holding the workspace binaries -- prepended to the daemon's PATH so
+/// the agent's bash can invoke the `just-agent` CLI (used by the normal/dirlock
+/// scenarios via `dirlock`/`aide`). Derived from the daemon binary's location.
+fn bin_dir() -> PathBuf {
+    resolve_bin("just-agent-daemon")
         .parent()
         .expect("binary has a parent dir")
         .to_path_buf()
@@ -371,7 +414,7 @@ async fn spawn_daemon(world: &World, permission_class: Option<&str>) -> DaemonPr
             "PATH",
             format!(
                 "{}:{}",
-                target_dir().display(),
+                bin_dir().display(),
                 std::env::var("PATH").unwrap_or_default()
             ),
         ),
@@ -387,7 +430,7 @@ async fn spawn_daemon(world: &World, permission_class: Option<&str>) -> DaemonPr
         env.push(("JUST_AGENT_ROOT_AGENT_PERMISSION_CLASS", class.into()));
     }
 
-    let mut cmd = Command::new(cargo_bin("just-agent-daemon"));
+    let mut cmd = Command::new(resolve_bin("just-agent-daemon"));
     cmd.args([
         "--listen-addr",
         &format!("127.0.0.1:{port}"),
@@ -456,7 +499,7 @@ pub struct RunResult {
 /// Spawn `just-agent-run` (a pure HTTP client -- it carries no sandbox logic) to
 /// drive one agent run against the daemon. Captures its single JSON stdout line.
 pub async fn run_agent(daemon: &DaemonProc, workspace: &Path, max_rounds: usize) -> RunResult {
-    let output = Command::new(cargo_bin("just-agent-run"))
+    let output = Command::new(resolve_bin("just-agent-run"))
         .args([
             "--prompt",
             "run the scripted sandbox checks",
@@ -474,7 +517,7 @@ pub async fn run_agent(daemon: &DaemonProc, workspace: &Path, max_rounds: usize)
                 "PATH",
                 &format!(
                     "{}:{}",
-                    target_dir().display(),
+                    bin_dir().display(),
                     std::env::var("PATH").unwrap_or_default()
                 ),
             ),

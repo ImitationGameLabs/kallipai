@@ -9,12 +9,13 @@ closure embedded in the image. Only `x86_64-linux` is published.
 
 The recommended way to run it is [Arion](https://docs.hercules-ci.com/arion/) (a
 Nix-native docker-compose), configured by `arion-compose.nix` at the repo root.
-Two modes are switched by an env var:
+Three modes are switched by an env var:
 
-| Mode     | Command                               | Image source                             | Host nix store |
-| -------- | ------------------------------------- | ---------------------------------------- | -------------- |
-| **dev**  | `arion up -d` (default)               | `packages.default`, run via useHostStore | shared (ro)    |
-| **prod** | `JUST_AGENT_ARION_MODE=prod arion up` | `packages.just-agent-image` (pre-built)  | not shared     |
+| Mode     | Command                               | Image source                                          | Host nix store |
+| -------- | ------------------------------------- | ----------------------------------------------------- | -------------- |
+| **dev**  | `arion up -d` (default)               | `packages.default`, run via useHostStore              | shared (ro)    |
+| **prod** | `JUST_AGENT_ARION_MODE=prod arion up` | `packages.just-agent-image` (pre-built)               | not shared     |
+| **test** | `JUST_AGENT_ARION_MODE=test arion up` | `packages.just-agent-integration-tests`, useHostStore | shared (ro)    |
 
 ## Prerequisites
 
@@ -55,7 +56,44 @@ arion logs -f
 Arion builds `packages.just-agent-image` (the flake's two-layer `buildImage`),
 loads it, and runs it — one command, no manual `docker load`.
 
-## Run-time privileges (both modes)
+## Integration tests: `JUST_AGENT_ARION_MODE=test arion up`
+
+Test mode runs the workspace's integration tests (`[[test]]` targets) **inside
+the container** to confirm the sandbox and shell backends behave correctly in
+the containerized environment the daemon ships in. Today that covers the
+`sandbox` suite (`crates/just-agent-daemon/tests/sandbox/` — a scripted
+end-to-end agent driving the real landlock + seccomp + mount-ns shell sandbox)
+and the `exec` suite (`crates/just-agent-shell/tests/exec.rs` — real `bash -c`
+cwd/process-group behavior). Any `[[test]]` added later is picked up
+automatically.
+
+The test binaries are pre-built by Nix (`packages.just-agent-integration-tests`):
+every `[[test]]` artifact built via `cargo test --no-run`, plus the agent
+binaries, merged into one closure. No build happens in the container; an
+in-process wiremock stands in for the LLM, so no provider credentials or
+external network are needed. The sandbox scenarios' scratch dirs live on a
+`/testdata` tmpfs (outside the sandbox's baseline-writable set, so write-denial
+assertions stay honest).
+
+```sh
+JUST_AGENT_ARION_MODE=test arion up
+arion ps -a          # exit code is the verdict (0 = all tests passed)
+arion logs just-agent
+```
+
+The service iterates `/integration-tests/*`, running each binary with
+`--nocapture`; the loop fails fast, so the first failing test masks later ones.
+`restart = "no"` keeps the service one-shot. The same `SYS_ADMIN` +
+`seccomp=unconfined` grants as dev/prod apply (see below).
+
+On the host the suites still run as ordinary tests, gated by runtime
+landlock/userns skip guards:
+
+```sh
+cargo test --workspace --all-targets --all-features
+```
+
+## Run-time privileges (all modes)
 
 The daemon enables the `landlock` and `seccomp` sandbox features for agent
 shells. Its shell backend sets up an isolated mount namespace (user namespace +
@@ -71,7 +109,8 @@ So you do not pass any `--security-opt` / `--cap-add` by hand.
 
 ## Volumes and workspaces
 
-`arion-compose.nix` bind-mounts two paths (create them first):
+`arion-compose.nix` bind-mounts two paths in dev/prod (create them first; test
+mode mounts none — its scratch tree is an ephemeral `/testdata` tmpfs):
 
 - `./data` → `/var/lib/just-agent` — agent state, logs, skills (persistent).
 - `./ws` → `/workspace` — the agent workspace root.
@@ -93,7 +132,7 @@ token come from `.env`:
 | `JUST_LLM_*_API_KEY`        | conditional | Provider key, e.g. `JUST_LLM_DEEPSEEK_API_KEY`.                                |
 | `JUST_AGENT_OPERATOR_TOKEN` | no          | If unset, a random `sk-operator-...` token is generated and printed to stdout. |
 
-The compose already sets `JUST_AGENT_DAEMON_ADDR=0.0.0.0:3000` (in both modes),
+The compose already sets `JUST_AGENT_DAEMON_ADDR=0.0.0.0:3000` (in dev and prod),
 `HOME`, `PATH`, and `RUST_LOG`. Do not override `JUST_AGENT_ADVERTISE_URL`; its
 default `http://127.0.0.1:3000` is correct because the daemon and agent shells
 share the container's network namespace.

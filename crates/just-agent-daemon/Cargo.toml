@@ -57,9 +57,10 @@ required-features = ["sandbox-test"]
 # be read off a prepared `reqwest::Request` — only a real request to a mock server proves it (and
 # catches an upstream `just-common::build_client` change that silently overwrites our UA).
 wiremock = { workspace = true }
-# Sandbox integration test (src/sandbox_it.rs, behind `sandbox-it`).
+# Sandbox integration test (tests/sandbox, behind the `sandbox-test` feature):
+# scratch dirs, serial execution, and the landlock runtime probe from
+# just-agent-shell.
 tempfile = { workspace = true }
 temp-env = { workspace = true }
-assert_cmd = { workspace = true }
 serial_test = { workspace = true }
 just-agent-shell = { workspace = true }
