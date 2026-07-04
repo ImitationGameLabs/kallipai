@@ -19,30 +19,37 @@ use crate::context::ContextStore;
 use just_agent_common::AgentId;
 use just_llm_client::types::chat::ChatMessage;
 
-/// Resolve the shared `<data_dir>/just-agent` root.
+/// Resolve the shared data root under which `agents/`, `archived/`, and
+/// `skills/` live.
 ///
-/// `$JUST_AGENT_DATA_DIR` if set, else the platform data directory. Both
-/// `agents_base` and `archived_base` route through this so the live and
+/// - If `$JUST_AGENT_DATA_DIR` is set, it IS the data root — used verbatim,
+///   no suffix appended. The operator has already named the directory.
+/// - Otherwise fall back to the platform data directory namespaced as
+///   `<platform_data_dir>/just-agent` (XDG convention).
+///
+/// Both `agents_base` and `archived_base` route through this so the live and
 /// archived trees share one root. When that root is on a single filesystem,
 /// `archive_agent_dir`'s `rename` is atomic; if the root is symlinked across a
 /// filesystem boundary the `rename` raises `EXDEV` and the archive falls back to
 /// a recursive copy + delete (see `archive_agent_dir`).
 pub fn data_dir_root() -> Result<PathBuf> {
-    let base = if let Ok(dir) = std::env::var("JUST_AGENT_DATA_DIR") {
-        PathBuf::from(dir)
+    if let Ok(dir) = std::env::var("JUST_AGENT_DATA_DIR") {
+        Ok(PathBuf::from(dir))
     } else {
-        dirs::data_dir().context("could not determine platform data directory")?
-    };
-    Ok(base.join("just-agent"))
+        Ok(dirs::data_dir()
+            .context("could not determine platform data directory")?
+            .join("just-agent"))
+    }
 }
 
 /// Canonicalize the data root for path-overlap comparison.
 ///
 /// The data root may not exist yet on a fresh install (no agent ever created), in
 /// which case [`std::fs::canonicalize`] would fail. Fall back to canonicalizing the
-/// parent (which must exist — it is the platform data dir or `$JUST_AGENT_DATA_DIR`)
-/// and re-appending the leaf, yielding the canonical path the data root *would*
-/// have. This keeps the overlap check sound without forcing the data dir to exist.
+/// parent (which must exist — the platform data dir for the XDG fallback, or the
+/// parent of `$JUST_AGENT_DATA_DIR` when it is set) and re-appending the leaf,
+/// yielding the canonical path the data root *would* have. This keeps the overlap
+/// check sound without forcing the data dir to exist.
 fn canonical_data_root() -> Result<PathBuf> {
     let root = data_dir_root()?;
     match root.canonicalize() {
@@ -632,8 +639,9 @@ mod tests {
     #[serial]
     fn overlap_detects_workspace_inside_data_root() {
         with_data_dir(|tmp| {
-            // workspace nested under <data_root>/just-agent/... → overlap.
-            let ws = tmp.path().join("just-agent/agents/x");
+            // data root == tmp (env var used verbatim); workspace nested under it
+            // → overlap. Exercises the `ws.starts_with(&data)` direction.
+            let ws = tmp.path().join("agents/x");
             std::fs::create_dir_all(&ws).unwrap();
             assert!(
                 workspace_overlaps_data_root(&ws).unwrap(),
@@ -646,9 +654,9 @@ mod tests {
     #[serial]
     fn overlap_detects_workspace_equal_to_data_root() {
         with_data_dir(|tmp| {
-            // workspace == <data_root>/just-agent → overlap (degenerate case).
-            let ws = tmp.path().join("just-agent");
-            std::fs::create_dir_all(&ws).unwrap();
+            // workspace == data root (== tmp) → overlap (degenerate case); equal
+            // paths satisfy both `starts_with` directions.
+            let ws = tmp.path().to_path_buf();
             assert!(
                 workspace_overlaps_data_root(&ws).unwrap(),
                 "workspace equal to data root must be detected as overlap"
@@ -660,11 +668,11 @@ mod tests {
     #[serial]
     fn overlap_detects_workspace_containing_data_root() {
         with_data_dir(|tmp| {
-            // workspace is an ancestor of <data_root>/just-agent (the workspace ==
+            // workspace is a strict ancestor of the data root (the workspace ==
             // $HOME case, the most dangerous: the broad write grant covers the
-            // whole data tree). Here the data base is `tmp`, so `tmp` itself is
-            // such an ancestor.
-            let ws = tmp.path().to_path_buf();
+            // whole data tree). Exercises the `data.starts_with(&ws)` direction.
+            // tmp's parent is the smallest such ancestor that exists on disk.
+            let ws = tmp.path().parent().unwrap().to_path_buf();
             assert!(
                 workspace_overlaps_data_root(&ws).unwrap(),
                 "workspace containing data root must be detected as overlap"
@@ -689,11 +697,15 @@ mod tests {
     #[serial]
     fn overlap_rejects_sibling_prefix() {
         with_data_dir(|tmp| {
-            // A sibling whose name is a string prefix of the data root's leaf
-            // (`<tmp>/just-agen`, no trailing `t`) must NOT be flagged:
-            // `Path::starts_with` is component-wise, not byte-wise. Guards against
-            // a future regression to a byte-prefix comparison.
-            let ws = tmp.path().join("just-agen");
+            // A sibling whose leaf name is a string prefix of the data root's leaf
+            // (the data root is `tmp`, whose leaf is a random tempfile name) must
+            // NOT be flagged: `Path::starts_with` is component-wise, not byte-wise.
+            // Guards against a future regression to a byte-prefix comparison. The
+            // candidate must exist on disk so `canonicalize` succeeds (the guard
+            // fails closed — returning Err — on a non-existent workspace).
+            let parent = tmp.path().parent().unwrap();
+            let leaf = tmp.path().file_name().unwrap().to_str().unwrap();
+            let ws = parent.join(&leaf[..leaf.len() - 1]);
             std::fs::create_dir_all(&ws).unwrap();
             assert!(
                 !workspace_overlaps_data_root(&ws).unwrap(),
@@ -761,10 +773,11 @@ mod tests {
             )
             .unwrap();
             assert_eq!(ctx["cumulative_usage"]["prompt_tokens"], 100);
-            // Live and archived trees share one root (so `rename` is atomic on
-            // one filesystem; a cross-fs EXDEV falls back to copy + delete).
-            assert!(tmp.path().join("just-agent/agents").exists());
-            assert!(tmp.path().join("just-agent/archived").exists());
+            // Live and archived trees share one root (the data dir, used
+            // verbatim from $JUST_AGENT_DATA_DIR == tmp; so `rename` is atomic
+            // on one filesystem, a cross-fs EXDEV falls back to copy + delete).
+            assert!(tmp.path().join("agents").exists());
+            assert!(tmp.path().join("archived").exists());
         })
     }
 

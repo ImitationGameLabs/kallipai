@@ -92,9 +92,9 @@ impl World {
     pub fn home_path(&self) -> &Path {
         self.home.path()
     }
-    /// `<JUST_AGENT_DATA_DIR>/just-agent` (data_dir_root appends "just-agent").
+    /// `$JUST_AGENT_DATA_DIR` verbatim (data_dir_root uses the env var as-is).
     pub fn data_root(&self) -> PathBuf {
-        self.data.path().join("just-agent")
+        self.data.path().to_path_buf()
     }
     fn profiles_file(&self) -> PathBuf {
         self.config_dir.join("just-agent").join("profiles.toml")

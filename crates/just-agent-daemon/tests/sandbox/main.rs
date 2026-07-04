@@ -7,7 +7,7 @@
 //! the `just-agent` CLI, and append-only history -- runs exactly as in production.
 //! Only the LLM HTTP call is mocked.
 //!
-//! Results are evaluated from the agents' history NDJSON (`<data>/just-agent/
+//! Results are evaluated from the agents' history NDJSON (`<data>/
 //! agents/<id>/history/*.ndjson`) cross-checked against direct filesystem state.
 //!
 //! Layout:

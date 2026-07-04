@@ -20,7 +20,10 @@ pub async fn skill_paths(
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
 
-    let shared = skill_dir().to_string_lossy().into_owned();
+    let shared = skill_dir()
+        .map_err(ApiError::internal)?
+        .to_string_lossy()
+        .into_owned();
     let local = entry
         .agent
         .agent_dir

@@ -98,24 +98,17 @@ question is better than a long wrong path.
 
 /// Returns the shared skill directory.
 ///
-/// Checks `JUST_AGENT_SKILLS_ROOT` first (used as-is, no suffix), then
-/// `JUST_AGENT_DATA_DIR` (appends `just-agent/skills/`), then falls back
-/// to the platform data directory (`~/.local/share/just-agent/skills/`).
-pub fn skill_dir() -> std::path::PathBuf {
+/// `JUST_AGENT_SKILLS_ROOT`, if set, is used verbatim. Otherwise the directory
+/// is `<data_dir_root>/skills/` — i.e. `$JUST_AGENT_DATA_DIR/skills/` when the
+/// env var is set, or `~/.local/share/just-agent/skills/` via the XDG fallback
+/// (see [`crate::persistence::data_dir_root`]).
+pub fn skill_dir() -> Result<std::path::PathBuf> {
     if let Ok(dir) = std::env::var("JUST_AGENT_SKILLS_ROOT")
         && !dir.is_empty()
     {
-        return std::path::PathBuf::from(dir);
+        return Ok(std::path::PathBuf::from(dir));
     }
-    if let Ok(dir) = std::env::var("JUST_AGENT_DATA_DIR") {
-        return std::path::PathBuf::from(dir)
-            .join("just-agent")
-            .join("skills");
-    }
-    dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("just-agent")
-        .join("skills")
+    Ok(crate::persistence::data_dir_root()?.join("skills"))
 }
 
 /// Parses YAML frontmatter from a skill markdown file.
@@ -165,7 +158,7 @@ fn resolve_skill_content(name: &str, agent_dir: Option<&Path>) -> Result<String>
     }
 
     // Fall back to shared.
-    let path = skill_dir().join(format!("{name}.md"));
+    let path = skill_dir()?.join(format!("{name}.md"));
     std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read skill '{name}' from {}", path.display()))
 }

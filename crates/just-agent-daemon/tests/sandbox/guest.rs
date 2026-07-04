@@ -13,7 +13,7 @@ async fn scenario1_guest() {
     }
     let world = World::setup();
     let ws = world.workspace.path().to_path_buf();
-    let agent_data = "$JUST_AGENT_DATA_DIR/just-agent/agents/$JUST_AGENT_ID";
+    let agent_data = "$JUST_AGENT_DATA_DIR/agents/$JUST_AGENT_ID";
     let script = vec![
         Reply::Tool("ls -A $HOME/.ssh".into()), // 0: hide-hole => empty
         Reply::Tool(format!("echo x > {}/probe.txt", ws.display())), // 1: workspace RO

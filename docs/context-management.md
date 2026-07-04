@@ -87,10 +87,10 @@ Skills are a natural consequence of agentic context management:
 1. The agent accumulates experience — effective patterns for a CLI tool, debugging
    strategies, project-specific conventions.
 2. It distills that experience into a markdown file:
-   `<data-dir>/just-agent/skills/<name>.md` (with optional YAML frontmatter).
+   `<data-dir>/skills/<name>.md` (with optional YAML frontmatter).
 
-   The data directory is determined by `JUST_AGENT_DATA_DIR` env var, or the
-   platform default if unset:
+   The data directory is determined by `JUST_AGENT_DATA_DIR` env var (used
+   verbatim), or the platform default if unset:
 
    | Platform | Default path                               |
    | -------- | ------------------------------------------ |
@@ -109,7 +109,7 @@ content.
 ### Skill file format
 
 ```
-<data-dir>/just-agent/skills/
+<data-dir>/skills/
 └── my-skill.md
 ```
 

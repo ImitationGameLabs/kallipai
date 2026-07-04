@@ -167,10 +167,10 @@ In the common case (everything on localhost) they have the same value. They dive
 
 ## Data and Skills
 
-| Variable                 | Required | Default                              | Description                                                                                                                                                                     |
-| ------------------------ | -------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `JUST_AGENT_DATA_DIR`    | no       | Platform data dir (`~/.local/share`) | Custom base directory for agents, logs, and skills. The runtime appends `just-agent/agents/`, `just-agent/archived/` (removed agents), and `just-agent/skills/` subdirectories. |
-| `JUST_AGENT_SKILLS_ROOT` | no       | `DATA_DIR/just-agent/skills/`        | Direct path to the shared skill directory. Used as-is (no suffix appended). Checked before `JUST_AGENT_DATA_DIR` and the platform default.                                      |
+| Variable                 | Required | Default                              | Description                                                                                                                                                                                                                   |
+| ------------------------ | -------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JUST_AGENT_DATA_DIR`    | no       | Platform data dir (`~/.local/share`) | The daemon's data directory, used verbatim. The runtime writes `agents/`, `archived/` (removed agents), and `skills/` directly under it. When unset, it defaults to the namespaced platform dir `~/.local/share/just-agent/`. |
+| `JUST_AGENT_SKILLS_ROOT` | no       | `DATA_DIR/skills/`                   | Direct path to the shared skill directory. Used as-is (no suffix appended). Checked before `JUST_AGENT_DATA_DIR` and the platform default.                                                                                    |
 
 Source: [`crates/just-agent-runtime/src/persistence.rs`](../../crates/just-agent-runtime/src/persistence.rs), [`crates/just-agent-runtime/src/tools/skill/mod.rs`](../../crates/just-agent-runtime/src/tools/skill/mod.rs).
 

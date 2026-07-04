@@ -17,7 +17,7 @@ async fn scenario2_normal() {
     }
     let world = World::setup();
     let ws = world.workspace.path().to_path_buf();
-    let agent_data = "$JUST_AGENT_DATA_DIR/just-agent/agents/$JUST_AGENT_ID";
+    let agent_data = "$JUST_AGENT_DATA_DIR/agents/$JUST_AGENT_ID";
     let script = vec![
         Reply::Tool(format!("echo hello > {}/test.txt", ws.display())), // 0: workspace writable
         Reply::Tool("just-agent dirlock acquire $HOME/writable_subdir".into()), // 1: lock home subdir
