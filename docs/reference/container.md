@@ -36,7 +36,6 @@ Dev mode skips the image bake entirely. `useHostStore` bind-mounts the host
 the crane workspace (`packages.default`). So iterating is just:
 
 ```sh
-mkdir -p data ws
 # after editing Rust source:
 nix build .#default        # rebuilds the workspace (incremental via crane)
 arion up -d                # picks up the new binary
@@ -48,7 +47,6 @@ store duplication.
 ## Production: `JUST_AGENT_ARION_MODE=prod arion up`
 
 ```sh
-mkdir -p data ws
 JUST_AGENT_ARION_MODE=prod arion up -d
 arion logs -f
 ```
@@ -109,11 +107,33 @@ So you do not pass any `--security-opt` / `--cap-add` by hand.
 
 ## Volumes and workspaces
 
-`arion-compose.nix` bind-mounts two paths in dev/prod (create them first; test
-mode mounts none — its scratch tree is an ephemeral `/testdata` tmpfs):
+In dev/prod, daemon data and the agent workspace are **docker named volumes**
+by default — no host directories are created and the project tree stays clean.
+Shared skills live inside the `data` volume's `skills/` subdir. Test mode mounts
+none (its scratch tree is an ephemeral `/testdata` tmpfs).
 
-- `./data` → `/var/lib/just-agent` — agent state, logs, skills (persistent).
-- `./ws` → `/workspace` — the agent workspace root.
+- `data` named volume → `/var/lib/just-agent` — agent state, logs, skills (persistent; survives `arion down`, removed by `arion down -v`).
+- `workspace` named volume → `/workspace` — the agent workspace root.
+
+Data and workspace can be bind-mounted to a host path via their env vars, when
+you want the files on the host (e.g. inspect/persist daemon state, or have the
+agent work on a checkout). Shared skills can be overlaid on the data volume's
+`skills/` subdir the same way (agent-local skills under
+`/var/lib/just-agent/agents/<id>/skills/` are unaffected):
+
+```sh
+JUST_AGENT_ARION_DATA_PATH=$PWD/data arion up -d        # /var/lib/just-agent ← host ./data
+JUST_AGENT_ARION_WORKSPACE_PATH=$PWD/ws arion up -d     # /workspace ← host ./ws
+JUST_AGENT_ARION_SKILLS_PATH=$PWD/skills arion up -d    # /var/lib/just-agent/skills ← host ./skills
+```
+
+Don't point `JUST_AGENT_ARION_SKILLS_PATH` at the same host path as
+`JUST_AGENT_ARION_DATA_PATH` — the skills subdir would shadow itself
+confusingly. The override value must be an absolute, colon-free path (the
+compose throws at eval otherwise).
+
+`workspace_root` passed to the daemon API is always resolved as an in-container
+path (default `/workspace`); a host bind does not change what the daemon sees.
 
 Each agent needs a `workspace_root` that exists in the container and is
 **disjoint** from `/var/lib/just-agent`. Pass `workspace_root: /workspace` when
@@ -133,7 +153,9 @@ token come from `.env`:
 | `JUST_AGENT_OPERATOR_TOKEN` | no          | If unset, a random `sk-operator-...` token is generated and printed to stdout. |
 
 The compose already sets `JUST_AGENT_DAEMON_ADDR=0.0.0.0:3000` (in dev and prod),
-`HOME`, `PATH`, and `RUST_LOG`. Do not override `JUST_AGENT_ADVERTISE_URL`; its
+`HOME`, `PATH`, `RUST_LOG`, and `JUST_AGENT_WORKSPACE_ROOT=/workspace` (the
+default workspace for clients like the TUI that create an agent without an
+explicit `workspace_root`). Do not override `JUST_AGENT_ADVERTISE_URL`; its
 default `http://127.0.0.1:3000` is correct because the daemon and agent shells
 share the container's network namespace.
 
@@ -147,8 +169,8 @@ docker load < result
 docker run --rm \
   --security-opt seccomp=unconfined --cap-add SYS_ADMIN \
   -p 3000:3000 \
-  -v "$PWD/data:/var/lib/just-agent" \
-  -v "$PWD/ws:/workspace" \
+  -v just-agent_data:/var/lib/just-agent \
+  -v just-agent_workspace:/workspace \
   -e JUST_LLM_PROVIDER=deepseek \
   -e JUST_LLM_MODEL=deepseek-v4-flash \
   -e JUST_LLM_DEEPSEEK_API_KEY="$DEEPSEEK_KEY" \

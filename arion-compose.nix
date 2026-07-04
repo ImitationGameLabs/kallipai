@@ -24,6 +24,42 @@ let
   # Dev is the default: any unset / unrecognized value (including "") runs dev.
   isDev = !isProd && !isTest;
 
+  # Read a bind-override env var, returning "<host>:<target>" or null when
+  # unset. The value must be empty or an absolute, colon-free path other than
+  # "/": a bare name is parsed by compose as a named-volume ref (-> "undefined
+  # volume"), a colon lets docker mis-parse the src:dst[:mode] string and
+  # silently mount to the wrong target (-> data loss on arion down), and "/"
+  # would bind the host root into the container. Throws at eval in dev/prod;
+  # in test mode the bindings are lazily ignored (never referenced), so a bad
+  # value is silent there.
+  bindOverride =
+    name: target:
+    let
+      v = builtins.getEnv name;
+    in
+    if v == "" then
+      null
+    else if v == "/" || !(lib.hasPrefix "/" v) || lib.hasInfix ":" v then
+      throw "arion: ${name} must be an absolute, colon-free host path other than '/' (got '${v}')"
+    else
+      "${v}:${target}";
+
+  # Bind overrides for the daemon data, agent workspace, and shared skills.
+  # Unset (the default) backs data + workspace with docker named volumes and
+  # leaves skills living inside the data volume; set to a host path to
+  # bind-mount instead -- data to keep daemon state on a known disk, workspace
+  # to make the agent's files host-visible, skills to curate shared skills on
+  # the host.
+  dataBind = bindOverride "JUST_AGENT_ARION_DATA_PATH" "/var/lib/just-agent";
+  workspaceBind = bindOverride "JUST_AGENT_ARION_WORKSPACE_PATH" "/workspace";
+  # Skills overlay the data volume's skills/ subdir (no named volume of its
+  # own). NOTE: JUST_AGENT_SKILLS_ROOT (if set via .env) short-circuits
+  # skill_dir() and bypasses this bind, so leave it unset when using it.
+  skillsBind = bindOverride "JUST_AGENT_ARION_SKILLS_PATH" "/var/lib/just-agent/skills";
+
+  dataVolume = if dataBind != null then dataBind else "data:/var/lib/just-agent";
+  workspaceVolume = if workspaceBind != null then workspaceBind else "workspace:/workspace";
+
   # Load via git+file URL (not a bare path) so getFlake applies fetchGit's VCS
   # filtering and the resolved packages match `nix build .#*` bit-for-bit.
   flake = builtins.getFlake "git+file://${toString ./.}";
@@ -68,14 +104,29 @@ in
     # Dev and prod host the long-running daemon: expose the port, persist state
     # + workspace, and read provider credentials from .env. The test mode runs
     # an ephemeral suite (in-process wiremock, internal ephemeral ports) and
-    # needs none of these.
+    # needs none of these. Daemon data and the workspace are docker named
+    # volumes by default (no host directories are created in the project tree);
+    # either can be bind-mounted via JUST_AGENT_ARION_DATA_PATH /
+    # JUST_AGENT_ARION_WORKSPACE_PATH, and shared skills can be overlaid on the
+    # data volume via JUST_AGENT_ARION_SKILLS_PATH.
     (lib.mkIf (!isTest) {
+      # Named volumes must be declared at the compose top level; compose rejects
+      # a service reference to an undeclared named volume. Each is declared only
+      # when its override env var is unset (otherwise that mount is a bind mount
+      # and no named volume is referenced).
+      docker-compose.volumes =
+        { }
+        // lib.optionalAttrs (dataBind == null) { data = { }; }
+        // lib.optionalAttrs (workspaceBind == null) { workspace = { }; };
       services.just-agent = {
         service.ports = [ "3000:3000" ];
         service.volumes = [
-          "${toString ./.}/data:/var/lib/just-agent"
-          "${toString ./.}/ws:/workspace"
-        ];
+          dataVolume
+          workspaceVolume
+        ]
+        # skills has no named volume of its own: unset -> skills live inside
+        # the `data` volume's skills/ subdir; set -> a bind overlays it.
+        ++ lib.optional (skillsBind != null) skillsBind;
         service.env_file = [ ".env" ];
       };
     })
@@ -101,6 +152,12 @@ in
           PATH = binPath;
           HOME = "/var/lib/just-agent";
           JUST_AGENT_DATA_DIR = "/var/lib/just-agent";
+          # Default workspace for clients (e.g. the TUI) that create an agent
+          # without an explicit workspace_root: AgentConfig::load otherwise
+          # falls back to the daemon's cwd, which is "/" in the container and
+          # overlaps the data dir -> 409. Pin the mounted workspace volume,
+          # which is disjoint from /var/lib/just-agent.
+          JUST_AGENT_WORKSPACE_ROOT = "/workspace";
           JUST_AGENT_DAEMON_ADDR = "0.0.0.0:3000";
           RUST_LOG = "info";
         };

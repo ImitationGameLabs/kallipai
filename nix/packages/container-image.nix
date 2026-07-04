@@ -44,6 +44,9 @@ pkgs.dockerTools.buildImage {
       "PATH=${binPath}"
       "HOME=/var/lib/just-agent"
       "JUST_AGENT_DATA_DIR=/var/lib/just-agent"
+      # Default workspace for clients that spawn an agent without an explicit
+      # workspace_root; see arion-compose.nix for the rationale.
+      "JUST_AGENT_WORKSPACE_ROOT=/workspace"
       "JUST_AGENT_DAEMON_ADDR=0.0.0.0:3000"
       "RUST_LOG=info"
     ];
