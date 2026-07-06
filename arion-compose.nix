@@ -1,24 +1,24 @@
-# Arion composition for just-agent-daemon.
+# Arion composition for kallip-daemon.
 #
-# Three modes, switched by the JUST_AGENT_ARION_MODE env var. Dev is the default
+# Three modes, switched by the KALLIP_ARION_MODE env var. Dev is the default
 # (cheap iteration via useHostStore); production and test are opt-in:
 #
 #   arion up                                  # dev (default)
-#   JUST_AGENT_ARION_MODE=prod arion up       # production (baked image)
-#   JUST_AGENT_ARION_MODE=test arion up       # run the integration-test suite
+#   KALLIP_ARION_MODE=prod arion up       # production (baked image)
+#   KALLIP_ARION_MODE=test arion up       # run the integration-test suite
 #
 # All modes consume the flake's pre-built outputs directly — arion does no
 # Rust/crane building of its own:
 #   - dev:  packages.default (the crane workspace), run via useHostStore so the
 #           host /nix/store is shared and `nix build .#default` picks up changes.
-#   - prod: packages.just-agent-image, handed to arion via build.image so arion
+#   - prod: packages.kallip-image, handed to arion via build.image so arion
 #           loads and runs it in one command.
-#   - test: packages.just-agent-integration-tests (every [[test]] binary + the
+#   - test: packages.kallip-integration-tests (every [[test]] binary + the
 #           agent binaries), run via useHostStore; the service exits with the
 #           test verdict.
 { pkgs, lib, ... }:
 let
-  mode = builtins.getEnv "JUST_AGENT_ARION_MODE";
+  mode = builtins.getEnv "KALLIP_ARION_MODE";
   isProd = mode == "prod";
   isTest = mode == "test";
   # Dev is the default: any unset / unrecognized value (including "") runs dev.
@@ -50,22 +50,22 @@ let
   # bind-mount instead -- data to keep daemon state on a known disk, workspace
   # to make the agent's files host-visible, skills to curate shared skills on
   # the host.
-  dataBind = bindOverride "JUST_AGENT_ARION_DATA_PATH" "/var/lib/just-agent";
-  workspaceBind = bindOverride "JUST_AGENT_ARION_WORKSPACE_PATH" "/workspace";
+  dataBind = bindOverride "KALLIP_ARION_DATA_PATH" "/var/lib/kallip";
+  workspaceBind = bindOverride "KALLIP_ARION_WORKSPACE_PATH" "/workspace";
   # Skills overlay the data volume's skills/ subdir (no named volume of its
-  # own). NOTE: JUST_AGENT_SKILLS_ROOT (if set via .env) short-circuits
+  # own). NOTE: KALLIP_SKILLS_ROOT (if set via .env) short-circuits
   # skill_dir() and bypasses this bind, so leave it unset when using it.
-  skillsBind = bindOverride "JUST_AGENT_ARION_SKILLS_PATH" "/var/lib/just-agent/skills";
+  skillsBind = bindOverride "KALLIP_ARION_SKILLS_PATH" "/var/lib/kallip/skills";
 
-  dataVolume = if dataBind != null then dataBind else "data:/var/lib/just-agent";
+  dataVolume = if dataBind != null then dataBind else "data:/var/lib/kallip";
   workspaceVolume = if workspaceBind != null then workspaceBind else "workspace:/workspace";
 
   # Load via git+file URL (not a bare path) so getFlake applies fetchGit's VCS
   # filtering and the resolved packages match `nix build .#*` bit-for-bit.
   flake = builtins.getFlake "git+file://${toString ./.}";
   workspace = flake.packages.x86_64-linux.default;
-  image = flake.packages.x86_64-linux.just-agent-image;
-  integrationTests = flake.packages.x86_64-linux.just-agent-integration-tests;
+  image = flake.packages.x86_64-linux.kallip-image;
+  integrationTests = flake.packages.x86_64-linux.kallip-integration-tests;
 
   # Shared toolset + certs + aifed + PATH (same recipe as the baked image in
   # nix/packages/container-shared.nix), so dev and prod cannot drift.
@@ -90,9 +90,9 @@ in
 {
   config = lib.mkMerge [
     {
-      project.name = "just-agent";
+      project.name = "kallip";
 
-      services.just-agent = {
+      services.kallip = {
         # Common to every mode: the landlock/seccomp shell sandbox needs these
         # privileges (see docs/reference/container.md). No typed option for
         # security_opt; out.service is the documented escape hatch (attrsOf,
@@ -106,9 +106,9 @@ in
     # an ephemeral suite (in-process wiremock, internal ephemeral ports) and
     # needs none of these. Daemon data and the workspace are docker named
     # volumes by default (no host directories are created in the project tree);
-    # either can be bind-mounted via JUST_AGENT_ARION_DATA_PATH /
-    # JUST_AGENT_ARION_WORKSPACE_PATH, and shared skills can be overlaid on the
-    # data volume via JUST_AGENT_ARION_SKILLS_PATH.
+    # either can be bind-mounted via KALLIP_ARION_DATA_PATH /
+    # KALLIP_ARION_WORKSPACE_PATH, and shared skills can be overlaid on the
+    # data volume via KALLIP_ARION_SKILLS_PATH.
     (lib.mkIf (!isTest) {
       # Named volumes must be declared at the compose top level; compose rejects
       # a service reference to an undeclared named volume. Each is declared only
@@ -118,7 +118,7 @@ in
         { }
         // lib.optionalAttrs (dataBind == null) { data = { }; }
         // lib.optionalAttrs (workspaceBind == null) { workspace = { }; };
-      services.just-agent = {
+      services.kallip = {
         service.ports = [ "3000:3000" ];
         service.volumes = [
           dataVolume
@@ -132,14 +132,14 @@ in
     })
     (lib.mkIf isProd {
       # Hand arion the flake-built image: it loads it and derives the tag, so
-      # `JUST_AGENT_ARION_MODE=prod arion up` builds + runs in one command (no
+      # `KALLIP_ARION_MODE=prod arion up` builds + runs in one command (no
       # manual `docker load`). mkForce overrides arion's own image builder,
       # which would otherwise inject a nix-database layer (and pull pkgs.nix
       # into the closure).
-      services.just-agent.build.image = lib.mkForce image;
+      services.kallip.build.image = lib.mkForce image;
     })
     (lib.mkIf isDev {
-      services.just-agent = {
+      services.kallip = {
         # Adds root-level /bin/sh and /usr/bin/env symlinks. The daemon and
         # agent shells don't need them (bash is resolved via PATH/toolEnv); this
         # is a convenience for `arion exec` and any `#!/bin/sh` shebangs (the
@@ -147,24 +147,24 @@ in
         image.enableRecommendedContents = true;
         image.contents = [ workspace ] ++ runtimeContents;
         service.useHostStore = true;
-        service.command = [ "${workspace}/bin/just-agent-daemon" ];
+        service.command = [ "${workspace}/bin/kallip-daemon" ];
         service.environment = {
           PATH = binPath;
-          HOME = "/var/lib/just-agent";
-          JUST_AGENT_DATA_DIR = "/var/lib/just-agent";
+          HOME = "/var/lib/kallip";
+          KALLIP_DATA_DIR = "/var/lib/kallip";
           # Default workspace for clients (e.g. the TUI) that create an agent
           # without an explicit workspace_root: AgentConfig::load otherwise
           # falls back to the daemon's cwd, which is "/" in the container and
           # overlaps the data dir -> 409. Pin the mounted workspace volume,
-          # which is disjoint from /var/lib/just-agent.
-          JUST_AGENT_WORKSPACE_ROOT = "/workspace";
-          JUST_AGENT_DAEMON_ADDR = "0.0.0.0:3000";
+          # which is disjoint from /var/lib/kallip.
+          KALLIP_WORKSPACE_ROOT = "/workspace";
+          KALLIP_DAEMON_ADDR = "0.0.0.0:3000";
           RUST_LOG = "info";
         };
       };
     })
     (lib.mkIf isTest {
-      services.just-agent = {
+      services.kallip = {
         image.enableRecommendedContents = true;
         image.contents = [ integrationTests ] ++ runtimeContents;
         service.useHostStore = true;
@@ -204,9 +204,9 @@ in
           PATH = "${integrationTests}/bin:${binPath}";
           # Explicit agent-bin dir for resolve_bin -- current_exe() resolves
           # the buildEnv symlink into a sub-store path, not the shared bin/.
-          JUST_AGENT_BIN_DIR = "${integrationTests}/bin";
-          JUST_AGENT_TESTDATA_DIR = "/testdata";
-          HOME = "/var/lib/just-agent";
+          KALLIP_BIN_DIR = "${integrationTests}/bin";
+          KALLIP_TESTDATA_DIR = "/testdata";
+          HOME = "/var/lib/kallip";
           RUST_LOG = "info";
         };
       };

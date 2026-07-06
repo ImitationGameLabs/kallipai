@@ -1,9 +1,9 @@
 # Docker image
 
-`just-agent-daemon` ships as a container image built with
+`kallip-daemon` ships as a container image built with
 `nixpkgs.dockerTools` — no Dockerfile. It shares the same crane-built workspace
-as the `just-agent-tarball` package, so the binaries inside are bit-identical to
-a `nix build .#just-agent-tarball` build. The image is **scratch-based**: glibc,
+as the `kallip-tarball` package, so the binaries inside are bit-identical to
+a `nix build .#kallip-tarball` build. The image is **scratch-based**: glibc,
 bash, the CA bundle, and every other runtime dependency come from the nix store
 closure embedded in the image. Only `x86_64-linux` is published.
 
@@ -11,11 +11,11 @@ The recommended way to run it is [Arion](https://docs.hercules-ci.com/arion/) (a
 Nix-native docker-compose), configured by `arion-compose.nix` at the repo root.
 Three modes are switched by an env var:
 
-| Mode     | Command                               | Image source                                          | Host nix store |
-| -------- | ------------------------------------- | ----------------------------------------------------- | -------------- |
-| **dev**  | `arion up -d` (default)               | `packages.default`, run via useHostStore              | shared (ro)    |
-| **prod** | `JUST_AGENT_ARION_MODE=prod arion up` | `packages.just-agent-image` (pre-built)               | not shared     |
-| **test** | `JUST_AGENT_ARION_MODE=test arion up` | `packages.just-agent-integration-tests`, useHostStore | shared (ro)    |
+| Mode     | Command                           | Image source                                      | Host nix store |
+| -------- | --------------------------------- | ------------------------------------------------- | -------------- |
+| **dev**  | `arion up -d` (default)           | `packages.default`, run via useHostStore          | shared (ro)    |
+| **prod** | `KALLIP_ARION_MODE=prod arion up` | `packages.kallip-image` (pre-built)               | not shared     |
+| **test** | `KALLIP_ARION_MODE=test arion up` | `packages.kallip-integration-tests`, useHostStore | shared (ro)    |
 
 ## Prerequisites
 
@@ -44,28 +44,28 @@ arion up -d                # picks up the new binary
 Arion resolves the same workspace path as `nix build .#default`, so there is no
 store duplication.
 
-## Production: `JUST_AGENT_ARION_MODE=prod arion up`
+## Production: `KALLIP_ARION_MODE=prod arion up`
 
 ```sh
-JUST_AGENT_ARION_MODE=prod arion up -d
+KALLIP_ARION_MODE=prod arion up -d
 arion logs -f
 ```
 
-Arion builds `packages.just-agent-image` (the flake's two-layer `buildImage`),
+Arion builds `packages.kallip-image` (the flake's two-layer `buildImage`),
 loads it, and runs it — one command, no manual `docker load`.
 
-## Integration tests: `JUST_AGENT_ARION_MODE=test arion up`
+## Integration tests: `KALLIP_ARION_MODE=test arion up`
 
 Test mode runs the workspace's integration tests (`[[test]]` targets) **inside
 the container** to confirm the sandbox and shell backends behave correctly in
 the containerized environment the daemon ships in. Today that covers the
-`sandbox` suite (`crates/just-agent-daemon/tests/sandbox/` — a scripted
+`sandbox` suite (`crates/kallip-daemon/tests/sandbox/` — a scripted
 end-to-end agent driving the real landlock + seccomp + mount-ns shell sandbox)
-and the `exec` suite (`crates/just-agent-shell/tests/exec.rs` — real `bash -c`
+and the `exec` suite (`crates/kallip-shell/tests/exec.rs` — real `bash -c`
 cwd/process-group behavior). Any `[[test]]` added later is picked up
 automatically.
 
-The test binaries are pre-built by Nix (`packages.just-agent-integration-tests`):
+The test binaries are pre-built by Nix (`packages.kallip-integration-tests`):
 every `[[test]]` artifact built via `cargo test --no-run`, plus the agent
 binaries, merged into one closure. No build happens in the container; an
 in-process wiremock stands in for the LLM, so no provider credentials or
@@ -74,9 +74,9 @@ external network are needed. The sandbox scenarios' scratch dirs live on a
 assertions stay honest).
 
 ```sh
-JUST_AGENT_ARION_MODE=test arion up
+KALLIP_ARION_MODE=test arion up
 arion ps -a          # exit code is the verdict (0 = all tests passed)
-arion logs just-agent
+arion logs kallip
 ```
 
 The service iterates `/integration-tests/*`, running each binary with
@@ -112,23 +112,23 @@ by default — no host directories are created and the project tree stays clean.
 Shared skills live inside the `data` volume's `skills/` subdir. Test mode mounts
 none (its scratch tree is an ephemeral `/testdata` tmpfs).
 
-- `data` named volume → `/var/lib/just-agent` — agent state, logs, skills (persistent; survives `arion down`, removed by `arion down -v`).
+- `data` named volume → `/var/lib/kallip` — agent state, logs, skills (persistent; survives `arion down`, removed by `arion down -v`).
 - `workspace` named volume → `/workspace` — the agent workspace root.
 
 Data and workspace can be bind-mounted to a host path via their env vars, when
 you want the files on the host (e.g. inspect/persist daemon state, or have the
 agent work on a checkout). Shared skills can be overlaid on the data volume's
 `skills/` subdir the same way (agent-local skills under
-`/var/lib/just-agent/agents/<id>/skills/` are unaffected):
+`/var/lib/kallip/agents/<id>/skills/` are unaffected):
 
 ```sh
-JUST_AGENT_ARION_DATA_PATH=$PWD/data arion up -d        # /var/lib/just-agent ← host ./data
-JUST_AGENT_ARION_WORKSPACE_PATH=$PWD/ws arion up -d     # /workspace ← host ./ws
-JUST_AGENT_ARION_SKILLS_PATH=$PWD/skills arion up -d    # /var/lib/just-agent/skills ← host ./skills
+KALLIP_ARION_DATA_PATH=$PWD/data arion up -d        # /var/lib/kallip ← host ./data
+KALLIP_ARION_WORKSPACE_PATH=$PWD/ws arion up -d     # /workspace ← host ./ws
+KALLIP_ARION_SKILLS_PATH=$PWD/skills arion up -d    # /var/lib/kallip/skills ← host ./skills
 ```
 
-Don't point `JUST_AGENT_ARION_SKILLS_PATH` at the same host path as
-`JUST_AGENT_ARION_DATA_PATH` — the skills subdir would shadow itself
+Don't point `KALLIP_ARION_SKILLS_PATH` at the same host path as
+`KALLIP_ARION_DATA_PATH` — the skills subdir would shadow itself
 confusingly. The override value must be an absolute, colon-free path (the
 compose throws at eval otherwise).
 
@@ -136,7 +136,7 @@ compose throws at eval otherwise).
 path (default `/workspace`); a host bind does not change what the daemon sees.
 
 Each agent needs a `workspace_root` that exists in the container and is
-**disjoint** from `/var/lib/just-agent`. Pass `workspace_root: /workspace` when
+**disjoint** from `/var/lib/kallip`. Pass `workspace_root: /workspace` when
 creating an agent via the [daemon API](daemon-api.md); the daemon rejects a
 workspace that contains or is contained by the data dir.
 
@@ -145,17 +145,17 @@ workspace that contains or is contained by the data dir.
 The compose sets only the daemon defaults. Provider credentials and the operator
 token come from `.env`:
 
-| Variable                    | Required    | Notes                                                                          |
-| --------------------------- | ----------- | ------------------------------------------------------------------------------ |
-| `JUST_LLM_PROVIDER`         | **yes**     | See [env.md](env.md).                                                          |
-| `JUST_LLM_MODEL`            | **yes**     | See [env.md](env.md).                                                          |
-| `JUST_LLM_*_API_KEY`        | conditional | Provider key, e.g. `JUST_LLM_DEEPSEEK_API_KEY`.                                |
-| `JUST_AGENT_OPERATOR_TOKEN` | no          | If unset, a random `sk-operator-...` token is generated and printed to stdout. |
+| Variable                | Required    | Notes                                                                          |
+| ----------------------- | ----------- | ------------------------------------------------------------------------------ |
+| `JUST_LLM_PROVIDER`     | **yes**     | See [env.md](env.md).                                                          |
+| `JUST_LLM_MODEL`        | **yes**     | See [env.md](env.md).                                                          |
+| `JUST_LLM_*_API_KEY`    | conditional | Provider key, e.g. `JUST_LLM_DEEPSEEK_API_KEY`.                                |
+| `KALLIP_OPERATOR_TOKEN` | no          | If unset, a random `sk-operator-...` token is generated and printed to stdout. |
 
-The compose already sets `JUST_AGENT_DAEMON_ADDR=0.0.0.0:3000` (in dev and prod),
-`HOME`, `PATH`, `RUST_LOG`, and `JUST_AGENT_WORKSPACE_ROOT=/workspace` (the
+The compose already sets `KALLIP_DAEMON_ADDR=0.0.0.0:3000` (in dev and prod),
+`HOME`, `PATH`, `RUST_LOG`, and `KALLIP_WORKSPACE_ROOT=/workspace` (the
 default workspace for clients like the TUI that create an agent without an
-explicit `workspace_root`). Do not override `JUST_AGENT_ADVERTISE_URL`; its
+explicit `workspace_root`). Do not override `KALLIP_ADVERTISE_URL`; its
 default `http://127.0.0.1:3000` is correct because the daemon and agent shells
 share the container's network namespace.
 
@@ -164,17 +164,17 @@ share the container's network namespace.
 If you cannot use Arion, build and load the image directly:
 
 ```sh
-nix build .#just-agent-image
+nix build .#kallip-image
 docker load < result
 docker run --rm \
   --security-opt seccomp=unconfined --cap-add SYS_ADMIN \
   -p 3000:3000 \
-  -v just-agent_data:/var/lib/just-agent \
-  -v just-agent_workspace:/workspace \
+  -v kallip_data:/var/lib/kallip \
+  -v kallip_workspace:/workspace \
   -e JUST_LLM_PROVIDER=deepseek \
   -e JUST_LLM_MODEL=deepseek-v4-flash \
   -e JUST_LLM_DEEPSEEK_API_KEY="$DEEPSEEK_KEY" \
-  just-agent:latest
+  kallip:latest
 ```
 
 Then create an agent via the [daemon API](daemon-api.md) with

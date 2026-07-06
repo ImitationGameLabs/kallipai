@@ -19,7 +19,7 @@ let
   # the closure into ~100 layers by narSize). This layer is cached across daemon
   # rebuilds because it only changes when the toolset changes.
   base = pkgs.dockerTools.buildImage {
-    name = "just-agent-base";
+    name = "kallip-base";
     tag = gitVersion;
     copyToRoot = [
       toolEnv
@@ -32,7 +32,7 @@ in
 # process-level shell-out dep; runtime adoption pending), stacked on the base.
 # This is the only layer rebuilt when Rust source changes.
 pkgs.dockerTools.buildImage {
-  name = "just-agent";
+  name = "kallip";
   tag = gitVersion;
   fromImage = base;
   copyToRoot = [
@@ -42,20 +42,20 @@ pkgs.dockerTools.buildImage {
   config = {
     Env = [
       "PATH=${binPath}"
-      "HOME=/var/lib/just-agent"
-      "JUST_AGENT_DATA_DIR=/var/lib/just-agent"
+      "HOME=/var/lib/kallip"
+      "KALLIP_DATA_DIR=/var/lib/kallip"
       # Default workspace for clients that spawn an agent without an explicit
       # workspace_root; see arion-compose.nix for the rationale.
-      "JUST_AGENT_WORKSPACE_ROOT=/workspace"
-      "JUST_AGENT_DAEMON_ADDR=0.0.0.0:3000"
+      "KALLIP_WORKSPACE_ROOT=/workspace"
+      "KALLIP_DAEMON_ADDR=0.0.0.0:3000"
       "RUST_LOG=info"
     ];
-    Cmd = [ "${workspace}/bin/just-agent-daemon" ];
+    Cmd = [ "${workspace}/bin/kallip-daemon" ];
     ExposedPorts = {
       "3000/tcp" = { };
     };
     Volumes = {
-      "/var/lib/just-agent" = { };
+      "/var/lib/kallip" = { };
     };
   };
 }

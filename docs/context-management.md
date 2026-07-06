@@ -1,6 +1,6 @@
 # Agentic Context Management
 
-The most experimental design decision in just-agent: context management is not
+The most experimental design decision in kallipai: context management is not
 a hidden heuristic — the agent controls its own attention explicitly through
 tools.
 
@@ -10,7 +10,7 @@ Traditional agents manage context opaquely: when the context window fills, older
 turns are silently summarized or dropped. The agent has no say in what stays or
 goes.
 
-just-agent takes a different approach: the agent gets **tools** to manage its
+kallipai takes a different approach: the agent gets **tools** to manage its
 own context. It decides what to keep (`pin`), what to drop (`evict`), and what
 to let go of (`unpin`). The traditional `/compact` operation becomes a special
 case of this model, not the only option.
@@ -61,7 +61,7 @@ until a token budget is exhausted. The new summary replaces the old one, and
 all processed turns are dropped.
 
 The maximum summary token count is configured via the
-`JUST_AGENT_SUMMARY_MAX_TOKENS` environment variable (default: 1200).
+`KALLIP_SUMMARY_MAX_TOKENS` environment variable (default: 1200).
 
 ## Automatic compaction in the agent loop
 
@@ -89,14 +89,14 @@ Skills are a natural consequence of agentic context management:
 2. It distills that experience into a markdown file:
    `<data-dir>/skills/<name>.md` (with optional YAML frontmatter).
 
-   The data directory is determined by `JUST_AGENT_DATA_DIR` env var (used
+   The data directory is determined by `KALLIP_DATA_DIR` env var (used
    verbatim), or the platform default if unset:
 
-   | Platform | Default path                               |
-   | -------- | ------------------------------------------ |
-   | Linux    | `~/.local/share/just-agent`                |
-   | macOS    | `~/Library/Application Support/just-agent` |
-   | Windows  | `%APPDATA%\just-agent`                     |
+   | Platform | Default path                           |
+   | -------- | -------------------------------------- |
+   | Linux    | `~/.local/share/kallip`                |
+   | macOS    | `~/Library/Application Support/kallip` |
+   | Windows  | `%APPDATA%\kallip`                     |
 
 3. When it encounters a matching situation later, it reads the file and pins
    the content into context.

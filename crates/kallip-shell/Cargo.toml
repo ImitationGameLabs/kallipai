@@ -1,0 +1,61 @@
+[package]
+name = "kallip-shell"
+description = "Provider-neutral shell tools for LLM applications"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+just-llm-client = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+# Shell backend: process spawning, pgroup kill, sticky cwd, background supervisor.
+tokio-util = { workspace = true }
+nix = { workspace = true }
+uuid = { workspace = true }
+regex = { workspace = true }
+tempfile = { workspace = true }
+unicode-normalization = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libsandbox = { workspace = true, optional = true }
+# `getuid`/`getgid` for mount-hole uid/gid maps (`landlock::apply`) + the
+# `EPERM` errno passed to libsandbox's seccomp `deny_with_errno` (`seccomp`).
+libc = { workspace = true }
+
+[features]
+# Testing utilities for downstream crates: exposes `MockShellBackend` (and
+# future test helpers) so consumers can drive shell-tool tests without spawning
+# a real process. Off by default to keep test-only code out of production
+# builds.
+testutils = []
+# Linux-only: restrict every spawned `bash` (foreground + background) to a
+# landlock filesystem domain + mount-ns readonly-holes derived from the owning
+# agent's current directory write-locks. Enforcement is composed from the
+# spawn-independent `prepare_*`/`install_*` primitives of the `libsandbox`
+# crate (its `landlock` feature pulls the landlock ruleset mechanism).
+# Off by default; enables mandatory enforcement of the advisory
+# `DirLockManager`. See `landlock`.
+landlock = ["dep:libsandbox", "libsandbox/landlock"]
+# Linux-only: install a seccomp denylist (default-allow; blocks rare high-risk
+# syscalls an agent never needs — reboot, kexec_*, init_module, bpf, ptrace,
+# ...) as the last step of every spawned `bash`'s pre_exec, after landlock.
+# Implies `landlock` (seccomp is layered on top of the landlock spawn path).
+# Composed from libsandbox's `SeccompFilterBuilder` (default-allow +
+# `Errno(EPERM)` denylist); this crate owns only the policy (which syscalls).
+# Off by default. See `seccomp`.
+seccomp = ["landlock"]
+
+[dev-dependencies]
+# Dev-only: the `spawn` benchmark measures per-command spawn cost for the shell
+# backend against a bare `bash -c` floor. Not pulled by runtime/daemon
+# (dev-dependencies are non-transitive).
+criterion = { workspace = true }
+
+[[bench]]
+name = "spawn"
+harness = false

@@ -1,0 +1,27 @@
+[package]
+name = "kallip-tui"
+description = "Interactive TUI client for kallip"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallip-client = { workspace = true }
+kallip-common = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ratatui = { workspace = true }
+ratatui-textarea = { workspace = true }
+pulldown-cmark = { workspace = true }
+comfy-table = { workspace = true }
+syntect = { workspace = true }
+futures-util = { workspace = true }
+rpassword = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+tokenx-rs = { workspace = true }
+tempfile = { workspace = true }

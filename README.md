@@ -1,16 +1,18 @@
-# just-agent
+# kallipai
 
 > **Early stage.** Not ready for production use.
+>
+> Binary/crate stem: `kallip`.
 
 An agentic multi-agent system. Agents manage their own context, coordinate across projects, and operate within a safety harness that constrains dangerous operations.
 
 ## Why not another Claude Code / Codex / OpenCode?
 
-Those tools excel at single-project, single-session coding assistance. just-agent
+Those tools excel at single-project, single-session coding assistance. kallip
 aims at a different problem: **cross-project, multi-agent coordination** — and it
 does so without being a "multi-agent manager."
 
-Instead of a top-down orchestration layer, just-agent is designed to be driven
+Instead of a top-down orchestration layer, kallip is designed to be driven
 **agenticly through a headless CLI**: the agent itself decides when to spawn,
 switch between, and coordinate multiple agent instances across projects.
 
@@ -18,20 +20,22 @@ For planned direction, see the [roadmap](docs/roadmap.md).
 
 ## Architecture
 
-| Crate                | Description                                                                           |
-| -------------------- | ------------------------------------------------------------------------------------- |
-| `just-agent-common`  | Shared types and command parsing                                                      |
-| `just-agent-runtime` | Agent runtime: agent context management, policy engine, tool dispatch                 |
-| `just-agent-shell`   | Provider-neutral shell/session tools for LLM applications (used by the runtime)       |
-| `just-agent-daemon`  | HTTP API server hosting multiple agent instances                                      |
-| `just-agent-client`  | Async client library for the daemon HTTP API                                          |
-| `just-agent`         | Headless CLI — designed for agents to call, so an agent can manage other agents       |
-| `just-agent-tui`     | Interactive terminal UI for human users, with approval prompts and markdown rendering |
-| `just-agent-run`     | Agent runner for scripting and automation — CI, benchmarks, scripted workflows        |
+| Crate            | Description                                                                           |
+| ---------------- | ------------------------------------------------------------------------------------- |
+| `kallip-common`  | Shared types and command parsing                                                      |
+| `kallip-runtime` | Agent runtime: agent context management, policy engine, tool dispatch                 |
+| `kallip-shell`   | Provider-neutral shell/session tools for LLM applications (used by the runtime)       |
+| `kallip-daemon`  | HTTP API server hosting multiple agent instances                                      |
+| `kallip-client`  | Async client library for the daemon HTTP API                                          |
+| `kallip`         | Headless CLI — designed for agents to call, so an agent can manage other agents       |
+| `kallip-tui`     | Interactive terminal UI for human users, with approval prompts and markdown rendering |
+| `kallip-run`     | Agent runner for scripting and automation — CI, benchmarks, scripted workflows        |
+
+> Note: `just-llm-client` is an unrelated upstream crate, not part of this project.
 
 ## Agentic context management
 
-The most experimental part of the design. Context management in just-agent is not
+The most experimental part of the design. Context management in kallip is not
 hidden behind heuristics — the agent manages its own attention explicitly
 through tools:
 
@@ -55,7 +59,7 @@ something interesting: **skills that emerge naturally.**
 
 When the agent accumulates experience — say, effective patterns for using a
 particular CLI tool or debugging a class of issues — it can distill that into a
-file (`~/.local/share/just-agent/skills/<name>.md`). Later, when it encounters a
+file (`~/.local/share/kallip/skills/<name>.md`). Later, when it encounters a
 matching situation, it reads the file and pins the content. No dedicated skill
 system is needed — file read + pin naturally forms skill management.
 
@@ -94,8 +98,8 @@ without a human in the loop. Or it can surface the decision to a human.
 JUST_LLM_PROVIDER=deepseek \
 JUST_LLM_MODEL=deepseek-v4-flash \
 JUST_LLM_DEEPSEEK_API_KEY=your-key \
-cargo run -p just-agent-daemon
+cargo run -p kallip-daemon
 
 # TUI client
-cargo run -p just-agent-tui
+cargo run -p kallip-tui
 ```

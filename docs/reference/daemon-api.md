@@ -1,7 +1,7 @@
 # Daemon HTTP API
 
-The daemon (`just-agent-daemon`) exposes an HTTP API at `JUST_AGENT_DAEMON_ADDR`
-(default `127.0.0.1:3000`). Clients — the agent CLI (`just-agent`), the runner (`just-agent-run`), TUI,
+The daemon (`kallip-daemon`) exposes an HTTP API at `KALLIP_DAEMON_ADDR`
+(default `127.0.0.1:3000`). Clients — the agent CLI (`kallip`), the runner (`kallip-run`), TUI,
 or the client library — connect over HTTP to manage agents, stream events,
 and handle
 approvals.
@@ -11,7 +11,7 @@ the full authorization matrix, see [auth.md](auth.md).
 
 ## Conventions
 
-- **Base URL**: `http://{JUST_AGENT_DAEMON_ADDR}` (default `127.0.0.1:3000`).
+- **Base URL**: `http://{KALLIP_DAEMON_ADDR}` (default `127.0.0.1:3000`).
   See [env.md](env.md) for configuration.
 - **Authentication**: `Authorization: Bearer <token>` on every request.
   See [auth.md](auth.md).
@@ -21,7 +21,7 @@ the full authorization matrix, see [auth.md](auth.md).
 - **Error responses**: plain text strings (not JSON-wrapped). For example,
   a `403` returns `"not a superior"`.
 - **Body size limit**: any endpoint that accepts a request body may return
-  `413 Payload Too Large` when the body exceeds `JUST_AGENT_MAX_BODY_SIZE_KB`
+  `413 Payload Too Large` when the body exceeds `KALLIP_MAX_BODY_SIZE_KB`
   (default 1024 KB, configurable; `0` = axum built-in 2 MB).
 - **Timestamps**: RFC 3339 format (e.g. `2025-06-05T14:30:00Z`), except
   `recent_retries.timestamp` which is Unix epoch seconds (`u64`).
@@ -89,7 +89,7 @@ superior can tell its subagents apart); a root/operator spawn may omit it. Both
 default to `""` and are never used as an address — `AgentId` is canonical.
 Mutable later via `PUT /agents/{id}/metadata`.
 
-**`max_tool_rounds`** — override the default/env-configured max tool-call rounds for this agent. Omit or `null` to use the daemon default (`JUST_AGENT_MAX_TOOL_ROUNDS` env var, or unlimited). To set an explicit value:
+**`max_tool_rounds`** — override the default/env-configured max tool-call rounds for this agent. Omit or `null` to use the daemon default (`KALLIP_MAX_TOOL_ROUNDS` env var, or unlimited). To set an explicit value:
 
 ```json
 "max_tool_rounds": {"limited": 64}
@@ -121,16 +121,16 @@ Status: `201 Created`
 | 400  | Invalid `workspace_root`, skill loading failure, invalid skill name, or subagent spawn with an empty `role`               |
 | 403  | Not operator (root agents); supervisor has no remaining delegation depth; `workspace_root` outside supervisor's workspace |
 | 404  | Supervisor agent not found                                                                                                |
-| 503  | Agent limit reached (`JUST_AGENT_MAX_AGENTS`), or supervisor already has max subagents (`JUST_AGENT_MAX_SUBAGENTS`)       |
+| 503  | Agent limit reached (`KALLIP_MAX_AGENTS`), or supervisor already has max subagents (`KALLIP_MAX_SUBAGENTS`)               |
 | 500  | Session creation failure, agent spawn failure, or supervisor removed during creation                                      |
 
 > **Subagent constraints:** The supervisor must have remaining delegation depth
 > (`max_depth > 0`), and the subagent's `workspace_root` must be within the
 > supervisor's workspace. The tool policy is inherited from the supervisor.
-> Each supervisor may have at most `JUST_AGENT_MAX_SUBAGENTS` (default 20) direct subagents.
+> Each supervisor may have at most `KALLIP_MAX_SUBAGENTS` (default 20) direct subagents.
 >
 > **Crash recovery:** Restore is exempt from resource limits. After a daemon
-> restart, the agent count may temporarily exceed `JUST_AGENT_MAX_AGENTS`. New
+> restart, the agent count may temporarily exceed `KALLIP_MAX_AGENTS`. New
 > creation requests will return 503 until agents are removed to make room.
 
 ### `GET /agents` — List agents
@@ -166,7 +166,7 @@ Auth: any authenticated identity. Response contains no secrets. See [auth.md](au
 ```
 
 `role`/`description` are supervisor-owned and persistent; `activity` is ephemeral,
-agent-self-reported via `PUT /agents/{id}/activity` (the `just-agent activity`
+agent-self-reported via `PUT /agents/{id}/activity` (the `kallip activity`
 CLI), and cleared on terminal events (empty while idle). All three are omitted
 from the JSON when empty.
 
@@ -242,11 +242,11 @@ no supervisor relationship is required. See [auth.md](auth.md).
 
 Status: `202 Accepted`
 
-| Code | Condition                                                                            |
-| ---- | ------------------------------------------------------------------------------------ |
-| 404  | Agent not found                                                                      |
-| 503  | Message queue is full (`JUST_AGENT_PROMPT_QUEUE_SIZE` messages pending); retry later |
-| 500  | Agent reactivation failure                                                           |
+| Code | Condition                                                                        |
+| ---- | -------------------------------------------------------------------------------- |
+| 404  | Agent not found                                                                  |
+| 503  | Message queue is full (`KALLIP_PROMPT_QUEUE_SIZE` messages pending); retry later |
+| 500  | Agent reactivation failure                                                       |
 
 > **Reactivation:** If the agent's task has terminated (channel closed), the
 > daemon creates a fresh message channel, pre-queues the incoming message, then
@@ -255,7 +255,7 @@ Status: `202 Accepted`
 > and the next message attempt will retry.
 >
 > **Backpressure:** The message queue has a configurable capacity
-> (`JUST_AGENT_PROMPT_QUEUE_SIZE`, default 5). When the queue is full, the
+> (`KALLIP_PROMPT_QUEUE_SIZE`, default 5). When the queue is full, the
 > daemon returns `503` instead of accepting the message. Callers should wait
 > and retry.
 
@@ -320,7 +320,7 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 ```
 
 - `activity`: ephemeral, agent-self-reported current activity (via
-  `PUT /agents/{id}/activity` / `just-agent activity`). Empty/omitted while idle
+  `PUT /agents/{id}/activity` / `kallip activity`). Empty/omitted while idle
   (cleared on terminal events).
 - `pinned_items`: per-item breakdown of `[label, estimated_tokens]`.
 - `last_prompt_tokens`: exact prompt token count from the last provider
@@ -474,8 +474,8 @@ Status: `200 OK`
 ### `PUT /agents/{id}/activity` — Report current activity
 
 Sets the agent's ephemeral `activity` (free text, e.g. `"reading docs/x.md"`).
-Self-reported: an agent sets **its own** activity via the `just-agent activity`
-CLI (which reads `JUST_AGENT_ID`); a supervisor observes activity via
+Self-reported: an agent sets **its own** activity via the `kallip activity`
+CLI (which reads `KALLIP_ID`); a supervisor observes activity via
 [`GET /agents`](#get-agents--list-agents), it does not write it. An empty string
 clears it (the bridge also auto-clears on terminal events). Truncated to 256 chars.
 
@@ -496,10 +496,10 @@ Status: `204 No Content`
 | 403  | Caller is not the target agent (or operator) |
 | 404  | Agent not found                              |
 
-> **Policy:** an agent reports activity by running `just-agent activity` through
-> `bash_exec`. `just-agent` is allow-listed in the command classifier, so this
+> **Policy:** an agent reports activity by running `kallip activity` through
+> `bash_exec`. `kallip` is allow-listed in the command classifier, so this
 > classifies as `Allow` under the default policy — same as every other
-> `just-agent` management command. (The uncommon `ask-all` debug preset gates
+> `kallip` management command. (The uncommon `ask-all` debug preset gates
 > all commands uniformly; activity is no different from `spawn`/`list` there.)
 
 ## Token Budget

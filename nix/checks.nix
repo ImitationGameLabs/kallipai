@@ -11,7 +11,7 @@ let
     cargoArtifacts
     ;
 
-  project = "just-agent";
+  project = "kallip";
 in
 {
   # Run clippy (and deny all warnings) on the workspace source

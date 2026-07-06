@@ -8,7 +8,7 @@ let
   # Shared by the baked image (nix/packages/container-image.nix) and the dev
   # compose (arion-compose.nix) so the two cannot drift.
   toolEnv = pkgs.buildEnv {
-    name = "just-agent-path-env";
+    name = "kallip-path-env";
     paths = [
       pkgs.bashInteractive
       pkgs.coreutils
@@ -32,7 +32,7 @@ let
   # works uniformly in buildImage.copyToRoot (prod) and image.contents (dev) —
   # buildImage's extraCommands runs without fakeroot and cannot mkdir under the
   # non-writable `etc` that cacert's copyToRoot brings in.
-  certLinks = pkgs.runCommand "just-agent-cert-links" { } ''
+  certLinks = pkgs.runCommand "kallip-cert-links" { } ''
     mkdir -p $out/etc/ssl/certs $out/etc/pki/tls/certs
     ln -s ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/etc/ssl/certs/ca-certificates.crt
     ln -s ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/etc/pki/tls/certs/ca-bundle.crt

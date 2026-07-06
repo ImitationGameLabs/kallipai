@@ -1,5 +1,5 @@
 {
-  description = "just-agent — agentic AI agent runtime built in Rust";
+  description = "kallip — agentic AI agent runtime built in Rust";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -69,7 +69,7 @@
 
           packages =
             let
-              # The crane-built workspace: every just-agent binary in one
+              # The crane-built workspace: every kallip binary in one
               # derivation. This is packages.default and the single source of
               # truth consumed by the tarball and docker image packages.
               workspace = import ./nix/packages/workspace.nix {
@@ -78,7 +78,7 @@
             in
             {
               default = workspace;
-              just-agent-tarball = import ./nix/packages/tarball.nix {
+              kallip-tarball = import ./nix/packages/tarball.nix {
                 inherit
                   pkgs
                   common
@@ -90,7 +90,7 @@
             # (the buildImage closure is Linux-native). Shares the same
             # workspace derivation as packages.default.
             // (lib.optionalAttrs pkgs.stdenv.isLinux {
-              just-agent-image = import ./nix/packages/container-image.nix {
+              kallip-image = import ./nix/packages/container-image.nix {
                 inherit
                   pkgs
                   common
@@ -100,7 +100,7 @@
               # Pre-built integration-test binaries + the agent binaries, for
               # running the suite in a container (see arion-compose.nix test
               # mode). Linux-only like the image.
-              just-agent-integration-tests = import ./nix/packages/integration-tests.nix {
+              kallip-integration-tests = import ./nix/packages/integration-tests.nix {
                 inherit
                   pkgs
                   common

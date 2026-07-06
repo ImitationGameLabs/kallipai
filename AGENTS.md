@@ -2,20 +2,24 @@
 
 AI Agent working guide. This document provides code structure and decision rules for AI agents.
 
+## Naming
+
+The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem is `kallip`. Use `kallipai` only for human-facing brand prose (README H1, doc opening identity sentences). Use `kallip` for every technical surface: crate names, binaries, Rust module paths, env var prefixes (`KALLIP_*`), on-disk paths, container paths/volumes, Nix attrs, Cargo/flake `description` strings, User-Agent, Harbor `name()`. When a sentence is mixed, prefer `kallip`.
+
 ## Directory Structure
 
 ```
 .
 ├── flake.nix                  # Flake entry point
 ├── crates/                    # Rust workspace members
-│   ├── just-agent-common/    # Shared types and command parsing
-│   ├── just-agent-runtime/   # Agent runtime: agent context, policy, tool dispatch (daemon-only)
-│   ├── just-agent-shell/     # Reusable shell/session tools for LLM applications
-│   ├── just-agent/           # Headless CLI for agent (daemon client)
-│   ├── just-agent-tui/       # Interactive TUI client
-│   ├── just-agent-daemon/    # HTTP API server hosting multiple agent instances
-│   ├── just-agent-run/       # Agent runner for scripting and benchmarking
-│   └── just-agent-client/    # Daemon client library
+│   ├── kallip-common/    # Shared types and command parsing
+│   ├── kallip-runtime/   # Agent runtime: agent context, policy, tool dispatch (daemon-only)
+│   ├── kallip-shell/     # Reusable shell/session tools for LLM applications
+│   ├── kallip/           # Headless CLI for agent (daemon client)
+│   ├── kallip-tui/       # Interactive TUI client
+│   ├── kallip-daemon/    # HTTP API server hosting multiple agent instances
+│   ├── kallip-run/       # Agent runner for scripting and benchmarking
+│   └── kallip-client/    # Daemon client library
 ├── docs/                      # Project documentation
 │   ├── architecture.md       # System architecture, daemon design, policy
 │   ├── context-management.md # Agentic context management design
@@ -24,8 +28,8 @@ AI Agent working guide. This document provides code structure and decision rules
 │       ├── auth.md           # Authentication and authorization
 │       ├── daemon-api.md     # HTTP API endpoints
 │       ├── env.md            # Environment variable reference
-│       ├── just-agent.md     # `just-agent` headless CLI for agent
-│       └── just-agent-run.md # `just-agent-run` agent runner for scripting
+│       ├── kallip.md     # `kallip` headless CLI for agent
+│       └── kallip-run.md # `kallip-run` agent runner for scripting
 └── nix/
       ├── common.nix           # Core config (crate paths, dependencies)
       ├── checks.nix           # CI checks

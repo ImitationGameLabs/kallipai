@@ -1,13 +1,13 @@
 [workspace]
 members = [
-  "crates/just-agent-common",
-  "crates/just-agent-runtime",
-  "crates/just-agent-shell",
-  "crates/just-agent",
-  "crates/just-agent-tui",
-  "crates/just-agent-daemon",
-  "crates/just-agent-client",
-  "crates/just-agent-run",
+  "crates/kallip-common",
+  "crates/kallip-runtime",
+  "crates/kallip-shell",
+  "crates/kallip",
+  "crates/kallip-tui",
+  "crates/kallip-daemon",
+  "crates/kallip-client",
+  "crates/kallip-run",
 ]
 
 resolver = "3"
@@ -17,16 +17,16 @@ version = "0.1.0"
 license = "MIT"
 
 [workspace.metadata.crane]
-name = "just-agent"
+name = "kallip"
 
 [workspace.dependencies]
 just-llm-client = "0.2.0"
 
-just-agent-common = { path = "crates/just-agent-common", default-features = false }
-just-agent-runtime = { path = "crates/just-agent-runtime" }
-just-agent-shell = { path = "crates/just-agent-shell" }
-just-agent-client = { path = "crates/just-agent-client" }
-just-agent-daemon = { path = "crates/just-agent-daemon" }
+kallip-common = { path = "crates/kallip-common", default-features = false }
+kallip-runtime = { path = "crates/kallip-runtime" }
+kallip-shell = { path = "crates/kallip-shell" }
+kallip-client = { path = "crates/kallip-client" }
+kallip-daemon = { path = "crates/kallip-daemon" }
 
 anyhow = "1.0.102"
 async-trait = "0.1.89"
@@ -35,7 +35,7 @@ async-stream = "0.3.6"
 nix = { version = "0.31", features = ["signal"] }
 # Linux-first sandbox toolbox (landlock ruleset + mount-ns composable
 # `prepare_*`/`install_*` primitives). Used only behind the `landlock` feature of
-# just-agent-shell, which is Linux-only. `default-features = false` drops its
+# kallip-shell, which is Linux-only. `default-features = false` drops its
 # tokio proxy runtime — we only consume the spawn-independent primitives.
 libsandbox = { git = "https://github.com/ImitationGameLabs/libsandbox-rs.git", rev = "979de21ae3f8a05d7efa0ff891343380b3622473", default-features = false }
 libc = "0.2"
@@ -88,5 +88,5 @@ temp-env = "0.3"
 tempfile = "3"
 wiremock = "0.6.5"
 serial_test = "3.5.0"
-# Dev-only: the `spawn` benchmark in just-agent-shell (criterion). Not a runtime dep.
+# Dev-only: the `spawn` benchmark in kallip-shell (criterion). Not a runtime dep.
 criterion = "0.8.2"

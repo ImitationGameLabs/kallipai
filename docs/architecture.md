@@ -1,15 +1,15 @@
 # Architecture
 
-just-agent is a **daemon-centric** agent runtime. Unlike most coding agents
+kallipai is a **daemon-centric** agent runtime. Unlike most coding agents
 where the UI process _is_ the agent, here the daemon is the long-lived host and
 all clients are thin surfaces.
 
 For planned direction, see [roadmap.md](roadmap.md).
 
-The daemon (`just-agent-daemon`) is the center: it hosts multiple isolated agent
+The daemon (`kallip-daemon`) is the center: it hosts multiple isolated agent
 instances, each running as a pair of tokio tasks (agent task + bridge task)
-behind an HTTP API. Clients — the headless CLI (`just-agent`), the runner
-(`just-agent-run`), or the TUI (`just-agent-tui`) — connect over HTTP
+behind an HTTP API. Clients — the headless CLI (`kallip`), the runner
+(`kallip-run`), or the TUI (`kallip-tui`) — connect over HTTP
 and SSE, send messages, stream events,
 and disconnect without affecting running agents.
 
@@ -73,7 +73,7 @@ authentication and the authorization matrix, see [auth.md](reference/auth.md).
 
 ## Agent loop
 
-The core loop (`run_agent_rounds` in `just-agent-runtime`) iterates up to
+The core loop (`run_agent_rounds` in `kallip-runtime`) iterates up to
 `max_tool_rounds` (default: unlimited, bounded by token budget) per message:
 
 1. Drain interjected messages (queued prompts from other agents) into context.
@@ -142,13 +142,13 @@ module that parses commands via `rable` and returns its own `Safety` decision
 
 ## Crate responsibilities
 
-| Crate                | Role                                                                                          |
-| -------------------- | --------------------------------------------------------------------------------------------- |
-| `just-agent-common`  | Shared types, slash command definitions, and protocol types. Used by all crates.              |
-| `just-agent-runtime` | Agent runtime: agent loop, context management, tool dispatch, policy engine. No network code. |
-| `just-agent-shell`   | Provider-neutral shell/session tools for LLM applications. Used by the runtime.               |
-| `just-agent-daemon`  | HTTP server hosting agent instances. Uses `just-agent-runtime` internally.                    |
-| `just-agent`         | Headless CLI for agents. Thin wrapper over `just-agent-client`. No agent logic.               |
-| `just-agent-tui`     | Interactive terminal UI. Same client library, adds ratatui rendering.                         |
-| `just-agent-run`     | Agent runner for scripting and automation. Streams progress to stderr, result to stdout.      |
-| `just-agent-client`  | Async HTTP client for the daemon API. Used by CLI, TUI, and runner.                           |
+| Crate            | Role                                                                                          |
+| ---------------- | --------------------------------------------------------------------------------------------- |
+| `kallip-common`  | Shared types, slash command definitions, and protocol types. Used by all crates.              |
+| `kallip-runtime` | Agent runtime: agent loop, context management, tool dispatch, policy engine. No network code. |
+| `kallip-shell`   | Provider-neutral shell/session tools for LLM applications. Used by the runtime.               |
+| `kallip-daemon`  | HTTP server hosting agent instances. Uses `kallip-runtime` internally.                        |
+| `kallip`         | Headless CLI for agents. Thin wrapper over `kallip-client`. No agent logic.                   |
+| `kallip-tui`     | Interactive terminal UI. Same client library, adds ratatui rendering.                         |
+| `kallip-run`     | Agent runner for scripting and automation. Streams progress to stderr, result to stdout.      |
+| `kallip-client`  | Async HTTP client for the daemon API. Used by CLI, TUI, and runner.                           |

@@ -1,6 +1,8 @@
-# just-agent Harbor Integration
+# kallipai Harbor Integration
 
-Harbor benchmarking adapter for [just-agent](../). Allows running just-agent inside Harbor's container-based evaluation pipeline (e.g. terminal-bench).
+Binary/crate stem: `kallip`.
+
+Harbor benchmarking adapter for [kallipai](../). Allows running kallip inside Harbor's container-based evaluation pipeline (e.g. terminal-bench).
 
 ## Prerequisites
 
@@ -10,14 +12,14 @@ Harbor benchmarking adapter for [just-agent](../). Allows running just-agent ins
 
 ## Architecture
 
-The adapter runs the full just-agent stack **inside the Harbor container**:
+The adapter runs the full kallip stack **inside the Harbor container**:
 
 ```
 install()  →  upload tarball → unpack → start daemon (background)
-run()      →  just-agent-run --prompt "$instruction" (connects to localhost daemon)
+run()      →  kallip-run --prompt "$instruction" (connects to localhost daemon)
 ```
 
-Both `just-agent-daemon` and `just-agent-run` run inside the container so the agent has direct filesystem access to benchmark task files.
+Both `kallip-daemon` and `kallip-run` run inside the container so the agent has direct filesystem access to benchmark task files.
 
 ## Setup
 
@@ -25,31 +27,31 @@ Both `just-agent-daemon` and `just-agent-run` run inside the container so the ag
 # Create venv + install adapter and harbor (tarball is built by harbor-test.sh)
 ./harbor-integration/setup-venv.sh
 
-# Activate the environment (includes JUST_AGENT_PACKAGE_PATH)
+# Activate the environment (includes KALLIP_PACKAGE_PATH)
 source harbor-integration/.venv/bin/activate
 ```
 
 Or manually:
 
 ```bash
-nix build .#just-agent-tarball
+nix build .#kallip-tarball
 python3 -m venv harbor-integration/.venv
 source harbor-integration/.venv/bin/activate
 pip install -e ./harbor-integration
-export JUST_AGENT_PACKAGE_PATH=./result/just-agent-*-linux-x86_64.tar.gz
+export KALLIP_PACKAGE_PATH=./result/kallip-*-linux-x86_64.tar.gz
 ```
 
 `harbor-test.sh` builds and injects **two** tarballs (both pinned by one `flake.lock`):
 
-**`just-agent-tarball`** (always installed):
+**`kallip-tarball`** (always installed):
 
-| Binary              | Purpose                                       |
-| ------------------- | --------------------------------------------- |
-| `just-agent`        | Headless CLI for agent-to-agent orchestration |
-| `just-agent-daemon` | HTTP server hosting agent instances           |
-| `just-agent-run`    | One-shot runner for scripting/benchmarking    |
+| Binary          | Purpose                                       |
+| --------------- | --------------------------------------------- |
+| `kallip`        | Headless CLI for agent-to-agent orchestration |
+| `kallip-daemon` | HTTP server hosting agent instances           |
+| `kallip-run`    | One-shot runner for scripting/benchmarking    |
 
-**`aifed-tarball`** (opt-in via `AIFED_PACKAGE_PATH`; aifed is just-agent's intended file-editing dependency — runtime adoption pending — `x86_64-linux` only):
+**`aifed-tarball`** (opt-in via `AIFED_PACKAGE_PATH`; aifed is kallip's intended file-editing dependency — runtime adoption pending — `x86_64-linux` only):
 
 | Binary         | Purpose                                          |
 | -------------- | ------------------------------------------------ |
@@ -68,8 +70,8 @@ Set these on the **host** before running Harbor. They are forwarded into the con
 | `JUST_LLM_OPENAI_COMPAT_API_KEY` | Yes\*    | API key for OpenAI-compatible provider                                            |
 | `JUST_LLM_PROVIDER`              | No       | LLM backend: `deepseek` or `openai-compatible`. Auto-set from config `model_name` |
 | `JUST_LLM_MODEL`                 | No       | Model identifier. Auto-set from config `model_name`                               |
-| `JUST_AGENT_OPERATOR_TOKEN`      | No       | Pre-set auth token; auto-generated if omitted                                     |
-| `JUST_AGENT_MAX_TOOL_ROUNDS`     | No       | Default max tool-call rounds per run                                              |
+| `KALLIP_OPERATOR_TOKEN`          | No       | Pre-set auth token; auto-generated if omitted                                     |
+| `KALLIP_MAX_TOOL_ROUNDS`         | No       | Default max tool-call rounds per run                                              |
 
 \* Set the key matching your provider.
 
@@ -93,9 +95,9 @@ export JUST_LLM_DEEPSEEK_API_KEY=<your-key>
 ## How It Works
 
 1. Harbor creates a container for the benchmark task
-2. `install()` uploads the tarball, unpacks it to `/opt/just-agent`, starts the daemon as a background process
-3. `run()` invokes `just-agent-run --prompt <instruction>` — it prints the final assistant reply to stdout and a completion hint (agent id + how to continue) to stderr. Pass `--verbose` to the runner for the full reasoning/tool log.
-4. `just-agent-run` exits with semantic codes: `0` success, `1` error, `2` max rounds, `3` cancelled, `4` budget exceeded
+2. `install()` uploads the tarball, unpacks it to `/opt/kallip`, starts the daemon as a background process
+3. `run()` invokes `kallip-run --prompt <instruction>` — it prints the final assistant reply to stdout and a completion hint (agent id + how to continue) to stderr. Pass `--verbose` to the runner for the full reasoning/tool log.
+4. `kallip-run` exits with semantic codes: `0` success, `1` error, `2` max rounds, `3` cancelled, `4` budget exceeded
 5. Harbor evaluates the result against the task's test suite
 
 ## Limitations

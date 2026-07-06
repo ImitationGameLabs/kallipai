@@ -1,0 +1,45 @@
+[package]
+name = "kallip-runtime"
+description = "Agent runtime: agent context, policy, and tool dispatch (daemon-only)"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+kallip-common = { workspace = true }
+kallip-shell = { workspace = true }
+just-llm-client = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rable = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+futures-util = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+toml = { workspace = true }
+tokenx-rs = { workspace = true }
+
+[features]
+# Linux-only: enable landlock enforcement of `DirLockManager` write-locks in
+# the shell backend. Off by default; the coordinator (`dirlock`) and its
+# HTTP/CLI surface are always built (advisory mode without this feature).
+landlock = ["kallip-shell/landlock"]
+# Linux-only: install the seccomp denylist as the last step of every spawned
+# `bash`'s pre_exec (after landlock/mount-ns setup). Implies `landlock`, since
+# the install site lives in the landlock spawn path. Off by default; the daemon
+# enables it. See `kallip-shell`'s `seccomp` feature.
+seccomp = ["landlock", "kallip-shell/seccomp"]
+
+[dev-dependencies]
+temp-env = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+serial_test = { workspace = true }

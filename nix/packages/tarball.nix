@@ -19,8 +19,8 @@ in
   # interpreter, which does not exist in standard container images.
   # We use patchelf to rewrite the interpreter and rpath so the
   # binaries run on any FHS-compliant Linux (Ubuntu, Debian, etc.).
-  just-agent-tarball =
-    pkgs.runCommand "just-agent-tarball"
+  kallip-tarball =
+    pkgs.runCommand "kallip-tarball"
       {
         nativeBuildInputs = with pkgs; [
           gnutar
@@ -38,6 +38,6 @@ in
           patchelf --remove-rpath "$bin"
         done
 
-        tar -czf $out/just-agent-${gitVersion}-linux-x86_64.tar.gz bin/
+        tar -czf $out/kallip-${gitVersion}-linux-x86_64.tar.gz bin/
       '';
 }

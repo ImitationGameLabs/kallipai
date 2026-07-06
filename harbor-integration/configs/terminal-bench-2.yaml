@@ -9,7 +9,7 @@
 jobs_dir: harbor-integration/jobs
 
 agents:
-  - import_path: just_agent_harbor:JustAgentAdapter
+  - import_path: kallip_harbor:KallipAdapter
     model_name: deepseek/deepseek-v4-flash
     kwargs:
       max_rounds: 50

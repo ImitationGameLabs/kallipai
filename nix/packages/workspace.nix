@@ -10,7 +10,7 @@ let
     ;
 in
 # Build the entire workspace at once. This is `packages.default` — the
-# canonical source of every just-agent binary, consumed by the tarball and the
+# canonical source of every kallip binary, consumed by the tarball and the
 # docker image packages so they never rebuild or duplicate it.
 #
 # NB: doCheck = false so `nix build .#default` doesn't run `cargo test` (whose

@@ -8,7 +8,7 @@ generates two categories of token:
 - **Operator token** — printed once at daemon startup. Grants full access: create
   root agents, manage any agent, approve/deny approvals.
 - **Agent token** — generated per agent at creation, injected into the agent's shell as
-  `JUST_AGENT_AUTH_TOKEN`. Agents use this to call back to the daemon.
+  `KALLIP_AUTH_TOKEN`. Agents use this to call back to the daemon.
 
 Both tokens are 256-bit CSPRNG secrets with a type-tag prefix (`sk-operator-…` /
 `sk-agent-…`), so the kind is self-describing and secret scanners can flag leaks. The
