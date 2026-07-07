@@ -24,20 +24,32 @@ pub(super) fn extract_command_name(word: &Node) -> Option<&str> {
     word_literal_value(word)
 }
 
-pub(super) fn has_any_flag(words: &[Node], flags: &[&str]) -> bool {
-    words.iter().skip(1).any(|w| {
-        word_literal_value(w)
-            .map(strip_surrounding_quotes)
-            .is_some_and(|v| flags.contains(&v))
+/// Return the first literal flag in `words` (after the command name) that is in
+/// `flags`, comparing the unquoted form. Used by catalog constraints both to
+/// *trip* and to *name* the offending flag in the defer reason.
+pub(super) fn find_mutating_flag<'a>(words: &[Node], flags: &[&'a str]) -> Option<&'a str> {
+    words.iter().skip(1).find_map(|w| {
+        let v = word_literal_value(w).map(strip_surrounding_quotes);
+        flags.iter().copied().find(|f| Some(*f) == v)
     })
+}
+
+/// The literal text of a redirect target word, with one layer of surrounding
+/// quotes stripped. Returns `None` for words containing expansions (e.g.
+/// `>$(cmd)` or `>$x`) — those targets cannot be statically reasoned about.
+///
+/// Single helper for both the `/dev/null` sink check and the redirect reason
+/// wording, so `> 'file'` is reported as `file` and matched consistently.
+pub(super) fn redirect_target_literal(node: &Node) -> Option<&str> {
+    word_literal_value(node).map(strip_surrounding_quotes)
 }
 
 /// Strip one layer of surrounding matching quotes from a literal word value.
 ///
-/// `rable` keeps quotes in `Word.value` (e.g. `'-delete'`), so flag matching must
-/// compare the unquoted form — otherwise a quoted mutating flag (`find '-delete'`)
-/// evades its constraint and auto-runs.
-fn strip_surrounding_quotes(s: &str) -> &str {
+/// `rable` keeps quotes in `Word.value` (e.g. `'-delete'`), so flag/target
+/// matching must compare the unquoted form — otherwise a quoted mutating flag
+/// (`find '-delete'`) evades its constraint and auto-runs.
+pub(super) fn strip_surrounding_quotes(s: &str) -> &str {
     let bytes = s.as_bytes();
     if s.len() >= 2 {
         let (first, last) = (bytes[0], bytes[s.len() - 1]);

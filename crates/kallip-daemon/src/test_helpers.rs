@@ -153,7 +153,7 @@ pub async fn enqueue_committed_approval(
 ) -> String {
     let entry = registry.get(agent_id).expect("agent exists");
     let mut store = entry.agent.approvals.lock().await;
-    let id = store.enqueue(tool_name, "{}");
+    let id = store.enqueue(tool_name, "{}", None);
     store.commit(&id, "test commit").expect("commit");
     id
 }

@@ -7,6 +7,12 @@ use crate::agentid::AgentId;
 use crate::approval::{ApprovalStatus, ToolCallContent};
 
 /// A single approval entry in API responses.
+///
+/// Deliberately does NOT carry the classifier's `defer_reason`: that reason is
+/// agent-facing (it helps the agent rewrite a deferred command) and lives on the
+/// runtime's `ApprovalInfo`. If a future change wants human approvers to see it
+/// over HTTP/TUI, add the field here *intentionally* — it is a wire-contract
+/// change, not a missing field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalEntry {
     pub id: String,

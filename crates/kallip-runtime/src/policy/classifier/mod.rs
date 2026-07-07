@@ -30,7 +30,13 @@ pub enum Safety {
     /// No mutation or code execution was detected.
     ReadOnly,
     /// The command may mutate state or execute code; defer to a human.
-    NeedsApproval,
+    ///
+    /// `reason` is a short, actionable explanation of *what* tripped the check,
+    /// surfaced to the agent via the approval-deferred response so it can rewrite
+    /// the command (e.g. drop a redirect, remove a flag) instead of requesting
+    /// approval. When several checks trip, the walker's `stricter` merge joins
+    /// their reasons with `"; "`.
+    NeedsApproval { reason: String },
     /// The classifier declines to greenlight (e.g. unparseable input, or a
     /// hard-refused pattern such as piping a download into a shell).
     Reject { reason: String },
@@ -173,7 +179,14 @@ pub const STRUCTURAL_RULES: &[(&str, &str)] = &[
     ),
     ("background operator &", "asks"),
     ("download piped to a shell (curl|sh)", "rejects"),
-    ("output redirect (> >>)", "asks"),
+    (
+        "output redirect (> >> >| <> &> &>>)",
+        "asks, except to /dev/null (pure sink)",
+    ),
+    (
+        "fd duplication/close (2>&1, >&-)",
+        "read-only (no file opened)",
+    ),
     (
         "sensitive env var assignment (PATH, LD_PRELOAD, ...)",
         "asks",

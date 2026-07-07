@@ -42,7 +42,7 @@ impl AgentPolicy {
             PolicyDecision::Deny => Ok(ToolDecision::Deny {
                 reason: format!("{tool_name} denied by policy"),
             }),
-            PolicyDecision::Ask => Ok(ToolDecision::Ask),
+            PolicyDecision::Ask => Ok(ToolDecision::Ask { reason: None }),
             PolicyDecision::Classify => {
                 if tool_name == names::BASH_EXEC {
                     let args: BashExecArgs = serde_json::from_str(args_json)?;
@@ -57,12 +57,14 @@ impl AgentPolicy {
                     Ok(
                         match self.classifier.classify_with(&args.command, &overrides) {
                             Safety::ReadOnly => ToolDecision::Allow,
-                            Safety::NeedsApproval => ToolDecision::Ask,
+                            Safety::NeedsApproval { reason } => ToolDecision::Ask {
+                                reason: Some(reason),
+                            },
                             Safety::Reject { reason } => ToolDecision::Deny { reason },
                         },
                     )
                 } else {
-                    Ok(ToolDecision::Ask)
+                    Ok(ToolDecision::Ask { reason: None })
                 }
             }
         }
@@ -101,10 +103,25 @@ mod tests {
     }
 
     #[test]
+    fn classify_surfaces_reason_on_ask() {
+        let policy = make_policy();
+        let decision = policy
+            .evaluate(names::BASH_EXEC, r#"{"command":"echo x > f"}"#)
+            .unwrap();
+        match decision {
+            ToolDecision::Ask { reason: Some(r) } => {
+                assert!(r.contains("redirect"), "reason: {r}");
+                assert!(r.contains("'f'"), "reason: {r}");
+            }
+            other => panic!("expected Ask with reason, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn unknown_tool_asks() {
         let policy = make_policy();
         let decision = policy.evaluate("some_new_tool", "{}").unwrap();
-        assert!(matches!(decision, ToolDecision::Ask));
+        assert!(matches!(decision, ToolDecision::Ask { .. }));
     }
 
     #[test]

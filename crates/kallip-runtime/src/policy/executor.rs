@@ -71,10 +71,10 @@ impl AuthorizedToolExecutor {
             super::ToolDecision::Deny { reason } => {
                 error_result(tool_name, format!("tool denied: {reason}"))
             }
-            super::ToolDecision::Ask => {
+            super::ToolDecision::Ask { reason } => {
                 let mut q = self.approvals.lock().await;
-                let id = q.enqueue(tool_name, args_json);
-                approval_result_json(&id, tool_name)
+                let id = q.enqueue(tool_name, args_json, reason.clone());
+                approval_result_json(&id, tool_name, reason.as_deref())
             }
         }
     }
@@ -91,6 +91,7 @@ impl AuthorizedToolExecutor {
                 commit_reason: a.commit_reason,
                 status: a.status,
                 deny_reason: a.deny_reason,
+                defer_reason: a.defer_reason,
                 created_at: a.created_at,
             })
             .collect();
@@ -235,6 +236,8 @@ struct ApprovalListItem {
     commit_reason: Option<String>,
     status: ApprovalStatus,
     deny_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    defer_reason: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     created_at: time::OffsetDateTime,
 }

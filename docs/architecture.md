@@ -128,7 +128,9 @@ module that parses commands via `rable` and returns its own `Safety` decision
 - Detects shell delegation (`bash -c`, `sh -c`, `eval`, `exec`, `source`, `.`)
   and re-parses the inner command.
 - Flags sensitive environment-variable overrides (`PATH`, `LD_PRELOAD`, …) and
-  write/append redirects (`>`, `>>`).
+  write/append redirects (`>`, `>>`, `<>`, `&>`, …), except to `/dev/null` (a
+  pure sink). fd duplication/close (`2>&1`, `>&-`) and input redirects (`<`,
+  `<<<`) open no file for writing and are read-only.
 
 ### Approval flow
 

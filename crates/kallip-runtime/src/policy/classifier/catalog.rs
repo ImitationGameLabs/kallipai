@@ -45,22 +45,43 @@ impl CommandSpec {
         for constraint in self.constraints {
             match constraint {
                 Constraint::Subcommands(safe) => {
-                    // words[1] is the subcommand. Missing, non-literal, or
-                    // unlisted → defer to approval. words.get(1) avoids indexing
-                    // a bare command (e.g. `git` with no subcommand).
-                    let sub = words.get(1).and_then(util::word_literal_value);
-                    if !sub.is_some_and(|s| safe.contains(&s)) {
-                        return Safety::NeedsApproval;
+                    // words[1] is the subcommand. A bare command (no subcommand)
+                    // or a non-literal one is NOT this constraint's concern: a
+                    // bare command is a usage error the command itself reports
+                    // (e.g. `git` prints help and exits — not a security issue),
+                    // and a non-literal subcommand like `git $(cmd)` is caught by
+                    // the word-expansion check. Only a literal subcommand outside
+                    // the read-only set defers. words.get(1) avoids indexing bare.
+                    //
+                    // Limitation: a global flag at words[1] (e.g. `git -c x=y log`)
+                    // is treated as the subcommand candidate, so such invocations
+                    // over-defer. Properly skipping git's value-taking global
+                    // flags to locate the real subcommand is a follow-up; the
+                    // over-gating direction is safe.
+                    let Some(sub) = words.get(1).and_then(util::word_literal_value) else {
+                        continue;
+                    };
+                    if !safe.contains(&sub) {
+                        return Safety::NeedsApproval {
+                            reason: format!(
+                                "'{} {}' is not a read-only {} subcommand",
+                                self.name, sub, self.name
+                            ),
+                        };
                     }
                 }
                 Constraint::MutatingFlags(flags) => {
-                    if util::has_any_flag(words, flags) {
-                        return Safety::NeedsApproval;
+                    if let Some(flag) = util::find_mutating_flag(words, flags) {
+                        return Safety::NeedsApproval {
+                            reason: format!("'{}' flag '{}' may mutate state", self.name, flag),
+                        };
                     }
                 }
                 Constraint::MutatingPredicate(predicate) => {
                     if predicate(words) {
-                        return Safety::NeedsApproval;
+                        return Safety::NeedsApproval {
+                            reason: format!("'{}' invocation runs a command", self.name),
+                        };
                     }
                 }
             }

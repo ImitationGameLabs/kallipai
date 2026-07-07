@@ -18,6 +18,12 @@ pub struct ApprovalAction {
     pub commit_reason: Option<String>,
     pub status: ApprovalStatus,
     pub deny_reason: Option<String>,
+    /// Why the classifier deferred this call, shown to the agent via
+    /// `approval_list` so it can recover the reason even after context
+    /// summarization drops the original defer response. Not forwarded to the
+    /// daemon HTTP wire type (see `ApprovalEntry`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer_reason: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -33,6 +39,7 @@ impl From<&ApprovalAction> for ApprovalInfo {
             commit_reason: a.commit_reason.clone(),
             status: a.status,
             deny_reason: a.deny_reason.clone(),
+            defer_reason: a.defer_reason.clone(),
             created_at: a.created_at,
         }
     }
@@ -47,6 +54,9 @@ pub struct ApprovalInfo {
     pub commit_reason: Option<String>,
     pub status: ApprovalStatus,
     pub deny_reason: Option<String>,
+    /// Classifier defer reason (see [`ApprovalAction::defer_reason`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer_reason: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -108,7 +118,15 @@ impl ApprovalStore {
     }
 
     /// Enqueue a new approval request and return the id.
-    pub fn enqueue(&mut self, tool_name: &str, args_json: &str) -> String {
+    ///
+    /// `defer_reason` is the classifier's explanation of why the call was
+    /// deferred (if any), surfaced to the agent via `approval_list`.
+    pub fn enqueue(
+        &mut self,
+        tool_name: &str,
+        args_json: &str,
+        defer_reason: Option<String>,
+    ) -> String {
         // "ap" is short for "approval"
         let id = format!("ap_{}", uuid::Uuid::new_v4().simple());
         let created_at = OffsetDateTime::now_utc();
@@ -119,6 +137,7 @@ impl ApprovalStore {
             commit_reason: None,
             status: ApprovalStatus::Pending,
             deny_reason: None,
+            defer_reason,
             created_at,
         };
         self.actions.insert(id.clone(), action);
@@ -291,16 +310,28 @@ impl ApprovalStore {
 }
 
 /// Format an approval-deferred tool result JSON returned to the LLM.
-pub fn approval_result_json(id: &str, tool_name: &str) -> String {
+///
+/// When `reason` is `Some`, it is included in `next_steps` so the agent can see
+/// *why* the call was deferred and rewrite the command (e.g. drop a redirect)
+/// instead of requesting approval.
+pub fn approval_result_json(id: &str, tool_name: &str, reason: Option<&str>) -> String {
+    let next_steps = match reason {
+        Some(r) => format!(
+            "This tool call was deferred because it requires approval: {r}. \
+             Call approval_commit with the id and a justification for why it is necessary, \
+             or approval_cancel to abandon it."
+        ),
+        None => "This tool call was deferred because it requires approval. \
+            Call approval_commit with the id and a justification for why it is necessary, \
+            or approval_cancel to abandon it."
+            .to_owned(),
+    };
     serde_json::to_string(&ApprovalDeferredResponse {
         ok: true,
         pending_approval: true,
         tool_name: tool_name.to_owned(),
         id: id.to_owned(),
-        next_steps: "This tool call was deferred because it requires approval. \
-            Call approval_commit with the id and a justification for why it is necessary, \
-            or approval_cancel to abandon it."
-            .to_owned(),
+        next_steps,
     })
     .unwrap_or_else(|_| r#"{"ok":true,"pending_approval":true}"#.to_owned())
 }
@@ -340,7 +371,7 @@ mod tests {
     #[test]
     fn enqueue_commit_approve_redeem() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("bash_exec", r#"{"command":"rm -rf /tmp"}"#);
+        let id = q.enqueue("bash_exec", r#"{"command":"rm -rf /tmp"}"#, None);
         assert!(id.starts_with("ap_"));
 
         let info = q.list(None);
@@ -366,7 +397,7 @@ mod tests {
     #[test]
     fn deny_prevents_redeem() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.commit(&id, "justification").unwrap();
         q.deny(&id, "no").unwrap();
         assert!(q.take_for_redeem(&id).is_err());
@@ -375,7 +406,7 @@ mod tests {
     #[test]
     fn cancel_pending() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         let prev = q.cancel(&id).unwrap();
         assert_eq!(prev, ApprovalStatus::Pending);
         assert_eq!(q.list(None)[0].status, ApprovalStatus::Cancelled);
@@ -384,7 +415,7 @@ mod tests {
     #[test]
     fn cancel_committed() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.commit(&id, "justification").unwrap();
         let prev = q.cancel(&id).unwrap();
         assert_eq!(prev, ApprovalStatus::Committed);
@@ -394,7 +425,7 @@ mod tests {
     #[test]
     fn cancel_approved() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.commit(&id, "justification").unwrap();
         q.approve(&id).unwrap();
         let prev = q.cancel(&id).unwrap();
@@ -405,7 +436,7 @@ mod tests {
     #[test]
     fn cancel_denied() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.commit(&id, "justification").unwrap();
         q.deny(&id, "no").unwrap();
         let prev = q.cancel(&id).unwrap();
@@ -416,7 +447,7 @@ mod tests {
     #[test]
     fn cannot_cancel_redeemed() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.commit(&id, "justification").unwrap();
         q.approve(&id).unwrap();
         q.take_for_redeem(&id).unwrap();
@@ -426,7 +457,7 @@ mod tests {
     #[test]
     fn cannot_cancel_already_cancelled() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.cancel(&id).unwrap();
         assert!(q.cancel(&id).is_err());
     }
@@ -434,7 +465,7 @@ mod tests {
     #[test]
     fn cannot_approve_non_committed() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         // Pending → cannot approve
         assert!(q.approve(&id).is_err());
         let _ = q.cancel(&id).unwrap();
@@ -445,7 +476,7 @@ mod tests {
     #[test]
     fn cannot_redeem_pending_or_committed() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         assert!(q.take_for_redeem(&id).is_err());
         q.commit(&id, "justification").unwrap();
         assert!(q.take_for_redeem(&id).is_err());
@@ -454,7 +485,7 @@ mod tests {
     #[test]
     fn cannot_commit_non_pending() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.commit(&id, "first").unwrap();
         // Already committed
         assert!(q.commit(&id, "second").is_err());
@@ -463,7 +494,7 @@ mod tests {
     #[test]
     fn take_last_committed_is_one_shot() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.commit(&id, "justification").unwrap();
         let info = q.take_last_committed().unwrap();
         assert_eq!(info.id, id);
@@ -474,8 +505,8 @@ mod tests {
     #[test]
     fn drain_notifications() {
         let mut q = ApprovalStore::new();
-        let id1 = q.enqueue("t1", "{}");
-        let id2 = q.enqueue("t2", "{}");
+        let id1 = q.enqueue("t1", "{}", None);
+        let id2 = q.enqueue("t2", "{}", None);
         q.commit(&id1, "j1").unwrap();
         q.commit(&id2, "j2").unwrap();
         q.approve(&id1).unwrap();
@@ -489,8 +520,8 @@ mod tests {
     #[test]
     fn list_filters_by_status() {
         let mut q = ApprovalStore::new();
-        let id1 = q.enqueue("t1", "{}");
-        let id2 = q.enqueue("t2", "{}");
+        let id1 = q.enqueue("t1", "{}", None);
+        let id2 = q.enqueue("t2", "{}", None);
         q.commit(&id1, "j1").unwrap();
         q.commit(&id2, "j2").unwrap();
         q.approve(&id1).unwrap();
@@ -524,7 +555,7 @@ mod tests {
     #[test]
     fn contains_checks() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         assert!(q.contains(&id));
         assert!(!q.contains("nonexistent"));
     }
@@ -538,7 +569,7 @@ mod tests {
     #[test]
     fn has_notifications_true_after_approve() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.commit(&id, "justification").unwrap();
         q.approve(&id).unwrap();
         assert!(q.has_notifications());
@@ -547,7 +578,7 @@ mod tests {
     #[test]
     fn has_notifications_false_after_drain() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.commit(&id, "justification").unwrap();
         q.approve(&id).unwrap();
         assert!(q.has_notifications());
@@ -558,7 +589,7 @@ mod tests {
     #[test]
     fn has_notifications_true_after_deny() {
         let mut q = ApprovalStore::new();
-        let id = q.enqueue("t", "{}");
+        let id = q.enqueue("t", "{}", None);
         q.commit(&id, "justification").unwrap();
         q.deny(&id, "unsafe").unwrap();
         assert!(q.has_notifications());
@@ -567,9 +598,39 @@ mod tests {
     #[test]
     fn info_has_tool_call_content() {
         let mut q = ApprovalStore::new();
-        q.enqueue("bash_exec", r#"{"command":"ls"}"#);
+        q.enqueue("bash_exec", r#"{"command":"ls"}"#, None);
         let info = &q.list(None)[0];
         assert_eq!(info.content.tool_name, "bash_exec");
         assert_eq!(info.content.arguments["command"], "ls");
+    }
+
+    #[test]
+    fn defer_reason_round_trips_through_list() {
+        let mut q = ApprovalStore::new();
+        q.enqueue(
+            "bash_exec",
+            r#"{"command":"echo x > f"}"#,
+            Some("output redirect '>' to 'f'".into()),
+        );
+        let info = &q.list(None)[0];
+        assert_eq!(
+            info.defer_reason.as_deref(),
+            Some("output redirect '>' to 'f'")
+        );
+    }
+
+    #[test]
+    fn approval_result_json_without_reason_is_static() {
+        let json = super::approval_result_json("ap_x", "bash_exec", None);
+        assert!(json.contains("\"pending_approval\":true"));
+        assert!(!json.contains("output redirect"));
+    }
+
+    #[test]
+    fn approval_result_json_with_reason_names_it() {
+        let json =
+            super::approval_result_json("ap_x", "bash_exec", Some("output redirect '>' to 'f'"));
+        assert!(json.contains("output redirect '>' to 'f'"));
+        assert!(json.contains("approval_commit"));
     }
 }

@@ -95,7 +95,11 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
                 .iter()
                 .any(|item| item.operator == Some(ListOperator::Background))
             {
-                return Safety::NeedsApproval;
+                return Safety::NeedsApproval {
+                    reason: "background operator '&' runs an unobservable process; \
+                        use the runtime's native background execution instead"
+                        .into(),
+                };
             }
             items
                 .iter()
@@ -170,9 +174,12 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
         }
 
         // --- Function ---
-        NodeKind::Function { body, .. } => {
-            helpers::stricter(Safety::NeedsApproval, classify_node(ctx, body))
-        }
+        NodeKind::Function { body, .. } => helpers::stricter(
+            Safety::NeedsApproval {
+                reason: "function definitions can later execute arbitrary code".into(),
+            },
+            classify_node(ctx, body),
+        ),
 
         // --- Grouping ---
         NodeKind::Subshell { body, redirects } | NodeKind::BraceGroup { body, redirects } => {
@@ -184,13 +191,18 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
 
         // --- Redirects ---
         NodeKind::Redirect { .. } => helpers::classify_redirect_node(ctx, node),
-        NodeKind::HereDoc { .. } => Safety::NeedsApproval,
+        NodeKind::HereDoc { .. } => Safety::NeedsApproval {
+            reason: "here-document is not auto-approved".into(),
+        },
 
         // --- Substitutions ---
         NodeKind::CommandSubstitution { command, .. } => classify_node(ctx, command),
-        NodeKind::ProcessSubstitution { command, .. } => {
-            helpers::stricter(Safety::NeedsApproval, classify_node(ctx, command))
-        }
+        NodeKind::ProcessSubstitution { command, .. } => helpers::stricter(
+            Safety::NeedsApproval {
+                reason: "process substitution runs a command".into(),
+            },
+            classify_node(ctx, command),
+        ),
 
         // --- Words ---
         NodeKind::Word { parts, .. } => {
@@ -209,7 +221,9 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
             .as_deref()
             .map_or(Safety::ReadOnly, |e| classify_node(ctx, e)),
 
-        NodeKind::ParamIndirect { .. } => Safety::NeedsApproval,
+        NodeKind::ParamIndirect { .. } => Safety::NeedsApproval {
+            reason: "indirect parameter expansion can read arbitrary variables".into(),
+        },
 
         // --- Arithmetic command ---
         NodeKind::ArithmeticCommand {
@@ -229,9 +243,14 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
         }
 
         // --- Coproc ---
-        NodeKind::Coproc { command, .. } => {
-            helpers::stricter(Safety::NeedsApproval, classify_node(ctx, command))
-        }
+        NodeKind::Coproc { command, .. } => helpers::stricter(
+            Safety::NeedsApproval {
+                reason: "coproc runs an unobservable background process; \
+                    use the runtime's native background execution instead"
+                    .into(),
+            },
+            classify_node(ctx, command),
+        ),
 
         // --- Conditional expression ---
         NodeKind::ConditionalExpr { body, redirects } => helpers::stricter(
@@ -318,7 +337,12 @@ fn classify_simple_command(
     let cmd_name = match util::extract_command_name(&words[0]) {
         Some(name) => name.to_ascii_lowercase(),
         None => {
-            return helpers::stricter(Safety::NeedsApproval, classify_node(ctx, &words[0]));
+            return helpers::stricter(
+                Safety::NeedsApproval {
+                    reason: "command name is not a literal word".into(),
+                },
+                classify_node(ctx, &words[0]),
+            );
         }
     };
 
@@ -363,13 +387,19 @@ fn apply_override(
     match catalog_verdict {
         None => match ctx.override_for(cmd_name) {
             Some(ExecDecision::Allow) => Safety::ReadOnly,
-            Some(ExecDecision::Ask) => Safety::NeedsApproval,
+            Some(ExecDecision::Ask) => Safety::NeedsApproval {
+                reason: format!("'{cmd_name}' is set to 'ask' by exec_policy"),
+            },
             Some(ExecDecision::Deny) => deny(),
-            None => Safety::NeedsApproval,
+            None => Safety::NeedsApproval {
+                reason: format!("'{cmd_name}' is not in the read-only catalog"),
+            },
         },
         Some(catalog_dec) => match ctx.override_for(cmd_name) {
             Some(ExecDecision::Allow) => catalog_dec,
-            Some(ExecDecision::Ask) => Safety::NeedsApproval,
+            Some(ExecDecision::Ask) => Safety::NeedsApproval {
+                reason: format!("'{cmd_name}' is set to 'ask' by exec_policy"),
+            },
             Some(ExecDecision::Deny) => deny(),
             None => catalog_dec,
         },
