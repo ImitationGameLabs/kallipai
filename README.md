@@ -1,20 +1,18 @@
-# kallipai
+# Kallip AI
 
 > **Early stage.** Not ready for production use.
->
-> Binary/crate stem: `kallip`.
 
-An agentic multi-agent system. Agents manage their own context, coordinate across projects, and operate within a safety harness that constrains dangerous operations.
+An agent harness designed from the start as a multi-agent system. Agents manage their own subagents and context, and coordinate across projects.
 
-## Why not another Claude Code / Codex / OpenCode?
+## Not another coding assistant
 
-Those tools excel at single-project, single-session coding assistance. kallip
-aims at a different problem: **cross-project, multi-agent coordination** — and it
-does so without being a "multi-agent manager."
+Existing coding assistants excel at single-project, single-session work.
+kallip aims at a different problem: **cross-project, multi-agent coordination**
+— without being a "multi-agent manager."
 
-Instead of a top-down orchestration layer, kallip is designed to be driven
-**agenticly through a headless CLI**: the agent itself decides when to spawn,
-switch between, and coordinate multiple agent instances across projects.
+Instead of a top-down orchestration layer, kallip is driven through a
+headless CLI: the agent itself decides when to spawn, switch between, and
+coordinate multiple agent instances across projects.
 
 For planned direction, see the [roadmap](docs/roadmap.md).
 

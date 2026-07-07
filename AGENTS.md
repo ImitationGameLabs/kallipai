@@ -4,7 +4,7 @@ AI Agent working guide. This document provides code structure and decision rules
 
 ## Naming
 
-The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem is `kallip`. Use `kallipai` only for human-facing brand prose (README H1, doc opening identity sentences). Use `kallip` for every technical surface: crate names, binaries, Rust module paths, env var prefixes (`KALLIP_*`), on-disk paths, container paths/volumes, Nix attrs, Cargo/flake `description` strings, User-Agent, Harbor `name()`. When a sentence is mixed, prefer `kallip`.
+The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem is `kallip`. Use the `Kallip AI` / `kallipai` brand forms only for human-facing surfaces (README and doc H1, prose where the brand reads better). Use `kallip` for every technical surface: crate names, binaries, Rust module paths, env var prefixes (`KALLIP_*`), on-disk paths, container paths/volumes, Nix attrs, Cargo/flake `description` strings, User-Agent, Harbor `name()`. When a sentence is mixed, prefer `kallip`. For the history and rationale behind these names, see [naming.md](docs/naming.md).
 
 ## Directory Structure
 
