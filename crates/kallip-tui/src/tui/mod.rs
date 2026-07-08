@@ -1,3 +1,4 @@
+mod alt_scroll;
 mod completion;
 mod events;
 mod history;
@@ -8,6 +9,8 @@ mod render;
 mod wrap;
 
 pub(crate) use prompt::{Outgoing, prepare_outgoing};
+
+pub(crate) use alt_scroll::{DisableAlternateScroll, EnableAlternateScroll};
 
 use kallip_common::protocol::ApprovalEntry;
 use ratatui::text::Line;
@@ -279,6 +282,23 @@ impl App {
         self.render_cache.clear();
         self.dirty = true;
     }
+
+    /// Scroll the chat toward older messages by `step` rows, disabling auto-follow so
+    /// the view stays put. Shared by `Up`/`Down` and `PageUp`/`PageDown` (and thus the
+    /// mouse wheel, which the terminal delivers as `Up`/`Down` via alternate-scroll).
+    pub(crate) fn scroll_up_by(&mut self, step: usize) {
+        self.scroll_pos = self.scroll_pos.saturating_sub(step);
+        self.auto_scroll = false;
+    }
+
+    /// Scroll the chat toward newer messages by `step` rows, re-engaging auto-follow
+    /// once the tail is reached or passed. Shared by `Up`/`Down` and
+    /// `PageUp`/`PageDown`.
+    pub(crate) fn scroll_down_by(&mut self, step: usize) {
+        self.scroll_pos = self.scroll_pos.saturating_add(step);
+        let max_pos = self.content_length.saturating_sub(self.visible_height);
+        self.auto_scroll = self.scroll_pos >= max_pos;
+    }
 }
 
 #[cfg(test)]
@@ -340,5 +360,42 @@ mod tests {
             Some(ChatLine::Error(_)) => {}
             other => panic!("expected an error chat line, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn scroll_up_by_decrements_and_leaves_auto_follow() {
+        let mut app = App::new();
+        app.content_length = 100;
+        app.visible_height = 10;
+        app.scroll_pos = 20;
+        app.auto_scroll = true;
+        app.scroll_up_by(3);
+        assert_eq!(app.scroll_pos, 17);
+        assert!(!app.auto_scroll, "scrolling up must leave auto-follow");
+    }
+
+    #[test]
+    fn scroll_up_by_clamps_at_zero() {
+        let mut app = App::new();
+        app.scroll_pos = 1;
+        app.scroll_up_by(10);
+        assert_eq!(app.scroll_pos, 0);
+    }
+
+    #[test]
+    fn scroll_down_by_reengages_auto_follow_only_at_tail() {
+        let mut app = App::new();
+        app.content_length = 100;
+        app.visible_height = 10;
+        // max_pos = 90; starting just shy of it.
+        app.scroll_pos = 80;
+        app.auto_scroll = false;
+        app.scroll_down_by(3);
+        assert_eq!(app.scroll_pos, 83);
+        assert!(!app.auto_scroll, "not yet at the tail");
+        // Reaching/passing the tail re-engages auto-follow.
+        app.scroll_down_by(10);
+        assert_eq!(app.scroll_pos, 93);
+        assert!(app.auto_scroll, "at/past the tail must re-follow");
     }
 }

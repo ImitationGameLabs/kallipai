@@ -8,6 +8,12 @@ use kallip_common::command::{BudgetOp, SlashCommand};
 
 use super::{App, AppMode, ApprovalPhase, ChatLine};
 
+/// Lines scrolled per `Up`/`Down` key (and per mouse-wheel tick, which the terminal
+/// delivers as `Up`/`Down` via alternate-scroll).
+const SCROLL_STEP_LINES: usize = 3;
+/// Lines scrolled per `PageUp`/`PageDown`.
+const PAGE_SCROLL_STEP_LINES: usize = 10;
+
 impl App {
     /// Handle a crossterm key event.
     pub async fn handle_key_event(
@@ -66,28 +72,12 @@ impl App {
             return;
         }
 
-        // Scroll keys
-        match key.code {
-            KeyCode::PageUp => {
-                self.scroll_pos = self.scroll_pos.saturating_sub(10);
-                self.auto_scroll = false;
-                return;
-            }
-            KeyCode::PageDown => {
-                self.scroll_pos = self.scroll_pos.saturating_add(10);
-                // Re-engage auto-follow when scrolled to (or past) the tail, so
-                // keyboard paging matches the old mouse-wheel behavior.
-                let max_pos = self.content_length.saturating_sub(self.visible_height);
-                self.auto_scroll = self.scroll_pos >= max_pos;
-                return;
-            }
-            _ => {}
-        }
-
-        // History navigation (when completion popup is not visible)
-        if !self.completion.is_visible() {
+        // Ctrl-P / Ctrl-N recall input history (previous / next). Up/Down scroll the
+        // chat because the mouse wheel arrives as Up/Down via alternate-scroll; history
+        // is bound to Ctrl-P/Ctrl-N so the wheel does not cycle it.
+        if !self.completion.is_visible() && key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Up => {
+                KeyCode::Char('p') => {
                     let current = self.textarea.lines().join("\n");
                     if let Some(entry) = self.history.up(&current) {
                         self.textarea.clear();
@@ -95,18 +85,41 @@ impl App {
                     }
                     return;
                 }
-                KeyCode::Down => {
+                KeyCode::Char('n') => {
                     if let Some(result) = self.history.down() {
                         self.textarea.clear();
-                        match result {
-                            super::history::Either::Entry(s) => {
-                                self.textarea.insert_str(s);
-                            }
-                            super::history::Either::Draft(s) => {
-                                self.textarea.insert_str(s);
-                            }
-                        }
+                        self.textarea.insert_str(result.as_str());
                     }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Scroll keys
+        match key.code {
+            KeyCode::PageUp => {
+                self.scroll_up_by(PAGE_SCROLL_STEP_LINES);
+                return;
+            }
+            KeyCode::PageDown => {
+                self.scroll_down_by(PAGE_SCROLL_STEP_LINES);
+                return;
+            }
+            _ => {}
+        }
+
+        // Chat scrolling via Up/Down (when the completion popup is not visible - the
+        // popup handles its own Up/Down navigation below). The mouse wheel is delivered
+        // as Up/Down by alternate-scroll, so this is what makes the wheel scroll chat.
+        if !self.completion.is_visible() {
+            match key.code {
+                KeyCode::Up => {
+                    self.scroll_up_by(SCROLL_STEP_LINES);
+                    return;
+                }
+                KeyCode::Down => {
+                    self.scroll_down_by(SCROLL_STEP_LINES);
                     return;
                 }
                 _ => {}

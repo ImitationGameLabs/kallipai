@@ -70,3 +70,13 @@ pub enum Either<'a> {
     Entry(&'a str),
     Draft(String),
 }
+
+impl<'a> Either<'a> {
+    /// The recalled text, borrowed whether it is a saved entry or the in-progress draft.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Either::Entry(s) => s,
+            Either::Draft(s) => s,
+        }
+    }
+}

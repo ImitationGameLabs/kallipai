@@ -132,5 +132,17 @@ pub fn help_text() -> String {
         "  {:<12} toggle folding of tool output / reasoning\n",
         "Ctrl-O"
     ));
+    out.push_str(&format!(
+        "  {:<12} scroll chat (mouse wheel / arrow keys)\n",
+        "Up/Down"
+    ));
+    out.push_str(&format!(
+        "  {:<12} scroll chat by a larger step\n",
+        "PgUp/PgDn"
+    ));
+    out.push_str(&format!(
+        "  {:<12} recall input history (prev / next)\n",
+        "Ctrl-P/N"
+    ));
     out
 }

@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use kallip_client::DaemonClient;
 use tokio::sync::mpsc;
 
-use crate::tui::{Outgoing, prepare_outgoing};
+use crate::tui::{DisableAlternateScroll, EnableAlternateScroll, Outgoing, prepare_outgoing};
 use args::Args;
 use session::Session;
 
@@ -130,15 +130,17 @@ async fn run_tui(session: Session) -> Result<()> {
     ratatui::try_init()?;
     let mut terminal = ratatui::init();
 
-    // Chain a panic hook so a panic pops the keyboard enhancement flags before
-    // ratatui's own hook restores the terminal. Without this, a panic would leak
-    // the Kitty keyboard-protocol mode into the user's shell, corrupting key
-    // reporting for subsequent programs until reset.
+    // Chain a panic hook so a panic pops the keyboard enhancement flags and disables
+    // alternate-scroll before ratatui's own hook restores the terminal. Both escapes
+    // only apply inside the alt screen, so they must be written while still in it;
+    // without this, a panic would leak the Kitty keyboard-protocol mode into the
+    // user's shell, corrupting key reporting for subsequent programs until reset.
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = ratatui::crossterm::execute!(
             std::io::stdout(),
             ratatui::crossterm::event::PopKeyboardEnhancementFlags,
+            DisableAlternateScroll,
         );
         previous_hook(info);
     }));
@@ -146,17 +148,18 @@ async fn run_tui(session: Session) -> Result<()> {
     // Request modifier-augmented key reporting so Shift+Enter (and other modified
     // keys) arrive as distinct events. Required for Shift+Enter to insert a newline
     // instead of submitting. Ignored (no-op) on terminals that lack the protocol.
-    //
-    // Mouse capture is intentionally NOT enabled: capturing the mouse (even only
-    // for wheel scrolling) also intercepts click-drag, which blocks the terminal's
-    // native text selection/copy. Keyboard scrolling (PageUp/PageDown) covers
-    // navigation instead.
     ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::event::PushKeyboardEnhancementFlags(
             ratatui::crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
         )
     )?;
+
+    // Mouse capture stays OFF so the terminal's native click-drag text selection
+    // works everywhere. Instead, enable alternate-scroll: the terminal translates the
+    // mouse wheel into Up/Down arrows, which the input handler binds to chat scrolling
+    // (see `tui::input`). This keeps both wheel scrolling and native selection.
+    ratatui::crossterm::execute!(std::io::stdout(), EnableAlternateScroll)?;
     let mut app = tui::App::new();
     // Filled when the daemon event stream ends; breaks the loop and is surfaced
     // after the terminal is restored. Without this, a dead stream leaves the TUI
@@ -252,13 +255,14 @@ async fn run_tui(session: Session) -> Result<()> {
         }
     }
 
-    // Pop enhancement flags while still in the alternate screen, before
-    // `ratatui::restore()` leaves it. On non-Kitty terminals the pop writes an
-    // escape that only the alt buffer discards; leaving the screen first would
-    // leak it to the user's shell.
+    // Pop enhancement flags and disable alternate-scroll while still in the alternate
+    // screen, before `ratatui::restore()` leaves it. On non-Kitty terminals the pop
+    // writes an escape that only the alt buffer discards; leaving the screen first
+    // would leak it to the user's shell.
     ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::event::PopKeyboardEnhancementFlags,
+        DisableAlternateScroll,
     )
     .ok();
     ratatui::restore();
