@@ -264,23 +264,24 @@ pub(crate) fn abort_agent(agent: &crate::state::Agent) {
     }
 }
 
-/// RAII guard for the workspace write-lock auto-acquired in `create_agent`.
+/// RAII guard for the workspace write-lock acquired on every materialization
+/// path (create, restore, reactivation) for a Normal agent.
 ///
-/// Releases the lock on `Drop` (every `return Err` — and any panic — between
+/// Releases the lock on `Drop` (every `return Err` -- and any panic -- between
 /// acquire and successful registration) unless disarmed. The success path
 /// disarms it so the registered agent keeps the lock for its lifetime (it is
 /// released later by `remove_agent`/reactivation). This covers the panic case a
 /// manual `release_all` at each error return cannot reach.
-struct WorkspaceLockGuard<'a> {
+pub(crate) struct WorkspaceLockGuard<'a> {
     state: &'a SharedState,
     id: &'a AgentId,
     armed: bool,
 }
 
 impl WorkspaceLockGuard<'_> {
-    /// Disarm so `Drop` no longer releases — call exactly once, on the success
+    /// Disarm so `Drop` no longer releases -- call exactly once, on the success
     /// path once the agent is registered and owns the lock.
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -293,15 +294,66 @@ impl Drop for WorkspaceLockGuard<'_> {
     }
 }
 
-/// Auto-acquire the workspace write-lock for a Normal agent (Guests acquire
-/// nothing and get `None`). `chain` is the agent's delegation ancestors —
-/// computed by the caller under the registry read lock and passed in as owned
-/// ids, so a nested lock held under an ancestor is treated as delegation, not
-/// conflict (see [`DirLockManager::acquire`]). On conflict/error the agent dir
-/// is rolled back and an `Err` is returned. Extracted from `create_agent` so the
-/// acquire path is unit-testable without spawning the agent task.
+/// Failure to acquire the workspace write-lock for a Normal agent. Callers
+/// apply path-specific policy: create rolls back the agent dir and returns 409;
+/// restore bails so the caller skips the agent (and its subtree); reactivation
+/// refuses to wake the agent into a state where it cannot write its own
+/// workspace (returning conflict to the sender).
+pub(crate) enum WorkspaceAcquireFailure {
+    /// Another agent holds an overlapping write-lock.
+    Busy { holder: AgentId, conflict: PathBuf },
+    /// The acquire itself errored (e.g. an unresolvable workspace path).
+    Other(std::io::Error),
+}
+
+/// Acquire the workspace write-lock for a Normal agent (Guests acquire nothing
+/// and get `Ok(None)`). Returns an armed [`WorkspaceLockGuard`] on success --
+/// its `Drop` releases the lock, so a failure on the caller's path between this
+/// call and a successful spawn needs no manual `release_all`. Callers that want
+/// the lock to persist past a success point call `guard.disarm()`.
+///
+/// `chain` is the agent's delegation ancestors (owned ids), so a nested lock
+/// held under an ancestor is treated as delegation, not conflict (see
+/// [`DirLockManager::acquire`]).
+///
+/// Pure acquire: NO rollback, NO `ApiError` mapping -- each materialization path
+/// decides its own conflict policy. This is the single place the workspace lock
+/// is taken, so the "a Normal agent holds a write-lock on its workspace for the
+/// lifetime of its task" invariant cannot be bypassed by skipping a call site.
 ///
 /// [`DirLockManager::acquire`]: kallip_runtime::dirlock::DirLockManager::acquire
+pub(crate) fn try_acquire_workspace_lock<'a>(
+    state: &'a SharedState,
+    id: &'a AgentId,
+    config: &AgentConfig,
+    chain: &[AgentId],
+) -> Result<Option<WorkspaceLockGuard<'a>>, WorkspaceAcquireFailure> {
+    if config.permissions_class != PermissionClass::Normal {
+        return Ok(None);
+    }
+    match state
+        .lock_manager
+        .acquire(id, &config.workspace_root, chain)
+    {
+        Ok(kallip_runtime::dirlock::AcquireOutcome::Acquired)
+        | Ok(kallip_runtime::dirlock::AcquireOutcome::AlreadyHeld) => {
+            Ok(Some(WorkspaceLockGuard {
+                state,
+                id,
+                armed: true,
+            }))
+        }
+        Ok(kallip_runtime::dirlock::AcquireOutcome::Busy { holder, conflict }) => {
+            Err(WorkspaceAcquireFailure::Busy { holder, conflict })
+        }
+        Err(e) => Err(WorkspaceAcquireFailure::Other(e)),
+    }
+}
+
+/// Create-path wrapper around [`try_acquire_workspace_lock`] that maps failure
+/// to [`ApiError`] and rolls back the pre-created agent dir (create-specific
+/// bookkeeping the other paths do not have). Extracted from `create_agent` so
+/// the acquire + rollback path is unit-testable without spawning the agent task.
 async fn acquire_workspace_lock<'a>(
     state: &'a SharedState,
     id: &'a AgentId,
@@ -311,14 +363,9 @@ async fn acquire_workspace_lock<'a>(
     agent_dir: &std::path::Path,
     log_ws: &str,
 ) -> Result<Option<WorkspaceLockGuard<'a>>, ApiError> {
-    if config.permissions_class != PermissionClass::Normal {
-        return Ok(None);
-    }
-    let workspace_root = config.workspace_root.clone();
-    match state.lock_manager.acquire(id, &workspace_root, chain) {
-        Ok(kallip_runtime::dirlock::AcquireOutcome::Acquired)
-        | Ok(kallip_runtime::dirlock::AcquireOutcome::AlreadyHeld) => {}
-        Ok(kallip_runtime::dirlock::AcquireOutcome::Busy { holder, conflict }) => {
+    match try_acquire_workspace_lock(state, id, config, chain) {
+        Ok(guard) => Ok(guard),
+        Err(WorkspaceAcquireFailure::Busy { holder, conflict }) => {
             // `agent_dir` was created before the acquire; roll it back so
             // `scan_agents` doesn't pick up an orphan `meta.json` on restart.
             rollback_unspawned_create(state, created_by, id, agent_dir).await;
@@ -326,25 +373,17 @@ async fn acquire_workspace_lock<'a>(
             // workspace itself, or an ancestor/descendant another agent holds
             // that is not a delegation ancestor). A nested-vs-existing-workspace
             // collision 409s here.
-            return Err(ApiError::conflict(format!(
+            Err(ApiError::conflict(format!(
                 "workspace_root {log_ws} overlaps a write-lock on {} held by agent \
                  {holder}; remove it or choose a non-overlapping workspace",
                 conflict.display()
-            )));
+            )))
         }
-        Err(e) => {
+        Err(WorkspaceAcquireFailure::Other(e)) => {
             rollback_unspawned_create(state, created_by, id, agent_dir).await;
-            return Err(ApiError::bad_request(e.to_string()));
+            Err(ApiError::bad_request(e.to_string()))
         }
     }
-    // Lock acquired (or already held): arm the guard so every failure path below
-    // — including a panic in `spawn_agent`/`build_client` — releases it. Disarmed
-    // on the single success path once the agent is registered.
-    Ok(Some(WorkspaceLockGuard {
-        state,
-        id,
-        armed: true,
-    }))
 }
 
 pub async fn create_agent(
@@ -504,13 +543,15 @@ pub async fn create_agent(
         None => Vec::new(),
     };
     // Auto-acquire an exclusive write-lock on the workspace so no two agents edit
-    // the same workspace concurrently. **Normal only** — a Guest is readonly (its
+    // the same workspace concurrently. **Normal only** -- a Guest is readonly (its
     // landlock writable set is the skills carve alone), so it neither needs nor
     // holds a workspace write-lock (holding one would block writers and mislabel
-    // the Guest as the workspace's writer in the dirlock registry). Create-only —
-    // restore and reactivation deliberately do NOT auto-acquire (restart
-    // semantics). Done before spawn so enforcement is active for the first
-    // command; rolled back on every failure path below.
+    // the Guest as the workspace's writer in the dirlock registry). A Normal
+    // agent holds this lock for the lifetime of its task: it is re-acquired on
+    // every materialization path (restore, reactivation), not just create, so
+    // the workspace stays in the landlock writable set across daemon restarts.
+    // Done before spawn so enforcement is active for the first command; rolled
+    // back on every failure path below.
     let mut workspace_lock = acquire_workspace_lock(
         &state,
         &id,

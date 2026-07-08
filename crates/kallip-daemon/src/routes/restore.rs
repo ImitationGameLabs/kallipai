@@ -276,14 +276,31 @@ async fn restore_one(
         .get_exec_policy(&p.agent_id)
         .context("failed to load exec_policy")?;
 
-    if let Some(ref supervisor_id) = p.meta.created_by {
-        let chain = load_supervisor_chain(supervisor_id, index)?;
-        config.permissions.max_depth = validate_depth_from_chain(&p.meta.workspace_root, &chain)?;
+    // Walk the delegation ancestor chain once and reuse it both for the
+    // strictness validations below and for the workspace write-lock acquire
+    // (the carve-out needs the ancestor ids so a nested lock is treated as
+    // delegation, not conflict). Empty for root agents.
+    let supervisor_chain: Vec<ChainNode> = match p.meta.created_by.as_ref() {
+        Some(supervisor_id) => load_supervisor_chain(supervisor_id, index)?,
+        None => Vec::new(),
+    };
+    if p.meta.created_by.is_some() {
+        config.permissions.max_depth =
+            validate_depth_from_chain(&p.meta.workspace_root, &supervisor_chain)?;
         let depth = config.permissions.depth();
-        validate_permission_class_from_chain(&p.agent_id, config.permissions_class, depth, &chain)?;
-        validate_policy_from_chain(&p.agent_id, &tool_policy, &chain)?;
-        validate_exec_policy_from_chain(&p.agent_id, &exec_policy, &chain)?;
+        validate_permission_class_from_chain(
+            &p.agent_id,
+            config.permissions_class,
+            depth,
+            &supervisor_chain,
+        )?;
+        validate_policy_from_chain(&p.agent_id, &tool_policy, &supervisor_chain)?;
+        validate_exec_policy_from_chain(&p.agent_id, &exec_policy, &supervisor_chain)?;
     }
+    let chain_ids: Vec<AgentId> = supervisor_chain
+        .iter()
+        .map(|n| n.agent_id.clone())
+        .collect();
 
     // Resolve the model tier purely by depth (positional tiers — no persisted binding). Warn if
     // the agent's depth exceeds the tier list: it clamps to the lowest-capability tier.
@@ -310,6 +327,37 @@ async fn restore_one(
     let tool_policy = Arc::new(std::sync::RwLock::new(tool_policy));
     let exec_policy = Arc::new(std::sync::RwLock::new(exec_policy));
 
+    // Acquire the workspace write-lock (Normal only) -- the same invariant
+    // `create_agent` establishes. Restore used to skip this ("restart
+    // semantics"), which left the workspace outside the landlock writable set
+    // (every write failed with EACCES -- e.g. `cargo run` writing
+    // `target/debug/.cargo-lock`) and left same-workspace mutual exclusion
+    // unenforced after a daemon restart. On conflict, bail so the caller skips
+    // this agent and its subtree (the same fate as an
+    // `ensure_workspace_disjoint` failure). The guard's `Drop` releases the
+    // lock if `spawn_agent` below fails; disarmed on success so the lock
+    // persists for the agent's lifetime.
+    let workspace_lock = match super::agent::try_acquire_workspace_lock(
+        &shared_state,
+        &p.agent_id,
+        &config,
+        &chain_ids,
+    ) {
+        Ok(guard) => guard,
+        Err(super::agent::WorkspaceAcquireFailure::Busy { holder, conflict }) => {
+            anyhow::bail!(
+                "workspace {} overlaps a write-lock on {} held by agent {}; \
+                 skipping restore",
+                config.workspace_root.display(),
+                conflict.display(),
+                holder
+            );
+        }
+        Err(super::agent::WorkspaceAcquireFailure::Other(e)) => {
+            anyhow::bail!("failed to acquire workspace lock: {e}");
+        }
+    };
+
     let agent = spawn_agent(SpawnArgs {
         agent_id: p.agent_id.clone(),
         store,
@@ -329,6 +377,11 @@ async fn restore_one(
         tier,
     })
     .await?;
+    // Spawn succeeded: the agent owns the workspace lock for its lifetime.
+    // Disarm so the guard's (imminent) Drop does not release it.
+    if let Some(mut guard) = workspace_lock {
+        guard.disarm();
+    }
 
     Ok((restored.agent_id, agent))
 }

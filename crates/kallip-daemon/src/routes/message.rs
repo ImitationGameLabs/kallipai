@@ -6,7 +6,9 @@ use kallip_common::protocol::{ApiError, MessageResponse};
 use tracing::{error, info, warn};
 
 use super::MessageRequest;
-use crate::routes::agent::{SpawnArgs, abort_agent, spawn_agent};
+use crate::routes::agent::{
+    SpawnArgs, WorkspaceAcquireFailure, abort_agent, spawn_agent, try_acquire_workspace_lock,
+};
 use crate::sse::sse_stream;
 use crate::state::SharedState;
 use kallip_common::agentid::AgentId;
@@ -76,8 +78,9 @@ pub async fn send_message(
         entry.agent.bridge_handle.abort();
         // Release the dead incarnation's directory write-locks before re-spawn,
         // so the new incarnation starts with an empty lock set and any peer it
-        // was blocking is freed. Reactivation does NOT auto-re-acquire the
-        // workspace lock (create-only auto-acquire — see the plan).
+        // was blocking is freed. The workspace write-lock is re-acquired in
+        // Phase 2 below (mirroring `create_agent`), so the reactivated agent
+        // can write its own workspace once more.
         state.lock_manager.release_all(&id);
         // Create a fresh channel and install the sender immediately.
         // This "reserves" the reactivation: concurrent requests see an open
@@ -120,23 +123,66 @@ pub async fn send_message(
         }
     }; // Write lock released. Concurrent requests see open channel.
 
-    // Phase 2: Spawn outside the lock, then install under write lock.
-    let agent = match spawn_agent(spawn_args).await {
-        Ok(a) => a,
-        Err(e) => {
-            error!(id = %id, "reactivation failed: {e:#}");
-            // Swap the installed sender to a closed channel so concurrent
-            // try_enqueue callers see `Closed` instead of accepting a message
-            // into a dead-end.  Create a channel and drop the receiver — the
-            // sender then reports `Closed` on every try_send.
-            {
-                let mut registry = state.registry.write().await;
-                if let Some(entry) = registry.get_mut(&id) {
-                    let (dead_tx, dead_rx) = tokio::sync::mpsc::channel(1);
-                    drop(dead_rx);
-                    entry.agent.prompt_tx = dead_tx;
-                }
+    // Phase 2: re-acquire the workspace write-lock, then spawn outside the lock.
+    //
+    // The dead incarnation's locks were released in Phase 1; re-acquire the
+    // workspace lock (Normal only) so the agent can write its own workspace --
+    // mirrors `create_agent` and closes the post-reactivation EACCES gap. On
+    // conflict (a peer legitimately grabbed the workspace while this agent was
+    // dead), REFUSE reactivation: waking the agent without its workspace lock
+    // would silently reproduce the exact EACCES gap this re-acquire exists to
+    // close. The sender gets holder/conflict; a retry re-attempts once the peer
+    // releases. The guard's `Drop` releases the lock if spawn fails below.
+    let chain_ids: Vec<AgentId> = match spawn_args.config.created_by.as_ref() {
+        Some(sup) => match state.registry.read().await.supervisor_chain_ids(sup) {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(
+                    id = %id,
+                    supervisor = %sup,
+                    "supervisor chain broken on reactivation ({e}); \
+                     proceeding with empty carve-out"
+                );
+                Vec::new()
             }
+        },
+        None => Vec::new(),
+    };
+    let workspace_lock =
+        match try_acquire_workspace_lock(&state, &id, &spawn_args.config, &chain_ids) {
+            Ok(guard) => guard,
+            Err(WorkspaceAcquireFailure::Busy { holder, conflict }) => {
+                close_prompt_channel(&state, &id).await;
+                return Err(ApiError::conflict(format!(
+                    "workspace {} overlaps a write-lock on {} held by agent {}; \
+                 remove it or wait for release before reactivating",
+                    spawn_args.config.workspace_root.display(),
+                    conflict.display(),
+                    holder,
+                )));
+            }
+            Err(WorkspaceAcquireFailure::Other(e)) => {
+                close_prompt_channel(&state, &id).await;
+                return Err(ApiError::internal(format!(
+                    "failed to re-acquire workspace lock: {e}"
+                )));
+            }
+        };
+
+    let agent = match spawn_agent(spawn_args).await {
+        Ok(a) => {
+            // Spawn succeeded: the agent owns the workspace lock for its
+            // lifetime. Disarm so the guard's (imminent) Drop does not release.
+            if let Some(mut guard) = workspace_lock {
+                guard.disarm();
+            }
+            a
+        }
+        Err(e) => {
+            // `workspace_lock`'s Drop releases the re-acquired lock as this
+            // arm unwinds -- no manual `release_all` needed.
+            error!(id = %id, "reactivation failed: {e:#}");
+            close_prompt_channel(&state, &id).await;
             warn!(id = %id, "agent left in dead state; next message will retry reactivation");
             return Err(ApiError::internal(format!("reactivation failed: {e:#}")));
         }
@@ -184,6 +230,18 @@ pub async fn sse_events(
 }
 
 // -- Helpers --
+
+/// Swap the agent's prompt sender to a closed channel so concurrent
+/// `try_enqueue` callers see `Closed` instead of accepting a message into a
+/// dead-end. Used when reactivation fails before or during spawn.
+async fn close_prompt_channel(state: &SharedState, id: &AgentId) {
+    let mut registry = state.registry.write().await;
+    if let Some(entry) = registry.get_mut(id) {
+        let (dead_tx, dead_rx) = tokio::sync::mpsc::channel(1);
+        drop(dead_rx);
+        entry.agent.prompt_tx = dead_tx;
+    }
+}
 
 /// Outcome of a non-blocking message enqueue attempt.
 #[derive(Debug)]

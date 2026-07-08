@@ -46,10 +46,18 @@
 //!
 //! # Invariants
 //!
+//! - **A Normal agent holds a write-lock on its `workspace_root` for the
+//!   lifetime of its task.** This is what makes the workspace appear in
+//!   [`DirLockManager::write_paths`] and thus in the landlock writable set. It is
+//!   acquired on *every* materialization path (create, restore, reactivation),
+//!   not just create, so the workspace stays writable across daemon restarts and
+//!   same-workspace mutual exclusion holds after a restore. The acquire is
+//!   centralized in `kallip-daemon`'s `try_acquire_workspace_lock`; this module
+//!   only provides the mechanism.
 //! - **Release is coupled to task death, not registry removal.** Reactivation
 //!   and `abort_agent` re-spawn or tear down an agent *without* removing its
 //!   registry entry, so [`DirLockManager::release_all`] must be called explicitly
-//!   on those paths — not only from the registry's `unregister`.
+//!   on those paths (and reactivation then re-acquires the workspace lock above).
 //! - **Lock order: registry always before lock-manager.** Callers that hold the
 //!   agent-registry lock may then touch this manager; never the reverse. Methods
 //!   here take only the manager's own mutex and return bare [`AgentId`]s, so the
