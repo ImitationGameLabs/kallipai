@@ -86,10 +86,13 @@ pub async fn bridge_task(
                             }
                             _ => {}
                         }
-                        if let Some(sse) = convert_event(other)
-                            && events_tx.send(sse).is_err()
-                        {
-                            info!("no SSE subscribers, event dropped");
+                        // Best-effort broadcast: with no SSE subscriber the
+                        // send errors, which is the normal steady state for a
+                        // headless/subagent run. Subscribe/unsubscribe state
+                        // transitions are logged at the SSE endpoint, not here
+                        // (logging per event would spam on every token delta).
+                        if let Some(sse) = convert_event(other) {
+                            let _ = events_tx.send(sse);
                         }
                     }
                 },

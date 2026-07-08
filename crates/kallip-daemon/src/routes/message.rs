@@ -221,12 +221,20 @@ pub async fn sse_events(
     _auth: crate::auth::AuthIdentity,
     Path(id): Path<AgentId>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let registry = state.registry.read().await;
-    let entry = registry
-        .get(&id)
-        .ok_or_else(|| ApiError::not_found("agent not found"))?;
-    let rx = entry.agent.events_tx.subscribe();
-    Ok(sse_stream(rx, state.shutdown.clone()))
+    // Subscribe and clone the sender under one lock, then build the SSE stream
+    // after releasing it. The sender outlives this call (held by the agent's
+    // registry entry); the receiver-count transition logged by `sse_stream` is
+    // observed against the same channel the receiver was subscribed to.
+    let (rx, events_tx) = {
+        let registry = state.registry.read().await;
+        let entry = registry
+            .get(&id)
+            .ok_or_else(|| ApiError::not_found("agent not found"))?;
+        let rx = entry.agent.events_tx.subscribe();
+        let events_tx = entry.agent.events_tx.clone();
+        (rx, events_tx)
+    };
+    Ok(sse_stream(id, events_tx, rx, state.shutdown.clone()))
 }
 
 // -- Helpers --

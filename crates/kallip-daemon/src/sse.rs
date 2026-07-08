@@ -1,12 +1,19 @@
+use std::convert::Infallible;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_core::Stream;
+use kallip_common::agentid::AgentId;
 use kallip_common::protocol::SseEvent;
-use std::convert::Infallible;
+use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
-use tracing::warn;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 
-/// A shutdown-aware SSE stream over one agent's broadcast channel.
+/// A shutdown-aware SSE stream over one agent's broadcast channel, with
+/// subscribe/unsubscribe transition logging.
 ///
 /// The stream ends for two reasons:
 /// - the broadcast sender is dropped (all subscribers gone / agent removed), or
@@ -23,11 +30,63 @@ use tracing::warn;
 /// SSE shutdown is a daemon lifecycle concern, not an agent lifecycle one.
 /// (Compare `bridge_task`, which uses the same parent token for its forced-exit
 /// arm for the same reason.)
+///
+/// # Subscriber-state logging
+///
+/// Subscribe/unsubscribe is the source of truth for "are this agent's runtime
+/// events being observed." We log exactly the `0 <-> 1` transitions of
+/// `events_tx.receiver_count()` here — not per runtime event, which would spam
+/// on every token delta for any agent (notably subagents) that runs without a
+/// subscriber. Attach is logged synchronously in this function; detach is logged
+/// from an [`OnDrop`] guard whose closure runs when the stream is dropped.
 pub fn sse_stream(
-    rx: tokio::sync::broadcast::Receiver<SseEvent>,
-    shutdown: tokio_util::sync::CancellationToken,
+    id: AgentId,
+    events_tx: broadcast::Sender<SseEvent>,
+    rx: broadcast::Receiver<SseEvent>,
+    shutdown: CancellationToken,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    Sse::new(event_stream(rx, shutdown)).keep_alive(KeepAlive::default())
+    // 0 -> 1 transition: this subscriber is the first (and, right now, only)
+    // one. `subscribe()` already ran at the call site, so the count includes us.
+    if events_tx.receiver_count() == 1 {
+        info!(id = %id, "SSE subscriber attached");
+    }
+
+    // Detach fires from the `OnDrop` guard's `Drop::drop`, which runs before
+    // any field is dropped — in particular before the inner broadcast receiver,
+    // whose `receiver_count()` decrement is what `should_log_detach` keys off
+    // of. Invariant relied on below: the closure observes the receiver still
+    // counted. Re-verify if `event_stream` is ever wrapped in a combinator with
+    // a custom `Drop` that could drop an inner field early.
+    let detach_id = id.clone();
+    let detach_tx = events_tx.clone();
+    let detach_shutdown = shutdown.clone();
+
+    Sse::new(OnDrop::new(event_stream(rx, shutdown), move || {
+        if should_log_detach(&detach_shutdown, &detach_tx) {
+            info!(id = %detach_id, "SSE subscriber detached");
+        }
+    }))
+    .keep_alive(KeepAlive::default())
+}
+
+/// Whether dropping one subscriber right now should be logged as the
+/// "no one is watching" transition.
+///
+/// - `receiver_count() == 1`: this connection's receiver is still alive in
+///   `Drop::drop` (Rust drops fields after the `Drop::drop` body), so a count of
+///   1 means we are the last — after the drop completes, none remain. With more
+///   than one subscriber, dropping one leaves others watching, so no transition.
+/// - `!shutdown.is_cancelled()`: on daemon-wide shutdown every still-attached
+///   stream ends via `take_until`, which would otherwise emit a misleading
+///   "detached" line per connection (nothing is left to reattach to).
+///
+/// Best-effort: `receiver_count()` is atomic but a concurrent subscribe/detach
+/// can at worst yield one misleading `info`-level line.
+fn should_log_detach(
+    shutdown: &CancellationToken,
+    events_tx: &broadcast::Sender<SseEvent>,
+) -> bool {
+    !shutdown.is_cancelled() && events_tx.receiver_count() == 1
 }
 
 /// Build the shutdown-aware event stream without the SSE/keepalive framing.
@@ -60,10 +119,56 @@ fn event_stream(
     })
 }
 
+/// A stream wrapper that runs a closure exactly once when the stream is dropped.
+///
+/// Used by [`sse_stream`] to detect an SSE subscriber detaching: axum/hyper drop
+/// the SSE response body on client disconnect, which drops this wrapper, firing
+/// the closure. See [`sse_stream`]'s subscriber-state-logging note for why the
+/// closure observes a `receiver_count()` of 1 as "the last subscriber."
+///
+/// The inner stream and the closure are both boxed (`Pin<Box<...>>` /
+/// `Box<dyn ...>`), so the struct is `Unpin` regardless of the inner stream's
+/// `Unpin`-ness — no pin-projection machinery. One allocation per SSE
+/// connection, negligible since connections are rare.
+struct OnDrop {
+    inner: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>,
+    on_drop: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl OnDrop {
+    fn new(
+        inner: impl Stream<Item = Result<Event, Infallible>> + Send + 'static,
+        on_drop: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            on_drop: Some(Box::new(on_drop)),
+        }
+    }
+}
+
+impl Stream for OnDrop {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().inner.as_mut().poll_next(cx)
+    }
+}
+
+impl Drop for OnDrop {
+    fn drop(&mut self) {
+        if let Some(f) = self.on_drop.take() {
+            f();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kallip_common::protocol::SseEvent;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::Duration;
     use tokio_util::sync::CancellationToken;
 
@@ -120,5 +225,47 @@ mod tests {
             .expect("timed out waiting for first event")
             .expect("stream ended before yielding the event");
         assert!(first.is_ok(), "queued event should have been delivered");
+    }
+
+    /// The `OnDrop` guard fires its closure exactly once when the wrapped
+    /// stream is dropped — the mechanism that lets `sse_stream` detect a
+    /// subscriber detaching.
+    #[tokio::test]
+    async fn on_drop_runs_closure_when_stream_dropped() {
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_for_closure = fired.clone();
+
+        // Inner stream type doesn't matter here — the test never polls it, only
+        // asserts the closure runs on drop. Use an empty stream with the Item
+        // type `OnDrop` is pinned to.
+        let stream = futures_util::stream::empty::<Result<Event, Infallible>>();
+        let wrapped = OnDrop::new(stream, move || {
+            fired_for_closure.store(true, Ordering::SeqCst);
+        });
+        drop(wrapped);
+
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "OnDrop closure must run when the wrapped stream is dropped"
+        );
+    }
+
+    /// `should_log_detach` is the precise detach-transition predicate: only when
+    /// this is the last subscriber AND the daemon is not shutting down.
+    #[tokio::test]
+    async fn should_log_detach_only_when_last_subscriber_and_not_shutting_down() {
+        // Single subscriber: last one -> log.
+        let (tx, _rx) = tokio::sync::broadcast::channel::<SseEvent>(4);
+        assert!(should_log_detach(&CancellationToken::new(), &tx));
+
+        // Two subscribers: dropping one leaves another -> no log.
+        let _second = tx.subscribe();
+        assert!(!should_log_detach(&CancellationToken::new(), &tx));
+
+        // Daemon shutting down: suppress even if this is the last subscriber.
+        let (tx2, _rx2) = tokio::sync::broadcast::channel::<SseEvent>(4);
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        assert!(!should_log_detach(&shutdown, &tx2));
     }
 }
