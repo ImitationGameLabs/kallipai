@@ -52,8 +52,9 @@ pub enum ChatLine {
 ///
 /// The transcript is append-mostly: once an entry is rendered at a given width its
 /// lines never change, so we cache them and skip the markdown/syntax-highlight work
-/// on every subsequent frame. Only the streaming tail (an in-place `push_str`) and a
-/// width change invalidate a slot.
+/// on every subsequent frame. Only the streaming tail (an in-place `push_str`), a
+/// width change, or a fold toggle ([`App::toggle_fold`] clears every slot)
+/// invalidate a slot.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedEntry {
     /// Content width (border-excluded) the cache was built at. A mismatch on the
@@ -125,6 +126,10 @@ pub struct App {
     scroll_pos: usize,
     content_length: usize,
     visible_height: usize,
+    /// When true (the default), tool-call args, tool-result bodies, and reasoning
+    /// whose body exceeds the fold threshold collapse to a few preview lines plus a
+    /// "... N more lines" summary; shorter bodies show in full. Ctrl-O toggles it.
+    folded: bool,
     streaming_content: bool,
     streaming_reasoning: bool,
     /// Queued user inputs awaiting send. Consecutive entries submitted while the
@@ -168,6 +173,7 @@ impl App {
             scroll_pos: 0,
             content_length: 0,
             visible_height: 0,
+            folded: true,
             streaming_content: false,
             streaming_reasoning: false,
             auto_scroll: true,
@@ -263,6 +269,15 @@ impl App {
     /// Take the dirty flag (the main loop calls this after a successful draw).
     pub(crate) fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
+    }
+
+    /// Toggle the global fold state for tool/reasoning content. The folded and
+    /// unfolded forms produce different lines and heights, so the render cache is
+    /// dropped to force a full rebuild on the next draw.
+    pub(crate) fn toggle_fold(&mut self) {
+        self.folded = !self.folded;
+        self.render_cache.clear();
+        self.dirty = true;
     }
 }
 

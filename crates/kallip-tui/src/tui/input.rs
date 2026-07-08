@@ -60,6 +60,12 @@ impl App {
             return;
         }
 
+        // Ctrl-O toggles folding of tool/reasoning content.
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.toggle_fold();
+            return;
+        }
+
         // Scroll keys
         match key.code {
             KeyCode::PageUp => {

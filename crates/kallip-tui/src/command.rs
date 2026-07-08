@@ -127,5 +127,10 @@ pub fn help_text() -> String {
             cmd.name, cmd.description, arg_hint
         ));
     }
+    out.push_str("\nKeybindings:\n");
+    out.push_str(&format!(
+        "  {:<12} toggle folding of tool output / reasoning\n",
+        "Ctrl-O"
+    ));
     out
 }

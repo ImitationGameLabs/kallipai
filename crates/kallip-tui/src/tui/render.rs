@@ -22,12 +22,18 @@ const MAX_TOOL_KEY_WIDTH: usize = 24;
 /// Tool-result boolean flags that are noise when `false` but worth flagging in red
 /// when `true`.
 const TOOL_ALERT_KEYS: &[&str] = &["timed_out", "truncated"];
-/// Header-bar background for a tool call. Blue reads as an action/information tint
-/// and stays clear of yellow (warning) and the other reserved accents (cyan result,
+/// Number of body lines a folded entry shows before its "... N more lines" summary.
+const FOLD_PREVIEW_LINES: usize = 3;
+/// An entry is folded only when its body exceeds this many lines. At or below the
+/// threshold the body is shown in full even in fold mode (folding 4 lines into 3
+/// plus a summary saves nothing).
+const FOLD_THRESHOLD: usize = 4;
+/// Header foreground for a tool call. Blue reads as an action/information tint and
+/// stays clear of yellow (warning) and the other reserved accents (cyan result,
 /// magenta reasoning, red error, green user).
-const TOOL_HEADER_BG: Color = Color::Blue;
-/// Header-bar background for a tool result.
-const RESULT_HEADER_BG: Color = Color::Cyan;
+const TOOL_HEADER_FG: Color = Color::Blue;
+/// Header foreground for a tool result.
+const RESULT_HEADER_FG: Color = Color::Cyan;
 
 impl App {
     /// Render the TUI.
@@ -45,7 +51,7 @@ impl App {
         let auto_scroll = self.auto_scroll;
         let old_pos = self.scroll_pos;
 
-        let (text, total, header_marks) = self.build_chat_text(chat_area.width);
+        let (text, total) = self.build_chat_text(chat_area.width);
 
         let visible_height = chat_area.height.saturating_sub(2) as usize;
 
@@ -60,28 +66,6 @@ impl App {
             .wrap(Wrap { trim: true })
             .scroll((pos as u16, 0));
         frame.render_widget(paragraph, chat_area);
-
-        // Paint tool call/result header bars. The Paragraph has already drawn the
-        // header labels; this merges a background color across each header's row
-        // (inside the border) so it reads as a solid bar. `set_style` only writes
-        // the bg, leaving the label's symbol and fg intact. Only visible rows are
-        // painted.
-        let inner = chat_area.inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        });
-        for &(row, bg) in &header_marks {
-            let dy = row as i64 - pos as i64;
-            if (0..inner.height as i64).contains(&dy) {
-                let bar = Rect {
-                    x: inner.x,
-                    y: inner.y + dy as u16,
-                    width: inner.width,
-                    height: 1,
-                };
-                frame.buffer_mut().set_style(bar, Style::default().bg(bg));
-            }
-        }
 
         // Scrollbar, only when content overflows viewport.
         let scroll_range = total.saturating_sub(visible_height);
@@ -288,39 +272,26 @@ impl App {
 
     /// Build the styled chat transcript, memoizing each entry's render output.
     ///
-    /// Returns the assembled `Text`, the total wrapped row count, and the
-    /// `(row, bg)` marks for each tool call/result header bar (consumed by the
-    /// post-pass in [`render_chat`](Self::render_chat)). On a cache hit (an entry
-    /// previously rendered at this width) the markdown/highlight work is skipped
+    /// Returns the assembled `Text` and the total wrapped row count. On a cache hit
+    /// (an entry previously rendered at this width) the markdown/highlight work is skipped
     /// entirely; only the streaming tail and width-changed entries re-render.
     /// `total` comes from cached per-entry row counts, so the old
     /// whole-transcript `word_wrap_line_count` pass is gone.
-    fn build_chat_text(&mut self, area_width: u16) -> (Text<'static>, usize, Vec<(usize, Color)>) {
+    fn build_chat_text(&mut self, area_width: u16) -> (Text<'static>, usize) {
         let content_width = area_width.saturating_sub(2);
+        let folded = self.folded;
         self.render_cache.resize(self.chat_lines.len(), None);
 
         let mut out: Vec<Line<'static>> = Vec::new();
         let mut total = 0usize;
-        let mut header_marks: Vec<(usize, Color)> = Vec::new();
         for (i, entry) in self.chat_lines.iter().enumerate() {
-            // The header bar (if any) is the entry's first visual row, which sits
-            // at the current cumulative height — record it before adding the entry.
-            let header_bg = match entry {
-                ChatLine::ToolCall { .. } => Some(TOOL_HEADER_BG),
-                ChatLine::ToolResult(_) => Some(RESULT_HEADER_BG),
-                _ => None,
-            };
-            if let Some(bg) = header_bg {
-                header_marks.push((total, bg));
-            }
-
             if let Some(cached) = self.render_cache[i].as_ref()
                 && cached.width == content_width
             {
                 total += cached.wrapped_height;
                 out.extend(cached.lines.iter().cloned());
             } else {
-                let lines = render_one_entry(entry, area_width);
+                let lines = render_one_entry(entry, area_width, folded);
                 let wrapped_height =
                     word_wrap_line_count(&Text::from(lines.clone()), content_width as usize);
                 total += wrapped_height;
@@ -334,7 +305,7 @@ impl App {
             }
         }
 
-        (Text::from(out), total, header_marks)
+        (Text::from(out), total)
     }
 
     fn render_quit_popup(&self, frame: &mut Frame, input_area: Rect) {
@@ -365,12 +336,14 @@ impl App {
 
 /// Render a single transcript entry into styled, unwrapped `Line`s.
 ///
-/// Called only on a render-cache miss ([`App::build_chat_text`]); the result is
-/// memoized per width. Word-wrapping of over-long lines is left to ratatui at
-/// draw time. `area_width` is the border-inclusive width (markdown/table layout
-/// subtracts its own border).
-fn render_one_entry(entry: &ChatLine, area_width: u16) -> Vec<Line<'static>> {
+/// In production this is called only on a render-cache miss by
+/// [`App::build_chat_text`], which memoizes the result per width; the tests also call
+/// it directly. Word-wrapping of over-long lines is left to ratatui at draw time.
+/// `area_width` is the border-inclusive width (markdown/table layout subtracts its own
+/// border).
+fn render_one_entry(entry: &ChatLine, area_width: u16, folded: bool) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let content_width = area_width.saturating_sub(2) as usize;
     match entry {
         ChatLine::User(text) => {
             for (i, line) in text.lines().enumerate() {
@@ -385,35 +358,45 @@ fn render_one_entry(entry: &ChatLine, area_width: u16) -> Vec<Line<'static>> {
             lines.extend(super::markdown::render_markdown(text, area_width));
         }
         ChatLine::ToolCall { name, args } => {
-            // Header bar background is painted by the post-pass in `render_chat`
-            // (the row mark is returned from `build_chat_text`); the label itself
-            // just needs a readable fg on that bg. Cap the label to one row so the
-            // background bar never splits across wrapped lines.
-            let label = cap_chars(
-                &format!("\u{258C}tool \u{00B7} {name}"),
-                area_width.saturating_sub(2) as usize,
-            );
-            lines.push(Line::styled(label, Style::default().fg(Color::Black)));
-            lines.extend(format_tool_args(args, MAX_TOOL_ARG_LINES));
+            // Bold colored header (no background fill) so the entry stands out
+            // without the noisy row-band alternation a bg bar would add. The label
+            // is capped to one row so it never wraps.
+            let label = cap_chars(&format!("\u{258C}tool \u{00B7} {name}"), content_width);
+            lines.push(Line::styled(
+                label,
+                Style::default()
+                    .fg(TOOL_HEADER_FG)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            let body = format_tool_args(args, MAX_TOOL_ARG_LINES);
+            lines.extend(fold_body(body, folded, content_width));
         }
         ChatLine::ToolResult(result) => {
             // Header label is derived from the envelope (tool_name + status) and
-            // capped to one row so the background bar never splits across lines.
+            // capped to one row. Bold colored, no background fill.
             let label = tool_result_header_label(result);
-            let header = cap_chars(&label, area_width.saturating_sub(2) as usize);
-            lines.push(Line::styled(header, Style::default().fg(Color::Black)));
-            if result.trim().is_empty() {
-                lines.push(Line::from(Span::raw("  (empty)").dim()));
+            let header = cap_chars(&label, content_width);
+            lines.push(Line::styled(
+                header,
+                Style::default()
+                    .fg(RESULT_HEADER_FG)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            let body = if result.trim().is_empty() {
+                vec![Line::from(Span::raw("  (empty)").dim())]
             } else {
-                lines.extend(format_tool_result(result, MAX_TOOL_RESULT_LINES));
-            }
+                format_tool_result(result, MAX_TOOL_RESULT_LINES)
+            };
+            lines.extend(fold_body(body, folded, content_width));
         }
         ChatLine::Reasoning(text) => {
-            lines.extend(prefixed_lines(
-                "[think] ",
-                text,
-                Style::default().dim().italic(),
-            ));
+            let mut body = prefixed_lines("[think] ", text, Style::default().dim().italic());
+            // Empty/blank reasoning produces no body lines; keep a marker so the entry
+            // is not invisible (it carries no header bar of its own).
+            if body.is_empty() {
+                body.push(Line::styled("[think]", Style::default().dim().italic()));
+            }
+            lines.extend(fold_body(body, folded, content_width));
         }
         ChatLine::Status(msg) => {
             lines.extend(styled_lines(msg, Style::default().dim().italic()));
@@ -771,6 +754,63 @@ fn styled_lines(text: &str, style: Style) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Collapse `body` for fold mode.
+///
+/// When `folded` is false, or the body is at or below [`FOLD_THRESHOLD`] lines, the
+/// body is returned unchanged — folding 4 lines into 3 plus a summary saves nothing,
+/// so short bodies are always shown in full. When folded past the threshold, only the
+/// first [`FOLD_PREVIEW_LINES`] lines are kept (each truncated to roughly one row via
+/// [`cap_line_to_width`]) and a dim "... N more lines (Ctrl-O to expand)" summary is
+/// appended, where N is the number of hidden body lines.
+fn fold_body(body: Vec<Line<'static>>, folded: bool, content_width: usize) -> Vec<Line<'static>> {
+    if !folded || body.len() <= FOLD_THRESHOLD {
+        return body;
+    }
+    let hidden = body.len() - FOLD_PREVIEW_LINES;
+    // -3 reserves room for the "..." suffix `cap_line_to_width` appends so a capped
+    // preview line stays on one row. `cap_line_to_width` no-ops on a degenerate
+    // (sub-3-column) terminal where this saturates to 0.
+    let cap = content_width.saturating_sub(3);
+    let mut out: Vec<Line<'static>> = body
+        .into_iter()
+        .take(FOLD_PREVIEW_LINES)
+        .map(|l| cap_line_to_width(l, cap))
+        .collect();
+    // This summary only appears on entries that are actually collapsed, so it is the
+    // right place to advertise the expand key.
+    out.push(Line::from(format!("  ... {hidden} more lines (Ctrl-O to expand)")).dim());
+    out
+}
+
+/// Truncate a `Line` to at most `max` characters, appending "..." when cut. Walks the
+/// spans rather than flattening to a string so each span keeps its style. Uses char
+/// count as an approximation of display width, consistent with `cap_chars`. `max == 0`
+/// (a sub-3-column terminal) yields an empty line rather than a 3-char "..." that would
+/// itself overflow.
+fn cap_line_to_width(line: Line<'static>, max: usize) -> Line<'static> {
+    if max == 0 {
+        return Line::default();
+    }
+    let mut used = 0usize;
+    let mut out: Vec<Span<'static>> = Vec::new();
+    for span in line.spans {
+        let n = span.content.chars().count();
+        if used + n <= max {
+            used += n;
+            out.push(span);
+            continue;
+        }
+        let take = max.saturating_sub(used);
+        if take > 0 {
+            let truncated: String = span.content.chars().take(take).collect();
+            out.push(Span::styled(truncated, span.style));
+        }
+        out.push(Span::raw("..."));
+        return Line::from(out);
+    }
+    Line::from(out)
+}
+
 /// One `Line` per source line of `text`; the first carries `prefix`, subsequent
 /// lines carry a blank indent of `prefix.chars().count()` spaces so they align under
 /// the first line's text. All spans share `style`. Empty text yields no lines.
@@ -792,20 +832,22 @@ fn prefixed_lines(prefix: &str, text: &str, style: Style) -> Vec<Line<'static>> 
 #[cfg(test)]
 mod tests {
     use ratatui::style::Style;
-    use ratatui::text::Line;
+    use ratatui::text::{Line, Span};
 
     use super::TOOL_ALERT_KEYS;
     use super::bound_with_hint;
     use super::cap_chars;
+    use super::cap_line_to_width;
     use super::format_json_pretty_lines;
     use super::format_kv_lines;
     use super::format_tool_args;
     use super::format_tool_result;
     use super::more_lines_hint;
     use super::prefixed_lines;
+    use super::render_one_entry;
     use super::styled_lines;
     use super::tool_result_header_label;
-    use super::{MAX_TOOL_ARG_LINES, MAX_TOOL_LINE_CHARS, TOOL_HEADER_BG};
+    use super::{MAX_TOOL_ARG_LINES, MAX_TOOL_LINE_CHARS};
     use crate::tui::{App, ChatLine};
 
     fn app_with(lines: Vec<ChatLine>) -> App {
@@ -817,6 +859,38 @@ mod tests {
     /// Flatten a `Line`'s spans into their concatenated text.
     fn line_text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn cap_line_to_width_preserves_style_and_truncates() {
+        // Two styled spans; the cut falls inside the second span. The kept prefix of
+        // the second span must keep its original style, and "..." is appended.
+        let line = Line::from(vec![
+            Span::raw("hello "),
+            Span::styled("world!".to_owned(), Style::default().bold()),
+        ]);
+        let out = cap_line_to_width(line, 9);
+        assert_eq!(line_text(&out), "hello wor...");
+        // The truncated second span keeps bold; the "..." marker is a raw (unstyled) span.
+        assert_eq!(out.spans.len(), 3);
+        assert!(out.spans[1].style.add_modifier == ratatui::style::Modifier::BOLD);
+    }
+
+    #[test]
+    fn cap_line_to_width_unchanged_when_fit() {
+        let line = Line::from(vec![Span::raw("abc"), Span::raw("def")]);
+        let out = cap_line_to_width(line, 10);
+        assert_eq!(line_text(&out), "abcdef");
+        assert_eq!(out.spans.len(), 2);
+    }
+
+    #[test]
+    fn cap_line_to_width_zero_max_is_empty() {
+        // A degenerate sub-3-column terminal must not emit a 3-char "..." that would
+        // itself overflow.
+        let line = Line::from(vec![Span::raw("hello")]);
+        let out = cap_line_to_width(line, 0);
+        assert!(out.spans.is_empty());
     }
 
     #[test]
@@ -870,9 +944,9 @@ mod tests {
     #[test]
     fn cache_hit_skips_rerender() {
         let mut app = app_with(vec![ChatLine::Assistant("# hi\n\ntext".into())]);
-        let (text_a, total_a, _) = app.build_chat_text(80);
+        let (text_a, total_a) = app.build_chat_text(80);
         assert!(app.render_cache[0].is_some(), "first build populates cache");
-        let (text_b, total_b, _) = app.build_chat_text(80);
+        let (text_b, total_b) = app.build_chat_text(80);
         assert_eq!(total_a, total_b);
         assert_eq!(text_a.lines.len(), text_b.lines.len());
         assert_eq!(app.render_cache[0].as_ref().unwrap().width, 78);
@@ -1131,24 +1205,6 @@ mod tests {
     }
 
     #[test]
-    fn header_marks_track_tool_rows() {
-        let mut app = app_with(vec![
-            ChatLine::Assistant("hello\nworld".into()),
-            ChatLine::ToolCall {
-                name: "ls".into(),
-                args: "{}".into(),
-            },
-        ]);
-        let (_, _, header_marks) = app.build_chat_text(80);
-        assert_eq!(header_marks.len(), 1);
-        let (row, bg) = header_marks[0];
-        assert_eq!(bg, TOOL_HEADER_BG);
-        // The header sits at the cumulative wrapped height of prior entries.
-        let prior = app.render_cache[0].as_ref().unwrap().wrapped_height;
-        assert_eq!(row, prior);
-    }
-
-    #[test]
     fn cap_chars_hard_truncates() {
         assert_eq!(cap_chars("abc", 5), "abc");
         assert_eq!(cap_chars("abcdef", 3), "abc");
@@ -1164,5 +1220,193 @@ mod tests {
         // Both key spans occupy the same column width.
         let key_widths: Vec<usize> = lines.iter().map(|l| l.spans[1].content.len()).collect();
         assert_eq!(key_widths[0], key_widths[1]);
+    }
+
+    #[test]
+    fn render_one_entry_toolcall_folded() {
+        let entry = ChatLine::ToolCall {
+            name: "ls".into(),
+            args: r#"{"path":"/x"}"#.into(),
+        };
+        let folded = render_one_entry(&entry, 80, true);
+        let unfolded = render_one_entry(&entry, 80, false);
+        // Folded = header + one-line preview of the first arg; no expand hint.
+        assert_eq!(folded.len(), 2, "header + preview");
+        let preview = line_text(&folded[1]);
+        assert!(preview.contains("path") && preview.contains("/x"));
+        assert!(!preview.contains("Ctrl-O"));
+        // Unfolded shows the same arg in its full key/value body.
+        let unfolded_joined: Vec<String> = unfolded.iter().map(line_text).collect();
+        assert!(unfolded_joined.iter().any(|s| s.contains("/x")));
+    }
+
+    #[test]
+    fn render_one_entry_toolcall_folded_caps_and_summarizes() {
+        // 5 key/value pairs (body > threshold): folded shows the first 3, capping any
+        // long single-line value to one row, and a "... N more lines" summary.
+        let entry = ChatLine::ToolCall {
+            name: "bash_exec".into(),
+            args: format!(
+                r#"{{"a":"{}","b":"2","c":"3","d":"4","e":"5"}}"#,
+                "x".repeat(100)
+            ),
+        };
+        let folded = render_one_entry(&entry, 40, true);
+        // header + 3 preview lines + 1 summary.
+        assert_eq!(folded.len(), 5);
+        // The long first value is capped so its preview stays on one row.
+        let first_preview = line_text(&folded[1]);
+        assert!(
+            first_preview.chars().count() <= 40,
+            "capped to one row: {first_preview}"
+        );
+        assert!(first_preview.ends_with("..."));
+        // The summary reports the two hidden body lines (d, e) and advertises the
+        // expand key.
+        let summary = line_text(folded.last().unwrap());
+        assert!(summary.contains("2 more lines"));
+        assert!(summary.contains("Ctrl-O"));
+    }
+
+    #[test]
+    fn render_one_entry_toolcall_empty_args_header_only() {
+        // Empty-object args yield no body; folded shows just the header.
+        let entry = ChatLine::ToolCall {
+            name: "ls".into(),
+            args: "{}".into(),
+        };
+        let folded = render_one_entry(&entry, 80, true);
+        assert_eq!(folded.len(), 1, "header only, empty body");
+    }
+
+    #[test]
+    fn render_one_entry_toolresult_folded_error_preview() {
+        let result = r#"{"ok":false,"tool_name":"bash_exec","error":"command not found"}"#;
+        let entry = ChatLine::ToolResult(result.into());
+        let folded = render_one_entry(&entry, 80, true);
+        // Single-line error body is at/below the threshold: shown in full.
+        let joined: Vec<String> = folded.iter().map(line_text).collect();
+        assert!(
+            joined.iter().any(|s| s.contains("command not found")),
+            "error message is shown"
+        );
+    }
+
+    #[test]
+    fn render_one_entry_toolresult_folded_pending_preview() {
+        // A pending-approval envelope has no `result`; its few fields stay below the
+        // threshold and render in full rather than collapsing.
+        let result = r#"{"ok":true,"pending_approval":true,"tool_name":"bash_exec","id":"ap_123","next_steps":"approve to proceed"}"#;
+        let entry = ChatLine::ToolResult(result.into());
+        let folded = render_one_entry(&entry, 80, true);
+        assert_eq!(folded.len(), 4, "header + 3 body lines, under threshold");
+        let joined: Vec<String> = folded.iter().map(line_text).collect();
+        assert!(
+            joined
+                .iter()
+                .any(|s| s.contains("ap_123") || s.contains("approve"))
+        );
+    }
+
+    #[test]
+    fn render_one_entry_toolresult_folded_four_body_lines_shown() {
+        // stdout of 3 content lines -> body is "stdout:" + 3 = 4 lines, exactly the
+        // threshold: shown in full, no summary (the user's "4 lines: just show them").
+        let envelope = serde_json::json!({
+            "ok": true,
+            "tool_name": "bash_exec",
+            "result": { "stdout": "a\nb\nc" }
+        });
+        let entry = ChatLine::ToolResult(envelope.to_string());
+        let folded = render_one_entry(&entry, 80, true);
+        assert_eq!(folded.len(), 5, "header + 4 body lines, no summary");
+        let joined: Vec<String> = folded.iter().map(line_text).collect();
+        assert!(joined.iter().any(|s| s.contains("stdout:")));
+        assert!(joined.iter().any(|s| s.ends_with('a')));
+        assert!(joined.iter().any(|s| s.ends_with('c')));
+        assert!(!joined.iter().any(|s| s.contains("more lines")));
+    }
+
+    #[test]
+    fn render_one_entry_toolresult_folded_previews_three_lines() {
+        // stdout with 5 content lines -> body of 6 lines folds to 3 preview + summary.
+        let envelope = serde_json::json!({
+            "ok": true,
+            "tool_name": "bash_exec",
+            "result": { "stdout": "line one\nline two\nline three\nline four\nline five" }
+        });
+        let entry = ChatLine::ToolResult(envelope.to_string());
+        let folded = render_one_entry(&entry, 80, true);
+        // header + "stdout:" + first 2 content lines + summary.
+        assert_eq!(folded.len(), 5, "header + 3 preview + summary");
+        let joined: Vec<String> = folded.iter().map(line_text).collect();
+        assert!(joined.iter().any(|s| s.contains("stdout:")));
+        assert!(joined.iter().any(|s| s.contains("line one")));
+        assert!(joined.iter().any(|s| s.contains("line two")));
+        assert!(!joined.iter().any(|s| s.contains("line three")));
+        assert!(!joined.iter().any(|s| s.contains("line four")));
+        assert!(!joined.iter().any(|s| s.contains("line five")));
+        let summary = line_text(folded.last().unwrap());
+        assert!(summary.contains("3 more lines"));
+        assert!(summary.contains("Ctrl-O"));
+    }
+
+    #[test]
+    fn render_one_entry_reasoning_folded_four_lines_shown() {
+        // 4 lines is exactly the threshold: shown in full, no summary.
+        let entry = ChatLine::Reasoning("step one\nstep two\nstep three\nstep four".into());
+        let folded = render_one_entry(&entry, 80, true);
+        let unfolded = render_one_entry(&entry, 80, false);
+        assert_eq!(folded.len(), 4, "4 lines shown in full");
+        let joined: Vec<String> = folded.iter().map(line_text).collect();
+        assert!(joined.iter().any(|s| s.contains("step one")));
+        assert!(joined.iter().any(|s| s.contains("step four")));
+        assert!(!joined.iter().any(|s| s.contains("more lines")));
+        assert!(!joined.iter().any(|s| s.contains("Ctrl-O")));
+        assert_eq!(unfolded.len(), 4, "splits on newline when unfolded");
+    }
+
+    #[test]
+    fn render_one_entry_reasoning_folded_five_lines_summarizes() {
+        // 5 lines (past the threshold) folds to 3 preview + a 2-more summary.
+        let entry = ChatLine::Reasoning("s1\ns2\ns3\ns4\ns5".into());
+        let folded = render_one_entry(&entry, 80, true);
+        assert_eq!(folded.len(), 4, "3 preview + summary");
+        let joined: Vec<String> = folded.iter().map(line_text).collect();
+        assert!(joined.iter().any(|s| s.contains("s1")));
+        assert!(joined.iter().any(|s| s.contains("s3")));
+        assert!(!joined.iter().any(|s| s.contains("s4")));
+        assert!(!joined.iter().any(|s| s.contains("s5")));
+        let summary = line_text(folded.last().unwrap());
+        assert!(summary.contains("2 more lines"));
+    }
+
+    #[test]
+    fn render_one_entry_assistant_not_folded() {
+        // Assistant content is never foldable; folded flag is a no-op.
+        let entry = ChatLine::Assistant("hello".into());
+        assert_eq!(
+            render_one_entry(&entry, 80, true).len(),
+            render_one_entry(&entry, 80, false).len()
+        );
+    }
+
+    #[test]
+    fn toggle_fold_flips_state_and_clears_cache() {
+        let mut app = app_with(vec![ChatLine::Assistant("x".into())]);
+        // Populate the cache so we can observe the clear.
+        let _ = app.build_chat_text(80);
+        assert!(!app.render_cache.is_empty());
+        assert!(app.folded);
+
+        app.toggle_fold();
+        assert!(!app.folded);
+        assert!(app.render_cache.is_empty());
+        assert!(app.take_dirty(), "toggle marks the screen dirty");
+
+        // A second toggle restores the default and re-clears.
+        app.toggle_fold();
+        assert!(app.folded);
+        assert!(app.render_cache.is_empty());
     }
 }
