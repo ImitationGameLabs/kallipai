@@ -69,7 +69,10 @@ impl App {
             }
             KeyCode::PageDown => {
                 self.scroll_pos = self.scroll_pos.saturating_add(10);
-                self.auto_scroll = false;
+                // Re-engage auto-follow when scrolled to (or past) the tail, so
+                // keyboard paging matches the old mouse-wheel behavior.
+                let max_pos = self.content_length.saturating_sub(self.visible_height);
+                self.auto_scroll = self.scroll_pos >= max_pos;
                 return;
             }
             _ => {}
@@ -328,7 +331,7 @@ impl App {
                 self.quit_confirm = true;
             }
             SlashCommand::Clear => {
-                self.chat_lines.clear();
+                self.clear_chat();
                 // Drop any queued input and pending state along with the view;
                 // otherwise a queued message would surface into the cleared chat.
                 self.pending.clear();

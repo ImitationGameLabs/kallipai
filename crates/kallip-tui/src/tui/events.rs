@@ -1,5 +1,3 @@
-use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
-
 use kallip_common::protocol::SseEvent;
 use kallip_common::tokens::format_tokens_m;
 
@@ -37,20 +35,12 @@ impl App {
             }
             SseEvent::AssistantContentDelta { delta } => {
                 self.streaming_content = true;
-                if let Some(ChatLine::Assistant(existing)) = self.chat_lines.last_mut() {
-                    existing.push_str(&delta);
-                } else {
-                    self.chat_lines.push(ChatLine::Assistant(delta));
-                }
+                self.append_streaming_delta(true, &delta);
                 self.auto_scroll = true;
             }
             SseEvent::ReasoningDelta { delta } => {
                 self.streaming_reasoning = true;
-                if let Some(ChatLine::Reasoning(existing)) = self.chat_lines.last_mut() {
-                    existing.push_str(&delta);
-                } else {
-                    self.chat_lines.push(ChatLine::Reasoning(delta));
-                }
+                self.append_streaming_delta(false, &delta);
                 self.auto_scroll = true;
             }
             SseEvent::ToolCall { name, args } => {
@@ -163,25 +153,6 @@ impl App {
         // `request_flush` no-ops when nothing is pending or the outbox is busy.
         if is_boundary {
             self.request_flush();
-        }
-    }
-
-    /// Handle a mouse scroll event in the chat area.
-    pub fn handle_mouse_event(&mut self, event: MouseEvent, _chat_area_height: u16) {
-        match event.kind {
-            MouseEventKind::ScrollUp => {
-                self.scroll_pos = self.scroll_pos.saturating_sub(3);
-                self.auto_scroll = false;
-            }
-            MouseEventKind::ScrollDown => {
-                self.scroll_pos = self.scroll_pos.saturating_add(3);
-                // Re-enable auto_scroll if scrolled to bottom
-                let max_pos = self.content_length.saturating_sub(self.visible_height);
-                if self.scroll_pos >= max_pos {
-                    self.auto_scroll = true;
-                }
-            }
-            _ => {}
         }
     }
 }

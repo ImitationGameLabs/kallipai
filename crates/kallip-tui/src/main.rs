@@ -130,27 +130,27 @@ async fn run_tui(session: Session) -> Result<()> {
     ratatui::try_init()?;
     let mut terminal = ratatui::init();
 
-    // Chain a panic hook so a panic pops the keyboard enhancement flags and
-    // disables mouse capture before ratatui's own hook restores the terminal.
-    // Without this, a panic would leak the Kitty keyboard-protocol mode into the
-    // user's shell, corrupting key reporting for subsequent programs until reset.
+    // Chain a panic hook so a panic pops the keyboard enhancement flags before
+    // ratatui's own hook restores the terminal. Without this, a panic would leak
+    // the Kitty keyboard-protocol mode into the user's shell, corrupting key
+    // reporting for subsequent programs until reset.
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = ratatui::crossterm::execute!(
             std::io::stdout(),
             ratatui::crossterm::event::PopKeyboardEnhancementFlags,
-            ratatui::crossterm::event::DisableMouseCapture,
         );
         previous_hook(info);
     }));
 
-    ratatui::crossterm::execute!(
-        std::io::stdout(),
-        ratatui::crossterm::event::EnableMouseCapture
-    )?;
     // Request modifier-augmented key reporting so Shift+Enter (and other modified
     // keys) arrive as distinct events. Required for Shift+Enter to insert a newline
     // instead of submitting. Ignored (no-op) on terminals that lack the protocol.
+    //
+    // Mouse capture is intentionally NOT enabled: capturing the mouse (even only
+    // for wheel scrolling) also intercepts click-drag, which blocks the terminal's
+    // native text selection/copy. Keyboard scrolling (PageUp/PageDown) covers
+    // navigation instead.
     ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::event::PushKeyboardEnhancementFlags(
@@ -164,26 +164,37 @@ async fn run_tui(session: Session) -> Result<()> {
     let mut stream_end: Option<session::StreamEnd> = None;
 
     loop {
-        terminal.draw(|frame| app.render(frame))?;
+        // Event-driven redraw: draw only when a handler signaled a change. With no
+        // tick, idle CPU stays at zero; the only periodic work is the SSE stream
+        // itself. `Event::Resize` is handled below so a resize still redraws.
+        if app.take_dirty() {
+            terminal.draw(|frame| app.render(frame))?;
+        }
 
         tokio::select! {
             Some(event) = key_rx.recv() => {
                 match event {
                     ratatui::crossterm::event::Event::Key(key) => {
                         app.handle_key_event(key, &session.client, &session.agent_id).await;
+                        app.mark_dirty();
                         if app.should_quit {
                             break;
                         }
                     }
-                    ratatui::crossterm::event::Event::Mouse(mouse) => {
-                        let chat_height = terminal.get_frame().area().height.saturating_sub(7);
-                        app.handle_mouse_event(mouse, chat_height);
+                    // crossterm multiplexes Resize through the same event channel;
+                    // without the old 30Hz tick this is the only resize signal, so
+                    // it must trigger a redraw.
+                    ratatui::crossterm::event::Event::Resize(..) => {
+                        app.mark_dirty();
                     }
                     _ => {}
                 }
             }
             event = event_stream.next() => match event {
-                Some(Ok(event)) => app.handle_sse_event(event),
+                Some(Ok(event)) => {
+                    app.handle_sse_event(event);
+                    app.mark_dirty();
+                }
                 None => {
                     stream_end = Some(session::StreamEnd::Graceful);
                     break;
@@ -201,12 +212,13 @@ async fn run_tui(session: Session) -> Result<()> {
                     if app.pending.is_empty() {
                         app.pending_send_failed = false;
                     }
+                    app.mark_dirty();
                 }
                 SendOutcome::Failed { outgoing, error } => {
                     app.requeue_send(outgoing, error);
+                    app.mark_dirty();
                 }
             },
-            _ = tokio::time::sleep(std::time::Duration::from_millis(33)) => {}
         }
 
         // Drain any prompt handed off by a flush. The main loop owns delivery so
@@ -223,6 +235,7 @@ async fn run_tui(session: Session) -> Result<()> {
             let display = outgoing.display.clone();
             app.chat_lines.push(tui::ChatLine::User(display));
             app.auto_scroll = true;
+            app.mark_dirty();
             match action_tx.try_send(Action::SendPrompt(outgoing)) {
                 Ok(()) => {}
                 Err(err) => {
@@ -239,14 +252,13 @@ async fn run_tui(session: Session) -> Result<()> {
         }
     }
 
-    // Pop enhancement flags and disable mouse capture while still in the alternate
-    // screen, before `ratatui::restore()` leaves it. On non-Kitty terminals the pop
-    // writes an escape that only the alt buffer discards; leaving the screen first
-    // would leak it to the user's shell.
+    // Pop enhancement flags while still in the alternate screen, before
+    // `ratatui::restore()` leaves it. On non-Kitty terminals the pop writes an
+    // escape that only the alt buffer discards; leaving the screen first would
+    // leak it to the user's shell.
     ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::event::PopKeyboardEnhancementFlags,
-        ratatui::crossterm::event::DisableMouseCapture,
     )
     .ok();
     ratatui::restore();

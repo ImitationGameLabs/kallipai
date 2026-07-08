@@ -10,6 +10,7 @@ mod wrap;
 pub(crate) use prompt::{Outgoing, prepare_outgoing};
 
 use kallip_common::protocol::ApprovalEntry;
+use ratatui::text::Line;
 use ratatui_textarea::{TextArea, WrapMode};
 
 use completion::CompletionState;
@@ -45,6 +46,25 @@ pub enum ChatLine {
         reason: String,
         detail: String,
     },
+}
+
+/// Memoized render output for one [`ChatLine`], index-parallel to `chat_lines`.
+///
+/// The transcript is append-mostly: once an entry is rendered at a given width its
+/// lines never change, so we cache them and skip the markdown/syntax-highlight work
+/// on every subsequent frame. Only the streaming tail (an in-place `push_str`) and a
+/// width change invalidate a slot.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedEntry {
+    /// Content width (border-excluded) the cache was built at. A mismatch on the
+    /// next build triggers a re-render of just this entry.
+    pub width: u16,
+    /// Styled, unwrapped lines. Word-wrapping is left to ratatui at draw time; the
+    /// resulting row count is cached as `wrapped_height`.
+    pub lines: Vec<Line<'static>>,
+    /// Visual row count after word-wrap at `width`. Cached so the aggregate scroll
+    /// math is O(entries) instead of re-wrapping the whole transcript per frame.
+    pub wrapped_height: usize,
 }
 
 /// Active TUI view.
@@ -86,6 +106,12 @@ impl ApprovalsState {
 /// TUI application state.
 pub struct App {
     pub chat_lines: Vec<ChatLine>,
+    /// Per-entry memoized render output, kept index-parallel to `chat_lines` by a
+    /// `resize` at the top of `build_chat_text`. `None` slots render lazily.
+    render_cache: Vec<Option<CachedEntry>>,
+    /// Set by any state-changing handler; the main loop draws only when true and
+    /// clears it after. Replaces the old unconditional 30Hz redraw.
+    dirty: bool,
     pub textarea: TextArea<'static>,
     pub auto_scroll: bool,
     pub agent_busy: bool,
@@ -136,6 +162,8 @@ impl App {
         textarea.set_cursor_line_style(ratatui::style::Style::default());
         Self {
             chat_lines: Vec::new(),
+            render_cache: Vec::new(),
+            dirty: true,
             textarea,
             scroll_pos: 0,
             content_length: 0,
@@ -187,6 +215,54 @@ impl App {
         self.chat_lines
             .push(ChatLine::Error(format!("send failed, will retry: {error}")));
         self.auto_scroll = true;
+    }
+
+    /// Append a streaming delta to the last entry when it matches the requested
+    /// variant, otherwise push a fresh entry. This is the only in-place mutation
+    /// of an existing transcript entry, so it owns invalidating that entry's render
+    /// cache. A fresh push leaves the new slot to be sized `None` lazily by
+    /// `build_chat_text`, so nothing to invalidate on that path.
+    pub(crate) fn append_streaming_delta(&mut self, assistant: bool, delta: &str) {
+        let appended_to_existing = match self.chat_lines.last_mut() {
+            Some(ChatLine::Assistant(existing)) if assistant => {
+                existing.push_str(delta);
+                true
+            }
+            Some(ChatLine::Reasoning(existing)) if !assistant => {
+                existing.push_str(delta);
+                true
+            }
+            _ => false,
+        };
+        if appended_to_existing {
+            if let Some(slot) = self.render_cache.last_mut() {
+                *slot = None;
+            }
+        } else {
+            let line = if assistant {
+                ChatLine::Assistant(delta.to_owned())
+            } else {
+                ChatLine::Reasoning(delta.to_owned())
+            };
+            self.chat_lines.push(line);
+        }
+    }
+
+    /// Clear the transcript and its render cache together so the two never drift.
+    pub(crate) fn clear_chat(&mut self) {
+        self.chat_lines.clear();
+        self.render_cache.clear();
+    }
+
+    /// Mark the screen as needing a redraw. Called by every state-changing handler;
+    /// the main loop checks `dirty` before drawing.
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Take the dirty flag (the main loop calls this after a successful draw).
+    pub(crate) fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
     }
 }
 
