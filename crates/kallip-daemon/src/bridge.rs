@@ -69,20 +69,25 @@ pub async fn bridge_task(
                     other => {
                         match &other {
                             AgentEvent::Busy => state.store(AgentState::BUSY, Ordering::Relaxed),
+                            AgentEvent::Error(msg) => {
+                                // Fatal LLM/runtime error. `warn!` (not `error!`):
+                                // the task stays alive — only the round ended. This
+                                // log is also the sole observability channel for a
+                                // headless/subagent run, where the SSE event below
+                                // has no subscriber and is dropped silently.
+                                warn!(id = %agent_id, "agent round ended in error: {msg}");
+                                mark_idle(&state, &activity);
+                            }
+                            AgentEvent::FailoverChainExhausted { detail, .. } => {
+                                warn!(id = %agent_id, "failover chain exhausted: {detail}");
+                                mark_idle(&state, &activity);
+                            }
                             AgentEvent::Finished(_)
                             | AgentEvent::MaxRoundsExceeded
-                            | AgentEvent::Error(_)
                             | AgentEvent::Cancelled
                             | AgentEvent::Interrupted
-                            | AgentEvent::TokenBudgetExceeded { .. }
-                            | AgentEvent::FailoverChainExhausted { .. } => {
-                                state.store(AgentState::IDLE, Ordering::Relaxed);
-                                // Turn end / terminal: clear the ephemeral activity
-                                // so a stale "reading docs" doesn't persist while idle.
-                                activity
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .clear();
+                            | AgentEvent::TokenBudgetExceeded { .. } => {
+                                mark_idle(&state, &activity);
                             }
                             _ => {}
                         }
@@ -97,11 +102,7 @@ pub async fn bridge_task(
                     }
                 },
                 None => {
-                    state.store(AgentState::IDLE, Ordering::Relaxed);
-                    activity
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .clear();
+                    mark_idle(&state, &activity);
                     info!("bridge task: agent channel closed, exiting");
                     break;
                 }
@@ -111,11 +112,7 @@ pub async fn bridge_task(
             // still queued before exiting. Per-agent cancellation reaches the
             // bridge via the channel-closed path above — see the lifecycle note.
             _ = cancel.cancelled() => {
-                state.store(AgentState::IDLE, Ordering::Relaxed);
-                activity
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .clear();
+                mark_idle(&state, &activity);
                 while let Ok(event) = agent_rx.try_recv() {
                     if let Some(sse) = convert_event(event) {
                         events_tx.send(sse).ok();
@@ -126,6 +123,14 @@ pub async fn bridge_task(
             }
         }
     }
+}
+
+/// Mark the agent idle: drop state to [`AgentState::IDLE`] and clear the ephemeral
+/// activity string so a stale "reading docs" doesn't persist while idle. Shared by
+/// every turn-end / terminal / shutdown path in [`bridge_task`].
+fn mark_idle(state: &std::sync::atomic::AtomicU8, activity: &std::sync::Mutex<String>) {
+    state.store(AgentState::IDLE, Ordering::Relaxed);
+    activity.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// Convert a runtime [`AgentEvent`] to a wire-format [`SseEvent`].

@@ -301,7 +301,9 @@ pub async fn run_and_report(
         }
         Err(e) => {
             agent_tx
-                .send(AgentEvent::Error(format!("{e:#}")))
+                .send(AgentEvent::Error(crate::llm_error::render_error(
+                    e.as_ref(),
+                )))
                 .await
                 .ok();
             false

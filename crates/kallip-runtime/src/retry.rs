@@ -16,25 +16,6 @@ use tracing::info;
 use crate::event::AgentEvent;
 use kallip_common::retry::RetryRecord;
 
-/// Format an error with its full `source()` chain, each level joined by `": "`.
-///
-/// A plain `std::error::Error`'s `Display` (and thus `{e}` / `{e:#}`) renders only the
-/// top level. Many `thiserror` types interpolate their *immediate* `#[source]` into
-/// `Display`, so the first cause is usually visible — but the deeper nesting (e.g. the
-/// hyper/h2/io error inside a `reqwest::Error`) is not. This walker surfaces the whole
-/// chain, which is where the actionable root cause lives for transport drops. Equivalent
-/// to `format!("{:#}", anyhow::Error::from(e))` but dependency-free.
-pub(crate) fn error_chain(e: &dyn std::error::Error) -> String {
-    let mut msg = format!("{e}");
-    let mut current = e.source();
-    while let Some(source) = current {
-        msg.push_str(": ");
-        msg.push_str(&source.to_string());
-        current = source.source();
-    }
-    msg
-}
-
 /// Configuration for LLM request retry behavior.
 #[derive(Clone, Debug)]
 pub struct RetryPolicy {
@@ -261,13 +242,14 @@ pub async fn stream_with_retry(
                     .max(retry_after.unwrap_or_default())
                     .min(remaining);
                 let delay_secs = actual.as_secs_f64();
-                let error_msg = error_chain(&error);
+                let error_msg = crate::llm_error::render_error(&error);
                 let global_attempt = prior_retries + attempt;
 
                 info!(
                     attempt = global_attempt,
                     max_attempts = policy.max_retries,
                     delay_secs,
+                    error = %error_msg,
                     "LLM request failed, retrying"
                 );
 

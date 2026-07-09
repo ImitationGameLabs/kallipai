@@ -77,7 +77,10 @@ async fn consume_stream(
                         // Mid-stream transport drop (connection reset, h2 error, premature EOF, ...).
                         // The partial content already emitted via deltas is void; the caller retries
                         // from scratch and emits a `StreamReset` so downstream folds/discards it.
-                        info!("LLM stream dropped mid-stream: {}", crate::retry::error_chain(&e));
+                        info!(
+                            "LLM stream dropped mid-stream: {}",
+                            crate::llm_error::render_error(&e)
+                        );
                         return StreamOutcome::Transient(e);
                     }
                     None => break,
@@ -389,7 +392,7 @@ async fn acquire_stream(
                 // Flush this endpoint's retries (tagged with its endpoint id for per-endpoint
                 // budget scoping) before advancing.
                 flush_retry_records(ctx, &mut retry_records).await;
-                let reason = crate::retry::error_chain(&e);
+                let reason = crate::llm_error::render_error(&e);
                 match step_failover(ctx, &mut messages, e.into(), reason, tx, round_cancel).await {
                     FailoverStep::Advanced => continue,
                     FailoverStep::Done(result) => return result,
@@ -423,7 +426,7 @@ async fn acquire_stream(
                 let prior_retries = count_recent_retries(ctx, &endpoint_id).await;
                 let policy = &ctx.config.retry_policy;
                 let attempt = prior_retries + 1;
-                let error_msg = crate::retry::error_chain(&e);
+                let error_msg = crate::llm_error::render_error(&e);
 
                 if prior_retries >= policy.max_retries {
                     // Budget exhausted: the endpoint keeps dropping mid-stream. Void the partial
@@ -440,7 +443,7 @@ async fn acquire_stream(
                     .ok();
                     let backend_err =
                         just_llm_client::BackendError::provider(ctx.client.family(), e);
-                    let reason = crate::retry::error_chain(&backend_err);
+                    let reason = crate::llm_error::render_error(&backend_err);
                     match step_failover(
                         ctx,
                         &mut messages,
@@ -572,11 +575,12 @@ async fn step_failover(
         FailoverOutcome::ChainExhausted { reason, trigger } => {
             // Chain exhaustion is a defined round-end (sibling of MaxRoundsExceeded), surfaced
             // as a distinguishable terminal outcome rather than a generic `Err`. `trigger` is an
-            // `anyhow::Error`, whose `{:#}` already walks the source chain.
+            // `anyhow::Error`; `render_error` de-duplicates its source chain and surfaces any HTTP
+            // error body (`as_ref` is required — `anyhow::Error` does not impl `std::error::Error`).
             FailoverStep::Done(AcquireResult::Outcome(
                 AgentOutcome::FailoverChainExhausted {
                     reason,
-                    detail: format!("{trigger:#}"),
+                    detail: crate::llm_error::render_error(trigger.as_ref()),
                 },
             ))
         }
