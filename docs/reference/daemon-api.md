@@ -79,7 +79,8 @@ Auth: operator (root agents) or direct supervisor (subagents). See
   "created_by": "AgentId — supervisor ID; omit for root agents (optional)",
   "role": "string — short display label, e.g. \"researcher\" (optional; required non-empty for subagents)",
   "description": "string — longer prose, what this agent is for (optional)",
-  "max_tool_rounds": "null — use daemon default (see below)"
+  "max_tool_rounds": "null — use daemon default (see below)",
+  "permission_class": "null — grant the tier ceiling (see below)"
 }
 ```
 
@@ -102,6 +103,18 @@ To force unlimited rounds (bounded only by token budget):
 ```
 
 `Limited` values must be > 0; `Limited(0)` returns 400.
+
+**`permission_class`** — optional explicit FS-access permission class for a
+subagent spawn, as the lowercase wire spelling (`"normal"` / `"guest"`).
+Honored only when `created_by` is present (subagent path); ignored for root
+agents, whose class is governed by `KALLIP_ROOT_AGENT_PERMISSION_CLASS`
+(see [env.md](env.md)). Omit or `null` to grant the model tier's ceiling
+(`ceiling_for_tier`). The daemon treats an explicit value as a **downgrade
+only**: a value above the tier ceiling or the supervisor's own granted class
+is rejected with `403 Forbidden` (never silently clamped). So a `normal`
+(root-tier) agent can spawn a read-only `guest` subagent for review work, but
+no agent can escalate a child above its tier. The granted class is observable
+on `GET /agents/{id}/permissions`.
 
 > **Token budget:** All agents share a single daemon-wide token budget
 > (default: 100M tokens). Use `POST /budget` to adjust at runtime.
@@ -340,8 +353,8 @@ Status: `200 OK`
 
 ### `GET /agents/{id}/permissions` — Agent permissions
 
-Returns the agent's permission profile (delegation depth, workspace boundary)
-and its effective tool policy.
+Returns the agent's permission profile (delegation depth, workspace boundary,
+granted permission class) and its effective tool policy.
 
 Auth: any authenticated identity. See [auth.md](auth.md).
 
@@ -357,9 +370,15 @@ Auth: any authenticated identity. See [auth.md](auth.md).
     "tools": {
       "tool_name": "allow | classify | ask | deny"
     }
-  }
+  },
+  "permission_class": "normal | guest"
 }
 ```
+
+**`permission_class`** — the FS-access permission class actually granted to
+this agent (lowercase `"normal"` / `"guest"`): the value the daemon clamped at
+spawn and re-validates on restore. Surfaced so an explicit downgrade
+(`POST /agents` `permission_class`) is observable.
 
 Status: `200 OK`
 

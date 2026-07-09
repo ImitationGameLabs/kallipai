@@ -93,6 +93,9 @@ impl Session {
                 role: ROOT_ROLE.to_string(),
                 description: ROOT_DESCRIPTION.to_string(),
                 max_tool_rounds: None,
+                // Root spawn: the class is governed by KALLIP_ROOT_AGENT_PERMISSION_CLASS,
+                // not this field — leave it unset.
+                permission_class: None,
             })
             .await?;
         Ok(Self { client, agent_id })

@@ -65,6 +65,12 @@ pub struct SpawnArgs {
     /// Longer prose: what this agent is for.
     #[arg(long)]
     pub description: Option<String>,
+    /// Explicitly downgrade the subagent's FS-access permission class
+    /// (`normal` = home+workspace read-write, `guest` = read-only). Omit to
+    /// grant the tier's default ceiling. Honored only for subagent spawns; the
+    /// daemon rejects a value above the tier ceiling or the supervisor's class.
+    #[arg(long, value_name = "CLASS", value_parser = ["normal", "guest"])]
+    pub permission_class: Option<String>,
 }
 
 #[derive(Args)]

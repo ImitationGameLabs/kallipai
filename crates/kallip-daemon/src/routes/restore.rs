@@ -221,14 +221,14 @@ fn validate_permission_class_from_chain(
     let ceiling = PermissionClass::ceiling_for_tier(depth);
     if class > ceiling {
         anyhow::bail!(
-            "agent {agent_id}: permission class {class:?} exceeds its tier ceiling {ceiling:?}"
+            "agent {agent_id}: permission class {class} exceeds its tier ceiling {ceiling}"
         );
     }
     if let Some(supervisor) = chain.first() {
         let supervisor_class = supervisor.meta.permissions_class;
         if class > supervisor_class {
             anyhow::bail!(
-                "agent {agent_id}: permission class {class:?} exceeds supervisor's {supervisor_class:?}"
+                "agent {agent_id}: permission class {class} exceeds supervisor's {supervisor_class}"
             );
         }
     }
@@ -239,7 +239,7 @@ fn validate_permission_class_from_chain(
         );
         if child > parent {
             anyhow::bail!(
-                "agent {}: permission class {child:?} exceeds its supervisor's {parent:?}",
+                "agent {}: permission class {child} exceeds its supervisor's {parent}",
                 window[0].agent_id
             );
         }
@@ -570,5 +570,79 @@ pub async fn restore_agents(state: &SharedState) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChainNode, validate_permission_class_from_chain};
+    use kallip_common::agentid::AgentId;
+    use kallip_common::policy::{ExecPolicy, PolicyDecision, ToolPolicy};
+    use kallip_runtime::config::PermissionClass;
+    use kallip_runtime::persistence::AgentMeta;
+
+    // A supervisor chain node carrying only the fields the validator reads
+    // (permissions_class) — the rest are defaulted/minimal.
+    fn node(id: &str, class: PermissionClass) -> ChainNode {
+        ChainNode {
+            agent_id: AgentId::from(id.to_owned()),
+            meta: AgentMeta {
+                workspace_root: std::path::PathBuf::from("/ws"),
+                last_restored_at: None,
+                consecutive_restart_count: 0,
+                created_by: None,
+                role: String::new(),
+                description: String::new(),
+                permissions_class: class,
+            },
+            policy: ToolPolicy::new(PolicyDecision::Allow),
+            exec_policy: ExecPolicy::default(),
+        }
+    }
+
+    #[test]
+    fn restore_accepts_downgraded_subagent() {
+        // A Normal-tier (depth 1, ceiling Normal) child explicitly granted Guest
+        // beneath a Normal supervisor must restore cleanly — the downgrade is
+        // strictly lower than both the ceiling and the supervisor's class, and the
+        // chain stays monotonic. Guards the restore-side gate (zero prior coverage).
+        let child = AgentId::from("child".to_owned());
+        let chain = vec![node("root", PermissionClass::Normal)];
+        validate_permission_class_from_chain(&child, PermissionClass::Guest, 1, &chain).unwrap();
+    }
+
+    #[test]
+    fn restore_rejects_class_above_downgraded_supervisor() {
+        // The restore-side mirror of the M1 tightening: a child whose granted
+        // class (Normal) exceeds its downgraded supervisor's (Guest) must fail
+        // restore, even though it sits at its tier ceiling.
+        let child = AgentId::from("child".to_owned());
+        let chain = vec![node("root", PermissionClass::Guest)];
+        let err = validate_permission_class_from_chain(&child, PermissionClass::Normal, 1, &chain)
+            .unwrap_err();
+        assert!(err.to_string().contains("supervisor"), "{}", err);
+    }
+
+    #[test]
+    fn restore_enforces_chain_monotonicity() {
+        // A two-level chain where the deeper ancestor (root) was downgraded to
+        // Guest but the mid node persisted at Normal (tampered meta.json). The
+        // agent itself sits validly at depth 2 (ceiling Guest, class Guest), and
+        // beneath its immediate supervisor (mid = Normal) — so only the
+        // `chain.windows(2)` monotonicity check catches the mid>root inversion.
+        // This is the case depth monotonicity alone cannot detect.
+        let deep = AgentId::from("deep".to_owned());
+        // chain[0] = immediate supervisor (mid = Normal), chain[1] = root (Guest).
+        let chain = vec![
+            node("mid", PermissionClass::Normal),
+            node("root", PermissionClass::Guest),
+        ];
+        let err = validate_permission_class_from_chain(&deep, PermissionClass::Guest, 2, &chain)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds its supervisor"),
+            "{}",
+            err
+        );
     }
 }

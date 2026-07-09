@@ -177,11 +177,14 @@ pub fn permission_class_from_env() -> PermissionClass {
     let Ok(raw) = std::env::var("KALLIP_ROOT_AGENT_PERMISSION_CLASS") else {
         return PermissionClass::default();
     };
-    match raw.trim() {
-        "normal" => PermissionClass::Normal,
-        "guest" => PermissionClass::Guest,
-        other => panic!(
-            "KALLIP_ROOT_AGENT_PERMISSION_CLASS: invalid permission class '{other}' (expected normal or guest)"
+    // Trim here, not inside FromStr: the wire/env convention trims surrounding
+    // whitespace, but FromStr stays trim-free so the daemon rejects untrimmed
+    // client input verbatim.
+    let raw = raw.trim();
+    match raw.parse::<PermissionClass>() {
+        Ok(class) => class,
+        Err(_) => panic!(
+            "KALLIP_ROOT_AGENT_PERMISSION_CLASS: invalid permission class '{raw}' (expected normal or guest)"
         ),
     }
 }
@@ -242,6 +245,54 @@ impl PermissionClass {
     }
 }
 
+/// Error returned when a [`PermissionClass`] cannot be parsed from its lowercase
+/// wire/env spelling. Surfaced by the daemon as a `400 Bad Request` body, so the
+/// message stays client-readable and stable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsePermissionClassError(pub String);
+
+impl std::fmt::Display for ParsePermissionClassError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid permission class '{}' (expected \"normal\" or \"guest\")",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ParsePermissionClassError {}
+
+/// Lowercase wire/env spelling: `"normal"` / `"guest"`. This is the inverse of
+/// [`PermissionClass`]'s [`std::fmt::Display`] and matches the
+/// `KALLIP_ROOT_AGENT_PERMISSION_CLASS` env-var convention — distinct from the
+/// PascalCase serde form persisted in `meta.json`. Parsing is intentionally
+/// trim-free; callers decide whether to trim surrounding whitespace.
+impl std::str::FromStr for PermissionClass {
+    type Err = ParsePermissionClassError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "normal" => Ok(PermissionClass::Normal),
+            "guest" => Ok(PermissionClass::Guest),
+            other => Err(ParsePermissionClassError(other.to_owned())),
+        }
+    }
+}
+
+/// Lowercase wire/env spelling (`"normal"` / `"guest"`), the inverse of
+/// [`std::str::FromStr`]. Used by the permissions endpoint and by client-facing
+/// error messages so they stay consistent with the wire form (rather than the
+/// PascalCase `Debug`/serde form).
+impl std::fmt::Display for PermissionClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PermissionClass::Guest => f.write_str("guest"),
+            PermissionClass::Normal => f.write_str("normal"),
+        }
+    }
+}
+
 /// Runtime configuration for `kallip`.
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -267,6 +318,11 @@ pub struct AgentConfig {
     /// baseline axis of the sandbox (§2.3). Defaults to Normal; the daemon clamps
     /// it to the model tier's ceiling at spawn and re-validates on restore. Unlike
     /// `role`/`description`, this is a safety invariant, not display metadata.
+    ///
+    /// Spelled `permissions_class` (plural) here for historical reasons; the
+    /// wire/protocol field that sets it on a subagent spawn is the singular
+    /// `permission_class` on `CreateAgentRequest` — same value, two names by
+    /// layer (internal config vs client-facing wire form).
     pub permissions_class: PermissionClass,
     /// Short display label ("researcher"). Supervisor-owned; set at spawn (and
     /// via `PUT /agents/{id}/metadata`), persisted in `AgentMeta`. Required
@@ -553,6 +609,27 @@ mod tests {
             PermissionClass::ceiling_for_tier(99),
             PermissionClass::Guest
         );
+    }
+
+    #[test]
+    fn permission_class_from_str_display_round_trip() {
+        use std::str::FromStr;
+        // Lowercase wire/env spelling, both variants round-trip through Display.
+        for class in [PermissionClass::Normal, PermissionClass::Guest] {
+            let s = class.to_string();
+            assert_eq!(PermissionClass::from_str(&s).unwrap(), class);
+        }
+        assert_eq!(PermissionClass::Normal.to_string(), "normal");
+        assert_eq!(PermissionClass::Guest.to_string(), "guest");
+
+        // FromStr is trim-free: untrimmed input is rejected (the daemon must not
+        // silently accept " guest "). The env knob trims before parsing.
+        assert!(PermissionClass::from_str(" guest ").is_err());
+        assert!(PermissionClass::from_str("Normal").is_err());
+        assert!(PermissionClass::from_str("").is_err());
+        let err = PermissionClass::from_str("admin").unwrap_err();
+        assert!(err.to_string().contains("admin"));
+        assert!(err.to_string().contains("normal"));
     }
 
     #[test]

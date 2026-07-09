@@ -13,8 +13,8 @@
 //! Layout:
 //! - [`harness`] -- shared machinery (on-disk world, wiremock scripting, daemon
 //!   + runner subprocess control, history/assertion helpers).
-//! - [`guest`] / [`normal`] / [`dirlock`] -- the three scenario bodies, one per
-//!   permission/dirlock concern.
+//! - [`guest`] / [`normal`] / [`dirlock`] / [`guest_spawn`] -- the scenario
+//!   bodies, one per permission/dirlock concern.
 //!
 //!  1. **Guest** root agent -- secrets hidden (`.ssh` empty tmpfs), writes
 //!     denied everywhere except the skills carve.
@@ -25,6 +25,9 @@
 //!     hole to the parent (delegation carve), while the parent keeps writing its
 //!     own workspace; a second subagent locking an overlapping path is rejected
 //!     (409).
+//!  4. **Guest subagent spawn** -- a Normal parent explicitly downgrades a
+//!     subagent to `guest` via `--permission-class`; the granted class is
+//!     persisted, and a bad spelling is rejected by the CLI.
 //!
 //! Linux-only; gated behind the `sandbox-test` feature. Skip-guarded at runtime
 //! when landlock or unprivileged user namespaces are unavailable.
@@ -33,5 +36,6 @@
 
 mod dirlock;
 mod guest;
+mod guest_spawn;
 mod harness;
 mod normal;

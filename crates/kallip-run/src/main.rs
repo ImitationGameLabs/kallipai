@@ -129,6 +129,9 @@ async fn run() -> Result<ExitCode> {
                 role: String::new(),
                 description: String::new(),
                 max_tool_rounds: cli.max_rounds.map(MaxToolRounds::Limited),
+                // kallip-run does not expose an explicit downgrade today; agents
+                // land on their tier ceiling (or the root env knob for roots).
+                permission_class: None,
             })
             .await?;
         let stream = client.event_stream(&id).await?;

@@ -67,6 +67,19 @@ pub struct CreateAgentRequest {
     /// - `Some(MaxToolRounds::Limited(N))` → explicit limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<MaxToolRounds>,
+    /// Optional explicit FS-access permission class for a subagent spawn, as the
+    /// lowercase wire spelling (`"normal"` / `"guest"`). Honored only when
+    /// `created_by` is set (subagent path); ignored for root/operator spawns,
+    /// whose class is governed by `KALLIP_ROOT_AGENT_PERMISSION_CLASS`.
+    ///
+    /// `None` → grant the model tier's ceiling (`ceiling_for_tier`), preserving
+    /// the historical default. An explicit value is treated as a downgrade
+    /// request by the daemon (the reference monitor): it is rejected with
+    /// `forbidden` if it exceeds the tier ceiling or the supervisor's own
+    /// granted class. The string carries no runtime type here to keep
+    /// `kallip-common` free of any `kallip-runtime` dependency.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_class: Option<String>,
 }
 
 /// Response body returned after creating an agent.
@@ -174,4 +187,10 @@ pub struct AgentPermissionsResponse {
     pub workspace_root: String,
     pub created_by: Option<AgentId>,
     pub tool_policy: ToolPolicy,
+    /// FS-access permission class actually granted to this agent, as the
+    /// lowercase wire spelling (`"normal"` / `"guest"`) — the value the daemon
+    /// clamped at spawn and re-validates on restore. Surfaced here (it was
+    /// previously invisible to clients) so an explicit downgrade is observable
+    /// and verifiable. String-typed to keep `kallip-common` runtime-free.
+    pub permission_class: String,
 }

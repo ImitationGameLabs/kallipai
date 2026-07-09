@@ -59,6 +59,11 @@ Scoping notes (server-enforced):
   convenience, not a server-side restriction.
 - `aide spawn` requires a non-empty `--role`; the daemon rejects subagents with
   an empty role.
+- `aide spawn --permission-class {normal,guest}` explicitly **downgrades** the
+  subagent's FS-access class below its tier ceiling (e.g. a `normal` parent
+  spawning a read-only `guest` reviewer). The daemon rejects a value above the
+  tier ceiling or the parent's own class with `403`. Omit to grant the tier
+  ceiling. The granted class is shown by `kallip`/`GET /agents/{id}/permissions`.
 
 ```bash
 $ kallip aide list

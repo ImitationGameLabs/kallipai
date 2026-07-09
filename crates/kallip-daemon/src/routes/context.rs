@@ -67,6 +67,10 @@ pub async fn agent_permissions(
         workspace_root: config.workspace_root.to_string_lossy().into_owned(),
         created_by: config.created_by.clone(),
         tool_policy,
+        // Lowercase wire spelling via Display — the value the daemon clamped at
+        // spawn and re-validates on restore, surfaced so an explicit downgrade
+        // is observable.
+        permission_class: config.permissions_class.to_string(),
     }))
 }
 

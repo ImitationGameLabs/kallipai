@@ -53,6 +53,18 @@ supervisor. Metadata (`role`/`description`) is edited by the **direct
 supervisor**; activity is **self**-reported (the agent itself, not its
 supervisor).
 
+#### Permission class (FS-access downgrade)
+
+A subagent spawn (`POST /agents` with `created_by`) accepts an optional
+`permission_class` field (`"normal"` / `"guest"`) that explicitly **downgrades**
+the child's FS-access class below its model tier's ceiling. The daemon is the
+reference monitor: a value above the tier ceiling or the supervisor's own
+granted class is rejected with `403 Forbidden` — downgrade only, never an
+escalation. A root agent may thus spawn a read-only `guest` reviewer. The field
+is ignored on root spawns, which use `KALLIP_ROOT_AGENT_PERMISSION_CLASS`
+(see [env.md](env.md)). The granted class is reported by
+`GET /agents/{id}/permissions` (see [daemon-api.md](daemon-api.md)).
+
 ### Context and policy
 
 | Endpoint                       | Operator | Superior | Any agent |

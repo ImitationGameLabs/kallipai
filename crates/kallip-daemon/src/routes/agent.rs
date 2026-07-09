@@ -447,12 +447,19 @@ pub async fn create_agent(
     // Subagent: validate supervisor and delegation constraints, or use default policy.
     // Pre-reserve the subagent slot under write lock to eliminate TOCTOU.
     let (tool_policy, exec_policy) = if let Some(ref supervisor_id) = req.created_by {
+        // Parse the optional downgrade request once, before taking the lock, so a
+        // bad spelling is a cheap client-side 400 rather than a held-write-lock
+        // rejection. The daemon is the reference monitor: a value is accepted only
+        // as a downgrade, clamped to the tier ceiling and supervisor class inside
+        // validate_subagent_request.
+        let requested_class = parse_requested_class(&req.permission_class)?;
         let mut registry = state.registry.write().await;
         let (permissions, policy, exec, permission_class) = validate_subagent_request(
             &registry,
             auth.identity(),
             supervisor_id,
             &config.workspace_root,
+            requested_class,
         )?;
         // Check per-agent subagent limit and pre-reserve the slot.
         let supervisor = registry
@@ -472,6 +479,18 @@ pub async fn create_agent(
         config.permissions_class = permission_class;
         (policy, exec)
     } else {
+        // Root/operator spawns are governed by KALLIP_ROOT_AGENT_PERMISSION_CLASS,
+        // not the request field (a documented, inert-on-this-path field). No client
+        // sends it on a root spawn today, so a value here almost certainly signals a
+        // client bug — warn (not reject) so the documented "ignored" contract holds
+        // while the stray value stays observable in default logs.
+        if let Some(class) = &req.permission_class {
+            tracing::warn!(
+                class,
+                "ignoring permission_class on root spawn; \
+                 root agents use KALLIP_ROOT_AGENT_PERMISSION_CLASS"
+            );
+        }
         config.permissions_class = permission_class_from_env();
         (tool_policy_from_env(), ExecPolicy::default())
     };
@@ -855,9 +874,16 @@ pub async fn interrupt_agent(
 ///
 /// Returns `(PermissionProfile, ToolPolicy, ExecPolicy, PermissionClass)` for the
 /// new subagent if valid. The subagent inherits the supervisor's exec-policy
-/// overrides (cloned), so monotonic strictness holds at creation. The
-/// `PermissionClass` is the ceiling for the child's model tier, clamped by the
-/// supervisor's own class (the §2.3 ceiling invariant).
+/// overrides (cloned), so monotonic strictness holds at creation.
+///
+/// `requested_class` is the optional explicit downgrade from the spawn request
+/// (already parsed from the wire string by the caller). When `None`, the child
+/// is granted its model tier's ceiling (`ceiling_for_tier`); otherwise the
+/// requested class is treated as a downgrade and is rejected with `forbidden` if
+/// it exceeds the tier ceiling or the supervisor's own granted class. This is
+/// the §2.3 ceiling invariant, enforced explicitly by the daemon as the trusted
+/// reference monitor (depth monotonicity alone does NOT imply it — the tier 0/1
+/// and 2/3 plateaus).
 ///
 /// Lock ordering: `registry` RwLock is held when calling this function.
 /// Inside, `tool_policy.read()` / `exec_policy.read()` acquire the per-agent
@@ -867,6 +893,7 @@ fn validate_subagent_request(
     identity: &crate::auth::Identity,
     supervisor_id: &AgentId,
     workspace_root: &std::path::Path,
+    requested_class: Option<PermissionClass>,
 ) -> Result<(PermissionProfile, ToolPolicy, ExecPolicy, PermissionClass), ApiError> {
     let supervisor = registry.require_supervisor(identity, supervisor_id)?;
 
@@ -889,19 +916,14 @@ fn validate_subagent_request(
 
     // Ceiling invariant (`.draft/design/agent-sandbox.md` §2.3): the child's
     // granted permission class cannot exceed its model tier's ceiling, nor its
-    // supervisor's class. Depth monotonicity alone does NOT imply the latter
-    // (tier 0/1 share Normal, 2/3 share Guest), so this is an explicit check — the
-    // gate that keeps a weak model from ever being elevated. Default grant =
-    // ceiling (full power for the tier); an explicit downgrade interface is a
-    // later phase.
-    let granted = PermissionClass::ceiling_for_tier(permissions.depth());
+    // supervisor's granted class. The decision is delegated to
+    // `resolve_granted_class`, a pure function unit-tested in isolation (the
+    // depth monotonicity alone does NOT imply the ceiling monotonicity — tier
+    // 0/1 share Normal, 2/3 share Guest — so these are explicit checks).
+    let ceiling = PermissionClass::ceiling_for_tier(permissions.depth());
     let supervisor = &supervisor.agent;
     let supervisor_class = supervisor.config.permissions_class;
-    if granted > supervisor_class {
-        return Err(ApiError::forbidden(format!(
-            "subagent permission class {granted:?} would exceed supervisor's {supervisor_class:?}"
-        )));
-    }
+    let granted = resolve_granted_class(ceiling, supervisor_class, requested_class)?;
 
     let tool_policy = supervisor
         .tool_policy
@@ -917,13 +939,57 @@ fn validate_subagent_request(
     Ok((permissions, tool_policy, exec_policy, granted))
 }
 
+/// Parse the optional `permission_class` wire string (lowercase `"normal"` /
+/// `"guest"`) into a typed class. A client spelling error is a `400 Bad
+/// Request` here — distinct from the `403 Forbidden` the reference monitor
+/// returns for a class that parses fine but exceeds the ceiling/supervisor.
+fn parse_requested_class(raw: &Option<String>) -> Result<Option<PermissionClass>, ApiError> {
+    use std::str::FromStr;
+    match raw {
+        None => Ok(None),
+        Some(s) => Ok(Some(
+            PermissionClass::from_str(s).map_err(|e| ApiError::bad_request(e.to_string()))?,
+        )),
+    }
+}
+
+/// Pure reference-monitor decision for the §2.3 ceiling invariant, separated
+/// from `validate_subagent_request` so it can be unit-tested without building
+/// a full `Agent`/registry. Returns the class to actually grant.
+///
+/// - `None` requested -> grant the tier `ceiling` (historical default).
+/// - An explicit request is a **downgrade only**: anything above the ceiling or
+///   the supervisor's own granted class is rejected with `forbidden`, never
+///   silently clamped, so a caller mistake surfaces loudly. Because the gate
+///   compares granted (not ceiling) classes, a supervisor that was itself
+///   downgraded can no longer grant a child at its tier's default ceiling — the
+///   intended "weak model can never escalate" property.
+fn resolve_granted_class(
+    ceiling: PermissionClass,
+    supervisor_class: PermissionClass,
+    requested: Option<PermissionClass>,
+) -> Result<PermissionClass, ApiError> {
+    let granted = requested.unwrap_or(ceiling);
+    if granted > ceiling {
+        return Err(ApiError::forbidden(format!(
+            "requested permission class {granted} exceeds tier ceiling {ceiling}"
+        )));
+    }
+    if granted > supervisor_class {
+        return Err(ApiError::forbidden(format!(
+            "requested permission class {granted} exceeds supervisor's {supervisor_class}"
+        )));
+    }
+    Ok(granted)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use super::{
         AgentConfig, AgentId, MAX_ACTIVITY_CHARS, PermissionClass, PermissionProfile,
-        acquire_workspace_lock, truncate_chars,
+        acquire_workspace_lock, resolve_granted_class, truncate_chars,
     };
     use crate::test_helpers::{make_entry, make_state};
 
@@ -953,6 +1019,73 @@ mod tests {
         let mut s = "x".repeat(MAX_ACTIVITY_CHARS + 100);
         truncate_chars(&mut s, MAX_ACTIVITY_CHARS);
         assert_eq!(s.chars().count(), MAX_ACTIVITY_CHARS);
+    }
+
+    // -- resolve_granted_class (the §2.3 reference-monitor decision, extracted) --
+
+    #[test]
+    fn granted_defaults_to_tier_ceiling_when_unrequested() {
+        // No explicit request -> historical behavior: grant the ceiling.
+        assert_eq!(
+            resolve_granted_class(PermissionClass::Normal, PermissionClass::Normal, None).unwrap(),
+            PermissionClass::Normal
+        );
+        assert_eq!(
+            resolve_granted_class(PermissionClass::Guest, PermissionClass::Guest, None).unwrap(),
+            PermissionClass::Guest
+        );
+    }
+
+    #[test]
+    fn granted_accepts_explicit_downgrade() {
+        // A Normal-ceiling, Normal supervisor may actively grant Guest.
+        assert_eq!(
+            resolve_granted_class(
+                PermissionClass::Normal,
+                PermissionClass::Normal,
+                Some(PermissionClass::Guest)
+            )
+            .unwrap(),
+            PermissionClass::Guest
+        );
+        // Asking for exactly the ceiling is fine too.
+        assert_eq!(
+            resolve_granted_class(
+                PermissionClass::Normal,
+                PermissionClass::Normal,
+                Some(PermissionClass::Normal)
+            )
+            .unwrap(),
+            PermissionClass::Normal
+        );
+    }
+
+    #[test]
+    fn granted_rejects_request_above_tier_ceiling() {
+        // depth-2 tier (ceiling Guest) cannot be bumped to Normal, even though the
+        // supervisor is Normal.
+        let err = resolve_granted_class(
+            PermissionClass::Guest,
+            PermissionClass::Normal,
+            Some(PermissionClass::Normal),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("tier ceiling"), "{}", err);
+    }
+
+    #[test]
+    fn granted_rejects_request_above_downgraded_supervisor() {
+        // M1: a supervisor downgraded to Guest can no longer grant a child at its
+        // tier's default Normal ceiling — the child's granted (Normal, the ceiling)
+        // exceeds the supervisor's granted (Guest). Fail-closed: correct escalation
+        // prevention, newly reachable once downgrade exists.
+        let err = resolve_granted_class(
+            PermissionClass::Normal,
+            PermissionClass::Guest,
+            None, // child asks for the default ceiling, which is now too high
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("supervisor"), "{}", err);
     }
 
     // -- acquire_workspace_lock (the :445 auto-acquire path, extracted) --

@@ -88,6 +88,7 @@ async fn main() -> Result<()> {
                             role: args.role.unwrap_or_default(),
                             description: args.description.unwrap_or_default(),
                             max_tool_rounds: None,
+                            permission_class: args.permission_class,
                         })
                         .await?;
                     println!("{id}");
