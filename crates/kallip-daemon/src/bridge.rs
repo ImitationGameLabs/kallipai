@@ -166,6 +166,17 @@ fn convert_event(event: AgentEvent) -> Option<SseEvent> {
             error,
             delay_secs,
         }),
+        AgentEvent::StreamReset {
+            error,
+            attempt,
+            max_attempts,
+            delay_secs,
+        } => Some(SseEvent::StreamReset {
+            error,
+            attempt,
+            max_attempts,
+            delay_secs,
+        }),
         AgentEvent::Failover { from, to, reason } => Some(SseEvent::Failover { from, to, reason }),
         AgentEvent::FailoverChainExhausted { reason, detail } => {
             Some(SseEvent::FailoverChainExhausted { reason, detail })

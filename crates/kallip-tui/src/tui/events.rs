@@ -147,6 +147,43 @@ impl App {
                 self.streaming_reasoning = false;
                 self.auto_scroll = true;
             }
+            SseEvent::StreamReset {
+                error,
+                attempt,
+                max_attempts,
+                delay_secs,
+            } => {
+                // The stream dropped mid-way and the runtime is retrying from scratch. Fold the
+                // trailing partial assistant/reasoning entries this turn streamed (keep them in
+                // history, collapsed, for traceability) so the retried stream renders fresh
+                // below — do NOT overwrite. Walk the tail until a non-streaming entry.
+                for idx in (0..self.chat_lines.len()).rev() {
+                    match &self.chat_lines[idx] {
+                        ChatLine::Assistant(_) | ChatLine::Reasoning(_) => {
+                            if self.collapsed.insert(idx) {
+                                // Force a re-render so the now-collapsed entry shows folded.
+                                if let Some(slot) = self.render_cache.get_mut(idx) {
+                                    *slot = None;
+                                }
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                // Clear the streaming flags: the pushed `StreamDropped` line is what makes the
+                // next delta start a fresh entry (`append_streaming_delta` no longer tail-matches
+                // `Assistant`/`Reasoning`); these flags only gate `Finished`'s dedup gate, but
+                // clearing them keeps the "is a turn streaming?" state truthful after a void.
+                self.streaming_content = false;
+                self.streaming_reasoning = false;
+                self.chat_lines.push(ChatLine::StreamDropped {
+                    attempt,
+                    max_attempts,
+                    error,
+                    delay_secs,
+                });
+                self.auto_scroll = true;
+            }
         }
 
         // After a boundary, hand any queued input to the main loop for sending.
@@ -209,5 +246,64 @@ mod tests {
     #[test]
     fn busy_is_not_a_boundary() {
         assert_non_boundary_keeps_pending(SseEvent::Busy);
+    }
+
+    #[test]
+    fn stream_reset_is_not_a_boundary() {
+        assert_non_boundary_keeps_pending(SseEvent::StreamReset {
+            error: "boom".into(),
+            attempt: 1,
+            max_attempts: 2,
+            delay_secs: 0.1,
+        });
+    }
+
+    #[test]
+    fn stream_reset_folds_partial_and_starts_fresh() {
+        let mut app = App::new();
+        // Stream a partial assistant turn, then the stream drops mid-way.
+        app.handle_sse_event(SseEvent::AssistantContentDelta {
+            delta: "part1-".into(),
+        });
+        app.handle_sse_event(SseEvent::AssistantContentDelta {
+            delta: "part2".into(),
+        });
+        assert_eq!(
+            app.chat_lines.len(),
+            1,
+            "deltas coalesce into one Assistant entry"
+        );
+        app.handle_sse_event(SseEvent::StreamReset {
+            error: "boom".into(),
+            attempt: 1,
+            max_attempts: 2,
+            delay_secs: 0.1,
+        });
+        // The abandoned partial stays in history but is collapsed, and a report line is pushed.
+        assert!(matches!(
+            app.chat_lines.last(),
+            Some(ChatLine::StreamDropped { .. })
+        ));
+        assert!(
+            app.collapsed.contains(&0),
+            "the abandoned partial is marked collapsed"
+        );
+        assert!(
+            !app.streaming_content,
+            "streaming flag cleared for a fresh entry"
+        );
+        // The retried stream's first delta starts a NEW entry — not appended to the voided tail.
+        app.handle_sse_event(SseEvent::AssistantContentDelta {
+            delta: "fresh".into(),
+        });
+        assert_eq!(
+            app.chat_lines.len(),
+            3,
+            "[Assistant(partial), StreamDropped, Assistant(fresh)]"
+        );
+        assert!(matches!(
+            app.chat_lines.last(),
+            Some(ChatLine::Assistant(s)) if s == "fresh"
+        ));
     }
 }

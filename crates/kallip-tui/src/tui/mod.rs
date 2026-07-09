@@ -12,6 +12,8 @@ pub(crate) use prompt::{Outgoing, prepare_outgoing};
 
 pub(crate) use alt_scroll::{DisableAlternateScroll, EnableAlternateScroll};
 
+use std::collections::HashSet;
+
 use kallip_common::protocol::ApprovalEntry;
 use ratatui::text::Line;
 use ratatui_textarea::{TextArea, WrapMode};
@@ -49,6 +51,16 @@ pub enum ChatLine {
         reason: String,
         detail: String,
     },
+    /// The LLM stream dropped mid-way and the runner is retrying from scratch. The partial
+    /// assistant/reasoning entries above are collapsed (voided history); the retried stream
+    /// renders below. Non-terminal (the agent stays busy). Mirrors [`ChatLine::Retrying`] plus
+    /// the carried error.
+    StreamDropped {
+        attempt: u32,
+        max_attempts: u32,
+        error: String,
+        delay_secs: f64,
+    },
 }
 
 /// Memoized render output for one [`ChatLine`], index-parallel to `chat_lines`.
@@ -56,8 +68,13 @@ pub enum ChatLine {
 /// The transcript is append-mostly: once an entry is rendered at a given width its
 /// lines never change, so we cache them and skip the markdown/syntax-highlight work
 /// on every subsequent frame. Only the streaming tail (an in-place `push_str`), a
-/// width change, or a fold toggle ([`App::toggle_fold`] clears every slot)
-/// invalidate a slot.
+/// width change, a fold toggle ([`App::toggle_fold`] clears every slot), or a
+/// per-entry collapse transition (`App::collapsed`, invalidated by the `StreamReset`
+/// handler) invalidate a slot.
+///
+/// The cache key is width alone — it does NOT capture fold/collapse state, so it is
+/// only correct because `collapsed` is append-only (an entry never un-collapses). If
+/// expand is ever supported, the collapsed set's transition must invalidate the slot.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedEntry {
     /// Content width (border-excluded) the cache was built at. A mismatch on the
@@ -133,6 +150,12 @@ pub struct App {
     /// whose body exceeds the fold threshold collapse to a few preview lines plus a
     /// "... N more lines" summary; shorter bodies show in full. Ctrl-O toggles it.
     folded: bool,
+    /// Per-entry forced collapse, keyed by `chat_lines` index. Populated by a mid-stream
+    /// `StreamReset` for the trailing partial assistant/reasoning entries of an abandoned
+    /// stream, so they stay in history but render folded (independent of the global `folded`
+    /// toggle, which must not collapse normal assistant answers). Indices are stable:
+    /// `chat_lines` is append-only except `clear_chat`, which clears this too.
+    collapsed: HashSet<usize>,
     streaming_content: bool,
     streaming_reasoning: bool,
     /// Queued user inputs awaiting send. Consecutive entries submitted while the
@@ -177,6 +200,7 @@ impl App {
             content_length: 0,
             visible_height: 0,
             folded: true,
+            collapsed: HashSet::new(),
             streaming_content: false,
             streaming_reasoning: false,
             auto_scroll: true,
@@ -261,6 +285,7 @@ impl App {
     pub(crate) fn clear_chat(&mut self) {
         self.chat_lines.clear();
         self.render_cache.clear();
+        self.collapsed.clear();
     }
 
     /// Mark the screen as needing a redraw. Called by every state-changing handler;
@@ -276,7 +301,9 @@ impl App {
 
     /// Toggle the global fold state for tool/reasoning content. The folded and
     /// unfolded forms produce different lines and heights, so the render cache is
-    /// dropped to force a full rebuild on the next draw.
+    /// dropped to force a full rebuild on the next draw. Does NOT clear `collapsed`:
+    /// a per-entry voided partial (from a `StreamReset`) stays compact regardless of
+    /// the global toggle — re-rendering recomputes `folded || collapsed`.
     pub(crate) fn toggle_fold(&mut self) {
         self.folded = !self.folded;
         self.render_cache.clear();

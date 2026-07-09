@@ -291,7 +291,10 @@ impl App {
                 total += cached.wrapped_height;
                 out.extend(cached.lines.iter().cloned());
             } else {
-                let lines = render_one_entry(entry, area_width, folded);
+                // Per-entry collapse (an abandoned mid-stream partial) overrides the global
+                // `folded` toggle for Assistant/Reasoning without folding normal answers.
+                let collapsed = self.collapsed.contains(&i);
+                let lines = render_one_entry(entry, area_width, folded, collapsed);
                 let wrapped_height =
                     word_wrap_line_count(&Text::from(lines.clone()), content_width as usize);
                 total += wrapped_height;
@@ -341,7 +344,12 @@ impl App {
 /// it directly. Word-wrapping of over-long lines is left to ratatui at draw time.
 /// `area_width` is the border-inclusive width (markdown/table layout subtracts its own
 /// border).
-fn render_one_entry(entry: &ChatLine, area_width: u16, folded: bool) -> Vec<Line<'static>> {
+fn render_one_entry(
+    entry: &ChatLine,
+    area_width: u16,
+    folded: bool,
+    collapsed: bool,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let content_width = area_width.saturating_sub(2) as usize;
     match entry {
@@ -355,7 +363,13 @@ fn render_one_entry(entry: &ChatLine, area_width: u16, folded: bool) -> Vec<Line
             }
         }
         ChatLine::Assistant(text) => {
-            lines.extend(super::markdown::render_markdown(text, area_width));
+            // Normal answers always render in full — the global `folded` toggle never applies to
+            // assistant content (only ToolCall/ToolResult/Reasoning fold). A `collapsed` entry is
+            // an abandoned mid-stream partial: render it folded so the voided history stays
+            // compact while remaining traceable. So the fold here is `collapsed` alone, NOT
+            // `folded || collapsed` (which would hide every multi-line answer under `folded=true`).
+            let body = super::markdown::render_markdown(text, area_width);
+            lines.extend(fold_body(body, collapsed, content_width));
         }
         ChatLine::ToolCall { name, args } => {
             // Bold colored header (no background fill) so the entry stands out
@@ -369,7 +383,7 @@ fn render_one_entry(entry: &ChatLine, area_width: u16, folded: bool) -> Vec<Line
                     .add_modifier(Modifier::BOLD),
             ));
             let body = format_tool_args(args, MAX_TOOL_ARG_LINES);
-            lines.extend(fold_body(body, folded, content_width));
+            lines.extend(fold_body(body, folded || collapsed, content_width));
         }
         ChatLine::ToolResult(result) => {
             // Header label is derived from the envelope (tool_name + status) and
@@ -387,7 +401,7 @@ fn render_one_entry(entry: &ChatLine, area_width: u16, folded: bool) -> Vec<Line
             } else {
                 format_tool_result(result, MAX_TOOL_RESULT_LINES)
             };
-            lines.extend(fold_body(body, folded, content_width));
+            lines.extend(fold_body(body, folded || collapsed, content_width));
         }
         ChatLine::Reasoning(text) => {
             let mut body = prefixed_lines("[think] ", text, Style::default().dim().italic());
@@ -396,7 +410,7 @@ fn render_one_entry(entry: &ChatLine, area_width: u16, folded: bool) -> Vec<Line
             if body.is_empty() {
                 body.push(Line::styled("[think]", Style::default().dim().italic()));
             }
-            lines.extend(fold_body(body, folded, content_width));
+            lines.extend(fold_body(body, folded || collapsed, content_width));
         }
         ChatLine::Status(msg) => {
             lines.extend(styled_lines(msg, Style::default().dim().italic()));
@@ -443,6 +457,26 @@ fn render_one_entry(entry: &ChatLine, area_width: u16, folded: bool) -> Vec<Line
                 "[failover exhausted] ".fg(Color::Red),
                 format!("{reason}: {detail}").fg(Color::Red),
             ]));
+        }
+        ChatLine::StreamDropped {
+            attempt,
+            max_attempts,
+            error,
+            delay_secs,
+        } => {
+            // The partial above is collapsed (voided); this line reports the drop, then the
+            // retried (or failed-over) stream renders below. The wait hint only appears when a
+            // backoff actually precedes the next attempt — `delay_secs: 0.0` means an immediate
+            // failover, not a retry, so "retrying in 0.0s" would be misleading.
+            let mut spans = vec![
+                "\u{21BB} ".dim().fg(Color::Yellow),
+                "[stream dropped] ".dim().fg(Color::Yellow),
+                format!("({attempt}/{max_attempts}) {error}").dim(),
+            ];
+            if *delay_secs > 0.0 {
+                spans.push(format!(" \u{2014} retrying in {delay_secs:.1}s").dim());
+            }
+            lines.push(Line::from(spans));
         }
     }
     lines
@@ -1228,8 +1262,8 @@ mod tests {
             name: "ls".into(),
             args: r#"{"path":"/x"}"#.into(),
         };
-        let folded = render_one_entry(&entry, 80, true);
-        let unfolded = render_one_entry(&entry, 80, false);
+        let folded = render_one_entry(&entry, 80, true, false);
+        let unfolded = render_one_entry(&entry, 80, false, false);
         // Folded = header + one-line preview of the first arg; no expand hint.
         assert_eq!(folded.len(), 2, "header + preview");
         let preview = line_text(&folded[1]);
@@ -1251,7 +1285,7 @@ mod tests {
                 "x".repeat(100)
             ),
         };
-        let folded = render_one_entry(&entry, 40, true);
+        let folded = render_one_entry(&entry, 40, true, false);
         // header + 3 preview lines + 1 summary.
         assert_eq!(folded.len(), 5);
         // The long first value is capped so its preview stays on one row.
@@ -1275,7 +1309,7 @@ mod tests {
             name: "ls".into(),
             args: "{}".into(),
         };
-        let folded = render_one_entry(&entry, 80, true);
+        let folded = render_one_entry(&entry, 80, true, false);
         assert_eq!(folded.len(), 1, "header only, empty body");
     }
 
@@ -1283,7 +1317,7 @@ mod tests {
     fn render_one_entry_toolresult_folded_error_preview() {
         let result = r#"{"ok":false,"tool_name":"bash_exec","error":"command not found"}"#;
         let entry = ChatLine::ToolResult(result.into());
-        let folded = render_one_entry(&entry, 80, true);
+        let folded = render_one_entry(&entry, 80, true, false);
         // Single-line error body is at/below the threshold: shown in full.
         let joined: Vec<String> = folded.iter().map(line_text).collect();
         assert!(
@@ -1298,7 +1332,7 @@ mod tests {
         // threshold and render in full rather than collapsing.
         let result = r#"{"ok":true,"pending_approval":true,"tool_name":"bash_exec","id":"ap_123","next_steps":"approve to proceed"}"#;
         let entry = ChatLine::ToolResult(result.into());
-        let folded = render_one_entry(&entry, 80, true);
+        let folded = render_one_entry(&entry, 80, true, false);
         assert_eq!(folded.len(), 4, "header + 3 body lines, under threshold");
         let joined: Vec<String> = folded.iter().map(line_text).collect();
         assert!(
@@ -1318,7 +1352,7 @@ mod tests {
             "result": { "stdout": "a\nb\nc" }
         });
         let entry = ChatLine::ToolResult(envelope.to_string());
-        let folded = render_one_entry(&entry, 80, true);
+        let folded = render_one_entry(&entry, 80, true, false);
         assert_eq!(folded.len(), 5, "header + 4 body lines, no summary");
         let joined: Vec<String> = folded.iter().map(line_text).collect();
         assert!(joined.iter().any(|s| s.contains("stdout:")));
@@ -1336,7 +1370,7 @@ mod tests {
             "result": { "stdout": "line one\nline two\nline three\nline four\nline five" }
         });
         let entry = ChatLine::ToolResult(envelope.to_string());
-        let folded = render_one_entry(&entry, 80, true);
+        let folded = render_one_entry(&entry, 80, true, false);
         // header + "stdout:" + first 2 content lines + summary.
         assert_eq!(folded.len(), 5, "header + 3 preview + summary");
         let joined: Vec<String> = folded.iter().map(line_text).collect();
@@ -1355,8 +1389,8 @@ mod tests {
     fn render_one_entry_reasoning_folded_four_lines_shown() {
         // 4 lines is exactly the threshold: shown in full, no summary.
         let entry = ChatLine::Reasoning("step one\nstep two\nstep three\nstep four".into());
-        let folded = render_one_entry(&entry, 80, true);
-        let unfolded = render_one_entry(&entry, 80, false);
+        let folded = render_one_entry(&entry, 80, true, false);
+        let unfolded = render_one_entry(&entry, 80, false, false);
         assert_eq!(folded.len(), 4, "4 lines shown in full");
         let joined: Vec<String> = folded.iter().map(line_text).collect();
         assert!(joined.iter().any(|s| s.contains("step one")));
@@ -1370,7 +1404,7 @@ mod tests {
     fn render_one_entry_reasoning_folded_five_lines_summarizes() {
         // 5 lines (past the threshold) folds to 3 preview + a 2-more summary.
         let entry = ChatLine::Reasoning("s1\ns2\ns3\ns4\ns5".into());
-        let folded = render_one_entry(&entry, 80, true);
+        let folded = render_one_entry(&entry, 80, true, false);
         assert_eq!(folded.len(), 4, "3 preview + summary");
         let joined: Vec<String> = folded.iter().map(line_text).collect();
         assert!(joined.iter().any(|s| s.contains("s1")));
@@ -1383,12 +1417,45 @@ mod tests {
 
     #[test]
     fn render_one_entry_assistant_not_folded() {
-        // Assistant content is never foldable; folded flag is a no-op.
+        // Assistant content is never foldable via the global toggle; folded flag is a no-op.
         let entry = ChatLine::Assistant("hello".into());
         assert_eq!(
-            render_one_entry(&entry, 80, true).len(),
-            render_one_entry(&entry, 80, false).len()
+            render_one_entry(&entry, 80, true, false).len(),
+            render_one_entry(&entry, 80, false, false).len()
         );
+    }
+
+    #[test]
+    fn render_one_entry_assistant_multiline_ignores_global_fold() {
+        // Regression guard: a multi-line answer must NOT collapse under the default `folded=true`.
+        // Only an abandoned mid-stream partial (collapsed=true) folds. (A previous version routed
+        // Assistant through `fold_body(folded || collapsed)` and hid every long answer.)
+        let entry = ChatLine::Assistant("l1\nl2\nl3\nl4\nl5".into());
+        let global_folded = render_one_entry(&entry, 80, true, false);
+        let global_unfolded = render_one_entry(&entry, 80, false, false);
+        assert_eq!(
+            global_folded.len(),
+            global_unfolded.len(),
+            "global fold must not affect assistant content"
+        );
+        assert!(
+            global_folded.len() >= 5,
+            "all five lines render in full under folded=true"
+        );
+    }
+
+    #[test]
+    fn render_one_entry_assistant_collapsed_folds() {
+        // An abandoned mid-stream partial (collapsed=true) renders folded regardless of the global
+        // toggle — voided history stays compact.
+        let entry = ChatLine::Assistant("l1\nl2\nl3\nl4\nl5".into());
+        let collapsed = render_one_entry(&entry, 80, false, true);
+        assert!(
+            collapsed.len() < 5,
+            "collapsed partial folds below its full line count"
+        );
+        let summary = line_text(collapsed.last().unwrap());
+        assert!(summary.contains("more lines"));
     }
 
     #[test]

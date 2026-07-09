@@ -316,6 +316,24 @@ where
                     eprintln!("[failover] {from} → {to}: {reason}");
                 }
             }
+            SseEvent::StreamReset {
+                error,
+                attempt,
+                max_attempts,
+                delay_secs,
+            } => {
+                // The stream dropped mid-way and the runtime is retrying from scratch. The
+                // accumulated `assistant` buffer holds the abandoned partial — void it so the
+                // final output is the clean retried content, not partial-then-full. (Reasoning
+                // is streamed but never accumulated, so nothing else to clear.)
+                end_reasoning(&mut in_reasoning);
+                assistant.clear();
+                if verbose {
+                    eprintln!(
+                        "[stream reset {attempt}/{max_attempts}] {error} (retrying in {delay_secs:.1}s)"
+                    );
+                }
+            }
             SseEvent::Finished { content } => {
                 end_reasoning(&mut in_reasoning);
                 if !json && !content.is_empty() {
@@ -436,6 +454,38 @@ mod tests {
         let outcome = consume_stream(stream::iter(events), true, false).await;
         assert_eq!(outcome.exit, RunExit::Error);
         assert_eq!(outcome.assistant, "partial");
+    }
+
+    #[tokio::test]
+    async fn stream_reset_voids_partial_then_accumulates_retry() {
+        // A mid-stream drop voids the accumulated partial; the retried stream's content is the
+        // only thing in the final output (no partial-then-full duplication).
+        let events: Vec<Item> = vec![
+            Ok(SseEvent::AssistantContentDelta {
+                delta: "partial-".into(),
+            }),
+            Ok(SseEvent::AssistantContentDelta {
+                delta: "abandoned".into(),
+            }),
+            Ok(SseEvent::StreamReset {
+                error: "connection reset".into(),
+                attempt: 1,
+                max_attempts: 2,
+                delay_secs: 0.0,
+            }),
+            Ok(SseEvent::AssistantContentDelta {
+                delta: "clean".into(),
+            }),
+            Ok(SseEvent::Finished {
+                content: "clean".into(),
+            }),
+        ];
+        let outcome = consume_stream(stream::iter(events), true, false).await;
+        assert_eq!(outcome.exit, RunExit::Success);
+        assert_eq!(
+            outcome.assistant, "clean",
+            "partial before StreamReset is voided"
+        );
     }
 
     #[tokio::test]

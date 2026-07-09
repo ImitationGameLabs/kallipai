@@ -27,6 +27,7 @@ use just_llm_client::types::chat::{
     ToolDefinition,
 };
 use kallip_common::protocol::FailoverChainExhaustion;
+use kallip_common::retry::RetryRecord;
 
 // ---------------------------------------------------------------------------
 // Stream consumption
@@ -38,6 +39,10 @@ enum StreamOutcome {
     Cancelled,
     /// The stream completed normally.
     Completed(StreamConsumed),
+    /// The stream dropped mid-way with a transport error. The partial content accumulated so far
+    /// is abandoned (already-emitted deltas are void); the caller retries from scratch. Carries the
+    /// error so the caller can drive retry/failover and surface a diagnostic.
+    Transient(just_llm_client::TransportError),
 }
 
 /// Data accumulated from a completed LLM response stream.
@@ -69,8 +74,11 @@ async fn consume_stream(
                 let chunk = match chunk_result {
                     Some(Ok(c)) => c,
                     Some(Err(e)) => {
-                        warn!("stream chunk error: {e:#}");
-                        break;
+                        // Mid-stream transport drop (connection reset, h2 error, premature EOF, ...).
+                        // The partial content already emitted via deltas is void; the caller retries
+                        // from scratch and emits a `StreamReset` so downstream folds/discards it.
+                        info!("LLM stream dropped mid-stream: {}", crate::retry::error_chain(&e));
+                        return StreamOutcome::Transient(e);
                     }
                     None => break,
                 };
@@ -135,8 +143,8 @@ enum BudgetAction {
 
 /// Outcome of the within-tier failover acquisition loop.
 enum AcquireResult {
-    /// A live stream was acquired — proceed to consume it.
-    Stream(just_llm_client::ChatCompletionStream),
+    /// A stream was acquired AND fully consumed — proceed to post-stream budgeting / tool calls.
+    Consumed(StreamConsumed),
     /// A terminal round outcome (chain exhausted / cancelled / budget exceeded).
     Outcome(AgentOutcome),
     /// A request-level error — the round errors.
@@ -213,17 +221,12 @@ pub(crate) async fn run_agent_rounds(
             BudgetAction::Proceed => {}
         }
 
-        // -- Within-tier failover acquisition --
-        let stream = match acquire_stream(ctx, messages, tools, tx, round_cancel, round).await {
-            AcquireResult::Stream(s) => s,
+        // -- Within-tier failover acquisition (also consumes the stream, retrying mid-stream
+        // transport drops in-place) --
+        let consumed = match acquire_stream(ctx, messages, tools, tx, round_cancel, round).await {
+            AcquireResult::Consumed(c) => c,
             AcquireResult::Outcome(outcome) => return Ok(outcome),
             AcquireResult::Error(e) => return Err(e),
-        };
-
-        // -- Stream consumption --
-        let consumed = match consume_stream(stream, tx, round_cancel).await {
-            StreamOutcome::Cancelled => return Ok(AgentOutcome::Cancelled),
-            StreamOutcome::Completed(c) => c,
         };
 
         match enforce_post_stream_budget(ctx, consumed.usage.as_ref()).await {
@@ -340,30 +343,9 @@ async fn acquire_stream(
     round: usize,
 ) -> AcquireResult {
     let mut retry_records = Vec::new();
-    let stream = loop {
+    let consumed = loop {
         let endpoint_id = ctx.failover.current_profile().endpoint.clone();
-        // Per-endpoint retry budget: rate limits are endpoint-scoped, so only this endpoint's
-        // recent retries (within retry_timeout, across rounds) count. Two profiles sharing one
-        // endpoint share one budget — so after advancing, a successor on the same endpoint
-        // counts its predecessor's in-window retries too (correct: both draw on the same rate-
-        // limit quota).
-        let prior_retries = {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let window_secs = ctx.config.retry_policy.retry_timeout.as_secs();
-            ctx.store
-                .lock()
-                .await
-                .retry_log
-                .iter()
-                .filter(|r| {
-                    r.endpoint.as_deref() == Some(endpoint_id.as_str())
-                        && r.timestamp + window_secs > now
-                })
-                .count() as u32
-        };
+        let prior_retries = count_recent_retries(ctx, &endpoint_id).await;
         let request = ctx
             .client
             .create_request(messages.clone())
@@ -392,89 +374,222 @@ async fn acquire_stream(
             tokio::select! {
                 result = fut => result,
                 _ = round_cancel.cancelled() => {
-                    if !retry_records.is_empty() {
-                        ctx.store.lock().await.retry_log.extend(retry_records);
-                        ctx.persist().await;
-                    }
+                    flush_retry_records(ctx, &mut retry_records).await;
                     return AcquireResult::Outcome(AgentOutcome::Cancelled);
                 }
             }
         };
-        match result {
-            Ok(stream) => break stream,
+        let stream = match result {
+            Ok(stream) => stream,
             Err(crate::retry::RequestFailure::Fatal(e)) => {
-                if !retry_records.is_empty() {
-                    ctx.store.lock().await.retry_log.extend(retry_records);
-                    ctx.persist().await;
-                }
+                flush_retry_records(ctx, &mut retry_records).await;
                 return AcquireResult::Error(e.into());
             }
             Err(crate::retry::RequestFailure::Failover(e)) => {
                 // Flush this endpoint's retries (tagged with its endpoint id for per-endpoint
                 // budget scoping) before advancing.
-                if !retry_records.is_empty() {
-                    ctx.store
-                        .lock()
-                        .await
-                        .retry_log
-                        .extend(std::mem::take(&mut retry_records));
-                    ctx.persist().await;
-                }
-                // Capture the trigger reason before `e` moves into advance_failover.
-                let reason = format!("{e:#}");
-                match advance_failover(ctx, messages, e.into(), round_cancel).await {
-                    FailoverOutcome::Advanced {
-                        from,
-                        to,
-                        messages: new_messages,
-                    } => {
-                        messages = new_messages;
-                        // Under skip, `from`→`to` may jump over unbuildable intermediates;
-                        // those are warned inside advance_failover (not surfaced here).
-                        info!(
-                            from = %from, to = %to, reason = %reason,
-                            "within-tier failover"
-                        );
-                        tx.send(AgentEvent::Failover { from, to, reason })
-                            .await
-                            .ok();
-                    }
-                    FailoverOutcome::ChainExhausted { reason, trigger } => {
-                        // Chain exhaustion is a defined round-end (sibling of
-                        // MaxRoundsExceeded), surfaced as a distinguishable terminal outcome
-                        // rather than a generic `Err`. `run_and_report` emits the event.
-                        return AcquireResult::Outcome(AgentOutcome::FailoverChainExhausted {
-                            reason,
-                            detail: format!("{trigger:#}"),
-                        });
-                    }
-                    FailoverOutcome::Cancelled => {
-                        return AcquireResult::Outcome(AgentOutcome::Cancelled);
-                    }
-                    FailoverOutcome::BudgetExceeded { consumed, budget } => {
-                        return AcquireResult::Outcome(AgentOutcome::TokenBudgetExceeded {
-                            consumed,
-                            budget,
-                        });
-                    }
+                flush_retry_records(ctx, &mut retry_records).await;
+                let reason = crate::retry::error_chain(&e);
+                match step_failover(ctx, &mut messages, e.into(), reason, tx, round_cancel).await {
+                    FailoverStep::Advanced => continue,
+                    FailoverStep::Done(result) => return result,
                 }
             }
             Err(crate::retry::RequestFailure::Cancelled) => {
                 // Cancel surfaced from within a retry backoff — flush this endpoint's
                 // retries and short-circuit to a cancelled round. Mirrors the Fatal arm's flush.
-                if !retry_records.is_empty() {
-                    ctx.store.lock().await.retry_log.extend(retry_records);
-                    ctx.persist().await;
-                }
+                flush_retry_records(ctx, &mut retry_records).await;
                 return AcquireResult::Outcome(AgentOutcome::Cancelled);
+            }
+        };
+
+        // Consume the acquired stream. A mid-stream transport drop is retryable in-place:
+        // the partial content is abandoned (already-emitted deltas are voided downstream by
+        // a `StreamReset` event) and the request is re-sent from scratch.
+        match consume_stream(stream, tx, round_cancel).await {
+            StreamOutcome::Completed(c) => {
+                flush_retry_records(ctx, &mut retry_records).await;
+                break c;
+            }
+            StreamOutcome::Cancelled => {
+                flush_retry_records(ctx, &mut retry_records).await;
+                return AcquireResult::Outcome(AgentOutcome::Cancelled);
+            }
+            StreamOutcome::Transient(e) => {
+                // This attempt's prepare/send retries (if any) were buffered locally; persist
+                // them first so they count toward the shared per-endpoint budget before we
+                // decide whether a mid-stream retry remains within it.
+                flush_retry_records(ctx, &mut retry_records).await;
+                let prior_retries = count_recent_retries(ctx, &endpoint_id).await;
+                let policy = &ctx.config.retry_policy;
+                let attempt = prior_retries + 1;
+                let error_msg = crate::retry::error_chain(&e);
+
+                if prior_retries >= policy.max_retries {
+                    // Budget exhausted: the endpoint keeps dropping mid-stream. Void the partial
+                    // downstream first (no backoff — failover is immediate; `delay_secs: 0.0`),
+                    // then treat as transient-exhausted and advance the failover chain (a
+                    // different profile/endpoint may hold a healthier connection). `attempt`
+                    // exceeds `max_attempts` here, honestly signalling the budget is blown.
+                    tx.try_send(AgentEvent::StreamReset {
+                        error: error_msg,
+                        attempt,
+                        max_attempts: policy.max_retries,
+                        delay_secs: 0.0,
+                    })
+                    .ok();
+                    let backend_err =
+                        just_llm_client::BackendError::provider(ctx.client.family(), e);
+                    let reason = crate::retry::error_chain(&backend_err);
+                    match step_failover(
+                        ctx,
+                        &mut messages,
+                        backend_err.into(),
+                        reason,
+                        tx,
+                        round_cancel,
+                    )
+                    .await
+                    {
+                        FailoverStep::Advanced => continue,
+                        FailoverStep::Done(result) => return result,
+                    }
+                }
+
+                // Within budget: tell downstream to fold/discard the partial it already rendered,
+                // back off, record the retry, then re-acquire. Mirrors the backoff/emit/record
+                // shape of `retry::stream_with_retry`'s `Attempt::Retry` arm. Two intentional
+                // omissions vs that arm: a mid-stream drop carries no `Retry-After` header (no
+                // floor), and the `retry_timeout` deadline is scoped per `stream_with_retry` call
+                // (reset on each re-entry), so there is no remaining-deadline cap to apply here.
+                // The backoff exponent is `prior_retries` (cumulative across the endpoint's
+                // in-window retries), so sustained flakiness lengthens the wait.
+                let delay = crate::retry::backoff_delay(policy, prior_retries);
+                let delay_secs = delay.as_secs_f64();
+                tx.try_send(AgentEvent::StreamReset {
+                    error: error_msg.clone(),
+                    attempt,
+                    max_attempts: policy.max_retries,
+                    delay_secs,
+                })
+                .ok();
+                let record = RetryRecord {
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    round,
+                    attempt,
+                    max_attempts: policy.max_retries,
+                    error: error_msg,
+                    delay_secs,
+                    endpoint: Some(endpoint_id.clone()),
+                };
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {
+                        ctx.store.lock().await.retry_log.push(record);
+                        ctx.persist().await;
+                    }
+                    _ = round_cancel.cancelled() => {
+                        return AcquireResult::Outcome(AgentOutcome::Cancelled);
+                    }
+                }
+                // Loop continues; prior_retries is recomputed (now incremented by the record
+                // just persisted) and the request is re-sent.
             }
         }
     };
-    if !retry_records.is_empty() {
-        ctx.store.lock().await.retry_log.extend(retry_records);
-        ctx.persist().await;
+    AcquireResult::Consumed(consumed)
+}
+
+/// Count this endpoint's recent retries (within `retry_timeout`, across rounds) persisted in the
+/// store. Rate limits are endpoint-scoped, so the per-endpoint budget is shared: two profiles on
+/// the same endpoint draw on the same quota, and a successor counts its predecessor's in-window
+/// retries.
+async fn count_recent_retries(ctx: &mut AgentContext, endpoint_id: &str) -> u32 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let window_secs = ctx.config.retry_policy.retry_timeout.as_secs();
+    ctx.store
+        .lock()
+        .await
+        .retry_log
+        .iter()
+        .filter(|r| r.endpoint.as_deref() == Some(endpoint_id) && r.timestamp + window_secs > now)
+        .count() as u32
+}
+
+/// Persist any buffered retry records for this endpoint into the store. A no-op when empty.
+async fn flush_retry_records(ctx: &mut AgentContext, retry_records: &mut Vec<RetryRecord>) {
+    if retry_records.is_empty() {
+        return;
     }
-    AcquireResult::Stream(stream)
+    ctx.store
+        .lock()
+        .await
+        .retry_log
+        .extend(std::mem::take(retry_records));
+    ctx.persist().await;
+}
+
+/// One step of within-tier failover, shared by the prepare/send/parse `Failover` arm and the
+/// mid-stream-drop budget-exhausted path so both entry points behave identically.
+enum FailoverStep {
+    /// The chain advanced to a new profile; the caller re-loops with the rebound `messages`.
+    Advanced,
+    /// A terminal acquire result (chain exhausted / cancelled / budget exceeded).
+    Done(AcquireResult),
+}
+
+/// Drive within-tier failover for `trigger`: advance the chain, emit a `Failover` event on
+/// advance, and map the [`FailoverOutcome`] to a [`FailoverStep`]. `reason` is the operator-facing
+/// diagnostic captured from `trigger` before it is moved into [`advance_failover`].
+async fn step_failover(
+    ctx: &mut AgentContext,
+    messages: &mut Vec<ChatMessage>,
+    trigger: Error,
+    reason: String,
+    tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    round_cancel: &CancellationToken,
+) -> FailoverStep {
+    match advance_failover(ctx, std::mem::take(messages), trigger, round_cancel).await {
+        FailoverOutcome::Advanced {
+            from,
+            to,
+            messages: new_messages,
+        } => {
+            *messages = new_messages;
+            // Under skip, `from`→`to` may jump over unbuildable intermediates; those are
+            // warned inside advance_failover (not surfaced here).
+            info!(from = %from, to = %to, reason = %reason, "within-tier failover");
+            tx.send(AgentEvent::Failover { from, to, reason })
+                .await
+                .ok();
+            FailoverStep::Advanced
+        }
+        FailoverOutcome::ChainExhausted { reason, trigger } => {
+            // Chain exhaustion is a defined round-end (sibling of MaxRoundsExceeded), surfaced
+            // as a distinguishable terminal outcome rather than a generic `Err`. `trigger` is an
+            // `anyhow::Error`, whose `{:#}` already walks the source chain.
+            FailoverStep::Done(AcquireResult::Outcome(
+                AgentOutcome::FailoverChainExhausted {
+                    reason,
+                    detail: format!("{trigger:#}"),
+                },
+            ))
+        }
+        FailoverOutcome::Cancelled => {
+            FailoverStep::Done(AcquireResult::Outcome(AgentOutcome::Cancelled))
+        }
+        FailoverOutcome::BudgetExceeded { consumed, budget } => {
+            FailoverStep::Done(AcquireResult::Outcome(AgentOutcome::TokenBudgetExceeded {
+                consumed,
+                budget,
+            }))
+        }
+    }
 }
 
 /// Post-stream budget gate: accumulate usage, inject budget warnings, and check exhaustion.
@@ -1036,6 +1151,94 @@ mod tests {
             .collect()
     }
 
+    /// The `(attempt, max_attempts)` carried by each `StreamReset` event, in order.
+    fn stream_resets(events: &[AgentEvent]) -> Vec<(u32, u32)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::StreamReset {
+                    attempt,
+                    max_attempts,
+                    ..
+                } => Some((*attempt, *max_attempts)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Serialize one SSE `data:` line as an HTTP/1.1 chunked-transfer chunk.
+    fn write_chunk<W: std::io::Write>(w: &mut W, data: &[u8]) {
+        let _ = write!(w, "{:x}\r\n", data.len());
+        let _ = w.write_all(data);
+        let _ = w.write_all(b"\r\n");
+    }
+
+    /// Build an SSE chunk carrying a single content delta.
+    fn sse_delta(content: &str) -> Vec<u8> {
+        format!(
+            "data: {{\"id\":\"s\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\n"
+        )
+        .into_bytes()
+    }
+
+    /// A raw `std::net` server that, on the first request, streams one content delta then closes
+    /// the socket **without** the terminating zero-length chunk — so hyper/reqwest surfaces a body
+    /// decode error mid-stream (the exact transport drop this feature recovers from). On the second
+    /// request it returns a complete, properly-terminated stream carrying `retry_content`.
+    ///
+    /// wiremock cannot reproduce this: it only emits complete bodies (a clean EOF reads as `None`,
+    /// not `Err`), so a real truncated-chunk connection is required.
+    fn dropping_then_ok_server(retry_content: &str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let retry = retry_content.to_owned();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for attempt in 0..2u32 {
+                let (mut socket, _) = match listener.accept() {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                // Best-effort drain of the request (the small JSON body); HTTP is full-duplex so
+                // writing the response does not depend on fully reading the request.
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf);
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+                );
+                if attempt == 0 {
+                    write_chunk(&mut socket, &sse_delta("PARTIAL"));
+                    // Drop mid-stream: close without the terminating zero-length chunk.
+                    let _ = socket.shutdown(std::net::Shutdown::Both);
+                } else {
+                    write_chunk(&mut socket, &sse_delta(&retry));
+                    write_chunk(&mut socket, b"data: [DONE]\n\n");
+                    let _ = socket.write_all(b"0\r\n\r\n");
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A raw server that drops mid-stream on every request (for budget-exhaustion tests).
+    fn always_dropping_server() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            while let Ok((mut socket, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf);
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+                );
+                write_chunk(&mut socket, &sse_delta("PARTIAL"));
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+            }
+        });
+        format!("http://{addr}")
+    }
+
     #[tokio::test]
     async fn failover_primary_down_backup_succeeds() {
         let primary = MockServer::start().await;
@@ -1112,5 +1315,54 @@ mod tests {
             failover_hops(&events).is_empty(),
             "no failover event when the chain is exhausted"
         );
+    }
+
+    #[tokio::test]
+    async fn mid_stream_drop_retries_and_emits_stream_reset() {
+        // First request drops mid-stream after a "PARTIAL" delta; the retry returns "done".
+        let uri = dropping_then_ok_server("done");
+        let mut map = HashMap::new();
+        map.insert("ep1".into(), wiremock_backend(&uri));
+        let profiles = vec![profile("p1", "ep1", 500_000)];
+        let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+
+        let (outcome, events) = run_rounds(&mut ctx).await;
+
+        let content = match outcome {
+            Ok(AgentOutcome::Finished { content }) => content,
+            other => panic!("expected Finished, got {other:?}"),
+        };
+        // The retried full content — not the abandoned "PARTIAL".
+        assert_eq!(content, "done");
+        // Exactly one mid-stream retry, carrying the shared per-endpoint budget telemetry.
+        assert_eq!(stream_resets(&events), vec![(1, 2)]);
+        // No failover: the same endpoint recovered.
+        assert!(failover_hops(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn mid_stream_drop_budget_exhausted_failovers() {
+        // Every request drops mid-stream; after `max_retries` (2) mid-stream retries the endpoint
+        // is treated as transient-exhausted → Failover, which a single-profile tier surfaces as
+        // ChainExhausted(NoFailoverConfigured).
+        let uri = always_dropping_server();
+        let mut map = HashMap::new();
+        map.insert("ep1".into(), wiremock_backend(&uri));
+        let profiles = vec![profile("p1", "ep1", 500_000)];
+        let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+
+        let (outcome, events) = run_rounds(&mut ctx).await;
+
+        match outcome {
+            Ok(AgentOutcome::FailoverChainExhausted {
+                reason: FailoverChainExhaustion::NoFailoverConfigured,
+                ..
+            }) => {}
+            other => panic!("expected FailoverChainExhausted(NoFailoverConfigured), got {other:?}"),
+        }
+        // Two in-budget mid-stream retries ((1,2), (2,2)), then the third drop voids the partial
+        // once more before failover — its `attempt` exceeds `max_attempts`, signalling the blown
+        // budget — and the chain exhausts (single-profile tier).
+        assert_eq!(stream_resets(&events), vec![(1, 2), (2, 2), (3, 2)]);
     }
 }

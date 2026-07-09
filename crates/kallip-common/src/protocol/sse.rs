@@ -102,6 +102,17 @@ pub enum SseEvent {
         error: String,
         delay_secs: f64,
     },
+    /// The LLM stream dropped mid-way (transport error after content started flowing) and the
+    /// runner is retrying from scratch. Downstream must abandon the partial assistant/reasoning
+    /// content accumulated since the last boundary (fold or discard it) before the retried stream
+    /// renders. Non-terminal; the agent stays busy. Fields mirror [`Retrying`](Self::Retrying)
+    /// plus the carried `error`.
+    StreamReset {
+        error: String,
+        attempt: u32,
+        max_attempts: u32,
+        delay_secs: f64,
+    },
     /// Within-tier failover: the active profile failed terminally and the runner advanced to the
     /// next profile in the tier's chain. Non-terminal — the agent stays busy and continues the
     /// turn on the new profile. `from`/`to` are profile ids.
