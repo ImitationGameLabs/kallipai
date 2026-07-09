@@ -146,6 +146,17 @@ pub struct App {
     scroll_pos: usize,
     content_length: usize,
     visible_height: usize,
+    /// Mirrored viewport top row for the input textarea, used to convert the
+    /// caret's absolute screen row into a visible row when positioning the real
+    /// terminal cursor for IME (see `tui::render`). `textarea.viewport` is
+    /// `pub(crate)` in ratatui-textarea 0.9.x, so we recompute its `top_row`
+    /// ourselves each frame via the same `next_scroll_top` follow logic.
+    ///
+    /// Invariant: PageUp/PageDown/Ctrl+V/Alt+V/wheel must scroll the chat
+    /// region, never the textarea -- otherwise the widget's viewport diverges
+    /// from this stored value and the cursor drifts. Pinned to 0.9.x's formula,
+    /// so a version bump needs a re-check.
+    textarea_top_row: u16,
     /// When true (the default), tool-call args, tool-result bodies, and reasoning
     /// whose body exceeds the fold threshold collapse to a few preview lines plus a
     /// "... N more lines" summary; shorter bodies show in full. Ctrl-O toggles it.
@@ -189,8 +200,13 @@ impl App {
         textarea.set_wrap_mode(WrapMode::WordOrGlyph);
         // Drop the default underline on the cursor line: it underlines every
         // character on the active line and leaves underline residue after deletion.
-        // The caret itself (reversed block) stays visible via `cursor_style`.
         textarea.set_cursor_line_style(ratatui::style::Style::default());
+        // Clear `cursor_style` (the default is a REVERSED block painted into the
+        // buffer). `render_chat` positions the real terminal cursor at the caret
+        // every frame; a painted reversed cell at the same spot would swallow
+        // the hardware cursor (reversed background hides a light block cursor),
+        // making the caret invisible. The hardware cursor is the sole caret.
+        textarea.set_cursor_style(ratatui::style::Style::default());
         Self {
             chat_lines: Vec::new(),
             render_cache: Vec::new(),
@@ -199,6 +215,7 @@ impl App {
             scroll_pos: 0,
             content_length: 0,
             visible_height: 0,
+            textarea_top_row: 0,
             folded: true,
             collapsed: HashSet::new(),
             streaming_content: false,
@@ -248,6 +265,44 @@ impl App {
         self.chat_lines
             .push(ChatLine::Error(format!("send failed, will retry: {error}")));
         self.auto_scroll = true;
+    }
+
+    /// Whether a turn is currently streaming content or reasoning deltas.
+    ///
+    /// Used to defer syntect code highlighting for the in-flight tail entry (see
+    /// [`App::finalize_streaming`] and the render cache path): while streaming,
+    /// code blocks render as plain monospace and are highlighted once on
+    /// finalization, avoiding a syntect pass over the growing block on every
+    /// token.
+    pub(crate) fn is_streaming(&self) -> bool {
+        self.streaming_content || self.streaming_reasoning
+    }
+
+    /// Finalize streaming: clear the render-cache slot of the trailing
+    /// assistant/reasoning entry so the next frame rebuilds it (with full
+    /// syntax highlighting, deferred while streaming).
+    ///
+    /// Call from **every** handler that flips a `streaming_*` flag to false.
+    /// Consolidating the invalidation here avoids the latent gap where a flag
+    /// is cleared without invalidating — which would leave the tail cached as
+    /// plain monospace forever. Guards on the trailing entry being
+    /// `Assistant`/`Reasoning`: a terminal event like `Busy` can arrive when
+    /// the tail is e.g. a `ToolResult`, where there is nothing to re-highlight.
+    pub(crate) fn finalize_streaming(&mut self) {
+        // No-op unless a stream was actually active, so a terminal event that
+        // arrives while idle (flags already false) does not needlessly
+        // invalidate the prior finalized entry's cache slot.
+        if !self.is_streaming() {
+            return;
+        }
+        let clears_slot = matches!(
+            self.chat_lines.last(),
+            Some(ChatLine::Assistant(_) | ChatLine::Reasoning(_))
+        );
+        if clears_slot && let Some(slot) = self.render_cache.last_mut() {
+            *slot = None;
+        }
+        self.dirty = true;
     }
 
     /// Append a streaming delta to the last entry when it matches the requested

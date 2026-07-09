@@ -82,6 +82,7 @@ impl App {
                     if let Some(entry) = self.history.up(&current) {
                         self.textarea.clear();
                         self.textarea.insert_str(entry);
+                        self.refresh_completion();
                     }
                     return;
                 }
@@ -89,6 +90,7 @@ impl App {
                     if let Some(result) = self.history.down() {
                         self.textarea.clear();
                         self.textarea.insert_str(result.as_str());
+                        self.refresh_completion();
                     }
                     return;
                 }
@@ -96,13 +98,26 @@ impl App {
             }
         }
 
-        // Scroll keys
+        // Scroll keys. PageUp/PageDown scroll the chat, never the textarea. The
+        // same goes for Ctrl+V / Alt+V, which ratatui-textarea's default input
+        // map would otherwise consume as PageDown/PageUp viewport scroll: letting
+        // them reach `textarea.input` would scroll the textarea's private viewport
+        // and desync the caret-positioning mirror in `render_chat` (which assumes
+        // the textarea viewport only ever moves via cursor follow).
         match key.code {
             KeyCode::PageUp => {
                 self.scroll_up_by(PAGE_SCROLL_STEP_LINES);
                 return;
             }
             KeyCode::PageDown => {
+                self.scroll_down_by(PAGE_SCROLL_STEP_LINES);
+                return;
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.scroll_up_by(PAGE_SCROLL_STEP_LINES);
+                return;
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.scroll_down_by(PAGE_SCROLL_STEP_LINES);
                 return;
             }
@@ -221,8 +236,29 @@ impl App {
 
         // Forward all other keys to textarea, then update completion
         self.textarea.input(key);
+        self.refresh_completion();
+    }
+
+    /// Re-derive completion candidates from the current textarea content.
+    /// Shared by the per-key path above and [`App::apply_bracketed_paste`]
+    /// (and, as a side effect, fixes a latent staleness in the Ctrl-P/Ctrl-N
+    /// history-recall path, which previously skipped this).
+    fn refresh_completion(&mut self) {
         let text = self.textarea.lines().join("\n");
         self.completion.update(&text);
+    }
+
+    /// Insert a bracketed-paste payload as a single batched edit.
+    ///
+    /// Named to avoid colliding with [`ratatui_textarea::TextArea::paste`], the
+    /// kill-ring yank. Crossterm strips the `ESC[200~`/`ESC[201~` delimiters
+    /// before delivering `Event::Paste`, so the text is inserted verbatim. One
+    /// insertion + one completion refresh, regardless of payload size — the
+    /// non-bracketed fallback (one char per `KeyEvent`) still applies on
+    /// terminals without the mode.
+    pub(crate) async fn apply_bracketed_paste(&mut self, text: String) {
+        self.textarea.insert_str(text);
+        self.refresh_completion();
     }
 
     /// Handle key events in the approvals view.

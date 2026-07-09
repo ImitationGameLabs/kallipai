@@ -104,6 +104,48 @@ impl App {
         frame.render_widget(Clear, input_area);
         self.apply_input_title();
         frame.render_widget(&self.textarea, input_area);
+
+        // Position the real terminal cursor at the caret every frame so it is
+        // visible (it is the sole caret -- `cursor_style` is cleared in
+        // `App::new`) and so an IME candidate window anchors there instead of
+        // tracking the hidden cursor that ratatui's diff-flush would drift
+        // across the chat region on every streaming delta. This is the LAST
+        // cursor-setting action in the frame: ratatui applies only the final
+        // `set_cursor_position`.
+        //
+        // `screen_cursor()` gives the caret's wrap-aware visual row/col, but the
+        // row is absolute across all wrapped content. Converting it to a visible
+        // row needs the viewport's `top_row`, which `ratatui-textarea` 0.9.x
+        // keeps `pub(crate)`. We mirror the widget's `next_scroll_top` follow
+        // logic (see `textarea_scroll_top`) with a stored `prev_top` to recover
+        // it. This is faithful because no scroll key reaches `textarea.input` in
+        // this app (PageUp/PageDown/Ctrl+V/Alt+V/wheel scroll the chat, not the
+        // textarea), so the widget's `top_row` is always `next_scroll_top(prev,
+        // cursor, h)`.
+        //
+        // The caret is always in the input area; popups render above it, so
+        // positioning here never floats the cursor over a popup.
+        let sc = self.textarea.screen_cursor();
+        // Border-excluded content rect; matches the widget's `block().inner()`.
+        let inner = input_area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        let cursor_row = sc.row as u16;
+        let top = textarea_scroll_top(self.textarea_top_row, cursor_row, inner.height);
+        self.textarea_top_row = top;
+        // Col is already visible (WrapMode::WordOrGlyph disables horizontal
+        // scroll). Bound inclusive to inner.width: a full line puts the caret
+        // one past the last char, its true position; do NOT clamp to width - 1,
+        // that shifts the cursor left of the true caret.
+        let x = inner.x + (sc.col as u16).min(inner.width);
+        // Hide the cursor if the mirror ever drifts the caret out of view
+        // (defensive; should not happen given the keybinding invariant above).
+        if let Some(visible_row) = cursor_row.checked_sub(top)
+            && visible_row < inner.height
+        {
+            frame.set_cursor_position((x, inner.y + visible_row));
+        }
     }
 
     /// Refresh the textarea border title to reflect queued input / send state.
@@ -280,6 +322,13 @@ impl App {
     fn build_chat_text(&mut self, area_width: u16) -> (Text<'static>, usize) {
         let content_width = area_width.saturating_sub(2);
         let folded = self.folded;
+        // Defer syntect highlighting for the in-flight streaming tail: while a
+        // turn streams, only the last entry's content is still growing, so it is
+        // the sole cache miss per delta. All other entries (cache hits) bypass
+        // `render_one_entry` entirely, so gating `highlight` per-entry changes
+        // observable output only for that tail.
+        let streaming = self.is_streaming();
+        let last_index = self.chat_lines.len().saturating_sub(1);
         self.render_cache.resize(self.chat_lines.len(), None);
 
         let mut out: Vec<Line<'static>> = Vec::new();
@@ -294,7 +343,8 @@ impl App {
                 // Per-entry collapse (an abandoned mid-stream partial) overrides the global
                 // `folded` toggle for Assistant/Reasoning without folding normal answers.
                 let collapsed = self.collapsed.contains(&i);
-                let lines = render_one_entry(entry, area_width, folded, collapsed);
+                let highlight = !(streaming && i == last_index);
+                let lines = render_one_entry(entry, area_width, folded, collapsed, highlight);
                 let wrapped_height =
                     word_wrap_line_count(&Text::from(lines.clone()), content_width as usize);
                 total += wrapped_height;
@@ -337,18 +387,40 @@ impl App {
     }
 }
 
+/// Mirror of ratatui-textarea 0.9.x's viewport follow (`widget.rs`
+/// `next_scroll_top`). Given the previous top row, the caret's absolute screen
+/// row, and the visible row count, returns the new top row that keeps the caret
+/// in view. Used to convert the caret's absolute row into a visible row when
+/// positioning the terminal cursor for IME, since `textarea.viewport` is
+/// `pub(crate)` and its `top_row` cannot be read directly.
+///
+/// Faithful only because no scroll key reaches `textarea.input` in this app;
+/// pinned to 0.9.x's formula. A version bump needs a re-check; covered by a
+/// unit test.
+fn textarea_scroll_top(prev_top: u16, cursor: u16, len: u16) -> u16 {
+    if cursor < prev_top {
+        cursor
+    } else if prev_top + len <= cursor {
+        cursor + 1 - len
+    } else {
+        prev_top
+    }
+}
+
 /// Render a single transcript entry into styled, unwrapped `Line`s.
 ///
 /// In production this is called only on a render-cache miss by
 /// [`App::build_chat_text`], which memoizes the result per width; the tests also call
 /// it directly. Word-wrapping of over-long lines is left to ratatui at draw time.
 /// `area_width` is the border-inclusive width (markdown/table layout subtracts its own
-/// border).
+/// border). `highlight` controls syntect code highlighting for assistant markdown;
+/// false during streaming (see [`App::build_chat_text`]).
 fn render_one_entry(
     entry: &ChatLine,
     area_width: u16,
     folded: bool,
     collapsed: bool,
+    highlight: bool,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let content_width = area_width.saturating_sub(2) as usize;
@@ -368,7 +440,7 @@ fn render_one_entry(
             // an abandoned mid-stream partial: render it folded so the voided history stays
             // compact while remaining traceable. So the fold here is `collapsed` alone, NOT
             // `folded || collapsed` (which would hide every multi-line answer under `folded=true`).
-            let body = super::markdown::render_markdown(text, area_width);
+            let body = super::markdown::render_markdown(text, area_width, highlight);
             lines.extend(fold_body(body, collapsed, content_width));
         }
         ChatLine::ToolCall { name, args } => {
@@ -880,6 +952,7 @@ mod tests {
     use super::prefixed_lines;
     use super::render_one_entry;
     use super::styled_lines;
+    use super::textarea_scroll_top;
     use super::tool_result_header_label;
     use super::{MAX_TOOL_ARG_LINES, MAX_TOOL_LINE_CHARS};
     use crate::tui::{App, ChatLine};
@@ -893,6 +966,24 @@ mod tests {
     /// Flatten a `Line`'s spans into their concatenated text.
     fn line_text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn textarea_scroll_top_keeps_caret_visible() {
+        // Mirror of ratatui-textarea 0.9.x `next_scroll_top`.
+        let len = 3;
+        // Caret already within [top, top+len): top unchanged.
+        assert_eq!(textarea_scroll_top(2, 3, len), 2);
+        assert_eq!(textarea_scroll_top(0, 0, len), 0);
+        // Caret scrolled past the bottom: top follows so the caret lands on the
+        // last visible row.
+        assert_eq!(textarea_scroll_top(0, 3, len), 1);
+        assert_eq!(textarea_scroll_top(2, 6, len), 4);
+        // Caret scrolled above the top: top snaps up to the caret's row.
+        assert_eq!(textarea_scroll_top(5, 1, len), 1);
+        // Caret at row 0 snaps top to 0 regardless of prior scroll (caret above
+        // any prior top), which is also the empty-textarea case.
+        assert_eq!(textarea_scroll_top(4, 0, len), 0);
     }
 
     #[test]
@@ -1006,7 +1097,6 @@ mod tests {
         let _ = app.build_chat_text(80);
         assert!(app.render_cache[0].is_some());
         assert!(app.render_cache[1].is_some());
-
         app.append_streaming_delta(true, " more");
         assert!(
             app.render_cache[0].is_some(),
@@ -1015,6 +1105,54 @@ mod tests {
         assert!(
             app.render_cache[1].is_none(),
             "streaming entry cache must be invalidated"
+        );
+    }
+
+    #[test]
+    fn finalize_streaming_clears_streaming_tail_cache() {
+        use kallip_common::protocol::SseEvent;
+        let mut app = app_with(Vec::new());
+        // Stream a delta so the trailing Assistant entry exists and streaming is active.
+        app.handle_sse_event(SseEvent::AssistantContentDelta {
+            delta: "hello".into(),
+        });
+        let _ = app.build_chat_text(80);
+        assert!(
+            app.render_cache[0].is_some(),
+            "streaming tail is built into the cache (deferred highlight)"
+        );
+
+        // A terminal event finalizes the stream: the tail slot is invalidated so
+        // the next frame rebuilds it with full highlighting.
+        app.handle_sse_event(SseEvent::Finished {
+            content: "done".into(),
+        });
+        assert!(
+            app.render_cache[0].is_none(),
+            "finalize_streaming invalidated the deferred-highlight slot"
+        );
+        let _ = app.build_chat_text(80);
+        assert!(
+            app.render_cache[0].is_some(),
+            "rebuild repopulates the cache with highlighting"
+        );
+    }
+
+    #[test]
+    fn finalize_streaming_is_noop_when_idle() {
+        use kallip_common::protocol::SseEvent;
+        let mut app = app_with(Vec::new());
+        // A finalized (non-streaming) assistant entry, then a terminal event
+        // while nothing is streaming must NOT invalidate the prior slot.
+        app.handle_sse_event(SseEvent::AssistantContent {
+            content: "hi".into(),
+        });
+        let _ = app.build_chat_text(80);
+        assert!(app.render_cache[0].is_some());
+        app.handle_sse_event(SseEvent::Finished { content: "".into() });
+        assert!(
+            app.render_cache[0].is_some(),
+            "idle finalize must not invalidate the prior entry"
         );
     }
 
@@ -1262,8 +1400,8 @@ mod tests {
             name: "ls".into(),
             args: r#"{"path":"/x"}"#.into(),
         };
-        let folded = render_one_entry(&entry, 80, true, false);
-        let unfolded = render_one_entry(&entry, 80, false, false);
+        let folded = render_one_entry(&entry, 80, true, false, true);
+        let unfolded = render_one_entry(&entry, 80, false, false, true);
         // Folded = header + one-line preview of the first arg; no expand hint.
         assert_eq!(folded.len(), 2, "header + preview");
         let preview = line_text(&folded[1]);
@@ -1285,7 +1423,7 @@ mod tests {
                 "x".repeat(100)
             ),
         };
-        let folded = render_one_entry(&entry, 40, true, false);
+        let folded = render_one_entry(&entry, 40, true, false, true);
         // header + 3 preview lines + 1 summary.
         assert_eq!(folded.len(), 5);
         // The long first value is capped so its preview stays on one row.
@@ -1309,7 +1447,7 @@ mod tests {
             name: "ls".into(),
             args: "{}".into(),
         };
-        let folded = render_one_entry(&entry, 80, true, false);
+        let folded = render_one_entry(&entry, 80, true, false, true);
         assert_eq!(folded.len(), 1, "header only, empty body");
     }
 
@@ -1317,7 +1455,7 @@ mod tests {
     fn render_one_entry_toolresult_folded_error_preview() {
         let result = r#"{"ok":false,"tool_name":"bash_exec","error":"command not found"}"#;
         let entry = ChatLine::ToolResult(result.into());
-        let folded = render_one_entry(&entry, 80, true, false);
+        let folded = render_one_entry(&entry, 80, true, false, true);
         // Single-line error body is at/below the threshold: shown in full.
         let joined: Vec<String> = folded.iter().map(line_text).collect();
         assert!(
@@ -1332,7 +1470,7 @@ mod tests {
         // threshold and render in full rather than collapsing.
         let result = r#"{"ok":true,"pending_approval":true,"tool_name":"bash_exec","id":"ap_123","next_steps":"approve to proceed"}"#;
         let entry = ChatLine::ToolResult(result.into());
-        let folded = render_one_entry(&entry, 80, true, false);
+        let folded = render_one_entry(&entry, 80, true, false, true);
         assert_eq!(folded.len(), 4, "header + 3 body lines, under threshold");
         let joined: Vec<String> = folded.iter().map(line_text).collect();
         assert!(
@@ -1352,7 +1490,7 @@ mod tests {
             "result": { "stdout": "a\nb\nc" }
         });
         let entry = ChatLine::ToolResult(envelope.to_string());
-        let folded = render_one_entry(&entry, 80, true, false);
+        let folded = render_one_entry(&entry, 80, true, false, true);
         assert_eq!(folded.len(), 5, "header + 4 body lines, no summary");
         let joined: Vec<String> = folded.iter().map(line_text).collect();
         assert!(joined.iter().any(|s| s.contains("stdout:")));
@@ -1370,7 +1508,7 @@ mod tests {
             "result": { "stdout": "line one\nline two\nline three\nline four\nline five" }
         });
         let entry = ChatLine::ToolResult(envelope.to_string());
-        let folded = render_one_entry(&entry, 80, true, false);
+        let folded = render_one_entry(&entry, 80, true, false, true);
         // header + "stdout:" + first 2 content lines + summary.
         assert_eq!(folded.len(), 5, "header + 3 preview + summary");
         let joined: Vec<String> = folded.iter().map(line_text).collect();
@@ -1389,8 +1527,8 @@ mod tests {
     fn render_one_entry_reasoning_folded_four_lines_shown() {
         // 4 lines is exactly the threshold: shown in full, no summary.
         let entry = ChatLine::Reasoning("step one\nstep two\nstep three\nstep four".into());
-        let folded = render_one_entry(&entry, 80, true, false);
-        let unfolded = render_one_entry(&entry, 80, false, false);
+        let folded = render_one_entry(&entry, 80, true, false, true);
+        let unfolded = render_one_entry(&entry, 80, false, false, true);
         assert_eq!(folded.len(), 4, "4 lines shown in full");
         let joined: Vec<String> = folded.iter().map(line_text).collect();
         assert!(joined.iter().any(|s| s.contains("step one")));
@@ -1404,7 +1542,7 @@ mod tests {
     fn render_one_entry_reasoning_folded_five_lines_summarizes() {
         // 5 lines (past the threshold) folds to 3 preview + a 2-more summary.
         let entry = ChatLine::Reasoning("s1\ns2\ns3\ns4\ns5".into());
-        let folded = render_one_entry(&entry, 80, true, false);
+        let folded = render_one_entry(&entry, 80, true, false, true);
         assert_eq!(folded.len(), 4, "3 preview + summary");
         let joined: Vec<String> = folded.iter().map(line_text).collect();
         assert!(joined.iter().any(|s| s.contains("s1")));
@@ -1420,8 +1558,8 @@ mod tests {
         // Assistant content is never foldable via the global toggle; folded flag is a no-op.
         let entry = ChatLine::Assistant("hello".into());
         assert_eq!(
-            render_one_entry(&entry, 80, true, false).len(),
-            render_one_entry(&entry, 80, false, false).len()
+            render_one_entry(&entry, 80, true, false, true).len(),
+            render_one_entry(&entry, 80, false, false, true).len()
         );
     }
 
@@ -1431,8 +1569,8 @@ mod tests {
         // Only an abandoned mid-stream partial (collapsed=true) folds. (A previous version routed
         // Assistant through `fold_body(folded || collapsed)` and hid every long answer.)
         let entry = ChatLine::Assistant("l1\nl2\nl3\nl4\nl5".into());
-        let global_folded = render_one_entry(&entry, 80, true, false);
-        let global_unfolded = render_one_entry(&entry, 80, false, false);
+        let global_folded = render_one_entry(&entry, 80, true, false, true);
+        let global_unfolded = render_one_entry(&entry, 80, false, false, true);
         assert_eq!(
             global_folded.len(),
             global_unfolded.len(),
@@ -1449,7 +1587,7 @@ mod tests {
         // An abandoned mid-stream partial (collapsed=true) renders folded regardless of the global
         // toggle — voided history stays compact.
         let entry = ChatLine::Assistant("l1\nl2\nl3\nl4\nl5".into());
-        let collapsed = render_one_entry(&entry, 80, false, true);
+        let collapsed = render_one_entry(&entry, 80, false, true, true);
         assert!(
             collapsed.len() < 5,
             "collapsed partial folds below its full line count"

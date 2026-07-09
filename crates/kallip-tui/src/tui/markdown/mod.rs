@@ -9,7 +9,13 @@ use ratatui::text::{Line, Span};
 use tracing::warn;
 
 /// Render a markdown string into styled ratatui Lines.
-pub fn render_markdown(input: &str, term_width: u16) -> Vec<Line<'static>> {
+///
+/// When `highlight` is false, fenced code blocks render as plain monospace
+/// spans instead of running syntect. Used for the in-flight streaming entry,
+/// where re-highlighting a growing code block on every token dominates CPU; the
+/// finalized entry is re-rendered with `highlight = true` once streaming ends
+/// (see `App::finalize_streaming`).
+pub fn render_markdown(input: &str, term_width: u16, highlight: bool) -> Vec<Line<'static>> {
     use pulldown_cmark::{Options, Parser};
 
     let t0 = Instant::now();
@@ -22,6 +28,7 @@ pub fn render_markdown(input: &str, term_width: u16) -> Vec<Line<'static>> {
     let parser = Parser::new_ext(input, opts);
     let mut renderer = MdRenderer {
         term_width,
+        highlight,
         ..Default::default()
     };
     renderer.run(parser);
@@ -45,6 +52,8 @@ struct MdRenderer {
     current: Vec<Span<'static>>,
     style_stack: Vec<Style>,
     term_width: u16,
+    /// When false, code blocks skip syntect highlighting (plain monospace).
+    highlight: bool,
     list_depth: usize,
     list_counters: Vec<u64>,
     in_code_block: bool,
@@ -289,13 +298,29 @@ impl MdRenderer {
         }
     }
 
-    /// Render collected code lines with syntect syntax highlighting.
+    /// Render collected code lines, with syntect highlighting when enabled.
+    ///
+    /// When `highlight` is false (the in-flight streaming tail), code renders as
+    /// plain monospace instead of running syntect. Both paths iterate
+    /// `code.lines()` and emit one `│ `-prefixed line per source line, so the
+    /// deferred and highlighted forms produce the same row count — the cache key
+    /// does not distinguish them, and the finalize transition does not shift
+    /// scroll math.
     fn render_code_block(&mut self) {
         let code: String = self.code_block_lines.join("");
-        let highlighted = highlight::highlight_code(&code, self.code_block_lang.as_deref());
-
         let prefix_style = Style::default().fg(Color::DarkGray);
-        for span_line in highlighted {
+
+        // Normalize both paths to `Vec<Vec<Span>>` so the framing loop is shared
+        // and row-count parity is structural rather than comment-enforced.
+        let body: Vec<Vec<Span<'static>>> = if self.highlight {
+            highlight::highlight_code(&code, self.code_block_lang.as_deref())
+        } else {
+            let code_style = Style::default().fg(Color::Gray);
+            code.lines()
+                .map(|line| vec![Span::styled(line.to_owned(), code_style)])
+                .collect()
+        };
+        for span_line in body {
             let mut spans = vec![Span::styled("│ ", prefix_style)];
             spans.extend(span_line);
             self.lines.push(Line::from(spans));

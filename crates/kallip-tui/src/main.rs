@@ -7,11 +7,17 @@ use anyhow::Result;
 use clap::Parser;
 use futures_util::StreamExt;
 use kallip_client::DaemonClient;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::tui::{DisableAlternateScroll, EnableAlternateScroll, Outgoing, prepare_outgoing};
 use args::Args;
 use session::Session;
+
+/// Frame-rate cap for streaming redraws (~60 fps). Only the high-frequency
+/// case (content/reasoning deltas) is coalesced to this interval; state
+/// mutation stays immediate and all other events redraw at once.
+const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -140,6 +146,7 @@ async fn run_tui(session: Session) -> Result<()> {
         let _ = ratatui::crossterm::execute!(
             std::io::stdout(),
             ratatui::crossterm::event::PopKeyboardEnhancementFlags,
+            ratatui::crossterm::event::DisableBracketedPaste,
             DisableAlternateScroll,
         );
         previous_hook(info);
@@ -155,6 +162,16 @@ async fn run_tui(session: Session) -> Result<()> {
         )
     )?;
 
+    // Enable bracketed paste so a multi-character paste arrives as a single
+    // `Event::Paste(String)` (inserted in one batched edit) instead of a burst of
+    // one-char `KeyEvent`s that render char-by-char. Terminals without the mode
+    // keep the per-char fallback. Disabled alongside the other alt-screen escapes
+    // in the panic hook and the exit block below.
+    ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::EnableBracketedPaste
+    )?;
+
     // Mouse capture stays OFF so the terminal's native click-drag text selection
     // works everywhere. Instead, enable alternate-scroll: the terminal translates the
     // mouse wheel into Up/Down arrows, which the input handler binds to chat scrolling
@@ -166,15 +183,29 @@ async fn run_tui(session: Session) -> Result<()> {
     // silently frozen — no events, prompts vanish.
     let mut stream_end: Option<session::StreamEnd> = None;
 
+    // Frame-rate cap for streaming redraws. State mutation stays immediate
+    // (every delta is appended at once); only the redraw is coalesced, so the
+    // final state is always correct. Idle CPU stays at zero: `redraw_scheduled`
+    // only arms the timer branch while a deferred delta is pending, and select!
+    // parks the task when nothing is ready.
+    let mut last_draw = Instant::now();
+    let mut redraw_scheduled = false;
+
     loop {
         // Event-driven redraw: draw only when a handler signaled a change. With no
         // tick, idle CPU stays at zero; the only periodic work is the SSE stream
         // itself. `Event::Resize` is handled below so a resize still redraws.
+        // Clearing `redraw_scheduled` here (not at timer-fire) guarantees a
+        // deferred delta is never left undrawn until some unrelated event wakes
+        // the loop.
         if app.take_dirty() {
             terminal.draw(|frame| app.render(frame))?;
+            last_draw = Instant::now();
+            redraw_scheduled = false;
         }
 
         tokio::select! {
+            biased;
             Some(event) = key_rx.recv() => {
                 match event {
                     ratatui::crossterm::event::Event::Key(key) => {
@@ -183,6 +214,12 @@ async fn run_tui(session: Session) -> Result<()> {
                         if app.should_quit {
                             break;
                         }
+                    }
+                    // A bracketed-paste payload arrives as one event; insert it as
+                    // a single batched edit (see `App::apply_bracketed_paste`).
+                    ratatui::crossterm::event::Event::Paste(text) => {
+                        app.apply_bracketed_paste(text).await;
+                        app.mark_dirty();
                     }
                     // crossterm multiplexes Resize through the same event channel;
                     // without the old 30Hz tick this is the only resize signal, so
@@ -195,8 +232,16 @@ async fn run_tui(session: Session) -> Result<()> {
             }
             event = event_stream.next() => match event {
                 Some(Ok(event)) => {
-                    app.handle_sse_event(event);
-                    app.mark_dirty();
+                    // Coalesce only the high-frequency case (content/reasoning
+                    // deltas); boundaries, tool events, and errors redraw
+                    // promptly. The deferred flush is bounded to one frame by the
+                    // timer branch below.
+                    let is_delta = app.handle_sse_event(event);
+                    if is_delta && last_draw.elapsed() < STREAM_FRAME_INTERVAL {
+                        redraw_scheduled = true;
+                    } else {
+                        app.mark_dirty();
+                    }
                 }
                 None => {
                     stream_end = Some(session::StreamEnd::Graceful);
@@ -222,6 +267,13 @@ async fn run_tui(session: Session) -> Result<()> {
                     app.mark_dirty();
                 }
             },
+            // Deferred streaming-redraw flush. The guard disables the branch
+            // entirely while no delta is pending, so select! parks the task and
+            // idle CPU stays zero. Placed last under `biased` so key/SSE/feedback
+            // always win when ready.
+            _ = tokio::time::sleep(STREAM_FRAME_INTERVAL.saturating_sub(last_draw.elapsed())), if redraw_scheduled => {
+                app.mark_dirty();
+            }
         }
 
         // Drain any prompt handed off by a flush. The main loop owns delivery so
@@ -255,6 +307,13 @@ async fn run_tui(session: Session) -> Result<()> {
         }
     }
 
+    // Flush any deferred-but-undrawn state (e.g. the final streaming delta when
+    // the stream closed before the frame timer fired) before tearing down the alt
+    // screen. `take_dirty` runs only at the loop top, which the break skipped.
+    if app.take_dirty() {
+        terminal.draw(|frame| app.render(frame)).ok();
+    }
+
     // Pop enhancement flags and disable alternate-scroll while still in the alternate
     // screen, before `ratatui::restore()` leaves it. On non-Kitty terminals the pop
     // writes an escape that only the alt buffer discards; leaving the screen first
@@ -262,6 +321,7 @@ async fn run_tui(session: Session) -> Result<()> {
     ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::event::PopKeyboardEnhancementFlags,
+        ratatui::crossterm::event::DisableBracketedPaste,
         DisableAlternateScroll,
     )
     .ok();

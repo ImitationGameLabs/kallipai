@@ -5,7 +5,14 @@ use super::{App, AppMode, ChatLine};
 
 impl App {
     /// Handle an SSE event from the daemon.
-    pub fn handle_sse_event(&mut self, event: SseEvent) {
+    ///
+    /// Returns `true` when the event is a streaming content/reasoning delta —
+    /// the high-frequency case the main loop coalesces into a frame-rate-capped
+    /// redraw. All other events (boundaries, tool events, errors) return
+    /// `false` and redraw immediately. The state mutation has already happened
+    /// by the time this returns; a `true` only defers the *draw* to the frame
+    /// cap, so the final state is always correct.
+    pub fn handle_sse_event(&mut self, event: SseEvent) -> bool {
         // A "boundary" marks a point where the daemon can interject a queued
         // prompt: a `ToolCall` (the assistant committed tool calls, ending this
         // streamed message) or a terminal event. The daemon's
@@ -24,6 +31,7 @@ impl App {
                 | SseEvent::FailoverChainExhausted { .. }
                 | SseEvent::TokenBudgetExceeded { .. }
         );
+        let mut is_delta = false;
         match event {
             SseEvent::Reasoning { content } => {
                 self.chat_lines.push(ChatLine::Reasoning(content));
@@ -37,11 +45,13 @@ impl App {
                 self.streaming_content = true;
                 self.append_streaming_delta(true, &delta);
                 self.auto_scroll = true;
+                is_delta = true;
             }
             SseEvent::ReasoningDelta { delta } => {
                 self.streaming_reasoning = true;
                 self.append_streaming_delta(false, &delta);
                 self.auto_scroll = true;
+                is_delta = true;
             }
             SseEvent::ToolCall { name, args } => {
                 self.chat_lines.push(ChatLine::ToolCall { name, args });
@@ -52,6 +62,10 @@ impl App {
                 self.auto_scroll = true;
             }
             SseEvent::Finished { content } => {
+                // Finalize before clearing the flags: while a flag is still set,
+                // the trailing entry is the in-flight partial whose cache slot
+                // holds the deferred (unhighlighted) render and must be rebuilt.
+                self.finalize_streaming();
                 if !self.streaming_content && !content.is_empty() {
                     self.chat_lines.push(ChatLine::Assistant(content));
                 }
@@ -76,6 +90,7 @@ impl App {
                 self.auto_scroll = true;
             }
             SseEvent::Busy => {
+                self.finalize_streaming();
                 self.agent_busy = true;
                 self.streaming_content = false;
                 self.streaming_reasoning = false;
@@ -111,6 +126,7 @@ impl App {
                 self.auto_scroll = true;
             }
             SseEvent::FailoverChainExhausted { reason, detail } => {
+                self.finalize_streaming();
                 self.chat_lines.push(ChatLine::FailoverExhausted {
                     reason: reason.to_string(),
                     detail,
@@ -121,6 +137,7 @@ impl App {
                 self.auto_scroll = true;
             }
             SseEvent::Cancelled => {
+                self.finalize_streaming();
                 self.chat_lines
                     .push(ChatLine::System("Operation cancelled".into()));
                 self.agent_busy = false;
@@ -129,6 +146,7 @@ impl App {
                 self.auto_scroll = true;
             }
             SseEvent::Interrupted => {
+                self.finalize_streaming();
                 self.chat_lines
                     .push(ChatLine::System("Operation interrupted".into()));
                 self.agent_busy = false;
@@ -137,6 +155,7 @@ impl App {
                 self.auto_scroll = true;
             }
             SseEvent::TokenBudgetExceeded { consumed, budget } => {
+                self.finalize_streaming();
                 self.chat_lines.push(ChatLine::Error(format!(
                     "Token budget exceeded: {} / {}",
                     format_tokens_m(consumed),
@@ -174,6 +193,11 @@ impl App {
                 // next delta start a fresh entry (`append_streaming_delta` no longer tail-matches
                 // `Assistant`/`Reasoning`); these flags only gate `Finished`'s dedup gate, but
                 // clearing them keeps the "is a turn streaming?" state truthful after a void.
+                //
+                // `finalize_streaming()` is intentionally NOT called here, unlike the other
+                // flag-clearing arms: the tail-walk above already invalidated every slot it
+                // touched, and `finalize_streaming`'s "is the last entry Assistant/Reasoning?"
+                // guard would be wrong now that those partials are collapsed.
                 self.streaming_content = false;
                 self.streaming_reasoning = false;
                 self.chat_lines.push(ChatLine::StreamDropped {
@@ -191,6 +215,8 @@ impl App {
         if is_boundary {
             self.request_flush();
         }
+
+        is_delta
     }
 }
 
@@ -246,6 +272,25 @@ mod tests {
     #[test]
     fn busy_is_not_a_boundary() {
         assert_non_boundary_keeps_pending(SseEvent::Busy);
+    }
+
+    #[test]
+    fn delta_events_signal_coalescable_redraw() {
+        // The frame-rate cap coalesces only streaming deltas; everything else
+        // redraws immediately. `handle_sse_event` reports which via its return.
+        let mut app = App::new();
+        assert!(
+            app.handle_sse_event(SseEvent::AssistantContentDelta { delta: "a".into() }),
+            "content delta is coalescable"
+        );
+        assert!(
+            app.handle_sse_event(SseEvent::ReasoningDelta { delta: "b".into() }),
+            "reasoning delta is coalescable"
+        );
+        assert!(
+            !app.handle_sse_event(SseEvent::Busy),
+            "non-delta events redraw immediately"
+        );
     }
 
     #[test]
