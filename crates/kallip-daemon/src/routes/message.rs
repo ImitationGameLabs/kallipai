@@ -5,6 +5,8 @@ use axum::response::IntoResponse;
 use kallip_common::protocol::{ApiError, MessageResponse};
 use tracing::{error, info, warn};
 
+use crate::messaging::{MessageSender, SenderRelation, format_incoming};
+
 use super::MessageRequest;
 use crate::routes::agent::{
     SpawnArgs, WorkspaceAcquireFailure, abort_agent, spawn_agent, try_acquire_workspace_lock,
@@ -23,17 +25,45 @@ use kallip_common::agentid::AgentId;
 /// - `503`: message queue is full, caller should retry later.
 pub async fn send_message(
     State(state): State<SharedState>,
-    _auth: crate::auth::AuthIdentity,
+    auth: crate::auth::AuthIdentity,
     Path(id): Path<AgentId>,
     Json(req): Json<MessageRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
+    // Derive the sender from the caller's auth identity and render a
+    // `[From: ...]` header so the receiver knows who sent the message and how
+    // they relate. Computed once and reused across the fast path and the
+    // reactivation slow path. The sender's entry may have been unregistered
+    // between auth resolution and this lock; fall back to a placeholder role.
+    let (sender, relation) = {
+        let registry = state.registry.read().await;
+        match auth.identity() {
+            crate::auth::Identity::Operator => (MessageSender::Operator, SenderRelation::Operator),
+            crate::auth::Identity::Agent { id: sender_id } => {
+                let role = registry
+                    .get(sender_id)
+                    .map(|e| e.agent.config.role.clone())
+                    .unwrap_or_else(|| "unknown".to_owned());
+                let relation = registry.relation_of(Some(sender_id), &id);
+                (
+                    MessageSender::Agent {
+                        id: sender_id.clone(),
+                        role,
+                    },
+                    relation,
+                )
+            }
+        }
+    };
+    info!(receiver = %id, sender = ?sender, relation = ?relation, "delivering message");
+    let envelope = format_incoming(&sender, relation, &req.text);
+
     // Fast path: agent is alive, try non-blocking send.
     {
         let registry = state.registry.read().await;
         let entry = registry
             .get(&id)
             .ok_or_else(|| ApiError::not_found("agent not found"))?;
-        match try_enqueue(&entry.agent.prompt_tx, &req.text) {
+        match try_enqueue(&entry.agent.prompt_tx, &envelope) {
             EnqueueResult::Accepted(response) => return Ok((StatusCode::ACCEPTED, Json(response))),
             EnqueueResult::Full => {
                 let cap = entry.agent.prompt_tx.max_capacity();
@@ -62,7 +92,7 @@ pub async fn send_message(
             .ok_or_else(|| ApiError::not_found("agent not found"))?;
 
         // Double-check under write lock: another request may have reactivated.
-        match try_enqueue(&entry.agent.prompt_tx, &req.text) {
+        match try_enqueue(&entry.agent.prompt_tx, &envelope) {
             EnqueueResult::Accepted(response) => return Ok((StatusCode::ACCEPTED, Json(response))),
             EnqueueResult::Full => {
                 let cap = entry.agent.prompt_tx.max_capacity();
@@ -86,8 +116,10 @@ pub async fn send_message(
         // This "reserves" the reactivation: concurrent requests see an open
         // channel instead of a closed one, so they try_enqueue normally.
         let (prompt_tx, prompt_rx) = tokio::sync::mpsc::channel(state.prompt_queue_size);
-        // Pre-send the message so it's already queued when the agent starts.
-        prompt_tx.try_send(req.text.clone()).map_err(|e| {
+        // Pre-send the labeled message so it's already queued when the agent
+        // starts -- it becomes the reactivated agent's first user turn, carrying
+        // the same `[From: ...]` header as the live path.
+        prompt_tx.try_send(envelope.clone()).map_err(|e| {
             error!(id = %id, "fresh channel rejected pre-send: {e}");
             ApiError::internal("failed to pre-send message")
         })?;
@@ -298,6 +330,12 @@ fn try_enqueue(tx: &tokio::sync::mpsc::Sender<String>, text: &str) -> EnqueueRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{AuthIdentity, Identity};
+    use crate::state::AgentId;
+    use crate::test_helpers::{make_entry_with_rx, make_state};
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use kallip_common::protocol::MessageRequest;
 
     /// A newly created channel accepts a message with queue_depth == 0 and no warning.
     #[tokio::test]
@@ -354,5 +392,107 @@ mod tests {
             EnqueueResult::Closed => {}
             other => panic!("expected Closed, got {other:?}"),
         }
+    }
+
+    // -- send_message: sender identity is attached to the delivered payload --
+
+    /// Deliver a message as the operator and assert the receiver sees a
+    /// `[From: operator]` header.
+    #[tokio::test]
+    async fn operator_message_carries_operator_header() {
+        let state = make_state();
+        let receiver = AgentId::random();
+        let (mut entry, mut rx) = make_entry_with_rx(None, "recv".into());
+        entry.agent.config.role = "root".into();
+        state
+            .registry
+            .write()
+            .await
+            .register(receiver.clone(), entry);
+
+        let resp = send_message(
+            State(state),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(receiver),
+            Json(MessageRequest {
+                text: "do the thing".into(),
+            }),
+        )
+        .await
+        .expect("operator send accepted");
+        assert_eq!(resp.0, StatusCode::ACCEPTED);
+
+        let delivered = rx.recv().await.expect("message delivered");
+        assert_eq!(delivered, "[From: operator]\ndo the thing");
+    }
+
+    /// Deliver a message from a child agent to its parent and assert the
+    /// header identifies the sender (id + role) and the subordinate relation.
+    #[tokio::test]
+    async fn agent_message_carries_sender_and_relation_header() {
+        let state = make_state();
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (mut parent_entry, mut parent_rx) = make_entry_with_rx(None, "parent".into());
+        parent_entry.agent.config.role = "lead".into();
+        state
+            .registry
+            .write()
+            .await
+            .register(parent.clone(), parent_entry);
+
+        let (mut child_entry, _child_rx) = make_entry_with_rx(Some(parent.clone()), "child".into());
+        child_entry.agent.config.role = "researcher".into();
+        state
+            .registry
+            .write()
+            .await
+            .register(child.clone(), child_entry);
+
+        let resp = send_message(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: child.clone() }),
+            Path(parent),
+            Json(MessageRequest {
+                text: "results attached".into(),
+            }),
+        )
+        .await
+        .expect("agent send accepted");
+        assert_eq!(resp.0, StatusCode::ACCEPTED);
+
+        let delivered = parent_rx.recv().await.expect("message delivered");
+        // Child is a subordinate of parent (parent is the receiver/ancestor).
+        let expected =
+            format!("[From: agent {child} (role: researcher, subordinate)]\nresults attached");
+        assert_eq!(delivered, expected);
+    }
+
+    /// Self-message: an agent messaging itself is labeled `same`.
+    #[tokio::test]
+    async fn self_message_carries_same_relation() {
+        let state = make_state();
+        let me = AgentId::random();
+        let (mut entry, mut rx) = make_entry_with_rx(None, "me".into());
+        entry.agent.config.role = "solo".into();
+        state.registry.write().await.register(me.clone(), entry);
+
+        let _ = send_message(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: me.clone() }),
+            Path(me.clone()),
+            Json(MessageRequest {
+                text: "note to self".into(),
+            }),
+        )
+        .await
+        .expect("self send accepted");
+
+        let delivered = rx.recv().await.expect("message delivered");
+        assert_eq!(
+            delivered,
+            format!("[From: agent {me} (role: solo, same)]\nnote to self")
+        );
     }
 }

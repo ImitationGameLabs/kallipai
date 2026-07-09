@@ -3,6 +3,7 @@ mod auth;
 mod backend;
 mod bridge;
 mod error;
+mod messaging;
 mod routes;
 mod shutdown;
 mod skill_promote;

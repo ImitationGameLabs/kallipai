@@ -361,6 +361,51 @@ impl AgentRegistry {
         Ok(ids)
     }
 
+    /// Relation of `sender_id` to `receiver`, where `sender_id == None` denotes
+    /// the operator. Informational only -- it never gates authorization. Returns
+    /// [`SenderRelation::Unknown`](crate::messaging::SenderRelation::Unknown)
+    /// only when neither a superior nor subordinate relation can be established
+    /// *and* at least one chain walk failed; an intact hierarchy always resolves
+    /// to one of the other variants.
+    ///
+    /// Reuses [`Self::supervisor_chain_ids`] (which already detects cycles and
+    /// broken links); strict ancestors are the chain entries after index 0.
+    pub fn relation_of(
+        &self,
+        sender_id: Option<&AgentId>,
+        receiver: &AgentId,
+    ) -> crate::messaging::SenderRelation {
+        use crate::messaging::SenderRelation;
+
+        let Some(id) = sender_id else {
+            return SenderRelation::Operator;
+        };
+        if id == receiver {
+            return SenderRelation::Same;
+        }
+
+        // `supervisor_chain_ids` returns `[start, ..., root]` (owned ids) and
+        // `Err` on a broken/cyclic chain. `skip(1)` drops the start node so only
+        // strict ancestors count. Each chain is walked at most once: a Superior
+        // match returns after the first walk, and the failed-walk flag is reused
+        // for the Unknown fallback (no re-walk).
+        let receiver_chain = self.supervisor_chain_ids(receiver);
+        if matches!(&receiver_chain, Ok(chain) if chain.iter().skip(1).any(|a| a == id)) {
+            return SenderRelation::Superior; // sender outranks receiver
+        }
+        let sender_chain = self.supervisor_chain_ids(id);
+        if matches!(&sender_chain, Ok(chain) if chain.iter().skip(1).any(|a| a == receiver)) {
+            return SenderRelation::Subordinate; // receiver outranks sender
+        }
+        // Neither ancestor relation matched. If either walk failed, the chain is
+        // corrupt enough that we cannot confidently call it a peer.
+        if receiver_chain.is_err() || sender_chain.is_err() {
+            SenderRelation::Unknown
+        } else {
+            SenderRelation::Peer
+        }
+    }
+
     /// Caller must be the operator or the direct supervisor of the subagent being created.
     /// Returns the supervisor's `AgentEntry` for delegation checks.
     pub fn require_supervisor(
@@ -635,6 +680,95 @@ mod tests {
             Err(e) => assert_eq!(e.status, 403),
             Ok(_) => panic!("expected broken chain error"),
         }
+    }
+
+    // -- relation_of --
+
+    #[tokio::test]
+    async fn relation_of_operator_is_operator() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        add_root(&mut reg, &a);
+        assert_eq!(
+            reg.relation_of(None, &a),
+            crate::messaging::SenderRelation::Operator
+        );
+    }
+
+    #[tokio::test]
+    async fn relation_of_self_is_same() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        add_root(&mut reg, &a);
+        assert_eq!(
+            reg.relation_of(Some(&a), &a),
+            crate::messaging::SenderRelation::Same
+        );
+    }
+
+    #[tokio::test]
+    async fn relation_of_direct_and_transitive_parent_is_superior() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        let b = AgentId::random();
+        let c = AgentId::random();
+        add_root(&mut reg, &a);
+        add_sub(&mut reg, &b, &a);
+        add_sub(&mut reg, &c, &b);
+        let superior = crate::messaging::SenderRelation::Superior;
+        // a is grandparent of c, b is parent of c.
+        assert_eq!(reg.relation_of(Some(&a), &c), superior);
+        assert_eq!(reg.relation_of(Some(&b), &c), superior);
+    }
+
+    #[tokio::test]
+    async fn relation_of_child_is_subordinate() {
+        let mut reg = AgentRegistry::new();
+        let parent = AgentId::random();
+        let child = AgentId::random();
+        add_root(&mut reg, &parent);
+        add_sub(&mut reg, &child, &parent);
+        // Child messaging parent: child is subordinate (receiver is its ancestor).
+        assert_eq!(
+            reg.relation_of(Some(&child), &parent),
+            crate::messaging::SenderRelation::Subordinate
+        );
+    }
+
+    #[tokio::test]
+    async fn relation_of_sibling_and_unrelated_are_peers() {
+        let mut reg = AgentRegistry::new();
+        let parent = AgentId::random();
+        let sib1 = AgentId::random();
+        let sib2 = AgentId::random();
+        add_root(&mut reg, &parent);
+        add_sub(&mut reg, &sib1, &parent);
+        add_sub(&mut reg, &sib2, &parent);
+        let peer = crate::messaging::SenderRelation::Peer;
+        assert_eq!(reg.relation_of(Some(&sib1), &sib2), peer);
+        // Unrelated roots are also peers.
+        let other = AgentId::random();
+        add_root(&mut reg, &other);
+        assert_eq!(reg.relation_of(Some(&other), &parent), peer);
+    }
+
+    #[tokio::test]
+    async fn relation_of_broken_chain_is_unknown() {
+        let mut reg = AgentRegistry::new();
+        let a = AgentId::random();
+        let ghost = AgentId::random();
+        reg.register(a.clone(), make_entry(Some(ghost), "a".into()));
+        // Self short-circuits before any walk, so a broken chain is irrelevant.
+        assert_eq!(
+            reg.relation_of(Some(&a), &a),
+            crate::messaging::SenderRelation::Same
+        );
+        let b = AgentId::random();
+        add_root(&mut reg, &b);
+        // a's chain is broken; relation to the unrelated root b is unknowable.
+        let unknown = crate::messaging::SenderRelation::Unknown;
+        assert_eq!(reg.relation_of(Some(&a), &b), unknown);
+        assert_eq!(reg.relation_of(Some(&b), &a), unknown);
     }
 
     // -- Authorization: require_superior --
