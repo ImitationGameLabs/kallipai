@@ -74,32 +74,32 @@ class KallipAdapter(BaseInstalledAgent):
     # These are resolved from Harbor kwargs / host env / defaults, and
     # forwarded into the container for the daemon and runner.
     # Note: API keys are provider-specific, matching kallip's design:
-    #   deepseek           → JUST_LLM_DEEPSEEK_API_KEY
-    #   openai-compatible  → JUST_LLM_OPENAI_COMPAT_API_KEY
+    #   deepseek           → KALLIP_LLM_DEEPSEEK_API_KEY
+    #   openai-compatible  → KALLIP_LLM_OPENAI_COMPAT_API_KEY
     ENV_VARS: list[EnvVar] = [
         EnvVar(
             "llm_provider",
-            env="JUST_LLM_PROVIDER",
+            env="KALLIP_LLM_PROVIDER",
             type="str",
-            env_fallback="JUST_LLM_PROVIDER",
+            env_fallback="KALLIP_LLM_PROVIDER",
         ),
         EnvVar(
             "llm_model",
-            env="JUST_LLM_MODEL",
+            env="KALLIP_LLM_MODEL",
             type="str",
-            env_fallback="JUST_LLM_MODEL",
+            env_fallback="KALLIP_LLM_MODEL",
         ),
         EnvVar(
             "llm_deepseek_api_key",
-            env="JUST_LLM_DEEPSEEK_API_KEY",
+            env="KALLIP_LLM_DEEPSEEK_API_KEY",
             type="str",
-            env_fallback="JUST_LLM_DEEPSEEK_API_KEY",
+            env_fallback="KALLIP_LLM_DEEPSEEK_API_KEY",
         ),
         EnvVar(
             "llm_openai_compat_api_key",
-            env="JUST_LLM_OPENAI_COMPAT_API_KEY",
+            env="KALLIP_LLM_OPENAI_COMPAT_API_KEY",
             type="str",
-            env_fallback="JUST_LLM_OPENAI_COMPAT_API_KEY",
+            env_fallback="KALLIP_LLM_OPENAI_COMPAT_API_KEY",
         ),
         EnvVar(
             "operator_token",
@@ -180,11 +180,11 @@ class KallipAdapter(BaseInstalledAgent):
 
         # 4. Apply Harbor's --model if provided.
         #    Convention: --model "provider/model-name"
-        #    Maps to JUST_LLM_PROVIDER + JUST_LLM_MODEL.
+        #    Maps to KALLIP_LLM_PROVIDER + KALLIP_LLM_MODEL.
         if self.model_name and "/" in self.model_name:
             provider, model = self.model_name.split("/", 1)
-            env.setdefault("JUST_LLM_PROVIDER", provider)
-            env.setdefault("JUST_LLM_MODEL", model)
+            env.setdefault("KALLIP_LLM_PROVIDER", provider)
+            env.setdefault("KALLIP_LLM_MODEL", model)
 
         # Persist daemon data under Harbor's bind-mounted /logs/agent/ so it
         # survives on the host at <trial_dir>/agent/ for post-run inspection.

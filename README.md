@@ -93,9 +93,9 @@ without a human in the loop. Or it can surface the decision to a human.
 ## Quick start
 
 ```bash
-JUST_LLM_PROVIDER=deepseek \
-JUST_LLM_MODEL=deepseek-v4-flash \
-JUST_LLM_DEEPSEEK_API_KEY=your-key \
+KALLIP_LLM_PROVIDER=deepseek \
+KALLIP_LLM_MODEL=deepseek-v4-flash \
+KALLIP_LLM_DEEPSEEK_API_KEY=your-key \
 cargo run -p kallip-daemon
 
 # TUI client

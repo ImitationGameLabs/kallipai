@@ -17,7 +17,7 @@
 #
 # Prerequisites:
 #   - Completed setup (./harbor-integration/setup-venv.sh)
-#   - Provider API key exported (e.g. JUST_LLM_DEEPSEEK_API_KEY)
+#   - Provider API key exported (e.g. KALLIP_LLM_DEEPSEEK_API_KEY)
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"

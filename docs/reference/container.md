@@ -147,9 +147,9 @@ token come from `.env`:
 
 | Variable                | Required    | Notes                                                                          |
 | ----------------------- | ----------- | ------------------------------------------------------------------------------ |
-| `JUST_LLM_PROVIDER`     | **yes**     | See [env.md](env.md).                                                          |
-| `JUST_LLM_MODEL`        | **yes**     | See [env.md](env.md).                                                          |
-| `JUST_LLM_*_API_KEY`    | conditional | Provider key, e.g. `JUST_LLM_DEEPSEEK_API_KEY`.                                |
+| `KALLIP_LLM_PROVIDER`   | **yes**     | See [env.md](env.md).                                                          |
+| `KALLIP_LLM_MODEL`      | **yes**     | See [env.md](env.md).                                                          |
+| `KALLIP_LLM_*_API_KEY`  | conditional | Provider key, e.g. `KALLIP_LLM_DEEPSEEK_API_KEY`.                              |
 | `KALLIP_OPERATOR_TOKEN` | no          | If unset, a random `sk-operator-...` token is generated and printed to stdout. |
 
 The compose already sets `KALLIP_DAEMON_ADDR=0.0.0.0:3000` (in dev and prod),
@@ -171,9 +171,9 @@ docker run --rm \
   -p 3000:3000 \
   -v kallip_data:/var/lib/kallip \
   -v kallip_workspace:/workspace \
-  -e JUST_LLM_PROVIDER=deepseek \
-  -e JUST_LLM_MODEL=deepseek-v4-flash \
-  -e JUST_LLM_DEEPSEEK_API_KEY="$DEEPSEEK_KEY" \
+  -e KALLIP_LLM_PROVIDER=deepseek \
+  -e KALLIP_LLM_MODEL=deepseek-v4-flash \
+  -e KALLIP_LLM_DEEPSEEK_API_KEY="$DEEPSEEK_KEY" \
   kallip:latest
 ```
 

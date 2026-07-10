@@ -64,14 +64,14 @@ export KALLIP_PACKAGE_PATH=./result/kallip-*-linux-x86_64.tar.gz
 
 Set these on the **host** before running Harbor. They are forwarded into the container via Harbor's `ENV_VARS` mechanism.
 
-| Variable                         | Required | Description                                                                       |
-| -------------------------------- | -------- | --------------------------------------------------------------------------------- |
-| `JUST_LLM_DEEPSEEK_API_KEY`      | Yes\*    | API key for DeepSeek provider                                                     |
-| `JUST_LLM_OPENAI_COMPAT_API_KEY` | Yes\*    | API key for OpenAI-compatible provider                                            |
-| `JUST_LLM_PROVIDER`              | No       | LLM backend: `deepseek` or `openai-compatible`. Auto-set from config `model_name` |
-| `JUST_LLM_MODEL`                 | No       | Model identifier. Auto-set from config `model_name`                               |
-| `KALLIP_OPERATOR_TOKEN`          | No       | Pre-set auth token; auto-generated if omitted                                     |
-| `KALLIP_MAX_TOOL_ROUNDS`         | No       | Default max tool-call rounds per run                                              |
+| Variable                           | Required | Description                                                                       |
+| ---------------------------------- | -------- | --------------------------------------------------------------------------------- |
+| `KALLIP_LLM_DEEPSEEK_API_KEY`      | Yes\*    | API key for DeepSeek provider                                                     |
+| `KALLIP_LLM_OPENAI_COMPAT_API_KEY` | Yes\*    | API key for OpenAI-compatible provider                                            |
+| `KALLIP_LLM_PROVIDER`              | No       | LLM backend: `deepseek` or `openai-compatible`. Auto-set from config `model_name` |
+| `KALLIP_LLM_MODEL`                 | No       | Model identifier. Auto-set from config `model_name`                               |
+| `KALLIP_OPERATOR_TOKEN`            | No       | Pre-set auth token; auto-generated if omitted                                     |
+| `KALLIP_MAX_TOOL_ROUNDS`           | No       | Default max tool-call rounds per run                                              |
 
 \* Set the key matching your provider.
 
@@ -80,7 +80,7 @@ Set these on the **host** before running Harbor. They are forwarded into the con
 Pre-built config files are in `harbor-integration/configs/`. Each config encodes the agent, model, dataset, and output directory so you don't need to pass them as CLI flags.
 
 ```bash
-export JUST_LLM_DEEPSEEK_API_KEY=<your-key>
+export KALLIP_LLM_DEEPSEEK_API_KEY=<your-key>
 
 # Quick verification (hello-world)
 ./harbor-integration/harbor-test.sh

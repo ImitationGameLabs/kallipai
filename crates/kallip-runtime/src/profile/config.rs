@@ -1,5 +1,5 @@
 //! Profile configuration: a TOML file (multi-tier) or an implicit single profile from
-//! `JUST_LLM_*` env (the no-config-file path).
+//! `KALLIP_LLM_*` env (the no-config-file path).
 //!
 //! Progressive disclosure — Harbor / `kallip-run` set only env vars and ship no config
 //! file, so they get the implicit single profile with zero overhead. A `profiles.toml`
@@ -30,7 +30,7 @@ pub struct ProfileConfig {
 }
 
 /// Load profile configuration: from `KALLIP_PROFILES_FILE` (or a default path) if present,
-/// else an implicit single profile built from `JUST_LLM_*` env.
+/// else an implicit single profile built from `KALLIP_LLM_*` env.
 pub fn load() -> Result<ProfileConfig> {
     match resolve_config_path()? {
         Some(path) => load_file(&path),
@@ -38,26 +38,26 @@ pub fn load() -> Result<ProfileConfig> {
     }
 }
 
-/// Build the implicit single-profile registry from `JUST_LLM_*` env (the env path).
+/// Build the implicit single-profile registry from `KALLIP_LLM_*` env (the env path).
 ///
 /// Mirrors the historical `client_from_env` reads 1:1. The profile's `max_context_window` is
 /// derived from `KALLIP_CONTEXT_WINDOW_TOKENS` (default `128_000`), so the env path and the
 /// config-file path both carry an authoritative window installed via `set_context_window` at spawn.
 pub fn from_env() -> Result<ProfileConfig> {
-    let provider = env_str("JUST_LLM_PROVIDER")?;
-    let model = env_str("JUST_LLM_MODEL")?;
+    let provider = env_str("KALLIP_LLM_PROVIDER")?;
+    let model = env_str("KALLIP_LLM_MODEL")?;
     let (family_id, api_key, base_url) = match provider.as_str() {
         family::DEEPSEEK => {
-            let key = env_str("JUST_LLM_DEEPSEEK_API_KEY")?;
-            let base = std::env::var("JUST_LLM_DEEPSEEK_BASE_URL").ok();
+            let key = env_str("KALLIP_LLM_DEEPSEEK_API_KEY")?;
+            let base = std::env::var("KALLIP_LLM_DEEPSEEK_BASE_URL").ok();
             (family::DEEPSEEK, key, base)
         }
         family::OPENAI_COMPATIBLE => {
-            let key = env_str("JUST_LLM_OPENAI_COMPAT_API_KEY")?;
-            let base = std::env::var("JUST_LLM_OPENAI_COMPAT_BASE_URL").ok();
+            let key = env_str("KALLIP_LLM_OPENAI_COMPAT_API_KEY")?;
+            let base = std::env::var("KALLIP_LLM_OPENAI_COMPAT_BASE_URL").ok();
             (family::OPENAI_COMPATIBLE, key, base)
         }
-        other => bail!("unsupported JUST_LLM_PROVIDER: {other}"),
+        other => bail!("unsupported KALLIP_LLM_PROVIDER: {other}"),
     };
     let endpoint = Endpoint {
         id: provider.clone(),
@@ -275,9 +275,9 @@ mod tests {
 
     fn ds_env() -> [(&'static str, Option<&'static str>); 4] {
         [
-            ("JUST_LLM_PROVIDER", Some("deepseek")),
-            ("JUST_LLM_MODEL", Some("deepseek-test")),
-            ("JUST_LLM_DEEPSEEK_API_KEY", Some("fake")),
+            ("KALLIP_LLM_PROVIDER", Some("deepseek")),
+            ("KALLIP_LLM_MODEL", Some("deepseek-test")),
+            ("KALLIP_LLM_DEEPSEEK_API_KEY", Some("fake")),
             ("KALLIP_CONTEXT_WINDOW_TOKENS", Some("200000")),
         ]
     }
@@ -297,8 +297,8 @@ mod tests {
     fn from_env_rejects_unknown_provider() {
         temp_env::with_vars(
             [
-                ("JUST_LLM_PROVIDER", Some("anthropic")),
-                ("JUST_LLM_MODEL", Some("m")),
+                ("KALLIP_LLM_PROVIDER", Some("anthropic")),
+                ("KALLIP_LLM_MODEL", Some("m")),
             ],
             || {
                 assert!(from_env().is_err());

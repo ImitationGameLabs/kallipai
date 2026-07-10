@@ -27,5 +27,5 @@ uv pip install harbor --python harbor-integration/.venv/bin/python
 echo ""
 echo "Done. Next steps:"
 echo ""
-echo "  1. export JUST_LLM_DEEPSEEK_API_KEY=<your-key>  (or JUST_LLM_OPENAI_COMPAT_API_KEY)"
+echo "  1. export KALLIP_LLM_DEEPSEEK_API_KEY=<your-key>  (or KALLIP_LLM_OPENAI_COMPAT_API_KEY)"
 echo "  2. ./harbor-integration/harbor-test.sh"

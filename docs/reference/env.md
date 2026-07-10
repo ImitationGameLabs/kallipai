@@ -6,31 +6,31 @@ All configuration is done through environment variables. Copy `.env.example` to 
 
 These variables select and configure the LLM backend. They are **required** when no [model profiles](#model-profiles) config file is present.
 
-| Variable                          | Required    | Default          | Description                                                                                               |
-| --------------------------------- | ----------- | ---------------- | --------------------------------------------------------------------------------------------------------- |
-| `JUST_LLM_PROVIDER`               | **yes**     | —                | LLM backend. Supported values: `deepseek`, `openai-compatible`.                                           |
-| `JUST_LLM_MODEL`                  | **yes**     | —                | Model identifier passed to the provider (e.g. `deepseek-v4-flash`, `glm-5.1`).                            |
-| `JUST_LLM_DEEPSEEK_API_KEY`       | conditional | —                | API key for the DeepSeek provider. Required when `JUST_LLM_PROVIDER=deepseek`.                            |
-| `JUST_LLM_DEEPSEEK_BASE_URL`      | no          | DeepSeek default | Override the default DeepSeek API endpoint.                                                               |
-| `JUST_LLM_OPENAI_COMPAT_API_KEY`  | conditional | —                | API key for the OpenAI-compatible provider. Required when `JUST_LLM_PROVIDER=openai-compatible`.          |
-| `JUST_LLM_OPENAI_COMPAT_BASE_URL` | conditional | `""`             | Override the default OpenAI-compatible API endpoint. Required when `JUST_LLM_PROVIDER=openai-compatible`. |
+| Variable                            | Required    | Default          | Description                                                                                                 |
+| ----------------------------------- | ----------- | ---------------- | ----------------------------------------------------------------------------------------------------------- |
+| `KALLIP_LLM_PROVIDER`               | **yes**     | —                | LLM backend. Supported values: `deepseek`, `openai-compatible`.                                             |
+| `KALLIP_LLM_MODEL`                  | **yes**     | —                | Model identifier passed to the provider (e.g. `deepseek-v4-flash`, `glm-5.1`).                              |
+| `KALLIP_LLM_DEEPSEEK_API_KEY`       | conditional | —                | API key for the DeepSeek provider. Required when `KALLIP_LLM_PROVIDER=deepseek`.                            |
+| `KALLIP_LLM_DEEPSEEK_BASE_URL`      | no          | DeepSeek default | Override the default DeepSeek API endpoint.                                                                 |
+| `KALLIP_LLM_OPENAI_COMPAT_API_KEY`  | conditional | —                | API key for the OpenAI-compatible provider. Required when `KALLIP_LLM_PROVIDER=openai-compatible`.          |
+| `KALLIP_LLM_OPENAI_COMPAT_BASE_URL` | conditional | `""`             | Override the default OpenAI-compatible API endpoint. Required when `KALLIP_LLM_PROVIDER=openai-compatible`. |
 
 ## Model Profiles
 
 A profile binds a model to an endpoint and its declared capabilities (`max_context_window`), grouped into capability tiers. With a profiles config file, the daemon loads multiple provider/model combinations, each profile declaring its own `max_context_window`.
 
-| Variable               | Required | Default                                 | Description                                                                                                                         |
-| ---------------------- | -------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `KALLIP_PROFILES_FILE` | no       | `$XDG_CONFIG_HOME/kallip/profiles.toml` | Path to a TOML profiles config. Absent (and the default path missing) → the implicit single profile is built from `JUST_LLM_*` env. |
+| Variable               | Required | Default                                 | Description                                                                                                                           |
+| ---------------------- | -------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `KALLIP_PROFILES_FILE` | no       | `$XDG_CONFIG_HOME/kallip/profiles.toml` | Path to a TOML profiles config. Absent (and the default path missing) → the implicit single profile is built from `KALLIP_LLM_*` env. |
 
-Without a config file (the default for benchmark/scripting via Harbor and `kallip-run`), a single implicit profile is derived from `JUST_LLM_*` env, and its `max_context_window` is derived from `KALLIP_CONTEXT_WINDOW_TOKENS` (default `128000`).
+Without a config file (the default for benchmark/scripting via Harbor and `kallip-run`), a single implicit profile is derived from `KALLIP_LLM_*` env, and its `max_context_window` is derived from `KALLIP_CONTEXT_WINDOW_TOKENS` (default `128000`).
 
 Example `profiles.toml`:
 
 ```toml
 [endpoints.deepseek-primary]
 family = "deepseek"
-api_key = "${JUST_LLM_DEEPSEEK_API_KEY}" # env-var indirection keeps secrets out of the file
+api_key = "${KALLIP_LLM_DEEPSEEK_API_KEY}" # env-var indirection keeps secrets out of the file
 
 [endpoints.openrouter]
 family = "openai-compatible"
