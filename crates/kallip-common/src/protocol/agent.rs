@@ -8,11 +8,19 @@ use crate::policy::ToolPolicy;
 use crate::retry::RetryRecord;
 
 /// Agent lifecycle state exposed via the status endpoint.
+///
+/// `Idle`/`Busy` are stored on the live agent as an `AtomicU8` (see `IDLE`/`BUSY`
+/// constants) and flipped only by the bridge task. `Faulted` is **wire/display-only**:
+/// it reports an entry that could not be brought up (e.g. restore failure) and so has no
+/// running task. It is never stored atomically and never written by a bridge -- the
+/// `RegistryEntry` enum distinguishes it structurally -- which is why there is no
+/// `FAULTED: u8` constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     Idle,
     Busy,
+    Faulted,
 }
 
 impl AgentState {
@@ -25,6 +33,7 @@ impl std::fmt::Display for AgentState {
         f.write_str(match self {
             AgentState::Idle => "idle",
             AgentState::Busy => "busy",
+            AgentState::Faulted => "faulted",
         })
     }
 }
@@ -105,6 +114,10 @@ pub struct AgentSummary {
     /// Empty when idle (the bridge clears it on terminal events). Not persisted.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub activity: String,
+    /// Present only when `state == Faulted`: why the agent could not be brought up
+    /// (e.g. "restore failed: workspace ... not found"). Absent for live agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faulted_reason: Option<String>,
 }
 
 /// Response body for listing agents.

@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures_util::future::join_all;
 use kallip_common::agentid::AgentId;
 
-use crate::state::{AgentEntry, AppState};
+use crate::state::{AppState, RegistryEntry};
 
 /// Maximum time to wait for a single agent's tasks to finish on deletion.
 ///
@@ -37,7 +37,7 @@ pub(crate) const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 /// the registry read lock (via `route_to_superior`) must not contend with an
 /// await held under the write lock.
 pub(crate) async fn graceful_agent_shutdown(state: &AppState) {
-    let entries: Vec<(AgentId, AgentEntry)> = {
+    let entries: Vec<(AgentId, RegistryEntry)> = {
         let mut registry = state.registry.write().await;
         registry.drain()
     };
@@ -50,10 +50,20 @@ pub(crate) async fn graceful_agent_shutdown(state: &AppState) {
     join_all(entries.into_iter().map(|(id, entry)| async move {
         // Defense-in-depth: release this agent's directory locks (the process
         // is exiting, but explicit release keeps the coordinator consistent if
-        // shutdown ever runs without a full process exit).
+        // shutdown ever runs without a full process exit). A no-op for faulted
+        // entries, which never acquired locks.
         state.lock_manager.release_all(&id);
-        if !entry.agent.shutdown(bound).await {
-            tracing::warn!(id = %id, "agent did not shut down in time, force-aborted");
+        match entry {
+            RegistryEntry::Live(live) => {
+                if !live.agent.shutdown(bound).await {
+                    tracing::warn!(id = %id, "agent did not shut down in time, force-aborted");
+                }
+            }
+            RegistryEntry::Faulted(_) => {
+                // No task to await -- the on-disk data stays for the next
+                // startup to retry. Nothing to do but drop the entry.
+                tracing::info!(id = %id, "faulted agent drained (no task)");
+            }
         }
     }))
     .await;

@@ -127,7 +127,10 @@ mod tests {
         let plain = format!("agent-{id}");
         {
             let mut reg = state.registry.write().await;
-            reg.register(id.clone(), make_entry(None, plain.clone()));
+            reg.register(
+                id.clone(),
+                crate::state::RegistryEntry::Live(make_entry(None, plain.clone())),
+            );
         }
         let mut parts = parts_with_bearer(&plain);
         let auth = AuthIdentity::from_request_parts(&mut parts, &state)

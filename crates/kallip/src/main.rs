@@ -411,6 +411,12 @@ fn print_agent_list(agents: &[kallip_common::protocol::AgentSummary], empty_msg:
             line.push_str(&a.activity);
             line.push(']');
         }
+        if let Some(reason) = &a.faulted_reason {
+            // Surface why a faulted agent could not be brought up, so an
+            // operator can decide between fixing the workspace and removing it.
+            line.push_str("  faulted: ");
+            line.push_str(reason);
+        }
         println!("{line}");
     }
 }

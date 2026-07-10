@@ -334,6 +334,38 @@ pub struct AgentConfig {
     pub description: String,
 }
 
+impl Default for AgentConfig {
+    /// Field defaults mirroring the env-unset branches of [`Self::load`]. Used to
+    /// construct a placeholder config for a faulted registry entry (which never
+    /// runs, so the runtime knobs are irrelevant) and to keep test literals small.
+    /// The identity fields (`agent_id`, `created_by`, `role`, `description`,
+    /// `workspace_root`, `permissions_class`) default to empty/None and are
+    /// overwritten by the caller.
+    fn default() -> Self {
+        Self {
+            prompt: None,
+            system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
+            max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
+            workspace_root: PathBuf::new(),
+            context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            output_reserve_tokens: DEFAULT_OUTPUT_RESERVE_TOKENS,
+            summary_max_tokens: DEFAULT_SUMMARY_MAX_TOKENS,
+            tool_timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
+            skills: Vec::new(),
+            retry_policy: RetryPolicy::default(),
+            pinned_budget_ratio: DEFAULT_PINNED_BUDGET_RATIO,
+            context_thresholds: DEFAULT_CONTEXT_THRESHOLDS.to_vec(),
+            token_budget_warnings: DEFAULT_TOKEN_BUDGET_WARNINGS.to_vec(),
+            agent_id: None,
+            created_by: None,
+            permissions: PermissionProfile::new(PathBuf::new()),
+            permissions_class: PermissionClass::Normal,
+            role: String::new(),
+            description: String::new(),
+        }
+    }
+}
+
 impl AgentConfig {
     /// Loads configuration from CLI arguments and environment variables.
     pub fn load(

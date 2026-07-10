@@ -19,7 +19,10 @@ use kallip_runtime::retry::RetryPolicy;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::state::{Agent, AgentEntry, AgentRegistry, AppState, SharedState};
+use crate::state::{
+    Agent, AgentEntry, AgentIdentity, AgentRegistry, AppState, FaultedEntry, RegistryEntry,
+    SharedState,
+};
 use crate::token::TokenHash;
 
 /// Construct a full `AgentEntry` with real channels and default policy.
@@ -56,15 +59,17 @@ pub fn make_entry_with_rx(
         description: String::new(),
     };
     let entry = AgentEntry {
+        identity: AgentIdentity {
+            config,
+            agent_dir: None,
+        },
         agent: Agent {
             prompt_tx,
             events_tx,
             approvals: Arc::new(Mutex::new(ApprovalStore::new())),
-            config,
             agent_handle: tokio::spawn(async {}),
             bridge_handle: tokio::spawn(async {}),
             store: Arc::new(Mutex::new(ContextStore::new())),
-            agent_dir: None,
             cancel: CancellationToken::new(),
             round_cancel: Arc::new(std::sync::Mutex::new(None)),
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -80,6 +85,23 @@ pub fn make_entry_with_rx(
         subagent_ids: vec![],
     };
     (entry, prompt_rx)
+}
+
+/// Construct a faulted entry (no running task) with the given reason.
+pub fn make_faulted_entry(created_by: Option<AgentId>, reason: &str) -> FaultedEntry {
+    let config = AgentConfig {
+        created_by,
+        workspace_root: PathBuf::from("/tmp"),
+        ..AgentConfig::default()
+    };
+    FaultedEntry {
+        identity: AgentIdentity {
+            config,
+            agent_dir: None,
+        },
+        subagent_ids: vec![],
+        reason: reason.to_string(),
+    }
 }
 
 /// Construct an entry with a custom `ToolPolicy`.
@@ -106,14 +128,17 @@ pub fn make_entry_with_policy_rx(
 
 /// Register a root agent (no `created_by`).
 pub fn add_root(registry: &mut AgentRegistry, id: &AgentId) {
-    registry.register(id.clone(), make_entry(None, format!("agent-{id}")));
+    registry.register(
+        id.clone(),
+        RegistryEntry::Live(make_entry(None, format!("agent-{id}"))),
+    );
 }
 
 /// Register a sub-agent under a supervisor.
 pub fn add_sub(registry: &mut AgentRegistry, id: &AgentId, supervisor: &AgentId) {
     registry.register(
         id.clone(),
-        make_entry(Some(supervisor.clone()), format!("agent-{id}")),
+        RegistryEntry::Live(make_entry(Some(supervisor.clone()), format!("agent-{id}"))),
     );
 }
 
@@ -121,7 +146,28 @@ pub fn add_sub(registry: &mut AgentRegistry, id: &AgentId, supervisor: &AgentId)
 pub fn add_root_with_policy(registry: &mut AgentRegistry, id: &AgentId, policy: ToolPolicy) {
     registry.register(
         id.clone(),
-        make_entry_with_policy(None, format!("agent-{id}"), policy),
+        RegistryEntry::Live(make_entry_with_policy(None, format!("agent-{id}"), policy)),
+    );
+}
+
+/// Register a faulted root agent with the given reason.
+pub fn add_faulted_root(registry: &mut AgentRegistry, id: &AgentId, reason: &str) {
+    registry.register(
+        id.clone(),
+        RegistryEntry::Faulted(make_faulted_entry(None, reason)),
+    );
+}
+
+/// Register a faulted sub-agent under a supervisor.
+pub fn add_faulted_sub(
+    registry: &mut AgentRegistry,
+    id: &AgentId,
+    supervisor: &AgentId,
+    reason: &str,
+) {
+    registry.register(
+        id.clone(),
+        RegistryEntry::Faulted(make_faulted_entry(Some(supervisor.clone()), reason)),
     );
 }
 
@@ -152,7 +198,8 @@ pub async fn enqueue_committed_approval(
     tool_name: &str,
 ) -> String {
     let entry = registry.get(agent_id).expect("agent exists");
-    let mut store = entry.agent.approvals.lock().await;
+    let live = entry.as_live().expect("agent is live");
+    let mut store = live.agent.approvals.lock().await;
     let id = store.enqueue(tool_name, "{}", None);
     store.commit(&id, "test commit").expect("commit");
     id

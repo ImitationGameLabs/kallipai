@@ -24,6 +24,12 @@ pub async fn list_approvals(
 
     let mut entries: Vec<ApprovalEntry> = Vec::new();
     for (agent_id, entry) in registry.iter() {
+        // Faulted entries have no approval queue and no task to act on a
+        // decision; skip them (defense-in-depth, and required for compilation
+        // since `approvals` is a live-only field).
+        let Some(live) = entry.as_live() else {
+            continue;
+        };
         if registry
             .require_superior(auth.identity(), agent_id)
             .is_err()
@@ -35,7 +41,7 @@ pub async fn list_approvals(
         {
             continue;
         }
-        let q = entry.agent.approvals.lock().await;
+        let q = live.agent.approvals.lock().await;
         for info in q.list(None) {
             // Pending actions are not yet committed — not visible to superiors.
             if info.status == ApprovalStatus::Pending {
@@ -89,7 +95,10 @@ pub async fn get_approval(
 ) -> Result<Json<ApprovalEntry>, ApiError> {
     let registry = state.registry.read().await;
     for (agent_id, entry) in registry.iter() {
-        let approvals = entry.agent.approvals.lock().await;
+        let Some(live) = entry.as_live() else {
+            continue;
+        };
+        let approvals = live.agent.approvals.lock().await;
         if let Some(info) = approvals.get(&id) {
             registry.require_superior(auth.identity(), agent_id)?;
             return Ok(Json(ApprovalEntry::from_info(
@@ -130,7 +139,12 @@ pub async fn respond_approval(
     // Find the owning agent and apply the decision in a single approval-lock
     // acquisition to prevent TOCTOU races with the agent loop.
     for (agent_id, entry) in registry.iter() {
-        let mut approvals = entry.agent.approvals.lock().await;
+        // Skip faulted entries up front: they have no approval queue to lock
+        // and no task to notify. Must precede the `approvals.lock()` below.
+        let Some(live) = entry.as_live() else {
+            continue;
+        };
+        let mut approvals = live.agent.approvals.lock().await;
         if !approvals.contains(&id) {
             continue;
         }
@@ -147,7 +161,12 @@ pub async fn respond_approval(
                     let caller_entry = registry
                         .get(caller_id)
                         .ok_or_else(|| ApiError::internal("caller agent not found in registry"))?;
-                    let caller_decision = caller_entry
+                    // A faulted agent cannot authenticate (never token-indexed),
+                    // so the caller is always live; reject defensively anyway.
+                    let caller_live = caller_entry
+                        .as_live()
+                        .ok_or_else(|| ApiError::internal("caller agent is faulted"))?;
+                    let caller_decision = caller_live
                         .agent
                         .tool_policy
                         .read()
@@ -165,8 +184,7 @@ pub async fn respond_approval(
                 approvals
                     .approve(&id)
                     .map_err(|e| ApiError::conflict(e.to_string()))?;
-                entry
-                    .agent
+                live.agent
                     .events_tx
                     .send(SseEvent::ApprovalUpdated {
                         id: id.clone(),
@@ -180,8 +198,7 @@ pub async fn respond_approval(
                 approvals
                     .deny(&id, &reason)
                     .map_err(|e| ApiError::conflict(e.to_string()))?;
-                entry
-                    .agent
+                live.agent
                     .events_tx
                     .send(SseEvent::ApprovalUpdated {
                         id: id.clone(),
@@ -199,7 +216,7 @@ pub async fn respond_approval(
 
         // Persist while still holding the lock so the agent loop's
         // concurrent persist() cannot interleave a stale write.
-        if let (Some(json), Some(dir)) = (json, entry.agent.agent_dir.as_ref())
+        if let (Some(json), Some(dir)) = (json, live.identity.agent_dir.as_ref())
             && let Err(e) = persistence::persist_approvals(&json, dir)
         {
             tracing::error!("approval persist after decision failed: {e:#}");
@@ -209,7 +226,7 @@ pub async fn respond_approval(
         // approval/denial.  The approval lock is still held here but will be
         // dropped on return; the agent task will briefly contend on the lock
         // and then proceed.
-        entry.agent.notify.notify_one();
+        live.agent.notify.notify_one();
 
         return Ok(axum::http::StatusCode::OK);
     }

@@ -37,7 +37,9 @@ use kallip_common::protocol::{
 
 use super::ListAgentsResponse;
 use crate::bridge::bridge_task;
-use crate::state::{Agent, AgentEntry, AgentState, AgentSummary, SharedState};
+use crate::state::{
+    Agent, AgentEntry, AgentIdentity, AgentState, AgentSummary, RegistryEntry, SharedState,
+};
 use crate::token::{MintedToken, TokenHash, TokenKind};
 
 pub(crate) struct SpawnArgs {
@@ -81,7 +83,13 @@ impl SpawnArgs {
 }
 
 /// Reconstruct runtime resources shared by create and restore.
-pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
+///
+/// Returns the running [`Agent`] handle plus the durable [`AgentIdentity`]
+/// (config + on-disk dir) for the caller to wrap into an [`AgentEntry`]. The
+/// identity travels out of `spawn_agent` because the runtime config and agent
+/// dir are *moved* into the spawn pipeline (used to build the tool dispatch and
+/// `AgentContext`); the caller still needs them to construct the registry entry.
+pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, AgentIdentity)> {
     let cancel = args.shutdown_cancel.child_token();
     let notify = Arc::new(Notify::new());
     // Round-scoped interrupt slot: `Some` only while a round runs. Shared with the agent
@@ -202,25 +210,29 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<Agent> {
         args.shared_state.clone(),
     ));
 
-    Ok(Agent {
-        prompt_tx,
-        events_tx: args.events_tx,
-        approvals: args.approvals,
-        config: args.config,
-        agent_handle,
-        bridge_handle,
-        store: args.store,
-        agent_dir: Some(args.agent_dir),
-        cancel,
-        round_cancel,
-        notify,
-        state,
-        activity,
-        auth_token_hash: args.auth_token_hash,
-        env: args.env,
-        tool_policy: args.tool_policy,
-        exec_policy: args.exec_policy,
-    })
+    Ok((
+        Agent {
+            prompt_tx,
+            events_tx: args.events_tx,
+            approvals: args.approvals,
+            agent_handle,
+            bridge_handle,
+            store: args.store,
+            cancel,
+            round_cancel,
+            notify,
+            state,
+            activity,
+            auth_token_hash: args.auth_token_hash,
+            env: args.env,
+            tool_policy: args.tool_policy,
+            exec_policy: args.exec_policy,
+        },
+        AgentIdentity {
+            config: args.config,
+            agent_dir: Some(args.agent_dir),
+        },
+    ))
 }
 
 /// Best-effort removal of an agent's on-disk directory on a create/rollback
@@ -248,18 +260,19 @@ async fn rollback_unspawned_create(
     if let Some(supervisor_id) = created_by {
         let mut registry = state.registry.write().await;
         if let Some(supervisor) = registry.get_mut(supervisor_id) {
-            supervisor.subagent_ids.retain(|sid| sid != id);
+            supervisor.subagent_ids_mut().retain(|sid| sid != id);
         }
     }
     remove_agent_dir(agent_dir);
 }
 
 /// Abort agent/bridge handles and remove agent dir (best-effort).
-/// Used when a spawned agent cannot be registered.
-pub(crate) fn abort_agent(agent: &crate::state::Agent) {
+/// Used when a spawned agent cannot be registered. The on-disk dir is no longer
+/// carried by `Agent` (it lives on `AgentIdentity`), so the caller passes it.
+pub(crate) fn abort_agent(agent: &crate::state::Agent, dir: Option<&std::path::Path>) {
     agent.agent_handle.abort();
     agent.bridge_handle.abort();
-    if let Some(ref dir) = agent.agent_dir {
+    if let Some(dir) = dir {
         remove_agent_dir(dir);
     }
 }
@@ -296,9 +309,9 @@ impl Drop for WorkspaceLockGuard<'_> {
 
 /// Failure to acquire the workspace write-lock for a Normal agent. Callers
 /// apply path-specific policy: create rolls back the agent dir and returns 409;
-/// restore bails so the caller skips the agent (and its subtree); reactivation
-/// refuses to wake the agent into a state where it cannot write its own
-/// workspace (returning conflict to the sender).
+/// restore bails and the caller registers the agent `Faulted` (its children are
+/// still attempted); reactivation refuses to wake the agent into a state where
+/// it cannot write its own workspace (returning conflict to the sender).
 pub(crate) enum WorkspaceAcquireFailure {
     /// Another agent holds an overlapping write-lock.
     Busy { holder: AgentId, conflict: PathBuf },
@@ -465,15 +478,15 @@ pub async fn create_agent(
         let supervisor = registry
             .get_mut(supervisor_id)
             .ok_or_else(|| ApiError::not_found("supervisor not found"))?;
-        if supervisor.subagent_ids.len() >= state.max_subagents {
+        if supervisor.subagent_ids().len() >= state.max_subagents {
             return Err(ApiError::unavailable(format!(
                 "supervisor has {}/{max} subagents, cannot create more",
-                supervisor.subagent_ids.len(),
+                supervisor.subagent_ids().len(),
                 max = state.max_subagents
             )));
         }
         // Pre-reserve: push the new ID so concurrent requests see the updated count.
-        supervisor.subagent_ids.push(id.clone());
+        supervisor.subagent_ids_mut().push(id.clone());
         config.created_by = Some(supervisor_id.clone());
         config.permissions = permissions;
         config.permissions_class = permission_class;
@@ -583,7 +596,7 @@ pub async fn create_agent(
     .await?;
     let (events_tx, _) = broadcast::channel(256);
     let agent_dir_clone = agent_dir.clone();
-    let agent = match spawn_agent(SpawnArgs {
+    let (agent, identity) = match spawn_agent(SpawnArgs {
         agent_id: id.clone(),
         store,
         approvals,
@@ -603,7 +616,7 @@ pub async fn create_agent(
     })
     .await
     {
-        Ok(a) => a,
+        Ok(pair) => pair,
         Err(e) => {
             // The workspace lock is released by `workspace_lock`'s Drop on the
             // `return Err` below; roll back the subagent slot + agent dir here.
@@ -619,9 +632,9 @@ pub async fn create_agent(
             if let Some(ref supervisor_id) = req.created_by
                 && let Some(supervisor) = registry.get_mut(supervisor_id)
             {
-                supervisor.subagent_ids.retain(|sid| sid != &id);
+                supervisor.subagent_ids_mut().retain(|sid| sid != &id);
             }
-            abort_agent(&agent);
+            abort_agent(&agent, identity.agent_dir.as_deref());
             // `workspace_lock` releases the workspace lock on `return Err`.
             return Err(ApiError::unavailable(format!(
                 "agent limit reached ({}/{max}), remove agents to create new ones",
@@ -635,7 +648,7 @@ pub async fn create_agent(
         {
             // Supervisor gone — the pre-reserved slot is already cleaned up
             // (unregistering the supervisor removes it from the map entirely).
-            abort_agent(&agent);
+            abort_agent(&agent, identity.agent_dir.as_deref());
             // `workspace_lock` releases the workspace lock on `return Err`.
             return Err(ApiError::internal(
                 "supervisor agent was removed during creation",
@@ -643,10 +656,11 @@ pub async fn create_agent(
         }
         registry.register_no_subagent_push(
             id.clone(),
-            AgentEntry {
+            RegistryEntry::Live(AgentEntry {
+                identity,
                 agent,
                 subagent_ids: vec![],
-            },
+            }),
         );
     }
     // Registered: the Normal agent now owns the workspace lock for its lifetime —
@@ -680,7 +694,7 @@ pub async fn list_agents(
             query
                 .created_by
                 .as_ref()
-                .is_none_or(|sup| entry.agent.config.created_by.as_ref() == Some(sup))
+                .is_none_or(|sup| entry.identity().config.created_by.as_ref() == Some(sup))
         })
         .map(|(id, entry)| entry.summary(id))
         .collect();
@@ -724,7 +738,7 @@ pub async fn update_metadata(
         .get_mut(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
     let agent_dir = entry
-        .agent
+        .identity()
         .agent_dir
         .clone()
         .ok_or_else(|| ApiError::internal("agent has no on-disk directory to update"))?;
@@ -737,10 +751,10 @@ pub async fn update_metadata(
     )
     .map_err(ApiError::internal)?;
     if let Some(role) = &body.role {
-        entry.agent.config.role = role.clone();
+        entry.identity_mut().config.role = role.clone();
     }
     if let Some(desc) = &body.description {
-        entry.agent.config.description = desc.clone();
+        entry.identity_mut().config.description = desc.clone();
     }
     Ok(Json(entry.summary(&id)))
 }
@@ -763,9 +777,12 @@ pub async fn update_activity(
     let entry = registry
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
+    let live = entry
+        .as_live()
+        .ok_or_else(|| ApiError::conflict("agent is faulted; cannot report activity"))?;
     let mut activity = body.activity;
     truncate_chars(&mut activity, MAX_ACTIVITY_CHARS);
-    *entry
+    *live
         .agent
         .activity
         .lock()
@@ -795,11 +812,15 @@ pub async fn remove_agent(
         let Some(entry) = registry.get(&id) else {
             return Err(ApiError::not_found("agent not found"));
         };
-        // Agent must be idle and have no subagents.
-        if entry.agent.get_state() != AgentState::Idle {
+        // Live agents must be idle and have no subagents. Faulted agents have no
+        // task to be busy, so the idle check is skipped; the no-subagents check
+        // still applies (remove children first).
+        if let Some(live) = entry.as_live()
+            && live.agent.get_state() != AgentState::Idle
+        {
             return Err(ApiError::conflict("agent is busy, interrupt it first"));
         }
-        if !entry.subagent_ids.is_empty() {
+        if !entry.subagent_ids().is_empty() {
             return Err(ApiError::conflict(
                 "agent has active subagents, remove or interrupt them first",
             ));
@@ -816,19 +837,29 @@ pub async fn remove_agent(
     };
 
     // Release all of this agent's directory write-locks (coupled to task death,
-    // not registry removal — see DirLockManager invariants).
+    // not registry removal — see DirLockManager invariants). A no-op for
+    // faulted entries, which never acquired locks.
     state.lock_manager.release_all(&id);
 
-    // Signal graceful cancellation; the agent persists on its way out.
-    entry.agent.cancel.cancel();
+    match entry {
+        crate::state::RegistryEntry::Live(live) => {
+            // Signal graceful cancellation; the agent persists on its way out.
+            live.agent.cancel.cancel();
 
-    // The agent is idle, so its tasks finish in milliseconds: the agent task
-    // persists and returns (dropping its sender), and the bridge exits on
-    // channel-close (see `crate::bridge::bridge_task`). Await real completion
-    // under a bound; force-abort only if a task is stuck.
-    let bound = Duration::from_secs(crate::shutdown::REMOVE_AGENT_SHUTDOWN_TIMEOUT_SECS);
-    if !entry.agent.shutdown(bound).await {
-        warn!(id = %id, "agent did not shut down in time, force-aborted");
+            // The agent is idle, so its tasks finish in milliseconds: the agent task
+            // persists and returns (dropping its sender), and the bridge exits on
+            // channel-close (see `crate::bridge::bridge_task`). Await real completion
+            // under a bound; force-abort only if a task is stuck.
+            let bound = Duration::from_secs(crate::shutdown::REMOVE_AGENT_SHUTDOWN_TIMEOUT_SECS);
+            if !live.agent.shutdown(bound).await {
+                warn!(id = %id, "agent did not shut down in time, force-aborted");
+            }
+        }
+        crate::state::RegistryEntry::Faulted(_) => {
+            // No task to cancel or await -- go straight to archival so the
+            // operator can clean up the orphaned data dir.
+            info!(id = %id, "removing faulted agent (no task to shut down)");
+        }
     }
 
     if let Err(e) = persistence::archive_agent_dir(&id) {
@@ -858,7 +889,10 @@ pub async fn interrupt_agent(
         let Some(entry) = registry.get(&id) else {
             return Err(ApiError::not_found("agent not found"));
         };
-        entry.agent.round_cancel.clone()
+        let live = entry
+            .as_live()
+            .ok_or_else(|| ApiError::conflict("agent is faulted; nothing to interrupt"))?;
+        live.agent.round_cancel.clone()
     };
     if let Some(round) = round_cancel
         .lock()
@@ -895,9 +929,14 @@ fn validate_subagent_request(
     workspace_root: &std::path::Path,
     requested_class: Option<PermissionClass>,
 ) -> Result<(PermissionProfile, ToolPolicy, ExecPolicy, PermissionClass), ApiError> {
-    let supervisor = registry.require_supervisor(identity, supervisor_id)?;
+    let supervisor_entry = registry.require_supervisor(identity, supervisor_id)?;
+    // A faulted supervisor has no running task and no policy to inherit -- it
+    // cannot host a new subagent.
+    let supervisor = supervisor_entry
+        .as_live()
+        .ok_or_else(|| ApiError::conflict("supervisor is faulted; cannot spawn subagents"))?;
 
-    let supervisor_perms = &supervisor.agent.config.permissions;
+    let supervisor_perms = &supervisor.identity.config.permissions;
     if supervisor_perms.max_depth == 0 {
         return Err(ApiError::forbidden(
             "supervisor has no remaining delegation depth",
@@ -921,16 +960,17 @@ fn validate_subagent_request(
     // depth monotonicity alone does NOT imply the ceiling monotonicity — tier
     // 0/1 share Normal, 2/3 share Guest — so these are explicit checks).
     let ceiling = PermissionClass::ceiling_for_tier(permissions.depth());
-    let supervisor = &supervisor.agent;
-    let supervisor_class = supervisor.config.permissions_class;
+    let supervisor_class = supervisor.identity.config.permissions_class;
     let granted = resolve_granted_class(ceiling, supervisor_class, requested_class)?;
 
     let tool_policy = supervisor
+        .agent
         .tool_policy
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     let exec_policy = supervisor
+        .agent
         .exec_policy
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -989,9 +1029,13 @@ mod tests {
 
     use super::{
         AgentConfig, AgentId, MAX_ACTIVITY_CHARS, PermissionClass, PermissionProfile,
-        acquire_workspace_lock, resolve_granted_class, truncate_chars,
+        acquire_workspace_lock, interrupt_agent, list_agents, remove_agent, resolve_granted_class,
+        truncate_chars,
     };
-    use crate::test_helpers::{make_entry, make_state};
+    use crate::auth::{AuthIdentity, Identity};
+    use crate::test_helpers::{add_faulted_root, add_root, make_entry, make_state};
+    use axum::extract::{Path, Query, State};
+    use kallip_common::protocol::ListAgentsQuery;
 
     #[test]
     fn truncate_keeps_short_strings() {
@@ -1093,7 +1137,7 @@ mod tests {
     /// A Normal `AgentConfig` rooted at `ws`, reusing `make_entry`'s template so
     /// every field is populated.
     fn normal_config(ws: &std::path::Path) -> AgentConfig {
-        let mut config = make_entry(None, String::new()).agent.config;
+        let mut config = make_entry(None, String::new()).identity.config;
         config.workspace_root = ws.to_path_buf();
         config.permissions = PermissionProfile::new(ws.to_path_buf());
         config.permissions_class = PermissionClass::Normal;
@@ -1225,5 +1269,77 @@ mod tests {
             .unwrap();
         assert!(guard.is_none());
         assert!(state.lock_manager.holder(&ws).unwrap().is_none());
+    }
+
+    // -- Faulted agent manageability (the headline bug fix) --
+
+    /// `aide list` includes faulted agents, marking state and surfacing reason.
+    #[tokio::test]
+    async fn list_agents_includes_faulted() {
+        let state = make_state();
+        let live = AgentId::random();
+        let faulted = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &live);
+            add_faulted_root(&mut reg, &faulted, "restore failed: boom");
+        }
+        let resp = list_agents(
+            State(state),
+            AuthIdentity::test_new(Identity::Operator),
+            Query(ListAgentsQuery { created_by: None }),
+        )
+        .await;
+        let agents = resp.0.agents;
+        let f = agents
+            .iter()
+            .find(|a| a.id == faulted)
+            .expect("faulted agent listed");
+        assert_eq!(f.state, super::AgentState::Faulted);
+        assert_eq!(f.faulted_reason.as_deref(), Some("restore failed: boom"));
+        assert!(agents.iter().any(|a| a.id == live));
+    }
+
+    /// Removing a faulted agent succeeds (204) -- the bug was 403/404 because the
+    /// agent was never registered. The fast path skips shutdown (no task); the
+    /// archive is a best-effort no-op when the dir is absent.
+    #[tokio::test]
+    async fn remove_faulted_agent_succeeds() {
+        let state = make_state();
+        let faulted = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_faulted_root(&mut reg, &faulted, "broken");
+        }
+        let status = remove_agent(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(faulted.clone()),
+        )
+        .await
+        .expect("remove succeeds");
+        assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+        // Entry is gone from the registry.
+        assert!(!state.registry.read().await.contains_key(&faulted));
+    }
+
+    /// Interrupting a faulted agent returns 409 (nothing to interrupt) instead
+    /// of touching runtime fields that don't exist on a faulted entry.
+    #[tokio::test]
+    async fn interrupt_faulted_returns_conflict() {
+        let state = make_state();
+        let faulted = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_faulted_root(&mut reg, &faulted, "broken");
+        }
+        let err = interrupt_agent(
+            State(state),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(faulted),
+        )
+        .await
+        .expect_err("interrupt faulted is a conflict");
+        assert_eq!(err.status, 409);
     }
 }

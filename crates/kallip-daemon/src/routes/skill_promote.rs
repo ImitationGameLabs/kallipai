@@ -64,7 +64,7 @@ pub async fn submit_promote_request(
             .get(&id)
             .ok_or_else(|| ApiError::not_found("agent not found"))?;
         let agent_dir = entry
-            .agent
+            .identity()
             .agent_dir
             .clone()
             .ok_or_else(|| ApiError::not_found("agent has no persistent directory"))?;
@@ -128,7 +128,11 @@ pub async fn submit_promote_request(
              or `kallip skill promote deny {request_id} <reason>` to deny."
         );
         for (root_id, entry) in registry.root_agents() {
-            if let Err(e) = entry.agent.prompt_tx.try_send(notification.clone()) {
+            // A faulted root cannot review a promotion (no prompt channel); skip it.
+            let Some(live) = entry.as_live() else {
+                continue;
+            };
+            if let Err(e) = live.agent.prompt_tx.try_send(notification.clone()) {
                 warn!(root_id = %root_id, "failed to notify root agent of promote request: {e}");
             }
         }
@@ -336,11 +340,13 @@ async fn handle_deny(
 /// Fails silently if the agent is terminated or its channel is full (logged, not an error).
 async fn notify_requesting_agent(state: &SharedState, agent_id: &AgentId, message: &str) {
     let registry = state.registry.read().await;
-    if let Some(entry) = registry.get(agent_id) {
-        if let Err(e) = entry.agent.prompt_tx.try_send(message.to_owned()) {
+    if let Some(entry) = registry.get(agent_id)
+        && let Some(live) = entry.as_live()
+    {
+        if let Err(e) = live.agent.prompt_tx.try_send(message.to_owned()) {
             warn!(id = %agent_id, "failed to notify agent: {e}");
         }
     } else {
-        warn!(id = %agent_id, "requesting agent not found for notification");
+        warn!(id = %agent_id, "requesting agent not available for notification");
     }
 }

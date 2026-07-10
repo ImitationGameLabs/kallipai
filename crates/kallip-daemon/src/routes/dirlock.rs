@@ -85,7 +85,7 @@ pub async fn acquire(
         let registry = state.registry.read().await;
         registry.require_self_or_operator(auth.identity(), &id)?;
         match registry.get(&id) {
-            Some(entry) => match entry.agent.config.created_by.as_ref() {
+            Some(entry) => match entry.identity().config.created_by.as_ref() {
                 Some(supervisor_id) => registry.supervisor_chain_ids(supervisor_id)?,
                 None => Vec::new(),
             },

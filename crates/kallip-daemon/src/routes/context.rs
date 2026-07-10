@@ -22,9 +22,12 @@ pub async fn agent_status(
     let entry = registry
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
+    let live = entry
+        .as_live()
+        .ok_or_else(|| ApiError::conflict("agent is faulted; no status"))?;
     // Take the brief std activity snapshot before the async store lock — no nesting.
-    let activity = entry.agent.activity_snapshot();
-    let store = entry.agent.store.lock().await;
+    let activity = live.agent.activity_snapshot();
+    let store = live.agent.store.lock().await;
     let context = store.usage_snapshot();
     let recent_retries = store
         .retry_log
@@ -35,7 +38,7 @@ pub async fn agent_status(
         .collect::<Vec<_>>();
     let snap = state.token_budget.snapshot();
     Ok(Json(AgentStatusResponse {
-        state: entry.agent.get_state(),
+        state: live.agent.get_state(),
         context,
         recent_retries,
         token_budget: snap.budget,
@@ -55,8 +58,11 @@ pub async fn agent_permissions(
     let entry = registry
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
-    let config = &entry.agent.config;
-    let tool_policy = entry
+    let config = &entry.identity().config;
+    let live = entry
+        .as_live()
+        .ok_or_else(|| ApiError::conflict("agent is faulted; permissions not available"))?;
+    let tool_policy = live
         .agent
         .tool_policy
         .read()
@@ -84,7 +90,10 @@ pub async fn get_policy(
     let entry = registry
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
-    let policy = entry
+    let live = entry
+        .as_live()
+        .ok_or_else(|| ApiError::conflict("agent is faulted; policy not available"))?;
+    let policy = live
         .agent
         .tool_policy
         .read()
@@ -119,13 +128,18 @@ pub async fn update_policy(
     let entry = registry
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
+    // A faulted target has no policy to read or write.
+    let live = entry
+        .as_live()
+        .ok_or_else(|| ApiError::conflict("agent is faulted; policy not available"))?;
 
-    // Strictness validation against parent.
-    if let Some(ref parent_id) = entry.agent.config.created_by {
-        let parent_entry = registry
-            .get(parent_id)
-            .ok_or_else(|| ApiError::internal("parent agent not found"))?;
-        let parent_policy = parent_entry
+    // Strictness validation against parent. A faulted parent contributes no
+    // constraint (it isn't running), so skip it.
+    if let Some(ref parent_id) = entry.identity().config.created_by
+        && let Some(parent_entry) = registry.get(parent_id)
+        && let Some(parent_live) = parent_entry.as_live()
+    {
+        let parent_policy = parent_live
             .agent
             .tool_policy
             .read()
@@ -138,11 +152,15 @@ pub async fn update_policy(
     }
 
     // Cascade: children must still be at least as strict as the new policy.
-    for child_id in &entry.subagent_ids {
-        let child = registry
-            .get(child_id)
-            .ok_or_else(|| ApiError::internal(format!("child agent {child_id} not found")))?;
-        let child_policy = child
+    // Skip faulted children (no policy, not running).
+    for child_id in entry.subagent_ids() {
+        let Some(child) = registry.get(child_id) else {
+            continue;
+        };
+        let Some(child_live) = child.as_live() else {
+            continue;
+        };
+        let child_policy = child_live
             .agent
             .tool_policy
             .read()
@@ -156,14 +174,14 @@ pub async fn update_policy(
     }
 
     // Persist first, then update in-memory.
-    let agent_dir = entry
-        .agent
+    let agent_dir = live
+        .identity
         .agent_dir
         .as_ref()
         .ok_or_else(|| ApiError::internal("agent has no persistent directory"))?;
     persistence::persist_policy(agent_dir, &new_policy).map_err(ApiError::internal)?;
 
-    *entry
+    *live
         .agent
         .tool_policy
         .write()
@@ -182,7 +200,10 @@ pub async fn get_exec_policy(
     let entry = registry
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
-    let exec_policy = entry
+    let live = entry
+        .as_live()
+        .ok_or_else(|| ApiError::conflict("agent is faulted; exec_policy not available"))?;
+    let exec_policy = live
         .agent
         .exec_policy
         .read()
@@ -212,6 +233,9 @@ pub async fn update_exec_policy(
     let entry = registry
         .get(&id)
         .ok_or_else(|| ApiError::not_found("agent not found"))?;
+    let live = entry
+        .as_live()
+        .ok_or_else(|| ApiError::conflict("agent is faulted; exec_policy not available"))?;
 
     // Normalize keys (command names are matched case-insensitively), then reject
     // keys that would be silent no-ops (interpreter/eval names).
@@ -221,11 +245,12 @@ pub async fn update_exec_policy(
     }
 
     // Strictness against parent — effective decisions vs the catalog baseline.
-    if let Some(ref parent_id) = entry.agent.config.created_by {
-        let parent_entry = registry
-            .get(parent_id)
-            .ok_or_else(|| ApiError::internal("parent agent not found"))?;
-        let parent_policy = parent_entry
+    // A faulted parent contributes no constraint; skip it.
+    if let Some(ref parent_id) = entry.identity().config.created_by
+        && let Some(parent_entry) = registry.get(parent_id)
+        && let Some(parent_live) = parent_entry.as_live()
+    {
+        let parent_policy = parent_live
             .agent
             .exec_policy
             .read()
@@ -237,12 +262,15 @@ pub async fn update_exec_policy(
             })?;
     }
 
-    // Cascade: children must still be at least as strict.
-    for child_id in &entry.subagent_ids {
-        let child = registry
-            .get(child_id)
-            .ok_or_else(|| ApiError::internal(format!("child agent {child_id} not found")))?;
-        let child_policy = child
+    // Cascade: children must still be at least as strict. Skip faulted children.
+    for child_id in entry.subagent_ids() {
+        let Some(child) = registry.get(child_id) else {
+            continue;
+        };
+        let Some(child_live) = child.as_live() else {
+            continue;
+        };
+        let child_policy = child_live
             .agent
             .exec_policy
             .read()
@@ -256,14 +284,14 @@ pub async fn update_exec_policy(
     }
 
     // Persist first, then update in-memory.
-    let agent_dir = entry
-        .agent
+    let agent_dir = live
+        .identity
         .agent_dir
         .as_ref()
         .ok_or_else(|| ApiError::internal("agent has no persistent directory"))?;
     persistence::persist_exec_policy(agent_dir, &new_policy).map_err(ApiError::internal)?;
 
-    *entry
+    *live
         .agent
         .exec_policy
         .write()

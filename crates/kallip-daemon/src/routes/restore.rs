@@ -2,8 +2,13 @@
 //!
 //! Restores persisted agents top-down, level by level. Root agents
 //! (no supervisor) are restored first, then their children, and so on.
-//! Siblings within each level are restored concurrently. If an agent fails
-//! to restore, its entire subtree is skipped — no orphans are created.
+//! Siblings within each level are restored concurrently. An agent that fails
+//! to restore (missing workspace, policy validation failure, spawn failure,
+//! or an absent supervisor) is registered in a `Faulted` state instead of
+//! being dropped, so the supervisor chain stays intact and the entry remains
+//! listable/removable. Its children are still attempted -- an intact child
+//! restores live against a faulted parent, and a broken child is itself
+//! registered faulted.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -19,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use super::agent::{SpawnArgs, spawn_agent};
-use crate::state::{Agent, AgentEntry, SharedState};
+use crate::state::{AgentEntry, AgentIdentity, FaultedEntry, RegistryEntry, SharedState};
 use crate::token::{MintedToken, TokenKind};
 
 /// One node in a supervisor chain, fully loaded from disk.
@@ -253,7 +258,7 @@ async fn restore_one(
     shutdown: CancellationToken,
     shared_state: SharedState,
     index: &RestoreIndex,
-) -> anyhow::Result<(AgentId, Agent)> {
+) -> anyhow::Result<(AgentId, AgentEntry)> {
     let restored = persistence::restore_agent(&p.agent_id, &p.agent_dir)?;
 
     let mut config = AgentConfig::load(None, vec![], Some(p.meta.workspace_root.clone()))?;
@@ -265,8 +270,9 @@ async fn restore_one(
 
     // Same data-dir overlap guard as `create_agent` (bidirectional, fail-closed).
     // An agent persisted before this guard existed with an overlapping workspace
-    // is skipped here rather than restored into an unsafe configuration; its
-    // subtree is skipped too (see `restore_agents` semantics).
+    // fails restore here; `restore_agents` then registers it `Faulted` (its
+    // children are still attempted) rather than restoring it into an unsafe
+    // configuration.
     persistence::ensure_workspace_disjoint(&config.workspace_root)?;
 
     let tool_policy = index
@@ -358,7 +364,7 @@ async fn restore_one(
         }
     };
 
-    let agent = spawn_agent(SpawnArgs {
+    let (agent, identity) = spawn_agent(SpawnArgs {
         agent_id: p.agent_id.clone(),
         store,
         approvals,
@@ -383,14 +389,60 @@ async fn restore_one(
         guard.disarm();
     }
 
-    Ok((restored.agent_id, agent))
+    Ok((
+        restored.agent_id,
+        AgentEntry {
+            identity,
+            agent,
+            subagent_ids: vec![],
+        },
+    ))
+}
+
+/// Build a faulted registry entry from on-disk metadata and a failure reason.
+///
+/// Used when `restore_one` fails or when an agent's supervisor is absent from
+/// disk. Loads NO runtime resources (no task, no channel, no store, no policy):
+/// the entry exists solely for visibility and lifecycle management -- so the
+/// supervisor chain stays intact and the agent stays listable/removable. Fields
+/// not carried by [`persistence::AgentMeta`] fall back to
+/// [`AgentConfig::default`] (irrelevant for an agent that never runs).
+///
+/// Deliberately does NOT call [`AgentConfig::load`]: that re-canonicalizes the
+/// workspace and would re-fail for the missing-workspace case that brought us
+/// here. The meta's `workspace_root` is copied as-is.
+fn faulted_from_meta(
+    agent_id: &AgentId,
+    agent_dir: std::path::PathBuf,
+    meta: &persistence::AgentMeta,
+    reason: String,
+) -> FaultedEntry {
+    let config = AgentConfig {
+        agent_id: Some(agent_id.clone()),
+        created_by: meta.created_by.clone(),
+        role: meta.role.clone(),
+        description: meta.description.clone(),
+        workspace_root: meta.workspace_root.clone(),
+        permissions_class: meta.permissions_class,
+        ..AgentConfig::default()
+    };
+    FaultedEntry {
+        identity: AgentIdentity {
+            config,
+            agent_dir: Some(agent_dir),
+        },
+        subagent_ids: vec![],
+        reason,
+    }
 }
 
 /// Restore persisted agents top-down, level by level.
 ///
 /// Root agents (no supervisor) are restored first, then their children, and
-/// so on.  Siblings within each level are restored concurrently.  If an agent
-/// fails to restore, its entire subtree is skipped — no orphans are created.
+/// so on. Siblings within each level are restored concurrently. An agent that
+/// fails to restore is registered in a `Faulted` state (not dropped), and its
+/// children are still attempted -- so the supervisor chain stays intact and
+/// every on-disk agent remains listable and removable.
 ///
 /// **Exempt from resource limits:** `max_agents` and `max_subagents` are not
 /// enforced during restore. These agents were already running before the crash,
@@ -433,7 +485,12 @@ pub async fn restore_agents(state: &SharedState) {
 
     let mut children_of: HashMap<AgentId, Vec<AgentId>> = HashMap::new();
     let mut roots = Vec::new();
-    let mut direct_skips = Vec::new();
+    // Agents whose supervisor is absent from disk entirely (not merely
+    // restore-failed). They cannot be restored and have no live supervisor to
+    // link to, so they are registered faulted up front and their descendants
+    // are enqueued into the BFS so each still gets a chance to restore (or be
+    // registered faulted itself).
+    let mut orphan_faulted: Vec<(AgentId, FaultedEntry)> = Vec::new();
 
     for (id, p) in &pending_map {
         match &p.meta.created_by {
@@ -447,29 +504,57 @@ pub async fn restore_agents(state: &SharedState) {
                     .push(id.clone());
             }
             Some(supervisor_id) => {
-                // Supervisor not in restore set (crash-loop or removed).
-                // This agent and its descendants will not be restored.
+                // Supervisor not on disk (crash-loop-pruned, archived, or
+                // removed). Register this agent faulted with its chain intact
+                // so it stays individually manageable. We do NOT fabricate a
+                // ghost supervisor -- there is no source-of-truth metadata for
+                // one. See the plan's "Known limitation".
                 tracing::error!(
                     id = %id,
                     supervisor = %supervisor_id,
-                    "skipping agent: supervisor not in restore set"
+                    "supervisor not present on disk; registering agent as faulted"
                 );
-                direct_skips.push(id.clone());
+                orphan_faulted.push((
+                    id.clone(),
+                    faulted_from_meta(
+                        id,
+                        p.agent_dir.clone(),
+                        &p.meta,
+                        format!("supervisor {supervisor_id} not present on disk"),
+                    ),
+                ));
             }
         }
     }
 
-    // Remove directly-skipped agents so the post-BFS pass does not double-log.
-    for id in &direct_skips {
+    // Register the supervisor-absent orphans before BFS so their descendants
+    // (enqueued below) link to them via `register`'s eager subagent-push.
+    // Also seed the BFS with those descendants so each is restored or
+    // registered faulted, rather than vanishing with the orphan.
+    let mut orphan_children = Vec::new();
+    for (id, _entry) in &orphan_faulted {
         pending_map.remove(id);
+        if let Some(kids) = children_of.get(id) {
+            orphan_children.extend(kids.iter().cloned());
+        }
+    }
+    if !orphan_faulted.is_empty() {
+        let mut registry = state.registry.write().await;
+        for (id, entry) in orphan_faulted {
+            registry.register(id, RegistryEntry::Faulted(entry));
+        }
     }
 
     // Deterministic ordering within each level.
     roots.sort();
+    orphan_children.sort();
 
     // Level-by-level BFS restore.  Siblings within each level are restored
-    // concurrently; children are only queued after their parent succeeds.
+    // concurrently; children are queued after their parent is processed,
+    // whether it restored live or faulted (a faulted parent does not imply a
+    // broken child -- the child has its own workspace).
     let mut current_level = roots;
+    current_level.extend(orphan_children);
     while !current_level.is_empty() {
         // Take ownership of PendingRestores for this level.
         let tasks: Vec<(AgentId, persistence::PendingRestore)> = current_level
@@ -478,35 +563,42 @@ pub async fn restore_agents(state: &SharedState) {
             .collect();
 
         // Restore all siblings concurrently.
-        type RestoreOutcome = (AgentId, Agent);
-        // Tuple slots: (agent_id, created_by, role, restore result). `created_by`
-        // and `role` are cloned before `p` moves into `restore_one` so the
-        // `restored agent` log (below, post-`join_all`) can identify roots.
-        let results: Vec<(
+        type RestoreOutcome = (AgentId, AgentEntry);
+        // Tuple slots: (agent_id, created_by, role, meta, agent_dir, result).
+        // `meta` and `agent_dir` are cloned before `p` moves into `restore_one`
+        // so the `Err` arm can build a faulted entry from the on-disk metadata.
+        type RestoreAttempt = (
             AgentId,
             Option<AgentId>,
             String,
+            persistence::AgentMeta,
+            std::path::PathBuf,
             anyhow::Result<RestoreOutcome>,
-        )> = futures_util::future::join_all(tasks.into_iter().map(|(id, p)| {
-            let created_by = p.meta.created_by.clone();
-            let role = p.meta.role.clone();
-            // Bind a reference so the `async move` block captures `&RestoreIndex`
-            // (Copy) instead of moving the loop-owned `index` on every iteration.
-            let index = &index;
-            async move {
-                let result = restore_one(p, state.shutdown.clone(), state.clone(), index).await;
-                (id, created_by, role, result)
-            }
-        }))
-        .await;
+        );
+        let results: Vec<RestoreAttempt> =
+            futures_util::future::join_all(tasks.into_iter().map(|(id, p)| {
+                let created_by = p.meta.created_by.clone();
+                let role = p.meta.role.clone();
+                let meta = p.meta.clone();
+                let agent_dir = p.agent_dir.clone();
+                // Bind a reference so the `async move` block captures `&RestoreIndex`
+                // (Copy) instead of moving the loop-owned `index` on every iteration.
+                let index = &index;
+                async move {
+                    let result = restore_one(p, state.shutdown.clone(), state.clone(), index).await;
+                    (id, created_by, role, meta, agent_dir, result)
+                }
+            }))
+            .await;
 
-        // Batch-register successes under a single lock, collect children.
+        // Batch-register outcomes under a single lock, collect children.
         let mut next_level = Vec::new();
         let mut successes = Vec::new();
-        for (id, created_by, role, result) in results {
+        let mut faulted = Vec::new();
+        for (id, created_by, role, meta, agent_dir, result) in results {
             match result {
-                Ok((registered_id, agent)) => {
-                    successes.push((registered_id, agent));
+                Ok((registered_id, entry)) => {
+                    successes.push((registered_id, entry));
                     if let Some(children) = children_of.get(&id) {
                         next_level.extend(children.iter().cloned());
                     }
@@ -518,22 +610,27 @@ pub async fn restore_agents(state: &SharedState) {
                     );
                 }
                 Err(e) => {
-                    // Subtree is implicitly pruned — children not queued.
-                    tracing::error!(id = %id, "restore failed: {e:#}");
+                    // Register the agent faulted (not silently dropped), and
+                    // STILL enqueue its children: an intact child can restore
+                    // live against a faulted parent, and a broken child becomes
+                    // faulted itself. Either way each node stays manageable.
+                    let reason = format!("restore failed: {e:#}");
+                    tracing::error!(id = %id, "{reason}; registering as faulted");
+                    faulted.push((id.clone(), faulted_from_meta(&id, agent_dir, &meta, reason)));
+                    if let Some(children) = children_of.get(&id) {
+                        next_level.extend(children.iter().cloned());
+                    }
                 }
             }
         }
 
-        if !successes.is_empty() {
+        if !successes.is_empty() || !faulted.is_empty() {
             let mut registry = state.registry.write().await;
-            for (id, agent) in successes {
-                registry.register(
-                    id,
-                    AgentEntry {
-                        agent,
-                        subagent_ids: vec![],
-                    },
-                );
+            for (id, entry) in successes {
+                registry.register(id, RegistryEntry::Live(entry));
+            }
+            for (id, entry) in faulted {
+                registry.register(id, RegistryEntry::Faulted(entry));
             }
         }
 
@@ -541,12 +638,14 @@ pub async fn restore_agents(state: &SharedState) {
         current_level = next_level;
     }
 
-    // Log transitively skipped agents (ancestors failed or cycles).
+    // Any agent still pending here was never enqueued -- only possible for a
+    // cycle that defeated the BFS seed. Log it; `scan_agents` already warned
+    // about unreadable data dirs, and cycles are caught as restore errors above.
     for (id, p) in &pending_map {
         tracing::error!(
             id = %id,
             supervisor = ?p.meta.created_by,
-            "skipping agent: ancestor was not restored"
+            "agent was not reached by restore (cycle or scan gap); leaving on disk"
         );
     }
 
@@ -561,10 +660,10 @@ pub async fn restore_agents(state: &SharedState) {
             );
         }
         for (id, entry) in registry.iter() {
-            if entry.subagent_ids.len() > state.max_subagents {
+            if entry.subagent_ids().len() > state.max_subagents {
                 tracing::warn!(
                     id = %id,
-                    count = entry.subagent_ids.len(),
+                    count = entry.subagent_ids().len(),
                     max = state.max_subagents,
                     "restored agent exceeds max_subagents limit"
                 );
@@ -575,7 +674,7 @@ pub async fn restore_agents(state: &SharedState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainNode, validate_permission_class_from_chain};
+    use super::{ChainNode, faulted_from_meta, validate_permission_class_from_chain};
     use kallip_common::agentid::AgentId;
     use kallip_common::policy::{ExecPolicy, PolicyDecision, ToolPolicy};
     use kallip_runtime::config::PermissionClass;
@@ -598,6 +697,41 @@ mod tests {
             policy: ToolPolicy::new(PolicyDecision::Allow),
             exec_policy: ExecPolicy::default(),
         }
+    }
+
+    #[test]
+    fn faulted_from_meta_carries_identity_and_reason() {
+        // A faulted entry is built purely from on-disk meta + a reason: it
+        // carries the durable identity (so the chain stays walkable) and no
+        // runtime resources. The reason is surfaced verbatim.
+        let id = AgentId::from("deadbeef".to_owned());
+        let meta = AgentMeta {
+            workspace_root: std::path::PathBuf::from("/ws/proj"),
+            last_restored_at: None,
+            consecutive_restart_count: 0,
+            created_by: Some(AgentId::from("parent".to_owned())),
+            role: "researcher".into(),
+            description: "goners".into(),
+            permissions_class: PermissionClass::Guest,
+        };
+        let entry = faulted_from_meta(
+            &id,
+            std::path::PathBuf::from("/data/agents/deadbeef"),
+            &meta,
+            "restore failed: missing workspace".into(),
+        );
+        assert_eq!(entry.reason, "restore failed: missing workspace");
+        assert_eq!(
+            entry.identity.config.created_by.as_ref(),
+            Some(&AgentId::from("parent".to_owned()))
+        );
+        assert_eq!(entry.identity.config.role, "researcher");
+        assert_eq!(
+            entry.identity.config.permissions_class,
+            PermissionClass::Guest
+        );
+        assert_eq!(entry.identity.config.agent_id.as_ref(), Some(&id));
+        assert!(entry.subagent_ids.is_empty());
     }
 
     #[test]

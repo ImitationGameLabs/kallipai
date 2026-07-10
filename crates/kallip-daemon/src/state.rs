@@ -61,28 +61,62 @@ pub struct AppState {
 /// Combined index: agent map + token-hash→id lookup + subagent reverse pointers.
 /// All mutations go through methods that maintain invariants atomically.
 pub struct AgentRegistry {
-    agents: HashMap<AgentId, AgentEntry>,
-    /// SHA-256 of each agent's auth token → its id. Keyed by hash so agent auth
-    /// shares the operator's `TokenHash::of` → hash-compare path (consistency) — not
-    /// for secret protection, since the plaintext still lives in [`Agent::env`] for
-    /// shell injection.
+    agents: HashMap<AgentId, RegistryEntry>,
+    /// SHA-256 of each **live** agent's auth token → its id. Faulted entries are
+    /// never indexed: their token is minted fresh on each restore and never
+    /// persisted, so a faulted entry (which never spawned) has no real hash and
+    /// cannot authenticate. Keyed by hash so agent auth shares the operator's
+    /// `TokenHash::of` → hash-compare path (consistency) — not for secret
+    /// protection, since the plaintext still lives in [`Agent::env`] for shell
+    /// injection.
     token_index: HashMap<TokenHash, AgentId>,
 }
 
+/// Durable identity shared by live and faulted registry entries: the config
+/// (created_by, role, description, workspace_root, permissions_class, agent_id)
+/// and the on-disk directory. Everything a supervisor needs to list, authorize
+/// against, relabel, or archive an agent -- independent of whether it currently
+/// has a running task.
+pub struct AgentIdentity {
+    pub config: AgentConfig,
+    pub agent_dir: Option<PathBuf>,
+}
+
+/// The registry value: a live running agent, or a faulted placeholder that
+/// could not be brought up (e.g. restore failure). The enum makes "is there a
+/// live task?" a type-level question, forcing every runtime-field access to
+/// consciously handle the faulted case.
+pub enum RegistryEntry {
+    /// A live, running agent: durable identity + runtime handle + known children.
+    Live(AgentEntry),
+    /// Registered for visibility/management only -- no task, no channels. The
+    /// supervisor chain still runs through it (chain walkers read `identity`).
+    Faulted(FaultedEntry),
+}
+
+/// A live agent entry: durable identity, the running [`Agent`] handle, and the
+/// ids of direct subagents this agent has spawned.
 pub struct AgentEntry {
+    pub identity: AgentIdentity,
     pub agent: Agent,
     pub subagent_ids: Vec<AgentId>,
+}
+
+/// A faulted agent entry: durable identity and known children, plus the reason
+/// it could not be brought up. Surfaced via [`AgentSummary::faulted_reason`].
+pub struct FaultedEntry {
+    pub identity: AgentIdentity,
+    pub subagent_ids: Vec<AgentId>,
+    pub reason: String,
 }
 
 pub struct Agent {
     pub prompt_tx: mpsc::Sender<String>,
     pub events_tx: broadcast::Sender<SseEvent>,
     pub approvals: Arc<Mutex<ApprovalStore>>,
-    pub config: AgentConfig,
     pub agent_handle: JoinHandle<()>,
     pub bridge_handle: JoinHandle<()>,
     pub store: Arc<Mutex<ContextStore>>,
-    pub agent_dir: Option<PathBuf>,
     pub cancel: CancellationToken,
     /// The current round's cancellation token, reachable by `interrupt_agent`. `Some` only
     /// while a round is running; cancelling it aborts the round without terminating the
@@ -161,18 +195,94 @@ impl Agent {
 }
 
 impl AgentEntry {
-    /// Build the wire [`AgentSummary`] for this entry. The single construction
-    /// site for list / metadata responses; centralizes the poison-tolerant
-    /// activity read.
+    /// Ephemeral activity snapshot for the live-only [`AgentSummary`] activity
+    /// field. Faulted entries report an empty activity.
+    fn activity_for_summary(&self) -> String {
+        self.agent.activity_snapshot()
+    }
+}
+
+impl RegistryEntry {
+    /// Durable identity (config + on-disk dir) -- available on both variants,
+    /// so chain walkers, list, and metadata routes read uniformly.
+    pub fn identity(&self) -> &AgentIdentity {
+        match self {
+            RegistryEntry::Live(e) => &e.identity,
+            RegistryEntry::Faulted(e) => &e.identity,
+        }
+    }
+
+    /// Mutable durable identity, for relabel writes (`update_metadata`).
+    pub fn identity_mut(&mut self) -> &mut AgentIdentity {
+        match self {
+            RegistryEntry::Live(e) => &mut e.identity,
+            RegistryEntry::Faulted(e) => &mut e.identity,
+        }
+    }
+
+    /// Direct children of this entry -- maintained on both variants so a
+    /// faulted parent still tracks the subagents it spawned before faulting
+    /// (or that were restored under it).
+    pub fn subagent_ids(&self) -> &Vec<AgentId> {
+        match self {
+            RegistryEntry::Live(e) => &e.subagent_ids,
+            RegistryEntry::Faulted(e) => &e.subagent_ids,
+        }
+    }
+
+    pub fn subagent_ids_mut(&mut self) -> &mut Vec<AgentId> {
+        match self {
+            RegistryEntry::Live(e) => &mut e.subagent_ids,
+            RegistryEntry::Faulted(e) => &mut e.subagent_ids,
+        }
+    }
+
+    /// The live agent handle, or `None` for a faulted entry. Callers that need
+    /// runtime resources (channels, policies, task handles) branch on this and
+    /// reject/skip faulted entries.
+    pub fn as_live(&self) -> Option<&AgentEntry> {
+        match self {
+            RegistryEntry::Live(e) => Some(e),
+            RegistryEntry::Faulted(_) => None,
+        }
+    }
+
+    pub fn as_live_mut(&mut self) -> Option<&mut AgentEntry> {
+        match self {
+            RegistryEntry::Live(e) => Some(e),
+            RegistryEntry::Faulted(_) => None,
+        }
+    }
+
+    /// Lifecycle state this entry reports. Live entries read the bridge-owned
+    /// atomic; faulted entries are always [`AgentState::Faulted`] (a
+    /// wire/display state that is never stored atomically -- see
+    /// [`AgentState`]). Used by [`Self::summary`] and directly where a caller
+    /// needs just the state.
+    pub fn state_for_summary(&self) -> AgentState {
+        match self {
+            RegistryEntry::Live(e) => e.agent.get_state(),
+            RegistryEntry::Faulted(_) => AgentState::Faulted,
+        }
+    }
+
+    /// Build the wire [`AgentSummary`] for either variant. The single
+    /// construction site for list / metadata responses.
     pub fn summary(&self, id: &AgentId) -> AgentSummary {
+        let identity = self.identity();
+        let (activity, faulted_reason) = match self {
+            RegistryEntry::Live(e) => (e.activity_for_summary(), None),
+            RegistryEntry::Faulted(e) => (String::new(), Some(e.reason.clone())),
+        };
         AgentSummary {
             id: id.clone(),
-            workspace_root: self.agent.config.workspace_root.display().to_string(),
-            state: self.agent.get_state(),
-            created_by: self.agent.config.created_by.clone(),
-            role: self.agent.config.role.clone(),
-            description: self.agent.config.description.clone(),
-            activity: self.agent.activity_snapshot(),
+            workspace_root: identity.config.workspace_root.display().to_string(),
+            state: self.state_for_summary(),
+            created_by: identity.config.created_by.clone(),
+            role: identity.config.role.clone(),
+            description: identity.config.description.clone(),
+            activity,
+            faulted_reason,
         }
     }
 }
@@ -236,11 +346,11 @@ impl AgentRegistry {
 
     // -- read helpers --
 
-    pub fn get(&self, id: &AgentId) -> Option<&AgentEntry> {
+    pub fn get(&self, id: &AgentId) -> Option<&RegistryEntry> {
         self.agents.get(id)
     }
 
-    pub fn get_mut(&mut self, id: &AgentId) -> Option<&mut AgentEntry> {
+    pub fn get_mut(&mut self, id: &AgentId) -> Option<&mut RegistryEntry> {
         self.agents.get_mut(id)
     }
 
@@ -252,7 +362,7 @@ impl AgentRegistry {
         self.agents.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&AgentId, &AgentEntry)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&AgentId, &RegistryEntry)> {
         self.agents.iter()
     }
 
@@ -262,47 +372,61 @@ impl AgentRegistry {
 
     // -- write helpers --
 
-    /// Insert agent, index its token hash, update supervisor's subagent_ids.
-    pub fn register(&mut self, id: AgentId, entry: AgentEntry) {
-        // Eagerly link: if the supervisor is already registered, update its
-        // subagent_ids now. This always succeeds in the create path
-        // (supervisor is validated before we get here) and in the restore
-        // path (top-down BFS guarantees supervisor is registered first).
-        if let Some(ref supervisor_id) = entry.agent.config.created_by
+    /// Insert an entry, update the supervisor's `subagent_ids`, and -- for live
+    /// entries only -- index the auth-token hash. Faulted entries are never
+    /// token-indexed (see [`AgentRegistry`] doc).
+    ///
+    /// Eagerly links the entry under its supervisor if the supervisor is already
+    /// registered. This always succeeds in the create path (supervisor is
+    /// validated first) and in the restore path (top-down BFS guarantees the
+    /// supervisor is registered first). If the supervisor isn't registered
+    /// (e.g. an orphaned faulted entry whose supervisor's data is gone), the
+    /// push is silently skipped -- safe, the link just isn't established.
+    pub fn register(&mut self, id: AgentId, entry: RegistryEntry) {
+        if let Some(ref supervisor_id) = entry.identity().config.created_by
             && let Some(supervisor) = self.agents.get_mut(supervisor_id)
         {
-            supervisor.subagent_ids.push(id.clone());
+            supervisor.subagent_ids_mut().push(id.clone());
         }
-        self.token_index
-            .insert(entry.agent.auth_token_hash.clone(), id.clone());
+        if let RegistryEntry::Live(live) = &entry {
+            self.token_index
+                .insert(live.agent.auth_token_hash.clone(), id.clone());
+        }
         self.agents.insert(id, entry);
     }
 
-    /// Like [`Self::register`], but skips the subagent_ids push.
+    /// Like [`Self::register`], but skips the `subagent_ids` push.
     /// Used by `create_agent` which pre-reserves the slot before spawning.
-    pub fn register_no_subagent_push(&mut self, id: AgentId, entry: AgentEntry) {
-        self.token_index
-            .insert(entry.agent.auth_token_hash.clone(), id.clone());
+    pub fn register_no_subagent_push(&mut self, id: AgentId, entry: RegistryEntry) {
+        if let RegistryEntry::Live(live) = &entry {
+            self.token_index
+                .insert(live.agent.auth_token_hash.clone(), id.clone());
+        }
         self.agents.insert(id, entry);
     }
 
-    /// Remove agent, unregister its token hash, update supervisor's subagent_ids.
-    pub fn unregister(&mut self, id: &AgentId) -> Option<AgentEntry> {
+    /// Remove an entry, unregister its token hash (live only), and drop it from
+    /// the supervisor's `subagent_ids`.
+    pub fn unregister(&mut self, id: &AgentId) -> Option<RegistryEntry> {
         let entry = self.agents.remove(id)?;
-        self.token_index.remove(&entry.agent.auth_token_hash);
-        if let Some(ref supervisor_id) = entry.agent.config.created_by
+        if let RegistryEntry::Live(live) = &entry {
+            self.token_index.remove(&live.agent.auth_token_hash);
+        }
+        if let Some(ref supervisor_id) = entry.identity().config.created_by
             && let Some(supervisor) = self.agents.get_mut(supervisor_id)
         {
-            supervisor.subagent_ids.retain(|sid| sid != id);
+            supervisor.subagent_ids_mut().retain(|sid| sid != id);
         }
         Some(entry)
     }
 
     /// Remove and return every entry, clearing the token index.
     ///
-    /// Used at daemon shutdown to take ownership of all agents so their task
-    /// handles can be awaited without holding the registry lock.
-    pub fn drain(&mut self) -> Vec<(AgentId, AgentEntry)> {
+    /// Used at daemon shutdown to take ownership of all entries so live task
+    /// handles can be awaited without holding the registry lock. Faulted
+    /// entries are returned too; the shutdown caller simply has no task to
+    /// await for them.
+    pub fn drain(&mut self) -> Vec<(AgentId, RegistryEntry)> {
         self.token_index.clear();
         self.agents.drain().collect()
     }
@@ -310,7 +434,10 @@ impl AgentRegistry {
     // -- authorization helpers --
 
     /// Walk the `created_by` chain from `start_id` upward with cycle detection.
-    pub fn walk_supervisor_chain(&self, start_id: &AgentId) -> Result<Vec<&AgentEntry>, ApiError> {
+    pub fn walk_supervisor_chain(
+        &self,
+        start_id: &AgentId,
+    ) -> Result<Vec<&RegistryEntry>, ApiError> {
         let mut visited = HashSet::new();
         let mut current_id = start_id.clone();
         let mut chain = Vec::new();
@@ -322,7 +449,7 @@ impl AgentRegistry {
                 .get(&current_id)
                 .ok_or_else(|| ApiError::forbidden("broken supervisor chain"))?;
             chain.push(entry);
-            match &entry.agent.config.created_by {
+            match &entry.identity().config.created_by {
                 Some(supervisor_id) => current_id = supervisor_id.clone(),
                 None => break,
             }
@@ -353,7 +480,7 @@ impl AgentRegistry {
                 .get(&current_id)
                 .ok_or_else(|| ApiError::forbidden("broken supervisor chain"))?;
             ids.push(current_id.clone());
-            match &entry.agent.config.created_by {
+            match &entry.identity().config.created_by {
                 Some(supervisor_id) => current_id = supervisor_id.clone(),
                 None => break,
             }
@@ -407,12 +534,12 @@ impl AgentRegistry {
     }
 
     /// Caller must be the operator or the direct supervisor of the subagent being created.
-    /// Returns the supervisor's `AgentEntry` for delegation checks.
+    /// Returns the supervisor's entry for delegation checks.
     pub fn require_supervisor(
         &self,
         identity: &crate::auth::Identity,
         supervisor_id: &AgentId,
-    ) -> Result<&AgentEntry, ApiError> {
+    ) -> Result<&RegistryEntry, ApiError> {
         let supervisor = self.get(supervisor_id).ok_or_else(|| {
             ApiError::not_found(format!("supervisor agent {supervisor_id} not found"))
         })?;
@@ -437,7 +564,7 @@ impl AgentRegistry {
                 let chain = self.walk_supervisor_chain(target_id)?;
                 if chain
                     .iter()
-                    .any(|e| e.agent.config.created_by.as_ref() == Some(caller_id))
+                    .any(|e| e.identity().config.created_by.as_ref() == Some(caller_id))
                 {
                     return Ok(());
                 }
@@ -463,7 +590,7 @@ impl AgentRegistry {
         match identity {
             crate::auth::Identity::Operator => Ok(()),
             crate::auth::Identity::Agent { id: caller_id } => {
-                match &target.agent.config.created_by {
+                match &target.identity().config.created_by {
                     Some(parent) if parent == caller_id => Ok(()),
                     _ => Err(ApiError::forbidden(
                         "only the direct supervisor may change this agent's metadata",
@@ -485,7 +612,7 @@ impl AgentRegistry {
                 let entry = self
                     .get(id)
                     .ok_or_else(|| ApiError::forbidden("unknown agent"))?;
-                if entry.agent.config.created_by.is_none() {
+                if entry.identity().config.created_by.is_none() {
                     Ok(())
                 } else {
                     Err(ApiError::forbidden(
@@ -514,11 +641,13 @@ impl AgentRegistry {
         }
     }
 
-    /// Return all root agents (created_by is None).
-    pub fn root_agents(&self) -> Vec<(&AgentId, &AgentEntry)> {
+    /// Return all root agents (created_by is None), live or faulted. Callers
+    /// that need a running task (e.g. promote-request notification) must skip
+    /// [`RegistryEntry::Faulted`] entries themselves.
+    pub fn root_agents(&self) -> Vec<(&AgentId, &RegistryEntry)> {
         self.agents
             .iter()
-            .filter(|(_, e)| e.agent.config.created_by.is_none())
+            .filter(|(_, e)| e.identity().config.created_by.is_none())
             .collect()
     }
 }
@@ -607,12 +736,19 @@ mod tests {
         // The registry indexes by the agent's token hash, derived inside make_entry.
         let token = "test-token";
         let hash = TokenHash::of(token);
-        reg.register(id.clone(), make_entry(None, token.into()));
+        reg.register(
+            id.clone(),
+            RegistryEntry::Live(make_entry(None, token.into())),
+        );
         assert!(reg.contains_key(&id));
         assert_eq!(reg.get_agent_id_by_token(&hash), Some(&id));
 
         let removed = reg.unregister(&id).unwrap();
-        assert_eq!(removed.agent.auth_token_hash, hash);
+        let removed_live = match removed {
+            RegistryEntry::Live(l) => l,
+            RegistryEntry::Faulted(_) => panic!("expected live entry"),
+        };
+        assert_eq!(removed_live.agent.auth_token_hash, hash);
         assert!(!reg.contains_key(&id));
         assert!(reg.get_agent_id_by_token(&hash).is_none());
     }
@@ -624,7 +760,7 @@ mod tests {
         let child = AgentId::random();
         add_root(&mut reg, &sup);
         add_sub(&mut reg, &child, &sup);
-        assert_eq!(reg.get(&sup).unwrap().subagent_ids, vec![child]);
+        assert_eq!(reg.get(&sup).unwrap().subagent_ids(), &vec![child]);
     }
 
     #[tokio::test]
@@ -635,7 +771,7 @@ mod tests {
         add_root(&mut reg, &sup);
         add_sub(&mut reg, &child, &sup);
         reg.unregister(&child).unwrap();
-        assert!(reg.get(&sup).unwrap().subagent_ids.is_empty());
+        assert!(reg.get(&sup).unwrap().subagent_ids().is_empty());
     }
 
     // -- Supervisor chain walking --
@@ -651,7 +787,7 @@ mod tests {
         add_sub(&mut reg, &c, &b);
         let chain = reg.walk_supervisor_chain(&c).unwrap();
         assert_eq!(chain.len(), 3);
-        assert!(chain[2].agent.config.created_by.is_none()); // root
+        assert!(chain[2].identity().config.created_by.is_none()); // root
     }
 
     #[tokio::test]
@@ -659,8 +795,14 @@ mod tests {
         let mut reg = AgentRegistry::new();
         let a = AgentId::random();
         let b = AgentId::random();
-        reg.register(a.clone(), make_entry(Some(b.clone()), "aa".into()));
-        reg.register(b, make_entry(Some(a.clone()), "ab".into()));
+        reg.register(
+            a.clone(),
+            RegistryEntry::Live(make_entry(Some(b.clone()), "aa".into())),
+        );
+        reg.register(
+            b,
+            RegistryEntry::Live(make_entry(Some(a.clone()), "ab".into())),
+        );
         match reg.walk_supervisor_chain(&a) {
             Err(e) => {
                 assert_eq!(e.status, 403);
@@ -675,11 +817,115 @@ mod tests {
         let mut reg = AgentRegistry::new();
         let a = AgentId::random();
         let ghost = AgentId::random();
-        reg.register(a.clone(), make_entry(Some(ghost), "a".into()));
+        reg.register(
+            a.clone(),
+            RegistryEntry::Live(make_entry(Some(ghost), "a".into())),
+        );
         match reg.walk_supervisor_chain(&a) {
             Err(e) => assert_eq!(e.status, 403),
             Ok(_) => panic!("expected broken chain error"),
         }
+    }
+
+    // -- Faulted entries: chain integrity, registration, authorization --
+
+    /// The headline fix: a supervisor chain walks cleanly through faulted
+    /// nodes, so a superior can authorize against a faulted descendant. Today
+    /// the whole subtree vanishes and the walk 403s ("broken supervisor chain").
+    #[tokio::test]
+    async fn walk_chain_traverses_faulted_nodes() {
+        let mut reg = AgentRegistry::new();
+        let root = AgentId::random();
+        let mid = AgentId::random();
+        let leaf = AgentId::random();
+        add_root(&mut reg, &root);
+        add_faulted_sub(&mut reg, &mid, &root, "mid restore failed");
+        add_faulted_sub(&mut reg, &leaf, &mid, "leaf restore failed");
+        let chain = reg.walk_supervisor_chain(&leaf).expect("chain is intact");
+        assert_eq!(chain.len(), 3);
+        // The faulted nodes are present and report their state for summaries.
+        assert_eq!(chain[0].state_for_summary(), AgentState::Faulted);
+        assert_eq!(chain[1].state_for_summary(), AgentState::Faulted);
+    }
+
+    /// A faulted entry links to a live supervisor via the eager subagent-push,
+    /// so `aide list` on the supervisor includes the faulted child.
+    #[tokio::test]
+    async fn register_faulted_links_to_live_supervisor() {
+        let mut reg = AgentRegistry::new();
+        let sup = AgentId::random();
+        let child = AgentId::random();
+        add_root(&mut reg, &sup);
+        add_faulted_sub(&mut reg, &child, &sup, "boom");
+        assert!(reg.get(&sup).unwrap().subagent_ids().contains(&child));
+    }
+
+    /// A faulted child links to a faulted supervisor too (subtree stays connected).
+    #[tokio::test]
+    async fn register_faulted_links_to_faulted_supervisor() {
+        let mut reg = AgentRegistry::new();
+        let sup = AgentId::random();
+        let child = AgentId::random();
+        add_faulted_root(&mut reg, &sup, "sup restore failed");
+        add_faulted_sub(&mut reg, &child, &sup, "child restore failed");
+        assert!(reg.get(&sup).unwrap().subagent_ids().contains(&child));
+    }
+
+    /// A faulted entry is never inserted into the token index: it has no auth
+    /// token (the token is minted fresh on each restore and never persisted), so
+    /// it must not be authenticatable.
+    #[tokio::test]
+    async fn register_faulted_not_in_token_index() {
+        let mut reg = AgentRegistry::new();
+        let id = AgentId::random();
+        add_faulted_root(&mut reg, &id, "missing workspace");
+        // Any hash lookup misses -- a faulted agent cannot authenticate.
+        assert!(
+            reg.get_agent_id_by_token(&TokenHash::of("anything"))
+                .is_none()
+        );
+    }
+
+    /// Operator and a live ancestor both pass `require_superior` against a
+    /// faulted descendant -- the chain is walkable, so management works.
+    #[tokio::test]
+    async fn require_superior_succeeds_through_faulted() {
+        let mut reg = AgentRegistry::new();
+        let root = AgentId::random();
+        let faulted_child = AgentId::random();
+        add_root(&mut reg, &root);
+        add_faulted_sub(&mut reg, &faulted_child, &root, "restore failed");
+        assert!(
+            reg.require_superior(&Identity::Operator, &faulted_child)
+                .is_ok()
+        );
+        assert!(
+            reg.require_superior(&Identity::Agent { id: root.clone() }, &faulted_child)
+                .is_ok()
+        );
+    }
+
+    /// `drain` returns both live and faulted entries so the shutdown caller can
+    /// await live tasks and drop faulted ones.
+    #[tokio::test]
+    async fn drain_returns_both_variants() {
+        let mut reg = AgentRegistry::new();
+        let live = AgentId::random();
+        let faulted = AgentId::random();
+        add_root(&mut reg, &live);
+        add_faulted_root(&mut reg, &faulted, "broken");
+        let drained = reg.drain();
+        assert_eq!(drained.len(), 2);
+        assert!(
+            drained
+                .iter()
+                .any(|(_, e)| matches!(e, RegistryEntry::Live(_)))
+        );
+        assert!(
+            drained
+                .iter()
+                .any(|(_, e)| matches!(e, RegistryEntry::Faulted(_)))
+        );
     }
 
     // -- relation_of --
@@ -757,7 +1003,10 @@ mod tests {
         let mut reg = AgentRegistry::new();
         let a = AgentId::random();
         let ghost = AgentId::random();
-        reg.register(a.clone(), make_entry(Some(ghost), "a".into()));
+        reg.register(
+            a.clone(),
+            RegistryEntry::Live(make_entry(Some(ghost), "a".into())),
+        );
         // Self short-circuits before any walk, so a broken chain is irrelevant.
         assert_eq!(
             reg.relation_of(Some(&a), &a),

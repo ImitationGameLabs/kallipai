@@ -221,15 +221,22 @@ async fn route_to_superior(
             warn!(id = %agent_id, "agent not found in registry during superior routing");
             return;
         };
-        let Some(ref superior_id) = entry.agent.config.created_by else {
+        let Some(ref superior_id) = entry.identity().config.created_by else {
             return;
         };
         let Some(superior_entry) = registry.get(superior_id) else {
             warn!(id = %superior_id, "superior not found in registry");
             return;
         };
+        // The direct superior must be live: it receives the notification and
+        // contributes a policy decision. A faulted superior has no prompt
+        // channel, so escalation cannot proceed.
+        let Some(superior_live) = superior_entry.as_live() else {
+            warn!(id = %superior_id, "direct superior is faulted; cannot route approval");
+            return;
+        };
 
-        let superior_decision = superior_entry
+        let superior_decision = superior_live
             .agent
             .tool_policy
             .read()
@@ -241,6 +248,11 @@ async fn route_to_superior(
         // lacks Allow — otherwise no escalation needed.
         // A visited-set guards against cycles (defense-in-depth; chains are
         // validated at creation time but restoration could bypass that).
+        //
+        // `created_by` (durable) drives root-detection and chain advancement, so
+        // a faulted node is traversed normally; only its `tool_policy` (live)
+        // is skipped -- a faulted superior contributes no policy decision and
+        // cannot be the escalation target.
         let mut allow_superior_id = None;
         let mut root_agent_id: Option<AgentId> = None;
         let mut is_superior_root = false;
@@ -254,15 +266,18 @@ async fn route_to_superior(
                 let Some(entry) = registry.get(&current_id) else {
                     break;
                 };
-                let is_root = entry.agent.config.created_by.is_none();
+                let is_root = entry.identity().config.created_by.is_none();
                 if is_root {
                     root_agent_id = Some(current_id.clone());
                     is_superior_root = current_id == *superior_id;
                 }
                 // Check policy for upper-level superiors (skip the direct superior
-                // whose decision we already know is non-Allow).
-                if current_id != *superior_id {
-                    let decision = entry
+                // whose decision we already know is non-Allow, and skip faulted
+                // nodes which have no policy to read).
+                if current_id != *superior_id
+                    && let Some(live) = entry.as_live()
+                {
+                    let decision = live
                         .agent
                         .tool_policy
                         .read()
@@ -276,13 +291,13 @@ async fn route_to_superior(
                     break;
                 }
                 // Safe: `is_root` is false, so `created_by` is `Some`.
-                current_id = entry.agent.config.created_by.as_ref().unwrap().clone();
+                current_id = entry.identity().config.created_by.as_ref().unwrap().clone();
             }
         }
 
         SuperiorContext {
             superior_id: superior_id.clone(),
-            prompt_tx: superior_entry.agent.prompt_tx.clone(),
+            prompt_tx: superior_live.agent.prompt_tx.clone(),
             superior_decision,
             allow_superior_id,
             root_agent_id,
@@ -365,6 +380,7 @@ mod tests {
     use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
 
+    use crate::state::RegistryEntry;
     use crate::test_helpers::*;
 
     /// Helper: receive a notification from the prompt channel within a timeout.
@@ -585,7 +601,7 @@ mod tests {
         );
         {
             let mut reg = state.registry.write().await;
-            reg.register(parent.clone(), parent_entry);
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
             add_sub(&mut reg, &child, &parent);
         }
 
@@ -621,7 +637,7 @@ mod tests {
         {
             let mut reg = state.registry.write().await;
             add_root_with_policy(&mut reg, &root, policy_allow_tool("dangerous_tool"));
-            reg.register(parent.clone(), parent_entry);
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
             add_sub(&mut reg, &child, &parent);
         }
 
@@ -661,7 +677,7 @@ mod tests {
                 &root,
                 policy_for_tool("dangerous_tool", PolicyDecision::Deny),
             );
-            reg.register(parent.clone(), parent_entry);
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
             add_sub(&mut reg, &child, &parent);
         }
 
@@ -720,7 +736,7 @@ mod tests {
         );
         {
             let mut reg = state.registry.write().await;
-            reg.register(root.clone(), root_entry);
+            reg.register(root.clone(), RegistryEntry::Live(root_entry));
             add_sub(&mut reg, &child, &root);
         }
 

@@ -12,7 +12,7 @@ use crate::routes::agent::{
     SpawnArgs, WorkspaceAcquireFailure, abort_agent, spawn_agent, try_acquire_workspace_lock,
 };
 use crate::sse::sse_stream;
-use crate::state::SharedState;
+use crate::state::{RegistryEntry, SharedState};
 use kallip_common::agentid::AgentId;
 
 /// Any authenticated agent may send a message to any other agent.
@@ -41,7 +41,7 @@ pub async fn send_message(
             crate::auth::Identity::Agent { id: sender_id } => {
                 let role = registry
                     .get(sender_id)
-                    .map(|e| e.agent.config.role.clone())
+                    .map(|e| e.identity().config.role.clone())
                     .unwrap_or_else(|| "unknown".to_owned());
                 let relation = registry.relation_of(Some(sender_id), &id);
                 (
@@ -63,10 +63,22 @@ pub async fn send_message(
         let entry = registry
             .get(&id)
             .ok_or_else(|| ApiError::not_found("agent not found"))?;
-        match try_enqueue(&entry.agent.prompt_tx, &envelope) {
+        // A faulted agent has no prompt channel and can never run; reject up
+        // front rather than falling through to reactivation (which would try to
+        // read runtime fields that don't exist on a faulted entry).
+        let live = entry.as_live().ok_or_else(|| {
+            let reason = match entry {
+                RegistryEntry::Faulted(f) => f.reason.clone(),
+                _ => String::new(),
+            };
+            ApiError::conflict(format!(
+                "agent is faulted ({reason}); it cannot receive messages"
+            ))
+        })?;
+        match try_enqueue(&live.agent.prompt_tx, &envelope) {
             EnqueueResult::Accepted(response) => return Ok((StatusCode::ACCEPTED, Json(response))),
             EnqueueResult::Full => {
-                let cap = entry.agent.prompt_tx.max_capacity();
+                let cap = live.agent.prompt_tx.max_capacity();
                 return Err(ApiError::unavailable(format!(
                     "agent message queue is full ({cap} messages), retry later"
                 )));
@@ -90,12 +102,18 @@ pub async fn send_message(
         let entry = registry
             .get_mut(&id)
             .ok_or_else(|| ApiError::not_found("agent not found"))?;
+        // Defensive: the fast path rejects faulted entries, so reaching here
+        // means the entry is live. Reject anyway if a future refactor bypasses
+        // the fast path -- a faulted entry has no runtime fields to read.
+        let live = entry
+            .as_live_mut()
+            .ok_or_else(|| ApiError::conflict("agent is faulted; cannot reactivate"))?;
 
         // Double-check under write lock: another request may have reactivated.
-        match try_enqueue(&entry.agent.prompt_tx, &envelope) {
+        match try_enqueue(&live.agent.prompt_tx, &envelope) {
             EnqueueResult::Accepted(response) => return Ok((StatusCode::ACCEPTED, Json(response))),
             EnqueueResult::Full => {
-                let cap = entry.agent.prompt_tx.max_capacity();
+                let cap = live.agent.prompt_tx.max_capacity();
                 return Err(ApiError::unavailable(format!(
                     "agent message queue is full ({cap} messages), retry later"
                 )));
@@ -104,8 +122,8 @@ pub async fn send_message(
         }
 
         info!(id = %id, "reactivating agent");
-        entry.agent.agent_handle.abort();
-        entry.agent.bridge_handle.abort();
+        live.agent.agent_handle.abort();
+        live.agent.bridge_handle.abort();
         // Release the dead incarnation's directory write-locks before re-spawn,
         // so the new incarnation starts with an empty lock set and any peer it
         // was blocking is freed. The workspace write-lock is re-acquired in
@@ -123,11 +141,11 @@ pub async fn send_message(
             error!(id = %id, "fresh channel rejected pre-send: {e}");
             ApiError::internal("failed to pre-send message")
         })?;
-        entry.agent.prompt_tx = prompt_tx;
+        live.agent.prompt_tx = prompt_tx;
 
         // Resolve the tier purely by depth (positional tiers) — reactivation re-derives the same
         // way restore does.
-        let config = entry.agent.config.clone();
+        let config = live.identity.config.clone();
         let tier = state
             .profiles
             .select_profile(config.permissions.depth())
@@ -135,22 +153,22 @@ pub async fn send_message(
 
         SpawnArgs {
             agent_id: id.clone(),
-            store: entry.agent.store.clone(),
-            approvals: entry.agent.approvals.clone(),
-            agent_dir: entry.agent.agent_dir.clone().unwrap_or_default(),
+            store: live.agent.store.clone(),
+            approvals: live.agent.approvals.clone(),
+            agent_dir: live.identity.agent_dir.clone().unwrap_or_default(),
             config,
             initial_prompt: None, // message already pre-sent to the channel
             shutdown_cancel: state.shutdown.clone(),
-            events_tx: entry.agent.events_tx.clone(),
+            events_tx: live.agent.events_tx.clone(),
             // Hash preserved across reactivation → token_index stays consistent
             // (same id, same hash), so the reactivated agent needs no re-registration.
-            auth_token_hash: entry.agent.auth_token_hash.clone(),
-            env: entry.agent.env.clone(),
+            auth_token_hash: live.agent.auth_token_hash.clone(),
+            env: live.agent.env.clone(),
             shared_state: state.clone(),
-            tool_policy: entry.agent.tool_policy.clone(),
-            exec_policy: entry.agent.exec_policy.clone(),
+            tool_policy: live.agent.tool_policy.clone(),
+            exec_policy: live.agent.exec_policy.clone(),
             prompt_queue_size: state.prompt_queue_size,
-            prompt_channel: Some((entry.agent.prompt_tx.clone(), prompt_rx)),
+            prompt_channel: Some((live.agent.prompt_tx.clone(), prompt_rx)),
             tier,
         }
     }; // Write lock released. Concurrent requests see open channel.
@@ -201,14 +219,17 @@ pub async fn send_message(
             }
         };
 
-    let agent = match spawn_agent(spawn_args).await {
-        Ok(a) => {
+    let (agent, new_identity) = match spawn_agent(spawn_args).await {
+        Ok((a, new_identity)) => {
             // Spawn succeeded: the agent owns the workspace lock for its
             // lifetime. Disarm so the guard's (imminent) Drop does not release.
             if let Some(mut guard) = workspace_lock {
                 guard.disarm();
             }
-            a
+            // Reactivation preserves the existing identity (config/agent_dir are
+            // unchanged); hold the returned identity only for its dir, used on
+            // the rollback paths below.
+            (a, new_identity)
         }
         Err(e) => {
             // `workspace_lock`'s Drop releases the re-acquired lock as this
@@ -227,14 +248,31 @@ pub async fn send_message(
             // fresh incarnation may have acquired (defense-in-depth, mirroring
             // the shutdown drain — the new task should not have run yet, but be
             // explicit).
-            abort_agent(&agent);
+            abort_agent(&agent, new_identity.agent_dir.as_deref());
             state.lock_manager.release_all(&id);
             return Err(ApiError::not_found("agent removed during reactivation"));
+        };
+        // Structural write-back: the entry is live (the fast path rejects
+        // faulted entries), so swap in the freshly-spawned runtime handle
+        // while preserving identity and subagent_ids.
+        let live = match entry {
+            RegistryEntry::Live(live) => live,
+            RegistryEntry::Faulted(_) => {
+                // The entry became faulted between Phase 1 and Phase 2. Abort
+                // the fresh spawn and release any locks it acquired (the
+                // workspace lock was disarmed on spawn success, so the manager
+                // is the only cleanup path) -- mirrors the entry-removed arm.
+                abort_agent(&agent, new_identity.agent_dir.as_deref());
+                state.lock_manager.release_all(&id);
+                return Err(ApiError::conflict(
+                    "agent became faulted during reactivation",
+                ));
+            }
         };
         // No try_enqueue double-check needed: the sender we installed in
         // Phase 1 is still there, and the new Agent's prompt_tx is the same
         // sender (passed through prompt_channel).
-        entry.agent = agent;
+        live.agent = agent;
     }
 
     Ok((
@@ -262,8 +300,11 @@ pub async fn sse_events(
         let entry = registry
             .get(&id)
             .ok_or_else(|| ApiError::not_found("agent not found"))?;
-        let rx = entry.agent.events_tx.subscribe();
-        let events_tx = entry.agent.events_tx.clone();
+        let live = entry
+            .as_live()
+            .ok_or_else(|| ApiError::conflict("agent is faulted; no event stream"))?;
+        let rx = live.agent.events_tx.subscribe();
+        let events_tx = live.agent.events_tx.clone();
         (rx, events_tx)
     };
     Ok(sse_stream(id, events_tx, rx, state.shutdown.clone()))
@@ -276,10 +317,12 @@ pub async fn sse_events(
 /// dead-end. Used when reactivation fails before or during spawn.
 async fn close_prompt_channel(state: &SharedState, id: &AgentId) {
     let mut registry = state.registry.write().await;
-    if let Some(entry) = registry.get_mut(id) {
+    if let Some(entry) = registry.get_mut(id)
+        && let Some(live) = entry.as_live_mut()
+    {
         let (dead_tx, dead_rx) = tokio::sync::mpsc::channel(1);
         drop(dead_rx);
-        entry.agent.prompt_tx = dead_tx;
+        live.agent.prompt_tx = dead_tx;
     }
 }
 
@@ -332,7 +375,7 @@ mod tests {
     use super::*;
     use crate::auth::{AuthIdentity, Identity};
     use crate::state::AgentId;
-    use crate::test_helpers::{make_entry_with_rx, make_state};
+    use crate::test_helpers::{add_faulted_root, make_entry_with_rx, make_state};
     use axum::Json;
     use axum::extract::{Path, State};
     use kallip_common::protocol::MessageRequest;
@@ -403,12 +446,12 @@ mod tests {
         let state = make_state();
         let receiver = AgentId::random();
         let (mut entry, mut rx) = make_entry_with_rx(None, "recv".into());
-        entry.agent.config.role = "root".into();
+        entry.identity.config.role = "root".into();
         state
             .registry
             .write()
             .await
-            .register(receiver.clone(), entry);
+            .register(receiver.clone(), RegistryEntry::Live(entry));
 
         let resp = send_message(
             State(state),
@@ -435,20 +478,20 @@ mod tests {
         let child = AgentId::random();
 
         let (mut parent_entry, mut parent_rx) = make_entry_with_rx(None, "parent".into());
-        parent_entry.agent.config.role = "lead".into();
+        parent_entry.identity.config.role = "lead".into();
         state
             .registry
             .write()
             .await
-            .register(parent.clone(), parent_entry);
+            .register(parent.clone(), RegistryEntry::Live(parent_entry));
 
         let (mut child_entry, _child_rx) = make_entry_with_rx(Some(parent.clone()), "child".into());
-        child_entry.agent.config.role = "researcher".into();
+        child_entry.identity.config.role = "researcher".into();
         state
             .registry
             .write()
             .await
-            .register(child.clone(), child_entry);
+            .register(child.clone(), RegistryEntry::Live(child_entry));
 
         let resp = send_message(
             State(state),
@@ -475,8 +518,12 @@ mod tests {
         let state = make_state();
         let me = AgentId::random();
         let (mut entry, mut rx) = make_entry_with_rx(None, "me".into());
-        entry.agent.config.role = "solo".into();
-        state.registry.write().await.register(me.clone(), entry);
+        entry.identity.config.role = "solo".into();
+        state
+            .registry
+            .write()
+            .await
+            .register(me.clone(), RegistryEntry::Live(entry));
 
         let _ = send_message(
             State(state),
@@ -493,6 +540,38 @@ mod tests {
         assert_eq!(
             delivered,
             format!("[From: agent {me} (role: solo, same)]\nnote to self")
+        );
+    }
+
+    /// Messaging a faulted agent returns 409 with the reason -- it cannot
+    /// receive messages and must not fall through to reactivation (no runtime
+    /// fields to read).
+    #[tokio::test]
+    async fn send_message_to_faulted_returns_conflict() {
+        let state = make_state();
+        let faulted = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_faulted_root(&mut reg, &faulted, "restore failed: missing workspace");
+        }
+        let err = send_message(
+            State(state),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(faulted),
+            Json(MessageRequest { text: "hi".into() }),
+        )
+        .await
+        .expect_err("faulted agent rejects messages");
+        assert_eq!(err.status, 409);
+        assert!(
+            err.message.contains("faulted"),
+            "message should mention faulted: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("missing workspace"),
+            "message should include the reason: {}",
+            err.message
         );
     }
 }
