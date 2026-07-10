@@ -40,9 +40,9 @@ pub fn load() -> Result<ProfileConfig> {
 
 /// Build the implicit single-profile registry from `KALLIP_LLM_*` env (the env path).
 ///
-/// Mirrors the historical `client_from_env` reads 1:1. The profile's `max_context_window` is
-/// derived from `KALLIP_CONTEXT_WINDOW_TOKENS` (default `128_000`), so the env path and the
-/// config-file path both carry an authoritative window installed via `set_context_window` at spawn.
+/// The profile's `max_context_window` is derived from `KALLIP_CONTEXT_WINDOW_TOKENS`
+/// (default `128_000`), so the env path and the config-file path both carry an authoritative
+/// window installed via `set_context_window` at spawn.
 pub fn from_env() -> Result<ProfileConfig> {
     let provider = env_str("KALLIP_LLM_PROVIDER")?;
     let model = env_str("KALLIP_LLM_MODEL")?;
