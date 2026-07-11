@@ -1359,9 +1359,11 @@ mod tests {
 
     #[test]
     fn format_tool_result_non_envelope_falls_back() {
-        let body = format_tool_result("tool 'bash_exec' timed out after 120s", 50);
+        // A genuinely non-JSON tool result (tool outputs are normally JSON
+        // envelopes; this exercises the plain-text fallback render path).
+        let body = format_tool_result("not a json envelope at all", 50);
         let joined: Vec<String> = body.iter().map(line_text).collect();
-        assert!(joined.iter().any(|s| s.contains("timed out")));
+        assert!(joined.iter().any(|s| s.contains("not a json")));
     }
 
     #[test]

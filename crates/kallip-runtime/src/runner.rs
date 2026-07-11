@@ -21,6 +21,7 @@ use crate::context::{
 };
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::failover::FailoverOutcome;
+use crate::policy::{ToolCallOutcome, skipped_tool_result, timed_out_tool_result};
 use crate::stream_accumulator::ToolCallAccumulator;
 use just_llm_client::types::chat::{
     ChatMessage, ChatToolCall, StreamOptions, ToolCallsMessage, ToolChoice, ToolChoiceMode,
@@ -656,62 +657,91 @@ async fn execute_tool_calls(
         },
     })];
 
-    for call in consumed.tool_calls {
-        tx.send(AgentEvent::ToolCall {
-            name: call.function.name.clone(),
-            args: call.function.arguments.clone(),
-        })
-        .await
-        .ok();
-        let result = {
-            let tool_fut = tokio::time::timeout(
-                tool_timeout,
-                ctx.executor
-                    .execute(&call.function.name, &call.function.arguments),
-            );
-            tokio::select! {
-                result = tool_fut => match result {
-                    Ok(output) => output,
-                    Err(_) => format!(
-                        "tool '{}' timed out after {}s",
-                        call.function.name,
-                        tool_timeout.as_secs()
-                    ),
-                },
-                _ = round_cancel.cancelled() => {
-                    tracing::info!(tool = %call.function.name, "tool execution cancelled");
-                    return ToolExecResult::Cancelled;
-                }
-            }
-        };
+    // Stop on the first call that does not cleanly succeed. The agent composed
+    // this round's calls without seeing intermediate results (a returned cwd,
+    // exit code, etc.), so running later calls -- which may be destructive -- on
+    // an unverified premise is unsafe. Once a call fails or is deferred pending
+    // approval, the remaining calls are returned as synthetic skip errors; the
+    // agent re-issues them after reviewing what happened.
+    let mut skip: Option<(String, String)> = None;
 
-        // Check approval state transitions (single lock acquisition).
-        let (committed, redeemed, cancelled) = {
-            let mut d = ctx.approvals.lock().await;
-            (
-                d.take_last_committed(),
-                d.take_last_redeemed(),
-                d.take_last_cancelled(),
-            )
-        };
-        if let Some(info) = committed {
-            let arguments =
-                serde_json::from_str(&info.args_json).unwrap_or(serde_json::Value::Null);
-            tx.send(AgentEvent::ApprovalCommitted {
-                id: info.id,
-                tool_name: info.tool_name,
-                arguments,
-                commit_reason: info.commit_reason,
+    for call in consumed.tool_calls {
+        let result = if let Some((prior_name, reason)) = &skip {
+            // Earlier call did not cleanly succeed: do not execute this one.
+            skipped_tool_result(&call.function.name, prior_name, reason)
+        } else {
+            tx.send(AgentEvent::ToolCall {
+                name: call.function.name.clone(),
+                args: call.function.arguments.clone(),
             })
             .await
             .ok();
-        }
-        if let Some(id) = redeemed {
-            tx.send(AgentEvent::ApprovalRedeemed { id }).await.ok();
-        }
-        if let Some(id) = cancelled {
-            tx.send(AgentEvent::ApprovalCancelled { id }).await.ok();
-        }
+            let outcome = {
+                let tool_fut = tokio::time::timeout(
+                    tool_timeout,
+                    ctx.executor
+                        .execute(&call.function.name, &call.function.arguments),
+                );
+                tokio::select! {
+                    result = tool_fut => match result {
+                        Ok(outcome) => outcome,
+                        Err(_) => ToolCallOutcome::Failed(timed_out_tool_result(
+                            &call.function.name,
+                            tool_timeout.as_secs(),
+                        )),
+                    },
+                    _ = round_cancel.cancelled() => {
+                        tracing::info!(tool = %call.function.name, "tool execution cancelled");
+                        return ToolExecResult::Cancelled;
+                    }
+                }
+            };
+
+            // Check approval state transitions (single lock acquisition).
+            let (committed, redeemed, cancelled) = {
+                let mut d = ctx.approvals.lock().await;
+                (
+                    d.take_last_committed(),
+                    d.take_last_redeemed(),
+                    d.take_last_cancelled(),
+                )
+            };
+            if let Some(info) = committed {
+                let arguments =
+                    serde_json::from_str(&info.args_json).unwrap_or(serde_json::Value::Null);
+                tx.send(AgentEvent::ApprovalCommitted {
+                    id: info.id,
+                    tool_name: info.tool_name,
+                    arguments,
+                    commit_reason: info.commit_reason,
+                })
+                .await
+                .ok();
+            }
+            if let Some(id) = redeemed {
+                tx.send(AgentEvent::ApprovalRedeemed { id }).await.ok();
+            }
+            if let Some(id) = cancelled {
+                tx.send(AgentEvent::ApprovalCancelled { id }).await.ok();
+            }
+
+            // Record the result envelope; if it was not a clean success, arm
+            // the skip flag so the rest of the round is skipped.
+            match outcome {
+                ToolCallOutcome::Success(s) => s,
+                ToolCallOutcome::Failed(s) => {
+                    skip = Some((call.function.name.clone(), "did not succeed".to_string()));
+                    s
+                }
+                ToolCallOutcome::Deferred(s) => {
+                    skip = Some((
+                        call.function.name.clone(),
+                        "is pending approval".to_string(),
+                    ));
+                    s
+                }
+            }
+        };
 
         tx.send(AgentEvent::ToolResult(result.clone())).await.ok();
         turn_messages.push(ChatMessage::tool_result(result, call.id));

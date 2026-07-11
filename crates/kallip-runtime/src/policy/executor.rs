@@ -12,6 +12,22 @@ use super::AgentPolicy;
 use crate::approval::{ApprovalStatus, ApprovalStore, approval_result_json};
 use crate::tools;
 
+/// Outcome of a single tool call, for the runner's stop-on-non-success policy.
+/// Each variant carries the result envelope (the same `String` that becomes the
+/// `tool`-role message) unchanged; the variant only drives whether the rest of
+/// the round is skipped.
+///
+/// `Success` = the call cleanly achieved its goal (`ok:true`, and for bash_exec
+/// a foreground `exit_code` of 0; a `background:true` spawn counts as success).
+/// `Failed` = tool-level error/deny/timeout, or a bash foreground non-zero/null
+/// exit. `Deferred` = pending approval.
+#[derive(Debug)]
+pub enum ToolCallOutcome {
+    Success(String),
+    Failed(String),
+    Deferred(String),
+}
+
 /// Executes tools behind a policy gate with approval gating.
 ///
 /// When policy returns `Ask`, the tool call is stored in the
@@ -46,14 +62,15 @@ impl AuthorizedToolExecutor {
         defs
     }
 
-    pub async fn execute(&mut self, tool_name: &str, args_json: &str) -> String {
-        match tool_name {
+    pub async fn execute(&mut self, tool_name: &str, args_json: &str) -> ToolCallOutcome {
+        let envelope = match tool_name {
             "approval_list" => self.handle_list(args_json).await,
             "approval_commit" => self.handle_commit(args_json).await,
             "approval_redeem" => self.handle_redeem(args_json).await,
             "approval_cancel" => self.handle_cancel(args_json).await,
             _ => self.execute_tool(tool_name, args_json).await,
-        }
+        };
+        classify_outcome(envelope)
     }
 
     async fn execute_tool(&mut self, tool_name: &str, args_json: &str) -> String {
@@ -207,6 +224,65 @@ fn error_result(tool_name: &str, error: String) -> String {
     .unwrap_or_else(|_| r#"{"ok":false,"error":"serialization failed"}"#.to_owned())
 }
 
+/// Synthetic error envelope for a tool call skipped because an earlier call in
+/// the same round did not cleanly succeed. The runner emits this (instead of
+/// executing) so every `tool_use` still gets a result.
+pub(crate) fn skipped_tool_result(tool_name: &str, prior_name: &str, reason: &str) -> String {
+    error_result(
+        tool_name,
+        format!("skipped: earlier tool call '{prior_name}' {reason} in this round"),
+    )
+}
+
+/// Error envelope for a tool call that exceeded its timeout. Normalizes what
+/// used to be a bare diagnostic string into the standard `ok:false` envelope.
+pub(crate) fn timed_out_tool_result(tool_name: &str, secs: u64) -> String {
+    error_result(tool_name, format!("timed out after {secs}s"))
+}
+
+/// Classify a result envelope into a [`ToolCallOutcome`]. The runner uses the
+/// variant to decide stop-and-skip; the envelope string itself is returned to
+/// the agent unchanged. All tool-specific knowledge (the bash foreground
+/// exit-code rule, the background `task_id` carve-out) lives here, not in the
+/// runner.
+fn classify_outcome(envelope: String) -> ToolCallOutcome {
+    let Ok(v) = serde_json::from_str::<Value>(&envelope) else {
+        // Unparseable envelope (should not happen): don't second-guess success.
+        return ToolCallOutcome::Success(envelope);
+    };
+    if v.get("pending_approval").and_then(|b| b.as_bool()) == Some(true) {
+        return ToolCallOutcome::Deferred(envelope);
+    }
+    if v.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        return ToolCallOutcome::Failed(envelope);
+    }
+    // ok:true. A bash_exec foreground result is only a clean success at exit 0;
+    // background spawns (task_id present) succeed regardless of exit_code.
+    // Note: approval_redeem re-runs the stored call under its own tool_name, so
+    // this also classifies a redeemed bash_exec by its inner exit code.
+    if v.get("tool_name").and_then(|s| s.as_str()) == Some("bash_exec")
+        && bash_foreground_failed(&v)
+    {
+        return ToolCallOutcome::Failed(envelope);
+    }
+    ToolCallOutcome::Success(envelope)
+}
+
+/// `true` iff this is a foreground bash_exec result that did not exit 0
+/// (non-zero exit, or null exit_code = signal death). Background spawns
+/// (`task_id` present) are NOT foreground failures.
+fn bash_foreground_failed(v: &Value) -> bool {
+    let Some(result) = v.get("result") else {
+        return false;
+    };
+    if result.get("task_id").and_then(|t| t.as_str()).is_some() {
+        return false; // background spawn
+    }
+    // exit_code == 0 -> clean; anything else (non-zero, or null = signal death)
+    // is a foreground failure.
+    result.get("exit_code").and_then(|c| c.as_i64()) != Some(0)
+}
+
 // -- Typed response structs --
 
 #[derive(Serialize)]
@@ -254,4 +330,102 @@ struct ApprovalCancelResponse {
     ok: bool,
     cancelled: String,
     previous_status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a bash_exec tool-output JSON string (the shape `call_tool` returns),
+    /// mirroring the relevant `BashExecOutput` fields.
+    fn bash_output(exit_code: Option<i32>, task_id: Option<&str>) -> String {
+        let exit = match exit_code {
+            Some(n) => n.to_string(),
+            None => "null".to_string(),
+        };
+        let task = match task_id {
+            Some(t) => format!(",\"task_id\":\"{t}\""),
+            None => String::new(),
+        };
+        format!(
+            "{{\"output\":\"o\",\"exit_code\":{exit},\"timed_out\":false,\"truncated\":false,\"cwd\":\"/tmp\"{task}}}"
+        )
+    }
+
+    #[test]
+    fn classify_bash_foreground_zero_is_success() {
+        let env = success_result("bash_exec", bash_output(Some(0), None));
+        assert!(matches!(classify_outcome(env), ToolCallOutcome::Success(_)));
+    }
+
+    #[test]
+    fn classify_bash_foreground_nonzero_is_failed() {
+        let env = success_result("bash_exec", bash_output(Some(2), None));
+        assert!(matches!(classify_outcome(env), ToolCallOutcome::Failed(_)));
+    }
+
+    #[test]
+    fn classify_bash_signal_death_null_exit_is_failed() {
+        let env = success_result("bash_exec", bash_output(None, None));
+        assert!(matches!(classify_outcome(env), ToolCallOutcome::Failed(_)));
+    }
+
+    #[test]
+    fn classify_bash_timeout_124_is_failed() {
+        let env = success_result("bash_exec", bash_output(Some(124), None));
+        assert!(matches!(classify_outcome(env), ToolCallOutcome::Failed(_)));
+    }
+
+    #[test]
+    fn classify_bash_background_spawn_is_success() {
+        // background:true returns task_id + exit_code null. It is a success
+        // (process spawned) and must NOT be misclassified as a foreground
+        // failure despite the null exit_code.
+        let env = success_result("bash_exec", bash_output(None, Some("t1")));
+        assert!(matches!(classify_outcome(env), ToolCallOutcome::Success(_)));
+    }
+
+    #[test]
+    fn classify_non_bash_success_is_success() {
+        let env = success_result("read_file_and_pin", "{\"label\":\"x\"}".to_string());
+        assert!(matches!(classify_outcome(env), ToolCallOutcome::Success(_)));
+    }
+
+    #[test]
+    fn classify_ok_false_is_failed() {
+        let env = error_result("bash_exec", "tool denied: destructive".to_string());
+        assert!(matches!(classify_outcome(env), ToolCallOutcome::Failed(_)));
+    }
+
+    #[test]
+    fn classify_pending_approval_is_deferred() {
+        let env = approval_result_json("ap_x", "bash_exec", None);
+        assert!(matches!(
+            classify_outcome(env),
+            ToolCallOutcome::Deferred(_)
+        ));
+    }
+
+    #[test]
+    fn classify_redeemed_bash_nonzero_is_failed() {
+        // approval_redeem re-runs the stored call; its envelope carries the
+        // inner tool_name (bash_exec) + exit code, so the same rule applies.
+        let env = success_result("bash_exec", bash_output(Some(2), None));
+        assert!(matches!(classify_outcome(env), ToolCallOutcome::Failed(_)));
+    }
+
+    #[test]
+    fn skipped_and_timed_out_envelopes_are_ok_false() {
+        let s = skipped_tool_result("rm", "bash_exec", "did not succeed");
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["tool_name"], "rm");
+        assert!(v["error"].as_str().unwrap().contains("skipped"));
+        assert!(v["error"].as_str().unwrap().contains("bash_exec"));
+
+        let t = timed_out_tool_result("bash_exec", 30);
+        let v: Value = serde_json::from_str(&t).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("30s"));
+    }
 }

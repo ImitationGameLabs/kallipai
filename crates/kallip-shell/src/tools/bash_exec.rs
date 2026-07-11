@@ -84,11 +84,10 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
          appears in a terminal; the command is responsible for any ordering between the two \
          (it must flush to enforce it). Use `capture` to return them separately or keep only \
          one stream: \"merged\" (default), \"separate\", \"stdout\", or \"stderr\". Also returns \
-         the exit code and the working directory after the command (reflects cd). The working \
-         directory is NOT sticky across calls — to operate in a directory, prepend \
-         `cd <dir> &&` to your command and read the returned cwd. Supports a timeout \
-         (default 120s) and optional background mode. A timed-out command is killed and \
-         returns exit code 124."
+         the exit code and the working directory after the command. The working directory \
+         persists across calls; the returned `cwd` is authoritative: it is where the next \
+         command will run. Supports a timeout (default 120s) and optional background mode. \
+         A timed-out command is killed and returns exit code 124."
     }
 
     fn parameters_schema(&self) -> Value {

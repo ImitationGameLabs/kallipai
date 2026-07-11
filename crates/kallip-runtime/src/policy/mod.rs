@@ -18,4 +18,6 @@ pub enum ToolDecision {
 }
 
 pub use agent::AgentPolicy;
-pub use executor::AuthorizedToolExecutor;
+pub use executor::{AuthorizedToolExecutor, ToolCallOutcome};
+
+pub(crate) use executor::{skipped_tool_result, timed_out_tool_result};

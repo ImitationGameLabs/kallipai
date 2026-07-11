@@ -120,8 +120,13 @@ mod tests {
                 .unwrap_or_else(|| panic!("tool {name} present"))
         };
         let bash = desc(names::BASH_EXEC);
-        assert!(bash.contains("NOT sticky"), "bash_exec desc: {bash}");
-        assert!(bash.contains("cd <dir>"), "bash_exec desc: {bash}");
+        // cwd is sticky and the returned value is authoritative -- the description
+        // must not claim otherwise.
+        assert!(
+            bash.contains("persists across calls"),
+            "bash_exec desc: {bash}"
+        );
+        assert!(bash.contains("authoritative"), "bash_exec desc: {bash}");
         let read = desc(names::BG_READ);
         assert!(read.contains("Background task"), "bg_read desc: {read}");
     }

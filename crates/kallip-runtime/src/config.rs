@@ -18,7 +18,11 @@ const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "each tool's own description explains its usage. ",
     "Some tool actions are asynchronous — a backgrounded bash task or a deferred ",
     "(pending-approval) action completes later and surfaces a notice in context; ",
-    "read the notice and follow its instruction.",
+    "read the notice and follow its instruction. ",
+    "Tool calls within one round run in order; if a call does not succeed cleanly ",
+    "(non-zero exit, denied, timed out, or deferred pending approval) the remaining ",
+    "calls in that round are skipped and returned as errors — re-issue them after ",
+    "reviewing what happened.",
 );
 /// Effectively unlimited — the real safety net is the daemon-wide token budget.
 /// Individual rounds are bounded by LLM response length; the loop as a whole is
