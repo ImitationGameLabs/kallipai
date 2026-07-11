@@ -12,7 +12,14 @@ use kallip_common::AgentId;
 use kallip_common::policy::{PolicyDecision, ToolPolicy};
 use kallip_shell::tools::names;
 
-const DEFAULT_SYSTEM_PROMPT: &str = "You are a minimal coding agent. Use bash_exec to run a shell command in a fresh, isolated bash process; it returns stdout, stderr, exit_code, and the working directory after the command. The working directory does not persist implicitly — to operate in a directory, prepend `cd <dir> &&` to your command and read the returned cwd. bash_exec takes an optional timeout (seconds, default 120) and an optional background flag; with background:true it starts a long-running task and returns a task_id immediately. Use bash_background_read to poll a background task's output and state (running/exited/killed); a stalled:true state means it is likely waiting on an interactive prompt — kill it. Use bash_background_kill to cancel a background task. When a background task finishes, you receive a [Background task <id> <state>] notice — call bash_background_read to collect its output (including exit code). Keep answers concise and prefer the least risky tool that can accomplish the task.\n\nUse read_file_and_pin to load a file into persistent context (e.g. skills or reference documents). Use context_unpin to remove pinned items.\n\nWhen a tool returns {\"pending_approval\": true, \"id\": \"...\"}, the action was deferred and is pending authorization. Continue with other work. When you see an approval notification in context, call approval_redeem with the id to execute. Call approval_list to check status, approval_cancel if you no longer need a pending approval.\n\nUse `kallip skill promote submit <name>` to request promotion of a local skill to the shared directory. The request is reviewed by the root agent. You will be notified when the decision is made.";
+const DEFAULT_SYSTEM_PROMPT: &str = concat!(
+    "You are a minimal coding agent. ",
+    "Keep answers concise and prefer the least risky tool that accomplishes the task; ",
+    "each tool's own description explains its usage. ",
+    "Some tool actions are asynchronous — a backgrounded bash task or a deferred ",
+    "(pending-approval) action completes later and surfaces a notice in context; ",
+    "read the notice and follow its instruction.",
+);
 /// Effectively unlimited — the real safety net is the daemon-wide token budget.
 /// Individual rounds are bounded by LLM response length; the loop as a whole is
 /// bounded by token consumption. This constant only serves as a last-resort
@@ -665,23 +672,34 @@ mod tests {
     }
 
     #[test]
-    fn default_system_prompt_names_every_mentioned_tool() {
-        // The system prompt names tools by their string form. Guard against
-        // drift: if any of these NAMEs change, this fails unless the prompt is
-        // updated too. Only the tools the prompt actually references are
-        // asserted — `switch` and the context status/evict/pin tools are
-        // introduced elsewhere, so they are intentionally absent here.
+    fn default_system_prompt_stays_high_altitude() {
+        // The base prompt must stay at agent altitude: identity, posture, and
+        // the cross-cutting async-notice model. Tool mechanics belong in each
+        // tool's `description()` and the skill system belongs in the bootstrap
+        // meta-skill the daemon appends at runtime (routes/agent.rs). This guard
+        // prevents tool/CLI usage from creeping back into the prompt and
+        // re-duplicating those sources (drift + per-request token cost).
         let prompt = DEFAULT_SYSTEM_PROMPT;
-        for name in [
+        assert!(prompt.contains("minimal coding agent"));
+        assert!(prompt.contains("asynchronous"));
+        for verboten in [
             names::BASH_EXEC,
             names::BG_READ,
             names::BG_KILL,
             ContextUnpinTool::NAME,
             FilePinTool::NAME,
+            // The approval family and the skill-promote CLI were migrated out
+            // together; guard the whole family, not just one member.
+            "approval_redeem",
+            "approval_commit",
+            "approval_list",
+            "approval_cancel",
+            "skill promote",
         ] {
             assert!(
-                prompt.contains(name),
-                "DEFAULT_SYSTEM_PROMPT must mention '{name}'"
+                !prompt.contains(verboten),
+                "DEFAULT_SYSTEM_PROMPT must not embed tool/CLI usage ('{verboten}'); \
+                 it belongs in the tool description or the bootstrap skill"
             );
         }
     }

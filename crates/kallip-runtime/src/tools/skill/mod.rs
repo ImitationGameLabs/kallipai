@@ -341,6 +341,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn meta_skill_content_covers_relocated_material() {
+        // The base system prompt stays lean; these mechanics were moved OUT of
+        // it and are delivered via this meta-skill, which the daemon appends to
+        // every agent's prompt at spawn (routes/agent.rs). If this content goes
+        // missing here, the agent silently loses pin/unpin and the promote
+        // workflow -- so pin the dependency at the source.
+        let content = meta_skill_content();
+        assert!(
+            content.contains("read_file_and_pin"),
+            "meta-skill: {content}"
+        );
+        assert!(content.contains("context_unpin"), "meta-skill: {content}");
+        assert!(content.contains("skill promote"), "meta-skill: {content}");
+        assert!(
+            content.contains("skill paths") || content.contains("skill meta"),
+            "meta-skill must teach skill discovery: {content}"
+        );
+    }
+
+    #[test]
     fn strip_frontmatter_with_frontmatter() {
         let input = "---\nname: test\n---\nHello world\n";
         assert_eq!(strip_frontmatter(input), "Hello world\n");

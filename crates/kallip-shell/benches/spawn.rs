@@ -29,7 +29,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use kallip_shell::{ShellBackend, ShellBuilder};
+use kallip_shell::{CaptureMode, ShellBackend, ShellBuilder};
 
 /// Generous timeout — none of the read-only pool commands approach it.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -126,7 +126,9 @@ fn spawn_benches(c: &mut Criterion) {
             },
             |backend| {
                 let cmd = POOL[pick(&mut state)];
-                let output = rt.block_on(backend.exec(cmd, TIMEOUT)).expect("shell exec");
+                let output = rt
+                    .block_on(backend.exec(cmd, TIMEOUT, CaptureMode::Merged))
+                    .expect("shell exec");
                 black_box(output);
             },
             BatchSize::SmallInput,

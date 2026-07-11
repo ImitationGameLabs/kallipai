@@ -46,22 +46,21 @@ async fn scenario3_dirlock() {
 
     expect(&results, 0, "root own workspace write", true);
     expect(&results, 1, "subagent spawn child", true);
-    // The child agent id is the subagent-spawn stdout.
-    let child_id = results[1].stdout.trim().to_string();
+    // The child agent id is the subagent-spawn output.
+    let child_id = results[1].text().trim().to_string();
     assert!(
         !child_id.is_empty(),
         "subagent spawn should print the child agent id, got: {:?}",
-        results[1].stdout
+        results[1].text()
     );
     expect(&results, 2, "child workspace readonly to root", false);
     expect(&results, 3, "root own workspace still writable", true);
     expect(&results, 4, "second spawn must conflict", false);
-    let conflict_msg = format!("{}\n{}", results[4].stderr, results[4].stdout);
+    let conflict_msg = results[4].text();
     assert!(
         conflict_msg.contains("overlaps") || conflict_msg.contains("held by agent"),
-        "second spawn should report a conflict, got stderr={:?} stdout={:?}",
-        results[4].stderr,
-        results[4].stdout
+        "second spawn should report a conflict, got: {:?}",
+        conflict_msg
     );
 
     // FS corroboration.

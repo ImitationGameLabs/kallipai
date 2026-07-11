@@ -55,15 +55,18 @@ async fn scenario2_normal() {
     expect(&results, 5, "data-tree read ok", true);
     expect(&results, 6, "skills carve write", true);
     expect(&results, 7, ".ssh ls", true);
+    // The LLM picks bash_exec's `capture` mode, so read via `text()` (merged /
+    // stdout / stderr, whichever the mode surfaced) and match with `contains`.
     assert!(
-        results[7].stdout.trim().contains("id_testkey"),
+        results[7].text().trim().contains("id_testkey"),
         ".ssh should list id_testkey for Normal, got: {:?}",
-        results[7].stdout
+        results[7].text()
     );
     expect(&results, 8, ".ssh read", true);
-    assert_eq!(
-        results[8].stdout, SECRET_KEY,
-        "Normal can read the ssh key (no hide-hole)"
+    assert!(
+        results[8].text().contains(SECRET_KEY),
+        "Normal can read the ssh key (no hide-hole); got: {:?}",
+        results[8].text()
     );
     expect(&results, 9, "profiles read", true);
 

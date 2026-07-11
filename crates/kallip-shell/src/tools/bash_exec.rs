@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::backend::{DEFAULT_TIMEOUT_SECS, ShellBackend};
+use crate::backend::{CaptureMode, DEFAULT_TIMEOUT_SECS, ShellBackend};
 
 /// Arguments accepted by [`BashExec`].
 #[derive(Debug, Deserialize, Serialize)]
@@ -22,20 +22,36 @@ pub struct BashExecArgs {
     /// Run in the background (returns a task id immediately).
     #[serde(default)]
     pub background: bool,
+    /// How to capture output: `"merged"` (default; stdout+stderr interleaved as
+    /// one stream), `"separate"` (stdout+stderr as two fields), `"stdout"`, or
+    /// `"stderr"`.
+    #[serde(default)]
+    pub capture: CaptureMode,
 }
 
-/// Result returned by [`BashExec`].
+/// Result returned by [`BashExec`]. Exactly the output field(s) for the
+/// requested [`CaptureMode`] are present (the others are omitted on the wire):
+/// `merged` -> `output`; `separate` -> `stdout` + `stderr`; `stdout` ->
+/// `stdout`; `stderr` -> `stderr`.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct BashExecOutput {
-    /// Captured stdout (clipped to a tail on overflow).
-    pub stdout: String,
-    /// Captured stderr (clipped to a tail on overflow).
-    pub stderr: String,
+    /// Merged stdout+stderr (clipped to a tail on overflow). Present under
+    /// `capture: "merged"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Captured stdout (clipped to a tail on overflow). Present under
+    /// `capture: "separate"` or `"stdout"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    /// Captured stderr (clipped to a tail on overflow). Present under
+    /// `capture: "separate"` or `"stderr"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
     /// Exit code, or `None` on signal death; `124` on timeout.
     pub exit_code: Option<i32>,
     /// Whether the command exceeded its timeout.
     pub timed_out: bool,
-    /// Whether stdout/stderr was clipped.
+    /// Whether a returned stream was clipped.
     pub truncated: bool,
     /// Working directory after the command (read fresh from `pwd`).
     pub cwd: String,
@@ -63,10 +79,16 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command in a fresh, isolated bash process. Returns stdout, stderr, \
-         exit code, and the working directory after the command (reflects cd). Supports a \
-         timeout (default 120s) and optional background mode. A timed-out command is killed \
-         and returns exit code 124."
+        "Execute a shell command in a fresh, isolated bash process. By default stdout and \
+         stderr are merged into one stream (`output`), like 2>&1, matching how a command \
+         appears in a terminal; the command is responsible for any ordering between the two \
+         (it must flush to enforce it). Use `capture` to return them separately or keep only \
+         one stream: \"merged\" (default), \"separate\", \"stdout\", or \"stderr\". Also returns \
+         the exit code and the working directory after the command (reflects cd). The working \
+         directory is NOT sticky across calls — to operate in a directory, prepend \
+         `cd <dir> &&` to your command and read the returned cwd. Supports a timeout \
+         (default 120s) and optional background mode. A timed-out command is killed and \
+         returns exit code 124."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -86,6 +108,14 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
                     "type": "boolean",
                     "description": "If true, run in the background and return a task_id immediately.",
                     "default": false
+                },
+                "capture": {
+                    "type": "string",
+                    "enum": ["merged", "separate", "stdout", "stderr"],
+                    "default": "merged",
+                    "description": "How to capture output. \"merged\" (default) interleaves \
+                    stdout and stderr into one stream (normal command experience). \"separate\" \
+                    returns them as two fields. \"stdout\"/\"stderr\" keep only one stream."
                 }
             },
             "required": ["command"]
@@ -100,8 +130,9 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
         let output = if args.background {
             let task_id = backend.spawn_background(&args.command).await?;
             BashExecOutput {
-                stdout: String::new(),
-                stderr: String::new(),
+                output: None,
+                stdout: None,
+                stderr: None,
                 exit_code: None,
                 timed_out: false,
                 truncated: false,
@@ -109,8 +140,9 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
                 task_id: Some(task_id),
             }
         } else {
-            let result = backend.exec(&args.command, timeout).await?;
+            let result = backend.exec(&args.command, timeout, args.capture).await?;
             BashExecOutput {
+                output: result.merged,
                 stdout: result.stdout,
                 stderr: result.stderr,
                 exit_code: result.exit_code,

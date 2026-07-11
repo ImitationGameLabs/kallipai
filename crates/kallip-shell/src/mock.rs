@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::backend::{ShellBackend, ShellOutput};
+use crate::backend::{CaptureMode, ShellBackend, ShellOutput};
 use crate::error::ShellError;
 use crate::supervisor::{BgReadOutput, TaskState};
 
@@ -72,30 +72,43 @@ impl Default for MockShellBackend {
 
 #[async_trait]
 impl ShellBackend for MockShellBackend {
-    async fn exec(&mut self, command: &str, _timeout: Duration) -> Result<ShellOutput, ShellError> {
+    async fn exec(
+        &mut self,
+        command: &str,
+        _timeout: Duration,
+        capture: CaptureMode,
+    ) -> Result<ShellOutput, ShellError> {
         self.commands.push(command.to_owned());
 
         if self.should_timeout {
             self.should_timeout = false;
             return Ok(ShellOutput {
-                stdout: String::new(),
-                stderr: String::new(),
                 exit_code: Some(124),
                 timed_out: true,
-                truncated: false,
                 cwd: self.cwd.clone(),
+                ..Default::default()
             });
         }
 
-        let stdout = self.outputs.pop_front().unwrap_or_default();
+        // Place the single queued blob in the field the mode surfaces. The mock
+        // is a stub (it does not model two streams), so for `Separate` only
+        // stdout is populated -- enough for consumers that just want one
+        // exec's text.
+        let blob = self.outputs.pop_front().unwrap_or_default();
         let exit_code = self.exit_codes.pop_front().flatten();
+        let (merged, stdout, stderr) = match capture {
+            CaptureMode::Merged => (Some(blob), None, None),
+            CaptureMode::Separate | CaptureMode::Stdout => (None, Some(blob), None),
+            CaptureMode::Stderr => (None, None, Some(blob)),
+        };
         Ok(ShellOutput {
+            merged,
             stdout,
-            stderr: String::new(),
+            stderr,
             exit_code,
             timed_out: false,
-            truncated: false,
             cwd: self.cwd.clone(),
+            ..Default::default()
         })
     }
 
@@ -143,10 +156,11 @@ mod tests {
         let mut backend = MockShellBackend::new();
         backend.push_output("hello").push_exit_code(Some(0));
         let out = backend
-            .exec("echo hello", Duration::from_secs(1))
+            .exec("echo hello", Duration::from_secs(1), CaptureMode::Merged)
             .await
             .unwrap();
-        assert_eq!(out.stdout, "hello");
+        assert_eq!(out.merged.as_deref(), Some("hello"));
+        assert!(out.stdout.is_none() && out.stderr.is_none());
         assert_eq!(out.exit_code, Some(0));
         assert!(!out.timed_out);
         assert_eq!(backend.executed_commands(), &["echo hello"]);
@@ -157,7 +171,7 @@ mod tests {
         let mut backend = MockShellBackend::new();
         backend.set_should_timeout();
         let out = backend
-            .exec("sleep 999", Duration::from_millis(1))
+            .exec("sleep 999", Duration::from_millis(1), CaptureMode::Merged)
             .await
             .unwrap();
         assert!(out.timed_out);

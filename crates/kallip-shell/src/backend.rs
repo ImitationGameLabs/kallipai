@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 
@@ -54,20 +55,52 @@ pub(super) const COLOR_VARS: &[(&str, &str)] = &[
     ("CLICOLOR", "0"),
 ];
 
-/// Result of a command execution.
-#[derive(Debug, Clone)]
+/// How [`ShellBackend::exec`] captures a command's output.
+///
+/// `Merged` (the default) interleaves stdout and stderr into a single stream,
+/// like `2>&1` — the natural "run a command" experience, where any ordering
+/// between the two is the program's own responsibility (it flushes to enforce
+/// it). The other variants trade that for stream separation or selection, e.g.
+/// to parse clean stdout without diagnostic noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureMode {
+    /// stdout and stderr merged into one stream (program-determined ordering).
+    #[default]
+    Merged,
+    /// stdout and stderr captured and returned as separate fields.
+    Separate,
+    /// Only stdout. Stderr is still captured internally to recover the cwd
+    /// marker, then discarded.
+    Stdout,
+    /// Only stderr. Stdout is still captured internally to recover the cwd
+    /// marker (when the command redirected fd 2 onto it), then discarded.
+    Stderr,
+}
+
+/// Result of a command execution. Exactly the [`CaptureMode`]'s output fields
+/// are `Some` (`Merged` -> `merged`; `Separate` -> `stdout` + `stderr`; `Stdout` ->
+/// `stdout`; `Stderr` -> `stderr`); the rest are `None`, so the tool layer can
+/// omitempty-tag them and the caller sees only what it asked for. Any
+/// cwd-recovery marker is stripped from whichever stream(s) carry it.
+#[derive(Debug, Clone, Default)]
 pub struct ShellOutput {
+    /// Merged stdout+stderr (possibly clipped to a tail). `Some` only under
+    /// [`CaptureMode::Merged`]; the marker is stripped before return.
+    pub merged: Option<String>,
     /// Captured stdout (possibly clipped to a tail). Any cwd-recovery marker
     /// that landed here (e.g. after `exec 2>&1`) is stripped before return.
-    pub stdout: String,
+    pub stdout: Option<String>,
     /// Captured stderr (possibly clipped to a tail). The cwd-recovery marker is
     /// stripped before this is returned.
-    pub stderr: String,
+    pub stderr: Option<String>,
     /// Process exit code, or `None` on signal death; `Some(124)` on timeout.
     pub exit_code: Option<i32>,
     /// Whether the command exceeded its timeout.
     pub timed_out: bool,
-    /// Whether stdout or stderr was clipped (exceeded the byte budget).
+    /// Whether a returned stream was clipped (exceeded the byte budget). Only
+    /// the stream(s) the mode returns are considered; clipping a discarded
+    /// stream is not reported.
     pub truncated: bool,
     /// The working directory after the command (read fresh from the cwd marker).
     pub cwd: PathBuf,
@@ -82,8 +115,14 @@ pub struct ShellOutput {
 /// generic over its backend.
 #[async_trait]
 pub trait ShellBackend: Send + Sync {
-    /// Run `command`, returning its output and the post-command cwd.
-    async fn exec(&mut self, command: &str, timeout: Duration) -> Result<ShellOutput, ShellError>;
+    /// Run `command`, capturing output per `capture`, and return the
+    /// post-command cwd.
+    async fn exec(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+        capture: CaptureMode,
+    ) -> Result<ShellOutput, ShellError>;
     /// The current (sticky) working directory.
     fn cwd(&self) -> &Path;
     /// Spawn `command` as a background task; returns its id.
@@ -115,6 +154,7 @@ impl ShellBackend for ProcessBackend {
         &mut self,
         command: &str,
         timeout_dur: Duration,
+        capture: CaptureMode,
     ) -> Result<ShellOutput, ShellError> {
         // Resolve an existing spawn cwd; fall back if the cached one was deleted.
         let spawn_cwd =
@@ -123,7 +163,7 @@ impl ShellBackend for ProcessBackend {
         // Build the `-c` script (EXIT-trap marker + command) and reject an
         // oversized script up front with an actionable error.
         let marker = CwdMarker::new();
-        let script = build_exec_script(command, &marker);
+        let script = build_exec_script(command, &marker, capture);
         if script.len() > MAX_SCRIPT_BYTES {
             return Err(ShellError::command_too_large(MAX_SCRIPT_BYTES));
         }
@@ -144,6 +184,15 @@ impl ShellBackend for ProcessBackend {
         for (key, value) in COLOR_VARS {
             cmd.env(key, value);
         }
+        // Merged mode is realized at the script level (`exec 2>&1` prepended by
+        // [`build_exec_script`]), not via an fd dup2 in `pre_exec`: the shell
+        // itself points fd 2 at the stdout pipe, so a single stdout pump captures
+        // the interleaved stream with program-determined ordering. This keeps the
+        // Command setup uniform (no platform-specific dup2) and reuses the
+        // already-proven marker path -- the trap's `>&2` lands on the merged
+        // stdout stream, where it is recovered and stripped. After the merge no
+        // process writes the stderr pipe, so its read-end is not pumped below.
+
         // Landlock-restrict this bash to the agent's current access decision
         // (Linux + landlock). The foreground path writes nothing on disk, so it
         // needs no scratch beyond `baseline_writable` (`/tmp`, `/dev/null`, ...)
@@ -175,14 +224,28 @@ impl ShellBackend for ProcessBackend {
         let out_cap = Arc::new(Mutex::new(capture::BoundedCapture::new(max)));
         let err_cap = Arc::new(Mutex::new(capture::BoundedCapture::new(max)));
         let out_task = tokio::spawn(pump(child.stdout.take(), out_cap.clone()));
-        let err_task = tokio::spawn(pump(child.stderr.take(), err_cap.clone()));
+        // In Merged mode the script's `exec 2>&1` points fd 2 at the stdout
+        // pipe, so the stderr pipe carries nothing: skip its pump and drop the
+        // read-end (immediate EOF, no hang). Stdout/Stderr modes still pipe both
+        // because the cwd marker rides fd 2 and must be recovered even when only
+        // one stream is returned.
+        let err_task = if capture == CaptureMode::Merged {
+            drop(child.stderr.take());
+            None
+        } else {
+            Some(tokio::spawn(pump(child.stderr.take(), err_cap.clone())))
+        };
 
         let (exit_status, timed_out) = run_until_exit_or_timeout(&mut child, timeout_dur).await;
 
         // Abort any still-blocked pump (a grandchild may hold the write-end) and
         // finalize whatever was buffered — partial output is preserved.
         let out_cap = finish_capture(out_task, out_cap).await;
-        let err_cap = finish_capture(err_task, err_cap).await;
+        let err_cap = match err_task {
+            Some(task) => finish_capture(task, err_cap).await,
+            // No stderr pump (Merged): empty, untruncated capture placeholder.
+            None => capture::CaptureResult::default(),
+        };
 
         // Recover the post-command cwd from the EXIT-trap marker, and strip
         // marker lines from both streams so none reach the LLM. The trap writes
@@ -211,12 +274,31 @@ impl ShellBackend for ProcessBackend {
         // group kill when the future otherwise finishes dropping.
         kill_guard.disarm();
 
+        // Strip the marker from whichever stream(s) carry it (no-op where it is
+        // absent), then surface only the field(s) the capture mode returns.
+        // `truncated` considers just those returned streams — clipping a stream
+        // the mode discards is not reported.
+        let stripped_out = marker.strip(&out_cap.text);
+        let stripped_err = marker.strip(&err_cap.text);
+        let (merged, stdout, stderr, truncated) = match capture {
+            CaptureMode::Merged => (Some(stripped_out), None, None, out_cap.truncated),
+            CaptureMode::Separate => (
+                None,
+                Some(stripped_out),
+                Some(stripped_err),
+                out_cap.truncated || err_cap.truncated,
+            ),
+            CaptureMode::Stdout => (None, Some(stripped_out), None, out_cap.truncated),
+            CaptureMode::Stderr => (None, None, Some(stripped_err), err_cap.truncated),
+        };
+
         Ok(ShellOutput {
-            stdout: marker.strip(&out_cap.text),
-            stderr: marker.strip(&err_cap.text),
+            merged,
+            stdout,
+            stderr,
             exit_code,
             timed_out,
-            truncated: out_cap.truncated || err_cap.truncated,
+            truncated,
             cwd: new_cwd,
         })
     }
@@ -300,14 +382,30 @@ async fn pump(reader: Option<impl AsyncRead + Unpin>, cap: Arc<Mutex<capture::Bo
     }
 }
 
-/// Abort a pump task (it may be blocked on a pipe held open by a grandchild)
-/// and finalize whatever it buffered. Partial output survives.
+/// Deadline to drain a pump after the child has exited. On the normal path the
+/// pipe's write-end closes with the child, so the pump's next read returns EOF
+/// within microseconds; this bound only ever binds when a grandchild the command
+/// backgrounded still holds the write-end open.
+const PUMP_DRAIN_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Finalize a pump, preserving every buffered byte. Let it drain naturally
+/// first (after the child exits the pump completes on EOF), so an abort can never
+/// drop bytes the kernel has buffered but the pump has not yet read -- a race the
+/// unconditional abort could occasionally hit when a pump was mid-read. Only if
+/// the pump is still blocked past [`PUMP_DRAIN_DEADLINE`] (a grandchild holding
+/// the write-end) is it aborted; partial output survives either way.
 async fn finish_capture(
-    handle: tokio::task::JoinHandle<()>,
+    mut handle: tokio::task::JoinHandle<()>,
     cap: Arc<Mutex<capture::BoundedCapture>>,
 ) -> capture::CaptureResult {
-    handle.abort();
-    let _ = handle.await; // resolves promptly with Cancelled after abort
+    if tokio::time::timeout(PUMP_DRAIN_DEADLINE, &mut handle)
+        .await
+        .is_err()
+    {
+        // Grandchild-held pipe: cancel the stuck pump, keep what it buffered.
+        handle.abort();
+        let _ = handle.await; // resolves promptly with Cancelled after abort
+    }
     let taken = std::mem::take(&mut *cap.lock().expect("capture lock poisoned"));
     taken.finish()
 }
@@ -423,10 +521,16 @@ fn strip_marker_lines(text: &str, needle: &str) -> String {
 }
 
 /// Build the foreground `-c` script: install the EXIT-trap marker, then run the
-/// command. The whole string is passed as `bash -c`'s single argv element.
-fn build_exec_script(command: &str, marker: &CwdMarker) -> String {
+/// command. The whole string is passed as `bash -c`'s single argv element. Under
+/// [`CaptureMode::Merged`] an `exec 2>&1` is inserted after the trap so the shell
+/// itself merges stderr onto the stdout pipe (program-determined ordering); the
+/// trap's `>&2` then lands on that merged stream, where it is recovered/stripped.
+fn build_exec_script(command: &str, marker: &CwdMarker, capture: CaptureMode) -> String {
     let mut s = String::with_capacity(256 + command.len());
     s.push_str(&marker.trap_script());
+    if capture == CaptureMode::Merged {
+        s.push_str("exec 2>&1\n");
+    }
     s.push_str(command);
     s.push('\n');
     s
@@ -441,11 +545,16 @@ mod tests {
     async fn exec_captures_stdout_and_exit_code() {
         let mut backend = ShellBuilder::new().build().await.unwrap();
         let out = backend
-            .exec("echo hello; exit 7", Duration::from_secs(10))
+            .exec(
+                "echo hello; exit 7",
+                Duration::from_secs(10),
+                CaptureMode::Merged,
+            )
             .await
             .unwrap();
         assert_eq!(out.exit_code, Some(7));
-        assert!(out.stdout.contains("hello"));
+        assert!(out.merged.as_deref().unwrap().contains("hello"));
+        assert!(out.stdout.is_none() && out.stderr.is_none());
         assert!(!out.timed_out);
     }
 
@@ -454,20 +563,27 @@ mod tests {
         let mut backend = ShellBuilder::new().build().await.unwrap();
         let target = std::env::temp_dir();
         let cd = format!("cd '{}'", target.display());
-        backend.exec(&cd, Duration::from_secs(10)).await.unwrap();
-        let out = backend.exec("pwd", Duration::from_secs(10)).await.unwrap();
+        backend
+            .exec(&cd, Duration::from_secs(10), CaptureMode::Merged)
+            .await
+            .unwrap();
+        let out = backend
+            .exec("pwd", Duration::from_secs(10), CaptureMode::Merged)
+            .await
+            .unwrap();
         // cwd is read fresh from the stderr marker after the cd -> sticky.
         assert_eq!(out.cwd, std::fs::canonicalize(&target).unwrap());
-        assert!(out.stdout.trim() == out.cwd.to_string_lossy());
-        // stdout carries the marker's channel (stderr) untouched: no marker leaks.
-        assert!(!out.stdout.contains("__JA_CWD_"));
+        assert!(out.merged.as_deref().unwrap().trim() == out.cwd.to_string_lossy());
+        // The marker rides the merged stream (fd 2 -> stdout via `exec 2>&1`)
+        // and is stripped before return: no marker bytes leak.
+        assert!(!out.merged.as_deref().unwrap().contains("__JA_CWD_"));
     }
 
     #[tokio::test]
     async fn exec_timeout_kills_and_synthesizes_124() {
         let mut backend = ShellBuilder::new().build().await.unwrap();
         let out = backend
-            .exec("sleep 30", Duration::from_millis(500))
+            .exec("sleep 30", Duration::from_millis(500), CaptureMode::Merged)
             .await
             .unwrap();
         assert!(out.timed_out);
@@ -485,7 +601,7 @@ mod tests {
         // the EXIT trap during shutdown. `cd` then `sleep` past the timeout.
         let cmd = format!("cd '{}'; sleep 30", target.display());
         let out = backend
-            .exec(&cmd, Duration::from_millis(500))
+            .exec(&cmd, Duration::from_millis(500), CaptureMode::Merged)
             .await
             .unwrap();
         assert!(out.timed_out);
@@ -502,7 +618,11 @@ mod tests {
         // duration so `pgrep` doesn't match `sleep` spawned by sibling tests
         // running in parallel.
         let _ = backend
-            .exec("sleep 43 & wait", Duration::from_millis(500))
+            .exec(
+                "sleep 43 & wait",
+                Duration::from_millis(500),
+                CaptureMode::Merged,
+            )
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -527,7 +647,11 @@ mod tests {
         let mut backend = ShellBuilder::new().build().await.unwrap();
         let outer = tokio::time::timeout(
             Duration::from_millis(500),
-            backend.exec("sleep 44 & wait", Duration::from_secs(30)),
+            backend.exec(
+                "sleep 44 & wait",
+                Duration::from_secs(30),
+                CaptureMode::Merged,
+            ),
         )
         .await;
         // The outer timeout must fire (cancel path), not the backend's 30s one.
@@ -566,6 +690,7 @@ mod tests {
             .exec(
                 &format!("cd '{}'", dir_a.display()),
                 Duration::from_secs(10),
+                CaptureMode::Merged,
             )
             .await
             .unwrap();
@@ -573,13 +698,17 @@ mod tests {
             .exec(
                 &format!("cd '{}' ; exit 42", dir_b.display()),
                 Duration::from_secs(10),
+                CaptureMode::Merged,
             )
             .await
             .unwrap();
         assert_eq!(out.exit_code, Some(42));
         assert_eq!(out.cwd, dir_b);
         // Sticky cwd persists to the next call.
-        let out = backend.exec("pwd", Duration::from_secs(10)).await.unwrap();
+        let out = backend
+            .exec("pwd", Duration::from_secs(10), CaptureMode::Merged)
+            .await
+            .unwrap();
         assert_eq!(out.cwd, dir_b);
     }
 
@@ -596,6 +725,7 @@ mod tests {
             .exec(
                 &format!("cd '{}' && rmdir '{}'", doomed.display(), doomed.display()),
                 Duration::from_secs(10),
+                CaptureMode::Merged,
             )
             .await
             .unwrap();
@@ -606,10 +736,11 @@ mod tests {
         );
     }
 
-    /// A command that persistently redirects fd 2 onto stdout (`exec 2>&1`)
-    /// moves the cwd marker onto the stdout pipe. The marker is still recovered
-    /// there (so the sticky cwd updates) and stripped from the returned stdout
-    /// so no marker bytes reach the LLM.
+    /// Under `CaptureMode::Merged` the script prepends `exec 2>&1`, so fd 2
+    /// points at the stdout pipe and the cwd marker (written to fd 2) lands on
+    /// the merged stream. The marker is still recovered there (sticky cwd
+    /// updates) and stripped from the returned `merged` so no marker bytes reach
+    /// the LLM. A command that *also* does its own `exec 2>&1` is a no-op on top.
     #[tokio::test]
     async fn exec_with_merged_stderr_recovers_cwd_and_strips_marker() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -619,24 +750,21 @@ mod tests {
             .exec(
                 &format!("cd '{}' && exec 2>&1 && echo merged", target.display()),
                 Duration::from_secs(10),
+                CaptureMode::Merged,
             )
             .await
             .unwrap();
         assert_eq!(out.exit_code, Some(0));
         assert_eq!(
             out.cwd, target,
-            "marker on stdout must still recover the cwd"
+            "marker on the merged stream must still recover the cwd"
         );
+        // Only `merged` is populated; stdout/stderr are None under Merged.
+        let merged = out.merged.as_deref().unwrap();
+        assert!(out.stdout.is_none() && out.stderr.is_none());
         // The command's own output survives; the marker does not leak.
-        assert!(out.stdout.contains("merged"), "stdout: {}", out.stdout);
-        assert!(
-            !out.stdout.contains("__JA_CWD_"),
-            "marker leaked into stdout"
-        );
-        assert!(
-            !out.stderr.contains("__JA_CWD_"),
-            "marker leaked into stderr"
-        );
+        assert!(merged.contains("merged"), "merged: {merged}");
+        assert!(!merged.contains("__JA_CWD_"), "marker leaked into merged");
     }
 
     /// Color-suppression env vars reach the spawned bash via `Command::env`
@@ -649,11 +777,12 @@ mod tests {
             .exec(
                 "echo \"$TERM/$NO_COLOR/$CLICOLOR\"; test -z \"$LS_COLORS\" && echo empty",
                 Duration::from_secs(10),
+                CaptureMode::Merged,
             )
             .await
             .unwrap();
         assert_eq!(out.exit_code, Some(0));
-        assert_eq!(out.stdout.trim(), "dumb/1/0\nempty");
+        assert_eq!(out.merged.as_deref().unwrap().trim(), "dumb/1/0\nempty");
     }
 
     /// Foreground `exec` leaves no scratch behind: the script rides argv and
@@ -675,7 +804,7 @@ mod tests {
             .await
             .unwrap();
         let _ = backend
-            .exec("echo hi", Duration::from_secs(10))
+            .exec("echo hi", Duration::from_secs(10), CaptureMode::Merged)
             .await
             .unwrap();
         // Only the probe dir the test created should exist; no scratch artifact.
@@ -697,7 +826,7 @@ mod tests {
         // 9000 bytes of payload -> script well over the 8 KiB cap.
         let oversized = format!("printf '{}'", "x".repeat(9000));
         let err = backend
-            .exec(&oversized, Duration::from_secs(10))
+            .exec(&oversized, Duration::from_secs(10), CaptureMode::Merged)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -719,11 +848,140 @@ mod tests {
             .exec(
                 "echo \"${JA_INHERIT_PROBE:?unset}\"",
                 Duration::from_secs(10),
+                CaptureMode::Merged,
             )
             .await
             .unwrap();
         assert_eq!(out.exit_code, Some(0));
-        assert_eq!(out.stdout.trim(), "ok");
+        assert_eq!(out.merged.as_deref().unwrap().trim(), "ok");
+    }
+
+    // -- CaptureMode coverage -------------------------------------------------
+
+    /// `Merged` (the default) interleaves stdout and stderr into one stream via
+    /// the `exec 2>&1` prepended to the script: both `out` and `err` reach the
+    /// single `merged` field; `stdout`/`stderr` stay `None`.
+    #[tokio::test]
+    async fn exec_merged_interleaves_streams() {
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let out = backend
+            .exec(
+                "echo out; echo err >&2",
+                Duration::from_secs(10),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        let merged = out.merged.as_deref().unwrap();
+        assert!(merged.contains("out"), "merged: {merged}");
+        assert!(merged.contains("err"), "merged: {merged}");
+        assert!(out.stdout.is_none() && out.stderr.is_none());
+        assert!(!out.truncated);
+    }
+
+    /// `Separate` keeps the two streams apart: stdout has `out` (not `err`),
+    /// stderr has `err` (not `out`), `merged` is `None`.
+    #[tokio::test]
+    async fn exec_separate_keeps_streams_apart() {
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let out = backend
+            .exec(
+                "echo out; echo err >&2",
+                Duration::from_secs(10),
+                CaptureMode::Separate,
+            )
+            .await
+            .unwrap();
+        let stdout = out.stdout.as_deref().unwrap();
+        let stderr = out.stderr.as_deref().unwrap();
+        assert!(stdout.contains("out") && !stdout.contains("err"));
+        assert!(stderr.contains("err") && !stderr.contains("out"));
+        assert!(out.merged.is_none());
+    }
+
+    /// `Stdout` returns only stdout but still recovers the cwd, because the
+    /// marker rides fd 2 and stderr is captured internally for the marker even
+    /// though it is not returned. The returned `stderr` is `None`.
+    #[tokio::test]
+    async fn exec_stdout_mode_recovers_cwd_from_stderr() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = std::fs::canonicalize(tmp.path()).unwrap();
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let out = backend
+            .exec(
+                &format!("cd '{}' && echo hi", target.display()),
+                Duration::from_secs(10),
+                CaptureMode::Stdout,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout.as_deref().unwrap().trim(), "hi");
+        assert!(out.stderr.is_none() && out.merged.is_none());
+        assert_eq!(
+            out.cwd, target,
+            "Stdout mode must still recover cwd from the internally-captured stderr marker"
+        );
+    }
+
+    /// `Stderr` mode pins the documented behavior when the command itself
+    /// redirects fd 2 onto stdout (`exec 2>&1`): the redirect moves both the
+    /// command output and the EXIT-trap marker onto stdout, so nothing ever
+    /// writes the stderr pipe and the returned `stderr` is empty. The cwd is
+    /// still recovered -- from the internally-captured stdout, via the extract
+    /// fallback that scans it for the marker.
+    #[tokio::test]
+    async fn exec_stderr_mode_pins_down_command_merge() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = std::fs::canonicalize(tmp.path()).unwrap();
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let out = backend
+            .exec(
+                &format!("cd '{}' && exec 2>&1 && echo hi", target.display()),
+                Duration::from_secs(10),
+                CaptureMode::Stderr,
+            )
+            .await
+            .unwrap();
+        // The command's `exec 2>&1` abandoned fd 2 (pointed it at fd 1), so the
+        // stderr capture (`err_cap`) saw nothing: stderr is empty.
+        assert_eq!(out.stderr.as_deref().unwrap(), "");
+        assert!(out.stdout.is_none() && out.merged.is_none());
+        // The marker followed the redirect onto stdout; cwd is still recovered
+        // via the extract fallback that scans the internally-captured stdout.
+        assert_eq!(out.cwd, target);
+    }
+
+    /// `Merged` truncation reflects the single combined capture: overflowing it
+    /// flags `truncated` and retains the tail (single BoundedCapture semantics,
+    /// not an OR of two streams).
+    #[tokio::test]
+    async fn exec_merged_truncation_single_stream() {
+        let mut backend = ShellBuilder::new()
+            .max_output_bytes(64)
+            .build()
+            .await
+            .unwrap();
+        // Write well over the 64-byte budget; in Merged both fds land in one
+        // capture, which clips and keeps its tail. The cwd marker is appended at
+        // EXIT *after* the command output, so it can dominate the retained tail
+        // -- assert the clip semantics, not the exact tail bytes.
+        let out = backend
+            .exec(
+                "printf 'A%.0s' {1..200}; printf 'B%.0s' {1..200} >&2",
+                Duration::from_secs(10),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        assert!(out.truncated, "merged stream should be clipped");
+        let merged = out.merged.as_deref().unwrap();
+        assert!(
+            merged.len() <= 64,
+            "tail retained within the byte budget: {}",
+            merged.len()
+        );
+        // The marker (appended at EXIT) is still stripped even from a clipped tail.
+        assert!(!merged.contains("__JA_CWD_"));
     }
 
     // -- CwdMarker unit tests -------------------------------------------------

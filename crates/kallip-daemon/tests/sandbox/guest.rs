@@ -38,9 +38,9 @@ async fn scenario1_guest() {
 
     expect(&results, 0, "guest .ssh hidden (empty ls)", true);
     assert!(
-        results[0].stdout.trim().is_empty(),
+        results[0].text().trim().is_empty(),
         "guest .ssh should be empty (tmpfs hide-hole), got: {:?}",
-        results[0].stdout
+        results[0].text()
     );
     expect(&results, 1, "guest workspace write denied", false);
     expect(&results, 2, "guest data-tree write denied", false);

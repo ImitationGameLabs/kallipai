@@ -54,11 +54,11 @@ async fn scenario4_guest_spawn_downgrade() {
     );
 
     expect(&results, 0, "guest subagent spawn", true);
-    let child_id = results[0].stdout.trim().to_string();
+    let child_id = results[0].text().trim().to_string();
     assert!(
         !child_id.is_empty(),
         "subagent spawn should print the child agent id, got: {:?}",
-        results[0].stdout
+        results[0].text()
     );
 
     // The downgraded class is persisted on the child's meta.json -- the
@@ -77,7 +77,7 @@ async fn scenario4_guest_spawn_downgrade() {
 
     // CLI-side rejection of an invalid class (clap value_parser names the flag).
     expect(&results, 1, "invalid class rejected by CLI", false);
-    let err = format!("{}\n{}", results[1].stderr, results[1].stdout);
+    let err = results[1].text();
     assert!(
         err.contains("--permission-class"),
         "invalid class should name the flag, got: {err}"

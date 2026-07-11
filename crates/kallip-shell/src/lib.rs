@@ -58,7 +58,7 @@ use std::sync::Arc;
 use just_llm_client::tools::LlmTool;
 use tokio::sync::Mutex;
 
-pub use backend::{ProcessBackend, ShellBackend, ShellOutput};
+pub use backend::{CaptureMode, ProcessBackend, ShellBackend, ShellOutput};
 pub use builder::ShellBuilder;
 pub use error::ShellError;
 pub use tools::{BashExec, BashExecOutput, BgKill, BgRead};
@@ -98,10 +98,31 @@ pub fn mock_shell_tool_set() -> (Vec<Box<dyn LlmTool>>, Arc<Mutex<MockShellBacke
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::names;
 
     #[test]
     fn shell_tool_set_contains_three_tools() {
         let (tools, _) = mock_shell_tool_set();
         assert_eq!(tools.len(), 3);
+    }
+
+    /// The base system prompt is lean (tool mechanics live here, not in the
+    /// prompt). Guard the migrated content: bash_exec's description teaches the
+    /// non-sticky cwd, and bg_read's teaches reacting to the completion notice.
+    #[test]
+    fn tool_descriptions_cover_usage_migrated_from_the_prompt() {
+        let (tools, _) = mock_shell_tool_set();
+        let desc = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t.name() == name)
+                .map(|t| t.description().to_string())
+                .unwrap_or_else(|| panic!("tool {name} present"))
+        };
+        let bash = desc(names::BASH_EXEC);
+        assert!(bash.contains("NOT sticky"), "bash_exec desc: {bash}");
+        assert!(bash.contains("cd <dir>"), "bash_exec desc: {bash}");
+        let read = desc(names::BG_READ);
+        assert!(read.contains("Background task"), "bg_read desc: {read}");
     }
 }

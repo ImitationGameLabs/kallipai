@@ -547,12 +547,34 @@ pub async fn run_agent(daemon: &DaemonProc, workspace: &Path, max_rounds: usize)
 // ===========================================================================
 
 /// The subset of `BashExecOutput` we assert on (serde ignores the extra
-/// `timed_out`/`truncated`/`cwd`/`task_id` fields).
+/// `timed_out`/`truncated`/`cwd`/`task_id` fields). `output`/`stdout`/`stderr`
+/// are all optional because `bash_exec`'s return shape depends on the `capture`
+/// arg the LLM chose (`output` under `"merged"`, the default; `stdout`/`stderr`
+/// under `"separate"`/`"stdout"`/`"stderr"`); assert via [`BashOut::text`] to stay
+/// robust to whichever mode the model picked.
 #[derive(Deserialize, Debug)]
 pub struct BashOut {
-    pub stdout: String,
-    pub stderr: String,
+    #[serde(default)]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub stdout: Option<String>,
+    #[serde(default)]
+    pub stderr: Option<String>,
+    #[serde(default)]
     exit_code: Option<i32>,
+}
+
+impl BashOut {
+    /// The captured command text regardless of which `capture` mode produced
+    /// this result: the merged stream, else stdout, else stderr (whichever is
+    /// present). Empty string when nothing was captured.
+    pub fn text(&self) -> &str {
+        self.output
+            .as_deref()
+            .or(self.stdout.as_deref())
+            .or(self.stderr.as_deref())
+            .unwrap_or("")
+    }
 }
 
 /// Read all history records for an agent as raw JSON values.
@@ -635,11 +657,10 @@ pub fn expect(results: &[BashOut], idx: usize, label: &str, success: bool) {
     let ok = if success { code == 0 } else { code != 0 };
     if !ok {
         panic!(
-            "scenario step `{label}` (#{idx}): expected {}, got exit_code={:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            "scenario step `{label}` (#{idx}): expected {}, got exit_code={:?}\n--- output ---\n{}",
             if success { "success" } else { "failure" },
             out.exit_code,
-            out.stdout,
-            out.stderr,
+            out.text(),
         );
     }
 }
