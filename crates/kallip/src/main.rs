@@ -17,8 +17,8 @@ fn deny_reason_display(reason: &Option<String>) -> &str {
 }
 
 use args::{
-    AgentCommand, AideCommand, ApprovalCommand, BudgetCommand, Cli, Commands, DirlockCommand,
-    PolicyCommand, SkillCommand, SkillPromoteCommand,
+    AgentCommand, ApprovalCommand, BudgetCommand, Cli, Commands, DirlockCommand, PolicyCommand,
+    SkillCommand, SkillPromoteCommand, SubagentCommand,
 };
 
 /// Read agent ID from KALLIP_ID env var.
@@ -75,10 +75,10 @@ async fn main() -> Result<()> {
                     .await?;
             }
         },
-        Commands::Aide(cmd) => {
+        Commands::Subagent(cmd) => {
             let current = agent_id_from_env()?;
             match cmd {
-                AideCommand::Spawn(args) => {
+                SubagentCommand::Spawn(args) => {
                     let id = client
                         .spawn(kallip_common::protocol::CreateAgentRequest {
                             workspace_root: args.workspace_root,
@@ -93,19 +93,19 @@ async fn main() -> Result<()> {
                         .await?;
                     println!("{id}");
                 }
-                AideCommand::List => {
+                SubagentCommand::List => {
                     let agents = client.list_agents(Some(&current)).await?;
                     print_agent_list(&agents, "No direct subagents.");
                 }
-                AideCommand::Remove(args) => {
+                SubagentCommand::Remove(args) => {
                     annotate_remove_error(client.remove_agent(&args.id).await, &args.id)?;
                     println!("Agent {} archived.", args.id);
                 }
-                AideCommand::Interrupt(args) => {
+                SubagentCommand::Interrupt(args) => {
                     client.interrupt_agent(&args.id).await?;
                     println!("Agent {} interrupted.", args.id);
                 }
-                AideCommand::Metadata(args) => {
+                SubagentCommand::Metadata(args) => {
                     let updated = client
                         .update_agent_metadata(
                             &args.id,
@@ -446,7 +446,7 @@ fn annotate_remove_error(result: anyhow::Result<()>, id: &AgentId) -> anyhow::Re
         let msg = err.to_string();
         if msg.contains("409") || msg.contains("busy") || msg.contains("subagent") {
             eprintln!(
-                "Cannot remove agent: {}. Try: kallip aide interrupt {}",
+                "Cannot remove agent: {}. Try: kallip subagent interrupt {}",
                 msg.to_lowercase(),
                 id
             );

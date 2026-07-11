@@ -369,7 +369,7 @@ fn resolve_bin(name: &str) -> PathBuf {
 
 /// The dir holding the workspace binaries -- prepended to the daemon's PATH so
 /// the agent's bash can invoke the `kallip` CLI (used by the normal/dirlock
-/// scenarios via `dirlock`/`aide`). Derived from the daemon binary's location.
+/// scenarios via `dirlock`/`subagent`). Derived from the daemon binary's location.
 fn bin_dir() -> PathBuf {
     resolve_bin("kallip-daemon")
         .parent()

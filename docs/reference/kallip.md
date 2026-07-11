@@ -30,45 +30,45 @@ kallip status <ID>
 
 Prints context token usage and recent retry history for the agent.
 
-### `aide` — Manage direct subagents
+### `subagent` — Manage direct subagents
 
 ```bash
-kallip aide <subcommand> [args]
+kallip subagent <subcommand> [args]
 ```
 
 Manage the **current agent's direct subagents**. The acting supervisor is taken
 from the `KALLIP_ID` env var, so these commands only make sense inside an
-agent context — they error if it is unset. `aide` is the sole management entry
-point; spawning, listing, removing, interrupting, and relabeling agents all go
-through here.
+agent context — they error if it is unset. `subagent` is the sole management
+entry point; spawning, listing, removing, interrupting, and relabeling agents
+all go through here.
 
-| Subcommand            | Purpose                                          |
-| --------------------- | ------------------------------------------------ |
-| `aide spawn`          | Spawn a direct subagent (`--role` required).     |
-| `aide list`           | List the current agent's direct subagents.       |
-| `aide remove <ID>`    | Remove a direct subagent.                        |
-| `aide interrupt <ID>` | Interrupt a direct subagent's current operation. |
-| `aide metadata <ID>`  | Update a direct subagent's role/description.     |
+| Subcommand                | Purpose                                          |
+| ------------------------- | ------------------------------------------------ |
+| `subagent spawn`          | Spawn a direct subagent (`--role` required).     |
+| `subagent list`           | List the current agent's direct subagents.       |
+| `subagent remove <ID>`    | Remove a direct subagent.                        |
+| `subagent interrupt <ID>` | Interrupt a direct subagent's current operation. |
+| `subagent metadata <ID>`  | Update a direct subagent's role/description.     |
 
 Scoping notes (server-enforced):
 
-- `aide metadata` is restricted to the **direct supervisor**
+- `subagent metadata` is restricted to the **direct supervisor**
   (`require_direct_supervisor`); a grandparent cannot relabel a grandchild.
-- `aide remove` / `aide interrupt` authorize **any ancestor**
+- `subagent remove` / `subagent interrupt` authorize **any ancestor**
   (`require_superior`), so the direct-subagent framing here is a CLI
   convenience, not a server-side restriction.
-- `aide spawn` requires a non-empty `--role`; the daemon rejects subagents with
-  an empty role.
-- `aide spawn --permission-class {normal,guest}` explicitly **downgrades** the
-  subagent's FS-access class below its tier ceiling (e.g. a `normal` parent
+- `subagent spawn` requires a non-empty `--role`; the daemon rejects subagents
+  with an empty role.
+- `subagent spawn --permission-class {normal,guest}` explicitly **downgrades**
+  the subagent's FS-access class below its tier ceiling (e.g. a `normal` parent
   spawning a read-only `guest` reviewer). The daemon rejects a value above the
   tier ceiling or the parent's own class with `403`. Omit to grant the tier
   ceiling. The granted class is shown by `kallip`/`GET /agents/{id}/permissions`.
 
 ```bash
-$ kallip aide list
+$ kallip subagent list
 researcher  idle  ws=/projects/frontend
-$ kallip aide spawn --role reviewer --description "reviews PRs"
+$ kallip subagent spawn --role reviewer --description "reviews PRs"
 b4c2d3e5-...
 ```
 
@@ -134,7 +134,7 @@ $ kallip approval deny "ap_a1b2c3d4..." "too risky"
 
 ```bash
 # Spawn a subordinate, then send it work and poll its progress
-CHILD=$(kallip aide spawn --role researcher --prompt "explore the codebase")
+CHILD=$(kallip subagent spawn --role researcher --prompt "explore the codebase")
 kallip message "$CHILD" "Summarize the project structure"
 kallip status "$CHILD"
 ```
@@ -148,8 +148,8 @@ agents across multiple projects simultaneously.
 
 ```bash
 # Spawn two subagents for different scopes
-FRONTEND=$(kallip aide spawn --role reviewer --workspace-root /projects/frontend)
-BACKEND=$(kallip aide spawn --role auditor --workspace-root /projects/backend)
+FRONTEND=$(kallip subagent spawn --role reviewer --workspace-root /projects/frontend)
+BACKEND=$(kallip subagent spawn --role auditor --workspace-root /projects/backend)
 
 # Send work to both
 kallip message "$FRONTEND" "Review the latest changes for performance issues" &
@@ -163,13 +163,13 @@ wait
 
 ```bash
 # List your direct subagents
-kallip aide list
+kallip subagent list
 
 # Check a subagent's context usage before sending more work
 kallip status $CHILD
 
 # Interrupt a running subagent gracefully (without removing it)
-kallip aide interrupt $CHILD
+kallip subagent interrupt $CHILD
 ```
 
 ## Environment variables

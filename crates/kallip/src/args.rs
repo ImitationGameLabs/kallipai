@@ -29,7 +29,7 @@ pub enum Commands {
     Budget(BudgetCommand),
     /// Manage this agent's direct subagents
     #[command(subcommand)]
-    Aide(AideCommand),
+    Subagent(SubagentCommand),
     /// Manage directory write-locks (mutual exclusion across agents)
     #[command(subcommand)]
     Dirlock(DirlockCommand),
@@ -59,7 +59,7 @@ pub struct SpawnArgs {
     #[arg(long)]
     pub prompt: Option<String>,
     /// Short display label (e.g. "researcher"). Required by the daemon when
-    /// spawning a subordinate (the only spawn path: `aide spawn`).
+    /// spawning a subordinate (the only spawn path: `subagent spawn`).
     #[arg(long)]
     pub role: Option<String>,
     /// Longer prose: what this agent is for.
@@ -274,14 +274,14 @@ pub struct BudgetAmountArgs {
 }
 
 // ---------------------------------------------------------------------------
-// Aide commands — manage the current agent's (KALLIP_ID) direct subagents
+// Subagent commands — manage the current agent's (KALLIP_ID) direct subagents
 // ---------------------------------------------------------------------------
 
 /// Manage the current agent's direct subagents. The acting superior is taken
 /// from the `KALLIP_ID` env var, so these commands only make sense inside
 /// an agent context.
 #[derive(Subcommand)]
-pub enum AideCommand {
+pub enum SubagentCommand {
     /// Spawn a direct subagent of the current agent
     Spawn(SpawnArgs),
     /// List the current agent's direct subagents

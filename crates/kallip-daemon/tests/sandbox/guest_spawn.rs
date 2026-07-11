@@ -27,7 +27,7 @@ async fn scenario4_guest_spawn_downgrade() {
             // 0: spawn a guest subagent (mkdir first -- the workspace must exist
             // for canonicalize). Success prints the child agent id.
             "mkdir -p {0}/reviewer && \
-             kallip aide spawn --permission-class guest \
+             kallip subagent spawn --permission-class guest \
              --workspace-root {0}/reviewer --role reviewer --prompt noop",
             ws.display()
         )),
@@ -35,7 +35,7 @@ async fn scenario4_guest_spawn_downgrade() {
             // 1: a bad spelling must be rejected by the CLI value_parser (exit != 0),
             // never reaching the daemon. Do not create the workspace first so a
             // daemon-side path can't accidentally succeed.
-            "kallip aide spawn --permission-class admin --role x --prompt noop".to_string(),
+            "kallip subagent spawn --permission-class admin --role x --prompt noop".to_string(),
         ),
         Reply::End("done"),
     ];
@@ -57,7 +57,7 @@ async fn scenario4_guest_spawn_downgrade() {
     let child_id = results[0].stdout.trim().to_string();
     assert!(
         !child_id.is_empty(),
-        "aide spawn should print the child agent id, got: {:?}",
+        "subagent spawn should print the child agent id, got: {:?}",
         results[0].stdout
     );
 

@@ -1273,7 +1273,7 @@ mod tests {
 
     // -- Faulted agent manageability (the headline bug fix) --
 
-    /// `aide list` includes faulted agents, marking state and surfacing reason.
+    /// `subagent list` includes faulted agents, marking state and surfacing reason.
     #[tokio::test]
     async fn list_agents_includes_faulted() {
         let state = make_state();

@@ -849,7 +849,7 @@ mod tests {
     }
 
     /// A faulted entry links to a live supervisor via the eager subagent-push,
-    /// so `aide list` on the supervisor includes the faulted child.
+    /// so `subagent list` on the supervisor includes the faulted child.
     #[tokio::test]
     async fn register_faulted_links_to_live_supervisor() {
         let mut reg = AgentRegistry::new();

@@ -18,14 +18,14 @@ async fn scenario3_dirlock() {
         Reply::Tool(format!("echo root > {}/own.txt", ws.display())), // 0: own workspace
         Reply::Tool(format!(
             // 1: spawn child (mkdir first -- the workspace must exist for canonicalize)
-            "mkdir -p {0}/child && kallip aide spawn --workspace-root {0}/child --role worker --prompt noop",
+            "mkdir -p {0}/child && kallip subagent spawn --workspace-root {0}/child --role worker --prompt noop",
             ws.display()
         )),
         Reply::Tool(format!("echo p > {}/child/inside.txt", ws.display())), // 2: child WS RO to root
         Reply::Tool(format!("echo q > {}/own2.txt", ws.display())), // 3: own workspace writable
         Reply::Tool(format!(
             // 4: 409 conflict
-            "kallip aide spawn --workspace-root {}/child --role worker2 --prompt noop",
+            "kallip subagent spawn --workspace-root {}/child --role worker2 --prompt noop",
             ws.display()
         )),
         Reply::End("done"),
@@ -45,12 +45,12 @@ async fn scenario3_dirlock() {
     );
 
     expect(&results, 0, "root own workspace write", true);
-    expect(&results, 1, "aide spawn child", true);
-    // The child agent id is the aide-spawn stdout.
+    expect(&results, 1, "subagent spawn child", true);
+    // The child agent id is the subagent-spawn stdout.
     let child_id = results[1].stdout.trim().to_string();
     assert!(
         !child_id.is_empty(),
-        "aide spawn should print the child agent id, got: {:?}",
+        "subagent spawn should print the child agent id, got: {:?}",
         results[1].stdout
     );
     expect(&results, 2, "child workspace readonly to root", false);
