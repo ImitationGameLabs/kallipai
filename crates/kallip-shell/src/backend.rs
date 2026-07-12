@@ -1,30 +1,40 @@
 //! One-shot command execution: a fresh `bash` process per call.
 //!
 //! Every [`ProcessBackend::exec`] spawns an isolated `bash -c <script>` (piped
-//! stdout/stderr, `stdin` null, its own process group) and writes **no files**:
-//! the script rides argv, and the post-command cwd rides a marker the script's
-//! `EXIT` trap prints to stderr. Output is captured until the child exits, then
-//! a final pipe drain is bounded in case a grandchild holds the write-end open.
-//! On timeout the whole process group is killed (SIGTERM -> grace -> SIGKILL)
-//! and exit code 124 is synthesized. If the future is dropped before completion
-//! (the runtime cancels the tool call), a `GroupKillGuard` force-kills the
-//! whole group so grandchildren do not survive the leader. The trap fires on
-//! normal exit, `exit`, and SIGTERM, so the sticky cwd is read fresh after
-//! every command. A SIGKILL before the trap, a wedged pipe, or `exec
-//! 2>/dev/null` loses the marker, in which case the caller falls back (never a
-//! stale path); `exec 2>&1` moves the marker onto stdout, where it is still
-//! recovered and stripped. A grandchild that the command intentionally
+//! stdout/stderr, `stdin` null, its own process group). The script rides argv;
+//! the post-command cwd rides a **private fd channel** (not the output stream):
+//! the parent opens a pipe and dups its write end to a high fd, the script's
+//! `EXIT` trap writes `pwd -P` to that fd, and the parent reads it after the
+//! child exits. So stdout/stderr carry only the command's own output (no marker
+//! to strip, no marker eating the output budget). Output is captured into a
+//! bounded head+tail buffer per stream; on overflow the complete stream is
+//! spilled to a file under `spill_dir` so the dropped middle is recoverable,
+//! and a banner naming the file is prepended to the clipped text. Other than
+//! that overflow spill (and only then), `exec` writes nothing under the spawn
+//! cwd or workspace. On timeout the whole process group is killed (SIGTERM ->
+//! grace -> SIGKILL) and exit code 124 is synthesized. If the future is dropped
+//! before completion (the runtime cancels the tool call), a `GroupKillGuard`
+//! force-kills the whole group so grandchildren do not survive the leader. The
+//! trap fires on normal exit, `exit`, and SIGTERM, so the sticky cwd is read
+//! fresh after every command; a SIGKILL before the trap (or a timeout-kill of a
+//! command flooding the marker fd) loses the cwd and the caller falls back
+//! (never a stale path). A grandchild that the command intentionally
 //! backgrounded and detached on the *normal* exit path (e.g. `sleep 99 &
 //! disown; exit`) is not killed -- that is an intentional non-goal (use
 //! `spawn_background` for durable background work); only the cancel path
 //! force-kills the group.
 
+use std::fs::File;
+use std::io::Read;
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
+use nix::unistd::pipe;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
@@ -70,29 +80,34 @@ pub enum CaptureMode {
     Merged,
     /// stdout and stderr captured and returned as separate fields.
     Separate,
-    /// Only stdout. Stderr is still captured internally to recover the cwd
-    /// marker, then discarded.
+    /// Only stdout is returned. Stderr is still drained (into a discarded
+    /// buffer) so a command that writes heavily to it is not blocked by a full
+    /// pipe, but it is not returned.
     Stdout,
-    /// Only stderr. Stdout is still captured internally to recover the cwd
-    /// marker (when the command redirected fd 2 onto it), then discarded.
+    /// Only stderr is returned. Stdout is still drained (into a discarded
+    /// buffer) so a command that writes heavily to it is not blocked by a full
+    /// pipe, but it is not returned.
     Stderr,
 }
 
 /// Result of a command execution. Exactly the [`CaptureMode`]'s output fields
 /// are `Some` (`Merged` -> `merged`; `Separate` -> `stdout` + `stderr`; `Stdout` ->
 /// `stdout`; `Stderr` -> `stderr`); the rest are `None`, so the tool layer can
-/// omitempty-tag them and the caller sees only what it asked for. Any
-/// cwd-recovery marker is stripped from whichever stream(s) carry it.
+/// omitempty-tag them and the caller sees only what it asked for. A clipped
+/// stream carries a one-line banner naming the spill file holding its full
+/// output. The streams carry only the command's own output: cwd recovery is
+/// off-band (a private fd), so nothing is stripped.
 #[derive(Debug, Clone, Default)]
 pub struct ShellOutput {
-    /// Merged stdout+stderr (possibly clipped to a tail). `Some` only under
-    /// [`CaptureMode::Merged`]; the marker is stripped before return.
+    /// Merged stdout+stderr, possibly clipped (head+tail with a middle-omitted
+    /// marker) and banner-prefixed on clip. `Some` only under
+    /// [`CaptureMode::Merged`].
     pub merged: Option<String>,
-    /// Captured stdout (possibly clipped to a tail). Any cwd-recovery marker
-    /// that landed here (e.g. after `exec 2>&1`) is stripped before return.
+    /// Captured stdout, possibly clipped + banner-prefixed on clip. `Some` under
+    /// [`CaptureMode::Separate`] or [`CaptureMode::Stdout`].
     pub stdout: Option<String>,
-    /// Captured stderr (possibly clipped to a tail). The cwd-recovery marker is
-    /// stripped before this is returned.
+    /// Captured stderr, possibly clipped + banner-prefixed on clip. `Some` under
+    /// [`CaptureMode::Separate`] or [`CaptureMode::Stderr`].
     pub stderr: Option<String>,
     /// Process exit code, or `None` on signal death; `Some(124)` on timeout.
     pub exit_code: Option<i32>,
@@ -102,7 +117,8 @@ pub struct ShellOutput {
     /// the stream(s) the mode returns are considered; clipping a discarded
     /// stream is not reported.
     pub truncated: bool,
-    /// The working directory after the command (read fresh from the cwd marker).
+    /// The working directory after the command (read fresh from the cwd fd
+    /// channel).
     pub cwd: PathBuf,
 }
 
@@ -160,10 +176,21 @@ impl ShellBackend for ProcessBackend {
         let spawn_cwd =
             std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.config.fallback_cwd.clone());
 
-        // Build the `-c` script (EXIT-trap marker + command) and reject an
-        // oversized script up front with an actionable error.
-        let marker = CwdMarker::new();
-        let script = build_exec_script(command, &marker, capture);
+        // The cwd marker rides a private fd channel (see `CwdProbe`), not the
+        // output stream. Set it up before building the script; on failure
+        // (exceedingly rare) the trap is omitted and cwd falls back.
+        let (cwd_probe, write_end) = match CwdProbe::new() {
+            Ok((probe, write_end)) => (Some(probe), Some(write_end)),
+            Err(_) => (None, None),
+        };
+        let marker_fd = write_end.as_ref().map(|w| w.fd());
+
+        // The spill dir is created lazily by the capture on overflow (so an
+        // under-budget exec writes nothing to disk); no eager creation here.
+
+        // Build the `-c` script (cwd-trap on the fd channel + command) and reject
+        // an oversized script up front with an actionable error.
+        let script = build_exec_script(command, marker_fd, capture);
         if script.len() > MAX_SCRIPT_BYTES {
             return Err(ShellError::command_too_large(MAX_SCRIPT_BYTES));
         }
@@ -185,28 +212,34 @@ impl ShellBackend for ProcessBackend {
             cmd.env(key, value);
         }
         // Merged mode is realized at the script level (`exec 2>&1` prepended by
-        // [`build_exec_script`]), not via an fd dup2 in `pre_exec`: the shell
-        // itself points fd 2 at the stdout pipe, so a single stdout pump captures
-        // the interleaved stream with program-determined ordering. This keeps the
-        // Command setup uniform (no platform-specific dup2) and reuses the
-        // already-proven marker path -- the trap's `>&2` lands on the merged
-        // stdout stream, where it is recovered and stripped. After the merge no
-        // process writes the stderr pipe, so its read-end is not pumped below.
+        // [`build_exec_script`]): the shell itself points fd 2 at the stdout
+        // pipe, so a single stdout pump captures the interleaved stream with
+        // program-determined ordering. After the merge no process writes the
+        // stderr pipe, so its read-end is dropped below (immediate EOF, no hang).
+        // The cwd marker is unaffected -- it rides the separate fd channel.
 
         // Landlock-restrict this bash to the agent's current access decision
-        // (Linux + landlock). The foreground path writes nothing on disk, so it
-        // needs no scratch beyond `baseline_writable` (`/tmp`, `/dev/null`, ...)
-        // already folded in by `apply`; the snapshot's writable set carries the
-        // agent's own workspace write-locks. `apply` is pure mechanism: it moves
-        // the prepared landlock/mount-hole state into the `pre_exec` closure,
-        // which `cmd` owns until `spawn()` consumes it, so the ruleset fd
-        // survives the fork and is read in the child.
+        // (Linux + landlock). The foreground path needs no scratch beyond
+        // `baseline_writable` (`/tmp`, `/dev/null`, ...) already folded in by
+        // `apply`; the spill file (only on overflow) lands in `spill_dir`, which
+        // is `temp_dir()` and thus already in the writable set. `apply` is pure
+        // mechanism: it moves the prepared landlock/mount-hole state into the
+        // `pre_exec` closure, which `cmd` owns until `spawn()` consumes it, so
+        // the ruleset fd survives the fork and is read in the child. The marker
+        // fd is inherited independently (CLOEXEC cleared) and is not a filesystem
+        // object, so landlock/seccomp do not restrict it.
         #[cfg(all(target_os = "linux", feature = "landlock"))]
         if let Some(source) = &self.config.access_source {
             crate::landlock::apply(&mut cmd, &source.access()?)?;
         }
 
         let mut child = cmd.spawn()?;
+        // The child has forked and inherited the marker fd; release the parent's
+        // write-end copy NOW so the read end can reach EOF at child exit (this is
+        // load-bearing -- holding it past `read_cwd` would deadlock the read).
+        // `Drop` covers an early `?`-return between `CwdProbe::new` and here.
+        drop(write_end);
+
         // If this future is dropped while the child is still running (the
         // runtime cancels the tool call), force-kill the whole process group so
         // grandchildren do not survive the leader. `kill_on_drop(true)` on the
@@ -219,16 +252,35 @@ impl ShellBackend for ProcessBackend {
         let mut kill_guard = GroupKillGuard(child.id());
 
         let max = self.config.max_output_bytes;
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        // Stream label embedded in any spill filename: the merged stream under
+        // `Merged`, else the per-pipe `stdout`/`stderr`.
+        let out_label = if capture == CaptureMode::Merged {
+            "merged"
+        } else {
+            "stdout"
+        };
         // Shared captures so partial output survives even if a pump is stuck
         // (a grandchild holding the pipe write-end) and has to be aborted.
-        let out_cap = Arc::new(Mutex::new(capture::BoundedCapture::new(max)));
-        let err_cap = Arc::new(Mutex::new(capture::BoundedCapture::new(max)));
+        let out_cap = Arc::new(Mutex::new(capture::BoundedCapture::new(
+            max,
+            &nonce,
+            out_label,
+            self.config.spill_dir.clone(),
+        )));
+        let err_cap = Arc::new(Mutex::new(capture::BoundedCapture::new(
+            max,
+            &nonce,
+            "stderr",
+            self.config.spill_dir.clone(),
+        )));
         let out_task = tokio::spawn(pump(child.stdout.take(), out_cap.clone()));
         // In Merged mode the script's `exec 2>&1` points fd 2 at the stdout
         // pipe, so the stderr pipe carries nothing: skip its pump and drop the
-        // read-end (immediate EOF, no hang). Stdout/Stderr modes still pipe both
-        // because the cwd marker rides fd 2 and must be recovered even when only
-        // one stream is returned.
+        // read-end (immediate EOF, no hang). All other modes still pump both
+        // streams (the discarded one is drained into a buffer and not returned)
+        // so a command that writes heavily to the unreturned stream is not
+        // blocked by a full pipe.
         let err_task = if capture == CaptureMode::Merged {
             drop(child.stderr.take());
             None
@@ -247,16 +299,22 @@ impl ShellBackend for ProcessBackend {
             None => capture::CaptureResult::default(),
         };
 
-        // Recover the post-command cwd from the EXIT-trap marker, and strip
-        // marker lines from both streams so none reach the LLM. The trap writes
-        // to stderr; a command that persistently redirects fd 2 (e.g. `exec
-        // 2>&1`) can move the marker onto stdout, so scan stdout as a fallback.
-        // `exec 2>/dev/null` (or a SIGKILL before the trap, or a wedged pipe)
-        // loses the marker entirely -> fall back. The fallback is always an
-        // existing dir, never a stale path.
-        let pwd = marker
-            .extract_pwd(&err_cap.text)
-            .or_else(|| marker.extract_pwd(&out_cap.text));
+        // A drained-but-discarded stream (Stdout discards stderr, Stderr
+        // discards stdout) is never surfaced, so unlink its spill file if it
+        // overflowed -- otherwise it would leak under spill_dir with no banner
+        // pointing at it.
+        match capture {
+            CaptureMode::Stdout => drop_spill(&err_cap),
+            CaptureMode::Stderr => drop_spill(&out_cap),
+            _ => {}
+        }
+
+        // Recover the post-command cwd from the private fd channel (the EXIT
+        // trap wrote `pwd -P` to it). An absent/empty result (SIGKILL/timeout
+        // before the trap, or a flooded marker fd that the timeout killed, or
+        // the probe never came up) falls back -- always an existing dir, never a
+        // stale path.
+        let pwd = cwd_probe.and_then(CwdProbe::read_cwd);
         let new_cwd = match pwd {
             Some(p) => cwd::resolve_str(&p, &self.config.fallback_cwd),
             None => self.config.fallback_cwd.clone(),
@@ -274,22 +332,27 @@ impl ShellBackend for ProcessBackend {
         // group kill when the future otherwise finishes dropping.
         kill_guard.disarm();
 
-        // Strip the marker from whichever stream(s) carry it (no-op where it is
-        // absent), then surface only the field(s) the capture mode returns.
-        // `truncated` considers just those returned streams — clipping a stream
-        // the mode discards is not reported.
-        let stripped_out = marker.strip(&out_cap.text);
-        let stripped_err = marker.strip(&err_cap.text);
-        let (merged, stdout, stderr, truncated) = match capture {
-            CaptureMode::Merged => (Some(stripped_out), None, None, out_cap.truncated),
-            CaptureMode::Separate => (
-                None,
-                Some(stripped_out),
-                Some(stripped_err),
-                out_cap.truncated || err_cap.truncated,
-            ),
-            CaptureMode::Stdout => (None, Some(stripped_out), None, out_cap.truncated),
-            CaptureMode::Stderr => (None, None, Some(stripped_err), err_cap.truncated),
+        // Surface only the field(s) the capture mode returns, prepending the
+        // recovery banner to any clipped stream. `truncated` considers just the
+        // returned streams — clipping a drained-but-discarded stream is not
+        // reported. The streams are pure command output (cwd recovery is
+        // off-band), so nothing is stripped.
+        let merged = match capture {
+            CaptureMode::Merged => Some(with_banner("output", &out_cap)),
+            _ => None,
+        };
+        let stdout = match capture {
+            CaptureMode::Separate | CaptureMode::Stdout => Some(with_banner("stdout", &out_cap)),
+            _ => None,
+        };
+        let stderr = match capture {
+            CaptureMode::Separate | CaptureMode::Stderr => Some(with_banner("stderr", &err_cap)),
+            _ => None,
+        };
+        let truncated = match capture {
+            CaptureMode::Merged | CaptureMode::Stdout => out_cap.truncated,
+            CaptureMode::Stderr => err_cap.truncated,
+            CaptureMode::Separate => out_cap.truncated || err_cap.truncated,
         };
 
         Ok(ShellOutput {
@@ -410,124 +473,146 @@ async fn finish_capture(
     taken.finish()
 }
 
-// -- foreground cwd-recovery marker ------------------------------------------
+// -- foreground cwd-recovery fd channel --------------------------------------
 
-/// The cwd marker's fixed affixes; the `<nonce>` slot is filled per call. The
-/// emitted line is `\n__JA_CWD_<nonce>__:<pwd -P>\n` on stderr: the leading
-/// newline separates the marker from command output that lacks a trailing one,
-/// and the payload sits between the `:` and the terminating newline. The affixes
-/// appear both in the trap's `printf` format and in the search needle, so they
-/// are defined once here.
-const MARKER_HEAD: &str = "__JA_CWD_";
-const MARKER_TAIL: &str = "__:";
+/// Lowest fd number the cwd marker may occupy in the child. A high number
+/// avoids colliding with bash's own fds and ordinary user `exec N>...`
+/// redirects; the actual fd is chosen by `F_DUPFD` as the lowest free fd at or
+/// above this floor. A command that happens to use this exact fd loses the cwd
+/// marker and the caller falls back -- recoverable, not a hazard.
+const MARKER_FD_FLOOR: RawFd = 63;
 
-/// Per-call cwd-recovery marker emitted by the foreground script's `EXIT` trap.
-///
-/// The trap prints, to stderr, `\n__JA_CWD_<nonce>__:<pwd -P>\n`. After the
-/// capture pumps finish, [`CwdMarker::extract`] finds the marker, pulls out the
-/// pwd payload, and strips every marker line from the returned stderr. stdout
-/// is never touched. The nonce is a random 128-bit value so a command replaying
-/// an old log cannot shadow the real emission; `extract` takes the *last* match
-/// regardless, and the payload still passes `canonicalize` (a forged
-/// non-existent path falls back). Not a security boundary.
-struct CwdMarker {
-    nonce: String,
+/// The read end of the cwd marker pipe. The paired write end is inherited by
+/// the spawned `bash` ([`WriteEnd`]); its EXIT trap writes `pwd -P` to it, and
+/// the parent reads the result once the child is gone.
+struct CwdProbe {
+    read: OwnedFd,
 }
 
-impl CwdMarker {
-    /// Fresh unguessable marker (uuid v4, simple hex form).
-    fn new() -> Self {
-        Self {
-            nonce: uuid::Uuid::new_v4().simple().to_string(),
-        }
-    }
+/// The parent's copy of the marker pipe's write end, duped to a known high fd
+/// that the child inherits. Held only until `spawn()` returns, then dropped so
+/// the read end can reach EOF; `OwnedFd`'s `Drop` closes it, and is the
+/// error-path defense too (an early `?`-return between [`CwdProbe::new`] and
+/// the explicit drop never strands a write end). Holding an `OwnedFd` (not a
+/// bare `RawFd`) makes sole ownership a type property, so no `unsafe`/manual
+/// `Drop` is needed.
+struct WriteEnd(OwnedFd);
 
-    /// The needle used to locate the marker: a leading newline (so it matches
-    /// the trap's emitted separator) + the fixed head + nonce + tail, ending at
-    /// the `:` that precedes the pwd payload.
-    fn needle(&self) -> String {
-        format!("\n{MARKER_HEAD}{}{MARKER_TAIL}", self.nonce)
-    }
-
-    /// The EXIT-trap snippet that emits the marker to stderr. Embedded verbatim
-    /// into the `-c` script; the nonce is a literal (never an exported var), so
-    /// the command cannot read it via the environment. `printf` emits the bytes
-    /// exactly; `>&2` targets the stderr pipe (independent of stdout, so a
-    /// grandchild wedging stdout can't block the marker); the leading `\n`
-    /// separates the marker from unterminated command output.
-    fn trap_script(&self) -> String {
-        format!(
-            "__ja_pwd() {{ printf '\\n{MARKER_HEAD}{n}{MARKER_TAIL}%s\\n' \"$(pwd -P)\" >&2; }}\ntrap -- __ja_pwd EXIT\n",
-            n = self.nonce
-        )
-    }
-
-    /// Extract the cwd payload (the last marker's `pwd -P`) from a stream, or
-    /// `None` when no marker is present. Scans whichever stream the caller
-    /// passes — normally stderr, but stdout as a fallback when the command
-    /// redirected fd 2.
-    fn extract_pwd(&self, text: &str) -> Option<String> {
-        let needle = self.needle();
-        let last = text.rfind(&needle)?;
-        // pwd payload = bytes between the `:` (end of needle) and the next `\n`.
-        let pwd_start = last + needle.len();
-        let pwd_end = text[pwd_start..]
-            .find('\n')
-            .map(|i| pwd_start + i)
-            .unwrap_or(text.len());
-        Some(text[pwd_start..pwd_end].to_owned())
-    }
-
-    /// Strip every marker line from a stream, returning the cleaned text. Used
-    /// on both stdout and stderr so no marker bytes reach the LLM regardless of
-    /// which channel the command left fd 2 pointing at.
-    fn strip(&self, text: &str) -> String {
-        strip_marker_lines(text, &self.needle())
-    }
-
-    /// Extract the cwd payload from a single stream and strip every marker
-    /// line from it: `(cleaned, Some(pwd))` when present, `(unchanged, None)`
-    /// otherwise. A convenience for tests covering one channel at a time.
-    #[cfg(test)]
-    fn extract(&self, stderr: &str) -> (String, Option<String>) {
-        (self.strip(stderr), self.extract_pwd(stderr))
+impl WriteEnd {
+    /// The fd the child inherited and the trap writes to.
+    fn fd(&self) -> RawFd {
+        self.0.as_raw_fd()
     }
 }
 
-/// Remove every marker line from `text`. The needle begins with the marker's
-/// leading `\n`; the marker line spans from that `\n` (at the match index)
-/// through the terminating `\n` after the pwd payload. Everything before the
-/// leading `\n` is kept; the needle, payload, and terminator are dropped. The
-/// needle is ASCII, so byte indices from `str::find` land on char boundaries.
-fn strip_marker_lines(text: &str, needle: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(idx) = rest.find(needle) {
-        // Keep everything before the marker's leading `\n` (at `idx`).
-        out.push_str(&rest[..idx]);
-        // Skip from `idx` (the leading `\n`) past the pwd payload's terminating
-        // `\n`. The payload sits right after the needle.
-        let after = &rest[idx + needle.len()..];
-        match after.find('\n') {
-            Some(nl) => rest = &after[nl + 1..],
-            None => {
-                rest = "";
-                break;
+impl CwdProbe {
+    /// Create the marker pipe, dup the write end to a high fd (CLOEXEC cleared
+    /// so the child inherits it), close the original write end, and mark the
+    /// read end CLOEXEC (the child must not inherit it). Returns the probe plus
+    /// the [`WriteEnd`] guard whose `fd()` the trap script references.
+    fn new() -> std::io::Result<(CwdProbe, WriteEnd)> {
+        let (read, write) = pipe().map_err(std::io::Error::from)?;
+        // F_DUPFD returns the lowest free fd >= floor; it does NOT set CLOEXEC,
+        // so the child inherits this dup across execve. Wrap the result in an
+        // `OwnedFd` so its `Drop` owns the close.
+        let marker_raw = fcntl(write.as_fd(), FcntlArg::F_DUPFD(MARKER_FD_FLOOR))
+            .map_err(std::io::Error::from)? as RawFd;
+        let marker_fd = unsafe { OwnedFd::from_raw_fd(marker_raw) };
+        // Close the original write end (the dup at `marker_fd` survives).
+        drop(write);
+        // Keep the child from inheriting the read end.
+        fcntl(read.as_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(std::io::Error::from)?;
+        Ok((CwdProbe { read }, WriteEnd(marker_fd)))
+    }
+
+    /// Read the cwd the EXIT trap wrote. Called after the child is reaped (or
+    /// timeout-killed), by which point the trap's single short `pwd -P` line is
+    /// already in the kernel pipe buffer.
+    ///
+    /// The read end is set **nonblocking** so a backgrounded grandchild that
+    /// inherited the marker fd (CLOEXEC is cleared so the trap can use it) and
+    /// outlives the leader cannot wedge this read: we read whatever is available
+    /// right now and stop at `WouldBlock`/EOF, instead of draining to EOF (which
+    /// would block until every inherited write-end copy closes). The pwd line is
+    /// written atomically (`< PIPE_BUF`), so one read collects it whole. Cap the
+    /// read at the pipe buffer size; take the last non-empty line.
+    fn read_cwd(self) -> Option<String> {
+        // Pipes carry no settable flags besides O_NONBLOCK, so F_SETFL it
+        // directly (best-effort: a failure leaves the fd blocking, but the read
+        // loop still returns once data is available on the happy path).
+        let _ = fcntl(self.read.as_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
+        let mut file = File::from(self.read);
+        let mut buf = Vec::with_capacity(256);
+        let mut chunk = [0u8; 4096];
+        loop {
+            match file.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    // Cap at the pipe buffer size; the trap's payload is tiny.
+                    if buf.len() >= 64 * 1024 {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
             }
         }
+        if buf.is_empty() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&buf);
+        text.lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_owned())
     }
-    out.push_str(rest);
-    out
 }
 
-/// Build the foreground `-c` script: install the EXIT-trap marker, then run the
-/// command. The whole string is passed as `bash -c`'s single argv element. Under
-/// [`CaptureMode::Merged`] an `exec 2>&1` is inserted after the trap so the shell
-/// itself merges stderr onto the stdout pipe (program-determined ordering); the
-/// trap's `>&2` then lands on that merged stream, where it is recovered/stripped.
-fn build_exec_script(command: &str, marker: &CwdMarker, capture: CaptureMode) -> String {
+/// Render a finalized capture for the LLM: the head+tail view (which already
+/// carries a middle-omitted marker when clipped), with a one-line recovery
+/// banner prepended when this stream overflowed and spilled. The banner names
+/// the spill file once and the `cat` affordance so the model can read the full
+/// output back; `stream` matches the JSON field name the model sees.
+fn with_banner(stream: &str, cap: &capture::CaptureResult) -> String {
+    match &cap.spill {
+        Some(path) => {
+            let banner = format!(
+                "[{stream} was clipped (middle omitted); read the full output with: cat {}]\n",
+                path.display()
+            );
+            format!("{}{}", banner, cap.text)
+        }
+        None => cap.text.clone(),
+    }
+}
+
+/// Best-effort unlink of a discarded capture's spill file so it does not leak
+/// under `spill_dir` with no banner referencing it.
+fn drop_spill(cap: &capture::CaptureResult) {
+    if let Some(path) = &cap.spill {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Build the foreground `-c` script: install the EXIT-trap cwd probe on the
+/// private fd channel (if any), then run the command. The whole string is passed
+/// as `bash -c`'s single argv element. Under [`CaptureMode::Merged`] an
+/// `exec 2>&1` is inserted after the trap so the shell itself merges stderr onto
+/// the stdout pipe (program-determined ordering); the cwd trap writes to the fd
+/// channel, not fd 2, so it is independent of that merge.
+fn build_exec_script(command: &str, marker_fd: Option<RawFd>, capture: CaptureMode) -> String {
     let mut s = String::with_capacity(256 + command.len());
-    s.push_str(&marker.trap_script());
+    if let Some(fd) = marker_fd {
+        // `pwd -P >&N` duplicates fd N to pwd's stdout for the duration of the
+        // call -- a bash fd-dup redirect on the bare integer N (NOT the `>&{N}`
+        // brace form, which bash treats as a filename and silently no-ops). It
+        // is independent of fds 0/1/2, so `exec 2>&1` / `exec 2>/dev/null` /
+        // `exec 1>/dev/null` do not affect cwd recovery.
+        s.push_str(&format!(
+            "__ja_pwd() {{ pwd -P >&{fd}; }}\ntrap -- __ja_pwd EXIT\n"
+        ));
+    }
     if capture == CaptureMode::Merged {
         s.push_str("exec 2>&1\n");
     }
@@ -540,6 +625,22 @@ fn build_exec_script(command: &str, marker: &CwdMarker, capture: CaptureMode) ->
 mod tests {
     use super::*;
     use crate::builder::ShellBuilder;
+
+    /// Collect all `bash_exec-*.txt` spill files directly under `root` (the spill
+    /// layout is flat -- no per-backend subdir).
+    fn spill_files(root: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("bash_exec-"))
+            })
+            .collect()
+    }
 
     #[tokio::test]
     async fn exec_captures_stdout_and_exit_code() {
@@ -571,12 +672,12 @@ mod tests {
             .exec("pwd", Duration::from_secs(10), CaptureMode::Merged)
             .await
             .unwrap();
-        // cwd is read fresh from the stderr marker after the cd -> sticky.
+        // cwd is read fresh from the private fd channel after the cd -> sticky.
         assert_eq!(out.cwd, std::fs::canonicalize(&target).unwrap());
         assert!(out.merged.as_deref().unwrap().trim() == out.cwd.to_string_lossy());
-        // The marker rides the merged stream (fd 2 -> stdout via `exec 2>&1`)
-        // and is stripped before return: no marker bytes leak.
-        assert!(!out.merged.as_deref().unwrap().contains("__JA_CWD_"));
+        // The cwd marker rides a separate fd, not the output stream, so the
+        // merged text is pure command output.
+        assert!(!out.merged.as_deref().unwrap().contains("__ja_pwd"));
     }
 
     #[tokio::test]
@@ -737,12 +838,11 @@ mod tests {
     }
 
     /// Under `CaptureMode::Merged` the script prepends `exec 2>&1`, so fd 2
-    /// points at the stdout pipe and the cwd marker (written to fd 2) lands on
-    /// the merged stream. The marker is still recovered there (sticky cwd
-    /// updates) and stripped from the returned `merged` so no marker bytes reach
-    /// the LLM. A command that *also* does its own `exec 2>&1` is a no-op on top.
+    /// points at the stdout pipe. The cwd marker rides a separate fd channel
+    /// (independent of fd 2), so a command that also does its own `exec 2>&1`
+    /// still recovers cwd and the merged stream carries only command output.
     #[tokio::test]
-    async fn exec_with_merged_stderr_recovers_cwd_and_strips_marker() {
+    async fn exec_with_merged_stderr_recovers_cwd() {
         let tmp = tempfile::TempDir::new().unwrap();
         let target = std::fs::canonicalize(tmp.path()).unwrap();
         let mut backend = ShellBuilder::new().build().await.unwrap();
@@ -757,14 +857,14 @@ mod tests {
         assert_eq!(out.exit_code, Some(0));
         assert_eq!(
             out.cwd, target,
-            "marker on the merged stream must still recover the cwd"
+            "cwd must still recover even when the command merges its own streams"
         );
         // Only `merged` is populated; stdout/stderr are None under Merged.
         let merged = out.merged.as_deref().unwrap();
         assert!(out.stdout.is_none() && out.stderr.is_none());
-        // The command's own output survives; the marker does not leak.
+        // The command's own output survives; no marker bytes leak.
         assert!(merged.contains("merged"), "merged: {merged}");
-        assert!(!merged.contains("__JA_CWD_"), "marker leaked into merged");
+        assert!(!merged.contains("__ja_pwd"));
     }
 
     /// Color-suppression env vars reach the spawned bash via `Command::env`
@@ -785,11 +885,9 @@ mod tests {
         assert_eq!(out.merged.as_deref().unwrap().trim(), "dumb/1/0\nempty");
     }
 
-    /// Foreground `exec` leaves no scratch behind: the script rides argv and
-    /// the cwd rides a stderr marker, so no per-call scratch dir is created in
-    /// the spawn cwd. The headline invariant of this refactor. (It does not
-    /// snapshot `/tmp`; the structural guarantee that the shell crate has no
-    /// `data_dir` concept makes that unnecessary.)
+    /// Foreground `exec` writes nothing under the spawn cwd, and an under-budget
+    /// exec writes nothing under `spill_dir` either: the script rides argv, the
+    /// cwd rides the fd channel, and a spill file appears only on overflow.
     #[tokio::test]
     async fn exec_leaves_no_scratch_in_cwd() {
         let probe = std::env::temp_dir().join(format!(
@@ -798,21 +896,30 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&probe).unwrap();
+        let scratch = tempfile::TempDir::new().unwrap();
         let mut backend = ShellBuilder::new()
             .initial_cwd(probe.clone())
+            .spill_dir(scratch.path().to_path_buf())
             .build()
             .await
             .unwrap();
-        let _ = backend
+        let out = backend
             .exec("echo hi", Duration::from_secs(10), CaptureMode::Merged)
             .await
             .unwrap();
-        // Only the probe dir the test created should exist; no scratch artifact.
+        // Nothing written under the spawn cwd.
         let mut entries = std::fs::read_dir(&probe).unwrap();
         assert!(
             entries.next().is_none(),
             "foreground exec left files behind in {}",
             probe.display()
+        );
+        // Under budget: no spill file, no clip, no marker.
+        assert!(!out.truncated);
+        assert!(!out.merged.as_deref().unwrap().contains("bytes omitted"));
+        assert!(
+            spill_files(scratch.path()).is_empty(),
+            "under-budget exec wrote a spill file"
         );
         let _ = std::fs::remove_dir_all(&probe);
     }
@@ -899,11 +1006,11 @@ mod tests {
         assert!(out.merged.is_none());
     }
 
-    /// `Stdout` returns only stdout but still recovers the cwd, because the
-    /// marker rides fd 2 and stderr is captured internally for the marker even
-    /// though it is not returned. The returned `stderr` is `None`.
+    /// `Stdout` returns only stdout but still recovers the cwd: the marker rides
+    /// the private fd channel, so it does not depend on capturing stderr. The
+    /// returned `stderr` is `None`.
     #[tokio::test]
-    async fn exec_stdout_mode_recovers_cwd_from_stderr() {
+    async fn exec_stdout_mode_recovers_cwd() {
         let tmp = tempfile::TempDir::new().unwrap();
         let target = std::fs::canonicalize(tmp.path()).unwrap();
         let mut backend = ShellBuilder::new().build().await.unwrap();
@@ -919,18 +1026,16 @@ mod tests {
         assert!(out.stderr.is_none() && out.merged.is_none());
         assert_eq!(
             out.cwd, target,
-            "Stdout mode must still recover cwd from the internally-captured stderr marker"
+            "Stdout mode must still recover cwd via the fd channel"
         );
     }
 
-    /// `Stderr` mode pins the documented behavior when the command itself
-    /// redirects fd 2 onto stdout (`exec 2>&1`): the redirect moves both the
-    /// command output and the EXIT-trap marker onto stdout, so nothing ever
-    /// writes the stderr pipe and the returned `stderr` is empty. The cwd is
-    /// still recovered -- from the internally-captured stdout, via the extract
-    /// fallback that scans it for the marker.
+    /// `Stderr` mode under a command that redirects fd 2 onto stdout
+    /// (`exec 2>&1`): the redirect points fd 2 at the stdout pipe, so the stderr
+    /// capture sees nothing and the returned `stderr` is empty. The cwd is still
+    /// recovered -- the marker rides the fd channel, independent of fd 2.
     #[tokio::test]
-    async fn exec_stderr_mode_pins_down_command_merge() {
+    async fn exec_stderr_mode_with_command_merge() {
         let tmp = tempfile::TempDir::new().unwrap();
         let target = std::fs::canonicalize(tmp.path()).unwrap();
         let mut backend = ShellBuilder::new().build().await.unwrap();
@@ -942,29 +1047,28 @@ mod tests {
             )
             .await
             .unwrap();
-        // The command's `exec 2>&1` abandoned fd 2 (pointed it at fd 1), so the
-        // stderr capture (`err_cap`) saw nothing: stderr is empty.
+        // The command's `exec 2>&1` pointed fd 2 at fd 1, so the stderr capture
+        // saw nothing: stderr is empty.
         assert_eq!(out.stderr.as_deref().unwrap(), "");
         assert!(out.stdout.is_none() && out.merged.is_none());
-        // The marker followed the redirect onto stdout; cwd is still recovered
-        // via the extract fallback that scans the internally-captured stdout.
         assert_eq!(out.cwd, target);
     }
 
-    /// `Merged` truncation reflects the single combined capture: overflowing it
-    /// flags `truncated` and retains the tail (single BoundedCapture semantics,
-    /// not an OR of two streams).
+    /// `Merged` overflow clips the single combined capture to a head+tail view,
+    /// flags `truncated`, prepends the recovery banner, and spills the complete
+    /// stream to a file whose contents equal the full emitted output.
     #[tokio::test]
     async fn exec_merged_truncation_single_stream() {
+        let scratch = tempfile::TempDir::new().unwrap();
         let mut backend = ShellBuilder::new()
             .max_output_bytes(64)
+            .spill_dir(scratch.path().to_path_buf())
             .build()
             .await
             .unwrap();
         // Write well over the 64-byte budget; in Merged both fds land in one
-        // capture, which clips and keeps its tail. The cwd marker is appended at
-        // EXIT *after* the command output, so it can dominate the retained tail
-        // -- assert the clip semantics, not the exact tail bytes.
+        // capture, which clips to head+tail. The cwd marker rides the fd
+        // channel, so it does not pollute the captured stream.
         let out = backend
             .exec(
                 "printf 'A%.0s' {1..200}; printf 'B%.0s' {1..200} >&2",
@@ -976,120 +1080,270 @@ mod tests {
         assert!(out.truncated, "merged stream should be clipped");
         let merged = out.merged.as_deref().unwrap();
         assert!(
-            merged.len() <= 64,
-            "tail retained within the byte budget: {}",
-            merged.len()
+            merged.contains("bytes omitted"),
+            "head+tail view has the middle-omitted marker: {merged}"
         );
-        // The marker (appended at EXIT) is still stripped even from a clipped tail.
-        assert!(!merged.contains("__JA_CWD_"));
+        assert!(
+            merged.contains("was clipped (middle omitted)"),
+            "banner prepended: {merged}"
+        );
+        assert!(
+            merged.contains("with: cat"),
+            "banner carries the cat hint: {merged}"
+        );
+        // No marker bytes from the fd channel leak into the captured stream.
+        assert!(!merged.contains("__ja_pwd"));
+        // Exactly one spill file, holding the complete stream.
+        let files = spill_files(scratch.path());
+        assert_eq!(files.len(), 1, "only one spill file under Merged");
+        let spilled = std::fs::read(&files[0]).unwrap();
+        // 200 'A's + 200 'B's = the complete emitted output, in some order.
+        assert_eq!(spilled.len(), 400);
+        assert_eq!(spilled.iter().filter(|&&b| b == b'A').count(), 200);
+        assert_eq!(spilled.iter().filter(|&&b| b == b'B').count(), 200);
     }
 
-    // -- CwdMarker unit tests -------------------------------------------------
-
-    #[test]
-    fn marker_extract_found_strips_line_and_returns_pwd() {
-        let m = CwdMarker {
-            nonce: "abc".into(),
-        };
-        let stderr = "real output\n__JA_CWD_abc__:/tmp\n".to_owned();
-        let (clean, pwd) = m.extract(&stderr);
-        assert_eq!(pwd.as_deref(), Some("/tmp"));
-        assert_eq!(clean, "real output");
+    /// `Separate` overflow spills each stream to its own file and banners each
+    /// clipped stream; the non-clipped stream is clean (no banner).
+    #[tokio::test]
+    async fn exec_separate_overflow_spills_each_stream() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut backend = ShellBuilder::new()
+            .max_output_bytes(64)
+            .spill_dir(scratch.path().to_path_buf())
+            .build()
+            .await
+            .unwrap();
+        let out = backend
+            .exec(
+                "printf 'A%.0s' {1..200}; printf 'B%.0s' {1..200} >&2",
+                Duration::from_secs(10),
+                CaptureMode::Separate,
+            )
+            .await
+            .unwrap();
+        assert!(out.truncated);
+        let stdout = out.stdout.as_deref().unwrap();
+        let stderr = out.stderr.as_deref().unwrap();
+        assert!(stdout.contains("clipped (middle omitted)"));
+        assert!(stderr.contains("clipped (middle omitted)"));
+        // Two distinct spill files (-stdout / -stderr).
+        let spills: Vec<String> = spill_files(scratch.path())
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            spills.len(),
+            2,
+            "two spill files under Separate: {spills:?}"
+        );
+        assert!(spills.iter().any(|n| n.ends_with("-stdout.txt")));
+        assert!(spills.iter().any(|n| n.ends_with("-stderr.txt")));
     }
 
+    // -- CwdProbe / script-shape / spill-security tests -----------------------
+
+    /// The trap script redirects to the bare-integer fd (`>&63`), not the
+    /// `>&{63}` brace form (which bash treats as a filename and silently
+    /// no-ops). This shape test would have caught that regression.
     #[test]
-    fn marker_extract_absent_returns_none_and_keeps_stderr() {
-        let m = CwdMarker {
-            nonce: "abc".into(),
-        };
-        let stderr = "no marker here\n";
-        let (clean, pwd) = m.extract(stderr);
-        assert!(pwd.is_none());
-        assert_eq!(clean, stderr);
+    fn build_exec_script_uses_bare_fd_redirect() {
+        let s = build_exec_script("cmd", Some(63), CaptureMode::Merged);
+        assert!(
+            s.contains("pwd -P >&63"),
+            "trap must use the bare-integer fd redirect, got: {s}"
+        );
+        assert!(!s.contains(">&{63}"), "brace form is a silent no-op: {s}");
     }
 
+    /// With no marker fd the script omits the trap entirely (pipe setup failed).
     #[test]
-    fn marker_extract_at_offset_zero() {
-        let m = CwdMarker {
-            nonce: "abc".into(),
-        };
-        // Empty command output: just the trap's leading `\n` + marker line.
-        let stderr = "\n__JA_CWD_abc__:/tmp\n";
-        let (clean, pwd) = m.extract(stderr);
-        assert_eq!(pwd.as_deref(), Some("/tmp"));
-        assert_eq!(clean, "");
+    fn build_exec_script_omits_trap_when_no_fd() {
+        let s = build_exec_script("cmd", None, CaptureMode::Merged);
+        assert!(!s.contains("__ja_pwd"));
     }
 
+    /// `CwdProbe` round-trips a pwd written to the write end: writing a path
+    /// line, dropping the write end, then reading yields the trimmed pwd.
     #[test]
-    fn marker_extract_command_output_without_trailing_newline() {
-        let m = CwdMarker {
-            nonce: "abc".into(),
-        };
-        // Command wrote `hi` (no newline); the trap's leading `\n` separates.
-        let stderr = "hi\n__JA_CWD_abc__:/tmp\n";
-        let (clean, pwd) = m.extract(stderr);
-        assert_eq!(pwd.as_deref(), Some("/tmp"));
-        assert_eq!(clean, "hi");
+    fn cwd_probe_reads_pwd_from_fd_channel() {
+        let (probe, write_end) = CwdProbe::new().unwrap();
+        // Write the way the trap would (a path + newline) via a borrowed fd
+        // (no ownership transfer), then drop the write end so the read end EOFs.
+        let _ = nix::unistd::write(write_end.0.as_fd(), b"/srv/example\n");
+        drop(write_end);
+        let pwd = probe.read_cwd().unwrap();
+        assert_eq!(pwd, "/srv/example");
     }
 
-    #[test]
-    fn marker_extract_preserves_command_trailing_newline() {
-        let m = CwdMarker {
-            nonce: "abc".into(),
-        };
-        // Command wrote `hi\n`; the trap adds its own `\n` + marker.
-        let stderr = "hi\n\n__JA_CWD_abc__:/tmp\n";
-        let (clean, pwd) = m.extract(stderr);
-        assert_eq!(pwd.as_deref(), Some("/tmp"));
-        assert_eq!(clean, "hi\n");
+    /// `read_cwd` does not hang when a write-end copy stays open (a stand-in for
+    /// a backgrounded grandchild inheriting the marker fd): the read is
+    /// nonblocking and returns whatever the trap wrote, then stops at EAGAIN.
+    #[tokio::test]
+    async fn cwd_probe_does_not_hang_when_write_end_stays_open() {
+        let (probe, write_end) = CwdProbe::new().unwrap();
+        let _ = nix::unistd::write(write_end.0.as_fd(), b"/srv/example\n");
+        // Do NOT drop write_end -- emulate a grandchild holding the fd open.
+        let pwd = tokio::time::timeout(Duration::from_secs(2), async { probe.read_cwd() })
+            .await
+            .expect("read_cwd must not hang on a held write end");
+        assert_eq!(pwd.unwrap(), "/srv/example");
     }
 
+    /// A probe whose write end is dropped without writing yields no cwd (the
+    /// trap never fired / SIGKILL before EXIT).
     #[test]
-    fn marker_extract_multiple_matches_takes_last_strips_all() {
-        // Defensive: if the same nonce appeared more than once (it cannot in
-        // practice — the nonce is random per call), the real emission is last
-        // and no marker bytes survive in cleaned stderr. Every trap emission
-        // carries a leading newline, so both markers are matched and stripped.
-        let m = CwdMarker {
-            nonce: "abc".into(),
-        };
-        let stderr = "\n__JA_CWD_abc__:/a\nreal\n__JA_CWD_abc__:/b\n";
-        let (clean, pwd) = m.extract(stderr);
-        assert_eq!(pwd.as_deref(), Some("/b"));
-        assert_eq!(clean, "real");
-        assert!(!clean.contains("__JA_CWD_"));
+    fn cwd_probe_empty_when_trap_never_fired() {
+        let (probe, write_end) = CwdProbe::new().unwrap();
+        drop(write_end);
+        assert!(probe.read_cwd().is_none());
     }
 
+    /// The marker fd is at or above `MARKER_FD_FLOOR`.
     #[test]
-    fn marker_extract_never_leaves_needle_in_cleaned() {
-        // Property: for any realistic stderr (every marker carries the trap's
-        // leading newline), the cleaned result contains no marker bytes.
-        for stderr in [
-            "x\n__JA_CWD_abc__:/p\ny\n__JA_CWD_abc__:/q\n",
-            "\n__JA_CWD_abc__:/only\n",
-            "\n__JA_CWD_abc__:/nopath\n trailing",
-            "no marker",
-        ] {
-            let m = CwdMarker {
-                nonce: "abc".into(),
-            };
-            let (clean, _) = m.extract(stderr);
-            assert!(
-                !clean.contains("__JA_CWD_"),
-                "cleaned leaked marker: {clean:?}"
-            );
+    fn cwd_probe_marker_fd_is_high() {
+        let (_probe, write_end) = CwdProbe::new().unwrap();
+        assert!(write_end.fd() >= MARKER_FD_FLOOR);
+    }
+
+    /// A spilled file is created owner-only (0o600): no info leak to other uids
+    /// on a multi-user host.
+    #[tokio::test]
+    async fn spill_file_is_owner_only() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut backend = ShellBuilder::new()
+            .max_output_bytes(32)
+            .spill_dir(scratch.path().to_path_buf())
+            .build()
+            .await
+            .unwrap();
+        let out = backend
+            .exec(
+                "printf 'A%.0s' {1..200}",
+                Duration::from_secs(10),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        assert!(out.truncated);
+        let spill = spill_files(scratch.path()).pop().expect("a spill file");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&spill).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "spill file must be owner-only, got {:o}", mode);
+    }
+
+    /// The overflow-time spill open refuses a symlinked `spill_dir`: even if an
+    /// adversary swaps the dir for a symlink between build and the first overflow,
+    /// the `O_NOFOLLOW` dir open poisons (no banner, no spill path) and the write
+    /// does NOT follow the symlink into its target. Guards the TOCTOU.
+    #[tokio::test]
+    async fn spill_refuses_symlinked_spill_dir() {
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = root.path().join("dir");
+        let target = root.path().join("target");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        // Build against the real dir (passes the build-time check).
+        let mut backend = ShellBuilder::new()
+            .max_output_bytes(32)
+            .spill_dir(dir.clone())
+            .build()
+            .await
+            .unwrap();
+        // Swap: replace the real dir with a symlink -> target, then overflow.
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&target, &dir).unwrap();
+        let out = backend
+            .exec(
+                "printf 'A%.0s' {1..200}",
+                Duration::from_secs(10),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        // Overflow happened but the spill poisoned: no recovery banner.
+        assert!(out.truncated, "stream should still be clipped in-memory");
+        assert!(
+            !out.merged
+                .as_deref()
+                .unwrap()
+                .contains("read the full output with"),
+            "no banner when spill_dir is a symlink at overflow time"
+        );
+        // The write did NOT follow the symlink into the target dir.
+        assert!(
+            std::fs::read_dir(&target).unwrap().next().is_none(),
+            "spill wrote through the symlinked spill_dir into the target"
+        );
+    }
+
+    /// A SIGKILL before the EXIT trap fires loses the cwd (no trap ran); the
+    /// caller falls back rather than reporting a stale path.
+    #[tokio::test]
+    async fn sigkill_before_trap_falls_back() {
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let out = backend
+            .exec("kill -9 $$", Duration::from_secs(10), CaptureMode::Merged)
+            .await
+            .unwrap();
+        assert!(out.cwd.exists(), "cwd must fall back to an existing dir");
+    }
+
+    /// A second landlocked `bash` can `cat` a spill file the daemon parent
+    /// wrote under `temp_dir()`: `baseline_writable` grants read on writable
+    /// paths. Guards the read-back affordance the banner advertises.
+    #[cfg(all(target_os = "linux", feature = "landlock"))]
+    #[tokio::test]
+    async fn spilled_file_is_readable_by_landlocked_cat() {
+        use crate::landlock;
+        if landlock::ensure_supported().is_err() {
+            return;
         }
-    }
-
-    #[test]
-    fn marker_roundtrip_via_trap_script_shape() {
-        // The trap emits the exact needle shape `extract` scans for, so a
-        // synthesized emission round-trips. The needle already carries the
-        // leading newline; the payload + terminating newline follow.
-        let m = CwdMarker::new();
-        let emitted = format!("{}/srv/work\n", m.needle());
-        let (clean, pwd) = m.extract(&emitted);
-        assert_eq!(pwd.as_deref(), Some("/srv/work"));
-        assert_eq!(clean, "");
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut backend = ShellBuilder::new()
+            .max_output_bytes(32)
+            .spill_dir(scratch.path().to_path_buf())
+            .access_source(|| {
+                Ok(landlock::AccessDecision {
+                    read: landlock::ReadPolicy::Broad,
+                    writable: Vec::new(),
+                    readonly_holes: Vec::new(),
+                    hide_holes: Vec::new(),
+                })
+            })
+            .build()
+            .await
+            .unwrap();
+        let first = backend
+            .exec(
+                "printf 'HEAD'; printf 'A%.0s' {1..200}",
+                Duration::from_secs(10),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        let merged = first.merged.as_deref().unwrap();
+        let path = merged
+            .lines()
+            .next()
+            .and_then(|line| {
+                line.split("with: cat ")
+                    .nth(1)
+                    .and_then(|rest| rest.trim_end_matches(']').trim().to_string().into())
+            })
+            .expect("banner with a spill path");
+        let second = backend
+            .exec(
+                &format!("cat '{path}'"),
+                Duration::from_secs(10),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        let reread = second.merged.as_deref().unwrap();
+        assert!(
+            reread.contains("HEAD"),
+            "landlocked cat read the spill back"
+        );
     }
 }

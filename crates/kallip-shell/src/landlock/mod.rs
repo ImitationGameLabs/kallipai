@@ -16,9 +16,10 @@
 //! ([`ProcessBackend`](crate::backend::ProcessBackend) foreground commands and
 //! the background supervisor) builds the writable list from the owning agent's
 //! **current** directory write-locks (coordinated by the runtime crate's
-//! directory-lock coordinator); the foreground path writes nothing on disk and
-//! needs no scratch beyond `baseline_writable`, while each background task adds
-//! its own per-spawn tmpdir as scratch. Then it calls
+//! directory-lock coordinator); the foreground path writes nothing on disk
+//! except overflow spill files (under `temp_dir()`, already in
+//! `baseline_writable`), and needs no scratch beyond `baseline_writable`, while
+//! each background task adds its own per-spawn tmpdir as scratch. Then it calls
 //! [`crate::landlock::apply`]. landlock turns that advisory lock decision into a mandatory one —
 //! a process physically cannot write a directory not in its writable list.
 //!

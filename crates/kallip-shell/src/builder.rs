@@ -44,11 +44,12 @@ impl std::fmt::Debug for AccessSource {
 #[cfg(all(target_os = "linux", feature = "landlock"))]
 impl AccessSource {
     /// Snapshot the agent's access decision as-is, ready for
-    /// [`crate::landlock::apply`]. Used by the foreground path, which writes no
-    /// scratch of its own (`baseline_writable` in `apply` already covers
-    /// `/tmp`, `/dev/null`, ...). The snapshot error propagates (via `?`)
-    /// rather than silently producing an empty writable list, which would deny
-    /// all of the agent's writes.
+    /// [`crate::landlock::apply`]. Used by the foreground path, whose only
+    /// on-disk writes are overflow spill files under `spill_dir`
+    /// (`baseline_writable` in `apply` already covers `temp_dir()`, `/dev/null`,
+    /// ...). The snapshot error propagates (via `?`) rather than silently
+    /// producing an empty writable list, which would deny all of the agent's
+    /// writes.
     pub(crate) fn access(&self) -> io::Result<crate::landlock::AccessDecision> {
         (self.0)()
     }
@@ -78,8 +79,9 @@ impl AccessSource {
 /// |--------------------|-------------|---------------------------------------------------------------|
 /// | `shell`            | `"bash"`    | Program spawned per call                                      |
 /// | `fallback_cwd`     | `"/tmp"`   | cwd when `current_dir()` fails or a cached cwd was deleted     |
-/// | `max_output_bytes` | 1 MiB       | Per-stream in-memory tail before output is clipped             |
+/// | `max_output_bytes` | 1 MiB       | Per-stream in-memory head+tail before output is clipped        |
 /// | `max_bg_bytes`     | 100 MiB     | Background-task output cap before the size watchdog kills it   |
+/// | `spill_dir`        | `$TMPDIR/kallip` | Where overflow spill files are written (overflow only)    |
 #[derive(Clone, Debug)]
 pub struct ShellBuilder {
     pub(super) shell: OsString,
@@ -88,6 +90,14 @@ pub struct ShellBuilder {
     pub(super) env: HashMap<OsString, OsString>,
     pub(super) max_output_bytes: usize,
     pub(super) max_bg_bytes: usize,
+    /// Directory where overflow spill files are written (only when a captured
+    /// stream exceeds `max_output_bytes`). Defaults to `temp_dir()/kallip`.
+    /// Spill files persist until the system temp cleaner reaps them; cwd
+    /// recovery is file-free (a private fd channel), so this holds only the
+    /// spill files. Must match the landlocked child's notion of the temp dir
+    /// (`baseline_writable` uses `std::env::temp_dir()` at spawn), so do not
+    /// `env_clear` or override `TMPDIR` while leaving this default.
+    pub(super) spill_dir: PathBuf,
     pub(super) on_terminal: Option<TerminalObserver>,
     /// Optional source of this backend's agent's per-spawn access decision
     /// (read policy + writable set + readonly holes). When set (and the
@@ -110,6 +120,7 @@ impl ShellBuilder {
             env: HashMap::new(),
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_bg_bytes: DEFAULT_MAX_BG_BYTES,
+            spill_dir: std::env::temp_dir().join("kallip"),
             on_terminal: None,
             #[cfg(all(target_os = "linux", feature = "landlock"))]
             access_source: None,
@@ -143,6 +154,14 @@ impl ShellBuilder {
     /// Overrides the background-task output cap (bytes). Default: 100 MiB.
     pub fn max_bg_bytes(mut self, bytes: usize) -> Self {
         self.max_bg_bytes = bytes;
+        self
+    }
+
+    /// Overrides the spill directory for overflow output files. Default:
+    /// `temp_dir()/kallip`. Useful in tests to point at a `tempfile::TempDir`
+    /// for hermetic cleanup.
+    pub fn spill_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.spill_dir = dir.into();
         self
     }
 
@@ -208,10 +227,11 @@ impl ShellBuilder {
 
     /// Constructs a [`ProcessBackend`].
     ///
-    /// The backend is file-free: foreground `exec` passes its script via `bash
-    /// -c` argv and recovers cwd from a stderr marker; background tasks each own
-    /// an auto-cleaned tmpdir. Nothing is resolved from or written under a data
-    /// dir.
+    /// Foreground `exec` passes its script via `bash -c` argv and recovers cwd
+    /// over a private fd channel (no per-call files); on output overflow it
+    /// writes a spill file to `spill_dir` and nowhere else. Background tasks
+    /// each own an auto-cleaned tmpdir. Nothing is resolved from or written
+    /// under a data dir.
     pub async fn build(self) -> Result<ProcessBackend, ShellError> {
         self.validate()?;
 
@@ -219,6 +239,25 @@ impl ShellBuilder {
             Some(cwd) => cwd.clone(),
             None => std::env::current_dir().unwrap_or_else(|_| self.fallback_cwd.clone()),
         };
+
+        // Spill layout: `<spill_dir>/bash_exec-<nonce>-<stream>.txt` (spill_dir
+        // defaults to `temp_dir()/kallip`). The per-exec nonce in the filename
+        // makes collisions impossible, so no per-backend subdir is needed. The
+        // dir is created lazily, only when an overflow actually spills (see
+        // `capture.rs`), so an under-budget backend writes nothing to disk.
+        // The load-bearing symlink rejection is the `O_NOFOLLOW` dir open at
+        // overflow time (TOCTOU-safe: it pins the dir inode and refuses a
+        // symlink planted at the path at any time). This build-time stat is only
+        // an early, clear fail-closed error so a hostile symlink surfaces at
+        // startup rather than at the first overflow; it is not the seal.
+        let is_symlink =
+            std::fs::symlink_metadata(&self.spill_dir).is_ok_and(|m| m.file_type().is_symlink());
+        if is_symlink {
+            return Err(ShellError::backend(format!(
+                "spill_dir {} must not be a symlink",
+                self.spill_dir.display()
+            )));
+        }
 
         let background = supervisor::BackgroundRegistry::new(
             self.shell.clone(),

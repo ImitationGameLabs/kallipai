@@ -32,7 +32,7 @@ anyhow = "1.0.102"
 async-trait = "0.1.89"
 async-stream = "0.3.6"
 # `signal` transitively enables `process` (for `nix::unistd::Pid`).
-nix = { version = "0.31", features = ["signal"] }
+nix = { version = "0.31", features = ["fs", "signal"] }
 # Linux-first sandbox toolbox (landlock ruleset + mount-ns composable
 # `prepare_*`/`install_*` primitives). Used only behind the `landlock` feature of
 # kallip-shell, which is Linux-only. `default-features = false` drops its

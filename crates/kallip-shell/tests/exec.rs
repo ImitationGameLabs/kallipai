@@ -2,7 +2,9 @@
 //! interactive fail-fast.
 //!
 //! These exercise the real `ProcessBackend` (a fresh `bash -c` per call) end to
-//! end. The backend is file-free, so the tests need no scratch dir.
+//! end. The backend writes to disk only on output overflow (a spill file under
+//! `temp_dir()`); these tests stay under budget unless they exercise that path,
+//! so they need no scratch dir of their own.
 
 use std::time::Duration;
 
@@ -10,7 +12,7 @@ use kallip_shell::{CaptureMode, ShellBackend, ShellBuilder};
 
 #[tokio::test]
 async fn cd_is_reflected_in_reported_cwd() {
-    // The backend reflects `cd` in the reported cwd via the stderr marker.
+    // The backend reflects `cd` in the reported cwd via the private fd channel.
     let mut backend = ShellBuilder::new().build().await.unwrap();
     let target = std::env::temp_dir();
     let target = std::fs::canonicalize(&target).unwrap_or(target);
