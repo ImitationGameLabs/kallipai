@@ -16,6 +16,7 @@ mod test_helpers;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use kallip_common::authtoken::MintedToken;
 use kallip_runtime::profile::ProfileRegistry;
 use state::AppState;
 use std::sync::Arc;
@@ -43,8 +44,8 @@ async fn main() -> Result<()> {
     // Only the SHA-256 hash is retained by AppState; the plaintext is printed below
     // then dropped at end of scope.
     let operator = match std::env::var("KALLIP_OPERATOR_TOKEN") {
-        Ok(s) => token::MintedToken::from_secret(s),
-        Err(_) => token::MintedToken::generate(token::TokenKind::Operator),
+        Ok(s) => MintedToken::from_secret(s),
+        Err(_) => MintedToken::generate(token::OPERATOR),
     };
     anyhow::ensure!(
         !operator.secret().trim().is_empty(),

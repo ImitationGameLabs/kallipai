@@ -23,7 +23,7 @@ use crate::state::{
     Agent, AgentEntry, AgentIdentity, AgentRegistry, AppState, FaultedEntry, RegistryEntry,
     SharedState,
 };
-use crate::token::TokenHash;
+use kallip_common::authtoken::TokenHash;
 
 /// Construct a full `AgentEntry` with real channels and default policy.
 pub fn make_entry(created_by: Option<AgentId>, auth_token: String) -> AgentEntry {

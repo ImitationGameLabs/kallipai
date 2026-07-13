@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use kallip_common::agentid::AgentId;
+use kallip_common::authtoken::MintedToken;
 use kallip_common::policy::{ExecPolicy, ToolPolicy};
 use kallip_runtime::config::AgentConfig;
 use kallip_runtime::persistence;
@@ -25,7 +26,7 @@ use tracing::info;
 
 use super::agent::{SpawnArgs, spawn_agent};
 use crate::state::{AgentEntry, AgentIdentity, FaultedEntry, RegistryEntry, SharedState};
-use crate::token::{MintedToken, TokenKind};
+use crate::token::AGENT;
 
 /// One node in a supervisor chain, fully loaded from disk.
 struct ChainNode {
@@ -327,7 +328,7 @@ async fn restore_one(
 
     // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the agent shell env;
     // only its SHA-256 is indexed for auth lookup.
-    let token = MintedToken::generate(TokenKind::Agent);
+    let token = MintedToken::generate(AGENT);
     let env = SpawnArgs::default_env(&p.agent_id, token.secret());
 
     let tool_policy = Arc::new(std::sync::RwLock::new(tool_policy));

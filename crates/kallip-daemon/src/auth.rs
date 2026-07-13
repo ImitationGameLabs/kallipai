@@ -3,7 +3,7 @@
 use axum::extract::FromRequestParts;
 
 use crate::state::{AgentId, SharedState};
-use crate::token::TokenHash;
+use kallip_common::authtoken::TokenHash;
 use kallip_common::protocol::ApiError;
 
 /// Resolved identity from the Authorization header.

@@ -10,6 +10,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use just_llm_client::types::chat::ChatMessage;
 use kallip_common::agentid::AgentId;
+use kallip_common::authtoken::{MintedToken, TokenHash};
 use kallip_common::policy::{ExecPolicy, ToolPolicy};
 use kallip_common::protocol::ApiError;
 use kallip_common::protocol::SseEvent;
@@ -40,7 +41,7 @@ use crate::bridge::bridge_task;
 use crate::state::{
     Agent, AgentEntry, AgentIdentity, AgentState, AgentSummary, RegistryEntry, SharedState,
 };
-use crate::token::{MintedToken, TokenHash, TokenKind};
+use crate::token::AGENT;
 
 pub(crate) struct SpawnArgs {
     pub agent_id: AgentId,
@@ -412,7 +413,7 @@ pub async fn create_agent(
     let id = AgentId::random();
     // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the agent shell env
     // (`KALLIP_AUTH_TOKEN`); only its SHA-256 is indexed for auth lookup.
-    let token = MintedToken::generate(TokenKind::Agent);
+    let token = MintedToken::generate(AGENT);
 
     let mut config = {
         let ws = req.workspace_root.map(std::path::PathBuf::from);

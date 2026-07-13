@@ -1657,8 +1657,12 @@ name = "kallip-common"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
+ "getrandom 0.4.2",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "subtle",
  "time",
  "tracing",
  "uuid",
@@ -1670,11 +1674,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64",
  "clap",
  "futures-core",
  "futures-util",
- "getrandom 0.4.2",
  "just-llm-client",
  "kallip-common",
  "kallip-runtime",
@@ -1683,8 +1685,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
- "sha2 0.11.0",
- "subtle",
  "temp-env",
  "tempfile",
  "thiserror 2.0.18",

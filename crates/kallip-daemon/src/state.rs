@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use crate::skill_promote::SkillPromoteStore;
-use crate::token::TokenHash;
 pub use kallip_common::agentid::AgentId;
+use kallip_common::authtoken::TokenHash;
 use kallip_common::policy::{ExecPolicy, ToolPolicy};
 pub use kallip_common::protocol::AgentState;
 pub use kallip_common::protocol::AgentSummary;
@@ -657,7 +657,7 @@ mod tests {
     use super::*;
     use crate::auth::Identity;
     use crate::test_helpers::*;
-    use crate::token::TokenHash;
+    use kallip_common::authtoken::TokenHash;
 
     // -- Agent::shutdown: bounded graceful task drain --
 
