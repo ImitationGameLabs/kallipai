@@ -9,4 +9,7 @@ pub mod protocol;
 pub mod retry;
 pub mod tokens;
 
+#[cfg(feature = "axum")]
+pub mod sse;
+
 pub use agentid::AgentId;

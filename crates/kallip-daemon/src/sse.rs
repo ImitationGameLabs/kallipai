@@ -1,11 +1,10 @@
 use std::convert::Infallible;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_core::Stream;
 use kallip_common::agentid::AgentId;
 use kallip_common::protocol::SseEvent;
+use kallip_common::sse::OnDrop;
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -117,50 +116,6 @@ fn event_stream(
         },
         Err(_) => None, // skip lagged messages
     })
-}
-
-/// A stream wrapper that runs a closure exactly once when the stream is dropped.
-///
-/// Used by [`sse_stream`] to detect an SSE subscriber detaching: axum/hyper drop
-/// the SSE response body on client disconnect, which drops this wrapper, firing
-/// the closure. See [`sse_stream`]'s subscriber-state-logging note for why the
-/// closure observes a `receiver_count()` of 1 as "the last subscriber."
-///
-/// The inner stream and the closure are both boxed (`Pin<Box<...>>` /
-/// `Box<dyn ...>`), so the struct is `Unpin` regardless of the inner stream's
-/// `Unpin`-ness — no pin-projection machinery. One allocation per SSE
-/// connection, negligible since connections are rare.
-struct OnDrop {
-    inner: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>,
-    on_drop: Option<Box<dyn FnOnce() + Send>>,
-}
-
-impl OnDrop {
-    fn new(
-        inner: impl Stream<Item = Result<Event, Infallible>> + Send + 'static,
-        on_drop: impl FnOnce() + Send + 'static,
-    ) -> Self {
-        Self {
-            inner: Box::pin(inner),
-            on_drop: Some(Box::new(on_drop)),
-        }
-    }
-}
-
-impl Stream for OnDrop {
-    type Item = Result<Event, Infallible>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.get_mut().inner.as_mut().poll_next(cx)
-    }
-}
-
-impl Drop for OnDrop {
-    fn drop(&mut self) {
-        if let Some(f) = self.on_drop.take() {
-            f();
-        }
-    }
 }
 
 #[cfg(test)]
