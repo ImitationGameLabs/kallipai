@@ -3,8 +3,8 @@
 //!
 //! The CSPRNG minting, SHA-256 hashing, and constant-time comparison live in
 //! [`kallip_common::authtoken`]; this module pins only this crate's two
-//! type-tag prefixes. Import the shared [`MintedToken`]/[`TokenHash`] types
-//! directly from `kallip_common::authtoken`.
+//! type-tag prefixes. Import the shared `MintedToken`/`TokenHash` types
+//! directly from [`kallip_common::authtoken`].
 
 use kallip_common::authtoken::TokenKind;
 
