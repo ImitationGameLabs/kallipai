@@ -3,6 +3,7 @@
 use axum::extract::FromRequestParts;
 
 use crate::state::{AgentId, SharedState};
+use kallip_common::auth_header::extract_bearer_token;
 use kallip_common::authtoken::TokenHash;
 use kallip_common::protocol::ApiError;
 
@@ -43,7 +44,7 @@ impl FromRequestParts<SharedState> for AuthIdentity {
         parts: &mut axum::http::request::Parts,
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
-        let token = extract_token(&parts.headers)?;
+        let token = extract_bearer_token(&parts.headers)?;
 
         // Compare SHA-256 hashes: the operator secret via constant-time compare
         // (subtle), agents via a HashMap lookup keyed by hash. Because an attacker
@@ -76,21 +77,6 @@ pub fn require_operator(identity: &Identity) -> Result<(), ApiError> {
         Identity::Operator => Ok(()),
         Identity::Agent { .. } => Err(ApiError::forbidden("operator access required")),
     }
-}
-
-/// Extract bearer token from the Authorization header.
-fn extract_token(headers: &axum::http::HeaderMap) -> Result<&str, ApiError> {
-    let value = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| ApiError::unauthorized("authentication required"))?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| ApiError::unauthorized("invalid Authorization scheme, expected Bearer"))?;
-    if token.is_empty() {
-        return Err(ApiError::unauthorized("empty bearer token"));
-    }
-    Ok(token)
 }
 
 #[cfg(test)]

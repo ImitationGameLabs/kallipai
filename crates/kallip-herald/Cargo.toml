@@ -1,0 +1,29 @@
+[package]
+name = "kallip-herald"
+description = "Host-side relay connector: links a kallip-daemon to kallip-agora"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallip-common = { workspace = true }
+kallip-agora-common = { workspace = true }
+kallip-client = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures-util = { workspace = true }
+time = { workspace = true }
+dirs = { workspace = true }
+base64 = { workspace = true }
+getrandom = { workspace = true }
+x25519-dalek = { workspace = true, features = ["getrandom", "reusable_secrets"] }
+chacha20poly1305 = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+hkdf = { workspace = true }

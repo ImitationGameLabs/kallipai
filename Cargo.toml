@@ -1,6 +1,9 @@
 [workspace]
 members = [
   "crates/kallip-common",
+  "crates/kallip-agora-common",
+  "crates/kallip-agora",
+  "crates/kallip-herald",
   "crates/kallip-runtime",
   "crates/kallip-shell",
   "crates/kallip",
@@ -23,6 +26,9 @@ name = "kallip"
 just-llm-client = "0.2.0"
 
 kallip-common = { path = "crates/kallip-common", default-features = false }
+kallip-agora-common = { path = "crates/kallip-agora-common" }
+kallip-agora = { path = "crates/kallip-agora" }
+kallip-herald = { path = "crates/kallip-herald" }
 kallip-runtime = { path = "crates/kallip-runtime" }
 kallip-shell = { path = "crates/kallip-shell" }
 kallip-client = { path = "crates/kallip-client" }
@@ -69,6 +75,10 @@ base64 = "0.22"
 getrandom = "0.4"
 sha2 = "0.11"
 subtle = "2"
+x25519-dalek = "3"
+chacha20poly1305 = "0.11"
+ed25519-dalek = "3"
+hkdf = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rable = "0.2.0"
