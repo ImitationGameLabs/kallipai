@@ -291,6 +291,34 @@ impl DaemonClient {
         JsonEventStream::from_response(response).context("failed to parse SSE stream")
     }
 
+    /// Issue a raw HTTP request against the daemon and return the streaming
+    /// response, uninterpreted. Used by the herald's HTTP tunnel to proxy
+    /// arbitrary daemon routes transparently: the caller controls method/path/
+    /// headers/body, this client contributes only the base URL and the operator
+    /// auth. The response status is forwarded as-is (success is NOT enforced) so
+    /// the tunneled caller sees the daemon's real status code.
+    ///
+    /// Callers that stream long-lived responses (the herald tunnel's
+    /// `/agents/{id}/events`) must supply an `http_client` without a total
+    /// timeout via the builder; the default client has none, but the no-timeout
+    /// property is the caller's responsibility for streaming use.
+    pub async fn proxy_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<&[u8]>,
+    ) -> Result<reqwest::Response> {
+        let mut req = self.with_auth(self.inner.http.request(method, self.url(path)));
+        for (name, value) in headers {
+            req = req.header(name, value);
+        }
+        if let Some(bytes) = body {
+            req = req.body(bytes.to_vec());
+        }
+        req.send().await.context("daemon proxy request failed")
+    }
+
     // -- Approvals ------------------------------------------------------------
 
     /// Send a decision (approve/deny) for an approval.

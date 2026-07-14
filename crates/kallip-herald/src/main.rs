@@ -86,8 +86,18 @@ async fn main() -> Result<()> {
         }
     };
 
+    // The daemon proxy streams long-lived responses (e.g. /agents/{id}/events)
+    // with no natural end, so the daemon client must NOT carry a total request
+    // timeout — reqwest's `.timeout()` is a whole-request deadline that would
+    // kill the stream mid-flight. Build an explicit no-timeout client rather
+    // than relying on the DaemonClient default; the property is load-bearing
+    // for the tunnel.
+    let daemon_http = reqwest::Client::builder()
+        .build()
+        .context("build daemon http client")?;
     let daemon = DaemonClient::builder(&args.daemon_url)
         .auth_token(&args.daemon_token)
+        .http_client(daemon_http)
         .build()?;
 
     Herald::new(args.agora_url, team_id, team_token, daemon, device)

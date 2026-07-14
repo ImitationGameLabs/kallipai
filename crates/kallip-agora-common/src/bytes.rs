@@ -57,6 +57,13 @@ base64_bytes! {
     /// a key exchange.
     X25519PublicKey
 }
+base64_bytes! {
+    /// An opaque byte buffer for the HTTP tunnel: a tunneled request body or a
+    /// streamed response chunk. Base64 (not a JSON number array) so frames stay
+    /// compact under the agora's request-body limit. Opaque to the relay, which
+    /// never decrypts the enclosing [`TunnelFrame`](crate::message::TunnelFrame).
+    B64
+}
 
 #[cfg(test)]
 mod tests {
