@@ -89,6 +89,14 @@ impl ApiError {
             message: msg.into(),
         }
     }
+
+    /// 504 Gateway Timeout
+    pub fn gateway_timeout(msg: impl Into<String>) -> Self {
+        Self {
+            status: 504,
+            message: msg.into(),
+        }
+    }
 }
 
 impl fmt::Display for ApiError {
