@@ -129,6 +129,9 @@
                 cargo-hakari
                 rust-analyzer
 
+                # Typescript
+                deno
+
                 # Nix
                 nil
                 nixfmt
