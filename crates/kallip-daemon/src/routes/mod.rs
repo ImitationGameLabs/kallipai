@@ -15,8 +15,28 @@ mod skill_promote;
 use axum::Router;
 use kallip_common::protocol::{ListAgentsResponse, ListApprovalsQuery, MessageRequest};
 use state::SharedState;
+use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 
 use crate::state;
+
+/// Permissive CORS layer for the daemon. The daemon binds to localhost by
+/// default and authenticates every request with a bearer operator token, so a
+/// wildcard policy is safe here: CORS is not a security boundary, the operator
+/// token is. This lets a browser-served frontend at a different origin (e.g. a
+/// dev server on another port) call the HTTP API and open the authenticated SSE
+/// stream. If the daemon is ever bound to a public interface, restrict the
+/// origin instead.
+///
+/// `AllowHeaders::mirror_request()` reflects whatever the browser requests in
+/// preflight, which is the wildcard semantics we want: unlike `Any` (the `*`
+/// value), it actually covers `Authorization`, which the Fetch spec excludes
+/// from `*`.
+pub fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(AllowHeaders::mirror_request())
+}
 
 /// Build the full axum router with all agent routes.
 pub fn router() -> Router<SharedState> {

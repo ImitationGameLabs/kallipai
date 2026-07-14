@@ -128,6 +128,7 @@ async fn main() -> Result<()> {
     } else {
         app
     }
+    .layer(routes::cors_layer())
     .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr).await?;
