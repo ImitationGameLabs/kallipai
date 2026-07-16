@@ -26,7 +26,7 @@ use crate::{
     ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ExecPolicy, ListAgentsResponse,
     ListApprovalsResponse, ListSkillPromoteRecordsResponse, PromoteDecision, SkillMeta,
     SkillPathsResponse, SkillPromoteDecisionBody, SkillPromoteShowResponse,
-    SkillPromoteSubmitResponse, TokenBudgetResponse, TokenBudgetUpdateRequest, ToolPolicy,
+    SkillPromoteSubmitResponse, TokenBudgetResponse, TokenBudgetUpdateRequest,
     UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 
@@ -407,39 +407,6 @@ impl DaemonClient {
             "failed to parse permissions response",
         )
         .await
-    }
-
-    /// Get the raw tool policy for an agent.
-    pub async fn get_policy(&self, id: &AgentId) -> Result<ToolPolicy> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/policy"))),
-            )
-            .send()
-            .await
-            .context("failed to get agent policy")?,
-            "failed to parse policy response",
-        )
-        .await
-    }
-
-    /// Update the tool policy for an agent.
-    pub async fn update_policy(&self, id: &AgentId, policy: &ToolPolicy) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(
-                self.inner
-                    .http
-                    .put(self.url(&format!("/agents/{id}/policy")))
-                    .json(policy),
-            )
-            .send()
-            .await
-            .context("failed to update agent policy")?,
-        )
-        .await?;
-        Ok(())
     }
 
     /// Get the `bash_exec` command-policy overrides for an agent.

@@ -11,14 +11,13 @@ use axum::response::IntoResponse;
 use just_llm_client::types::chat::ChatMessage;
 use kallip_common::agentid::AgentId;
 use kallip_common::authtoken::{MintedToken, TokenHash};
-use kallip_common::policy::{ExecPolicy, ToolPolicy};
+use kallip_common::policy::{ExecPolicy, PolicyPreset};
 use kallip_common::protocol::ApiError;
 use kallip_common::protocol::SseEvent;
 use kallip_runtime::agent_task::{self, AgentContext};
 use kallip_runtime::approval::ApprovalStore;
 use kallip_runtime::config::{
     AgentConfig, PermissionClass, PermissionProfile, permission_class_from_env,
-    tool_policy_from_env,
 };
 use kallip_runtime::context::{AgenticContext, ContextStore, ContextSummarizer};
 use kallip_runtime::history::HistoryWriter;
@@ -55,7 +54,7 @@ pub(crate) struct SpawnArgs {
     pub auth_token_hash: TokenHash,
     pub env: HashMap<String, String>,
     pub shared_state: SharedState,
-    pub tool_policy: Arc<std::sync::RwLock<ToolPolicy>>,
+    pub preset: PolicyPreset,
     pub exec_policy: Arc<std::sync::RwLock<ExecPolicy>>,
     pub prompt_queue_size: usize,
     /// The resolved model tier (selected by the caller). The active profile is
@@ -160,7 +159,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
 
     let executor = AuthorizedToolExecutor::new(
         dispatch,
-        AgentPolicy::new(args.tool_policy.clone(), args.exec_policy.clone()),
+        AgentPolicy::new(args.exec_policy.clone(), args.preset),
         args.approvals.clone(),
     );
     let tool_defs = executor.tool_definitions();
@@ -226,7 +225,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
             activity,
             auth_token_hash: args.auth_token_hash,
             env: args.env,
-            tool_policy: args.tool_policy,
+            preset: args.preset,
             exec_policy: args.exec_policy,
         },
         AgentIdentity {
@@ -458,9 +457,11 @@ pub async fn create_agent(
         .map_err(|e| ApiError::conflict(e.to_string()))?;
     let env = SpawnArgs::default_env(&id, token.secret());
 
-    // Subagent: validate supervisor and delegation constraints, or use default policy.
-    // Pre-reserve the subagent slot under write lock to eliminate TOCTOU.
-    let (tool_policy, exec_policy) = if let Some(ref supervisor_id) = req.created_by {
+    // Subagent: validate supervisor and delegation constraints. The daemon-global
+    // preset applies to every agent (root and subagent alike), so only the
+    // per-agent exec-policy is resolved here. Pre-reserve the subagent slot under
+    // write lock to eliminate TOCTOU.
+    let exec_policy = if let Some(ref supervisor_id) = req.created_by {
         // Parse the optional downgrade request once, before taking the lock, so a
         // bad spelling is a cheap client-side 400 rather than a held-write-lock
         // rejection. The daemon is the reference monitor: a value is accepted only
@@ -468,7 +469,7 @@ pub async fn create_agent(
         // validate_subagent_request.
         let requested_class = parse_requested_class(&req.permission_class)?;
         let mut registry = state.registry.write().await;
-        let (permissions, policy, exec, permission_class) = validate_subagent_request(
+        let (permissions, exec, permission_class) = validate_subagent_request(
             &registry,
             auth.identity(),
             supervisor_id,
@@ -491,7 +492,7 @@ pub async fn create_agent(
         config.created_by = Some(supervisor_id.clone());
         config.permissions = permissions;
         config.permissions_class = permission_class;
-        (policy, exec)
+        exec
     } else {
         // Root/operator spawns are governed by KALLIP_ROOT_AGENT_PERMISSION_CLASS,
         // not the request field (a documented, inert-on-this-path field). No client
@@ -506,9 +507,8 @@ pub async fn create_agent(
             );
         }
         config.permissions_class = permission_class_from_env();
-        (tool_policy_from_env(), ExecPolicy::default())
+        ExecPolicy::default()
     };
-    let tool_policy = Arc::new(std::sync::RwLock::new(tool_policy));
     let exec_policy = Arc::new(std::sync::RwLock::new(exec_policy));
 
     // Resolve the model tier purely by depth (positional tiers — no name/override). Carry the
@@ -544,12 +544,6 @@ pub async fn create_agent(
             .map_err(ApiError::internal)?;
         info!(skill = skill_name, "loaded skill");
     }
-
-    persistence::persist_policy(
-        &agent_dir,
-        &tool_policy.read().unwrap_or_else(|e| e.into_inner()),
-    )
-    .map_err(ApiError::internal)?;
 
     persistence::persist_exec_policy(
         &agent_dir,
@@ -609,7 +603,7 @@ pub async fn create_agent(
         auth_token_hash: token.hash().clone(),
         env,
         shared_state: state.clone(),
-        tool_policy: tool_policy.clone(),
+        preset: state.preset,
         exec_policy: exec_policy.clone(),
         prompt_queue_size: state.prompt_queue_size,
         prompt_channel: None,
@@ -907,9 +901,10 @@ pub async fn interrupt_agent(
 
 /// Validate supervisor constraints for a subagent creation request.
 ///
-/// Returns `(PermissionProfile, ToolPolicy, ExecPolicy, PermissionClass)` for the
+/// Returns `(PermissionProfile, ExecPolicy, PermissionClass)` for the
 /// new subagent if valid. The subagent inherits the supervisor's exec-policy
-/// overrides (cloned), so monotonic strictness holds at creation.
+/// overrides (cloned), so monotonic strictness holds at creation. The classify
+/// preset is daemon-global, so it is not part of the per-agent inheritance.
 ///
 /// `requested_class` is the optional explicit downgrade from the spawn request
 /// (already parsed from the wire string by the caller). When `None`, the child
@@ -921,15 +916,14 @@ pub async fn interrupt_agent(
 /// and 2/3 plateaus).
 ///
 /// Lock ordering: `registry` RwLock is held when calling this function.
-/// Inside, `tool_policy.read()` / `exec_policy.read()` acquire the per-agent
-/// `std::sync::RwLock`s. Never acquire these in reverse order.
+/// Inside, `exec_policy.read()` acquires the per-agent `std::sync::RwLock`.
 fn validate_subagent_request(
     registry: &crate::state::AgentRegistry,
     identity: &crate::auth::Identity,
     supervisor_id: &AgentId,
     workspace_root: &std::path::Path,
     requested_class: Option<PermissionClass>,
-) -> Result<(PermissionProfile, ToolPolicy, ExecPolicy, PermissionClass), ApiError> {
+) -> Result<(PermissionProfile, ExecPolicy, PermissionClass), ApiError> {
     let supervisor_entry = registry.require_supervisor(identity, supervisor_id)?;
     // A faulted supervisor has no running task and no policy to inherit -- it
     // cannot host a new subagent.
@@ -964,12 +958,9 @@ fn validate_subagent_request(
     let supervisor_class = supervisor.identity.config.permissions_class;
     let granted = resolve_granted_class(ceiling, supervisor_class, requested_class)?;
 
-    let tool_policy = supervisor
-        .agent
-        .tool_policy
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    // The exec-policy is inherited from the supervisor (monotone: the daemon
+    // validates the child stays at least as strict on the PUT path). The classify
+    // preset is daemon-global, not per-agent, so it is not inherited here.
     let exec_policy = supervisor
         .agent
         .exec_policy
@@ -977,7 +968,7 @@ fn validate_subagent_request(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
 
-    Ok((permissions, tool_policy, exec_policy, granted))
+    Ok((permissions, exec_policy, granted))
 }
 
 /// Parse the optional `permission_class` wire string (lowercase `"normal"` /

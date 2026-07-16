@@ -92,7 +92,7 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
     // The skills carve (`agent_dir/skills`) lets either class author local skills
     // while the rest of the data tree stays non-writable — the data-dir integrity
     // baseline. Only the agent's own skills dir (disjoint from peers' by `<id>`);
-    // it does not grant write to `meta.json`/`context.json`/`policy.toml`/etc.
+    // it does not grant write to `meta.json`/`context.json`/`exec_policy.toml`/etc.
     #[cfg(all(target_os = "linux", feature = "landlock"))]
     let builder = {
         let lm = lock_manager.clone();

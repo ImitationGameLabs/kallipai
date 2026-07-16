@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use kallip_client::{DaemonClient, PromoteDecision};
 use kallip_common::agentid::AgentId;
-use kallip_common::policy::{ExecDecision, PolicyDecision};
+use kallip_common::policy::{ExecDecision, ExecOverride};
 use kallip_common::promote::{NO_REASON_PROVIDED, SkillPromoteStatus};
 use kallip_common::tokens::parse_token_amount;
 
@@ -202,39 +202,21 @@ async fn main() -> Result<()> {
                 if let Some(sup) = &perms.created_by {
                     println!("created_by: {sup}");
                 }
-                println!();
-                println!("default: {}", perms.tool_policy.default);
-                println!();
-                println!("tool policy:");
-                for (tool, decision) in &perms.tool_policy.tools {
-                    println!("  {tool}: {decision}");
-                }
-            }
-            PolicyCommand::Get(args) => {
-                let policy = client.get_policy(&args.id).await?;
-                println!("default: {}", policy.default);
-                println!();
-                for (tool, decision) in &policy.tools {
-                    println!("{tool}: {decision}");
-                }
-            }
-            PolicyCommand::Set(args) => {
-                let decision: PolicyDecision = args
-                    .decision
-                    .parse()
-                    .map_err(|e| anyhow::anyhow!("invalid decision: {e}"))?;
-                let mut policy = client.get_policy(&args.id).await?;
-                policy.tools.insert(args.tool.clone(), decision);
-                client.update_policy(&args.id, &policy).await?;
-                println!("Updated {} = {}.", args.tool, decision);
+                println!("permission_class: {}", perms.permission_class);
+                println!("preset: {}", perms.preset);
             }
             PolicyCommand::ExecGet(args) => {
                 let policy = client.get_exec_policy(&args.id).await?;
                 if policy.overrides.is_empty() {
                     println!("(no per-command overrides; static catalog applies)");
                 } else {
-                    for (command, decision) in &policy.overrides {
-                        println!("{command}: {decision}");
+                    for (command, entry) in &policy.overrides {
+                        match &entry.reason {
+                            Some(reason) => {
+                                println!("{command}: {} ({reason})", entry.decision);
+                            }
+                            None => println!("{command}: {}", entry.decision),
+                        }
                     }
                 }
             }
@@ -243,10 +225,14 @@ async fn main() -> Result<()> {
                     .decision
                     .parse()
                     .map_err(|e| anyhow::anyhow!("invalid decision: {e}"))?;
+                let entry = match args.reason {
+                    Some(reason) => ExecOverride::new(decision).with_reason(reason),
+                    None => ExecOverride::new(decision),
+                };
                 let mut policy = client.get_exec_policy(&args.id).await?;
                 policy
                     .overrides
-                    .insert(args.command.to_ascii_lowercase(), decision);
+                    .insert(args.command.to_ascii_lowercase(), entry);
                 client.update_exec_policy(&args.id, &policy).await?;
                 println!("Updated {} = {}.", args.command, decision);
             }

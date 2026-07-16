@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::skill_promote::SkillPromoteStore;
 pub use kallip_common::agentid::AgentId;
 use kallip_common::authtoken::TokenHash;
-use kallip_common::policy::{ExecPolicy, ToolPolicy};
+use kallip_common::policy::{ExecPolicy, PolicyPreset};
 pub use kallip_common::protocol::AgentState;
 pub use kallip_common::protocol::AgentSummary;
 use kallip_common::protocol::ApiError;
@@ -25,8 +25,12 @@ pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
     /// Agent registry. **Lock order:** this RwLock must be acquired before
-    /// any `tool_policy` std::sync::RwLock inside agent entries.
+    /// any per-agent `exec_policy` std::sync::RwLock inside agent entries.
     pub registry: RwLock<AgentRegistry>,
+    /// Daemon-global `bash_exec` classify preset, read once at startup from
+    /// `KALLIP_POLICY_PRESET` and immutable for the daemon's lifetime. Every agent
+    /// inherits this same preset (it is not per-agent).
+    pub preset: PolicyPreset,
     pub skill_promote_store: Mutex<SkillPromoteStore>,
     /// Serializes writes to the shared skill directory during promote-request
     /// approval. Held across the consistency check and the actual write so
@@ -139,13 +143,13 @@ pub struct Agent {
     /// Preserved across reactivation so the agent retains its identity. This is the
     /// sole home of the auth-token plaintext.
     pub env: HashMap<String, String>,
-    /// Shared tool policy. The daemon updates this via API; the runtime reads it in evaluate().
-    pub tool_policy: Arc<std::sync::RwLock<ToolPolicy>>,
+    /// The daemon-global `bash_exec` classify preset snapshot this agent was
+    /// spawned under. Immutable for the agent's lifetime (the daemon's preset is
+    /// fixed at startup); read by the runtime policy in `evaluate()`.
+    pub preset: PolicyPreset,
     /// Shared `bash_exec` command-policy overrides. The daemon updates this via
-    /// API; the runtime reads it in evaluate() for `Classify` + `bash_exec`.
-    /// Independent lock class from `tool_policy`: see the lock-order note on the
-    /// policy PUT handlers (`routes/context.rs`). If a handler ever acquires
-    /// both, acquire `tool_policy` before `exec_policy`.
+    /// API (`PUT /exec-policy`); the runtime reads it in `evaluate()` for
+    /// `bash_exec`. The only per-agent runtime-mutable policy knob.
     pub exec_policy: Arc<std::sync::RwLock<ExecPolicy>>,
 }
 
@@ -159,7 +163,7 @@ impl Agent {
 
     /// Snapshot the ephemeral activity string. Poison-tolerant (`into_inner`)
     /// so a prior panic in any cell holder cannot brick `list_agents` /
-    /// `agent_status` for this agent — matches the `tool_policy` pattern.
+    /// `agent_status` for this agent — matches the `exec_policy` pattern.
     pub fn activity_snapshot(&self) -> String {
         self.activity
             .lock()
@@ -291,8 +295,19 @@ impl AppState {
     /// Test-only constructor with generous resource limits.
     #[cfg(test)]
     pub fn new(operator_token_hash: TokenHash, profiles: Arc<ProfileRegistry>) -> Self {
+        Self::new_with_preset(operator_token_hash, profiles, PolicyPreset::Default)
+    }
+
+    /// Test-only constructor with a custom daemon-global preset.
+    #[cfg(test)]
+    pub fn new_with_preset(
+        operator_token_hash: TokenHash,
+        profiles: Arc<ProfileRegistry>,
+        preset: PolicyPreset,
+    ) -> Self {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
+            preset,
             skill_promote_store: Mutex::new(SkillPromoteStore::new()),
             skill_write_lock: Mutex::new(()),
             shutdown: CancellationToken::new(),
@@ -316,9 +331,11 @@ impl AppState {
         max_subagents: usize,
         prompt_queue_size: usize,
         profiles: Arc<ProfileRegistry>,
+        preset: PolicyPreset,
     ) -> Self {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
+            preset,
             skill_promote_store: Mutex::new(SkillPromoteStore::new()),
             skill_write_lock: Mutex::new(()),
             shutdown: CancellationToken::new(),
@@ -1285,7 +1302,14 @@ mod tests {
 
     #[test]
     fn with_limits_sets_max_agents() {
-        let state = AppState::with_limits(TokenHash::of("tok"), 50, 20, 5, make_profile_registry());
+        let state = AppState::with_limits(
+            TokenHash::of("tok"),
+            50,
+            20,
+            5,
+            make_profile_registry(),
+            PolicyPreset::Default,
+        );
         assert_eq!(state.max_agents, 50);
         assert_eq!(state.max_subagents, 20);
         assert_eq!(state.prompt_queue_size, 5);

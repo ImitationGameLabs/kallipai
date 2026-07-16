@@ -1,9 +1,9 @@
 //! Core recursive AST walker for shell command classification.
 
-use kallip_common::policy::ExecDecision;
+use kallip_common::policy::{ExecDecision, PolicyPreset};
 use rable::{ListOperator, Node, NodeKind};
 
-use super::Safety;
+use super::ToolDecision;
 use super::catalog;
 use super::{ClassifyCtx, delegate, helpers, util};
 
@@ -11,41 +11,58 @@ use super::{ClassifyCtx, delegate, helpers, util};
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Parse a shell command string and classify its safety.
+/// Parse a shell command string and classify it under the active preset.
 ///
-/// Returns `Reject` on parse errors (fail-closed).
-pub fn classify_command(ctx: &ClassifyCtx<'_>, command: &str) -> Safety {
+/// Fail-closed: an empty, unparseable, or empty-AST command is `Deny` regardless
+/// of preset. The `allow-all` short-circuit sits here (see below).
+pub fn classify_command(ctx: &ClassifyCtx<'_>, command: &str) -> ToolDecision {
     let trimmed = command.trim();
     if trimmed.is_empty() {
-        return Safety::Reject {
+        return ToolDecision::Deny {
             reason: "empty commands are not allowed".into(),
         };
     }
 
-    match rable::parse(trimmed, false) {
-        Ok(nodes) if nodes.is_empty() => Safety::Reject {
-            reason: "command parsed to an empty AST".into(),
-        },
-        Ok(nodes) => classify_nodes(ctx, &nodes),
-        Err(e) => Safety::Reject {
-            reason: format!("failed to parse command: {e}"),
-        },
+    let nodes = match rable::parse(trimmed, false) {
+        Ok(nodes) if !nodes.is_empty() => nodes,
+        Ok(_) => {
+            return ToolDecision::Deny {
+                reason: "command parsed to an empty AST".into(),
+            };
+        }
+        Err(e) => {
+            return ToolDecision::Deny {
+                reason: format!("failed to parse command: {e}"),
+            };
+        }
+    };
+
+    // `allow-all` short-circuit, placed AFTER parsing (fail-closed) and BEFORE the
+    // walk. This must live at `classify_command` (the single public entry), NOT at
+    // `classify_nodes`: interpreter delegation (`bash -c '...'`) re-enters via
+    // `classify_nodes`, and those inner walks must stay under this short-circuit's
+    // umbrella (a single preset check for the whole command) rather than
+    // re-evaluating the preset per inner node.
+    if ctx.preset() == PolicyPreset::AllowAll {
+        return ToolDecision::Allow;
     }
+
+    classify_nodes(ctx, &nodes)
 }
 
-pub(super) fn classify_nodes(ctx: &ClassifyCtx<'_>, nodes: &[Node]) -> Safety {
+pub(super) fn classify_nodes(ctx: &ClassifyCtx<'_>, nodes: &[Node]) -> ToolDecision {
     nodes
         .iter()
         .map(|n| classify_node(ctx, n))
-        .fold(Safety::ReadOnly, helpers::stricter)
+        .fold(ToolDecision::Allow, helpers::stricter)
 }
 
 /// Public wrapper so sibling modules (helpers, delegate) can recurse back into the walker.
-pub(super) fn classify_node_ref(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
+pub(super) fn classify_node_ref(ctx: &ClassifyCtx<'_>, node: &Node) -> ToolDecision {
     classify_node(ctx, node)
 }
 
-fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
+fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> ToolDecision {
     match &node.kind {
         // --- Simple command ---
         NodeKind::Command {
@@ -54,7 +71,7 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
             redirects,
         } => {
             if words.is_empty() && assignments.is_empty() && redirects.is_empty() {
-                return Safety::Reject {
+                return ToolDecision::Deny {
                     reason: "empty command".into(),
                 };
             }
@@ -64,14 +81,14 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
         // --- Pipeline ---
         // The decision is the OR of the component commands: read-only iff every
         // component is. (Composition cannot synthesize side effects beyond the
-        // union of the components'.) `curl|sh`-style downloads are hard-rejected.
+        // union of the components'.) `curl|sh`-style downloads are hard-denied.
         NodeKind::Pipeline { commands, .. } => {
             let sub = commands
                 .iter()
                 .map(|c| classify_node(ctx, c))
-                .fold(Safety::ReadOnly, helpers::stricter);
+                .fold(ToolDecision::Allow, helpers::stricter);
             let base = if helpers::is_download_to_shell(commands) {
-                Safety::Reject {
+                ToolDecision::Deny {
                     reason: concat!(
                         "downloading and piping to a shell is not allowed; ",
                         "download the file first, review it, then execute it",
@@ -79,7 +96,7 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
                     .into(),
                 }
             } else {
-                Safety::ReadOnly
+                ToolDecision::Allow
             };
             helpers::stricter(base, sub)
         }
@@ -95,16 +112,17 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
                 .iter()
                 .any(|item| item.operator == Some(ListOperator::Background))
             {
-                return Safety::NeedsApproval {
-                    reason: "background operator '&' runs an unobservable process; \
+                return helpers::needs_approval(
+                    ctx,
+                    "background operator '&' runs an unobservable process; \
                         use the runtime's native background execution instead"
                         .into(),
-                };
+                );
             }
             items
                 .iter()
                 .map(|item| classify_node(ctx, &item.command))
-                .fold(Safety::ReadOnly, helpers::stricter)
+                .fold(ToolDecision::Allow, helpers::stricter)
         }
 
         // --- Control flow ---
@@ -175,9 +193,10 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
 
         // --- Function ---
         NodeKind::Function { body, .. } => helpers::stricter(
-            Safety::NeedsApproval {
-                reason: "function definitions can later execute arbitrary code".into(),
-            },
+            helpers::needs_approval(
+                ctx,
+                "function definitions can later execute arbitrary code".into(),
+            ),
             classify_node(ctx, body),
         ),
 
@@ -191,39 +210,38 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
 
         // --- Redirects ---
         NodeKind::Redirect { .. } => helpers::classify_redirect_node(ctx, node),
-        NodeKind::HereDoc { .. } => Safety::NeedsApproval {
-            reason: "here-document is not auto-approved".into(),
-        },
+        NodeKind::HereDoc { .. } => {
+            helpers::needs_approval(ctx, "here-document is not auto-approved".into())
+        }
 
         // --- Substitutions ---
         NodeKind::CommandSubstitution { command, .. } => classify_node(ctx, command),
         NodeKind::ProcessSubstitution { command, .. } => helpers::stricter(
-            Safety::NeedsApproval {
-                reason: "process substitution runs a command".into(),
-            },
+            helpers::needs_approval(ctx, "process substitution runs a command".into()),
             classify_node(ctx, command),
         ),
 
         // --- Words ---
         NodeKind::Word { parts, .. } => {
             if parts.is_empty() {
-                Safety::ReadOnly
+                ToolDecision::Allow
             } else {
                 helpers::classify_word_parts(ctx, parts)
             }
         }
-        NodeKind::WordLiteral { .. } => Safety::ReadOnly,
+        NodeKind::WordLiteral { .. } => ToolDecision::Allow,
 
         // --- Expansions (side-effect-free) ---
-        NodeKind::ParamExpansion { .. } | NodeKind::ParamLength { .. } => Safety::ReadOnly,
+        NodeKind::ParamExpansion { .. } | NodeKind::ParamLength { .. } => ToolDecision::Allow,
 
         NodeKind::ArithmeticExpansion { expression } => expression
             .as_deref()
-            .map_or(Safety::ReadOnly, |e| classify_node(ctx, e)),
+            .map_or(ToolDecision::Allow, |e| classify_node(ctx, e)),
 
-        NodeKind::ParamIndirect { .. } => Safety::NeedsApproval {
-            reason: "indirect parameter expansion can read arbitrary variables".into(),
-        },
+        NodeKind::ParamIndirect { .. } => helpers::needs_approval(
+            ctx,
+            "indirect parameter expansion can read arbitrary variables".into(),
+        ),
 
         // --- Arithmetic command ---
         NodeKind::ArithmeticCommand {
@@ -233,7 +251,7 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
         } => {
             let expr_dec = expression
                 .as_deref()
-                .map_or(Safety::ReadOnly, |e| classify_node(ctx, e));
+                .map_or(ToolDecision::Allow, |e| classify_node(ctx, e));
             helpers::stricter(expr_dec, helpers::classify_redirects(ctx, redirects))
         }
 
@@ -244,11 +262,12 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
 
         // --- Coproc ---
         NodeKind::Coproc { command, .. } => helpers::stricter(
-            Safety::NeedsApproval {
-                reason: "coproc runs an unobservable background process; \
+            helpers::needs_approval(
+                ctx,
+                "coproc runs an unobservable background process; \
                     use the runtime's native background execution instead"
                     .into(),
-            },
+            ),
             classify_node(ctx, command),
         ),
 
@@ -266,16 +285,16 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
         }
         NodeKind::CondNot { operand } => classify_node(ctx, operand),
         NodeKind::CondParen { inner } => classify_node(ctx, inner),
-        NodeKind::CondTerm { .. } => Safety::ReadOnly,
+        NodeKind::CondTerm { .. } => ToolDecision::Allow,
 
         // --- Literals / structural ---
         NodeKind::AnsiCQuote { .. }
         | NodeKind::LocaleString { .. }
         | NodeKind::BraceExpansion { .. }
         | NodeKind::Array { .. }
-        | NodeKind::Comment { .. } => Safety::ReadOnly,
+        | NodeKind::Comment { .. } => ToolDecision::Allow,
 
-        NodeKind::Empty => Safety::Reject {
+        NodeKind::Empty => ToolDecision::Deny {
             reason: "empty command".into(),
         },
 
@@ -284,7 +303,7 @@ fn classify_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Safety {
         | NodeKind::ArithVar { .. }
         | NodeKind::ArithEmpty
         | NodeKind::ArithEscape { .. }
-        | NodeKind::ArithDeprecated { .. } => Safety::ReadOnly,
+        | NodeKind::ArithDeprecated { .. } => ToolDecision::Allow,
 
         // --- Arithmetic expression nodes (with children) ---
         NodeKind::ArithBinaryOp { left, right, .. } => {
@@ -329,7 +348,7 @@ fn classify_simple_command(
     words: &[Node],
     redirects: &[Node],
     assignments: &[Node],
-) -> Safety {
+) -> ToolDecision {
     if words.is_empty() {
         return helpers::classify_assignments(ctx, assignments);
     }
@@ -338,17 +357,15 @@ fn classify_simple_command(
         Some(name) => name.to_ascii_lowercase(),
         None => {
             return helpers::stricter(
-                Safety::NeedsApproval {
-                    reason: "command name is not a literal word".into(),
-                },
+                helpers::needs_approval(ctx, "command name is not a literal word".into()),
                 classify_node(ctx, &words[0]),
             );
         }
     };
 
     // 1. Shell interpreter delegation (re-parses inner commands).
-    if let Some(safety) = delegate::classify_interpreter_delegate(ctx, &cmd_name, words) {
-        return safety;
+    if let Some(decision) = delegate::classify_interpreter_delegate(ctx, &cmd_name, words) {
+        return decision;
     }
 
     // 2. Catalog verdict + exec-policy override.
@@ -356,9 +373,9 @@ fn classify_simple_command(
     //    commands the catalog verdict (constraints included) is authoritative, so
     //    `find -delete` / `git push` / `env -S` stay gated. Ask/Deny only narrow.
     let base_dec = apply_override(
-        &cmd_name,
-        catalog::classify_named_command(ctx.catalog(), &cmd_name, words),
         ctx,
+        &cmd_name,
+        catalog::classify_named_command(ctx, &cmd_name, words),
     );
 
     // 3. Structural child components (redirects, expansions, assignments) fold in
@@ -370,37 +387,82 @@ fn classify_simple_command(
 
     [base_dec, redirect_dec, expansion_dec, assignment_dec]
         .into_iter()
-        .fold(Safety::ReadOnly, helpers::stricter)
+        .fold(ToolDecision::Allow, helpers::stricter)
 }
 
 /// Fold an exec-policy override onto a catalog verdict.
 ///
-/// `catalog_verdict` is `None` when the command is absent from the catalog.
+/// `catalog_verdict` is `None` when the command is absent from the catalog. The
+/// decision lattice:
+///
+/// - **Builtin denylist** (hard floor, checked first): always `Deny`, cannot be
+///   widened by any override. Fires inside delegated bodies too (`bash -c 'sed …'`
+///   re-enters here via interpreter delegation).
+/// - **Override `Deny`/`Ask`**: authoritative — a deliberate supervisor decision,
+///   emitted as `Deny`/`Ask` directly and NOT subject to preset resolution. (Only
+///   the soft "command absent from catalog, no override" fallback tracks the
+///   preset; an explicit override remains meaningful under `auto`.)
+/// - **Override `Allow`**: widens an absent command to `Allow`; for a catalog
+///   command the catalog verdict (constraints included) stays authoritative.
+/// - **No override, absent from catalog**: the soft `needs_approval` fallback
+///   (`Ask` under `default`, `Allow` under `auto`).
+///
+/// A reason-bearing override is surfaced verbatim; a reason-less override falls
+/// back to a generic message. Reason strings are built lazily inside the arms.
 fn apply_override(
-    cmd_name: &str,
-    catalog_verdict: Option<Safety>,
     ctx: &ClassifyCtx<'_>,
-) -> Safety {
-    let deny = || Safety::Reject {
-        reason: format!("denied by exec_policy override for '{cmd_name}'"),
-    };
+    cmd_name: &str,
+    catalog_verdict: Option<ToolDecision>,
+) -> ToolDecision {
+    // Hard floor: builtin-denied commands are always Deny, regardless of the
+    // catalog verdict or any per-agent override. Checked first so it cannot be
+    // widened. Fires inside delegated bodies too (`bash -c 'sed …'` re-enters
+    // here via interpreter delegation).
+    if let Some(reason) = super::builtin_deny_reason(cmd_name) {
+        return ToolDecision::Deny {
+            reason: reason.to_string(),
+        };
+    }
+
+    let ov = ctx.override_for(cmd_name);
+    let decision = ov.map(|o| o.decision);
+    // Borrow the override's reason only when an arm below actually needs it.
+    let reason = || ov.and_then(|o| o.reason.as_deref());
+
     match catalog_verdict {
-        None => match ctx.override_for(cmd_name) {
-            Some(ExecDecision::Allow) => Safety::ReadOnly,
-            Some(ExecDecision::Ask) => Safety::NeedsApproval {
-                reason: format!("'{cmd_name}' is set to 'ask' by exec_policy"),
+        None => match decision {
+            Some(ExecDecision::Allow) => ToolDecision::Allow,
+            Some(ExecDecision::Ask) => ToolDecision::Ask {
+                reason: Some(
+                    reason()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("'{cmd_name}' is set to 'ask' by exec_policy")),
+                ),
             },
-            Some(ExecDecision::Deny) => deny(),
-            None => Safety::NeedsApproval {
-                reason: format!("'{cmd_name}' is not in the read-only catalog"),
+            Some(ExecDecision::Deny) => ToolDecision::Deny {
+                reason: reason()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("denied by exec_policy override for '{cmd_name}'")),
             },
+            None => helpers::needs_approval(
+                ctx,
+                format!("'{cmd_name}' is not in the read-only catalog"),
+            ),
         },
-        Some(catalog_dec) => match ctx.override_for(cmd_name) {
+        Some(catalog_dec) => match decision {
             Some(ExecDecision::Allow) => catalog_dec,
-            Some(ExecDecision::Ask) => Safety::NeedsApproval {
-                reason: format!("'{cmd_name}' is set to 'ask' by exec_policy"),
+            Some(ExecDecision::Ask) => ToolDecision::Ask {
+                reason: Some(
+                    reason()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("'{cmd_name}' is set to 'ask' by exec_policy")),
+                ),
             },
-            Some(ExecDecision::Deny) => deny(),
+            Some(ExecDecision::Deny) => ToolDecision::Deny {
+                reason: reason()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("denied by exec_policy override for '{cmd_name}'")),
+            },
             None => catalog_dec,
         },
     }

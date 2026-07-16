@@ -111,6 +111,7 @@ async fn main() -> Result<()> {
         args.max_subagents,
         args.prompt_queue_size,
         profiles,
+        kallip_runtime::config::policy_preset_from_env(),
     ));
 
     // Restore persisted agents before accepting requests.

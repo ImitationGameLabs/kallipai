@@ -4,13 +4,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::env_util::{DEFAULT_CONTEXT_WINDOW_TOKENS, parse_env, parse_env_list};
 use crate::retry::RetryPolicy;
-use crate::tools::context::{
-    ContextEvictTool, ContextPinTool, ContextStatusTool, ContextUnpinTool, ExecPolicyTool,
-};
-use crate::tools::skill::FilePinTool;
 use kallip_common::AgentId;
-use kallip_common::policy::{PolicyDecision, ToolPolicy};
-use kallip_shell::tools::names;
+use kallip_common::policy::PolicyPreset;
 
 const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "You are a minimal coding agent. ",
@@ -38,152 +33,35 @@ const DEFAULT_PINNED_BUDGET_RATIO: f64 = 0.25;
 const DEFAULT_CONTEXT_THRESHOLDS: &[u8] = &[50, 60, 70, 80];
 const DEFAULT_TOKEN_BUDGET_WARNINGS: &[u8] = &[80, 95];
 
-/// Named policy preset selectable via `KALLIP_POLICY_PRESET`.
+/// Resolve the daemon-global `bash_exec` classify preset from
+/// `KALLIP_POLICY_PRESET`.
 ///
-/// Each variant maps to a concrete [`ToolPolicy`]. When the env var is unset,
-/// the existing `KALLIP_ALLOW_TOOLS` / hardcoded default logic applies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PolicyPreset {
-    /// All tools allowed — `default: Allow`, no per-tool overrides.
-    AllowAll,
-    /// All tools require approval — `default: Ask`, no per-tool overrides.
-    AskAll,
-}
-
-impl std::fmt::Display for PolicyPreset {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::AllowAll => "allow-all",
-            Self::AskAll => "ask-all",
-        })
-    }
-}
-
-impl std::str::FromStr for PolicyPreset {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "allow-all" => Ok(Self::AllowAll),
-            "ask-all" => Ok(Self::AskAll),
-            _ => Err(format!(
-                "invalid policy preset '{s}' (expected allow-all or ask-all)"
-            )),
-        }
-    }
-}
-
-/// Default tool policy matching the current hardcoded behavior.
-///
-/// Tool names are referenced via each tool's `NAME` constant (context/skill
-/// tools, local) and the `kallip_shell::tools::names` module (shell tools)
-/// rather than duplicated string literals, keeping this map in lockstep with
-/// the tool registry.
-pub fn default_tool_policy() -> ToolPolicy {
-    use std::collections::BTreeMap;
-    let mut tools = BTreeMap::new();
-    tools.insert(names::BG_READ.into(), PolicyDecision::Allow);
-    // The agent only kills background tasks it spawned itself (task_id-scoped),
-    // so there is no cross-agent or user-workspace risk worth gating on.
-    tools.insert(names::BG_KILL.into(), PolicyDecision::Allow);
-    tools.insert(names::BASH_EXEC.into(), PolicyDecision::Classify);
-    tools.insert(ContextPinTool::NAME.into(), PolicyDecision::Allow);
-    tools.insert(ContextUnpinTool::NAME.into(), PolicyDecision::Allow);
-    tools.insert(ContextStatusTool::NAME.into(), PolicyDecision::Allow);
-    tools.insert(ContextEvictTool::NAME.into(), PolicyDecision::Allow);
-    tools.insert(FilePinTool::NAME.into(), PolicyDecision::Allow);
-    tools.insert(ExecPolicyTool::NAME.into(), PolicyDecision::Allow);
-    ToolPolicy {
-        default: PolicyDecision::Ask,
-        tools,
-    }
-}
-
-/// Resolve a [`PolicyPreset`] to a concrete [`ToolPolicy`].
-fn tool_policy_from_preset(preset: PolicyPreset) -> ToolPolicy {
-    match preset {
-        PolicyPreset::AllowAll => ToolPolicy::new(PolicyDecision::Allow),
-        PolicyPreset::AskAll => ToolPolicy::new(PolicyDecision::Ask),
-    }
-}
-
-/// Returns the tool policy using `KALLIP_ALLOW_TOOLS` (legacy) or the
-/// hardcoded [`default_tool_policy`].
-///
-/// See [`tool_policy_from_env`] for the full resolution chain that includes
-/// `KALLIP_POLICY_PRESET` support.
-fn tool_policy_from_env_inner() -> ToolPolicy {
-    let Ok(raw) = std::env::var("KALLIP_ALLOW_TOOLS") else {
-        return default_tool_policy();
-    };
-    if raw.trim().is_empty() {
-        return default_tool_policy();
-    }
-    let known = default_tool_policy();
-    let mut tools = std::collections::BTreeMap::new();
-    for name in raw.split(',') {
-        let name = name.trim();
-        if !name.is_empty() {
-            if !known.tools.contains_key(name) {
-                tracing::warn!(
-                    "KALLIP_ALLOW_TOOLS: unknown tool name '{name}' \
-                     — not in default tool policy, may be a typo"
-                );
-            }
-            tools.insert(name.to_owned(), PolicyDecision::Allow);
-        }
-    }
-    ToolPolicy {
-        default: PolicyDecision::Ask,
-        tools,
-    }
-}
-
-/// Returns the tool policy for a root agent, checking env vars in priority
-/// order:
-///
-/// 1. `KALLIP_POLICY_PRESET` — named preset (`allow-all` or `ask-all`).
-/// 2. `KALLIP_ALLOW_TOOLS` — legacy comma-separated allow list.
-/// 3. Hardcoded [`default_tool_policy`] — fallback.
-///
-/// `Classify` is not expressible via presets — it is a per-tool behavior
-/// unique to the default policy. When a preset is active, `bash_exec`
-/// resolves to the preset's default decision instead.
-///
-/// Only affects root agents at creation time. Subagents inherit their
-/// supervisor's policy.
-pub fn tool_policy_from_env() -> ToolPolicy {
-    // Priority 1: named preset.
+/// Unset or empty → [`PolicyPreset::Default`] (strict). Accepts `default`, `auto`,
+/// and `allow-all`. An unrecognized value is a fatal misconfiguration (the preset
+/// is structural to the sandbox), so it panics — matching the env-knob convention
+/// of [`permission_class_from_env`]. Only read once at daemon startup; the preset
+/// is immutable for the daemon's lifetime.
+pub fn policy_preset_from_env() -> PolicyPreset {
     let Ok(raw) = std::env::var("KALLIP_POLICY_PRESET") else {
-        return tool_policy_from_env_inner();
+        return PolicyPreset::Default;
     };
-
     let raw = raw.trim();
     if raw.is_empty() {
-        return tool_policy_from_env_inner();
+        return PolicyPreset::Default;
     }
-
-    let preset = raw.parse::<PolicyPreset>().unwrap_or_else(|e| {
+    raw.parse::<PolicyPreset>().unwrap_or_else(|e| {
         panic!("KALLIP_POLICY_PRESET: {e}");
-    });
-
-    if std::env::var("KALLIP_ALLOW_TOOLS").is_ok_and(|v| !v.trim().is_empty()) {
-        tracing::info!(
-            "KALLIP_POLICY_PRESET={preset} takes precedence \
-             over KALLIP_ALLOW_TOOLS"
-        );
-    }
-
-    tool_policy_from_preset(preset)
+    })
 }
 
 /// Resolve the root agent's permission class from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`.
 ///
-/// Root-only test knob, parallel to [`tool_policy_from_env`]: read in the
+/// Root-only test knob, parallel to [`policy_preset_from_env`]: read in the
 /// daemon's root-create branch, never on the subagent or restore paths
 /// (subagents derive their class from `ceiling_for_tier`; restore uses the
 /// persisted `meta.json`). Accepts lowercase `"normal"` / `"guest"` — the env-var
 /// convention, distinct from the PascalCase serde form persisted in `meta.json`.
-/// Panics on an invalid value, matching [`tool_policy_from_env`]'s misconfig behavior.
+/// Panics on an invalid value, matching [`policy_preset_from_env`]'s misconfig behavior.
 pub fn permission_class_from_env() -> PermissionClass {
     let Ok(raw) = std::env::var("KALLIP_ROOT_AGENT_PERMISSION_CLASS") else {
         return PermissionClass::default();
@@ -631,7 +509,10 @@ impl PermissionProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kallip_common::policy::PolicyDecision;
+    use crate::tools::context::ContextUnpinTool;
+    use crate::tools::skill::FilePinTool;
+    use kallip_common::policy::PolicyPreset;
+    use kallip_shell::tools::names;
 
     #[test]
     fn permission_class_ceiling_matches_tier_table() {
@@ -831,135 +712,62 @@ mod tests {
     }
 
     #[test]
-    fn policy_preset_display_roundtrip() {
-        for preset in [PolicyPreset::AllowAll, PolicyPreset::AskAll] {
-            let s = preset.to_string();
-            assert_eq!(s.parse::<PolicyPreset>().unwrap(), preset);
-        }
-    }
-
-    #[test]
-    fn policy_preset_rejects_invalid() {
-        assert!("default".parse::<PolicyPreset>().is_err());
-        assert!("copilot".parse::<PolicyPreset>().is_err());
-        assert!("".parse::<PolicyPreset>().is_err());
-    }
-
-    #[test]
-    fn preset_allow_all_sets_everything_to_allow() {
-        let policy = tool_policy_from_preset(PolicyPreset::AllowAll);
-        assert_eq!(policy.default, PolicyDecision::Allow);
-        assert!(policy.tools.is_empty());
-        // decision_for falls back to default.
-        assert_eq!(policy.decision_for("bash_exec"), PolicyDecision::Allow);
-        assert_eq!(policy.decision_for("unknown_tool"), PolicyDecision::Allow);
-    }
-
-    #[test]
-    fn preset_ask_all_sets_everything_to_ask() {
-        let policy = tool_policy_from_preset(PolicyPreset::AskAll);
-        assert_eq!(policy.default, PolicyDecision::Ask);
-        assert!(policy.tools.is_empty());
-        assert_eq!(policy.decision_for("bash_exec"), PolicyDecision::Ask);
-        assert_eq!(policy.decision_for("unknown_tool"), PolicyDecision::Ask);
-    }
-
-    #[test]
-    fn tool_policy_from_env_no_vars_returns_default() {
-        temp_env::with_vars_unset(["KALLIP_POLICY_PRESET", "KALLIP_ALLOW_TOOLS"], || {
-            let policy = tool_policy_from_env();
-            let expected = default_tool_policy();
-            assert_eq!(policy.default, expected.default);
-            assert_eq!(policy.tools, expected.tools);
+    fn policy_preset_from_env_unset_returns_default() {
+        temp_env::with_vars_unset(["KALLIP_POLICY_PRESET"], || {
+            assert_eq!(policy_preset_from_env(), PolicyPreset::Default);
         });
     }
 
     #[test]
-    fn tool_policy_from_env_preset_allow_all() {
-        temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("allow-all"))], || {
-            let policy = tool_policy_from_env();
-            assert_eq!(policy.default, PolicyDecision::Allow);
-            assert!(policy.tools.is_empty());
-        });
-    }
-
-    #[test]
-    fn tool_policy_from_env_preset_ask_all() {
-        temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("ask-all"))], || {
-            let policy = tool_policy_from_env();
-            assert_eq!(policy.default, PolicyDecision::Ask);
-            assert!(policy.tools.is_empty());
-        });
-    }
-
-    #[test]
-    fn tool_policy_from_env_whitespace_padded_preset() {
-        temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("  allow-all  "))], || {
-            let policy = tool_policy_from_env();
-            assert_eq!(policy.default, PolicyDecision::Allow);
-            assert!(policy.tools.is_empty());
-        });
-    }
-
-    #[test]
-    fn tool_policy_from_env_preset_takes_precedence_over_allow_tools() {
-        temp_env::with_vars(
-            [
-                ("KALLIP_POLICY_PRESET", Some("ask-all")),
-                ("KALLIP_ALLOW_TOOLS", Some("bash_exec")),
-            ],
-            || {
-                let policy = tool_policy_from_env();
-                // Preset wins — should be ask-all, not the allow-tools policy.
-                assert_eq!(policy.default, PolicyDecision::Ask);
-                assert!(policy.tools.is_empty());
-            },
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "KALLIP_POLICY_PRESET: invalid policy preset")]
-    fn tool_policy_from_env_invalid_preset_panics() {
-        temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("gibberish"))], || {
-            let _ = tool_policy_from_env();
-        });
-    }
-
-    #[test]
-    fn tool_policy_from_env_empty_preset_falls_through() {
+    fn policy_preset_from_env_empty_returns_default() {
         temp_env::with_vars([("KALLIP_POLICY_PRESET", Some(""))], || {
-            let policy = tool_policy_from_env();
-            let expected = default_tool_policy();
-            assert_eq!(policy.default, expected.default);
+            assert_eq!(policy_preset_from_env(), PolicyPreset::Default);
         });
     }
 
     #[test]
-    fn tool_policy_from_env_allow_tools_still_works() {
-        temp_env::with_vars(
-            [
-                ("KALLIP_POLICY_PRESET", None::<&str>),
-                ("KALLIP_ALLOW_TOOLS", Some("bash_exec")),
-            ],
-            || {
-                let policy = tool_policy_from_env();
-                assert_eq!(policy.default, PolicyDecision::Ask);
-                assert_eq!(policy.decision_for("bash_exec"), PolicyDecision::Allow);
-            },
-        );
+    fn policy_preset_from_env_explicit_default() {
+        temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("default"))], || {
+            assert_eq!(policy_preset_from_env(), PolicyPreset::Default);
+        });
+    }
+
+    #[test]
+    fn policy_preset_from_env_auto() {
+        temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("auto"))], || {
+            assert_eq!(policy_preset_from_env(), PolicyPreset::Auto);
+        });
+    }
+
+    #[test]
+    fn policy_preset_from_env_allow_all() {
+        temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("allow-all"))], || {
+            assert_eq!(policy_preset_from_env(), PolicyPreset::AllowAll);
+        });
+    }
+
+    #[test]
+    fn policy_preset_from_env_whitespace_padded() {
+        temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("  auto  "))], || {
+            assert_eq!(policy_preset_from_env(), PolicyPreset::Auto);
+        });
     }
 
     #[test]
     #[should_panic(expected = "KALLIP_POLICY_PRESET: invalid policy preset")]
-    fn tool_policy_from_env_invalid_preset_panics_even_with_allow_tools() {
-        temp_env::with_vars(
-            [
-                ("KALLIP_POLICY_PRESET", Some("gibberish")),
-                ("KALLIP_ALLOW_TOOLS", Some("bash_exec")),
-            ],
-            || {
-                let _ = tool_policy_from_env();
-            },
-        );
+    fn policy_preset_from_env_invalid_panics() {
+        temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("gibberish"))], || {
+            let _ = policy_preset_from_env();
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "KALLIP_POLICY_PRESET: invalid policy preset")]
+    fn policy_preset_from_env_ask_all_no_longer_valid() {
+        // `ask-all` was dropped; it must now be a fatal misconfiguration rather
+        // than silently falling back.
+        temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("ask-all"))], || {
+            let _ = policy_preset_from_env();
+        });
     }
 }

@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent_task::AgentContext;
 use crate::approval::ApprovalStore;
-use crate::config::{AgentConfig, PermissionProfile, default_tool_policy};
+use crate::config::{AgentConfig, PermissionProfile};
 use crate::context::{ContextStore, ContextSummarizer};
 use crate::failover::FailoverState;
 use crate::policy::{AgentPolicy, AuthorizedToolExecutor};
@@ -101,8 +101,8 @@ pub(crate) async fn ctx_from_source(
     let executor = AuthorizedToolExecutor::new(
         ToolDispatcher::new(),
         AgentPolicy::new(
-            Arc::new(RwLock::new(default_tool_policy())),
             Arc::new(RwLock::new(kallip_common::policy::ExecPolicy::default())),
+            kallip_common::policy::PolicyPreset::Default,
         ),
         approvals.clone(),
     );

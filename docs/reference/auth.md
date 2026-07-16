@@ -71,11 +71,10 @@ is ignored on root spawns, which use `KALLIP_ROOT_AGENT_PERMISSION_CLASS`
 | ------------------------------ | -------- | -------- | --------- |
 | `GET /agents/{id}/status`      | Yes      | —        | Yes       |
 | `GET /agents/{id}/permissions` | Yes      | —        | Yes       |
-| `GET /agents/{id}/policy`      | Yes      | —        | Yes       |
-| `PUT /agents/{id}/policy`      | Yes      | Yes      | —         |
 
-Read-only context endpoints are accessible to any authenticated identity.
-Policy mutation requires operator or superior.
+Read-only context endpoints are accessible to any authenticated identity. The
+classify preset is daemon-global and immutable; per-command `bash_exec` overrides
+(`PUT /agents/{id}/exec-policy`) require operator or superior.
 
 ### Approvals
 
@@ -83,12 +82,14 @@ Policy mutation requires operator or superior.
 | ---------------------- | -------- | -------- | --------- | ------------------------------------ |
 | `GET /approvals`       | Yes      | —        | Yes       | Results filtered to superior's scope |
 | `GET /approvals/{id}`  | Yes      | Yes      | —         | Must be superior of the owning agent |
-| `POST /approvals/{id}` | Yes      | Yes      | —         | Approve has additional policy gate   |
+| `POST /approvals/{id}` | Yes      | Yes      | —         | Approve has additional classify gate |
 
-For **approve** decisions, an additional policy gate applies: the caller's own
-`ToolPolicy` must set the specific tool to `allow`. This prevents superiors from
-using subordinates as proxies to bypass their own tool restrictions. The
-operator identity is exempt. **Deny** decisions have no policy gate.
+For **approve** decisions on a deferred `bash_exec`, an additional classify gate
+applies: the caller's own classify rule-set (the daemon-global preset plus the
+caller's `ExecPolicy` overrides) must classify the command as `allow`. This
+prevents superiors from using subordinates as proxies to run a command their own
+policy would gate. The operator identity is exempt. **Deny** decisions have no
+gate.
 
 ### Skills
 

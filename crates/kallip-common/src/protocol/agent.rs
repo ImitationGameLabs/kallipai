@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agentid::AgentId;
 use crate::context::ContextUsage;
-use crate::policy::ToolPolicy;
+use crate::policy::PolicyPreset;
 use crate::retry::RetryRecord;
 
 /// Agent lifecycle state exposed via the status endpoint.
@@ -199,7 +199,9 @@ pub struct AgentPermissionsResponse {
     pub max_depth: u8,
     pub workspace_root: String,
     pub created_by: Option<AgentId>,
-    pub tool_policy: ToolPolicy,
+    /// The daemon-global `bash_exec` classify rule-set in effect for this agent
+    /// (read-only — it is set once at daemon startup from `KALLIP_POLICY_PRESET`).
+    pub preset: PolicyPreset,
     /// FS-access permission class actually granted to this agent, as the
     /// lowercase wire spelling (`"normal"` / `"guest"`) — the value the daemon
     /// clamped at spawn and re-validates on restore. Surfaced here (it was

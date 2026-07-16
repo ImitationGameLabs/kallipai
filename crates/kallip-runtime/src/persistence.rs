@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use kallip_common::policy::{ExecPolicy, ToolPolicy};
+use kallip_common::policy::ExecPolicy;
 use serde::{Deserialize, Serialize};
 use time::{Duration as TimeDuration, OffsetDateTime};
 
@@ -73,7 +73,7 @@ fn canonical_data_root() -> Result<PathBuf> {
 ///
 /// Such overlap must be rejected by the daemon: an agent whose workspace *is* (or
 /// *contains*) the data tree could write daemon bookkeeping (`meta.json`,
-/// `context.json`, `policy.toml`, peers' `agents/<id>/`, ...). With the overlap
+/// `context.json`, `exec_policy.toml`, peers' `agents/<id>/`, ...). With the overlap
 /// eliminated, landlock alone enforces the data-dir integrity baseline (the agent's
 /// writable set never covers the data tree except its own `agents/<id>/skills/`).
 ///
@@ -167,7 +167,7 @@ pub fn create_agent_dir(
 ///
 /// Call this outside the registry lock (file I/O); the caller then updates the
 /// in-memory `AgentConfig` under the lock — persist-first-then-memory, mirroring
-/// `routes::context::update_policy`. `check_meta` is startup-only, so the two
+/// `routes::context::update_exec_policy`. `check_meta` is startup-only, so the two
 /// meta writers never run concurrently.
 pub fn rewrite_meta(dir: &Path, role: Option<&str>, description: Option<&str>) -> Result<()> {
     let path = dir.join("meta.json");
@@ -186,7 +186,7 @@ pub fn rewrite_meta(dir: &Path, role: Option<&str>, description: Option<&str>) -
 /// Move a lived agent's directory from `agents/` to `archived/` on remove.
 ///
 /// The agent's data (history, `context.json` with cumulative usage, approvals,
-/// policy, meta) is preserved verbatim — removal becomes archival, not
+/// exec_policy, meta) is preserved verbatim — removal becomes archival, not
 /// destruction. `archived/` is a sibling of `agents/`, so it is invisible to
 /// [`scan_agents`] and the live registry.
 ///
@@ -289,20 +289,6 @@ pub fn persist_context(json: &str, dir: &Path) -> Result<()> {
 /// Serialize and write approval store to approvals.json.
 pub fn persist_approvals(json: &str, dir: &Path) -> Result<()> {
     atomic_write(&dir.join("approvals.json"), json)
-}
-
-/// Serialize and write tool policy to policy.toml.
-pub fn persist_policy(dir: &Path, policy: &ToolPolicy) -> Result<()> {
-    let toml_str = toml::to_string_pretty(policy).context("serializing policy.toml")?;
-    atomic_write(&dir.join("policy.toml"), &toml_str)
-}
-
-/// Load tool policy from policy.toml.
-/// Errors on missing file, read failure, or parse failure.
-pub fn load_policy(dir: &Path) -> Result<ToolPolicy> {
-    let path = dir.join("policy.toml");
-    let content = fs::read_to_string(&path).context("reading policy.toml")?;
-    toml::from_str(&content).context("parsing policy.toml")
 }
 
 /// Serialize and write the `bash_exec` exec-policy overrides to exec_policy.toml.

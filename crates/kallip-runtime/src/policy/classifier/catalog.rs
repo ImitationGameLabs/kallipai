@@ -2,19 +2,21 @@
 //! commands the classifier treats as side-effect-free.
 //!
 //! A command absent from [`READ_ONLY_CATALOG`] is never auto-approved:
-//! [`classify_named_command`] returns [`Safety::NeedsApproval`] for it. "What is
-//! allowed" is therefore an explicit, auditable list rather than an implicit
-//! string fallback. Mutating/dangerous commands (`rm`, `sudo`, `dd`, …) are not
-//! listed and so defer to approval by default — there is no separate "dangerous
-//! list" to keep in sync.
+//! [`classify_named_command`] returns `None` for it (the walker then resolves it
+//! via the preset). "What is allowed" is therefore an explicit, auditable list
+//! rather than an implicit string fallback. Mutating/dangerous commands (`rm`,
+//! `sudo`, `dd`, …) are not listed and so defer to approval by default — there is
+//! no separate "dangerous list" to keep in sync.
 
 use rable::Node;
 
-use super::Safety;
+use super::ClassifyCtx;
+use super::ToolDecision;
+use super::helpers::needs_approval;
 use super::util;
 
-/// A constraint that can downgrade an otherwise-allowed command to
-/// [`Safety::NeedsApproval`].
+/// A constraint that can downgrade an otherwise-allowed command to "needs
+/// approval" (which the preset then resolves to `Ask` or `Allow`).
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Constraint {
     /// Only these subcommands are read-only. Any missing, non-literal, or
@@ -40,8 +42,8 @@ pub(super) struct CommandSpec {
 impl CommandSpec {
     /// Apply this spec's constraints to the command words.
     ///
-    /// Returns [`Safety::ReadOnly`] only if no constraint trips.
-    fn classify(&self, words: &[Node]) -> Safety {
+    /// Returns [`ToolDecision::Allow`] only if no constraint trips.
+    fn classify(&self, ctx: &ClassifyCtx<'_>, words: &[Node]) -> ToolDecision {
         for constraint in self.constraints {
             match constraint {
                 Constraint::Subcommands(safe) => {
@@ -62,31 +64,34 @@ impl CommandSpec {
                         continue;
                     };
                     if !safe.contains(&sub) {
-                        return Safety::NeedsApproval {
-                            reason: format!(
+                        return needs_approval(
+                            ctx,
+                            format!(
                                 "'{} {}' is not a read-only {} subcommand",
                                 self.name, sub, self.name
                             ),
-                        };
+                        );
                     }
                 }
                 Constraint::MutatingFlags(flags) => {
                     if let Some(flag) = util::find_mutating_flag(words, flags) {
-                        return Safety::NeedsApproval {
-                            reason: format!("'{}' flag '{}' may mutate state", self.name, flag),
-                        };
+                        return needs_approval(
+                            ctx,
+                            format!("'{}' flag '{}' may mutate state", self.name, flag),
+                        );
                     }
                 }
                 Constraint::MutatingPredicate(predicate) => {
                     if predicate(words) {
-                        return Safety::NeedsApproval {
-                            reason: format!("'{}' invocation runs a command", self.name),
-                        };
+                        return needs_approval(
+                            ctx,
+                            format!("'{}' invocation runs a command", self.name),
+                        );
                     }
                 }
             }
         }
-        Safety::ReadOnly
+        ToolDecision::Allow
     }
 }
 
@@ -223,6 +228,36 @@ pub(super) static SENSITIVE_ENV_VARS: &[&str] = &[
     "IFS",
 ];
 
+/// Commands refused by the classifier in every mode that runs it (`default` and
+/// `auto`), each with a curated reason surfaced to the agent. Checked as a hard
+/// floor at the top of `apply_override` (`walker.rs`), before per-agent overrides,
+/// so they cannot be widened. `allow-all` does not run the classifier, so it is
+/// unaffected. Direct invocations only — wrapped forms (`busybox sed`, `env sed`,
+/// `nice sed`) key off the outer command name and bypass a name-only check
+/// (defense-in-depth, the same gap the catalog allow-list has).
+pub(super) static BUILTIN_DENYLIST: &[(&str, &str)] = &[
+    (
+        "sed",
+        "silent substitution; the scope of changes is hard to confirm; \
+         make changes manually",
+    ),
+    (
+        "awk",
+        "complex, error-prone syntax; a misread misleads decisions; \
+         use a more targeted tool",
+    ),
+    (
+        "ed",
+        "line-editor scripts mutate files silently; \
+         hard to confirm the scope of changes",
+    ),
+    (
+        "ex",
+        "line-editor (ex mode) scripts mutate files silently; \
+         hard to confirm the scope of changes",
+    ),
+];
+
 // ---------------------------------------------------------------------------
 // Rendering (for the agent self-query tool / CLI)
 // ---------------------------------------------------------------------------
@@ -251,16 +286,17 @@ pub(super) fn summarize_constraints(constraints: &[Constraint]) -> Vec<String> {
 ///
 /// Returns `None` when the command is absent from the catalog (the caller
 /// decides its fate, factoring in exec-policy overrides). A `Some` verdict
-/// already reflects the spec's constraints (e.g. `find -delete` → NeedsApproval).
+/// already reflects the spec's constraints (e.g. `find -delete` → Ask/Deny).
 pub(super) fn classify_named_command(
-    catalog: &'static [CommandSpec],
+    ctx: &ClassifyCtx<'_>,
     name: &str,
     words: &[Node],
-) -> Option<Safety> {
+) -> Option<ToolDecision> {
+    let catalog = ctx.catalog();
     catalog
         .iter()
         .find(|spec| spec.name == name)
-        .map(|spec| spec.classify(words))
+        .map(|spec| spec.classify(ctx, words))
 }
 
 // ---------------------------------------------------------------------------

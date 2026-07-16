@@ -16,7 +16,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use kallip_common::agentid::AgentId;
 use kallip_common::authtoken::MintedToken;
-use kallip_common::policy::{ExecPolicy, ToolPolicy};
+use kallip_common::policy::ExecPolicy;
 use kallip_runtime::config::AgentConfig;
 use kallip_runtime::persistence;
 use kallip_runtime::policy::classifier;
@@ -32,16 +32,14 @@ use crate::token::AGENT;
 struct ChainNode {
     agent_id: AgentId,
     meta: persistence::AgentMeta,
-    policy: ToolPolicy,
     exec_policy: ExecPolicy,
 }
 
 /// Pre-loaded data for all agents being restored.
 /// Eliminates redundant disk reads during supervisor chain validation
-/// by caching meta and policy loaded during the scan phase.
+/// by caching meta and exec-policy loaded during the scan phase.
 struct RestoreIndex {
     meta: HashMap<AgentId, persistence::AgentMeta>,
-    policy: HashMap<AgentId, ToolPolicy>,
     exec: HashMap<AgentId, ExecPolicy>,
 }
 
@@ -51,17 +49,6 @@ impl RestoreIndex {
         match self.meta.get(id) {
             Some(m) => Ok(m.clone()),
             None => persistence::read_meta(id),
-        }
-    }
-
-    /// Look up tool policy. Falls back to disk read on cache miss.
-    fn get_policy(&self, id: &AgentId) -> anyhow::Result<ToolPolicy> {
-        match self.policy.get(id) {
-            Some(p) => Ok(p.clone()),
-            None => {
-                let dir = persistence::agent_dir(id).context("cannot resolve agent dir")?;
-                persistence::load_policy(&dir).context("failed to load policy")
-            }
         }
     }
 
@@ -98,9 +85,6 @@ fn load_supervisor_chain(
         let meta = index
             .get_meta(&current_id)
             .context("incomplete supervisor chain")?;
-        let policy = index
-            .get_policy(&current_id)
-            .context("cannot load supervisor policy")?;
         let exec_policy = index
             .get_exec_policy(&current_id)
             .context("cannot load supervisor exec_policy")?;
@@ -109,7 +93,6 @@ fn load_supervisor_chain(
         chain.push(ChainNode {
             agent_id: current_id,
             meta,
-            policy,
             exec_policy,
         });
 
@@ -137,46 +120,9 @@ fn validate_depth_from_chain(
     Ok(kallip_runtime::config::DEFAULT_MAX_DEPTH.saturating_sub(chain_depth))
 }
 
-/// Validate that `policy` is at least as strict as every ancestor's policy
-/// in the pre-loaded chain. Checks adjacent-pair monotonicity to match the
-/// original recursive semantics.
-fn validate_policy_from_chain(
-    agent_id: &AgentId,
-    policy: &ToolPolicy,
-    chain: &[ChainNode],
-) -> anyhow::Result<()> {
-    // Agent's policy must be >= immediate supervisor's policy.
-    if let Some(supervisor) = chain.first() {
-        policy
-            .validate_at_least_as_strict_as(&supervisor.policy)
-            .map_err(|violations| {
-                anyhow::anyhow!(
-                    "agent {agent_id}: policy is less strict than supervisor: {}",
-                    violations.join("; ")
-                )
-            })?;
-    }
-
-    // Chain monotonicity: each ancestor's policy must be >= its own supervisor's.
-    for window in chain.windows(2) {
-        window[0]
-            .policy
-            .validate_at_least_as_strict_as(&window[1].policy)
-            .map_err(|violations| {
-                anyhow::anyhow!(
-                    "agent {}: policy is less strict than supervisor: {}",
-                    window[0].agent_id,
-                    violations.join("; ")
-                )
-            })?;
-    }
-
-    Ok(())
-}
-
 /// Validate that `exec_policy` is at least as strict as every ancestor's
 /// exec policy in the pre-loaded chain, comparing *effective* decisions against
-/// the static catalog baseline. Mirrors [`validate_policy_from_chain`].
+/// the static catalog baseline.
 fn validate_exec_policy_from_chain(
     agent_id: &AgentId,
     exec_policy: &ExecPolicy,
@@ -276,9 +222,6 @@ async fn restore_one(
     // configuration.
     persistence::ensure_workspace_disjoint(&config.workspace_root)?;
 
-    let tool_policy = index
-        .get_policy(&p.agent_id)
-        .context("failed to load policy")?;
     let exec_policy = index
         .get_exec_policy(&p.agent_id)
         .context("failed to load exec_policy")?;
@@ -301,7 +244,6 @@ async fn restore_one(
             depth,
             &supervisor_chain,
         )?;
-        validate_policy_from_chain(&p.agent_id, &tool_policy, &supervisor_chain)?;
         validate_exec_policy_from_chain(&p.agent_id, &exec_policy, &supervisor_chain)?;
     }
     let chain_ids: Vec<AgentId> = supervisor_chain
@@ -331,7 +273,6 @@ async fn restore_one(
     let token = MintedToken::generate(AGENT);
     let env = SpawnArgs::default_env(&p.agent_id, token.secret());
 
-    let tool_policy = Arc::new(std::sync::RwLock::new(tool_policy));
     let exec_policy = Arc::new(std::sync::RwLock::new(exec_policy));
 
     // Acquire the workspace write-lock (Normal only) -- the same invariant
@@ -377,7 +318,7 @@ async fn restore_one(
         auth_token_hash: token.hash().clone(),
         env,
         shared_state: shared_state.clone(),
-        tool_policy,
+        preset: shared_state.preset,
         exec_policy,
         prompt_queue_size: shared_state.prompt_queue_size,
         prompt_channel: None,
@@ -458,22 +399,17 @@ pub async fn restore_agents(state: &SharedState) {
 
     info!(count = pending.len(), "restoring agents");
 
-    // Build index: meta from scan, policy loaded once per agent.
+    // Build index: meta from scan, exec-policy loaded once per agent.
     let mut meta_map = HashMap::new();
-    let mut policy_map = HashMap::new();
     let mut exec_map = HashMap::new();
     for p in &pending {
         meta_map.insert(p.agent_id.clone(), p.meta.clone());
-        if let Ok(policy) = persistence::load_policy(&p.agent_dir) {
-            policy_map.insert(p.agent_id.clone(), policy);
-        }
         if let Ok(exec) = persistence::load_exec_policy(&p.agent_dir) {
             exec_map.insert(p.agent_id.clone(), exec);
         }
     }
     let index = RestoreIndex {
         meta: meta_map,
-        policy: policy_map,
         exec: exec_map,
     };
 
@@ -677,7 +613,7 @@ pub async fn restore_agents(state: &SharedState) {
 mod tests {
     use super::{ChainNode, faulted_from_meta, validate_permission_class_from_chain};
     use kallip_common::agentid::AgentId;
-    use kallip_common::policy::{ExecPolicy, PolicyDecision, ToolPolicy};
+    use kallip_common::policy::ExecPolicy;
     use kallip_runtime::config::PermissionClass;
     use kallip_runtime::persistence::AgentMeta;
 
@@ -695,7 +631,6 @@ mod tests {
                 description: String::new(),
                 permissions_class: class,
             },
-            policy: ToolPolicy::new(PolicyDecision::Allow),
             exec_policy: ExecPolicy::default(),
         }
     }

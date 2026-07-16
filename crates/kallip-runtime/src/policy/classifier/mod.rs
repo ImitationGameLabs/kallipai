@@ -1,10 +1,11 @@
-//! Stateless, self-contained shell-command safety classifier.
+//! Preset-aware shell-command classifier.
 //!
-//! Encapsulated behind [`Classifier`] and returning its own [`Safety`] decision
-//! type, this module depends only on the `rable` parser — it deliberately does
-//! not import the runtime's `policy::ToolDecision`. The policy layer
-//! (`AgentPolicy`) maps `Safety` to `ToolDecision` at a single boundary
-//! (see `policy::agent`).
+//! Encapsulated behind [`Classifier`], this module parses a shell command with the
+//! `rable` parser and returns a final [`super::ToolDecision`] directly — there is
+//! no intermediate "safety" type and no separate mapping layer. The decision
+//! depends on the static catalog, the per-agent [`ExecPolicy`] overrides, and the
+//! daemon-global [`PolicyPreset`] (which selects the rule-set: how unclassified
+//! commands resolve and whether the denylist applies).
 
 mod catalog;
 mod delegate;
@@ -15,35 +16,14 @@ mod walker;
 #[cfg(test)]
 mod tests;
 
-use kallip_common::policy::{ExecDecision, ExecPolicy};
+use kallip_common::policy::{ExecDecision, ExecOverride, ExecPolicy, PolicyPreset};
 use serde::Serialize;
 
+use super::ToolDecision;
 use catalog::CommandSpec;
 
-/// Authorization decision produced by the classifier.
-///
-/// Intentionally decoupled from [`super::ToolDecision`]: the classifier reasons
-/// about *read-only-ness* of a shell command, not about the runtime's
-/// allow/ask/deny enforcement. The policy layer maps these one-to-one.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Safety {
-    /// No mutation or code execution was detected.
-    ReadOnly,
-    /// The command may mutate state or execute code; defer to a human.
-    ///
-    /// `reason` is a short, actionable explanation of *what* tripped the check,
-    /// surfaced to the agent via the approval-deferred response so it can rewrite
-    /// the command (e.g. drop a redirect, remove a flag) instead of requesting
-    /// approval. When several checks trip, the walker's `stricter` merge joins
-    /// their reasons with `"; "`.
-    NeedsApproval { reason: String },
-    /// The classifier declines to greenlight (e.g. unparseable input, or a
-    /// hard-refused pattern such as piping a download into a shell).
-    Reject { reason: String },
-}
-
-/// Read-only inputs for one classification pass: the static catalog plus the
-/// per-agent exec-policy overrides (borrowed for the duration of the call).
+/// Read-only inputs for one classification pass: the static catalog, the preset
+/// rule-set, and the per-agent exec-policy overrides (borrowed for the call).
 ///
 /// `Copy` so it threads through the recursive walker by value — no lifetime
 /// juggling beyond the single `<'a>` tying it to the borrowed overrides.
@@ -53,6 +33,7 @@ pub enum Safety {
 #[derive(Clone, Copy)]
 pub(in crate::policy::classifier) struct ClassifyCtx<'a> {
     catalog: &'static [CommandSpec],
+    preset: PolicyPreset,
     overrides: &'a ExecPolicy,
 }
 
@@ -61,8 +42,12 @@ impl<'a> ClassifyCtx<'a> {
         self.catalog
     }
 
+    pub(in crate::policy::classifier) fn preset(&self) -> PolicyPreset {
+        self.preset
+    }
+
     /// The exec-policy override for a command name, if any.
-    pub(in crate::policy::classifier) fn override_for(&self, name: &str) -> Option<ExecDecision> {
+    pub(in crate::policy::classifier) fn override_for(&self, name: &str) -> Option<&ExecOverride> {
         self.overrides.override_for(name)
     }
 }
@@ -83,19 +68,19 @@ impl Classifier {
         catalog: catalog::READ_ONLY_CATALOG,
     };
 
-    /// Parse and classify a shell command with no per-agent overrides.
-    /// Fail-closed: unparseable input is [`Safety::Reject`].
-    pub fn classify(&self, command: &str) -> Safety {
-        self.classify_with(command, &ExecPolicy::default())
-    }
-
-    /// Parse and classify a shell command, applying `overrides` per simple
-    /// command. The override is applied per simple command inside the walker:
-    /// `Allow` widens only commands absent from the catalog; for listed commands
-    /// the catalog verdict (constraints included) is authoritative.
-    pub fn classify_with(&self, command: &str, overrides: &ExecPolicy) -> Safety {
+    /// Parse and classify a shell command, applying `overrides` per simple command
+    /// under the `preset` rule-set. Returns the final [`ToolDecision`] directly.
+    ///
+    /// Fail-closed: unparseable / empty input is `Deny` regardless of preset.
+    pub fn classify_with(
+        &self,
+        command: &str,
+        overrides: &ExecPolicy,
+        preset: PolicyPreset,
+    ) -> ToolDecision {
         let ctx = ClassifyCtx {
             catalog: self.catalog,
+            preset,
             overrides,
         };
         walker::classify_command(&ctx, command)
@@ -132,7 +117,9 @@ pub fn exec_baseline(name: &str) -> ExecDecision {
 /// Shell interpreter / eval command names (`bash`, `sh`, `eval`, `source`, `.`,
 /// …) are rejected: their invocations are re-parsed by interpreter delegation
 /// *before* the override site, so an override on them would silently never apply
-/// and mislead the user.
+/// and mislead the user. Builtin-denied names ([`builtin_deny_reason`]) are also
+/// rejected: the classifier refuses them unconditionally, so an override could
+/// only mislead (it would be inert).
 pub fn is_valid_override_key(name: &str) -> std::result::Result<(), String> {
     if name.trim().is_empty() {
         return Err("override key must not be empty or whitespace".into());
@@ -143,7 +130,22 @@ pub fn is_valid_override_key(name: &str) -> std::result::Result<(), String> {
              so an override would never apply"
         ));
     }
+    if builtin_deny_reason(name).is_some() {
+        return Err(format!(
+            "cannot override '{name}': it is builtin-denied and cannot be widened"
+        ));
+    }
     Ok(())
+}
+
+/// The curated reason a command is builtin-denied, if any. Matched
+/// case-insensitively (command names are lowercased before the override site, but
+/// this keeps the contract consistent with the rest of the classifier).
+pub fn builtin_deny_reason(name: &str) -> Option<&'static str> {
+    catalog::BUILTIN_DENYLIST
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, reason)| *reason)
 }
 
 /// One row of the read-only catalog, rendered for external display.
@@ -165,6 +167,23 @@ pub fn default_catalog_summary() -> Vec<CatalogEntry> {
         .collect()
 }
 
+/// One row of the builtin denylist, rendered for external display.
+#[derive(Serialize, Clone)]
+pub struct DenylistEntry {
+    pub name: &'static str,
+    pub reason: &'static str,
+}
+
+/// Summarize every builtin-denied command (name + reason). Surfaced to the agent
+/// via the `exec_policy` self-query tool — denylisted names never appear in
+/// `overrides`, so this is the only way the agent learns them proactively.
+pub fn builtin_denylist_summary() -> Vec<DenylistEntry> {
+    catalog::BUILTIN_DENYLIST
+        .iter()
+        .map(|(name, reason)| DenylistEntry { name, reason })
+        .collect()
+}
+
 /// Structural shell rules that apply regardless of command identity: each pair
 /// is `(rule, effect)`. Reported by the agent self-query tool.
 ///
@@ -172,16 +191,26 @@ pub fn default_catalog_summary() -> Vec<CatalogEntry> {
 /// are stable rules, but a new structural check added to the walker should be
 /// reflected here too.
 pub const STRUCTURAL_RULES: &[(&str, &str)] = &[
-    ("command not in the read-only catalog", "asks"),
+    (
+        "command not in the read-only catalog",
+        "ask under default, allow under auto (allow-all allows everything)",
+    ),
     (
         "composition (&& ; || |)",
         "read-only iff every component is read-only",
     ),
-    ("background operator &", "asks"),
-    ("download piped to a shell (curl|sh)", "rejects"),
+    (
+        "background operator &",
+        "ask under default, allow under auto",
+    ),
+    ("download piped to a shell (curl|sh)", "deny"),
+    (
+        "builtin denylist (sed/awk/ed/ex)",
+        "deny with a curated reason",
+    ),
     (
         "output redirect (> >> >| <> &> &>>)",
-        "asks, except to /dev/null (pure sink)",
+        "ask under default, allow under auto, except to /dev/null (pure sink)",
     ),
     (
         "fd duplication/close (2>&1, >&-)",
@@ -189,6 +218,6 @@ pub const STRUCTURAL_RULES: &[(&str, &str)] = &[
     ),
     (
         "sensitive env var assignment (PATH, LD_PRELOAD, ...)",
-        "asks",
+        "ask under default, allow under auto",
     ),
 ];

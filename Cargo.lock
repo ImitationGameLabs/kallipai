@@ -1846,6 +1846,7 @@ dependencies = [
  "sha2 0.11.0",
  "subtle",
  "time",
+ "toml",
  "tracing",
  "uuid",
 ]

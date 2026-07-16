@@ -8,7 +8,7 @@
 use rable::Node;
 
 use super::ClassifyCtx;
-use super::Safety;
+use super::ToolDecision;
 use super::catalog;
 use super::{util, walker};
 
@@ -16,7 +16,7 @@ pub(super) fn classify_interpreter_delegate(
     ctx: &ClassifyCtx<'_>,
     cmd_name: &str,
     words: &[Node],
-) -> Option<Safety> {
+) -> Option<ToolDecision> {
     let inner_source = if catalog::SHELL_INTERPRETERS.contains(&cmd_name) {
         find_c_flag_argument(words)?
     } else if catalog::EVAL_COMMANDS.contains(&cmd_name) {
@@ -29,7 +29,7 @@ pub(super) fn classify_interpreter_delegate(
 
     match rable::parse(&inner_source, false) {
         Ok(nodes) => Some(walker::classify_nodes(ctx, &nodes)),
-        Err(_) => Some(Safety::Reject {
+        Err(_) => Some(ToolDecision::Deny {
             reason: "failed to parse inner command for interpreter delegate".into(),
         }),
     }

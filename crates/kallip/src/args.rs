@@ -18,7 +18,7 @@ pub enum Commands {
     /// Manage approvals
     #[command(subcommand)]
     Approval(ApprovalCommand),
-    /// Manage agent permissions and tool policy
+    /// Manage agent permissions and bash_exec exec-policy overrides
     #[command(subcommand)]
     Policy(PolicyCommand),
     /// Skill discovery and promotion
@@ -162,26 +162,12 @@ pub struct ApprovalDenyArgs {
 
 #[derive(Subcommand)]
 pub enum PolicyCommand {
-    /// Show full agent permissions and effective tool policy (a superset of `get`)
+    /// Show full agent permissions and the active classify preset
     Show(IdArgs),
-    /// Show the bare agent tool-policy map (default decision + per-tool overrides)
-    Get(IdArgs),
-    /// Modify a single tool policy rule
-    Set(PolicySetArgs),
     /// Show agent bash_exec command-policy overrides
     ExecGet(IdArgs),
     /// Set a per-command bash_exec override (superior-only)
     ExecSet(ExecSetArgs),
-}
-
-#[derive(Args)]
-pub struct PolicySetArgs {
-    /// Agent ID.
-    pub id: AgentId,
-    /// Tool name.
-    pub tool: String,
-    /// Decision: allow, ask, deny, classify.
-    pub decision: String,
 }
 
 #[derive(Args)]
@@ -192,6 +178,9 @@ pub struct ExecSetArgs {
     pub command: String,
     /// Decision: allow, ask, deny.
     pub decision: String,
+    /// Optional reason surfaced to the agent when the decision narrows (ask/deny).
+    #[arg(long)]
+    pub reason: Option<String>,
 }
 
 #[derive(Subcommand)]

@@ -1,11 +1,12 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use kallip_common::approval::ApprovalStatus;
-use kallip_common::policy::PolicyDecision;
 use kallip_common::protocol::{
     ApiError, ApprovalDecisionBody, ApprovalEntry, ListApprovalsResponse, SseEvent,
 };
 use kallip_runtime::persistence;
+use kallip_runtime::policy::classifier::Classifier;
+use kallip_runtime::{names, policy::ToolDecision};
 
 use super::ListApprovalsQuery;
 use crate::state::SharedState;
@@ -122,10 +123,13 @@ pub async fn get_approval(
 /// The caller must be a superior of the agent that owns the approval
 /// (checked via the [`AgentRegistry](crate::state::AgentRegistry)'s `require_superior` method).
 ///
-/// For **approve** decisions, an additional policy gate applies: the caller's
-/// own [`ToolPolicy`](kallip_common::policy::ToolPolicy) must permit the tool with `PolicyDecision::Allow`.
-/// This prevents a superior from using subordinates as proxies to bypass its
-/// own tool restrictions. The operator identity is exempt from this check.
+/// For **approve** decisions, an additional gate applies when the deferred action
+/// is a `bash_exec`: the superior's own classify rule-set (the daemon-global
+/// preset plus the superior's exec-policy overrides) must classify the command
+/// as `Allow`. This prevents a superior from using subordinates as proxies to run
+/// a command its own policy would gate. Only `bash_exec` can defer today (every
+/// other tool is unconditional `Allow`), so non-`bash_exec` actions need no gate.
+/// The operator identity is exempt.
 ///
 /// For **deny** decisions, no policy check is required — any superior may deny.
 pub async fn respond_approval(
@@ -155,9 +159,26 @@ pub async fn respond_approval(
 
         let json = match req.decision.as_str() {
             "approve" => {
-                // Policy gate: a superior may only approve if its own policy
-                // allows the tool unilaterally. Operator is exempt.
-                if let crate::auth::Identity::Agent { id: caller_id } = auth.identity() {
+                // Anti-proxy-bypass gate: a superior approving a deferred
+                // `bash_exec` may do so only if its own classify rule-set
+                // (daemon-global preset + its exec-policy overrides) would Allow
+                // the command. Operator is exempt. Non-bash_exec actions have no
+                // security surface and need no gate.
+                if info.content.tool_name == names::BASH_EXEC
+                    && let crate::auth::Identity::Agent { id: caller_id } = auth.identity()
+                {
+                    // Extract the command from the deferred bash_exec arguments.
+                    let command = info
+                        .content
+                        .arguments
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            ApiError::bad_request(
+                                "cannot approve bash_exec: deferred action has no 'command' \
+                                 argument",
+                            )
+                        })?;
                     let caller_entry = registry
                         .get(caller_id)
                         .ok_or_else(|| ApiError::internal("caller agent not found in registry"))?;
@@ -166,17 +187,19 @@ pub async fn respond_approval(
                     let caller_live = caller_entry
                         .as_live()
                         .ok_or_else(|| ApiError::internal("caller agent is faulted"))?;
-                    let caller_decision = caller_live
+                    let exec_policy = caller_live
                         .agent
-                        .tool_policy
+                        .exec_policy
                         .read()
                         .unwrap_or_else(|e| e.into_inner())
-                        .decision_for(&info.content.tool_name);
-                    if caller_decision != PolicyDecision::Allow {
+                        .clone();
+                    let decision =
+                        Classifier::DEFAULT.classify_with(command, &exec_policy, state.preset);
+                    if !matches!(decision, ToolDecision::Allow) {
                         return Err(ApiError::forbidden(format!(
-                            "cannot approve '{}': caller policy is '{caller_decision}' \
-                             (only 'allow' permits unilateral delegation)",
-                            info.content.tool_name,
+                            "cannot approve bash_exec: caller's classify rule-set does not \
+                             allow the command ({decision:?}); a superior may not delegate a \
+                             command its own policy would gate",
                         )));
                     }
                 }
@@ -239,30 +262,46 @@ mod tests {
     use axum::Json;
     use axum::extract::{Path, State};
     use kallip_common::agentid::AgentId;
-    use kallip_common::policy::{PolicyDecision, ToolPolicy};
+    use kallip_common::policy::{ExecDecision, ExecOverride, ExecPolicy, PolicyPreset};
     use kallip_common::protocol::ApprovalDecisionBody;
-    use std::collections::BTreeMap;
+    use kallip_shell::tools::names;
 
     use crate::auth::{AuthIdentity, Identity};
     use crate::test_helpers::*;
 
-    // -- Approval policy gate: respond_approval --
+    // Helper: the JSON arguments for a deferred `bash_exec` of `command`.
+    fn bash_args(command: &str) -> String {
+        serde_json::json!({ "command": command }).to_string()
+    }
+
+    // -- Approval classify gate: respond_approval --
 
     #[tokio::test]
-    async fn approval_policy_gate_allows_when_superior_has_allow() {
+    async fn approval_gate_allows_when_superior_classify_allows() {
+        // `ls` is read-only catalog → Allow under the default preset. A superior
+        // may approve the deferred bash_exec.
         let state = make_state();
         let parent = AgentId::random();
         let child = AgentId::random();
 
         {
             let mut reg = state.registry.write().await;
-            add_root_with_policy(&mut reg, &parent, policy_allow_tool("dangerous_tool"));
+            add_root_with_policy(
+                &mut reg,
+                &parent,
+                PolicyPreset::Default,
+                ExecPolicy::default(),
+            );
             add_sub(&mut reg, &child, &parent);
         }
 
-        let approval_id =
-            enqueue_committed_approval(&state.registry.read().await, &child, "dangerous_tool")
-                .await;
+        let approval_id = enqueue_committed_approval(
+            &state.registry.read().await,
+            &child,
+            names::BASH_EXEC,
+            &bash_args("ls"),
+        )
+        .await;
 
         let result = super::respond_approval(
             State(state),
@@ -279,7 +318,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_policy_gate_rejects_when_superior_has_ask() {
+    async fn approval_gate_rejects_when_superior_classify_asks() {
+        // `cargo` is absent from the catalog → Ask under default. The superior's
+        // own rule-set would gate it, so approving the delegation is forbidden.
         let state = make_state();
         let parent = AgentId::random();
         let child = AgentId::random();
@@ -289,14 +330,19 @@ mod tests {
             add_root_with_policy(
                 &mut reg,
                 &parent,
-                policy_for_tool("dangerous_tool", PolicyDecision::Ask),
+                PolicyPreset::Default,
+                ExecPolicy::default(),
             );
             add_sub(&mut reg, &child, &parent);
         }
 
-        let approval_id =
-            enqueue_committed_approval(&state.registry.read().await, &child, "dangerous_tool")
-                .await;
+        let approval_id = enqueue_committed_approval(
+            &state.registry.read().await,
+            &child,
+            names::BASH_EXEC,
+            &bash_args("cargo build"),
+        )
+        .await;
 
         let result = super::respond_approval(
             State(state),
@@ -310,34 +356,31 @@ mod tests {
         .await;
 
         match result {
-            Err(e) => {
-                assert_eq!(e.status, 403);
-                assert!(e.message.contains("dangerous_tool"));
-                assert!(e.message.contains("ask"));
-            }
-            Ok(_) => panic!("expected FORBIDDEN for superior with Ask policy"),
+            Err(e) => assert_eq!(e.status, 403),
+            Ok(_) => panic!("expected FORBIDDEN when superior classify asks"),
         }
     }
 
     #[tokio::test]
-    async fn approval_policy_gate_rejects_when_superior_has_deny() {
-        let state = make_state();
+    async fn approval_gate_rejects_when_denylisted() {
+        // `sed` is builtin-denied even under auto; approving it is forbidden.
+        let state = make_state_with_preset(PolicyPreset::Auto);
         let parent = AgentId::random();
         let child = AgentId::random();
 
         {
             let mut reg = state.registry.write().await;
-            add_root_with_policy(
-                &mut reg,
-                &parent,
-                policy_for_tool("dangerous_tool", PolicyDecision::Deny),
-            );
+            add_root_with_policy(&mut reg, &parent, PolicyPreset::Auto, ExecPolicy::default());
             add_sub(&mut reg, &child, &parent);
         }
 
-        let approval_id =
-            enqueue_committed_approval(&state.registry.read().await, &child, "dangerous_tool")
-                .await;
+        let approval_id = enqueue_committed_approval(
+            &state.registry.read().await,
+            &child,
+            names::BASH_EXEC,
+            &bash_args("sed 's/a/b/' f"),
+        )
+        .await;
 
         let result = super::respond_approval(
             State(state),
@@ -351,33 +394,79 @@ mod tests {
         .await;
 
         match result {
-            Err(e) => {
-                assert_eq!(e.status, 403);
-                assert!(e.message.contains("deny"));
-            }
-            Ok(_) => panic!("expected FORBIDDEN for superior with Deny policy"),
+            Err(e) => assert_eq!(e.status, 403),
+            Ok(_) => panic!("expected FORBIDDEN for denylisted command"),
         }
     }
 
     #[tokio::test]
-    async fn approval_policy_gate_rejects_when_superior_has_classify() {
+    async fn approval_gate_superior_exec_override_can_authorize() {
+        // The superior widens `cargo` to Allow via exec-policy; under the default
+        // preset that makes classify Allow, so the delegation is permitted. This
+        // is the "approval gate is live" path: a wider parent override authorizes
+        // a command the child deferred.
         let state = make_state();
         let parent = AgentId::random();
         let child = AgentId::random();
 
+        let mut exec = ExecPolicy::default();
+        exec.overrides
+            .insert("cargo".into(), ExecOverride::new(ExecDecision::Allow));
+
         {
             let mut reg = state.registry.write().await;
-            add_root_with_policy(
-                &mut reg,
-                &parent,
-                policy_for_tool("dangerous_tool", PolicyDecision::Classify),
-            );
+            add_root_with_policy(&mut reg, &parent, PolicyPreset::Default, exec);
             add_sub(&mut reg, &child, &parent);
         }
 
-        let approval_id =
-            enqueue_committed_approval(&state.registry.read().await, &child, "dangerous_tool")
-                .await;
+        let approval_id = enqueue_committed_approval(
+            &state.registry.read().await,
+            &child,
+            names::BASH_EXEC,
+            &bash_args("cargo build"),
+        )
+        .await;
+
+        let result = super::respond_approval(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: parent }),
+            Path(approval_id),
+            Json(ApprovalDecisionBody {
+                decision: "approve".into(),
+                reason: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn approval_gate_classifies_actual_command_not_any_allow() {
+        // The superior allows `cargo` but the deferred command is `rm` (absent,
+        // Ask under default). The gate must classify the actual command, so a
+        // sibling override does not smuggle it through.
+        let state = make_state();
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let mut exec = ExecPolicy::default();
+        exec.overrides
+            .insert("cargo".into(), ExecOverride::new(ExecDecision::Allow));
+
+        {
+            let mut reg = state.registry.write().await;
+            add_root_with_policy(&mut reg, &parent, PolicyPreset::Default, exec);
+            add_sub(&mut reg, &child, &parent);
+        }
+
+        let approval_id = enqueue_committed_approval(
+            &state.registry.read().await,
+            &child,
+            names::BASH_EXEC,
+            &bash_args("rm -rf /tmp/x"),
+        )
+        .await;
 
         let result = super::respond_approval(
             State(state),
@@ -391,16 +480,14 @@ mod tests {
         .await;
 
         match result {
-            Err(e) => {
-                assert_eq!(e.status, 403);
-                assert!(e.message.contains("classify"));
-            }
-            Ok(_) => panic!("expected FORBIDDEN for superior with Classify policy"),
+            Err(e) => assert_eq!(e.status, 403),
+            Ok(_) => panic!("expected FORBIDDEN: gate must classify the actual command"),
         }
     }
 
     #[tokio::test]
-    async fn approval_policy_gate_operator_exempt() {
+    async fn approval_gate_operator_exempt() {
+        // The operator may approve a command that an agent superior could not.
         let state = make_state();
         let child = AgentId::random();
 
@@ -409,9 +496,13 @@ mod tests {
             add_root(&mut reg, &child);
         }
 
-        let approval_id =
-            enqueue_committed_approval(&state.registry.read().await, &child, "dangerous_tool")
-                .await;
+        let approval_id = enqueue_committed_approval(
+            &state.registry.read().await,
+            &child,
+            names::BASH_EXEC,
+            &bash_args("cargo build"),
+        )
+        .await;
 
         let result = super::respond_approval(
             State(state),
@@ -428,7 +519,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_deny_always_allowed_regardless_of_policy() {
+    async fn approval_deny_always_allowed() {
+        // Any superior may deny, regardless of the classify verdict.
         let state = make_state();
         let parent = AgentId::random();
         let child = AgentId::random();
@@ -438,14 +530,19 @@ mod tests {
             add_root_with_policy(
                 &mut reg,
                 &parent,
-                policy_for_tool("dangerous_tool", PolicyDecision::Deny),
+                PolicyPreset::Default,
+                ExecPolicy::default(),
             );
             add_sub(&mut reg, &child, &parent);
         }
 
-        let approval_id =
-            enqueue_committed_approval(&state.registry.read().await, &child, "dangerous_tool")
-                .await;
+        let approval_id = enqueue_committed_approval(
+            &state.registry.read().await,
+            &child,
+            names::BASH_EXEC,
+            &bash_args("sed 's/a/b/' f"),
+        )
+        .await;
 
         let result = super::respond_approval(
             State(state),
@@ -462,28 +559,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_policy_gate_checks_specific_tool_not_any_allow() {
+    async fn approval_gate_skips_non_bash_deferred_action() {
+        // Only bash_exec has a classify gate. A deferred non-bash action needs no
+        // gate (there is no security surface), so a superior approves it cleanly.
         let state = make_state();
         let parent = AgentId::random();
         let child = AgentId::random();
 
-        let mut tools = BTreeMap::new();
-        tools.insert("safe_tool".to_string(), PolicyDecision::Allow);
-        tools.insert("dangerous_tool".to_string(), PolicyDecision::Ask);
-        let policy = ToolPolicy {
-            default: PolicyDecision::Ask,
-            tools,
-        };
-
         {
             let mut reg = state.registry.write().await;
-            add_root_with_policy(&mut reg, &parent, policy);
+            add_root_with_policy(
+                &mut reg,
+                &parent,
+                PolicyPreset::Default,
+                ExecPolicy::default(),
+            );
             add_sub(&mut reg, &child, &parent);
         }
 
-        let approval_id =
-            enqueue_committed_approval(&state.registry.read().await, &child, "dangerous_tool")
-                .await;
+        let approval_id = enqueue_committed_approval(
+            &state.registry.read().await,
+            &child,
+            "some_self_management_tool",
+            "{}",
+        )
+        .await;
 
         let result = super::respond_approval(
             State(state),
@@ -496,15 +596,6 @@ mod tests {
         )
         .await;
 
-        match result {
-            Err(e) => {
-                assert_eq!(e.status, 403);
-                assert!(e.message.contains("dangerous_tool"));
-                assert!(e.message.contains("ask"));
-            }
-            Ok(_) => {
-                panic!("expected FORBIDDEN — gate must check the specific tool, not any Allow")
-            }
-        }
+        assert_eq!(result.unwrap(), axum::http::StatusCode::OK);
     }
 }

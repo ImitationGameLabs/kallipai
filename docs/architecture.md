@@ -87,34 +87,36 @@ The core loop (`run_agent_rounds` in `kallip-runtime`) iterates up to
 
 ## Policy and approval
 
-Tools go through a three-layer policy before execution:
+Only `bash_exec` is gated — it is the arbitrary-execution surface. Every other
+tool is the agent's own self-management (context, skills, background tasks,
+exec-policy query, approval redemption) with no security surface, so it runs
+unconditionally. The `bash_exec` verdict comes from a single preset-aware
+classifier; there is no separate per-tool policy map and no intermediate
+"safety" type.
 
-**Layer 1 — `AgentPolicy`** routes by tool name:
+**`AgentPolicy`** routes by tool name:
 
-| Tool                       | Decision                   |
-| -------------------------- | -------------------------- |
-| `bash_background_read`     | Allow (read-only)          |
-| `bash_background_kill`     | Allow (agent-spawned task) |
-| `bash_exec`                | Delegate to AST classifier |
-| Context tools, skill tools | Allow                      |
-| Unknown tools              | Ask                        |
+| Tool             | Decision                       |
+| ---------------- | ------------------------------ |
+| `bash_exec`      | Delegate to the AST classifier |
+| Every other tool | Allow (agent self-management)  |
 
-**Layer 2 — `AuthorizedToolExecutor`** enforces the decision:
+**`AuthorizedToolExecutor`** enforces the decision:
 
 - **Allow** — dispatch immediately.
 - **Deny** — return an error to the LLM.
 - **Ask** — enqueue in `ApprovalStore`, return a deferred reference. The LLM
   continues working and can redeem later after external approval.
 
-**Layer 3 — Shell command classifier** (`policy/classifier`) is a self-contained
-module that parses commands via `rable` and returns its own `Safety` decision
-(`ReadOnly` / `NeedsApproval` / `Reject`), which the policy layer maps to
-`Allow` / `Ask` / `Deny`. It is fail-closed: unparseable input is `Reject`.
+**Shell command classifier** (`policy/classifier`) is a self-contained module
+that parses commands via `rable` and returns a final `ToolDecision` (`Allow` /
+`Ask{reason}` / `Deny{reason}`) directly — no separate safety type and no
+mapping layer. It is fail-closed: unparseable or empty input is `Deny`.
 
 - **Explicit read-only catalog.** A command is auto-approved only if it appears
   in the catalog (`catalog::READ_ONLY_CATALOG`) and satisfies its constraints.
   Anything not listed — including every mutating/dangerous command (`sudo`,
-  `dd`, `rm`, …) — defers to approval by default. There is no separate
+  `dd`, `rm`, …) — defers to approval under `default`. There is no separate
   "dangerous list".
 - **Per-command constraints.** Some catalog entries carry constraints: a flag
   that breaks read-only-ness (`find -delete`, `sort -o`, `yq -i`), a predicate
@@ -132,15 +134,40 @@ module that parses commands via `rable` and returns its own `Safety` decision
   pure sink). fd duplication/close (`2>&1`, `>&-`) and input redirects (`<`,
   `<<<`) open no file for writing and are read-only.
 
+> **Future seam.** If a second tool ever gains a security surface, the gate in
+> `AgentPolicy::evaluate` is the place to re-introduce per-tool routing. Today
+> the assumption "only `bash_exec` is gated" is structural, not configured.
+
 ### Approval flow
 
-1. Agent calls a tool that policy classifies as "Ask".
+1. Agent calls `bash_exec` and the classifier returns `Ask`.
 2. `ApprovalStore.enqueue()` stores the call and returns a deferred JSON to the LLM.
 3. An `ApprovalUpdated` SSE event is emitted (supervisor-facing).
 4. Client sees the event and sends `POST /approvals/{id}` to approve or deny.
 5. `ApprovalStore.approve()` or `.deny()` pushes a notification.
 6. On the next agent round, the notification is drained into context.
 7. The LLM calls `approval_redeem` to execute the stored tool action.
+
+### Classify presets
+
+The classify rule-set is daemon-global, chosen once at startup by the
+`KALLIP_POLICY_PRESET` env var (see `docs/reference/env.md`) and immutable for
+the daemon's lifetime. Every agent — root and subagent — runs under the same
+preset. The preset _is_ the rule bundle (there is no separate "mode" type):
+
+- **`default`** (also when the env var is unset) — strict: catalog commands
+  allow, unclassified commands ask, the builtin denylist (`sed`, `awk`, `ed`,
+  `ex`) and structural rejects (`curl | sh`, …) deny.
+- **`auto`** — the optimized middle: like `default`, but unclassified commands
+  allow too. The denylist and structural rejects still deny.
+- **`allow-all`** — **debug preset, not for production.** The classifier
+  short-circuits to `Allow` for every parseable command, so the denylist and
+  structural rejects do not apply.
+
+Per-command `bash_exec` overrides live separately in `ExecPolicy` (per-agent,
+runtime-mutable via `PUT /exec-policy`, inherited monotonically). An explicit
+override `Deny`/`Ask` is authoritative and not relaxed by the `auto` preset; a
+deliberate supervisor decision stays meaningful under every preset.
 
 ## Crate responsibilities
 

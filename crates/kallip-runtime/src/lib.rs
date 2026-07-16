@@ -22,3 +22,7 @@ pub mod tools;
 // Re-exported so the daemon (another crate) can construct `AgentContext.failover`. The state's
 // accessors stay `pub(crate)` — only the runtime reads them.
 pub use failover::FailoverState;
+
+// Re-exported shell tool-name constants so downstream crates (e.g. the daemon's
+// approval gate) can refer to them without taking a direct `kallip-shell` dep.
+pub use kallip_shell::tools::names;

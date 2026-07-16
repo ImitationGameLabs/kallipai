@@ -3,7 +3,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use kallip_common::agentid::AgentId;
-use kallip_common::policy::{ExecPolicy, ToolPolicy};
+use kallip_common::policy::ExecPolicy;
 use kallip_common::protocol::{AgentPermissionsResponse, AgentStatusResponse, ApiError};
 use kallip_runtime::context::AgenticContext;
 use kallip_runtime::persistence;
@@ -47,8 +47,8 @@ pub async fn agent_status(
     }))
 }
 
-/// GET /agents/{id}/permissions — return agent permission profile and tool policy.
-/// Any authenticated identity may query any agent's permissions.
+/// GET /agents/{id}/permissions — return agent permission profile and the active
+/// classify preset. Any authenticated identity may query any agent's permissions.
 pub async fn agent_permissions(
     State(state): State<SharedState>,
     _auth: crate::auth::AuthIdentity,
@@ -62,132 +62,18 @@ pub async fn agent_permissions(
     let live = entry
         .as_live()
         .ok_or_else(|| ApiError::conflict("agent is faulted; permissions not available"))?;
-    let tool_policy = live
-        .agent
-        .tool_policy
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
     Ok(Json(AgentPermissionsResponse {
         max_depth: config.permissions.max_depth,
         workspace_root: config.workspace_root.to_string_lossy().into_owned(),
         created_by: config.created_by.clone(),
-        tool_policy,
+        // The daemon-global classify preset this agent runs under (immutable for
+        // the daemon's lifetime).
+        preset: live.agent.preset,
         // Lowercase wire spelling via Display — the value the daemon clamped at
         // spawn and re-validates on restore, surfaced so an explicit downgrade
         // is observable.
         permission_class: config.permissions_class.to_string(),
     }))
-}
-
-/// GET /agents/{id}/policy — return the raw tool policy.
-pub async fn get_policy(
-    State(state): State<SharedState>,
-    _auth: crate::auth::AuthIdentity,
-    Path(id): Path<AgentId>,
-) -> Result<impl IntoResponse, ApiError> {
-    let registry = state.registry.read().await;
-    let entry = registry
-        .get(&id)
-        .ok_or_else(|| ApiError::not_found("agent not found"))?;
-    let live = entry
-        .as_live()
-        .ok_or_else(|| ApiError::conflict("agent is faulted; policy not available"))?;
-    let policy = live
-        .agent
-        .tool_policy
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    Ok(Json(policy))
-}
-
-/// PUT /agents/{id}/policy — update tool policy with strictness validation.
-///
-/// # Lock ordering
-///
-/// This handler acquires locks in a strict order to prevent deadlocks:
-///
-/// 1. **Registry async read lock** — held throughout to look up parent, children,
-///    and the target entry. Released on return.
-/// 2. **Per-agent `std::sync::RwLock<ToolPolicy>`** — read locks on parent and
-///    children for strictness/cascade validation, write lock on target for the update.
-///
-/// Because `evaluate()` (runtime) only acquires tool_policy **read** locks and never
-/// touches the registry, there is no circular dependency between the two lock classes.
-/// A future refactor that needs both must acquire the registry lock first.
-pub async fn update_policy(
-    State(state): State<SharedState>,
-    auth: crate::auth::AuthIdentity,
-    Path(id): Path<AgentId>,
-    Json(new_policy): Json<ToolPolicy>,
-) -> Result<StatusCode, ApiError> {
-    let registry = state.registry.read().await;
-    registry.require_superior(auth.identity(), &id)?;
-
-    let entry = registry
-        .get(&id)
-        .ok_or_else(|| ApiError::not_found("agent not found"))?;
-    // A faulted target has no policy to read or write.
-    let live = entry
-        .as_live()
-        .ok_or_else(|| ApiError::conflict("agent is faulted; policy not available"))?;
-
-    // Strictness validation against parent. A faulted parent contributes no
-    // constraint (it isn't running), so skip it.
-    if let Some(ref parent_id) = entry.identity().config.created_by
-        && let Some(parent_entry) = registry.get(parent_id)
-        && let Some(parent_live) = parent_entry.as_live()
-    {
-        let parent_policy = parent_live
-            .agent
-            .tool_policy
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        new_policy
-            .validate_at_least_as_strict_as(&parent_policy)
-            .map_err(|violations| {
-                ApiError::conflict(format!("policy violations: {}", violations.join("; ")))
-            })?;
-    }
-
-    // Cascade: children must still be at least as strict as the new policy.
-    // Skip faulted children (no policy, not running).
-    for child_id in entry.subagent_ids() {
-        let Some(child) = registry.get(child_id) else {
-            continue;
-        };
-        let Some(child_live) = child.as_live() else {
-            continue;
-        };
-        let child_policy = child_live
-            .agent
-            .tool_policy
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        child_policy
-            .validate_at_least_as_strict_as(&new_policy)
-            .map_err(|violations| {
-                ApiError::conflict(format!("child {child_id}: {}", violations.join("; ")))
-            })?;
-    }
-
-    // Persist first, then update in-memory.
-    let agent_dir = live
-        .identity
-        .agent_dir
-        .as_ref()
-        .ok_or_else(|| ApiError::internal("agent has no persistent directory"))?;
-    persistence::persist_policy(agent_dir, &new_policy).map_err(ApiError::internal)?;
-
-    *live
-        .agent
-        .tool_policy
-        .write()
-        .unwrap_or_else(|e| e.into_inner()) = new_policy;
-
-    Ok(StatusCode::NO_CONTENT)
 }
 
 /// GET /agents/{id}/exec-policy — return the `bash_exec` command-policy overrides.
@@ -217,10 +103,9 @@ pub async fn get_exec_policy(
 ///
 /// # Lock ordering
 ///
-/// Same discipline as [`update_policy`]: registry async read lock first, then
-/// per-agent `std::sync::RwLock<ExecPolicy>`. `exec_policy` and `tool_policy`
-/// are independent lock classes; a handler acquiring both must take
-/// `tool_policy` before `exec_policy`.
+/// Registry async read lock first, then the per-agent `std::sync::RwLock<ExecPolicy>`.
+/// `exec_policy` is now the only per-agent policy lock (the classify preset is an
+/// immutable snapshot, not a lock).
 pub async fn update_exec_policy(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,

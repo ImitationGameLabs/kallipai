@@ -32,11 +32,14 @@ impl LlmTool for ExecPolicyTool {
 
     fn description(&self) -> &str {
         "Report this agent's effective bash_exec command policy: the per-command \
-         overrides layered on the static read-only catalog, the catalog itself, \
-         and the structural shell rules (composition, background, redirects, etc.). \
+         overrides layered on the static read-only catalog, the builtin denylist \
+         (commands always refused, with a reason), the catalog itself, and the \
+         structural shell rules (composition, background, redirects, etc.). \
          Read-only — you cannot change your own exec policy; a supervisor sets it. \
          Use this to understand which commands run freely, which ask for approval, \
-         and which are denied before you call bash_exec."
+         and which are denied before you call bash_exec. Note: under the `auto` \
+         preset everything that is not a denylist entry or a structural reject \
+         (such as curl piped to a shell) runs without asking."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -52,6 +55,7 @@ impl LlmTool for ExecPolicyTool {
         let result = json!({
             "overrides": policy.overrides,
             "read_only_catalog": classifier::default_catalog_summary(),
+            "builtin_denylist": classifier::builtin_denylist_summary(),
             "structural_rules": classifier::STRUCTURAL_RULES
                 .iter()
                 .map(|(rule, effect)| json!({ "rule": rule, "effect": effect }))

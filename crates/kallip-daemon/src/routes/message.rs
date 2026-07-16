@@ -165,7 +165,7 @@ pub async fn send_message(
             auth_token_hash: live.agent.auth_token_hash.clone(),
             env: live.agent.env.clone(),
             shared_state: state.clone(),
-            tool_policy: live.agent.tool_policy.clone(),
+            preset: live.agent.preset,
             exec_policy: live.agent.exec_policy.clone(),
             prompt_queue_size: state.prompt_queue_size,
             prompt_channel: Some((live.agent.prompt_tx.clone(), prompt_rx)),

@@ -1,150 +1,193 @@
-//! Agent policy: per-tool authorization decisions.
+//! Agent policy: gates `bash_exec` via a preset-aware classifier; every other
+//! tool runs unconditionally (it is the agent's own self-management).
 
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
-use kallip_common::policy::{ExecPolicy, PolicyDecision, ToolPolicy};
+use kallip_common::policy::{ExecPolicy, PolicyPreset};
 
 use kallip_shell::tools::{BashExecArgs, names};
 
 use super::ToolDecision;
-use super::classifier::{Classifier, Safety};
+use super::classifier::Classifier;
 
-/// Policy layer that gates every tool call.
+/// Policy layer that gates tool calls.
 ///
-/// Wraps a shared `ToolPolicy` (per-tool routing) and a shared `ExecPolicy`
-/// (per-command `bash_exec` overrides), both updatable at runtime by the daemon,
-/// and owns the `Classifier` used to resolve `Classify` decisions.
+/// Only `bash_exec` is gated (it is the arbitrary-execution surface); every other
+/// tool is unconditionally `Allow`. The `bash_exec` verdict comes from a
+/// preset-aware [`Classifier`] applied to a snapshot of the shared per-agent
+/// [`ExecPolicy`] overrides. The preset is fixed for the agent's lifetime
+/// (daemon-global, selected once at startup), while the exec-policy is
+/// runtime-mutable.
 #[derive(Clone, Debug)]
 pub struct AgentPolicy {
-    policy: Arc<RwLock<ToolPolicy>>,
     exec_policy: Arc<RwLock<ExecPolicy>>,
     classifier: Classifier,
+    preset: PolicyPreset,
 }
 
 impl AgentPolicy {
-    pub fn new(policy: Arc<RwLock<ToolPolicy>>, exec_policy: Arc<RwLock<ExecPolicy>>) -> Self {
+    pub fn new(exec_policy: Arc<RwLock<ExecPolicy>>, preset: PolicyPreset) -> Self {
         Self {
-            policy,
             exec_policy,
             classifier: Classifier::DEFAULT,
+            preset,
         }
     }
 
     pub fn evaluate(&self, tool_name: &str, args_json: &str) -> Result<ToolDecision> {
-        let decision = self
-            .policy
+        if tool_name == names::BASH_EXEC {
+            return self.classify_bash(args_json);
+        }
+        // Every non-bash_exec tool is the agent's own self-management (context,
+        // skills, background tasks, exec-policy query, approval redemption) with no
+        // security surface — it runs unconditionally.
+        Ok(ToolDecision::Allow)
+    }
+
+    /// Parse `bash_exec` args and classify the command under the agent's preset
+    /// against a snapshot of the current exec-policy overrides.
+    fn classify_bash(&self, args_json: &str) -> Result<ToolDecision> {
+        let args: BashExecArgs = serde_json::from_str(args_json)?;
+        let overrides = self
+            .exec_policy
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .decision_for(tool_name);
-        match decision {
-            PolicyDecision::Allow => Ok(ToolDecision::Allow),
-            PolicyDecision::Deny => Ok(ToolDecision::Deny {
-                reason: format!("{tool_name} denied by policy"),
-            }),
-            PolicyDecision::Ask => Ok(ToolDecision::Ask { reason: None }),
-            PolicyDecision::Classify => {
-                if tool_name == names::BASH_EXEC {
-                    let args: BashExecArgs = serde_json::from_str(args_json)?;
-                    // Snapshot the exec-policy overrides for this one classification.
-                    let overrides = self
-                        .exec_policy
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    // Single boundary where the classifier's Safety decision is
-                    // translated into the runtime's ToolDecision.
-                    Ok(
-                        match self.classifier.classify_with(&args.command, &overrides) {
-                            Safety::ReadOnly => ToolDecision::Allow,
-                            Safety::NeedsApproval { reason } => ToolDecision::Ask {
-                                reason: Some(reason),
-                            },
-                            Safety::Reject { reason } => ToolDecision::Deny { reason },
-                        },
-                    )
-                } else {
-                    Ok(ToolDecision::Ask { reason: None })
-                }
-            }
-        }
+            .clone();
+        Ok(self
+            .classifier
+            .classify_with(&args.command, &overrides, self.preset))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::default_tool_policy;
+    use kallip_common::policy::{ExecDecision, ExecOverride, PolicyPreset};
 
-    fn make_policy() -> AgentPolicy {
-        AgentPolicy::new(
-            Arc::new(RwLock::new(default_tool_policy())),
-            Arc::new(RwLock::new(ExecPolicy::default())),
-        )
+    fn make_policy(preset: PolicyPreset) -> AgentPolicy {
+        AgentPolicy::new(Arc::new(RwLock::new(ExecPolicy::default())), preset)
     }
 
     #[test]
-    fn background_read_is_allowed() {
-        let policy = make_policy();
+    fn non_bash_tool_allows_under_default() {
+        let policy = make_policy(PolicyPreset::Default);
         assert!(matches!(
             policy.evaluate(names::BG_READ, "{}").unwrap(),
+            ToolDecision::Allow
+        ));
+        assert!(matches!(
+            policy.evaluate("some_new_tool", "{}").unwrap(),
             ToolDecision::Allow
         ));
     }
 
     #[test]
-    fn classify_delegates_to_classifier_for_bash_exec() {
-        let policy = make_policy();
-        // "ls" is in the read-only catalog → Allow via classifier.
-        let decision = policy
-            .evaluate(names::BASH_EXEC, r#"{"command":"ls"}"#)
-            .unwrap();
-        assert!(matches!(decision, ToolDecision::Allow));
-    }
-
-    #[test]
-    fn classify_surfaces_reason_on_ask() {
-        let policy = make_policy();
-        let decision = policy
-            .evaluate(names::BASH_EXEC, r#"{"command":"echo x > f"}"#)
-            .unwrap();
-        match decision {
-            ToolDecision::Ask { reason: Some(r) } => {
-                assert!(r.contains("redirect"), "reason: {r}");
-                assert!(r.contains("'f'"), "reason: {r}");
-            }
-            other => panic!("expected Ask with reason, got {other:?}"),
+    fn non_bash_tool_allows_under_auto_and_allow_all() {
+        for preset in [PolicyPreset::Auto, PolicyPreset::AllowAll] {
+            let policy = make_policy(preset);
+            assert!(
+                matches!(
+                    policy.evaluate(names::BG_READ, "{}").unwrap(),
+                    ToolDecision::Allow
+                ),
+                "{preset:?}: bg_read should allow"
+            );
+            assert!(
+                matches!(
+                    policy.evaluate("some_new_tool", "{}").unwrap(),
+                    ToolDecision::Allow
+                ),
+                "{preset:?}: unknown tool should allow"
+            );
         }
     }
 
     #[test]
-    fn unknown_tool_asks() {
-        let policy = make_policy();
-        let decision = policy.evaluate("some_new_tool", "{}").unwrap();
-        assert!(matches!(decision, ToolDecision::Ask { .. }));
-    }
-
-    #[test]
-    fn policy_update_takes_effect() {
-        let shared = Arc::new(RwLock::new(default_tool_policy()));
-        let policy = AgentPolicy::new(shared.clone(), Arc::new(RwLock::new(ExecPolicy::default())));
-
-        // Default: bash_background_read is allow.
+    fn bash_exec_returns_classifier_decision_under_default() {
+        let policy = make_policy(PolicyPreset::Default);
         assert!(matches!(
-            policy.evaluate(names::BG_READ, "{}").unwrap(),
+            policy
+                .evaluate(names::BASH_EXEC, r#"{"command":"ls"}"#)
+                .unwrap(),
             ToolDecision::Allow
         ));
-
-        // Update policy: set bash_background_read to deny.
-        {
-            let mut p = shared.write().unwrap();
-            p.tools.insert(names::BG_READ.into(), PolicyDecision::Deny);
-        }
-
-        // Now it should be denied.
         assert!(matches!(
-            policy.evaluate(names::BG_READ, "{}").unwrap(),
+            policy
+                .evaluate(names::BASH_EXEC, r#"{"command":"cargo"}"#)
+                .unwrap(),
+            ToolDecision::Ask { .. }
+        ));
+        assert!(matches!(
+            policy
+                .evaluate(names::BASH_EXEC, r#"{"command":"sed x"}"#)
+                .unwrap(),
             ToolDecision::Deny { .. }
         ));
+    }
+
+    #[test]
+    fn bash_exec_auto_allows_unclassified_keeps_denylist() {
+        let policy = make_policy(PolicyPreset::Auto);
+        assert!(matches!(
+            policy
+                .evaluate(names::BASH_EXEC, r#"{"command":"cargo"}"#)
+                .unwrap(),
+            ToolDecision::Allow
+        ));
+        assert!(matches!(
+            policy
+                .evaluate(names::BASH_EXEC, r#"{"command":"sed x"}"#)
+                .unwrap(),
+            ToolDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_exec_allow_all_bypasses_everything() {
+        let policy = make_policy(PolicyPreset::AllowAll);
+        assert_eq!(
+            policy
+                .evaluate(names::BASH_EXEC, r#"{"command":"sed x"}"#)
+                .unwrap(),
+            ToolDecision::Allow
+        );
+        assert_eq!(
+            policy
+                .evaluate(names::BASH_EXEC, r#"{"command":"rm -rf /"}"#)
+                .unwrap(),
+            ToolDecision::Allow
+        );
+    }
+
+    #[test]
+    fn exec_policy_override_widens_and_narrows() {
+        let exec = Arc::new(RwLock::new(ExecPolicy::default()));
+
+        // Widen an absent command (`cargo`) to Allow under the strict preset.
+        exec.write()
+            .unwrap()
+            .overrides
+            .insert("cargo".into(), ExecOverride::new(ExecDecision::Allow));
+        let policy = AgentPolicy::new(exec.clone(), PolicyPreset::Default);
+        assert!(matches!(
+            policy
+                .evaluate(names::BASH_EXEC, r#"{"command":"cargo"}"#)
+                .unwrap(),
+            ToolDecision::Allow
+        ));
+
+        // Narrow a catalog command (`ls`) to Deny with a surfaced reason.
+        exec.write().unwrap().overrides.insert(
+            "ls".into(),
+            ExecOverride::new(ExecDecision::Deny).with_reason("no ls here"),
+        );
+        match policy
+            .evaluate(names::BASH_EXEC, r#"{"command":"ls"}"#)
+            .unwrap()
+        {
+            ToolDecision::Deny { reason } => assert_eq!(reason, "no ls here"),
+            other => panic!("expected Deny, got {other:?}"),
+        }
     }
 }

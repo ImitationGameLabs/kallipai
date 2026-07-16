@@ -30,31 +30,29 @@ the full authorization matrix, see [auth.md](auth.md).
 
 ## Endpoint Overview
 
-| Method   | Path                                         | Purpose                                | Auth                         |
-| -------- | -------------------------------------------- | -------------------------------------- | ---------------------------- |
-| `POST`   | `/agents`                                    | Create a new agent instance            | operator / supervisor        |
-| `GET`    | `/agents`                                    | List running agents (`?created_by=`)   | any                          |
-| `DELETE` | `/agents/{id}`                               | Stop and remove an agent               | operator / superior          |
-| `POST`   | `/agents/{id}/interrupt`                     | Interrupt current agent operation      | operator / superior          |
-| `POST`   | `/agents/{id}/message`                       | Send a message                         | any (peer-to-peer)           |
-| `GET`    | `/agents/{id}/events`                        | Subscribe to agent events (SSE)        | any                          |
-| `GET`    | `/agents/{id}/status`                        | Get context usage and retry history    | any                          |
-| `GET`    | `/agents/{id}/permissions`                   | Get permission profile and tool policy | any                          |
-| `GET`    | `/agents/{id}/policy`                        | Get tool policy                        | any                          |
-| `PUT`    | `/agents/{id}/policy`                        | Update tool policy                     | operator / superior          |
-| `PUT`    | `/agents/{id}/metadata`                      | Update role / description              | direct supervisor / operator |
-| `PUT`    | `/agents/{id}/activity`                      | Report current activity (self)         | self / operator              |
-| `GET`    | `/budget`                                    | Get daemon-wide token budget status    | any                          |
-| `POST`   | `/budget`                                    | Adjust or set daemon-wide token budget | operator                     |
-| `GET`    | `/approvals`                                 | List approvals                         | any (filtered by scope)      |
-| `GET`    | `/approvals/{id}`                            | Get a single approval                  | operator / superior          |
-| `POST`   | `/approvals/{id}`                            | Approve or deny an approval            | operator / superior          |
-| `GET`    | `/agents/{id}/skills/paths`                  | Get skill directory paths              | any                          |
-| `GET`    | `/agents/{id}/skills/{name}/meta`            | Get skill metadata                     | any                          |
-| `POST`   | `/agents/{id}/skills/{name}/promote-request` | Submit a skill promote request         | self / operator              |
-| `GET`    | `/skill-promote-requests`                    | List promote requests                  | any                          |
-| `GET`    | `/skill-promote-requests/{id}`               | Show promote request with content diff | any                          |
-| `POST`   | `/skill-promote-requests/{id}`               | Approve or deny a promote request      | operator / root agent        |
+| Method   | Path                                         | Purpose                                    | Auth                         |
+| -------- | -------------------------------------------- | ------------------------------------------ | ---------------------------- |
+| `POST`   | `/agents`                                    | Create a new agent instance                | operator / supervisor        |
+| `GET`    | `/agents`                                    | List running agents (`?created_by=`)       | any                          |
+| `DELETE` | `/agents/{id}`                               | Stop and remove an agent                   | operator / superior          |
+| `POST`   | `/agents/{id}/interrupt`                     | Interrupt current agent operation          | operator / superior          |
+| `POST`   | `/agents/{id}/message`                       | Send a message                             | any (peer-to-peer)           |
+| `GET`    | `/agents/{id}/events`                        | Subscribe to agent events (SSE)            | any                          |
+| `GET`    | `/agents/{id}/status`                        | Get context usage and retry history        | any                          |
+| `GET`    | `/agents/{id}/permissions`                   | Get permission profile and classify preset | any                          |
+| `PUT`    | `/agents/{id}/metadata`                      | Update role / description                  | direct supervisor / operator |
+| `PUT`    | `/agents/{id}/activity`                      | Report current activity (self)             | self / operator              |
+| `GET`    | `/budget`                                    | Get daemon-wide token budget status        | any                          |
+| `POST`   | `/budget`                                    | Adjust or set daemon-wide token budget     | operator                     |
+| `GET`    | `/approvals`                                 | List approvals                             | any (filtered by scope)      |
+| `GET`    | `/approvals/{id}`                            | Get a single approval                      | operator / superior          |
+| `POST`   | `/approvals/{id}`                            | Approve or deny an approval                | operator / superior          |
+| `GET`    | `/agents/{id}/skills/paths`                  | Get skill directory paths                  | any                          |
+| `GET`    | `/agents/{id}/skills/{name}/meta`            | Get skill metadata                         | any                          |
+| `POST`   | `/agents/{id}/skills/{name}/promote-request` | Submit a skill promote request             | self / operator              |
+| `GET`    | `/skill-promote-requests`                    | List promote requests                      | any                          |
+| `GET`    | `/skill-promote-requests/{id}`               | Show promote request with content diff     | any                          |
+| `POST`   | `/skill-promote-requests/{id}`               | Approve or deny a promote request          | operator / root agent        |
 
 ## Agent Management
 
@@ -139,7 +137,9 @@ Status: `201 Created`
 
 > **Subagent constraints:** The supervisor must have remaining delegation depth
 > (`max_depth > 0`), and the subagent's `workspace_root` must be within the
-> supervisor's workspace. The tool policy is inherited from the supervisor.
+> supervisor's workspace. The per-command `bash_exec` exec-policy is inherited
+> from the supervisor; the classify preset is daemon-global (same for every
+> agent).
 > Each supervisor may have at most `KALLIP_MAX_SUBAGENTS` (default 20) direct subagents.
 >
 > **Crash recovery:** Restore is exempt from resource limits. After a daemon
@@ -354,7 +354,8 @@ Status: `200 OK`
 ### `GET /agents/{id}/permissions` — Agent permissions
 
 Returns the agent's permission profile (delegation depth, workspace boundary,
-granted permission class) and its effective tool policy.
+granted permission class) and the daemon-global `bash_exec` classify preset in
+effect.
 
 Auth: any authenticated identity. See [auth.md](auth.md).
 
@@ -365,15 +366,14 @@ Auth: any authenticated identity. See [auth.md](auth.md).
   "max_depth": 3,
   "workspace_root": "/path/to/workspace",
   "created_by": "AgentId | null",
-  "tool_policy": {
-    "default": "allow | classify | ask | deny",
-    "tools": {
-      "tool_name": "allow | classify | ask | deny"
-    }
-  },
+  "preset": "default | auto | allow-all",
   "permission_class": "normal | guest"
 }
 ```
+
+**`preset`** — the daemon-global `bash_exec` classify rule-set in effect for
+this agent (read-only; it is set once at daemon startup from
+`KALLIP_POLICY_PRESET`). See _Classify presets_ in `docs/architecture.md`.
 
 **`permission_class`** — the FS-access permission class actually granted to
 this agent (lowercase `"normal"` / `"guest"`): the value the daemon clamped at
@@ -385,61 +385,6 @@ Status: `200 OK`
 | Code | Condition       |
 | ---- | --------------- |
 | 404  | Agent not found |
-
-### `GET /agents/{id}/policy` — Get tool policy
-
-Returns the agent's tool policy — the default decision and per-tool overrides.
-
-Auth: any authenticated identity. See [auth.md](auth.md).
-
-**Response**
-
-```json
-{
-  "default": "ask",
-  "tools": {
-    "bash_background_read": "allow",
-    "bash_exec": "classify"
-  }
-}
-```
-
-Status: `200 OK`
-
-| Code | Condition       |
-| ---- | --------------- |
-| 404  | Agent not found |
-
-### `PUT /agents/{id}/policy` — Update tool policy
-
-Replaces the agent's tool policy. The new policy must be at least as strict as
-the parent's policy (if the agent has a supervisor), and all child agents'
-existing policies must still be at least as strict as the new policy.
-
-Auth: operator or superior. See [auth.md](auth.md).
-
-**Request body**
-
-```json
-{
-  "default": "ask",
-  "tools": {
-    "tool_name": "allow"
-  }
-}
-```
-
-Status: `204 No Content`
-
-| Code | Condition                                                                                          |
-| ---- | -------------------------------------------------------------------------------------------------- |
-| 403  | Not a superior of the target agent                                                                 |
-| 404  | Agent not found                                                                                    |
-| 409  | Policy is less strict than parent, or a child agent's policy would be stricter than the new policy |
-| 500  | Parent/child not found, no persistent directory, or persist failure                                |
-
-> **Strictness ordering:** `deny > ask > classify > allow`. Changes are
-> persisted to disk before the in-memory update.
 
 ### `PUT /agents/{id}/metadata` — Update role / description
 
@@ -517,9 +462,8 @@ Status: `204 No Content`
 
 > **Policy:** an agent reports activity by running `kallip activity` through
 > `bash_exec`. `kallip` is allow-listed in the command classifier, so this
-> classifies as `Allow` under the default policy — same as every other
-> `kallip` management command. (The uncommon `ask-all` debug preset gates
-> all commands uniformly; activity is no different from `spawn`/`list` there.)
+> classifies as `Allow` under every preset — same as every other `kallip`
+> management command. See _Classify presets_ in `docs/architecture.md`.
 
 ## Token Budget
 
@@ -679,18 +623,20 @@ decisions — see note below.
 
 Status: `200 OK`
 
-| Code | Condition                                                                      |
-| ---- | ------------------------------------------------------------------------------ |
-| 400  | `decision` is not `"approve"` or `"deny"`                                      |
-| 403  | Not a superior, or (for approve) caller's own policy does not `allow` the tool |
-| 404  | Approval not found                                                             |
-| 409  | Approval is not in `committed` status                                          |
+| Code | Condition                                                                                                   |
+| ---- | ----------------------------------------------------------------------------------------------------------- |
+| 400  | `decision` is not `"approve"` or `"deny"`                                                                   |
+| 403  | Not a superior, or (for approve of `bash_exec`) the caller's classify rule-set does not `allow` the command |
+| 404  | Approval not found                                                                                          |
+| 409  | Approval is not in `committed` status                                                                       |
 
-> **Policy gate on approve:** Agent callers must have their own `ToolPolicy`
-> set to `allow` for the specific tool in question. This prevents superiors
-> from using subordinates as proxies to bypass their own tool restrictions.
-> The operator identity is exempt from this check. Deny decisions have no
-> policy gate.
+> **Classify gate on approve:** only `bash_exec` can defer (every other tool is
+> unconditional `Allow`). When an agent superior approves a deferred
+> `bash_exec`, the caller's own classify rule-set (the daemon-global preset plus
+> the caller's `ExecPolicy` overrides) must classify the command as `allow`, or
+> the approve is rejected with 403. This prevents a superior from using
+> subordinates as proxies to run a command its own policy would gate. The
+> operator identity is exempt. Deny decisions have no gate.
 
 ## Skills
 

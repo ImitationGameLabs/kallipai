@@ -1,19 +1,18 @@
 //! Shared test helpers for daemon tests.
 //!
 //! This module is only compiled in test builds and provides utilities for
-//! constructing agent entries, registries, and policies used across
-//! `state.rs`, `bridge.rs`, and other test modules.
+//! constructing agent entries and registries used across `state.rs`,
+//! `bridge.rs`, and other test modules.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 
 use kallip_common::agentid::AgentId;
-use kallip_common::policy::{PolicyDecision, ToolPolicy};
+use kallip_common::policy::{ExecPolicy, PolicyPreset};
 use kallip_common::protocol::AgentState;
 use kallip_runtime::approval::ApprovalStore;
-use kallip_runtime::config::{AgentConfig, PermissionProfile, default_tool_policy};
+use kallip_runtime::config::{AgentConfig, PermissionProfile};
 use kallip_runtime::context::ContextStore;
 use kallip_runtime::retry::RetryPolicy;
 use tokio::sync::{Mutex, broadcast, mpsc};
@@ -25,15 +24,56 @@ use crate::state::{
 };
 use kallip_common::authtoken::TokenHash;
 
-/// Construct a full `AgentEntry` with real channels and default policy.
+/// Construct a full `AgentEntry` with real channels, the default preset, and an
+/// empty exec-policy.
 pub fn make_entry(created_by: Option<AgentId>, auth_token: String) -> AgentEntry {
-    make_entry_with_rx(created_by, auth_token).0
+    make_entry_inner(
+        created_by,
+        auth_token,
+        PolicyPreset::Default,
+        ExecPolicy::default(),
+    )
+    .0
 }
 
-/// Like `make_entry`, but returns the `prompt_rx` for capturing notifications.
+/// Like [`make_entry`], but returns the `prompt_rx` for capturing notifications.
 pub fn make_entry_with_rx(
     created_by: Option<AgentId>,
     auth_token: String,
+) -> (AgentEntry, mpsc::Receiver<String>) {
+    make_entry_inner(
+        created_by,
+        auth_token,
+        PolicyPreset::Default,
+        ExecPolicy::default(),
+    )
+}
+
+/// Like [`make_entry`], but installs a custom preset and exec-policy on the agent.
+pub fn make_entry_with_policy(
+    created_by: Option<AgentId>,
+    auth_token: String,
+    preset: PolicyPreset,
+    exec_policy: ExecPolicy,
+) -> AgentEntry {
+    make_entry_inner(created_by, auth_token, preset, exec_policy).0
+}
+
+/// Like [`make_entry_with_policy`], but returns the `prompt_rx`.
+pub fn make_entry_with_policy_rx(
+    created_by: Option<AgentId>,
+    auth_token: String,
+    preset: PolicyPreset,
+    exec_policy: ExecPolicy,
+) -> (AgentEntry, mpsc::Receiver<String>) {
+    make_entry_inner(created_by, auth_token, preset, exec_policy)
+}
+
+fn make_entry_inner(
+    created_by: Option<AgentId>,
+    auth_token: String,
+    preset: PolicyPreset,
+    exec_policy: ExecPolicy,
 ) -> (AgentEntry, mpsc::Receiver<String>) {
     let (prompt_tx, prompt_rx) = mpsc::channel(16);
     let (events_tx, _) = broadcast::channel(1);
@@ -77,10 +117,8 @@ pub fn make_entry_with_rx(
             activity: Arc::new(std::sync::Mutex::new(String::new())),
             auth_token_hash: TokenHash::of(&auth_token),
             env: std::collections::HashMap::new(),
-            tool_policy: Arc::new(std::sync::RwLock::new(default_tool_policy())),
-            exec_policy: Arc::new(std::sync::RwLock::new(
-                kallip_common::policy::ExecPolicy::default(),
-            )),
+            preset,
+            exec_policy: Arc::new(std::sync::RwLock::new(exec_policy)),
         },
         subagent_ids: vec![],
     };
@@ -104,28 +142,6 @@ pub fn make_faulted_entry(created_by: Option<AgentId>, reason: &str) -> FaultedE
     }
 }
 
-/// Construct an entry with a custom `ToolPolicy`.
-pub fn make_entry_with_policy(
-    created_by: Option<AgentId>,
-    auth_token: String,
-    policy: ToolPolicy,
-) -> AgentEntry {
-    let mut entry = make_entry(created_by, auth_token);
-    entry.agent.tool_policy = Arc::new(std::sync::RwLock::new(policy));
-    entry
-}
-
-/// Like `make_entry_with_policy`, but returns the `prompt_rx`.
-pub fn make_entry_with_policy_rx(
-    created_by: Option<AgentId>,
-    auth_token: String,
-    policy: ToolPolicy,
-) -> (AgentEntry, mpsc::Receiver<String>) {
-    let (mut entry, rx) = make_entry_with_rx(created_by, auth_token);
-    entry.agent.tool_policy = Arc::new(std::sync::RwLock::new(policy));
-    (entry, rx)
-}
-
 /// Register a root agent (no `created_by`).
 pub fn add_root(registry: &mut AgentRegistry, id: &AgentId) {
     registry.register(
@@ -142,11 +158,21 @@ pub fn add_sub(registry: &mut AgentRegistry, id: &AgentId, supervisor: &AgentId)
     );
 }
 
-/// Register a root agent with a custom policy.
-pub fn add_root_with_policy(registry: &mut AgentRegistry, id: &AgentId, policy: ToolPolicy) {
+/// Register a root agent with a custom preset and exec-policy.
+pub fn add_root_with_policy(
+    registry: &mut AgentRegistry,
+    id: &AgentId,
+    preset: PolicyPreset,
+    exec_policy: ExecPolicy,
+) {
     registry.register(
         id.clone(),
-        RegistryEntry::Live(make_entry_with_policy(None, format!("agent-{id}"), policy)),
+        RegistryEntry::Live(make_entry_with_policy(
+            None,
+            format!("agent-{id}"),
+            preset,
+            exec_policy,
+        )),
     );
 }
 
@@ -171,36 +197,17 @@ pub fn add_faulted_sub(
     );
 }
 
-/// Build a `ToolPolicy` that allows exactly one tool, defaults to `Ask`.
-pub fn policy_allow_tool(tool: &str) -> ToolPolicy {
-    let mut tools = BTreeMap::new();
-    tools.insert(tool.to_string(), PolicyDecision::Allow);
-    ToolPolicy {
-        default: PolicyDecision::Ask,
-        tools,
-    }
-}
-
-/// Build a `ToolPolicy` that sets one tool to the given decision, defaults to `Ask`.
-pub fn policy_for_tool(tool: &str, decision: PolicyDecision) -> ToolPolicy {
-    let mut tools = BTreeMap::new();
-    tools.insert(tool.to_string(), decision);
-    ToolPolicy {
-        default: PolicyDecision::Ask,
-        tools,
-    }
-}
-
 /// Enqueue and commit an approval on the target agent, return the approval ID.
 pub async fn enqueue_committed_approval(
     registry: &tokio::sync::RwLockReadGuard<'_, AgentRegistry>,
     agent_id: &AgentId,
     tool_name: &str,
+    arguments: &str,
 ) -> String {
     let entry = registry.get(agent_id).expect("agent exists");
     let live = entry.as_live().expect("agent is live");
     let mut store = live.agent.approvals.lock().await;
-    let id = store.enqueue(tool_name, "{}", None);
+    let id = store.enqueue(tool_name, arguments, None);
     store.commit(&id, "test commit").expect("commit");
     id
 }
@@ -241,11 +248,18 @@ pub fn make_profile_registry() -> Arc<kallip_runtime::profile::ProfileRegistry> 
     Arc::new(ProfileRegistry::new(cfg.tiers, source).expect("valid test registry"))
 }
 
-/// Create a fresh `SharedState` for testing. The operator token plaintext is
-/// `"op-token"` (hashed into `AppState`); tests present it as a bearer token.
+/// Create a fresh `SharedState` (default preset) for testing. The operator token
+/// plaintext is `"op-token"` (hashed into `AppState`); tests present it as a
+/// bearer token.
 pub fn make_state() -> SharedState {
-    Arc::new(AppState::new(
+    make_state_with_preset(PolicyPreset::Default)
+}
+
+/// Like [`make_state`], but with a custom daemon-global preset.
+pub fn make_state_with_preset(preset: PolicyPreset) -> SharedState {
+    Arc::new(AppState::new_with_preset(
         TokenHash::of("op-token"),
         make_profile_registry(),
+        preset,
     ))
 }

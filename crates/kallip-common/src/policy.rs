@@ -1,109 +1,66 @@
-//! Policy decision and tool policy types.
+//! Policy types shared between the runtime policy engine and the daemon API/config.
 //!
-//! Shared between the runtime policy engine and the daemon API/config.
+//! Only `bash_exec` is gated (it is the arbitrary-execution surface); every other
+//! tool is the agent's own self-management and runs unconditionally. There is no
+//! per-tool decision lattice. The `bash_exec` rule-set is selected by a daemon-global
+//! [`PolicyPreset`]; per-command overrides live in [`ExecPolicy`].
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de, de::Visitor};
+use std::str::FromStr;
 
-/// Decision for a tool in the policy.
+/// The daemon-global rule-set applied to `bash_exec` classification, selected once
+/// at startup by `KALLIP_POLICY_PRESET`.
 ///
-/// Ordering (via derived `Ord`): Allow < Classify < Ask < Deny.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PolicyDecision {
-    Allow,
-    Classify,
-    Ask,
-    Deny,
+/// There is no separate "mode" type: the preset *is* the rule bundle. The classifier
+/// consumes the preset directly to decide how an unclassified command resolves and
+/// whether the denylist applies.
+///
+/// - `Default` — strict: catalog commands allow, unclassified commands ask, the
+///   builtin denylist and structural rejects (`curl | sh`, ...) deny.
+/// - `Auto` — the optimized middle: like `Default` but unclassified commands allow
+///   too; the denylist still applies.
+/// - `AllowAll` — debug bypass: everything allows (the denylist and structural
+///   rejects do not apply). Not for production.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyPreset {
+    #[serde(rename = "default")]
+    Default,
+    Auto,
+    AllowAll,
 }
 
-impl std::fmt::Display for PolicyDecision {
+impl std::fmt::Display for PolicyPreset {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Allow => "allow",
-            Self::Classify => "classify",
-            Self::Ask => "ask",
-            Self::Deny => "deny",
+            Self::Default => "default",
+            Self::Auto => "auto",
+            Self::AllowAll => "allow-all",
         })
     }
 }
 
-impl std::str::FromStr for PolicyDecision {
+impl std::str::FromStr for PolicyPreset {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "allow" => Ok(Self::Allow),
-            "classify" => Ok(Self::Classify),
-            "ask" => Ok(Self::Ask),
-            "deny" => Ok(Self::Deny),
+            "default" => Ok(Self::Default),
+            "auto" => Ok(Self::Auto),
+            "allow-all" => Ok(Self::AllowAll),
             _ => Err(format!(
-                "invalid policy decision '{s}' (expected allow/ask/deny/classify)"
+                "invalid policy preset '{s}' (expected default, auto, or allow-all)"
             )),
-        }
-    }
-}
-
-/// Per-agent tool security policy.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ToolPolicy {
-    pub default: PolicyDecision,
-    pub tools: BTreeMap<String, PolicyDecision>,
-}
-
-impl ToolPolicy {
-    pub fn new(default: PolicyDecision) -> Self {
-        Self {
-            default,
-            tools: BTreeMap::new(),
-        }
-    }
-
-    /// Look up the decision for a tool name.
-    pub fn decision_for(&self, tool_name: &str) -> PolicyDecision {
-        self.tools.get(tool_name).copied().unwrap_or(self.default)
-    }
-
-    /// Validate that this policy is at least as strict as `other`.
-    /// Checks the union of both maps' keys plus the default.
-    pub fn validate_at_least_as_strict_as(&self, other: &ToolPolicy) -> Result<(), Vec<String>> {
-        let mut violations = Vec::new();
-
-        if self.default < other.default {
-            violations.push(format!(
-                "default {} is less strict than parent's {}",
-                self.default, other.default,
-            ));
-        }
-
-        let all_keys: std::collections::BTreeSet<&String> =
-            self.tools.keys().chain(other.tools.keys()).collect();
-
-        for key in &all_keys {
-            let mine = self.decision_for(key);
-            let theirs = other.decision_for(key);
-            if mine < theirs {
-                violations.push(format!(
-                    "{key}: {} is less strict than parent's {}",
-                    mine, theirs,
-                ));
-            }
-        }
-
-        if violations.is_empty() {
-            Ok(())
-        } else {
-            Err(violations)
         }
     }
 }
 
 /// Per-command decision for the `bash_exec` exec-policy override layer.
 ///
-/// Intentionally distinct from [`PolicyDecision`]: `Classify` has no meaning for
-/// a per-command shell override (the catalog *is* the classify step), and this
-/// lattice's `Ord` (Allow < Ask < Deny) drives the monotonic-strictness check in
-/// [`ExecPolicy::validate_at_least_as_strict_as`].
+/// This lattice's `Ord` (`Allow < Ask < Deny`) drives the monotonic-strictness
+/// check in [`ExecPolicy::validate_at_least_as_strict_as`]: a child agent's
+/// effective per-command decision must be at least as strict as its parent's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecDecision {
@@ -136,14 +93,134 @@ impl std::str::FromStr for ExecDecision {
     }
 }
 
+/// A per-command exec-policy override: a [`ExecDecision`] plus an optional
+/// human-readable `reason`.
+///
+/// The reason is surfaced verbatim to the agent when the override narrows the
+/// verdict (Ask/Deny), so it understands *why* a command is gated and what to
+/// use instead (e.g. deny `sed` with "silent substitution; make changes manually").
+/// It is informational metadata only — it never participates in the
+/// strictness lattice, which is purely on [`ExecDecision`].
+///
+/// Serializes in a dual form for backward compatibility and ergonomics: a
+/// reason-less override is a bare decision string (`sed = "deny"`); a reasoned
+/// override is a table (`sed = { decision = "deny", reason = "..." }`). The same
+/// dual form is accepted on deserialize, for both TOML (`exec_policy.toml`) and
+/// JSON (the PUT `/exec-policy` body). Unknown table fields are rejected so a
+/// typo'd `reason` key fails loudly instead of silently dropping the reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecOverride {
+    pub decision: ExecDecision,
+    pub reason: Option<String>,
+}
+
+impl ExecOverride {
+    pub fn new(decision: ExecDecision) -> Self {
+        Self {
+            decision,
+            reason: None,
+        }
+    }
+
+    /// Attach a reason (builder-style, consuming).
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+}
+
+impl From<ExecDecision> for ExecOverride {
+    fn from(decision: ExecDecision) -> Self {
+        Self::new(decision)
+    }
+}
+
+impl Serialize for ExecOverride {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match &self.reason {
+            // Bare form: byte-identical to the legacy `ExecDecision` value, so
+            // existing exec_policy.toml entries round-trip unchanged.
+            None => serializer.serialize_str(&self.decision.to_string()),
+            Some(reason) => {
+                use serde::ser::SerializeStruct;
+                let mut st = serializer.serialize_struct("ExecOverride", 2)?;
+                st.serialize_field("decision", &self.decision)?;
+                st.serialize_field("reason", reason)?;
+                st.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ExecOverride {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ExecOverrideVisitor;
+
+        impl<'de> Visitor<'de> for ExecOverrideVisitor {
+            type Value = ExecOverride;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an exec decision (allow/ask/deny) or a table { decision, reason }")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<ExecOverride, E>
+            where
+                E: de::Error,
+            {
+                let decision = ExecDecision::from_str(v.trim()).map_err(E::custom)?;
+                Ok(ExecOverride::new(decision))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<ExecOverride, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                let mut decision: Option<ExecDecision> = None;
+                let mut reason: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "decision" => {
+                            if decision.is_some() {
+                                return Err(de::Error::duplicate_field("decision"));
+                            }
+                            decision = Some(map.next_value()?);
+                        }
+                        "reason" => {
+                            if reason.is_some() {
+                                return Err(de::Error::duplicate_field("reason"));
+                            }
+                            reason = Some(map.next_value()?);
+                        }
+                        other => {
+                            return Err(de::Error::unknown_field(other, &["decision", "reason"]));
+                        }
+                    }
+                }
+                let decision = decision.ok_or_else(|| de::Error::missing_field("decision"))?;
+                Ok(ExecOverride { decision, reason })
+            }
+        }
+
+        // `deserialize_any` so both the bare-string and table forms dispatch
+        // correctly under toml (string vs table) and serde_json (string vs object).
+        deserializer.deserialize_any(ExecOverrideVisitor)
+    }
+}
+
 /// Per-agent `bash_exec` command-policy overrides layered on the static read-only
-/// catalog. An effective decision for a command is `overrides.get(name)` if
-/// present, else the catalog's baseline verdict (supplied by the caller, since
+/// catalog. An effective decision for a command is `overrides.get(name).decision`
+/// if present, else the catalog's baseline verdict (supplied by the caller, since
 /// the catalog lives in the runtime crate).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ExecPolicy {
     #[serde(default)]
-    pub overrides: BTreeMap<String, ExecDecision>,
+    pub overrides: BTreeMap<String, ExecOverride>,
 }
 
 impl ExecPolicy {
@@ -161,8 +238,7 @@ impl ExecPolicy {
     /// A parent **narrowing** override (e.g. `ls -> ask`) is viral: a child that
     /// drops it inherits the looser catalog baseline and is rejected. A parent
     /// **widening** override (`cargo -> allow` on an absent command) is not viral:
-    /// a child may stay stricter (catalog default). This mirrors
-    /// [`ToolPolicy::validate_at_least_as_strict_as`].
+    /// a child may stay stricter (catalog default).
     pub fn validate_at_least_as_strict_as(
         &self,
         other: &ExecPolicy,
@@ -172,7 +248,7 @@ impl ExecPolicy {
             policy
                 .overrides
                 .get(name)
-                .copied()
+                .map(|o| o.decision)
                 .unwrap_or_else(|| baseline(name))
         };
 
@@ -199,21 +275,22 @@ impl ExecPolicy {
         }
     }
 
-    /// Look up the override decision for a command name, if any. Returns the
-    /// raw override only (not the catalog-baseline fallback) — hence `override_for`
-    /// rather than a "decision" that implies an effective verdict.
-    pub fn override_for(&self, name: &str) -> Option<ExecDecision> {
-        self.overrides.get(name).copied()
+    /// Look up the override for a command name, if any. Returns the raw override
+    /// (carrying its optional reason) only — not the catalog-baseline fallback —
+    /// hence `override_for` rather than a "decision" that implies an effective
+    /// verdict.
+    pub fn override_for(&self, name: &str) -> Option<&ExecOverride> {
+        self.overrides.get(name)
     }
 
     /// Lowercase every override key in place. Command names are matched
     /// case-insensitively (the classifier lowercases `cmd_name`), so mixed-case
     /// keys would silently never match.
     pub fn lowercase_keys(&mut self) {
-        let normalized: BTreeMap<String, ExecDecision> = self
+        let normalized: BTreeMap<String, ExecOverride> = self
             .overrides
             .iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), *v))
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
             .collect();
         self.overrides = normalized;
     }
@@ -221,7 +298,7 @@ impl ExecPolicy {
 
 #[cfg(test)]
 mod exec_policy_tests {
-    use super::{ExecDecision, ExecPolicy};
+    use super::{ExecDecision, ExecOverride, ExecPolicy};
     use ExecDecision::*;
 
     /// Baseline resolver mirroring the runtime's `classifier::exec_baseline`:
@@ -237,7 +314,7 @@ mod exec_policy_tests {
     fn policy(pairs: &[(&str, ExecDecision)]) -> ExecPolicy {
         let mut e = ExecPolicy::default();
         for (k, v) in pairs {
-            e.overrides.insert((*k).to_string(), *v);
+            e.overrides.insert((*k).to_string(), (*v).into());
         }
         e
     }
@@ -303,8 +380,190 @@ mod exec_policy_tests {
     fn lowercase_keys_normalizes() {
         let mut p = policy(&[("LS", Allow), ("Cargo", Ask)]);
         p.lowercase_keys();
-        assert_eq!(p.overrides.get("ls"), Some(&Allow));
-        assert_eq!(p.overrides.get("cargo"), Some(&Ask));
+        assert_eq!(p.overrides.get("ls").map(|o| o.decision), Some(Allow));
+        assert_eq!(p.overrides.get("cargo").map(|o| o.decision), Some(Ask));
         assert!(!p.overrides.contains_key("LS"));
+    }
+
+    // -------------------------------------------------------------------------
+    // ExecOverride serde: dual-form (bare string vs {decision, reason} table)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn deserialize_bare_string_form() {
+        let toml = "overrides = { sed = \"deny\" }\n";
+        let p: ExecPolicy = toml::from_str(toml).unwrap();
+        let ov = p.override_for("sed").unwrap();
+        assert_eq!(ov.decision, Deny);
+        assert!(ov.reason.is_none());
+    }
+
+    #[test]
+    fn deserialize_table_form_carries_reason() {
+        let toml =
+            "overrides = { sed = { decision = \"deny\", reason = \"make changes manually\" } }\n";
+        let p: ExecPolicy = toml::from_str(toml).unwrap();
+        let ov = p.override_for("sed").unwrap();
+        assert_eq!(ov.decision, Deny);
+        assert_eq!(ov.reason.as_deref(), Some("make changes manually"));
+    }
+
+    #[test]
+    fn deserialize_reason_accepted_on_ask() {
+        let toml = "overrides = { cargo = { decision = \"ask\", reason = \"build scripts\" } }\n";
+        let p: ExecPolicy = toml::from_str(toml).unwrap();
+        let ov = p.override_for("cargo").unwrap();
+        assert_eq!(ov.decision, Ask);
+        assert_eq!(ov.reason.as_deref(), Some("build scripts"));
+    }
+
+    #[test]
+    fn deserialize_rejects_unknown_field() {
+        // Typo'd `reason` key must error, not silently drop the reason.
+        let toml = "overrides = { sed = { decision = \"deny\", reson = \"oops\" } }\n";
+        let err = toml::from_str::<ExecPolicy>(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected unknown_field error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_empty_table_missing_decision() {
+        // An empty table has no `decision`; this must fail loudly, not silently
+        // default to anything.
+        let toml = "overrides = { sed = {} }\n";
+        let err = toml::from_str::<ExecPolicy>(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("missing field"),
+            "expected missing_field error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("decision"),
+            "error should name the missing `decision` field: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_bare_string_form_via_json() {
+        // The HTTP PUT path (Json<ExecPolicy>) deserializes via serde_json, so
+        // the bare-string form must work there too, not just under TOML.
+        let json = r#"{"overrides":{"sed":"deny"}}"#;
+        let p: ExecPolicy = serde_json::from_str(json).unwrap();
+        let ov = p.override_for("sed").unwrap();
+        assert_eq!(ov.decision, Deny);
+        assert!(ov.reason.is_none());
+    }
+
+    #[test]
+    fn serialize_reason_less_entry_is_bare_string() {
+        let mut p = ExecPolicy::default();
+        p.overrides.insert("sed".into(), ExecOverride::new(Deny));
+        let toml = toml::to_string(&p).unwrap();
+        // Legacy bare form, byte-identical to the pre-reason era.
+        assert!(toml.contains("sed = \"deny\""), "got:\n{toml}");
+    }
+
+    #[test]
+    fn serialize_reasoned_entry_is_table() {
+        let mut p = ExecPolicy::default();
+        p.overrides.insert(
+            "sed".into(),
+            ExecOverride::new(Deny).with_reason("make changes manually"),
+        );
+        let toml = toml::to_string(&p).unwrap();
+        assert!(toml.contains("decision = \"deny\""), "got:\n{toml}");
+        assert!(
+            toml.contains("reason = \"make changes manually\""),
+            "got:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn override_round_trips_both_forms() {
+        // A policy mixing the bare and reasoned forms round-trips through TOML
+        // (the on-disk format), preserving each entry's shape and reason.
+        let mut p = ExecPolicy::default();
+        p.overrides.insert("ls".into(), ExecOverride::new(Allow));
+        p.overrides.insert(
+            "sed".into(),
+            ExecOverride::new(Ask).with_reason("build scripts; review"),
+        );
+
+        let s = toml::to_string(&p).unwrap();
+        let back: ExecPolicy = toml::from_str(&s).unwrap();
+
+        let ls = back.override_for("ls").unwrap();
+        assert_eq!(ls.decision, Allow);
+        assert!(ls.reason.is_none());
+        let sed = back.override_for("sed").unwrap();
+        assert_eq!(sed.decision, Ask);
+        assert_eq!(sed.reason.as_deref(), Some("build scripts; review"));
+    }
+
+    #[test]
+    fn reason_with_special_chars_survives_json_roundtrip() {
+        let original =
+            ExecOverride::new(Ask).with_reason("contains \" quotes, { braces }\nand newline");
+        let json = serde_json::to_string(&original).unwrap();
+        let back: ExecOverride = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, back);
+    }
+
+    // -------------------------------------------------------------------------
+    // Lattice ignores reason (monotonicity is purely on decision)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn validate_ignores_reason_only_decision_matters() {
+        // Same decision, different reasons: a child cannot be "less strict", and
+        // differing reasons alone never constitute a violation either way.
+        let parent = ExecPolicy {
+            overrides: [(
+                "sed".into(),
+                ExecOverride::new(Deny).with_reason("parent reason"),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let child = ExecPolicy {
+            overrides: [(
+                "sed".into(),
+                ExecOverride::new(Deny).with_reason("child reason"),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert!(
+            child
+                .validate_at_least_as_strict_as(&parent, baseline)
+                .is_ok()
+        );
+        assert!(
+            parent
+                .validate_at_least_as_strict_as(&child, baseline)
+                .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::PolicyPreset;
+    use PolicyPreset::*;
+
+    #[test]
+    fn display_from_str_roundtrip() {
+        for p in [Default, Auto, AllowAll] {
+            let s = p.to_string();
+            assert_eq!(s.parse::<PolicyPreset>().unwrap(), p);
+        }
+    }
+
+    #[test]
+    fn from_str_rejects_invalid() {
+        assert!("classify".parse::<PolicyPreset>().is_err());
+        assert!("ask-all".parse::<PolicyPreset>().is_err());
+        assert!("gibberish".parse::<PolicyPreset>().is_err());
     }
 }
