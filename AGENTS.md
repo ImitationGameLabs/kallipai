@@ -37,6 +37,10 @@ The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem 
             └── tarball.nix    # Release tarball builder
 ```
 
+## Frontend development
+
+When working on anything under `packages/` (the JS/TS workspace: `kallip-web`, `kallip-ui`, `kallip-app`, `kallip-client`, `kallip-common`, `kallip-agora-client`), read [frontend-development.md](docs/frontend-development.md) first. It defines the Deno-first toolchain: every action (dev, build, check, fmt, lint, installing deps) goes through `deno task`. Do not drop down to `npm`/`npx`/`pnpm`/`yarn` or hand-invoke `node_modules/.bin/*`; if a workflow is missing, add a `scripts` entry and call it via `deno task`.
+
 ## Common Tasks
 
 For adding workspace members, see [add-workspace-member.md](docs/agent-wizards/add-workspace-member.md).
@@ -75,7 +79,7 @@ After modifying TOML files:
 
 After modifying Markdown files:
 
-- `prettier -w <markdown file>` - Format specific file (run individually for each modified file)
+- `deno task fmt:file <markdown file>` - Format specific file (run individually for each modified file)
 
 After modifying Rust code:
 
