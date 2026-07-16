@@ -49,6 +49,11 @@
               (import inputs.rust-overlay)
               inputs.aifed.overlays.default
             ];
+
+            config = {
+              allowUnfree = true;
+              android_sdk.accept_license = true;
+            };
           };
 
           root = ./.;
@@ -115,41 +120,34 @@
               inherit (inputs.aifed.packages.${system}) aifed-tarball;
             });
 
-          inherit (common) craneLib;
+          # Opt-in devShell for the kallip-app Android (Tauri mobile) target.
+          # The app's Rust is a standalone Cargo project (not a root-workspace
+          # member), so this is intentionally a separate shell with its own
+          # Android toolchain — see nix/devshells/tauri.nix. Entered via `nix
+          # develop .#tauri`.
+          tauriDevShell = import ./nix/devshells/tauri.nix {
+            inherit
+              pkgs
+              lib
+              inputs
+              ;
+          };
+
+          # Backend toolchain only (Rust + TS + Nix) — see nix/devshells/default.nix.
+          defaultDevShell = import ./nix/devshells/default.nix {
+            inherit
+              pkgs
+              lib
+              common
+              ;
+          };
         in
         {
           inherit checks packages;
 
-          devShells.default = craneLib.devShell {
-            # Extra inputs can be added here; cargo and rustc are provided by default.
-            packages =
-              with pkgs;
-              [
-                # Rust
-                cargo-hakari
-                rust-analyzer
-
-                # Typescript
-                deno
-
-                # Nix
-                nil
-                nixfmt
-                statix
-
-                # TOML toolkit (linter, formatter)
-                taplo
-
-                # Markdown formatter
-                prettier
-
-                # Temporary workaround for copilot-cli direnv integration bug
-                # See: https://github.com/github/copilot-cli/issues/731
-                # TODO: Remove once the upstream issue is resolved
-                bashInteractive
-              ]
-              # aifed is Linux-only; keep it out of the darwin devShell.
-              ++ lib.optionals pkgs.stdenv.isLinux [ aifed ];
+          devShells = {
+            default = defaultDevShell;
+            tauri = tauriDevShell;
           };
         };
     };
