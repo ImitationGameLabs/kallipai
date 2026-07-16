@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // kallip-common is Deno-first and imports with ".ts" extensions; this flag
+    // (paired with noEmit from the base) lets svelte-check follow that source.
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.svelte", "src/**/*.js"]
+}

@@ -28,3 +28,9 @@ harbor-integration/*.egg-info/
 
 # Harbor job outputs
 harbor-integration/jobs/
+
+# JS / Deno frontend workspace
+node_modules/
+**/.svelte-kit/
+**/build/
+**/dist/

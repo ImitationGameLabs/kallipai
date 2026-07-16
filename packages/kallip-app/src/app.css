@@ -1,0 +1,25 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/forms";
+@plugin "@tailwindcss/typography";
+@import "@fontsource/fira-mono";
+
+/* Scan the shared UI package so Tailwind generates the utility classes its
+   Svelte components use (it lives outside this package's source tree). */
+@source "../../kallip-ui/src";
+
+@import "@skeletonlabs/skeleton";
+@import "@skeletonlabs/skeleton-svelte";
+@import "@skeletonlabs/skeleton/themes/vintage";
+
+/* Single light theme (vintage). Skeleton's `preset-*` classes resolve via CSS
+   light-dark(), which keys off `color-scheme`; without forcing `color-scheme:
+   light` here, a user whose OS is in dark mode would see the dark side of those
+   presets even under the vintage theme. */
+[data-theme="vintage"] {
+  color-scheme: light;
+}
+
+html,
+body {
+  height: 100%;
+}

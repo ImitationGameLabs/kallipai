@@ -1,0 +1,26 @@
+{
+  "fmt": {
+    "exclude": [
+      "**/node_modules",
+      "**/.svelte-kit",
+      "**/build",
+      "**/dist",
+      "deno.lock",
+      "target",
+      "crates"
+    ]
+  },
+  "lint": {
+    "exclude": [
+      "**/node_modules",
+      "**/.svelte-kit",
+      "**/build",
+      "**/dist",
+      "target",
+      "crates"
+    ]
+  },
+  "publish": {
+    "exclude": ["**/.svelte-kit", "**/build", "**/dist", "target", "crates"]
+  }
+}

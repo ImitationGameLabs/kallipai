@@ -1,0 +1,20 @@
+{
+  "name": "@kallipai/kallip-client",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./env": "./src/env.ts"
+  },
+  "scripts": {
+    "check": "deno check src",
+    "test": "deno test src"
+  },
+  "dependencies": {
+    "@kallipai/kallip-common": "workspace:*"
+  },
+  "devDependencies": {
+    "@std/assert": "npm:@jsr/std__assert@^1.0.19"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@kallipai/kallip-common",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "deno check src",
+    "test": "deno test src"
+  },
+  "devDependencies": {
+    "@std/assert": "npm:@jsr/std__assert@^1.0.19"
+  }
+}
