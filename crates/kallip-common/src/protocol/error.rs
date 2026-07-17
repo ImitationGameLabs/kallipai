@@ -69,6 +69,14 @@ impl ApiError {
         }
     }
 
+    /// 429 Too Many Requests
+    pub fn too_many_requests(msg: impl Into<String>) -> Self {
+        Self {
+            status: 429,
+            message: msg.into(),
+        }
+    }
+
     /// 500 Internal Server Error.
     ///
     /// Logs the full error detail via `tracing::error!` and returns a generic

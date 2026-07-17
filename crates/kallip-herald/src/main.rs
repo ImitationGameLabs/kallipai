@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use kallip_agora_common::bytes::Ed25519PublicKey;
 use kallip_agora_common::control::EnrollRequest;
-use kallip_agora_common::ids::TeamId;
+use kallip_agora_common::ids::TagmaId;
 use kallip_client::DaemonClient;
 use tracing::info;
 
@@ -31,7 +31,7 @@ struct Args {
         default_value = "http://127.0.0.1:7100"
     )]
     agora_url: String,
-    /// Single-use enrollment code (first run only; after that the stored team
+    /// Single-use enrollment code (first run only; after that the stored tagma
     /// token is reused).
     #[arg(long, env = "KALLIP_HERALD_ENROLLMENT_CODE")]
     enrollment_code: Option<String>,
@@ -45,7 +45,7 @@ struct Args {
     /// Daemon auth token (the herald acts as the operator).
     #[arg(long, env = "KALLIP_AUTH_TOKEN")]
     daemon_token: String,
-    /// State directory (device key + team token). Defaults to a per-user data dir.
+    /// State directory (device key + tagma token). Defaults to a per-user data dir.
     #[arg(long, env = "KALLIP_HERALD_STATE_DIR")]
     state_dir: Option<String>,
 }
@@ -68,20 +68,20 @@ async fn main() -> Result<()> {
     // Device key: load or generate + persist.
     let device = load_or_create_device(&state_dir)?;
 
-    // Team credentials: load or enroll.
-    let (team_id, team_token) = match load_team(&state_dir) {
+    // Tagma credentials: load or enroll.
+    let (tagma_id, tagma_token) = match load_tagma(&state_dir) {
         Some(creds) => {
-            info!(team = %creds.0, "loaded stored team credentials");
+            info!(tagma = %creds.0, "loaded stored tagma credentials");
             creds
         }
         None => {
             let code = args
                 .enrollment_code
                 .as_deref()
-                .context("no stored team token; --enrollment-code required for first run")?;
+                .context("no stored tagma token; --enrollment-code required for first run")?;
             let creds = enroll(&args.agora_url, code, &device).await?;
-            save_team(&state_dir, &creds);
-            info!(team = %creds.0, "enrolled with agora");
+            save_tagma(&state_dir, &creds);
+            info!(tagma = %creds.0, "enrolled with agora");
             creds
         }
     };
@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
         .http_client(daemon_http)
         .build()?;
 
-    Herald::new(args.agora_url, team_id, team_token, daemon, device)
+    Herald::new(args.agora_url, tagma_id, tagma_token, daemon, device)
         .run()
         .await;
     Ok(())
@@ -136,18 +136,18 @@ fn load_or_create_device(state_dir: &Path) -> Result<e2e::DeviceKey> {
     Ok(device)
 }
 
-fn load_team(state_dir: &Path) -> Option<(TeamId, String)> {
-    let id = std::fs::read_to_string(state_dir.join("team.id")).ok()?;
-    let token = std::fs::read_to_string(state_dir.join("team.token")).ok()?;
-    Some((TeamId::from(id), token.trim().to_string()))
+fn load_tagma(state_dir: &Path) -> Option<(TagmaId, String)> {
+    let id = std::fs::read_to_string(state_dir.join("tagma.id")).ok()?;
+    let token = std::fs::read_to_string(state_dir.join("tagma.token")).ok()?;
+    Some((TagmaId::from(id), token.trim().to_string()))
 }
 
-fn save_team(state_dir: &Path, (team_id, team_token): &(TeamId, String)) {
-    let _ = std::fs::write(state_dir.join("team.id"), team_id.to_string());
-    let _ = write_secret(&state_dir.join("team.token"), team_token.as_bytes());
+fn save_tagma(state_dir: &Path, (tagma_id, tagma_token): &(TagmaId, String)) {
+    let _ = std::fs::write(state_dir.join("tagma.id"), tagma_id.to_string());
+    let _ = write_secret(&state_dir.join("tagma.token"), tagma_token.as_bytes());
 }
 
-/// Write a secret (device key, team token) with mode `0o600` so other local
+/// Write a secret (device key, tagma token) with mode `0o600` so other local
 /// users cannot read it. Unix-only: `mode` is masked by the process umask, and
 /// `0o600 & !umask` stays `0o600` under the usual `0o022`.
 fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -171,7 +171,7 @@ fn set_owner_only(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn enroll(agora_url: &str, code: &str, device: &e2e::DeviceKey) -> Result<(TeamId, String)> {
+async fn enroll(agora_url: &str, code: &str, device: &e2e::DeviceKey) -> Result<(TagmaId, String)> {
     let public = device.public_bytes();
     let signature = device.sign(&kallip_agora_common::proof::enroll_transcript(
         code, &public,
@@ -185,7 +185,7 @@ async fn enroll(agora_url: &str, code: &str, device: &e2e::DeviceKey) -> Result<
         .timeout(Duration::from_secs(30))
         .build()
         .context("build reqwest client")?
-        .post(format!("{agora_url}/v1/teams"))
+        .post(format!("{agora_url}/v1/tagmata"))
         .json(&req)
         .send()
         .await
@@ -195,5 +195,5 @@ async fn enroll(agora_url: &str, code: &str, device: &e2e::DeviceKey) -> Result<
     }
     let body: kallip_agora_common::control::EnrollResponse =
         resp.json().await.context("decode enrollment response")?;
-    Ok((body.team_id, body.team_token))
+    Ok((body.tagma_id, body.tagma_token))
 }

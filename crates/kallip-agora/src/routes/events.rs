@@ -1,6 +1,6 @@
 //! The multiplexed app event stream (`GET /v1/me/events`). One connection per
 //! user carries envelope deliveries for all of their conversations. (Presence
-//! change events are deferred; the app polls `/v1/teams` for now.)
+//! change events are deferred; the app polls `/v1/tagmata` for now.)
 //!
 //! If a slow client falls behind the broadcast capacity, the channel drops
 //! events server-side (logged at `warn`); the client must reconnect/resync.

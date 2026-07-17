@@ -68,10 +68,34 @@ tokio = { version = "1.52.1", features = [
 tokio-util = { version = "0.7", features = ["rt"] }
 
 axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 tokio-stream = "0.1"
 uuid = { version = "1", features = ["v4"] }
+sea-orm = { version = "1.1", default-features = false, features = [
+  "sqlx-postgres",
+  "runtime-tokio-rustls",
+  "macros",
+  "with-uuid",
+  "with-time",
+  "with-json",
+] }
+sea-orm-migration = { version = "1.1", default-features = false, features = [
+  "sqlx-postgres",
+  "runtime-tokio-rustls",
+] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", default-features = false, features = [
+  "postgres",
+] }
+url = "2.5"
+# Pinned to the first pure-Rust (crypto-glue) release; bump to stable release when out.
+webauthn-rs = { version = "=0.6.1-dev", features = [
+  "danger-allow-state-serialisation",
+] }
+cookie = "0.18"
 base64 = "0.22"
+hex = "0.4"
 getrandom = "0.4"
 sha2 = "0.11"
 subtle = "2"
@@ -89,6 +113,7 @@ pulldown-cmark = "0.13.3"
 comfy-table = "7.2.2"
 syntect = "5.3"
 dirs = "6"
+ipnet = "2.12"
 unicode-normalization = "0.1"
 rpassword = "7.5"
 time = { version = "0.3", features = ["serde-well-known"] }
@@ -96,6 +121,7 @@ toml = "1"
 tokenx-rs = "0.1"
 temp-env = "0.3"
 tempfile = "3"
+http-body-util = "0.1"
 wiremock = "0.6.5"
 serial_test = "3.5.0"
 # Dev-only: the `spawn` benchmark in kallip-shell (criterion). Not a runtime dep.

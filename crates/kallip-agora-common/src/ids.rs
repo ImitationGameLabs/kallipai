@@ -6,8 +6,8 @@
 use kallip_common::id_type;
 
 id_type! {
-    /// Unique identifier for a registered agent team (one `kallip-daemon` instance).
-    TeamId
+    /// Unique identifier for a registered agent tagma (one `kallip-daemon` instance).
+    TagmaId
 }
 id_type! {
     /// Unique identifier for a user account.

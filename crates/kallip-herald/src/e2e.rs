@@ -54,12 +54,12 @@ impl DeviceKey {
 /// key, ECDH with the app's public, HKDF -> session key. Returns the response
 /// (herald ephemeral public + signature over the transcript) and the session key.
 ///
-/// The signature binds the ephemeral keys to `(team_id, conversation_id,
+/// The signature binds the ephemeral keys to `(tagma_id, conversation_id,
 /// agent_id)` (see [`kallip_agora_common::proof::kex_transcript`]), so the app
 /// can attribute the derived key unambiguously to the pinned identity.
 pub fn respond_key_exchange(
     device: &DeviceKey,
-    team_id: &str,
+    tagma_id: &str,
     conversation_id: &str,
     agent_id: &str,
     init: &KeyExchangeInit,
@@ -79,7 +79,7 @@ pub fn respond_key_exchange(
     let key = hkdf_sha256_32(shared.as_bytes(), HKDF_INFO);
 
     let herald_eph = eph_pub.to_bytes();
-    let transcript = kex_transcript(team_id, conversation_id, agent_id, &app_eph, &herald_eph);
+    let transcript = kex_transcript(tagma_id, conversation_id, agent_id, &app_eph, &herald_eph);
     let signature = device.sign(&transcript);
     Ok((
         KeyExchangeResponse {
@@ -193,7 +193,7 @@ mod tests {
         };
         // Herald responds, deriving its key.
         let (response, herald_key) =
-            respond_key_exchange(&device, "team", "conv", "agent", &init).unwrap();
+            respond_key_exchange(&device, "tagma", "conv", "agent", &init).unwrap();
         // App independently derives the key from the herald's ephemeral public.
         let herald_eph = array32(&response.ephemeral_public.0).unwrap();
         let app_key = app_derive_key(&app_secret, herald_eph);
@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn kex_signature_binds_conversation_and_verifies_against_pinned_key() {
         // The app side: it knows the herald's pinned public key (fetched via
-        // GET /v1/teams) and reconstructs the transcript to verify the response
+        // GET /v1/tagmata) and reconstructs the transcript to verify the response
         // signature, then derives the same key.
         let device = DeviceKey::generate();
         let pinned = device.public_bytes();
@@ -215,14 +215,14 @@ mod tests {
             ephemeral_public: X25519PublicKey(app_eph_pub.to_vec()),
         };
         let (response, _herald_key) =
-            respond_key_exchange(&device, "team-7", "conv-9", "agent-3", &init).unwrap();
+            respond_key_exchange(&device, "tagma-7", "conv-9", "agent-3", &init).unwrap();
 
         let herald_eph = array32(&response.ephemeral_public.0).unwrap();
         // Verify via the shared agora-common verifier (the app SDK does this).
         assert!(
             verify_kex_proof(
                 &pinned,
-                "team-7",
+                "tagma-7",
                 "conv-9",
                 "agent-3",
                 &app_eph_pub,
@@ -236,7 +236,7 @@ mod tests {
         assert!(
             verify_kex_proof(
                 &pinned,
-                "team-7",
+                "tagma-7",
                 "conv-OTHER",
                 "agent-3",
                 &app_eph_pub,
@@ -249,7 +249,7 @@ mod tests {
         // also passes (independent of the agora-common helper).
         let key = VerifyingKey::from_bytes(&pinned).unwrap();
         let sig = Signature::from_slice(&response.signature.0).unwrap();
-        let transcript = kex_transcript("team-7", "conv-9", "agent-3", &app_eph_pub, &herald_eph);
+        let transcript = kex_transcript("tagma-7", "conv-9", "agent-3", &app_eph_pub, &herald_eph);
         assert!(key.verify(&transcript, &sig).is_ok());
     }
 
@@ -320,7 +320,7 @@ mod tests {
         let init = KeyExchangeInit {
             ephemeral_public: X25519PublicKey(vec![0u8; 32]),
         };
-        let result = respond_key_exchange(&device, "team", "conv", "agent", &init);
+        let result = respond_key_exchange(&device, "tagma", "conv", "agent", &init);
         assert!(result.is_err(), "low-order app public key must be rejected");
     }
 }

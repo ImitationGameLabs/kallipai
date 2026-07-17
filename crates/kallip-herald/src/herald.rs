@@ -23,7 +23,7 @@ use base64::Engine;
 use futures_util::{FutureExt, StreamExt};
 use kallip_agora_common::bytes::{B64, Ciphertext};
 use kallip_agora_common::herald::HeraldInbound;
-use kallip_agora_common::ids::{ConversationId, TeamId, TraceId};
+use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId};
 use kallip_agora_common::message::{Envelope, Participant, TunnelFrame};
 use kallip_client::DaemonClient;
 use kallip_common::agentid::AgentId;
@@ -61,8 +61,8 @@ pub struct Herald {
 /// incarnation (no eviction); bounded in practice by process restart cadence.
 struct Inner {
     agora_url: String,
-    team_id: TeamId,
-    team_token: String,
+    tagma_id: TagmaId,
+    tagma_token: String,
     /// Client for agora control-plane POSTs (key-exchange, envelopes). Has a
     /// total timeout, which is correct for one-shot POSTs.
     http: reqwest::Client,
@@ -87,16 +87,16 @@ struct Inner {
 impl Herald {
     pub fn new(
         agora_url: String,
-        team_id: TeamId,
-        team_token: String,
+        tagma_id: TagmaId,
+        tagma_token: String,
         daemon: DaemonClient,
         device: DeviceKey,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 agora_url,
-                team_id,
-                team_token,
+                tagma_id,
+                tagma_token,
                 http: reqwest::Client::builder()
                     .timeout(Duration::from_secs(30))
                     .build()
@@ -128,7 +128,7 @@ impl Herald {
     async fn connect_and_drain(self) -> Result<()> {
         let url = format!("{}/v1/herald/tunnel", self.inner.agora_url);
         // Reconnect proof: a timestamp + signature over the tunnel transcript,
-        // so a stolen team token alone cannot open a tunnel.
+        // so a stolen tagma token alone cannot open a tunnel.
         let unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -137,7 +137,7 @@ impl Herald {
             .inner
             .device
             .sign(&kallip_agora_common::proof::tunnel_transcript(
-                self.inner.team_id.as_ref(),
+                self.inner.tagma_id.as_ref(),
                 unix_secs,
             ));
         let proof_b64 = base64::engine::general_purpose::STANDARD.encode(proof);
@@ -145,7 +145,7 @@ impl Herald {
             .inner
             .http
             .get(&url)
-            .bearer_auth(&self.inner.team_token)
+            .bearer_auth(&self.inner.tagma_token)
             .header("X-Device-Timestamp", unix_secs.to_string())
             .header("X-Device-Proof", proof_b64)
             .send()
@@ -184,7 +184,7 @@ impl Herald {
             } => {
                 let (response, key) = match e2e::respond_key_exchange(
                     &self.inner.device,
-                    self.inner.team_id.as_ref(),
+                    self.inner.tagma_id.as_ref(),
                     conversation_id.as_ref(),
                     agent_id.as_ref(),
                     &init,
@@ -269,7 +269,13 @@ impl Herald {
                 return;
             }
         };
-        let TunnelFrame::Request { req_id, method, path, headers, body } = frame
+        let TunnelFrame::Request {
+            req_id,
+            method,
+            path,
+            headers,
+            body,
+        } = frame
         else {
             // Only inbound requests drive the tunnel; response frames are
             // herald->app only and any inbound copy is ignored.
@@ -298,8 +304,17 @@ impl Herald {
         if result.is_err() {
             warn!(conv = %conv_id, req_id, "tunnel proxy panicked; emitting 502");
             let trace = trace_for(req_id);
-            let _ = self.emit(&conv_id, &agent_id, &trace, tunnel_head(req_id, 502, vec![])).await;
-            let _ = self.emit(&conv_id, &agent_id, &trace, tunnel_end(req_id)).await;
+            let _ = self
+                .emit(
+                    &conv_id,
+                    &agent_id,
+                    &trace,
+                    tunnel_head(req_id, 502, vec![]),
+                )
+                .await;
+            let _ = self
+                .emit(&conv_id, &agent_id, &trace, tunnel_end(req_id))
+                .await;
         }
     }
 
@@ -351,8 +366,13 @@ impl Herald {
             .iter()
             .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
             .collect();
-        self.emit(conv_id, agent_id, &trace, tunnel_head(req_id, status, resp_headers))
-            .await?;
+        self.emit(
+            conv_id,
+            agent_id,
+            &trace,
+            tunnel_head(req_id, status, resp_headers),
+        )
+        .await?;
 
         // Stream the body byte-agnostically; the herald does not parse SSE.
         // Each reqwest chunk is split to stay under CHUNK_CAP per envelope.
@@ -388,7 +408,10 @@ impl Herald {
             conv_id,
             agent_id,
             &trace,
-            TunnelFrame::ResponseEnd { req_id, error: stream_error },
+            TunnelFrame::ResponseEnd {
+                req_id,
+                error: stream_error,
+            },
         )
         .await
     }
@@ -404,9 +427,16 @@ impl Herald {
         status: u16,
     ) {
         let _ = self
-            .emit(conv_id, agent_id, trace, tunnel_head(req_id, status, vec![]))
+            .emit(
+                conv_id,
+                agent_id,
+                trace,
+                tunnel_head(req_id, status, vec![]),
+            )
             .await;
-        let _ = self.emit(conv_id, agent_id, trace, tunnel_end(req_id)).await;
+        let _ = self
+            .emit(conv_id, agent_id, trace, tunnel_end(req_id))
+            .await;
     }
 
     /// Encrypt `plaintext` for `conv_id` and post the agent envelope, retrying
@@ -438,7 +468,7 @@ impl Herald {
         let envelope = Envelope {
             conversation_id: conv_id.clone(),
             sender: Participant::Agent {
-                team_id: self.inner.team_id.clone(),
+                tagma_id: self.inner.tagma_id.clone(),
                 agent_id: agent_id.clone(),
             },
             sequence_n: seq,
@@ -492,7 +522,7 @@ impl Herald {
                 .inner
                 .http
                 .post(&url)
-                .bearer_auth(&self.inner.team_token)
+                .bearer_auth(&self.inner.tagma_token)
                 .json(envelope)
                 .send()
                 .await
@@ -519,15 +549,15 @@ impl Herald {
             "{}/v1/conversations/{conv_id}/key-exchange/response",
             self.inner.agora_url
         );
-        self.post_with_team_auth(&url, response).await
+        self.post_with_tagma_auth(&url, response).await
     }
 
-    async fn post_with_team_auth<T: serde::Serialize>(&self, url: &str, body: &T) -> Result<()> {
+    async fn post_with_tagma_auth<T: serde::Serialize>(&self, url: &str, body: &T) -> Result<()> {
         let resp = self
             .inner
             .http
             .post(url)
-            .bearer_auth(&self.inner.team_token)
+            .bearer_auth(&self.inner.tagma_token)
             .json(body)
             .send()
             .await
@@ -560,7 +590,10 @@ fn tunnel_head(req_id: u64, status: u16, headers: Vec<(String, String)>) -> Tunn
 
 /// Build a clean `ResponseEnd` tunnel frame (no error).
 fn tunnel_end(req_id: u64) -> TunnelFrame {
-    TunnelFrame::ResponseEnd { req_id, error: None }
+    TunnelFrame::ResponseEnd {
+        req_id,
+        error: None,
+    }
 }
 
 /// A trace id shared by every frame of one tunnel exchange, so a streamed
@@ -607,13 +640,13 @@ mod tunnel_tests {
     use super::*;
     use crate::e2e::SessionKey;
     use axum::extract::State;
-    use axum::http::header::CONTENT_TYPE;
     use axum::http::StatusCode;
+    use axum::http::header::CONTENT_TYPE;
     use axum::response::Response;
     use axum::{Router, routing::get};
     use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, aead::Aead};
     use kallip_agora_common::bytes::{B64, Ciphertext};
-    use kallip_agora_common::ids::{ConversationId, TeamId, TraceId, UserId};
+    use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId, UserId};
     use kallip_agora_common::message::{Envelope, Participant, TunnelFrame};
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -633,12 +666,14 @@ mod tunnel_tests {
 
     fn app_encrypt(key: &SessionKey, seq: u64, pt: &[u8]) -> Vec<u8> {
         let aead = ChaCha20Poly1305::new(key.into());
-        aead.encrypt(&Nonce::from(nonce(DIR_APP_TO_HERALD, seq)), pt).unwrap()
+        aead.encrypt(&Nonce::from(nonce(DIR_APP_TO_HERALD, seq)), pt)
+            .unwrap()
     }
 
     fn app_decrypt(key: &SessionKey, seq: u64, ct: &[u8]) -> Option<Vec<u8>> {
         let aead = ChaCha20Poly1305::new(key.into());
-        aead.decrypt(&Nonce::from(nonce(DIR_HERALD_TO_APP, seq)), ct).ok()
+        aead.decrypt(&Nonce::from(nonce(DIR_HERALD_TO_APP, seq)), ct)
+            .ok()
     }
 
     async fn spawn_agora(capture: Capture) -> String {
@@ -665,12 +700,7 @@ mod tunnel_tests {
         let app = Router::new()
             .route(
                 "/oneshot",
-                get(|| async {
-                    (
-                        [(CONTENT_TYPE, "application/json")],
-                        r#"{"ok":true}"#,
-                    )
-                }),
+                get(|| async { ([(CONTENT_TYPE, "application/json")], r#"{"ok":true}"#) }),
             )
             .route("/missing", get(|| async { StatusCode::NOT_FOUND }))
             .route(
@@ -712,7 +742,7 @@ mod tunnel_tests {
         let device = DeviceKey::generate();
         let herald = Herald::new(
             agora_url,
-            TeamId::from("team".to_string()),
+            TagmaId::from("tagma".to_string()),
             "tok".to_string(),
             daemon,
             device,
@@ -784,7 +814,10 @@ mod tunnel_tests {
     /// Reduce the reply frames for one `req_id` to its status, content-type,
     /// body, whether it ended cleanly (ResponseEnd with no error), and the
     /// ResponseBody frame count.
-    fn reassemble_for(frames: &[TunnelFrame], req_id: u64) -> (Option<u16>, Option<String>, Vec<u8>, bool, usize) {
+    fn reassemble_for(
+        frames: &[TunnelFrame],
+        req_id: u64,
+    ) -> (Option<u16>, Option<String>, Vec<u8>, bool, usize) {
         let mut status = None;
         let mut content_type = None;
         let mut body = Vec::new();
@@ -792,7 +825,11 @@ mod tunnel_tests {
         let mut body_frames = 0;
         for frame in frames {
             match frame {
-                TunnelFrame::ResponseHead { status: s, req_id: r, headers } if *r == req_id => {
+                TunnelFrame::ResponseHead {
+                    status: s,
+                    req_id: r,
+                    headers,
+                } if *r == req_id => {
                     status = Some(*s);
                     content_type = headers
                         .iter()
@@ -803,7 +840,10 @@ mod tunnel_tests {
                     body.extend_from_slice(&chunk.0);
                     body_frames += 1;
                 }
-                TunnelFrame::ResponseEnd { req_id: r, error: None } if *r == req_id => ended = true,
+                TunnelFrame::ResponseEnd {
+                    req_id: r,
+                    error: None,
+                } if *r == req_id => ended = true,
                 _ => {}
             }
         }

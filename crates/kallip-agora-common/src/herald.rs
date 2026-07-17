@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HeraldInbound {
-    /// A forwarded E2E envelope for a conversation the herald's team owns.
+    /// A forwarded E2E envelope for a conversation the herald's tagma owns.
     Envelope { envelope: Envelope },
     /// An app wants to establish a conversation E2E key. The herald derives the
     /// shared secret, caches the bound `agent_id`, and replies with a signed

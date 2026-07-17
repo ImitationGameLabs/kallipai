@@ -1,17 +1,19 @@
 //! The herald tunnel: a long-lived SSE the herald holds open to receive
 //! forwarded envelopes. Establishing it (with a fresh signed proof of the pinned
-//! device key) marks the team online; disconnect removes presence only if this
-//! tunnel is still the live one. A second concurrent tunnel for one team is
+//! device key) marks the tagma online; disconnect removes presence only if this
+//! tunnel is still the live one. A second concurrent tunnel for one tagma is
 //! rejected.
 //!
 //! Every (re)connect must present `X-Device-Timestamp` + `X-Device-Proof`: an
-//! Ed25519 signature over the tunnel transcript, verified against the team's
+//! Ed25519 signature over the tunnel transcript, verified against the tagma's
 //! pinned key, with the timestamp within `+/- proof_skew_secs`. So a stolen
-//! long-lived team token alone cannot open a tunnel.
+//! long-lived tagma token alone cannot open a tunnel.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::db::entity::tagmata;
+use crate::db::map_db_err;
 use axum::Router;
 use axum::extract::State;
 use axum::response::sse::{Event, Sse};
@@ -21,12 +23,13 @@ use base64::engine::general_purpose::STANDARD;
 use kallip_agora_common::herald::HeraldInbound;
 use kallip_agora_common::proof::{ProofError, verify_tunnel_proof};
 use kallip_common::protocol::ApiError;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-use crate::auth::{AuthPrincipal, require_team};
+use crate::auth::{AuthPrincipal, require_tagma};
 use crate::sse::{BoxEventStream, OnDrop};
 use crate::state::SharedState;
 
@@ -47,7 +50,7 @@ async fn tunnel(
     AuthPrincipal(principal): AuthPrincipal,
     headers: axum::http::HeaderMap,
 ) -> Result<Sse<OnDrop>, ApiError> {
-    let team_id = require_team(&principal)?.clone();
+    let tagma_id = require_tagma(&principal)?.clone();
 
     // Proof of possession: timestamp within the skew window + signature over the
     // tunnel transcript, verified against the pinned key.
@@ -67,39 +70,64 @@ async fn tunnel(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| STANDARD.decode(s).ok())
         .ok_or_else(|| ApiError::bad_request("missing or malformed X-Device-Proof"))?;
+    // The pinned device key now lives in the durable store (a registered tagma
+    // must survive an agora restart). Fetched outside the registry lock.
     let pinned = {
-        let reg = state.read()?;
-        let team = reg
-            .teams
-            .get(&team_id)
-            .ok_or_else(|| ApiError::not_found("unknown team"))?;
-        team.pinned_public_key.clone()
+        let tagma = tagmata::Entity::find_by_id(tagma_id.to_string())
+            .one(&state.db)
+            .await
+            .map_err(map_db_err)?;
+        let tagma = tagma.ok_or_else(|| ApiError::not_found("unknown tagma"))?;
+        tagma.pinned_public_key
     };
-    verify_tunnel_proof(&pinned.0, team_id.as_ref(), ts, &sig_bytes)
+    verify_tunnel_proof(&pinned, tagma_id.as_ref(), ts, &sig_bytes)
         .map_err(proof_to_unauthorized)?;
 
-    // Reserve the tunnel slot. One live tunnel per team. Also record the proof
-    // timestamp so a captured proof is single-use: a replay with the same or an
-    // older timestamp is rejected here. A legitimate reconnect carries a
-    // strictly later timestamp; the one edge case is a sub-second reconnect
-    // colliding on the same `unix_secs`, which the herald's 2s backoff rides
-    // past (brief offline flap on rapid reconnect).
+    // Durable replay guard: accept this proof only if the tagma's stored
+    // high-water-mark timestamp is NULL or strictly less than `ts`. The
+    // conditional UPDATE is atomic, so a replay with the same or older
+    // timestamp is rejected even after an agora restart (the guard is no longer
+    // in-memory). A legitimate reconnect carries a strictly later timestamp;
+    // the one edge case is a sub-second reconnect colliding on the same
+    // `unix_secs`, which the herald's 2s backoff rides past. Run outside the
+    // registry lock (DB access never happens under it).
+    let updated = tagmata::Entity::update_many()
+        .filter(tagmata::Column::Id.eq(tagma_id.to_string()))
+        .filter(
+            sea_orm::Condition::any()
+                .add(tagmata::Column::LastTunnelProofTs.is_null())
+                .add(tagmata::Column::LastTunnelProofTs.lt(ts)),
+        )
+        .col_expr(
+            tagmata::Column::LastTunnelProofTs,
+            sea_orm::sea_query::Expr::value(ts),
+        )
+        .exec(&state.db)
+        .await
+        .map_err(map_db_err)?;
+    if updated.rows_affected == 0 {
+        // The stored ts is `>= ts` (replay), or the tagma row vanished between
+        // the find above and here. Tagmata are not deletable today, so this is
+        // a documented rare-race conflation.
+        return Err(ApiError::unauthorized("replayed or stale device proof"));
+    }
+
+    // Reserve the tunnel slot. One live tunnel per tagma. (The proof `ts` is
+    // already durably recorded; a connection that then loses the presence race
+    // has burned its `ts`, which is fine: the herald retries with a fresh,
+    // strictly-later `ts`.)
     let (tx, rx) = broadcast::channel::<HeraldInbound>(crate::state::BROADCAST_CAPACITY);
     let id = Arc::new(());
     {
         let mut reg = state.write()?;
-        if reg.presence.contains_key(&team_id) {
-            return Err(ApiError::conflict("team already has a live tunnel"));
+        if reg.presence.contains_key(&tagma_id) {
+            return Err(ApiError::conflict("tagma already has a live tunnel"));
         }
-        // Replay guard: reject a stale/replayed proof, GC out-of-window entries,
-        // then record this timestamp. `>=` makes an equal-timestamp proof
-        // single-use.
-        reg.consume_tunnel_proof(&team_id, ts, state.limits.proof_skew_secs, now)?;
-        reg.register_presence(&team_id, tx, id.clone());
+        reg.register_presence(&tagma_id, tx, id.clone());
     }
-    tracing::info!(team = %team_id, "herald tunnel established; team online");
+    tracing::info!(tagma = %tagma_id, "herald tunnel established; tagma online");
 
-    let lag_team = team_id.clone();
+    let lag_tagma = tagma_id.clone();
     let stream: BoxEventStream =
         Box::pin(BroadcastStream::new(rx).filter_map(move |r| match r {
             Ok(env) => Some(env),
@@ -107,7 +135,7 @@ async fn tunnel(
                 // The herald fell behind: forwarded envelopes were dropped. Log
                 // so the operator sees the loss; recovery is the herald's
                 // reconnect/host-history re-pull.
-                tracing::warn!(lag = n, team = %lag_team, "herald tunnel lagged; envelopes dropped");
+                tracing::warn!(lag = n, tagma = %lag_tagma, "herald tunnel lagged; envelopes dropped");
                 None
             }
         }).map(|env| {
@@ -121,14 +149,14 @@ async fn tunnel(
     // Synchronous cleanup in Drop::drop: remove presence only if this tunnel is
     // still the live one (no reconnect has swapped in a new identity).
     let cleanup_state = state.clone();
-    let cleanup_team = team_id.clone();
+    let cleanup_tagma = tagma_id.clone();
     let cleanup_id = id.clone();
     let cleaned = OnDrop::new(stream, move || {
         let Ok(mut reg) = cleanup_state.write() else {
             return;
         };
-        if reg.take_presence_if_owned(&cleanup_team, &cleanup_id) {
-            tracing::info!(team = %cleanup_team, "herald tunnel closed; presence removed");
+        if reg.take_presence_if_owned(&cleanup_tagma, &cleanup_id) {
+            tracing::info!(tagma = %cleanup_tagma, "herald tunnel closed; presence removed");
         }
     });
     Ok(Sse::new(cleaned))

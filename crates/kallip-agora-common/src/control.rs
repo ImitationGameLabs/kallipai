@@ -1,14 +1,14 @@
-//! Control-plane messages: team enrollment and the app<->herald key exchange.
+//! Control-plane messages: tagma enrollment and the app<->herald key exchange.
 //!
 //! These are the request/response bodies for the agora's control routes. The
 //! agora brokers them (forwarding, persistence of the pinned key) but, for the
 //! key exchange, cannot derive the resulting shared secret.
 
 use crate::bytes::{Ed25519PublicKey, Ed25519Signature, X25519PublicKey};
-use crate::ids::TeamId;
+use crate::ids::TagmaId;
 use serde::{Deserialize, Serialize};
 
-/// `POST /v1/teams` — enroll a herald with a single-use code and its device key.
+/// `POST /v1/tagmata` — enroll a herald with a single-use code and its device key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollRequest {
     /// Single-use, short-TTL enrollment code (admin-issued, bound to a user).
@@ -27,10 +27,10 @@ pub struct EnrollRequest {
 /// Response to a successful enrollment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollResponse {
-    pub team_id: TeamId,
-    /// A long-lived bearer token (`sk-team-...`) the herald presents to reopen
+    pub tagma_id: TagmaId,
+    /// A long-lived bearer token (`sk-tagma-...`) the herald presents to reopen
     /// its tunnel. Stored at rest only as a SHA-256 hash by the agora.
-    pub team_token: String,
+    pub tagma_token: String,
 }
 
 /// App -> herald (relayed by the agora): start a 1-RTT key exchange for a
@@ -46,9 +46,9 @@ pub struct KeyExchangeInit {
 /// having neither private half, cannot.
 ///
 /// The signature is over
-/// [`kex_transcript`](crate::proof::kex_transcript)`(team_id, conversation_id,
+/// [`kex_transcript`](crate::proof::kex_transcript)`(tagma_id, conversation_id,
 /// agent_id, app_ephemeral_public, herald_ephemeral_public)` - i.e. it binds
-/// the two ephemeral keys to the team, conversation, and bound agent, so the
+/// the two ephemeral keys to the tagma, conversation, and bound agent, so the
 /// app can attribute the derived key unambiguously to the pinned identity. The
 /// app reconstructs this same transcript to verify.
 #[derive(Debug, Clone, Serialize, Deserialize)]

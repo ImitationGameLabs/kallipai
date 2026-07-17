@@ -4,8 +4,8 @@
 //! The [`TunnelFrame`] inside is the E2E payload shared between app and herald;
 //! the agora never decrypts it.
 
-use crate::bytes::Ciphertext;
 use crate::bytes::B64;
+use crate::bytes::Ciphertext;
 use crate::ids::{ConversationId, TraceId, UserId};
 use kallip_common::agentid::AgentId;
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,7 @@ pub enum Participant {
         user_id: UserId,
     },
     Agent {
-        team_id: crate::ids::TeamId,
+        tagma_id: crate::ids::TagmaId,
         agent_id: AgentId,
     },
 }
@@ -66,10 +66,7 @@ pub enum TunnelFrame {
     },
     /// Herald -> app: one chunk of the response body, in order. The herald caps
     /// each chunk so the enclosing envelope stays under the agora body limit.
-    ResponseBody {
-        req_id: u64,
-        chunk: B64,
-    },
+    ResponseBody { req_id: u64, chunk: B64 },
     /// Herald -> app: the response body is complete (one-shot requests). Not
     /// sent for a long-lived stream that the app intentionally keeps open.
     /// `error` is set when the daemon stream broke mid-body (after a `200`
@@ -129,7 +126,13 @@ mod tests {
         assert!(json.contains("\"body\":\"3q2+7w==\""));
         let back: TunnelFrame = serde_json::from_str(&json).unwrap();
         match back {
-            TunnelFrame::Request { req_id, method, path, body, .. } => {
+            TunnelFrame::Request {
+                req_id,
+                method,
+                path,
+                body,
+                ..
+            } => {
                 assert_eq!(req_id, 42);
                 assert_eq!(method, "POST");
                 assert_eq!(path, "/agents/a1/message");
@@ -151,7 +154,10 @@ mod tests {
                 req_id: 1,
                 chunk: B64(b"data: hello\n\n".to_vec()),
             },
-            TunnelFrame::ResponseEnd { req_id: 1, error: None },
+            TunnelFrame::ResponseEnd {
+                req_id: 1,
+                error: None,
+            },
             TunnelFrame::ResponseEnd {
                 req_id: 2,
                 error: Some("stream broke".into()),
@@ -159,9 +165,12 @@ mod tests {
         ] {
             let json = serde_json::to_string(&frame).unwrap();
             let back: TunnelFrame = serde_json::from_str(&json).unwrap();
-            assert!(matches!(back, TunnelFrame::ResponseHead { .. }
-                | TunnelFrame::ResponseBody { .. }
-                | TunnelFrame::ResponseEnd { .. }));
+            assert!(matches!(
+                back,
+                TunnelFrame::ResponseHead { .. }
+                    | TunnelFrame::ResponseBody { .. }
+                    | TunnelFrame::ResponseEnd { .. }
+            ));
         }
         // `error` is omitted when None, present when Some.
         let none_json = serde_json::to_string(&TunnelFrame::ResponseEnd {

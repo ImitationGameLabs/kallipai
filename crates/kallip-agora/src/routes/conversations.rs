@@ -1,9 +1,9 @@
 //! Conversation creation + envelope posting (the data plane).
 //!
-//! `POST /v1/conversations` binds a new direct conversation to `(team, agent)`,
+//! `POST /v1/conversations` binds a new direct conversation to `(tagma, agent)`,
 //! owned by the caller. `POST /v1/conversations/{id}/envelopes` routes an
 //! encrypted envelope to the other endpoint: a user-sent envelope forwards to
-//! the team's herald tunnel; an agent-sent envelope forwards to the owner's app
+//! the tagma's herald tunnel; an agent-sent envelope forwards to the owner's app
 //! SSE. The agora validates routing metadata + sender-vs-auth, dedups by
 //! `sequence_n`, and never decrypts.
 //!
@@ -13,6 +13,8 @@
 //! number is reserved before routing and rolled back if routing fails (e.g. the
 //! peer is offline), so a retried envelope with the same `sequence_n` succeeds.
 
+use crate::db::entity::tagmata;
+use crate::db::map_db_err;
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
@@ -21,13 +23,14 @@ use axum::routing::post;
 use kallip_agora_common::control::{KeyExchangeInit, KeyExchangeResponse};
 use kallip_agora_common::event::AgoraEvent;
 use kallip_agora_common::herald::HeraldInbound;
-use kallip_agora_common::ids::{ConversationId, TeamId};
+use kallip_agora_common::ids::{ConversationId, TagmaId};
 use kallip_agora_common::message::{Envelope, Participant};
 use kallip_common::agentid::AgentId;
 use kallip_common::protocol::ApiError;
+use sea_orm::EntityTrait;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthPrincipal, require_team, require_user};
+use crate::auth::{AuthPrincipal, require_tagma, require_user};
 use crate::state::SharedState;
 
 pub fn router() -> Router<SharedState> {
@@ -46,7 +49,7 @@ pub fn router() -> Router<SharedState> {
 
 #[derive(Deserialize)]
 struct CreateConversationRequest {
-    team_id: String,
+    tagma_id: String,
     agent_id: AgentId,
 }
 
@@ -61,22 +64,23 @@ async fn create_conversation(
     Json(req): Json<CreateConversationRequest>,
 ) -> Result<Json<CreateConversationResponse>, ApiError> {
     let user = require_user(&principal)?;
-    let team_id = TeamId::from(req.team_id);
-    let mut reg = state.write()?;
-    let owner = reg
-        .teams
-        .get(&team_id)
-        .ok_or_else(|| ApiError::not_found("unknown team"))?
-        .owner
-        .clone();
+    let tagma_id = TagmaId::from(req.tagma_id);
+    // Resolve tagma ownership from the durable store BEFORE taking the registry
+    // write lock (no `.await` under a guard).
+    let tagma = tagmata::Entity::find_by_id(tagma_id.to_string())
+        .one(&state.db)
+        .await
+        .map_err(map_db_err)?;
     // Existence-oracle hardening: a non-owner gets the same 404 as for an
-    // unknown team, so they cannot confirm whether a guessed team id exists.
-    if &owner != user {
-        return Err(ApiError::not_found("unknown team"));
+    // unknown tagma, so they cannot confirm whether a guessed tagma id exists.
+    let owned = matches!(tagma, Some(t) if t.owner_user_id.as_str() == user.as_ref());
+    if !owned {
+        return Err(ApiError::not_found("unknown tagma"));
     }
+    let mut reg = state.write()?;
     let conv_id = reg.create_conversation(
         user,
-        team_id,
+        tagma_id,
         req.agent_id,
         state.limits.max_conversations_per_user,
     )?;
@@ -126,20 +130,22 @@ async fn post_envelope(
                 }
                 let route = reg
                     .presence
-                    .get(&conv.team_id)
+                    .get(&conv.tagma_id)
                     .map(|p| Route::Herald(p.tx.clone()));
                 (format!("user:{user_id}"), route)
             }
-            Participant::Agent { team_id, agent_id } => {
-                let authed_team = require_team(&principal)?;
-                if team_id != authed_team || agent_id != &conv.agent_id || team_id != &conv.team_id
+            Participant::Agent { tagma_id, agent_id } => {
+                let authed_tagma = require_tagma(&principal)?;
+                if tagma_id != authed_tagma
+                    || agent_id != &conv.agent_id
+                    || tagma_id != &conv.tagma_id
                 {
                     return Err(ApiError::forbidden(
                         "envelope agent does not match conversation",
                     ));
                 }
                 let route = reg.app_stream(&conv.owner).cloned().map(Route::App);
-                (format!("agent:{team_id}:{agent_id}"), route)
+                (format!("agent:{tagma_id}:{agent_id}"), route)
             }
         }
     };
@@ -173,7 +179,7 @@ async fn post_envelope(
     if !delivered {
         rollback_seq(state.clone(), &conv_id, &sender_key, seq);
         return Err(ApiError::unavailable(if user_sent {
-            "team is offline"
+            "tagma is offline"
         } else {
             "user app is offline"
         }));
@@ -204,7 +210,7 @@ enum Route {
 /// App -> herald (synchronous): start a conversation key exchange and block
 /// until the herald relays its signed response back via
 /// [`key_exchange_response`]. The agora forwards the app's ephemeral X25519
-/// public key to the team's herald over its tunnel, registers a correlated
+/// public key to the tagma's herald over its tunnel, registers a correlated
 /// oneshot waiter, and returns the herald's response inline. Fails with 504
 /// after `key_exchange_timeout`, or 409 if a key exchange is already in flight
 /// for this conversation.
@@ -232,9 +238,9 @@ async fn key_exchange_init(
         }
         let sender = reg
             .presence
-            .get(&conv.team_id)
+            .get(&conv.tagma_id)
             .map(|p| p.tx.clone())
-            .ok_or_else(|| ApiError::unavailable("team is offline"))?;
+            .ok_or_else(|| ApiError::unavailable("tagma is offline"))?;
         (conv.agent_id, sender)
     };
 
@@ -295,17 +301,17 @@ async fn key_exchange_response(
     Json(response): Json<KeyExchangeResponse>,
 ) -> Result<StatusCode, ApiError> {
     let conv_id = ConversationId::from(id);
-    let team = require_team(&principal)?;
-    // Validate team ownership. No TOCTOU: ConversationRecord.team_id is immutable
-    // post-create and conversations are not deletable.
+    let tagma = require_tagma(&principal)?;
+    // Validate tagma ownership. No TOCTOU: ConversationRecord.tagma_id is
+    // immutable post-create and conversations are not deletable.
     {
         let reg = state.read()?;
         let conv = reg
             .conversations
             .get(&conv_id)
             .ok_or_else(|| ApiError::not_found("unknown conversation"))?;
-        if &conv.team_id != team {
-            return Err(ApiError::forbidden("not the conversation's team"));
+        if &conv.tagma_id != tagma {
+            return Err(ApiError::forbidden("not the conversation's tagma"));
         }
     }
     // Resolve the pending init if any. Ignore a send error: it means the app
@@ -367,13 +373,15 @@ mod tests {
     };
     use kallip_agora_common::control::{KeyExchangeInit, KeyExchangeResponse};
     use kallip_agora_common::herald::HeraldInbound;
-    use kallip_agora_common::ids::{ConversationId, TeamId, TraceId, UserId};
+    use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId, UserId};
     use kallip_agora_common::message::{Envelope, Participant};
     use time::OffsetDateTime;
 
     use super::{key_exchange_init, key_exchange_response, post_envelope};
     use crate::auth::{AuthPrincipal, Principal};
-    use crate::test_helpers::{make_state, seed_conversation, seed_presence, seed_team, seed_user};
+    use crate::test_helpers::{
+        make_state, seed_conversation, seed_presence, seed_tagma, seed_user,
+    };
 
     /// A dummy 32-byte X25519 public key for the app's KEX init.
     fn dummy_x25519() -> X25519PublicKey {
@@ -389,34 +397,34 @@ mod tests {
         }
     }
 
-    /// Seed a full conversation: owner user, online team, conversation bound to
+    /// Seed a full conversation: owner user, online tagma, conversation bound to
     /// a fixed agent, returning the pieces a KEX test needs.
-    fn seed_kex_fixture(
+    async fn seed_kex_fixture(
         state: &crate::state::SharedState,
     ) -> (
         UserId,
-        TeamId,
+        TagmaId,
         ConversationId,
         tokio::sync::broadcast::Sender<HeraldInbound>,
     ) {
-        let (owner, _) = seed_user(state);
-        let (team, _) = seed_team(state, &owner, Ed25519PublicKey(vec![0u8; 32]));
+        let owner = seed_user(state, "owner").await;
+        let (tagma, _) = seed_tagma(state, &owner, Ed25519PublicKey(vec![0u8; 32])).await;
         let conv = seed_conversation(
             state,
             &owner,
-            &team,
+            &tagma,
             kallip_common::agentid::AgentId::from("agent-1".to_string()),
         );
-        let tx = seed_presence(state, &team);
-        (owner, team, conv, tx)
+        let tx = seed_presence(state, &tagma);
+        (owner, tagma, conv, tx)
     }
 
     /// Init blocks until the herald's response is relayed back; the response
     /// handler resolves it and the init returns the response body.
     #[tokio::test]
     async fn kex_normal_round_trip() {
-        let state = make_state(Duration::from_secs(2));
-        let (owner, team, conv, tx) = seed_kex_fixture(&state);
+        let state = make_state(Duration::from_secs(2)).await;
+        let (owner, tagma, conv, tx) = seed_kex_fixture(&state).await;
         let mut rx = tx.subscribe();
         let init = KeyExchangeInit {
             ephemeral_public: dummy_x25519(),
@@ -451,7 +459,7 @@ mod tests {
         let expected = dummy_response();
         let resp = key_exchange_response(
             State(state.clone()),
-            AuthPrincipal(Principal::Team(team)),
+            AuthPrincipal(Principal::Tagma(tagma)),
             Path(conv.to_string()),
             Json(expected.clone()),
         )
@@ -469,8 +477,8 @@ mod tests {
     /// A second init while one is already in flight is rejected with 409.
     #[tokio::test]
     async fn kex_duplicate_init_returns_409() {
-        let state = make_state(Duration::from_secs(2));
-        let (owner, _team, conv, tx) = seed_kex_fixture(&state);
+        let state = make_state(Duration::from_secs(2)).await;
+        let (owner, _tagma, conv, tx) = seed_kex_fixture(&state).await;
         let mut rx = tx.subscribe();
 
         let state_for_init = state.clone();
@@ -509,12 +517,12 @@ mod tests {
     /// A response with no pending init is rejected with 409.
     #[tokio::test]
     async fn kex_response_without_pending_returns_409() {
-        let state = make_state(Duration::from_secs(2));
-        let (owner, team, conv, _tx) = seed_kex_fixture(&state);
+        let state = make_state(Duration::from_secs(2)).await;
+        let (owner, tagma, conv, _tx) = seed_kex_fixture(&state).await;
         let _ = owner;
         let err = key_exchange_response(
             State(state),
-            AuthPrincipal(Principal::Team(team)),
+            AuthPrincipal(Principal::Tagma(tagma)),
             Path(conv.to_string()),
             Json(dummy_response()),
         )
@@ -529,8 +537,8 @@ mod tests {
     /// deterministically run the future's drop (and the guard).
     #[tokio::test]
     async fn kex_cancel_frees_slot() {
-        let state = make_state(Duration::from_secs(5));
-        let (owner, team, conv, tx) = seed_kex_fixture(&state);
+        let state = make_state(Duration::from_secs(5)).await;
+        let (owner, tagma, conv, tx) = seed_kex_fixture(&state).await;
         let mut rx = tx.subscribe();
         let init = KeyExchangeInit {
             ephemeral_public: dummy_x25519(),
@@ -562,15 +570,15 @@ mod tests {
             !pending.contains_key(&conv),
             "KexGuard must remove the entry on cancel"
         );
-        let _ = team;
+        let _ = tagma;
     }
 
     /// If the herald never responds, the init times out with 504 and frees the
     /// slot. >=200ms keeps the test deterministic on loaded runners.
     #[tokio::test]
     async fn kex_timeout_returns_504() {
-        let state = make_state(Duration::from_millis(200));
-        let (owner, _team, conv, _tx) = seed_kex_fixture(&state);
+        let state = make_state(Duration::from_millis(200)).await;
+        let (owner, _tagma, conv, _tx) = seed_kex_fixture(&state).await;
         let err = key_exchange_init(
             State(state.clone()),
             AuthPrincipal(Principal::User(owner)),
@@ -590,9 +598,9 @@ mod tests {
     /// 403, so they cannot confirm a guessed conversation id.
     #[tokio::test]
     async fn post_envelope_non_owner_404() {
-        let state = make_state(Duration::from_secs(2));
-        let (owner, team, conv, _tx) = seed_kex_fixture(&state);
-        let (other, _) = seed_user(&state);
+        let state = make_state(Duration::from_secs(2)).await;
+        let (owner, tagma, conv, _tx) = seed_kex_fixture(&state).await;
+        let other = seed_user(&state, "other").await;
         let _ = owner;
         let env = Envelope {
             conversation_id: conv.clone(),
@@ -613,15 +621,15 @@ mod tests {
         .await
         .expect_err("non-owner should be rejected");
         assert_eq!(err.status, 404);
-        let _ = team;
+        let _ = tagma;
     }
 
     /// An envelope whose body `conversation_id` differs from the path is
     /// rejected with 400; the path is authoritative.
     #[tokio::test]
     async fn post_envelope_conversation_id_mismatch_400() {
-        let state = make_state(Duration::from_secs(2));
-        let (owner, _team, conv, _tx) = seed_kex_fixture(&state);
+        let state = make_state(Duration::from_secs(2)).await;
+        let (owner, _tagma, conv, _tx) = seed_kex_fixture(&state).await;
         let other_conv = ConversationId::from("other".to_string());
         let env = Envelope {
             conversation_id: other_conv,

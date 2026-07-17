@@ -1,40 +1,50 @@
-//! Soft-state `AppState` + in-memory `Registry`. No persistence, no DB.
+//! `AppState`: the durable handle + the in-memory soft-state `Registry`.
 //!
-//! Everything here is rebuilt on restart: presence from heralds reconnecting,
-//! ownership/pinned-key from re-enrollment, tokens minted fresh.
+//! **Durable** (Postgres, via [`crate::db`]): users, passkeys, invite codes, enrollment
+//! tokens, tagmata, tagma tokens, sessions — identity / credentials / provisioning.
+//! **Soft-state** (the `Registry` here): presence, conversations, app streams,
+//! tunnel-proof replay guard, per-user conversation counts. Everything in the
+//! `Registry` is rebuilt on restart: presence from heralds reconnecting,
+//! conversations are create-on-demand, conversations' history lives on the host.
 //!
 //! Known residual: the in-memory maps (`conversations`, `seq_seen`,
 //! `app_streams`) have no eviction cap, so a long-lived incarnation that
 //! accumulates many conversations grows without bound. This is bounded in
-//! practice by restart cadence; an LRU/cap is phase-2 work.
+//! practice by restart cadence; an LRU/cap is owed before any scale deploy.
 //!
 //! `Registry` lives behind a `std::sync::RwLock` (not tokio): every operation
-//! under it is non-async (HashMap lookups, `broadcast::send`, `receiver_count`,
-//! token-hash compare), and the synchronous guard is what lets the `OnDrop`
-//! cleanup in `routes/herald.rs` + `routes/events.rs` run inline in `Drop::drop`,
+//! under it is non-async (HashMap lookups, `broadcast::send`, `receiver_count`),
+//! and the synchronous guard is what lets the `OnDrop` cleanup in
+//! `routes/herald.rs` + `routes/events.rs` run inline in `Drop::drop`,
 //! provably race-free with no spawn-timing window. The replay/dedup window
 //! `seq_seen` is a separate `std::sync::Mutex`, never held at the same time as
 //! the registry lock.
+//!
+//! DB access never happens under the registry lock: handlers read the `Db`
+//! (Clone, async) before or after taking a registry guard, never both at once.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use kallip_agora_common::bytes::Ed25519PublicKey;
+use crate::db::Db;
+use crate::ratelimit::IpRateLimiter;
+use crate::session::SessionCfg;
 use kallip_agora_common::control::KeyExchangeResponse;
 use kallip_agora_common::event::AgoraEvent;
 use kallip_agora_common::herald::HeraldInbound;
-use kallip_agora_common::ids::{ConversationId, TeamId, UserId};
+use kallip_agora_common::ids::{ConversationId, TagmaId, UserId};
 use kallip_common::agentid::AgentId;
 use kallip_common::authtoken::TokenHash;
 use kallip_common::protocol::ApiError;
 use tokio::sync::broadcast;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+use webauthn_rs::Webauthn;
 
 pub type SharedState = Arc<AppState>;
 
-/// Capacity of the per-team / per-user broadcast channel feeding an SSE stream.
+/// Capacity of the per-tagma / per-user broadcast channel feeding an SSE stream.
 /// Shared by the herald tunnel and the app event stream.
 pub const BROADCAST_CAPACITY: usize = 128;
 
@@ -48,7 +58,8 @@ pub const BROADCAST_CAPACITY: usize = 128;
 ///
 /// 1. **No `.await` under a lock.** Drop every `read()`/`write()` /
 ///    `seq_seen`/`pending_key_exchange` guard before awaiting. The synchronous
-///    guards are fine precisely because nothing under them is async.
+///    guards are fine precisely because nothing under them is async. DB
+///    (`.await`-bearing) lookups happen outside the registry lock entirely.
 /// 2. **Never co-hold the registry lock with `seq_seen` or
 ///    `pending_key_exchange`.** Reserve a sequence / register a KEX waiter only
 ///    after the registry guard is dropped. This is what keeps `post_envelope`'s
@@ -66,11 +77,24 @@ pub struct AppState {
     pub limits: Limits,
     /// SHA-256 of the admin token; the single provisioning authority.
     pub admin_token_hash: TokenHash,
+    /// Durable store handle (sea-orm `DatabaseConnection`, cheap to clone).
+    pub db: Db,
+    /// Configured WebAuthn relying party (register/login ceremonies).
+    pub webauthn: Arc<Webauthn>,
+    /// Session-cookie attrs + TTL.
+    pub session_cfg: SessionCfg,
+    /// Per-IP token bucket guarding `/v1/auth/*`.
+    pub auth_rate_limiter: IpRateLimiter,
+    /// CIDRs whose direct connections are trusted to have set
+    /// `X-Forwarded-For`. The rate limiter honors XFF only for a peer in one of
+    /// these nets (see [`crate::clientip::real_client_ip`]). Empty means XFF is
+    /// never trusted.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     pub registry: RwLock<Registry>,
     /// Per-conversation, per-sender highest `sequence_n` seen.
     ///
     /// Per-incarnation only: lost on agora restart, so a retried envelope after
-    /// a restart is not deduped here (accepted residual, plan I5; the herald
+    /// a restart is not deduped here (accepted residual; the herald
     /// also runs its own receiver-side window).
     pub seq_seen: std::sync::Mutex<HashMap<ConversationId, HashMap<String, u64>>>,
     /// Outstanding synchronous key exchanges, keyed by conversation. The init
@@ -87,13 +111,16 @@ pub struct AppState {
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub max_body_size_bytes: usize,
-    /// How long a minted enrollment code remains redeemable.
+    /// How long a minted enrollment token remains redeemable.
     pub enrollment_code_ttl: Duration,
+    /// Default lifetime for an admin-minted invite code when none is given.
+    pub invite_default_ttl_secs: u64,
     /// Acceptable clock skew (both directions) on a tunnel reconnect proof's
     /// timestamp, in seconds.
     pub proof_skew_secs: i64,
-    /// Per-user cap on live conversations, bounding the growth of `conversations`
-    /// (and `seq_seen`) against an authenticated user driving unbounded creates.
+    /// Per-user cap on live conversations, bounding the growth of
+    /// `conversations` (and `seq_seen`) against an authenticated user driving
+    /// unbounded creates.
     pub max_conversations_per_user: usize,
     /// How long `key_exchange_init` waits for the herald's response before
     /// failing with 504. Key exchange is cryptographically instant; this only
@@ -102,29 +129,17 @@ pub struct Limits {
     pub key_exchange_timeout: Duration,
 }
 
-/// In-memory index of users, teams, conversations, presence, and per-user app
-/// streams. All token lookups are hash-based; variable lookup time over hashes
-/// leaks nothing about a secret (an attacker cannot steer a SHA-256 output).
+/// In-memory index of conversations, presence, and per-user app streams. The
+/// identity / credential / provisioning layer (users, passkeys, invite codes,
+/// enrollment tokens, tagmata, tagma tokens, sessions) lives in the durable
+/// store ([`crate::db`]); only the data-plane soft state that is rebuilt on
+/// every restart lives here.
 pub struct Registry {
-    pub users: HashSet<UserId>,
-    /// Access-token hash -> the user it authenticates.
-    pub access_tokens: HashMap<TokenHash, UserId>,
-    pub teams: HashMap<TeamId, TeamRecord>,
-    /// Team-token hash -> the team it authenticates.
-    pub team_tokens: HashMap<TokenHash, TeamId>,
-    /// Enrollment-code hash -> its binding + lifecycle.
-    pub enrollment_codes: HashMap<TokenHash, EnrollmentCode>,
     pub conversations: HashMap<ConversationId, ConversationRecord>,
-    /// team_id -> the team's live herald tunnel. A team is "online" iff it has
-    /// an entry. `id` is a per-connection identity token so a stale tunnel's
+    /// tagma_id -> the tagma's live herald tunnel. A tagma is "online" iff it
+    /// has an entry. `id` is a per-connection identity token so a stale tunnel's
     /// cleanup cannot remove a freshly-reconnected tunnel's presence.
-    pub presence: HashMap<TeamId, PresenceEntry>,
-    /// team_id -> the highest accepted tunnel-proof unix_secs. Makes a captured
-    /// proof single-use within the skew window: a replay (same or older
-    /// timestamp) is rejected. Bounded to one entry per team by overwrite; the
-    /// tunnel route GCs stale entries on each connect. Private: mutate only via
-    /// [`Registry::consume_tunnel_proof`].
-    seen_tunnel_proofs: HashMap<TeamId, i64>,
+    pub presence: HashMap<TagmaId, PresenceEntry>,
     /// user_id -> outbound broadcast to their multiplexed app SSE. The sole
     /// creator is `me_events` (`routes/events.rs`); it carries agent envelopes
     /// and lifecycle events only. Key exchange is synchronous and never touches
@@ -142,38 +157,39 @@ pub struct Registry {
 }
 
 /// One live herald tunnel: the outbound broadcast and a per-connection identity
-/// token used to make presence removal race-free across reconnects.
+/// token used to make presence removal race-free across reconnects. A planned
+/// agent roster will hang off this entry.
 pub struct PresenceEntry {
     pub tx: broadcast::Sender<HeraldInbound>,
     pub id: Arc<()>,
 }
 
-/// A registered agent team: owner + the herald's pinned device public key.
-pub struct TeamRecord {
-    pub owner: UserId,
-    pub pinned_public_key: Ed25519PublicKey,
-}
-
-#[derive(Debug)]
-pub struct EnrollmentCode {
-    pub user: UserId,
-    pub expires_at: Instant,
-    pub consumed: bool,
-}
-
 #[derive(Debug, Clone)]
 pub struct ConversationRecord {
     pub owner: UserId,
-    pub team_id: TeamId,
+    pub tagma_id: TagmaId,
     pub agent_id: AgentId,
 }
 
 impl AppState {
-    pub fn new(admin_token_hash: TokenHash, limits: Limits) -> Self {
+    pub fn new(
+        admin_token_hash: TokenHash,
+        limits: Limits,
+        db: Db,
+        webauthn: Arc<Webauthn>,
+        session_cfg: SessionCfg,
+        auth_rate_limiter: IpRateLimiter,
+        trusted_proxies: Vec<ipnet::IpNet>,
+    ) -> Self {
         Self {
             shutdown: CancellationToken::new(),
             limits,
             admin_token_hash,
+            db,
+            webauthn,
+            session_cfg,
+            auth_rate_limiter,
+            trusted_proxies,
             registry: RwLock::new(Registry::new()),
             seq_seen: std::sync::Mutex::new(HashMap::new()),
             pending_key_exchange: std::sync::Mutex::new(HashMap::new()),
@@ -199,24 +215,11 @@ impl AppState {
 impl Registry {
     pub fn new() -> Self {
         Self {
-            users: HashSet::new(),
-            access_tokens: HashMap::new(),
-            teams: HashMap::new(),
-            team_tokens: HashMap::new(),
-            enrollment_codes: HashMap::new(),
             conversations: HashMap::new(),
             presence: HashMap::new(),
-            seen_tunnel_proofs: HashMap::new(),
             app_streams: HashMap::new(),
             conversation_counts: HashMap::new(),
         }
-    }
-
-    /// Drop consumed/expired enrollment codes. Call opportunistically at create
-    /// and redeem so `enrollment_codes` growth is bounded by the TTL window x
-    /// creation rate rather than accumulating forever.
-    pub fn gc_enrollment_codes(&mut self, now: Instant) {
-        self.enrollment_codes.retain(|_, c| !c.is_dead(now));
     }
 
     /// The live app event-stream sender for `user`, if any. Read-only access for
@@ -249,13 +252,14 @@ impl Registry {
         }
     }
 
-    /// Create a conversation owned by `owner` bound to `(team_id, agent_id)`,
+    /// Create a conversation owned by `owner` bound to `(tagma_id, agent_id)`,
     /// enforcing the per-user cap and keeping `conversation_counts` in lockstep
-    /// with `conversations`. Sole mutator of both. Returns the new id.
+    /// with `conversations`. Sole mutator of both. Returns the new id. Tagma
+    /// ownership is validated by the caller against the DB before this call.
     pub fn create_conversation(
         &mut self,
         owner: &UserId,
-        team_id: TeamId,
+        tagma_id: TagmaId,
         agent_id: AgentId,
         cap: usize,
     ) -> Result<ConversationId, ApiError> {
@@ -268,7 +272,7 @@ impl Registry {
             conv_id.clone(),
             ConversationRecord {
                 owner: owner.clone(),
-                team_id,
+                tagma_id,
                 agent_id,
             },
         );
@@ -276,47 +280,29 @@ impl Registry {
         Ok(conv_id)
     }
 
-    /// Atomic tunnel-proof consume: reject a replay (same or older timestamp),
-    /// GC entries outside the skew window, then record `ts`. Sole mutator of
-    /// `seen_tunnel_proofs`. `now`/`skew` are unix seconds.
-    pub fn consume_tunnel_proof(
-        &mut self,
-        team: &TeamId,
-        ts: i64,
-        skew: i64,
-        now: i64,
-    ) -> Result<(), ApiError> {
-        if self.seen_tunnel_proofs.get(team).copied() >= Some(ts) {
-            return Err(ApiError::unauthorized("replayed or stale device proof"));
-        }
-        let floor = now - skew;
-        self.seen_tunnel_proofs.retain(|_, prev| *prev > floor);
-        self.seen_tunnel_proofs.insert(team.clone(), ts);
-        Ok(())
-    }
-
-    /// Register a live herald tunnel for `team`, capturing the per-connection
+    /// Register a live herald tunnel for `tagma`, capturing the per-connection
     /// identity token `id` so a stale tunnel's cleanup cannot remove a fresh
     /// reconnect's presence.
     pub fn register_presence(
         &mut self,
-        team: &TeamId,
+        tagma: &TagmaId,
         tx: broadcast::Sender<HeraldInbound>,
         id: Arc<()>,
     ) {
-        self.presence.insert(team.clone(), PresenceEntry { tx, id });
+        self.presence
+            .insert(tagma.clone(), PresenceEntry { tx, id });
     }
 
-    /// Remove `team`'s presence iff the live entry is still `id` (Arc pointer
+    /// Remove `tagma`'s presence iff the live entry is still `id` (Arc pointer
     /// identity), returning whether it was removed. Race-free across reconnects.
-    pub fn take_presence_if_owned(&mut self, team: &TeamId, id: &Arc<()>) -> bool {
+    pub fn take_presence_if_owned(&mut self, tagma: &TagmaId, id: &Arc<()>) -> bool {
         let still_ours = self
             .presence
-            .get(team)
+            .get(tagma)
             .map(|p| Arc::ptr_eq(&p.id, id))
             .unwrap_or(false);
         if still_ours {
-            self.presence.remove(team);
+            self.presence.remove(tagma);
         }
         still_ours
     }
@@ -325,12 +311,5 @@ impl Registry {
 impl Default for Registry {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl EnrollmentCode {
-    /// Has this code expired or already been consumed?
-    pub fn is_dead(&self, now: Instant) -> bool {
-        self.consumed || now >= self.expires_at
     }
 }

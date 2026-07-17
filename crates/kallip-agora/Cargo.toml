@@ -1,6 +1,6 @@
 [package]
 name = "kallip-agora"
-description = "Public-internet relay control plane for kallip agent teams"
+description = "Public-internet relay control plane for kallip agent tagmata"
 edition = "2024"
 version.workspace = true
 license.workspace = true
@@ -22,3 +22,19 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 time = { workspace = true }
 base64 = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+async-trait = { workspace = true }
+webauthn-rs = { workspace = true }
+cookie = { workspace = true }
+url = { workspace = true }
+ipnet = { workspace = true }
+getrandom = { workspace = true }
+
+[dev-dependencies]
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }

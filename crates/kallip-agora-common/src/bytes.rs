@@ -44,7 +44,7 @@ base64_bytes! {
     Ciphertext
 }
 base64_bytes! {
-    /// An Ed25519 public key (32 bytes) pinned to a team at enrollment and used
+    /// An Ed25519 public key (32 bytes) pinned to a tagma at enrollment and used
     /// to verify key-exchange signatures.
     Ed25519PublicKey
 }

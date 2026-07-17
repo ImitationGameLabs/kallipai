@@ -3,7 +3,7 @@
 //!
 //! This is the shared core used by every kallip component that mints bearer
 //! tokens (`kallip-daemon`'s operator/agent tokens, `kallip-agora`'s
-//! user/team/enrollment tokens). Each crate defines its own closed set of
+//! user/tagma/enrollment tokens). Each crate defines its own closed set of
 //! [`TokenKind`] prefixes as `const`s; this module is purpose-agnostic and holds
 //! no component-specific enum.
 //!
@@ -52,6 +52,13 @@ impl TokenHash {
     /// (subtle implements `ConstantTimeEq` for `[u8]`; the array coerces.)
     pub fn ct_eq(&self, other: &Self) -> bool {
         bool::from(self.0.ct_eq(&other.0))
+    }
+
+    /// The raw 32-byte digest. Safe to expose: this is a SHA-256 *hash*, not a
+    /// secret (preimage-infeasible), and is needed to store/query hashes at rest
+    /// (e.g. as a Postgres `BYTEA` index keyed by the hash).
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
