@@ -15,7 +15,7 @@ export interface AgoraConfig {
   readonly backend: "agora";
   readonly agoraUrl: string;
   readonly userToken: string;
-  readonly teamId: string;
+  readonly tagmaId: string;
   readonly agentId: string;
   readonly pinnedPublicKey?: string;
 }

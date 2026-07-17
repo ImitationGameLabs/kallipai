@@ -3,7 +3,7 @@
 // in @kallipai/kallip-client and @kallipai/kallip-agora-client produce them.
 
 export type AgentId = string;
-export type TeamId = string;
+export type TagmaId = string;
 export type ConversationId = string;
 export type UserId = string;
 export type TraceId = string;
