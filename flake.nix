@@ -74,15 +74,23 @@
 
           packages =
             let
-              # The crane-built workspace: every kallip binary in one
-              # derivation. This is packages.default and the single source of
-              # truth consumed by the tarball and docker image packages.
-              workspace = import ./nix/packages/workspace.nix {
-                inherit lib common;
+              # Crane binary builds (full workspace + per-crate subsets for the
+              # purpose-built images), all on the shared deps cache. See
+              # nix/packages/workspace.nix.
+              builds = import ./nix/packages/workspace.nix {
+                inherit common;
               };
+              # The full-workspace build, passed to the tarball + integration
+              # tests (they take a single `workspace` derivation).
+              workspace = builds.workspace;
             in
             {
               default = workspace;
+              # Per-crate binaries (agora-only; daemon+herald). Cross-platform:
+              # plain Rust builds. Their docker images are Linux-only (see
+              # kallip-agora-image / kallip-tagma-image below).
+              kallip-agora = builds.agora;
+              kallip-tagma = builds.tagma;
               kallip-tarball = import ./nix/packages/tarball.nix {
                 inherit
                   pkgs
@@ -91,16 +99,26 @@
                   ;
               };
             }
-            # Container image: scratch + nix closure via dockerTools. Linux-only
-            # (the buildImage closure is Linux-native). Shares the same
-            # workspace derivation as packages.default.
+            # Container images: scratch + nix closure via dockerTools. Linux-only
+            # (the buildImage closure is Linux-native). See
+            # nix/packages/docker-images/.
             // (lib.optionalAttrs pkgs.stdenv.isLinux {
-              kallip-image = import ./nix/packages/container-image.nix {
+              # Purpose-built prod images for the split deploy
+              # (nix/prod-composes/agora.nix / tagma.nix): agora carries no
+              # toolset; tagma carries no daemon-specific baked env.
+              kallip-agora-image = import ./nix/packages/docker-images/agora.nix {
                 inherit
                   pkgs
                   common
-                  workspace
                   ;
+                inherit (builds) agora;
+              };
+              kallip-tagma-image = import ./nix/packages/docker-images/tagma.nix {
+                inherit
+                  pkgs
+                  common
+                  ;
+                inherit (builds) tagma;
               };
               # Pre-built integration-test binaries + the agent binaries, for
               # running the suite in a container (see arion-compose.nix test

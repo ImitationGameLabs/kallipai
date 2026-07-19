@@ -5,8 +5,8 @@ let
   # toolset must live on PATH alongside the workspace binaries. pathsToLink
   # merges every package's /bin into a single ${toolEnv}/bin.
   #
-  # Shared by the baked image (nix/packages/container-image.nix) and the dev
-  # compose (arion-compose.nix) so the two cannot drift.
+  # Shared by the tagma docker image (nix/packages/docker-images/tagma.nix) and
+  # the dev compose (arion-compose.nix) so the two cannot drift.
   toolEnv = pkgs.buildEnv {
     name = "kallip-path-env";
     paths = [
