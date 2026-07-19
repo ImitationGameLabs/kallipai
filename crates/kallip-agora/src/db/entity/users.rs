@@ -19,8 +19,7 @@ pub struct Model {
     /// `login_begin`.
     #[sea_orm(column_type = "Text")]
     pub email: String,
-    /// Optional human-readable name (NULL until set; the API synthesizes it as
-    /// the username when absent). Not the WebAuthn `user.id`.
+    /// Optional human-readable name, NULL until set.
     #[sea_orm(column_type = "Text", nullable)]
     pub display_name: Option<String>,
     #[sea_orm(column_type = "TimestampWithTimeZone")]

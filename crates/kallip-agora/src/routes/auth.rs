@@ -168,7 +168,7 @@ struct MeResponse {
     user_id: String,
     username: String,
     email: String,
-    display_name: String,
+    display_name: Option<String>,
     created_at: OffsetDateTime,
     passkey_count: i64,
 }
@@ -191,10 +191,11 @@ async fn register_begin(
     // with exactly the address they registered.
     let email_norm = email::normalize(&req.email)?;
     let username_norm = username::normalize(&req.username)?;
-    // The WebAuthn user.displayName must be non-empty (the core rejects empty).
-    // Trim; fall back to the normalized username when omitted/blank; cap length
-    // on the trimmed slice before cloning (the body limit already bounds the
-    // raw input, but avoid materializing a huge trimmed copy).
+    // The WebAuthn `displayName` shown in the authenticator prompt MUST be
+    // non-empty -- webauthn-rs rejects an empty one -- so when the client omits
+    // `display_name` we fall back to the normalized username. Trim and cap the
+    // length on the trimmed slice before cloning (the body limit already bounds
+    // the raw input, but avoid materializing a huge trimmed copy).
     let display_name_for_prompt = match req.display_name.as_deref().map(str::trim) {
         Some(s) if !s.is_empty() => {
             if s.chars().count() > MAX_DISPLAY_NAME_LEN {
@@ -206,9 +207,12 @@ async fn register_begin(
         }
         _ => username_norm.clone(),
     };
-    // NOTE: display_name_for_prompt is used ONLY for the authenticator prompt;
-    // it is NOT persisted (users.display_name stays NULL until a future
-    // set-display-name feature; /v1/me synthesizes it as the username).
+    // NOTE: this fallback is ceremony-local ONLY. It is NOT persisted
+    // (`users.display_name` stays NULL) and the data layer does no synthesis:
+    // `/v1/me` returns `display_name` verbatim and leaves any fallback
+    // rendering to the frontend. The two layers intentionally differ -- the
+    // authenticator requires a non-empty label at ceremony time, while the API
+    // represents stored data faithfully.
 
     let code_hash = TokenHash::of(&req.invite_code);
     let code_hash_bytes = code_hash.as_bytes().to_vec();
@@ -815,11 +819,7 @@ async fn me(
         .map_err(map_db_err)? as i64;
     Ok(Json(MeResponse {
         user_id: user_id.to_string(),
-        // display_name is synthesized as the username when unset (NULL stored).
-        display_name: user
-            .display_name
-            .clone()
-            .unwrap_or_else(|| user.username.clone()),
+        display_name: user.display_name,
         username: user.username,
         email: user.email,
         created_at: user.created_at,
@@ -965,8 +965,7 @@ mod tests {
         assert_eq!(rows[0].username.as_deref(), Some("newuser"));
     }
 
-    /// `/v1/me` returns the signed-in user's id, username, email, synthesized
-    /// display_name (= username when unset), and a passkey count of 0.
+    /// `/v1/me` returns the signed-in user's profile.
     #[tokio::test]
     async fn me_returns_signed_in_user() {
         let state = make_state(Duration::from_secs(2)).await;
@@ -987,7 +986,7 @@ mod tests {
         assert_eq!(got, user_id.to_string());
         assert_eq!(username, "alice");
         assert_eq!(email, "alice@example.test");
-        assert_eq!(display_name, "alice"); // synthesized from username
+        assert_eq!(display_name, None);
         assert_eq!(passkey_count, 0);
     }
 
