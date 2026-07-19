@@ -200,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_session_rejects_disabled_user() {
         let state = make_state(std::time::Duration::from_secs(2)).await;
-        let user_id = seed_user(&state, "frozen").await;
+        let user_id = seed_user(&state, "frozen", "frozen@example.test").await;
         let session = MintedToken::generate(SESSION);
         let now = OffsetDateTime::now_utc();
         sessions::ActiveModel {

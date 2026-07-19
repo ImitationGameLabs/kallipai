@@ -125,15 +125,18 @@ pub async fn make_state_with(
     ))
 }
 
-/// Insert a user row with `username` and return its id. Users live in the
-/// durable store; sessions carry web auth, and the data-plane tests construct
-/// `Principal::User` directly. `display_name` is left `None`.
-pub async fn seed_user(state: &SharedState, username: &str) -> UserId {
+/// Insert a user row with `username` and `email` and return its id. Users live
+/// in the durable store; sessions carry web auth, and the data-plane tests
+/// construct `Principal::User` directly. `display_name` is left `None`. The
+/// `email` is stored verbatim (no canonicalization) so each test controls the
+/// exact lookup key.
+pub async fn seed_user(state: &SharedState, username: &str, email: &str) -> UserId {
     let user_id = UserId::random();
     let now = OffsetDateTime::now_utc();
     users::ActiveModel {
         id: Set(user_id.to_string()),
         username: Set(username.to_string()),
+        email: Set(email.to_string()),
         display_name: Set(None),
         created_at: Set(now),
         disabled_at: Set(None),

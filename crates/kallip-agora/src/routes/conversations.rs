@@ -407,7 +407,7 @@ mod tests {
         ConversationId,
         tokio::sync::broadcast::Sender<HeraldInbound>,
     ) {
-        let owner = seed_user(state, "owner").await;
+        let owner = seed_user(state, "owner", "owner@example.test").await;
         let (tagma, _) = seed_tagma(state, &owner, Ed25519PublicKey(vec![0u8; 32])).await;
         let conv = seed_conversation(
             state,
@@ -600,7 +600,7 @@ mod tests {
     async fn post_envelope_non_owner_404() {
         let state = make_state(Duration::from_secs(2)).await;
         let (owner, tagma, conv, _tx) = seed_kex_fixture(&state).await;
-        let other = seed_user(&state, "other").await;
+        let other = seed_user(&state, "other", "other@example.test").await;
         let _ = owner;
         let env = Envelope {
             conversation_id: conv.clone(),

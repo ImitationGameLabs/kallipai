@@ -197,6 +197,7 @@ async fn gc_sweep_deletes_expired_only() {
             state: Set(serde_json::Value::Null),
             invite_code_hash: Set(None),
             user_id: Set(None),
+            email: Set(None),
             username: Set(None),
             expires_at: Set(expires),
             created_at: Set(now),

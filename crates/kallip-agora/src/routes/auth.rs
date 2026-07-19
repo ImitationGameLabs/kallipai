@@ -1,20 +1,31 @@
 //! WebAuthn passkey registration + login, invite redemption, sessions, and the
 //! `/v1/me` profile.
 //!
+//! # Identity model
+//!
+//! The **login id is the email** (`users.email`, RFC 5321-faithful canonical
+//! form: local part preserved verbatim, domain lowercased — see `crate::email`).
+//! `login_begin` resolves the user by email. The **username** is a required,
+//! unique in-site display handle chosen at redemption (normalized via
+//! `crate::username`); it is NOT the login id. WebAuthn `user.name` is the
+//! email; the username surfaces only as the fallback WebAuthn `displayName`
+//! (when the client omits `display_name`) and in `/v1/me`. `user.id` stays the
+//! opaque pre-generated `UserId`.
+//!
 //! # Ceremonies
 //!
 //! - **register** `begin`/`finish`: `begin` validates (but does not consume) an
-//!   invite code, normalizes the chosen `username`, synthesizes a prompt-only
-//!   `display_name`, pre-generates the `UserId`, and persists the
-//!   `PasskeyRegistration` (+ username) on the challenge row. `finish` verifies
-//!   the credential (CPU, outside the txn), then in ONE transaction locks the
-//!   challenge row `FOR UPDATE`, re-checks the invite's full live predicate
-//!   `FOR UPDATE`, checks username uniqueness `FOR UPDATE` (`409` on conflict),
-//!   inserts the user + passkey, consumes the invite, deletes the challenge,
-//!   and mints a fresh session. A parallel double-finish on one invite loses on
-//!   the row lock.
-//! - **login** `begin`/`finish`: username-first. `begin` resolves the user by
-//!   `username`, loads their passkeys, and bakes them into the ceremony state
+//!   invite code, canonicalizes the email and normalizes the username,
+//!   synthesizes a prompt-only `display_name`, pre-generates the `UserId`, and
+//!   persists the `PasskeyRegistration` (+ email + username) on the challenge
+//!   row. `finish` verifies the credential (CPU, outside the txn), then in ONE
+//!   transaction locks the challenge row `FOR UPDATE`, re-checks the invite's
+//!   full live predicate `FOR UPDATE`, checks email AND username uniqueness
+//!   `FOR UPDATE` (`409` on conflict), inserts the user + passkey, consumes the
+//!   invite, deletes the challenge, and mints a fresh session. A parallel
+//!   double-finish on one invite loses on the row lock.
+//! - **login** `begin`/`finish`: email-first. `begin` resolves the user by
+//!   `email`, loads their passkeys, and bakes them into the ceremony state
 //!   via the wrapper's `start_passkey_authentication`. `finish` verifies the
 //!   assertion against that baked state (CPU, outside the txn) and advances the
 //!   stored passkey via `Passkey::update_credential` inside the SAME transaction
@@ -58,6 +69,7 @@ use webauthn_rs::prelude::{
 };
 
 use crate::auth::{AuthPrincipal, require_user};
+use crate::email;
 use crate::username;
 
 /// Ceremony-kind discriminator stored on `webauthn_challenges.kind`.
@@ -72,6 +84,10 @@ const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 /// the Postgres unique-violation message to discriminate a username-collision
 /// race (-> 409) from any other unique violation in the same transaction.
 const USERNAME_UNIQUE_CONSTRAINT: &str = "uniq_users_username";
+
+/// Name of the `users.email` unique index; same role as
+/// [`USERNAME_UNIQUE_CONSTRAINT`] for the login-id collision race (-> 409).
+const EMAIL_UNIQUE_CONSTRAINT: &str = "uniq_users_email";
 
 /// Max live (unexpired) ceremonies per invite (register) / user (login). Bounds
 /// `webauthn_challenges` storage growth against an attacker who spams begins;
@@ -114,6 +130,7 @@ pub fn session_router() -> Router<SharedState> {
 #[derive(Deserialize)]
 struct RegisterBeginRequest {
     invite_code: String,
+    email: String,
     username: String,
     display_name: Option<String>,
 }
@@ -132,7 +149,7 @@ struct RegisterFinishRequest {
 
 #[derive(Deserialize)]
 struct LoginBeginRequest {
-    username: String,
+    email: String,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +167,7 @@ struct AuthFinishResponse {
 struct MeResponse {
     user_id: String,
     username: String,
+    email: String,
     display_name: String,
     created_at: OffsetDateTime,
     passkey_count: i64,
@@ -168,8 +186,10 @@ async fn register_begin(
     State(state): State<SharedState>,
     Json(req): Json<RegisterBeginRequest>,
 ) -> Result<Json<CeremonyBeginResponse<CreationChallengeResponse>>, ApiError> {
-    // Normalize the chosen username once; the same normalization runs at
-    // login_begin so the user can log in with exactly what they registered.
+    // Canonicalize the email (login id) and normalize the username (in-site
+    // handle) once; the same transforms run at login_begin so a user can log in
+    // with exactly the address they registered.
+    let email_norm = email::normalize(&req.email)?;
     let username_norm = username::normalize(&req.username)?;
     // The WebAuthn user.displayName must be non-empty (the core rejects empty).
     // Trim; fall back to the normalized username when omitted/blank; cap length
@@ -224,17 +244,20 @@ async fn register_begin(
     }
 
     // Pre-generate the UserId so it rides the ceremony and becomes the WebAuthn
-    // `user.id` (the opaque, stable handle -- NOT the username, to avoid
-    // correlating the two). `UserId` is a UUID-v4 string newtype, so it parses
-    // back to the `Uuid` the wrapper wants.
+    // `user.id` (the opaque, stable handle -- NOT the email or username, to
+    // avoid correlating any of them). `UserId` is a UUID-v4 string newtype, so
+    // it parses back to the `Uuid` the wrapper wants.
     let user_id = UserId::random();
     let user_uuid = Uuid::parse_str(user_id.as_ref())
         .map_err(|e| ApiError::internal(format_args!("user id not a uuid: {e}")))?;
     // The wrapper hardcodes require_resident_key=false + UV=Required (upstream
-    // passkey defaults); username-first login does not rely on discoverability.
+    // passkey defaults); email-first login does not rely on discoverability.
+    // `user.name` is the email; the username is purely an in-site handle and
+    // reaches the authenticator only as the `displayName` fallback (see
+    // `display_name_for_prompt` above) when no `display_name` was supplied.
     let (options, reg_state) = state
         .webauthn
-        .start_passkey_registration(user_uuid, &username_norm, &display_name_for_prompt, None)
+        .start_passkey_registration(user_uuid, &email_norm, &display_name_for_prompt, None)
         .map_err(register_err)?;
     let state_value = serde_json::to_value(&reg_state)
         .map_err(|e| ApiError::internal(format_args!("serialize reg state: {e}")))?;
@@ -246,6 +269,7 @@ async fn register_begin(
         state: Set(state_value),
         invite_code_hash: Set(Some(code_hash_bytes)),
         user_id: Set(Some(user_id.to_string())),
+        email: Set(Some(email_norm)),
         username: Set(Some(username_norm)),
         expires_at: Set(now + CHALLENGE_TTL),
         created_at: Set(now),
@@ -267,7 +291,7 @@ async fn register_finish(
     // Rehydrate the ceremony state and run the (CPU-bound) registration
     // verification OUTSIDE the transaction so the row locks are not held across
     // crypto.
-    let (reg_state, invite_hash, user_id, username) =
+    let (reg_state, invite_hash, user_id, email, username) =
         load_register_state(&state.db, req.ceremony_id).await?;
     let passkey = state
         .webauthn
@@ -291,6 +315,7 @@ async fn register_finish(
         .transaction::<_, _, TxnError>(|txn| {
             let invite_hash = invite_hash.clone();
             let user_id = user_id_for_txn.clone();
+            let email = email.clone();
             let username = username.clone();
             let credential_json = credential_json.clone();
             let cred_id = cred_id.clone();
@@ -335,11 +360,22 @@ async fn register_finish(
                     return Err(TxnError::Api(ApiError::conflict("invite code expired")));
                 }
 
-                // Username uniqueness: FOR UPDATE-then-check so a taken name maps
-                // to a clean 409. The `uniq_users_username` index is the
-                // backstop for the sub-ms simultaneous-new-username race (which
-                // would otherwise surface as a 500; accepted residual for
-                // closed-beta registration, and the txn still aborts cleanly).
+                // Email (login id) uniqueness: FOR UPDATE-then-check so a taken
+                // address maps to a clean 409. The `uniq_users_email` index is
+                // the backstop for the sub-ms simultaneous-insert race.
+                let existing_email = users::Entity::find()
+                    .filter(users::Column::Email.eq(email.clone()))
+                    .lock_exclusive()
+                    .one(txn)
+                    .await?;
+                if existing_email.is_some() {
+                    return Err(TxnError::Api(ApiError::conflict(
+                        "email already registered",
+                    )));
+                }
+
+                // Username (in-site handle) uniqueness: same FOR UPDATE-then-check
+                // shape; the `uniq_users_username` index is the race backstop.
                 let existing = users::Entity::find()
                     .filter(users::Column::Username.eq(username.clone()))
                     .lock_exclusive()
@@ -352,6 +388,7 @@ async fn register_finish(
                 users::ActiveModel {
                     id: Set(user_id.to_string()),
                     username: Set(username),
+                    email: Set(email),
                     display_name: Set(None),
                     created_at: Set(now),
                     disabled_at: Set(None),
@@ -392,21 +429,25 @@ async fn register_finish(
         })
         .await;
     // Flatten the transaction result. The `users` insert can still race a
-    // parallel register of the same username (the FOR UPDATE pre-check above
-    // wins the common case; the sub-ms simultaneous-insert case loses to the
-    // `uniq_users_username` index). Discriminate that unique-constraint
-    // violation by constraint name and surface it as a clean 409 instead of a
-    // 500; any other unique violation (e.g. a duplicate passkey cred_id, which
-    // is never legitimate) stays a generic 500 via map_db_err.
+    // parallel register of the same email or username (the FOR UPDATE pre-checks
+    // above win the common case; the sub-ms simultaneous-insert case loses to
+    // the `uniq_users_email` / `uniq_users_username` index). Discriminate those
+    // unique-constraint violations by constraint name and surface each as a
+    // clean 409 with the right message instead of a 500; any other unique
+    // violation (e.g. a duplicate passkey cred_id, which is never legitimate)
+    // stays a generic 500 via map_db_err.
     match result {
         Ok(()) => {}
         Err(TransactionError::Transaction(TxnError::Api(e))) => return Err(e),
         Err(TransactionError::Transaction(TxnError::Db(e)))
         | Err(TransactionError::Connection(e)) => {
-            if let Some(SqlErr::UniqueConstraintViolation(msg)) = e.sql_err()
-                && msg.contains(USERNAME_UNIQUE_CONSTRAINT)
-            {
-                return Err(ApiError::conflict("username already taken"));
+            if let Some(SqlErr::UniqueConstraintViolation(msg)) = e.sql_err() {
+                if msg.contains(EMAIL_UNIQUE_CONSTRAINT) {
+                    return Err(ApiError::conflict("email already registered"));
+                }
+                if msg.contains(USERNAME_UNIQUE_CONSTRAINT) {
+                    return Err(ApiError::conflict("username already taken"));
+                }
             }
             return Err(map_db_err(e));
         }
@@ -421,12 +462,13 @@ async fn register_finish(
 }
 
 /// Read a register ceremony, rehydrate its `PasskeyRegistration`, and return
-/// the bound invite hash, the pre-generated `UserId`, and the chosen username.
-/// Errors if the ceremony is missing, expired, or not a register ceremony.
+/// the bound invite hash, the pre-generated `UserId`, the canonicalized email,
+/// and the chosen username. Errors if the ceremony is missing, expired, or not
+/// a register ceremony.
 async fn load_register_state(
     db: &crate::db::Db,
     ceremony_id: Uuid,
-) -> Result<(PasskeyRegistration, Vec<u8>, UserId, String), ApiError> {
+) -> Result<(PasskeyRegistration, Vec<u8>, UserId, String, String), ApiError> {
     let row = webauthn_challenges::Entity::find_by_id(ceremony_id)
         .one(db)
         .await
@@ -445,36 +487,40 @@ async fn load_register_state(
         .user_id
         .clone()
         .ok_or_else(|| ApiError::internal(format_args!("register ceremony missing user id")))?;
+    let email = row
+        .email
+        .clone()
+        .ok_or_else(|| ApiError::internal(format_args!("register ceremony missing email")))?;
     let username = row
         .username
         .clone()
         .ok_or_else(|| ApiError::internal(format_args!("register ceremony missing username")))?;
     let state: PasskeyRegistration = serde_json::from_value(row.state)
         .map_err(|e| ApiError::internal(format_args!("deserialize reg state: {e}")))?;
-    Ok((state, invite_hash, UserId::from(user_id), username))
+    Ok((state, invite_hash, UserId::from(user_id), email, username))
 }
 
 // ---------------------------------------------------------------------------
-// login (username-first)
+// login (email-first)
 // ---------------------------------------------------------------------------
 
 async fn login_begin(
     State(state): State<SharedState>,
     Json(req): Json<LoginBeginRequest>,
 ) -> Result<Json<CeremonyBeginResponse<RequestChallengeResponse>>, ApiError> {
-    let username_norm = username::normalize(&req.username)?;
+    let email_norm = email::normalize(&req.email)?;
 
-    // Resolve the user by username. NOTE: this is a timing-enumeration oracle
-    // -- an unknown username (or a user with no passkeys) returns immediately,
-    // while a known username with passkeys pays the cost of loading them +
-    // `start_passkey_authentication` (real crypto-state construction) + an
-    // INSERT, so existence is distinguishable by latency. The same generic
-    // "invalid credentials" body is used for all 401 branches so the response
-    // BODY leaks nothing. Accepted for closed beta (usernames are not public;
-    // signup is invite-only). The pre-public-launch fix is constant-time /
-    // dummy-ceremony work, not message parity alone.
+    // Resolve the user by email (the login id). NOTE: this is a timing-
+    // enumeration oracle -- an unknown email (or a user with no passkeys)
+    // returns immediately, while a known email with passkeys pays the cost of
+    // loading them + `start_passkey_authentication` (real crypto-state
+    // construction) + an INSERT, so existence is distinguishable by latency.
+    // The same generic "invalid credentials" body is used for all 401 branches
+    // so the response BODY leaks nothing. Accepted for closed beta (emails are
+    // personally issued via invite). The pre-public-launch fix is constant-time
+    // / dummy-ceremony work, not message parity alone.
     let user = users::Entity::find()
-        .filter(users::Column::Username.eq(username_norm))
+        .filter(users::Column::Email.eq(email_norm))
         .one(&state.db)
         .await
         .map_err(map_db_err)?
@@ -531,6 +577,7 @@ async fn login_begin(
         state: Set(state_value),
         invite_code_hash: Set(None),
         user_id: Set(Some(user_id.to_string())),
+        email: Set(None),
         username: Set(None),
         expires_at: Set(now + CHALLENGE_TTL),
         created_at: Set(now),
@@ -774,6 +821,7 @@ async fn me(
             .clone()
             .unwrap_or_else(|| user.username.clone()),
         username: user.username,
+        email: user.email,
         created_at: user.created_at,
         passkey_count,
     }))
@@ -870,6 +918,7 @@ mod tests {
             State(state),
             Json(RegisterBeginRequest {
                 invite_code: "sk-invite-bogus".to_string(),
+                email: "someone@example.test".to_string(),
                 username: "someone".to_string(),
                 display_name: None,
             }),
@@ -893,6 +942,7 @@ mod tests {
             State(state.clone()),
             Json(RegisterBeginRequest {
                 invite_code: token.secret().to_string(),
+                email: "NewUser@Example.TEST".to_string(),
                 username: "newuser".to_string(),
                 display_name: None,
             }),
@@ -909,19 +959,22 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "register");
         assert_eq!(rows[0].invite_code_hash.as_deref(), Some(hash.as_slice()));
-        // The normalized username rides the challenge row for finish.
+        // The canonical email (local preserved, domain lowercased) rides the
+        // challenge row for finish; the username rides too.
+        assert_eq!(rows[0].email.as_deref(), Some("NewUser@example.test"));
         assert_eq!(rows[0].username.as_deref(), Some("newuser"));
     }
 
-    /// `/v1/me` returns the signed-in user's id, username, synthesized
+    /// `/v1/me` returns the signed-in user's id, username, email, synthesized
     /// display_name (= username when unset), and a passkey count of 0.
     #[tokio::test]
     async fn me_returns_signed_in_user() {
         let state = make_state(Duration::from_secs(2)).await;
-        let user_id = seed_user(&state, "alice").await;
+        let user_id = seed_user(&state, "alice", "alice@example.test").await;
         let Json(MeResponse {
             user_id: got,
             username,
+            email,
             display_name,
             passkey_count,
             ..
@@ -933,25 +986,26 @@ mod tests {
         .expect("me ok");
         assert_eq!(got, user_id.to_string());
         assert_eq!(username, "alice");
+        assert_eq!(email, "alice@example.test");
         assert_eq!(display_name, "alice"); // synthesized from username
         assert_eq!(passkey_count, 0);
     }
 
-    /// `login_begin` rejects an unknown username with 401 (accepted
-    /// enumeration oracle for closed beta; see the handler doc comment).
+    /// `login_begin` rejects an unknown email with 401 (accepted enumeration
+    /// oracle for closed beta; see the handler doc comment).
     #[tokio::test]
-    async fn login_begin_rejects_unknown_username() {
+    async fn login_begin_rejects_unknown_email() {
         let state = make_state(Duration::from_secs(2)).await;
         match login_begin(
             State(state),
             Json(LoginBeginRequest {
-                username: "nobody".to_string(),
+                email: "nobody@example.test".to_string(),
             }),
         )
         .await
         {
             Err(e) => assert_eq!(e.status, 401),
-            Ok(_) => panic!("unknown username must be rejected"),
+            Ok(_) => panic!("unknown email must be rejected"),
         }
     }
 
@@ -960,7 +1014,7 @@ mod tests {
     #[tokio::test]
     async fn login_begin_rejects_disabled_user() {
         let state = make_state(Duration::from_secs(2)).await;
-        let user_id = seed_user(&state, "frozen").await;
+        let user_id = seed_user(&state, "frozen", "frozen@example.test").await;
         // Flip the account to disabled.
         let mut am: users::ActiveModel = users::Entity::find_by_id(user_id.to_string())
             .one(&state.db)
@@ -974,7 +1028,7 @@ mod tests {
         match login_begin(
             State(state),
             Json(LoginBeginRequest {
-                username: "frozen".to_string(),
+                email: "frozen@example.test".to_string(),
             }),
         )
         .await
@@ -1000,6 +1054,7 @@ mod tests {
                 state: Set(serde_json::Value::Null),
                 invite_code_hash: Set(Some(hash.clone())),
                 user_id: Set(None),
+                email: Set(None),
                 username: Set(None),
                 expires_at: Set(now + time::Duration::seconds(60)),
                 created_at: Set(now),
@@ -1013,6 +1068,7 @@ mod tests {
             State(state),
             Json(RegisterBeginRequest {
                 invite_code: token.secret().to_string(),
+                email: "newuser@example.test".to_string(),
                 username: "newuser".to_string(),
                 display_name: None,
             }),

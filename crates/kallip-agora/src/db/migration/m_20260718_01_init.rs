@@ -39,6 +39,7 @@ impl MigrationTrait for Migration {
                     .table(Users::Table)
                     .col(ColumnDef::new(Users::Id).text().not_null().primary_key())
                     .col(ColumnDef::new(Users::Username).text().not_null())
+                    .col(ColumnDef::new(Users::Email).text().not_null())
                     .col(ColumnDef::new(Users::DisplayName).text())
                     .col(
                         ColumnDef::new(Users::CreatedAt)
@@ -55,6 +56,16 @@ impl MigrationTrait for Migration {
                     .name("uniq_users_username")
                     .table(Users::Table)
                     .col(Users::Username)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("uniq_users_email")
+                    .table(Users::Table)
+                    .col(Users::Email)
                     .unique()
                     .to_owned(),
             )
@@ -343,6 +354,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(WebauthnChallenges::State).json().not_null())
                     .col(ColumnDef::new(WebauthnChallenges::InviteCodeHash).binary())
                     .col(ColumnDef::new(WebauthnChallenges::UserId).text())
+                    .col(ColumnDef::new(WebauthnChallenges::Email).text())
                     .col(ColumnDef::new(WebauthnChallenges::Username).text())
                     .col(
                         ColumnDef::new(WebauthnChallenges::ExpiresAt)
@@ -420,6 +432,7 @@ enum Users {
     Table,
     Id,
     Username,
+    Email,
     DisplayName,
     CreatedAt,
     DisabledAt,
@@ -498,6 +511,7 @@ enum WebauthnChallenges {
     State,
     InviteCodeHash,
     UserId,
+    Email,
     Username,
     ExpiresAt,
     CreatedAt,

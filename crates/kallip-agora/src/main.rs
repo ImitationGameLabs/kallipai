@@ -10,6 +10,7 @@ mod args;
 mod auth;
 mod clientip;
 mod db;
+mod email;
 #[cfg(test)]
 mod integration;
 mod middleware;

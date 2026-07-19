@@ -1,12 +1,13 @@
-//! Username normalization + validation, shared by `register_begin` and
-//! `login_begin` so a user can always log in with the exact handle they
-//! registered.
+//! Username normalization + validation for the in-site display handle chosen at
+//! invite redemption. The username is NOT the login id (login resolves by
+//! `crate::email`); it is a required, unique handle stored on the user row and
+//! surfaced in `/v1/me`, and used as the fallback WebAuthn `displayName` when
+//! the client omits one.
 //!
-//! Rules (applied at every write AND lookup): trim surrounding whitespace,
-//! fold to ASCII lower-case, then require `^[a-z0-9_-]{3,32}$`. ASCII-only
-//! folding is deliberate — Unicode case-folding would make lookups
-//! normalization-form-dependent and open homoglyph/collision surprises; a
-//! portable ASCII handle is also a safe WebAuthn `user.name`.
+//! Rules: trim surrounding whitespace, fold to ASCII lower-case, then require
+//! `^[a-z0-9_-]{3,32}$`. ASCII-only folding is deliberate — Unicode
+//! case-folding would make matches normalization-form-dependent and open
+//! homoglyph/collision surprises.
 
 use kallip_common::protocol::ApiError;
 

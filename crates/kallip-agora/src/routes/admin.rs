@@ -412,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn enrollment_code_for_known_user() {
         let state = make_state(Duration::from_secs(2)).await;
-        let user_id = seed_user(&state, "owner").await;
+        let user_id = seed_user(&state, "owner", "owner@example.test").await;
         let admin = AuthPrincipal(Principal::Admin);
         let resp = create_enrollment_code(
             State(state),

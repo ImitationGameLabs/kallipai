@@ -32,6 +32,7 @@ cookie = { workspace = true }
 url = { workspace = true }
 ipnet = { workspace = true }
 getrandom = { workspace = true }
+email_address = { workspace = true }
 
 [dev-dependencies]
 testcontainers = { workspace = true }

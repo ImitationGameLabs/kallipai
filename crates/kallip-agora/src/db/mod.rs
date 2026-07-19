@@ -180,6 +180,7 @@ mod tests {
         entity::users::ActiveModel {
             id: Set("owner-1".to_string()),
             username: Set("owner-1".to_string()),
+            email: Set("owner-1@example.test".to_string()),
             display_name: Set(None),
             created_at: Set(created_at),
             disabled_at: Set(None),

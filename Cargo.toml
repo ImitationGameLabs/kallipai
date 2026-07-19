@@ -37,6 +37,8 @@ kallip-daemon = { path = "crates/kallip-daemon" }
 anyhow = "1.0.102"
 async-trait = "0.1.89"
 async-stream = "0.3.6"
+# RFC 5321/5322 email validation for agora login ids; pure-Rust, no heavy deps.
+email_address = "0.2.9"
 # `signal` transitively enables `process` (for `nix::unistd::Pid`).
 nix = { version = "0.31", features = ["fs", "signal"] }
 # Linux-first sandbox toolbox (landlock ruleset + mount-ns composable

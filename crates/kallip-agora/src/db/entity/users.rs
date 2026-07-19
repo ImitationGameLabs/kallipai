@@ -10,10 +10,15 @@ pub struct Model {
     /// `UserId` (opaque UUID-string newtype), stored as `TEXT`.
     #[sea_orm(primary_key, column_type = "Text")]
     pub id: String,
-    /// Login handle, normalized at write time (trim + ASCII-lowercase,
-    /// `[a-z0-9_-]{3,32}`). Unique; resolved at `login_begin`.
+    /// In-site display handle, normalized at write time (trim + ASCII-lowercase,
+    /// `[a-z0-9_-]{3,32}`). Unique; NOT the login id.
     #[sea_orm(column_type = "Text")]
     pub username: String,
+    /// Login handle, canonicalized at write time per RFC 5321 sec 2.4 (local
+    /// part preserved verbatim, domain lowercased). Unique; resolved at
+    /// `login_begin`.
+    #[sea_orm(column_type = "Text")]
+    pub email: String,
     /// Optional human-readable name (NULL until set; the API synthesizes it as
     /// the username when absent). Not the WebAuthn `user.id`.
     #[sea_orm(column_type = "Text", nullable)]

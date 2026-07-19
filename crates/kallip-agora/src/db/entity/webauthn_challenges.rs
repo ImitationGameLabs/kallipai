@@ -25,11 +25,16 @@ pub struct Model {
     #[sea_orm(nullable)]
     pub invite_code_hash: Option<Vec<u8>>,
     /// For register: the pre-generated `UserId` that the finish txn will create.
-    /// For login: the `UserId` resolved from the username at `begin`. Plain
+    /// For login: the `UserId` resolved from the email at `begin`. Plain
     /// `TEXT`, NOT a FK (see the migration: at register the user row does not
     /// exist yet).
     #[sea_orm(column_type = "Text", nullable)]
     pub user_id: Option<String>,
+    /// For register: the canonicalized login email, carried across the
+    /// begin/finish split so finish can insert the `users` row and run the
+    /// uniqueness check. `None` for login.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub email: Option<String>,
     /// For register: the chosen username, carried across the begin/finish split
     /// so finish can insert the `users` row and run the uniqueness check. `None`
     /// for login.
