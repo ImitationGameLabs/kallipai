@@ -42,14 +42,6 @@ export function shapeFields(
         rows: [{ label: "unpinned", detail: r.unpinned ?? "" }],
         labels: labelItems(r.pinned_labels),
       };
-    case "read_file_and_pin":
-      return {
-        rows: [
-          { label: "pinned", detail: r.pinned ?? "" },
-          { label: "source", detail: r.source ?? "" },
-        ],
-        labels: labelItems(r.pinned_labels),
-      };
     case "bash_background_kill":
       return { rows: [{ label: "killed task", detail: r.task_id ?? "" }] };
     default:
