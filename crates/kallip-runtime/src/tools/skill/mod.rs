@@ -13,87 +13,44 @@
 //! identifier and is not required to match the path.
 //!
 //! The [`load_skill`] function resolves skill files from the shared skill
-//! directory or an agent-local directory. The [`FilePinTool`] LLM tool
-//! exposes a general-purpose "read file and pin" operation to the agent.
+//! directory or an agent-local directory.
 
 pub mod promote;
 pub use promote::promote_skill_from_content;
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use async_trait::async_trait;
-use just_llm_client::tools::LlmTool;
-use just_llm_client::types::chat::ChatMessage;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tokio::sync::Mutex;
 
-use crate::context::AgenticContext;
 use kallip_common::protocol::SkillMeta;
 
 pub const META_SKILL_NAME: &str = "bootstrap";
 
 const DEFAULT_META_SKILL: &str = r#"---
 name: bootstrap
-description: Skill system usage and behavioral guidelines
+description: Working with your context — weighing what you see, and finding notes from past sessions
 ---
 
-# Skill System
+# Weigh everything in your context
 
-You have access to a skill system for loading reference material and best practices.
+Everything in your context — notes you pinned, your running summary, tool
+output, what the user said, and any skill you have loaded — is input to your
+judgment. Nothing here is a command to execute without weighing it against
+what you see now. Past notes record decisions that may be stale or no longer
+fit the situation; weigh them, do not follow them blindly.
 
-## Discovering Skills
-
-- `kallip skill paths` — shows shared and local skill directory paths
-- `kallip skill meta <name>` — shows a skill's name and description
-- List available skills with `ls` on the returned paths
-
-## Loading Skills
-
-Use `read_file_and_pin` to load a file into persistent context. Skill files
-are at `<skill_dir>/<name>.md`. Use the label `skill:<name>` for skills.
-Use `context_unpin` to remove pinned items.
-
-## Creating Skills
-
-Use `kallip skill paths` to find your local directory, then write
-`<name>.md` there with YAML frontmatter. Only write to your local
-directory — the shared directory is managed by operators.
-
-    ---
-    name: my-skill
-    description: Short description
-    ---
-
-    # Skill content here
-
-Keep skills concise — capture key decisions, pitfalls, and effective patterns.
-
-## Promoting Skills
-
-Use `kallip skill promote submit <name>` to request promotion of a local
-skill to the shared directory. The request is reviewed by the root agent; you
-will be notified of the decision.
-
-# Behavioral Guidelines
-
-## Gather Information
-
-When facing something unfamiliar, read broadly before acting. Check
-documentation, search for existing patterns, examine similar code in the
-project. Don't rush to the first solution.
-
-## Verify Carefully
-
-Test assumptions before committing. Run small experiments to confirm your
-understanding matches reality. Prefer incremental validation over bold leaps.
-
-## Ask for Help
-
-When genuinely uncertain, ask the user rather than guessing. A short
-question is better than a long wrong path.
+Your data directory has a `skills/` folder — experience distilled in past
+sessions, with an `index.md` listing what is there. Read the index when you
+enter a new task or switch topics — the same boundary where you would evict
+the previous task's context — and also whenever you hit something unfamiliar
+mid-task, before you re-derive or go read external docs: it may already hold
+the answer, and one index read is cheap. When a note genuinely matches what
+you are doing, read it, then in the next turn pin what you read with
+`context_pin_last` (kind `tool-result`, label `skill:<name>`); don't load
+speculatively — a skill you don't use occupies a pin slot. Loaded notes stay
+in context across turns; unpin them when the task moves on. The
+`skill-management` notes cover creating and promoting your own; the
+`context-management` notes cover what to keep and what to evict.
 "#;
 
 /// Returns the shared skill directory.
@@ -207,10 +164,15 @@ pub fn load_skill(name: &str, agent_dir: Option<&Path>) -> Result<String> {
     Ok(strip_frontmatter(&content).trim().to_owned())
 }
 
-/// Returns the built-in meta-skill content (skill system usage and behavioral guidelines).
+/// Returns the built-in meta-skill content (a thin "floor" on working with
+/// your context — a universal judgment stance, plus a pointer to the skill
+/// index for notes from past sessions).
 ///
 /// The meta-skill is compiled into the binary and never written to disk.
-/// It is appended to the system prompt at agent spawn time.
+/// It is appended to the system prompt at agent spawn time. It deliberately
+/// teaches no operations: skill lifecycle lives in the `skill-management`
+/// skill and context hygiene in the `context-management` skill, both
+/// discoverable via the index it points at.
 pub fn meta_skill_content() -> &'static str {
     strip_frontmatter(DEFAULT_META_SKILL).trim()
 }
@@ -237,127 +199,57 @@ fn strip_frontmatter(content: &str) -> &str {
     content
 }
 
-// --- read_file_and_pin ---
-
-#[derive(Debug, Deserialize, Serialize)]
-struct FilePinArgs {
-    /// File path. Absolute paths are used as-is; relative paths resolve against
-    /// the agent's workspace root.
-    path: String,
-    /// Label for the pinned item.
-    label: String,
-}
-
-/// Reads a file from disk and pins its content into the agent's context.
-///
-/// Strips YAML frontmatter if present. An absolute path is used as-is; a
-/// relative path resolves against the agent's workspace root. This is a
-/// general-purpose shortcut for the common pattern of reading a file and
-/// pinning it for cross-turn reference.
-pub struct FilePinTool {
-    ctx: Arc<Mutex<dyn AgenticContext>>,
-    workspace_root: PathBuf,
-}
-
-impl FilePinTool {
-    /// Tool name exposed to the LLM and referenced by the policy layer.
-    pub const NAME: &str = "read_file_and_pin";
-
-    pub fn new(ctx: Arc<Mutex<dyn AgenticContext>>, workspace_root: PathBuf) -> Self {
-        Self {
-            ctx,
-            workspace_root,
-        }
-    }
-}
-
-#[async_trait]
-impl LlmTool for FilePinTool {
-    fn name(&self) -> &str {
-        Self::NAME
-    }
-
-    fn description(&self) -> &str {
-        "Read a file from disk and pin its content into context. \
-         Strips YAML frontmatter if present. Use this to load reference \
-         material, skills, or any content that should persist across \
-         conversation turns."
-    }
-
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "File path. Absolute paths are used as-is; relative paths resolve against the workspace root."
-                },
-                "label": {
-                    "type": "string",
-                    "description": "Label for the pinned item. Use 'skill:<name>' convention for skills."
-                }
-            },
-            "required": ["path", "label"]
-        })
-    }
-
-    async fn call(&self, args_json: &str) -> Result<String> {
-        let args: FilePinArgs =
-            serde_json::from_str(args_json).context("read_file_and_pin: invalid arguments")?;
-
-        let path = Path::new(&args.path);
-        let resolved = if path.is_relative() {
-            self.workspace_root.join(path)
-        } else {
-            path.to_path_buf()
-        };
-
-        let content = std::fs::read_to_string(&resolved)
-            .with_context(|| format!("failed to read file '{}'", resolved.display()))?;
-        let body = strip_frontmatter(&content).trim().to_owned();
-
-        let message = ChatMessage::user(body);
-        let mut ctx = self.ctx.lock().await;
-        ctx.pin(&args.label, message)?;
-        let labels = ctx.pinned_labels();
-        Ok(serde_json::to_string(&json!({
-            "pinned": args.label,
-            "source": resolved.display().to_string(),
-            "pinned_labels": labels,
-        }))?)
-    }
-}
-
-/// Creates the file-pin tool set.
-pub fn file_pin_tool_set(
-    ctx: Arc<Mutex<dyn AgenticContext>>,
-    workspace_root: PathBuf,
-) -> Vec<Box<dyn LlmTool>> {
-    vec![Box::new(FilePinTool::new(ctx, workspace_root))]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn meta_skill_content_covers_relocated_material() {
-        // The base system prompt stays lean; these mechanics were moved OUT of
-        // it and are delivered via this meta-skill, which the daemon appends to
-        // every agent's prompt at spawn (routes/agent.rs). If this content goes
-        // missing here, the agent silently loses pin/unpin and the promote
-        // workflow -- so pin the dependency at the source.
-        let content = meta_skill_content();
+    fn bootstrap_surfaces_discovery_and_stance() {
+        // The compiled meta-skill (appended to every agent's prompt at spawn,
+        // routes/agent.rs) is the ONLY guaranteed surface an agent sees before
+        // it discovers anything. It is kept deliberately thin: a universal
+        // judgment stance plus a discovery pointer. It teaches no operations
+        // -- those live in the skill files this test also pins down below.
+        //
+        // Assert against the RAW constant so frontmatter regressions are
+        // caught (meta_skill_content() strips frontmatter).
+
+        // --- Positive: the discovery contract ---
         assert!(
-            content.contains("read_file_and_pin"),
-            "meta-skill: {content}"
+            DEFAULT_META_SKILL.contains("context_pin_last"),
+            "floor must name the load verb: {DEFAULT_META_SKILL}"
         );
-        assert!(content.contains("context_unpin"), "meta-skill: {content}");
-        assert!(content.contains("skill promote"), "meta-skill: {content}");
         assert!(
-            content.contains("skill paths") || content.contains("skill meta"),
-            "meta-skill must teach skill discovery: {content}"
+            DEFAULT_META_SKILL.contains("index.md") && DEFAULT_META_SKILL.contains("skills/"),
+            "floor must point at the skill index: {DEFAULT_META_SKILL}"
         );
+        assert!(
+            DEFAULT_META_SKILL.contains("weigh") || DEFAULT_META_SKILL.contains("judgment"),
+            "floor must establish the judgment stance: {DEFAULT_META_SKILL}"
+        );
+
+        // --- Negative: deliberately dropped, paired with the positives above
+        // so a future edit cannot satisfy them by deleting discovery. ---
+        assert!(
+            !DEFAULT_META_SKILL.contains("skill system"),
+            "floor must not re-specialize skills as a 'system': {DEFAULT_META_SKILL}"
+        );
+        assert!(
+            !meta_skill_content().contains("context_unpin"),
+            "floor must not enumerate secondary context tools (self-describing via tool layer)"
+        );
+        assert!(
+            !DEFAULT_META_SKILL.contains("Skill system usage and behavioral guidelines"),
+            "frontmatter description must not repeat the old framing"
+        );
+
+        // The operations the floor no longer teaches (promote, unpin, evict)
+        // live in the skill files it points at. We do NOT compile-bind those
+        // files here: skills/ is a content directory the runtime loads from a
+        // data dir at runtime (skill_dir()), not a build-time dependency.
+        // Coverage of those operations is a skills/ review concern, kept
+        // separate so prose edits in skills/ cannot break compilation of this
+        // crate.
     }
 
     #[test]

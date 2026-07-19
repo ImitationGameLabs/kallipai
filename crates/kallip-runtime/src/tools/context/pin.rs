@@ -18,13 +18,15 @@ struct PinArgs {
 
 /// Tool that injects caller-provided content into the agent's persistent context.
 ///
-/// `context_pin` is **content-based**: the agent supplies the full text to persist, which is
-/// stored verbatim as a new persistent entry prepended to the context. It does *not* reference
-/// an existing conversation turn.
+/// `context_pin` is **content-based** (by-value): the agent supplies the full text to persist,
+/// which is stored verbatim as a new persistent entry prepended to the context. It does *not*
+/// reference an existing conversation turn.
 ///
-/// Re-stating important content to pin it is intentional — it doubles as attention
-/// reinforcement for a generative agent. By-reference pinning was considered and rejected: it
-/// would need fragile turn addressing prone to off-by-one and stale-index errors.
+/// Re-stating important content to pin it is intentional — for content the agent *composes*
+/// (decisions, constraints, instructions) retyping doubles as attention reinforcement. For
+/// content the agent has *received* (a file read, a command output, its own prior reply), where
+/// retyping is pure cost, use the by-reference companion [`super::ContextPinLastTool`]
+/// (`context_pin_last`) instead.
 pub struct ContextPinTool {
     ctx: Arc<Mutex<dyn AgenticContext>>,
 }

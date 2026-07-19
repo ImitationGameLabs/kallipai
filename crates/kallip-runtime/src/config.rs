@@ -510,7 +510,6 @@ impl PermissionProfile {
 mod tests {
     use super::*;
     use crate::tools::context::ContextUnpinTool;
-    use crate::tools::skill::FilePinTool;
     use kallip_common::policy::PolicyPreset;
     use kallip_shell::tools::names;
 
@@ -572,7 +571,6 @@ mod tests {
             names::BG_READ,
             names::BG_KILL,
             ContextUnpinTool::NAME,
-            FilePinTool::NAME,
             // The approval family and the skill-promote CLI were migrated out
             // together; guard the whole family, not just one member.
             "approval_redeem",

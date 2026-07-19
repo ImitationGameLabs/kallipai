@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn classify_non_bash_success_is_success() {
-        let env = success_result("read_file_and_pin", "{\"label\":\"x\"}".to_string());
+        let env = success_result("context_pin", "{\"label\":\"x\"}".to_string());
         assert!(matches!(classify_outcome(env), ToolCallOutcome::Success(_)));
     }
 

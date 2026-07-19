@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::config::AgentConfig;
-use crate::context::{AgenticContext, ContextStore};
+use crate::context::ContextStore;
 use crate::dirlock::DirLockManager;
 pub mod context;
 pub mod skill;
@@ -139,12 +139,7 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
 
     let mut dispatch = ToolDispatcher::new();
     dispatch.add_tools(shell_tool_set(backend))?;
-    let ctx_dyn: Arc<Mutex<dyn AgenticContext>> = ctx;
-    dispatch.add_tools(context::context_tool_set(ctx_dyn.clone(), exec_policy))?;
-    dispatch.add_tools(skill::file_pin_tool_set(
-        ctx_dyn,
-        config.workspace_root.clone(),
-    ))?;
+    dispatch.add_tools(context::context_tool_set(ctx, exec_policy))?;
 
     Ok(dispatch)
 }

@@ -6,12 +6,14 @@
 mod evict;
 mod exec_policy;
 mod pin;
+mod pin_last;
 mod status;
 mod unpin;
 
 pub use evict::ContextEvictTool;
 pub use exec_policy::ExecPolicyTool;
 pub use pin::ContextPinTool;
+pub use pin_last::ContextPinLastTool;
 pub use status::ContextStatusTool;
 pub use unpin::ContextUnpinTool;
 
@@ -29,6 +31,7 @@ pub fn context_tool_set(
 ) -> Vec<Box<dyn just_llm_client::tools::LlmTool>> {
     vec![
         Box::new(pin::ContextPinTool::new(ctx.clone())),
+        Box::new(pin_last::ContextPinLastTool::new(ctx.clone())),
         Box::new(unpin::ContextUnpinTool::new(ctx.clone())),
         Box::new(status::ContextStatusTool::new(ctx.clone())),
         Box::new(evict::ContextEvictTool::new(ctx.clone())),

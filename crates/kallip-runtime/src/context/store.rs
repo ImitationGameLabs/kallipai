@@ -57,6 +57,19 @@ pub trait AgenticContext: Send + Sync {
     /// or eviction. Does **not** reset token-budget warnings — those track
     /// daemon-wide consumption and must never be reset by a single agent.
     fn reset_context_warnings(&mut self);
+    /// Return the most recent message of `role` in the **conversation**
+    /// (non-pinned) turns, scanning newest-first.
+    ///
+    /// Pinned turns are deliberately skipped: they live at the front of the
+    /// store and include assistant-role entries (notably the compaction
+    /// `context_summary`), so a naive reverse scan would resolve `assistant`
+    /// to the summary rather than the agent's actual last reply. For the
+    /// `assistant` role, pure tool-call dispatch messages (no preamble text,
+    /// i.e. `content: None`) are also skipped: they carry nothing to pin, so
+    /// the accessor resolves to the last assistant message that has text
+    /// content. Tool results always carry content and are never pruned.
+    /// Returns `None` when no qualifying conversation message exists.
+    fn last_conversation_message_by_role(&self, role: &str) -> Option<ChatMessage>;
 }
 
 /// Single source of truth for all context data in an agent.
@@ -267,6 +280,27 @@ impl AgenticContext for ContextStore {
 
     fn reset_context_warnings(&mut self) {
         self.highest_warned_pct = None;
+    }
+
+    fn last_conversation_message_by_role(&self, role: &str) -> Option<ChatMessage> {
+        // Skip pinned turns (front of the deque). The compaction summary is an
+        // assistant-role pinned message, so including pinned turns would make
+        // `assistant` resolve to the summary instead of the last real reply.
+        self.turns
+            .iter()
+            .rev()
+            .filter(|t| !t.is_pinned())
+            .flat_map(|t| t.messages.iter().rev())
+            .find(|m| {
+                m.role() == role
+                    // A pure tool-call dispatch (no preamble text) carries no
+                    // content to pin -- skip it so `assistant` resolves to a
+                    // real reply. Tool results always carry content (their
+                    // body), so this prunes only assistant dispatch headers
+                    // produced by the runner's execute_tool_calls.
+                    && (role != "assistant" || m.content().is_some())
+            })
+            .cloned()
     }
 }
 
