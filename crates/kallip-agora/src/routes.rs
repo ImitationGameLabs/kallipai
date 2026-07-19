@@ -5,15 +5,16 @@ mod auth;
 mod conversations;
 mod events;
 mod herald;
+mod me_enrollment_codes;
 mod tagmata;
 
 use axum::Router;
 use axum::extract::State;
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::state::SharedState;
 
@@ -35,6 +36,7 @@ pub fn router(state: SharedState) -> Router<()> {
         .merge(ceremony_begin)
         .merge(auth::finish_router())
         .merge(auth::session_router())
+        .merge(me_enrollment_codes::me_enrollment_codes_router())
         .nest("/admin", admin::router())
         .merge(enroll)
         .merge(tagmata::protected_router())
@@ -91,7 +93,21 @@ pub(crate) fn cors_layer(origins: &str) -> CorsLayer {
     };
     CorsLayer::new()
         .allow_origin(origin)
-        .allow_methods(Any)
+        // Methods must be an explicit list, NOT `Any`: the Fetch spec forbids
+        // `Access-Control-Allow-Credentials: true` together with a wildcard
+        // (`Allow-Methods: *`), and tower-http panics at layer construction if
+        // they're combined. Listed are exactly the methods the agora routes use.
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        // Allow credentialed (cookie-bearing) cross-origin requests so the web
+        // app -- served from a different origin than the agora (e.g. the app at
+        // http://localhost:5173 calling the agora at http://localhost:7100 in
+        // dev, or app vs. agora hosts in prod) -- can send/receive the
+        // `kallip_session` cookie with `credentials: "include"`. Safe because
+        // every wildcard-forbidden field is concrete: the origin allowlist is
+        // `AllowOrigin::list` (never `Any`) and the methods are enumerated above.
+        // A misconfigured `KALLIP_AGORA_CORS_ORIGINS=*` therefore yields an empty
+        // allowlist (no cross-origin allowed) rather than an open hole.
+        .allow_credentials(true)
         // `Authorization` is excluded from the `*` wildcard by the Fetch spec,
         // so list the request headers we actually send explicitly. The CSRF
         // marker (`X-Requested-With`) is a custom header the browser only sends

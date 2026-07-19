@@ -25,10 +25,11 @@ use kallip_agora_common::proof::{ProofError, verify_enroll_proof};
 use kallip_common::authtoken::{MintedToken, TokenHash};
 use kallip_common::protocol::ApiError;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QuerySelect,
-    TransactionTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, TransactionTrait,
 };
 use serde::Serialize;
+use std::collections::HashSet;
 use time::OffsetDateTime;
 use tracing::warn;
 
@@ -47,11 +48,13 @@ pub fn enroll_router() -> Router<SharedState> {
     Router::new().route("/tagmata", post(enroll))
 }
 
-/// The authenticated tagma surface: owned-tagma key lookup. Cookie/bearer-authed
-/// and not rate-limited (must not share the unauth bucket, same reasoning as
-/// `/me`).
+/// The authenticated tagma surface: the owner's tagma list (with live presence)
+/// and owned-tagma key lookup. Cookie/bearer-authed and not rate-limited (must
+/// not share the unauth bucket, same reasoning as `/me`).
 pub fn protected_router() -> Router<SharedState> {
-    Router::new().route("/tagmata/{id}", get(get_tagma))
+    Router::new()
+        .route("/tagmata", get(list_tagmata))
+        .route("/tagmata/{id}", get(get_tagma))
 }
 
 async fn enroll(
@@ -176,6 +179,54 @@ fn proof_to_bad_request(e: ProofError) -> ApiError {
     ApiError::bad_request(format!("invalid enrollment proof: {e}"))
 }
 
+/// One row of the owner's tagma list. `online` is true iff the tagma currently
+/// has a live herald tunnel (the in-memory `Registry::presence` map); it is the
+/// sole liveness signal — `tagmata.last_tunnel_proof_ts` is a replay guard, NOT
+/// a liveness signal, and is intentionally NOT surfaced here (naming it "last
+/// seen" would mislead: a tagma whose tunnel dropped looks recent).
+#[derive(Serialize)]
+struct TagmaCardInfo {
+    tagma_id: String,
+    label: Option<String>,
+    created_at: OffsetDateTime,
+    online: bool,
+}
+
+/// List the caller's tagmata, newest first, each annotated with live presence.
+///
+/// Lock discipline: the DB read happens before any registry guard, and the
+/// presence check snapshots the currently-online ids under a single short
+/// `read()` (no `.await` under the lock — `state.rs`). The snapshot is dropped
+/// before the response is built, so the lock is never held across serialization.
+async fn list_tagmata(
+    State(state): State<SharedState>,
+    AuthPrincipal(principal): AuthPrincipal,
+) -> Result<Json<Vec<TagmaCardInfo>>, ApiError> {
+    let user_id = require_user(&principal)?;
+    let rows = tagmata::Entity::find()
+        .filter(tagmata::Column::OwnerUserId.eq(user_id.to_string()))
+        .order_by_desc(tagmata::Column::CreatedAt)
+        .all(&state.db)
+        .await
+        .map_err(map_db_err)?;
+    // Snapshot present ids under one read guard (presence is keyed by TagmaId;
+    // building the set here avoids per-row newtype construction under the lock).
+    let online_ids: HashSet<TagmaId> = {
+        let reg = state.read()?;
+        reg.presence.keys().cloned().collect()
+    };
+    let items = rows
+        .into_iter()
+        .map(|r| TagmaCardInfo {
+            online: online_ids.contains(&TagmaId::from(r.id.clone())),
+            tagma_id: r.id,
+            label: r.label,
+            created_at: r.created_at,
+        })
+        .collect();
+    Ok(Json(items))
+}
+
 #[derive(Serialize)]
 struct TagmaInfo {
     tagma_id: String,
@@ -203,4 +254,69 @@ async fn get_tagma(
         tagma_id: tagma_id.to_string(),
         pinned_public_key: Ed25519PublicKey(tagma.pinned_public_key),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    //! `list_tagmata` coverage: presence annotation + owner isolation.
+
+    use std::time::Duration;
+
+    use axum::Json;
+    use axum::extract::State;
+
+    use super::{TagmaCardInfo, list_tagmata};
+    use crate::auth::{AuthPrincipal, Principal};
+    use crate::test_helpers::{make_state, seed_presence, seed_tagma, seed_user};
+    use kallip_agora_common::bytes::Ed25519PublicKey;
+
+    /// A 32-byte zero key is fine for `list_tagmata` (it never verifies it).
+    fn dummy_key() -> Ed25519PublicKey {
+        Ed25519PublicKey([0u8; 32].to_vec())
+    }
+
+    /// An owner with no tagmata gets `[]` (200, not 404).
+    #[tokio::test]
+    async fn empty_list() {
+        let state = make_state(Duration::from_secs(2)).await;
+        let user = seed_user(&state, "alice", "alice@example.test").await;
+        let Json(got) = list_tagmata(State(state), AuthPrincipal(Principal::User(user)))
+            .await
+            .expect("list");
+        assert!(got.is_empty());
+    }
+
+    /// A tagma with no live tunnel is `online=false`; one with `seed_presence`
+    /// is `online=true`. Both appear in the owner's list.
+    #[tokio::test]
+    async fn online_and_offline_reflect_presence() {
+        let state = make_state(Duration::from_secs(2)).await;
+        let user = seed_user(&state, "alice", "alice@example.test").await;
+        let (offline, _) = seed_tagma(&state, &user, dummy_key()).await;
+        let (online, _) = seed_tagma(&state, &user, dummy_key()).await;
+        seed_presence(&state, &online);
+
+        let Json(got) = list_tagmata(State(state), AuthPrincipal(Principal::User(user)))
+            .await
+            .expect("list");
+        assert_eq!(got.len(), 2);
+        let by_id: std::collections::HashMap<String, TagmaCardInfo> =
+            got.into_iter().map(|t| (t.tagma_id.clone(), t)).collect();
+        assert!(!by_id.get(offline.as_ref()).expect("offline row").online);
+        assert!(by_id.get(online.as_ref()).expect("online row").online);
+    }
+
+    /// Another user's tagmata never appear in the caller's list.
+    #[tokio::test]
+    async fn owner_isolation() {
+        let state = make_state(Duration::from_secs(2)).await;
+        let alice = seed_user(&state, "alice", "alice@example.test").await;
+        let bob = seed_user(&state, "bob", "bob@example.test").await;
+        let _alice_tagma = seed_tagma(&state, &alice, dummy_key()).await;
+
+        let Json(got) = list_tagmata(State(state), AuthPrincipal(Principal::User(bob)))
+            .await
+            .expect("list");
+        assert!(got.is_empty(), "bob must not see alice's tagmata");
+    }
 }

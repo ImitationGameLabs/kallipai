@@ -30,7 +30,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use kallip_common::authtoken::MintedToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use webauthn_rs::prelude::WebauthnBuilder;
 
 use args::Args;
@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
     let mut trusted_proxies = parse_trusted_proxies(&args.trusted_proxies);
     let explicit_trusted = trusted_proxies != parse_trusted_proxies(args::DEFAULT_TRUSTED_PROXIES);
     if !explicit_trusted && !is_loopback_bind(&args.listen_addr) && !trusted_proxies.is_empty() {
-        error!(
+        warn!(
             "listen_addr {addr} is publicly bound but trusted_proxies is the loopback default; \
              clearing it to avoid XFF spoofing. Set KALLIP_AGORA_TRUSTED_PROXIES explicitly to \
              trust a reverse proxy on this bind.",

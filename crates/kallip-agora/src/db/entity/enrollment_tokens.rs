@@ -1,8 +1,7 @@
 //! `enrollment_tokens` entity — a single-use tagma-access credential
 //! (`sk-enroll-...`), redeemed by a herald at enroll to mint a tagma token.
-//! Today the admin mints these; a planned self-service surface
-//! (`/v1/me/enrollment-tokens`) will let users mint their own. The table is
-//! identical either way.
+//! Minted by the owning user via `/v1/me/enrollment-codes`, or by an operator
+//! via `/v1/admin/enrollment-codes`. The table is identical either way.
 
 use sea_orm::entity::prelude::*;
 use time::OffsetDateTime;

@@ -1,7 +1,9 @@
 //! Admin (operator) endpoints, authenticated by the admin token. The
 //! invite-only entry point: mint + list + revoke invite codes, and mint
-//! enrollment tokens (the latter is a stepping stone until the planned
-//! self-service `/v1/me/enrollment-tokens` surface lands).
+//! enrollment tokens on a user's behalf. The user-facing self-service
+//! counterpart for enrollment tokens lives at `/v1/me/enrollment-codes`
+//! (`routes/me_enrollment_codes.rs`); this admin mint is retained for operator
+//! use (e.g. provisioning a token for a user out-of-band).
 //!
 //! User accounts are born ONLY at invite redemption + passkey binding, so there
 //! is no admin user-creation endpoint.
@@ -252,8 +254,8 @@ async fn revoke_invite_code(
 }
 
 // ---------------------------------------------------------------------------
-// enrollment codes (admin mint; a planned self-service surface at /v1/me
-// will eventually displace this)
+// enrollment codes (operator mint on a user's behalf; users self-mint via
+// /v1/me/enrollment-codes)
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]

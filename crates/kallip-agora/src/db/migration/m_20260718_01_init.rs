@@ -102,10 +102,14 @@ impl MigrationTrait for Migration {
             .await?;
         manager
             .create_index(
+                // Composite so the owner-scoped, newest-first tagma list
+                // (`WHERE owner_user_id = ? ORDER BY created_at DESC`) is satisfied
+                // by the index without a filesort.
                 Index::create()
-                    .name("idx_tagmata_owner")
+                    .name("idx_tagmata_owner_created_at")
                     .table(Tagmata::Table)
                     .col(Tagmata::OwnerUserId)
+                    .col((Tagmata::CreatedAt, IndexOrder::Desc))
                     .to_owned(),
             )
             .await?;

@@ -113,6 +113,94 @@ async fn csrf_guard_exempts_bearer() {
     );
 }
 
+/// Seed a live session for a fresh user and return the cookie value to send.
+async fn seed_session(state: &crate::state::SharedState) -> String {
+    use crate::db::entity::{sessions, users};
+    use kallip_common::authtoken::MintedToken;
+    use sea_orm::ActiveValue::Set;
+    let now = OffsetDateTime::now_utc();
+    let user_id = kallip_agora_common::ids::UserId::random();
+    users::ActiveModel {
+        id: Set(user_id.to_string()),
+        username: Set("alice".to_string()),
+        email: Set("alice@example.test".to_string()),
+        display_name: Set(None),
+        created_at: Set(now),
+        disabled_at: Set(None),
+    }
+    .insert(&state.db)
+    .await
+    .expect("seed user");
+    let session = MintedToken::generate(crate::token::SESSION);
+    sessions::ActiveModel {
+        token_hash: Set(session.hash().as_bytes().to_vec()),
+        user_id: Set(user_id.to_string()),
+        created_at: Set(now),
+        expires_at: Set(now + time::Duration::hours(1)),
+    }
+    .insert(&state.db)
+    .await
+    .expect("seed session");
+    session.secret().to_string()
+}
+
+/// `POST /v1/me/enrollment-codes` is CSRF-gated: a cookie-bearing mint without
+/// the marker is 403.
+#[tokio::test]
+async fn csrf_guard_blocks_me_enrollment_codes_without_marker() {
+    let state = make_state_with(Duration::from_secs(2), 10, 10).await;
+    let cookie = seed_session(&state).await;
+    let app = routes::router(state);
+    let mut request = req(Method::POST, "/v1/me/enrollment-codes", "{}");
+    request.headers_mut().append(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("kallip_session={cookie}")).expect("cookie header"),
+    );
+    assert_eq!(run(app, request).await, StatusCode::FORBIDDEN);
+}
+
+/// With the marker, the same mint passes the guard and returns 200 (it actually
+/// mints a code, since the seeded session authenticates).
+#[tokio::test]
+async fn me_enrollment_codes_mint_with_marker_returns_200() {
+    let state = make_state_with(Duration::from_secs(2), 10, 10).await;
+    let cookie = seed_session(&state).await;
+    let app = routes::router(state);
+    let mut request = req(Method::POST, "/v1/me/enrollment-codes", "{}");
+    request.headers_mut().append(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("kallip_session={cookie}")).expect("cookie header"),
+    );
+    request.headers_mut().append(
+        HeaderName::from_static(CSRF_HEADER),
+        HeaderValue::from_static(CSRF_HEADER_VALUE),
+    );
+    assert_eq!(run(app, request).await, StatusCode::OK);
+}
+
+/// `DELETE /v1/me/enrollment-codes/{id}` passes the CSRF guard with the marker
+/// and reaches the handler (404 for an unknown id — not 403).
+#[tokio::test]
+async fn me_enrollment_codes_revoke_with_marker_reaches_handler() {
+    let state = make_state_with(Duration::from_secs(2), 10, 10).await;
+    let cookie = seed_session(&state).await;
+    let app = routes::router(state);
+    let mut request = req(
+        Method::DELETE,
+        "/v1/me/enrollment-codes/00000000-0000-0000-0000-000000000000",
+        "",
+    );
+    request.headers_mut().append(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("kallip_session={cookie}")).expect("cookie header"),
+    );
+    request.headers_mut().append(
+        HeaderName::from_static(CSRF_HEADER),
+        HeaderValue::from_static(CSRF_HEADER_VALUE),
+    );
+    assert_eq!(run(app, request).await, StatusCode::NOT_FOUND);
+}
+
 /// The begin endpoints share one per-client bucket; the finish endpoints do
 /// NOT (a ceremony id is unguessable + single-use, transitively bounded by
 /// begin's limiter). With a capacity-2 bucket, the 3rd begin is 429 while any
