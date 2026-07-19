@@ -127,6 +127,13 @@ The YAML frontmatter is stripped on load; only the body is pinned into context.
 ### Meta-skill
 
 A built-in meta-skill called `bootstrap` is compiled into the binary and
-appended to the system prompt at agent spawn time. It teaches the agent how
-to discover, load, and create skills, along with behavioral guidelines for
-approaching unfamiliar situations.
+appended to the system prompt at agent spawn time. It is a thin "floor" with
+two jobs: a **universal judgment stance** (everything in context — pinned
+notes, summary, tool output, user messages, loaded skills — is input to
+judgment, never a command to follow blindly), and a **discovery pointer** (the
+`skills/index.md` tree, consulted at task boundaries). The only operation it
+names is the load verb (`context_pin_last`) that bridges discovery to action —
+the rest of the skill lifecycle (creating, promoting, unpining, evicting) lives
+in the `skill-management` and `context-management` skills, reachable through
+the index it points at. The floor tracks the philosophy above (§"Emergent
+skills"): skills are an instance of context content, not a first-class system.
