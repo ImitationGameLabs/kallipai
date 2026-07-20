@@ -1,14 +1,14 @@
 //! Admin (operator) endpoints, authenticated by the admin token. The
-//! invite-only entry point: mint + list + revoke invite codes, and mint
-//! enrollment tokens on a user's behalf. The user-facing self-service
-//! counterpart for enrollment tokens lives at `/v1/me/enrollment-codes`
-//! (`routes/me_enrollment_codes.rs`); this admin mint is retained for operator
-//! use (e.g. provisioning a token for a user out-of-band).
+//! invite-only entry point: mint + list + revoke invite codes, and mint a
+//! pending tagma (an enrollment code) on a user's behalf. The user-facing
+//! self-service counterpart is `POST /v1/tagmata` (`routes/tagmata.rs`); this
+//! admin mint is retained for operator use (e.g. provisioning a code for a user
+//! out-of-band).
 //!
 //! User accounts are born ONLY at invite redemption + passkey binding, so there
 //! is no admin user-creation endpoint.
 
-use crate::db::entity::{enrollment_tokens, invite_codes, users};
+use crate::db::entity::{invite_codes, users};
 use crate::db::map_db_err;
 use axum::Json;
 use axum::Router;
@@ -25,11 +25,10 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use crate::auth::{AuthPrincipal, require_admin};
 use crate::state::SharedState;
-use crate::token::{ENROLLMENT, INVITE};
+use crate::token::INVITE;
 
 pub fn router() -> Router<SharedState> {
     Router::new()
@@ -41,7 +40,7 @@ pub fn router() -> Router<SharedState> {
             "/invite-codes/{code_hash_hex}",
             axum::routing::delete(revoke_invite_code),
         )
-        .route("/enrollment-codes", post(create_enrollment_code))
+        .route("/tagmata", post(create_enrollment_code))
         // A trivial GET on the admin nest so wiring is exercised without a
         // body-bearing call.
         .route("/", get(|| async { "kallip-agora admin" }))
@@ -65,6 +64,7 @@ struct InviteCode {
     code: String,
     code_hash_hex: String,
     note: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
 }
 
@@ -99,11 +99,15 @@ async fn create_invite_code(
 #[derive(Serialize)]
 struct InviteCodeSummary {
     code_hash_hex: String,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
+    #[serde(default, with = "time::serde::rfc3339::option")]
     consumed_at: Option<OffsetDateTime>,
     consumed_by: Option<String>,
     note: Option<String>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
     revoked_at: Option<OffsetDateTime>,
 }
 
@@ -254,8 +258,9 @@ async fn revoke_invite_code(
 }
 
 // ---------------------------------------------------------------------------
-// enrollment codes (operator mint on a user's behalf; users self-mint via
-// /v1/me/enrollment-codes)
+// enrollment codes (operator mint of a pending tagma on a user's behalf; users
+// self-mint via POST /v1/tagmata). Reuses the shared `mint_pending_tagma` so the
+// per-owner live-pending cap applies uniformly.
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -276,33 +281,20 @@ async fn create_enrollment_code(
 ) -> Result<Json<CreateEnrollmentCodeResponse>, ApiError> {
     require_admin(&principal)?;
     let user_id = UserId::from(req.user_id);
-    // Users now live in the durable store.
+    // Users live in the durable store. Admin surface (not public): distinguish
+    // the two cases clearly. Unknown user -> 404, disabled user -> 409.
     let user = users::Entity::find_by_id(user_id.to_string())
         .one(&state.db)
         .await
         .map_err(map_db_err)?;
-    // Admin surface (not public): distinguish the two cases clearly. Unknown
-    // user -> 404, disabled user -> 409.
     let Some(user) = user else {
         return Err(ApiError::not_found("unknown user_id"));
     };
     if user.disabled_at.is_some() {
         return Err(ApiError::conflict("user is disabled"));
     }
-    let code = MintedToken::generate(ENROLLMENT);
-    let plaintext = code.secret().to_string();
-    let now = OffsetDateTime::now_utc();
-    let am = enrollment_tokens::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        token_hash: Set(code.hash().as_bytes().to_vec()),
-        user_id: Set(user_id.to_string()),
-        created_at: Set(now),
-        expires_at: Set(now + state.limits.enrollment_code_ttl),
-        consumed_at: Set(None),
-        consumed_by_tagma: Set(None),
-        revoked_at: Set(None),
-    };
-    am.insert(&state.db).await.map_err(map_db_err)?;
+    let (_id, plaintext, _created_at, _expires_at) =
+        super::tagmata::mint_pending_tagma(&state, &user_id).await?;
     Ok(Json(CreateEnrollmentCodeResponse { code: plaintext }))
 }
 

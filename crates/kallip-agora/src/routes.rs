@@ -5,7 +5,6 @@ mod auth;
 mod conversations;
 mod events;
 mod herald;
-mod me_enrollment_codes;
 mod tagmata;
 
 use axum::Router;
@@ -36,7 +35,6 @@ pub fn router(state: SharedState) -> Router<()> {
         .merge(ceremony_begin)
         .merge(auth::finish_router())
         .merge(auth::session_router())
-        .merge(me_enrollment_codes::me_enrollment_codes_router())
         .nest("/admin", admin::router())
         .merge(enroll)
         .merge(tagmata::protected_router())
@@ -97,7 +95,7 @@ pub(crate) fn cors_layer(origins: &str) -> CorsLayer {
         // `Access-Control-Allow-Credentials: true` together with a wildcard
         // (`Allow-Methods: *`), and tower-http panics at layer construction if
         // they're combined. Listed are exactly the methods the agora routes use.
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
         // Allow credentialed (cookie-bearing) cross-origin requests so the web
         // app -- served from a different origin than the agora (e.g. the app at
         // http://localhost:5173 calling the agora at http://localhost:7100 in

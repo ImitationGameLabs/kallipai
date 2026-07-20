@@ -105,6 +105,27 @@ impl MintedToken {
     }
 }
 
+/// A display-safe mask of a token: `{kind.0}{body[..3]}***{body[len-3..]}`,
+/// where `body` is `secret` with `kind`'s prefix stripped. Enough to identify a
+/// code at a glance without exposing it; safe to persist and return on list
+/// endpoints (the plaintext itself is handed out only once, at mint).
+///
+/// `body` is the base64url token payload (ASCII, alphabet `[A-Za-z0-9_-]`), so
+/// byte-slicing is safe and the body can never contain `*` -- which lets callers
+/// distinguish a masked value from a full plaintext by checking for `***`.
+/// Bodies shorter than 8 chars collapse to `{kind.0}***` (the threshold exceeds
+/// head+tail = 6 so the two never overlap).
+pub fn mask_token(secret: &str, kind: TokenKind) -> String {
+    let prefix = kind.0;
+    let body = secret.strip_prefix(prefix).unwrap_or(secret);
+    if body.len() < 8 {
+        return format!("{prefix}***");
+    }
+    let head = &body[..3];
+    let tail = &body[body.len() - 3..];
+    format!("{prefix}{head}***{tail}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +182,25 @@ mod tests {
     fn empty_secret_is_hashable() {
         // Guard for the set-but-empty env-var edge case (rejected upstream).
         let _ = TokenHash::of("");
+    }
+
+    #[test]
+    fn mask_token_keeps_prefix_and_head_tail() {
+        let t = MintedToken::generate(TEST_KIND);
+        let masked = mask_token(t.secret(), TEST_KIND);
+        // 43-char base64url body -> head(3) + "***" + tail(3), prefix preserved.
+        assert_eq!(masked.len(), "sk-test-".len() + 3 + 3 + 3);
+        assert!(masked.starts_with("sk-test-"));
+        assert!(masked.contains("***"));
+        // The mask must not leak the middle of the body.
+        let body = &t.secret()["sk-test-".len()..];
+        assert!(!masked.contains(&body[3..body.len() - 3]));
+    }
+
+    #[test]
+    fn mask_token_short_body_collapses() {
+        // A body shorter than 8 hides entirely.
+        let masked = mask_token("sk-test-abc", TEST_KIND);
+        assert_eq!(masked, "sk-test-***");
     }
 }

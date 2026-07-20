@@ -71,10 +71,16 @@ async fn create_conversation(
         .one(&state.db)
         .await
         .map_err(map_db_err)?;
-    // Existence-oracle hardening: a non-owner gets the same 404 as for an
-    // unknown tagma, so they cannot confirm whether a guessed tagma id exists.
-    let owned = matches!(tagma, Some(t) if t.owner_user_id.as_str() == user.as_ref());
-    if !owned {
+    // Existence-oracle hardening: a non-owner OR a still-pending tagma gets the
+    // same 404 as for an unknown tagma, so they cannot confirm whether a guessed
+    // tagma id exists. A pending tagma has no device key and no possible tunnel,
+    // so a conversation against it would go nowhere -- reject it here rather than
+    // letting envelopes silently drop. Mirrors `get_tagma`'s pending-404.
+    let enrolled_owned = matches!(
+        tagma,
+        Some(t) if t.owner_user_id.as_str() == user.as_ref() && t.enrolled_at.is_some()
+    );
+    if !enrolled_owned {
         return Err(ApiError::not_found("unknown tagma"));
     }
     let mut reg = state.write()?;

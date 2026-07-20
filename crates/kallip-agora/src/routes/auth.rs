@@ -169,6 +169,7 @@ struct MeResponse {
     username: String,
     email: String,
     display_name: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
     passkey_count: i64,
 }

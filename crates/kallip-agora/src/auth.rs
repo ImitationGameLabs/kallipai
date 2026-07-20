@@ -49,10 +49,10 @@ pub enum Principal {
 /// user. A request with neither is anonymous and rejected with 401.
 ///
 /// The admin path is DB-free (constant-time compare); the tagma path is one
-/// indexed `tagma_tokens` lookup (plus an owner-disabled re-check); the cookie
-/// path is an indexed `sessions` lookup plus an owner-disabled re-check. A
-/// revoked tagma token or a disabled owner takes effect immediately on every
-/// request.
+/// indexed `tagma_tokens` lookup plus the owning tagma row (a revoked tagma or
+/// a disabled owner re-check); the cookie path is an indexed `sessions` lookup
+/// plus an owner-disabled re-check. A revoked tagma or a disabled owner takes
+/// effect immediately on every request.
 #[derive(Debug, Clone)]
 pub struct AuthPrincipal(pub Principal);
 
@@ -78,7 +78,7 @@ impl FromRequestParts<SharedState> for AuthPrincipal {
 }
 
 /// Resolve a bearer token to admin (constant-time) or a tagma. A revoked tagma
-/// token or a token whose owner is disabled never authenticates.
+/// or a tagma whose owner is disabled never authenticates.
 async fn resolve_bearer(state: &SharedState, token: &str) -> Result<Principal, ApiError> {
     let hash = TokenHash::of(token);
     if state.admin_token_hash.ct_eq(&hash) {
@@ -90,27 +90,30 @@ async fn resolve_bearer(state: &SharedState, token: &str) -> Result<Principal, A
         .await
         .map_err(map_db_err)?;
     if let Some(row) = row {
-        // A revoked tagma token never authenticates.
-        if row.revoked_at.is_some() {
+        // Load the owning tagma. A revoked tagma never authenticates (this is
+        // the unified revoke flag; an enrolled revoke takes effect here, on the
+        // next herald request). A missing tagma (shouldn't happen given the FK)
+        // is treated as not-revoked, never as a silent allow.
+        let tagma = tagmata::Entity::find_by_id(row.tagma_id.clone())
+            .one(&state.db)
+            .await
+            .map_err(map_db_err)?;
+        let Some(tagma) = tagma else {
+            return Err(ApiError::unauthorized("invalid token"));
+        };
+        if tagma.revoked_at.is_some() {
             return Err(ApiError::unauthorized("invalid token"));
         }
-        // A token owned by a disabled account never authenticates either:
-        // disabling a user must also cut off their herald. The tagma's owner is
-        // loaded by id; a missing tagma or owner (shouldn't happen given the FK)
-        // is treated as not-disabled, never as a silent allow.
-        let owner_disabled = match tagmata::Entity::find_by_id(row.tagma_id.clone())
+        // A tagma owned by a disabled account never authenticates either:
+        // disabling a user must also cut off their herald. A missing owner
+        // (shouldn't happen given the FK) is treated as not-disabled, never as a
+        // silent allow.
+        let owner_disabled = match users::Entity::find_by_id(tagma.owner_user_id)
             .one(&state.db)
             .await
             .map_err(map_db_err)?
         {
-            Some(tagma) => match users::Entity::find_by_id(tagma.owner_user_id)
-                .one(&state.db)
-                .await
-                .map_err(map_db_err)?
-            {
-                Some(owner) => owner.disabled_at.is_some(),
-                None => false,
-            },
+            Some(owner) => owner.disabled_at.is_some(),
             None => false,
         };
         if owner_disabled {
@@ -187,9 +190,10 @@ pub fn require_tagma(principal: &Principal) -> Result<&TagmaId, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::entity::sessions;
-    use crate::test_helpers::{make_state, seed_user};
+    use crate::db::entity::{sessions, tagmata};
+    use crate::test_helpers::{make_state, seed_tagma, seed_user};
     use crate::token::SESSION;
+    use kallip_agora_common::bytes::Ed25519PublicKey;
     use kallip_common::authtoken::MintedToken;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
     use time::{Duration, OffsetDateTime};
@@ -229,5 +233,35 @@ mod tests {
         am.disabled_at = Set(Some(now));
         am.update(&state.db).await.expect("disable user");
         assert!(resolve_session(&state, session.secret()).await.is_err());
+    }
+
+    /// A revoked tagma's bearer never authenticates: `resolve_bearer` checks
+    /// `tagmata.revoked_at` on every request, so an enrolled revoke cuts the
+    /// herald off on its next call. This is the headline guarantee of the unified
+    /// revoke, so it is tested directly rather than only via the DELETE handler
+    /// writing the flag.
+    #[tokio::test]
+    async fn resolve_bearer_rejects_revoked_tagma() {
+        let state = make_state(std::time::Duration::from_secs(2)).await;
+        let user_id = seed_user(&state, "owner", "owner@example.test").await;
+        let (tagma_id, token) =
+            seed_tagma(&state, &user_id, Ed25519PublicKey([0u8; 32].to_vec())).await;
+
+        // The live tagma token resolves to its tagma.
+        assert!(matches!(
+            resolve_bearer(&state, &token).await,
+            Ok(Principal::Tagma(id)) if id == tagma_id
+        ));
+
+        // Revoke the tagma; the same token is now rejected.
+        let row = tagmata::Entity::find_by_id(tagma_id.to_string())
+            .one(&state.db)
+            .await
+            .expect("load tagma")
+            .expect("tagma present");
+        let mut am: tagmata::ActiveModel = row.into();
+        am.revoked_at = Set(Some(OffsetDateTime::now_utc()));
+        am.update(&state.db).await.expect("revoke tagma");
+        assert!(resolve_bearer(&state, &token).await.is_err());
     }
 }

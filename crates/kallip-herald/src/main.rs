@@ -185,7 +185,7 @@ async fn enroll(agora_url: &str, code: &str, device: &e2e::DeviceKey) -> Result<
         .timeout(Duration::from_secs(30))
         .build()
         .context("build reqwest client")?
-        .post(format!("{agora_url}/v1/tagmata"))
+        .post(format!("{agora_url}/v1/tagmata/enroll"))
         .json(&req)
         .send()
         .await

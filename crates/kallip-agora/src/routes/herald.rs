@@ -71,14 +71,17 @@ async fn tunnel(
         .and_then(|s| STANDARD.decode(s).ok())
         .ok_or_else(|| ApiError::bad_request("missing or malformed X-Device-Proof"))?;
     // The pinned device key now lives in the durable store (a registered tagma
-    // must survive an agora restart). Fetched outside the registry lock.
+    // must survive an agora restart). Fetched outside the registry lock. A
+    // missing tagma or a still-pending tagma (no pinned key) is "unknown tagma".
     let pinned = {
         let tagma = tagmata::Entity::find_by_id(tagma_id.to_string())
             .one(&state.db)
             .await
             .map_err(map_db_err)?;
         let tagma = tagma.ok_or_else(|| ApiError::not_found("unknown tagma"))?;
-        tagma.pinned_public_key
+        tagma
+            .pinned_public_key
+            .ok_or_else(|| ApiError::not_found("unknown tagma"))?
     };
     verify_tunnel_proof(&pinned, tagma_id.as_ref(), ts, &sig_bytes)
         .map_err(proof_to_unauthorized)?;

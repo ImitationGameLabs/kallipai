@@ -1,5 +1,6 @@
 //! `tagma_tokens` entity — a herald's long-lived bearer (`sk-tagma-...`), keyed
-//! by its SHA-256 hash.
+//! by its SHA-256 hash. Revocation lives on the owning `tagmata` row
+//! (`tagmata.revoked_at`), the single source of truth, rather than here.
 
 use sea_orm::entity::prelude::*;
 use time::OffsetDateTime;
@@ -16,11 +17,6 @@ pub struct Model {
     pub tagma_id: String,
     #[sea_orm(column_type = "TimestampWithTimeZone")]
     pub issued_at: OffsetDateTime,
-    /// Revocation timestamp; `None` = live. A revoke endpoint is not yet
-    /// implemented; until it exists `resolve_bearer` checks this on every
-    /// request so revocation takes effect immediately once wired.
-    #[sea_orm(column_type = "TimestampWithTimeZone", nullable)]
-    pub revoked_at: Option<OffsetDateTime>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

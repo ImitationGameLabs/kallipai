@@ -147,9 +147,9 @@ pub async fn seed_user(state: &SharedState, username: &str, email: &str) -> User
     user_id
 }
 
-/// Register a tagma owned by `owner`, pinning `pinned_key`, and return the id
-/// plus the tagma-token plaintext. The tagma + tagma token are persisted
-/// (mirrors production enroll).
+/// Register an enrolled tagma owned by `owner`, pinning `pinned_key`, and
+/// return the id plus the tagma-token plaintext. The tagma + tagma token are
+/// persisted (mirrors production enroll: `enrolled_at` set, no code fields).
 pub async fn seed_tagma(
     state: &SharedState,
     owner: &UserId,
@@ -162,10 +162,15 @@ pub async fn seed_tagma(
     tagmata::ActiveModel {
         id: Set(tagma_id.to_string()),
         owner_user_id: Set(owner.to_string()),
-        pinned_public_key: Set(pinned_key.0.clone()),
+        pinned_public_key: Set(Some(pinned_key.0.clone())),
         created_at: Set(now),
         label: Set(None),
         last_tunnel_proof_ts: Set(None),
+        revoked_at: Set(None),
+        enrolled_at: Set(Some(now)),
+        enrollment_code_hash: Set(None),
+        enrollment_code_masked: Set(None),
+        expires_at: Set(None),
     }
     .insert(&state.db)
     .await
@@ -174,7 +179,6 @@ pub async fn seed_tagma(
         token_hash: Set(token.hash().as_bytes().to_vec()),
         tagma_id: Set(tagma_id.to_string()),
         issued_at: Set(now),
-        revoked_at: Set(None),
     }
     .insert(&state.db)
     .await

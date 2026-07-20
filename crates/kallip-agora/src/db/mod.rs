@@ -192,10 +192,15 @@ mod tests {
         let inserted = entity::tagmata::ActiveModel {
             id: Set("tagma-1".to_string()),
             owner_user_id: Set("owner-1".to_string()),
-            pinned_public_key: Set(vec![0u8; 32]),
+            pinned_public_key: Set(Some(vec![0u8; 32])),
             created_at: Set(created_at),
             label: Set(None),
             last_tunnel_proof_ts: Set(None),
+            revoked_at: Set(None),
+            enrolled_at: Set(Some(created_at)),
+            enrollment_code_hash: Set(None),
+            enrollment_code_masked: Set(None),
+            expires_at: Set(None),
         }
         .insert(&db)
         .await
@@ -208,7 +213,7 @@ mod tests {
             .expect("row present");
         assert_eq!(found.id, "tagma-1");
         assert_eq!(found.owner_user_id, "owner-1");
-        assert_eq!(found.pinned_public_key, vec![0u8; 32]);
+        assert_eq!(found.pinned_public_key, Some(vec![0u8; 32]));
         assert_eq!(
             found.created_at.unix_timestamp(),
             created_at.unix_timestamp()

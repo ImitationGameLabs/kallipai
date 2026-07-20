@@ -8,10 +8,11 @@ use crate::bytes::{Ed25519PublicKey, Ed25519Signature, X25519PublicKey};
 use crate::ids::TagmaId;
 use serde::{Deserialize, Serialize};
 
-/// `POST /v1/tagmata` — enroll a herald with a single-use code and its device key.
+/// `POST /v1/tagmata/enroll` — enroll a herald with a single-use code and its
+/// device key, transitioning a pending tagma to enrolled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollRequest {
-    /// Single-use, short-TTL enrollment code (admin-issued, bound to a user).
+    /// Single-use, short-TTL enrollment code, bound to a user.
     pub code: String,
     /// The herald's pinned Ed25519 device public key. The agora records this and
     /// requires a signed proof of possession on every tunnel reconnect.

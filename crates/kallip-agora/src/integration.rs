@@ -144,14 +144,14 @@ async fn seed_session(state: &crate::state::SharedState) -> String {
     session.secret().to_string()
 }
 
-/// `POST /v1/me/enrollment-codes` is CSRF-gated: a cookie-bearing mint without
-/// the marker is 403.
+/// `POST /v1/tagmata` (mint a pending tagma) is CSRF-gated: a cookie-bearing
+/// mint without the marker is 403.
 #[tokio::test]
-async fn csrf_guard_blocks_me_enrollment_codes_without_marker() {
+async fn csrf_guard_blocks_tagma_mint_without_marker() {
     let state = make_state_with(Duration::from_secs(2), 10, 10).await;
     let cookie = seed_session(&state).await;
     let app = routes::router(state);
-    let mut request = req(Method::POST, "/v1/me/enrollment-codes", "{}");
+    let mut request = req(Method::POST, "/v1/tagmata", "{}");
     request.headers_mut().append(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!("kallip_session={cookie}")).expect("cookie header"),
@@ -162,11 +162,11 @@ async fn csrf_guard_blocks_me_enrollment_codes_without_marker() {
 /// With the marker, the same mint passes the guard and returns 200 (it actually
 /// mints a code, since the seeded session authenticates).
 #[tokio::test]
-async fn me_enrollment_codes_mint_with_marker_returns_200() {
+async fn tagma_mint_with_marker_returns_200() {
     let state = make_state_with(Duration::from_secs(2), 10, 10).await;
     let cookie = seed_session(&state).await;
     let app = routes::router(state);
-    let mut request = req(Method::POST, "/v1/me/enrollment-codes", "{}");
+    let mut request = req(Method::POST, "/v1/tagmata", "{}");
     request.headers_mut().append(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!("kallip_session={cookie}")).expect("cookie header"),
@@ -178,16 +178,16 @@ async fn me_enrollment_codes_mint_with_marker_returns_200() {
     assert_eq!(run(app, request).await, StatusCode::OK);
 }
 
-/// `DELETE /v1/me/enrollment-codes/{id}` passes the CSRF guard with the marker
-/// and reaches the handler (404 for an unknown id — not 403).
+/// `DELETE /v1/tagmata/{id}` (revoke) passes the CSRF guard with the marker and
+/// reaches the handler (404 for an unknown id -- not 403).
 #[tokio::test]
-async fn me_enrollment_codes_revoke_with_marker_reaches_handler() {
+async fn tagma_revoke_with_marker_reaches_handler() {
     let state = make_state_with(Duration::from_secs(2), 10, 10).await;
     let cookie = seed_session(&state).await;
     let app = routes::router(state);
     let mut request = req(
         Method::DELETE,
-        "/v1/me/enrollment-codes/00000000-0000-0000-0000-000000000000",
+        "/v1/tagmata/00000000-0000-0000-0000-000000000000",
         "",
     );
     request.headers_mut().append(
@@ -250,19 +250,19 @@ async fn rate_limit_begins_but_not_finishes() {
     }
 }
 
-/// `POST /v1/tagmata` (enroll) shares the begin bucket; the 3rd call is 429.
+/// `POST /v1/tagmata/enroll` shares the begin bucket; the 3rd call is 429.
 #[tokio::test]
 async fn rate_limit_enroll() {
     let state = make_state_with(Duration::from_secs(2), 2, 0).await;
     let app = routes::router(state);
     for _ in 0..2 {
-        let request = req(Method::POST, "/v1/tagmata", r#"{"code":"x"}"#);
+        let request = req(Method::POST, "/v1/tagmata/enroll", r#"{"code":"x"}"#);
         assert_ne!(
             run(app.clone(), request).await,
             StatusCode::TOO_MANY_REQUESTS
         );
     }
-    let request = req(Method::POST, "/v1/tagmata", r#"{"code":"x"}"#);
+    let request = req(Method::POST, "/v1/tagmata/enroll", r#"{"code":"x"}"#);
     assert_eq!(
         run(app.clone(), request).await,
         StatusCode::TOO_MANY_REQUESTS

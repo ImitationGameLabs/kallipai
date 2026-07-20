@@ -1,7 +1,6 @@
 //! sea-orm entity models for the durable tables. The migrations under
 //! [`super::migration`] prime the full schema.
 
-pub mod enrollment_tokens;
 pub mod invite_codes;
 pub mod passkeys;
 pub mod sessions;

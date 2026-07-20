@@ -13,11 +13,12 @@
 //! app streams, tunnel-proof replay guard) stays in the bin's in-memory
 //! `Registry` and is rebuilt on restart.
 //!
-//! First DB introduction: each table is created once with its full final column
-//! set (no incremental `alter_table` adds), and nothing is guarded by
-//! `if_not_exists` -- there is no production data to migrate. A dev DB that
-//! recorded earlier migration names in `seaql_migrations` should be dropped and
-//! re-migrated.
+//! First DB introduction: each table is created with its original column set,
+//! and nothing is guarded by `if_not_exists`. Schema changes after this initial
+//! creation are separate `m_*` migration files (see `mod.rs`) that `ALTER` the
+//! tables -- so an existing dev DB picks them up on the next boot instead of
+//! needing a drop-and-recreate. A dev DB that predates a migration records it in
+//! `seaql_migrations` once applied.
 //!
 //! Secondary (non-unique) indexes are separate `create_index` calls rather than
 //! inline: Postgres `CREATE TABLE` only accepts `UNIQUE`/`PRIMARY KEY` (plus
