@@ -100,7 +100,7 @@
         {#if onMint}
           <button
             type="button"
-            class="card preset-tonal-surface card-hover flex items-center justify-center gap-2 py-4 text-sm font-medium transition hover:preset-filled-primary-500 disabled:opacity-60"
+            class="card preset-tonal-surface flex items-center justify-center gap-2 py-4 text-sm font-medium transition hover:preset-filled-primary-500 disabled:opacity-60"
             disabled={busy}
             onclick={() => onMint()}
           >

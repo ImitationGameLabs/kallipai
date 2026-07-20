@@ -131,7 +131,7 @@
   room; `overflow-hidden` + `min-w-0` keep the code inside the card's filled box.
 -->
 <div
-  class="card preset-tonal-surface card-hover overflow-hidden flex flex-col gap-4 p-5"
+  class="card preset-tonal-surface transition hover:brightness-95 overflow-hidden flex flex-col gap-4 p-5"
 >
   <div class="flex items-center justify-between gap-2">
     {#if editing}
@@ -170,11 +170,11 @@
         {code.label ?? "Unnamed tagma"}
       </h3>
       {#if expired}
-        <span class="badge variant-filled-warning text-xs shrink-0"
+        <span class="badge preset-filled-warning-500 text-xs shrink-0"
           >expired</span
         >
       {:else}
-        <span class="badge variant-filled-surface text-xs shrink-0"
+        <span class="badge preset-filled-surface-500 text-xs shrink-0"
           >pending</span
         >
       {/if}

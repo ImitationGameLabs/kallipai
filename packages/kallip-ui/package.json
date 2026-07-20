@@ -21,8 +21,8 @@
     "@kallipai/kallip-agora-client": "workspace:*",
     "@kallipai/kallip-client": "workspace:*",
     "@lucide/svelte": "^1.24.0",
-    "@skeletonlabs/skeleton": "^4.15.2",
-    "@skeletonlabs/skeleton-svelte": "^4.15.2",
+    "@skeletonlabs/skeleton": "^5.0.0",
+    "@skeletonlabs/skeleton-svelte": "^5.0.0",
     "svelte": "^5.56.1"
   },
   "devDependencies": {

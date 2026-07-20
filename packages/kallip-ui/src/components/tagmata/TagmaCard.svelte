@@ -119,7 +119,7 @@
   an inline edit triggered from the bottom-right kebab menu.
 -->
 <div
-  class="card preset-tonal-surface card-hover overflow-hidden flex flex-col gap-4 p-5"
+  class="card preset-tonal-surface transition hover:brightness-95 overflow-hidden flex flex-col gap-4 p-5"
 >
   <div class="flex items-center justify-between gap-2">
     {#if editing}
