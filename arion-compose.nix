@@ -281,6 +281,11 @@ let
         service.env_file = [ ".env" ];
         out.service.profiles = [ "tagma" ];
         service.useHostStore = true;
+        # CA layer (cacert + certLinks via runtimeContents), same as the daemon.
+        # reqwest needs the trust store even for a plain-http target, so without
+        # it the herald fails to build its Client at startup.
+        image.enableRecommendedContents = true;
+        image.contents = [ workspace ] ++ runtimeContents;
         service.depends_on = [
           "agora"
           "daemon"
