@@ -5,5 +5,9 @@
     // (paired with noEmit from the base) lets svelte-check follow that source.
     "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "src/**/*.js"]
+  "include": ["src/**/*.ts", "src/**/*.svelte", "src/**/*.js"],
+  // Deno test files use `Deno` globals + jsr: imports that svelte-check (tsc)
+  // can't resolve; `deno test` type-checks them with its own types. Excluded
+  // here so the library's standalone `check` stays green.
+  "exclude": ["src/**/*_test.ts"]
 }

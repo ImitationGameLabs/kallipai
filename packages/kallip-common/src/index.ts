@@ -2,9 +2,11 @@
 //
 // Transport-agnostic shared layer: identifiers, errors, the unified DomainEvent
 // union, the transcript model + reducer, SessionCapabilities, the Session
-// interface, approval domain types, and a shared SSE parser. Both
-// @kallipai/kallip-client and @kallipai/kallip-agora-client implement Session;
-// @kallipai/kallip-ui consumes these types.
+// interface, approval domain types, and a shared SSE parser.
+// @kallipai/kallip-client implements Session; @kallipai/kallip-agora-client
+// ships the agora HTTP + WebAuthn control-plane client today, with the
+// Session-over-agora data plane a future phase. @kallipai/kallip-ui consumes
+// these types.
 
 export * from "./ids.ts";
 export * from "./errors.ts";

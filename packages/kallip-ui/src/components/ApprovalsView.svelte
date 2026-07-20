@@ -37,7 +37,6 @@
 
 <div class="h-full overflow-y-auto p-6 space-y-3">
   <div class="flex items-center gap-3">
-    <h1 class="text-xl font-semibold">Approvals</h1>
     <button
       class="btn btn-sm preset-tonal-surface"
       onclick={refresh}

@@ -1335,6 +1335,13 @@
       ]
     },
     "members": {
+      "packages/kallip-agora-client": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@jsr/std__assert@^1.0.19"
+          ]
+        }
+      },
       "packages/kallip-app": {
         "packageJson": {
           "dependencies": [
@@ -1376,6 +1383,8 @@
       "packages/kallip-ui": {
         "packageJson": {
           "dependencies": [
+            "npm:@jsr/std__assert@^1.0.19",
+            "npm:@lucide/svelte@^1.24.0",
             "npm:@sveltejs/vite-plugin-svelte@^7.1.2",
             "npm:@tailwindcss/vite@^4.3.0",
             "npm:dompurify@^3.4.12",

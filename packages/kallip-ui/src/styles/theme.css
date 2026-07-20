@@ -1,0 +1,14 @@
+/* kallip theme customizations layered on top of the Skeleton base theme.
+   Centralized here so kallip-web and kallip-app import a single source rather
+   than each maintaining a copy in its own app.css.
+
+   color-scheme: Skeleton's `preset-*` utilities resolve via CSS `light-dark()`,
+   which keys off `color-scheme`. Pinning to light forces the light side of those
+   presets regardless of OS dark mode (kallip ships a single light UI).
+
+   Visual theming (page/card background shades, etc.) is done with utility
+   classes on the relevant elements, not by overriding Skeleton's theme tokens. */
+
+:root {
+  color-scheme: light;
+}

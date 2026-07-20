@@ -9,15 +9,11 @@
 
 @import "@skeletonlabs/skeleton";
 @import "@skeletonlabs/skeleton-svelte";
-@import "@skeletonlabs/skeleton/themes/vintage";
+@import "@skeletonlabs/skeleton/themes/rocket";
 
-/* Single light theme (vintage). Skeleton's `preset-*` classes resolve via CSS
-   light-dark(), which keys off `color-scheme`; without forcing `color-scheme:
-   light` here, a user whose OS is in dark mode would see the dark side of those
-   presets even under the vintage theme. */
-[data-theme="vintage"] {
-  color-scheme: light;
-}
+/* kallip-level theme customizations (force light) live in the shared UI package
+   so both apps import one source. */
+@import "../../kallip-ui/src/styles/theme.css";
 
 html,
 body {

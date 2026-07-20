@@ -1,6 +1,6 @@
 import { DaemonClient, DaemonSession } from "@kallipai/kallip-client";
 import type { AgentId } from "@kallipai/kallip-common";
-import type { DirectConfig } from "../config/credentials.ts";
+import type { OfflineModeConfig } from "../config/config.ts";
 
 /**
  * Connect to a daemon, reusing an existing root agent (created_by == null) or
@@ -8,7 +8,7 @@ import type { DirectConfig } from "../config/credentials.ts";
  * agent. Mirrors kallip-tui's Session::connect.
  */
 export async function connectDirect(
-  config: DirectConfig,
+  config: OfflineModeConfig,
 ): Promise<DaemonSession> {
   const client = new DaemonClient({
     baseUrl: config.daemonUrl,

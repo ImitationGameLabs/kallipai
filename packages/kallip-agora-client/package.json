@@ -11,6 +11,7 @@
     "test": "deno test src"
   },
   "dependencies": {
-    "@kallipai/kallip-common": "workspace:*"
+    "@kallipai/kallip-common": "workspace:*",
+    "@std/assert": "npm:@jsr/std__assert@^1.0.19"
   }
 }

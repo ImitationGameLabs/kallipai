@@ -10,7 +10,7 @@
     "dev": "deno task --filter @kallipai/kallip-web dev",
     "build": "deno task --filter @kallipai/kallip-web build",
     "check": "deno task --filter @kallipai/kallip-common check && deno task --filter @kallipai/kallip-client check && deno task --filter @kallipai/kallip-agora-client check && deno task --filter @kallipai/kallip-ui check && deno task --filter @kallipai/kallip-web check && deno task --filter @kallipai/kallip-app check",
-    "test": "deno task --filter @kallipai/kallip-common test && deno task --filter @kallipai/kallip-client test",
+    "test": "deno task --filter @kallipai/kallip-common test && deno task --filter @kallipai/kallip-client test && deno task --filter @kallipai/kallip-agora-client test",
     "fmt": "prettier --write .",
     "fmt:file": "prettier --write",
     "fmt:check": "prettier --check .",

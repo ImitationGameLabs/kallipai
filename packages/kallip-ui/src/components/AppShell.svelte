@@ -3,6 +3,8 @@
   import { Navigation } from "@skeletonlabs/skeleton-svelte";
   import type { NavItem } from "../lib/shell.ts";
   import type { ErrorView } from "../lib/errors.ts";
+  import Brand from "./Brand.svelte";
+  import Banner from "./Banner.svelte";
 
   let {
     links,
@@ -36,8 +38,8 @@
       href={item.href}
       aria-current={active ? "page" : undefined}
       class={active
-        ? "preset-filled-primary-500 hover:preset-filled-primary-500"
-        : "preset-tonal-surface"}
+        ? "preset-filled-surface-500"
+        : "preset-tonal-surface hover:preset-filled-surface-500"}
     >
       {#if Icon}<Icon class="size-4" />{/if}
       <Navigation.TriggerText>{item.label}</Navigation.TriggerText>
@@ -73,7 +75,7 @@
       {#if brand}
         {@render brand()}
       {:else}
-        <span class="px-2 text-xl font-bold tracking-tight">KallipAI</span>
+        <span class="px-2"><Brand /></span>
       {/if}
     </Navigation.Header>
     <Navigation.Content>
@@ -91,14 +93,7 @@
   <!-- page content -->
   <main class="flex flex-col min-h-0 min-w-0 overflow-hidden">
     {#if error}
-      <div
-        role="alert"
-        class="px-4 py-2 text-sm bg-error-500/10 text-error-500 flex flex-wrap items-center gap-x-2 gap-y-1"
-      >
-        <span class="font-medium">{error.title}</span>
-        {#if error.detail}<span class="opacity-80">{error.detail}</span>{/if}
-        {#if error.hint}<span class="opacity-60">{error.hint}</span>{/if}
-      </div>
+      <Banner title={error.title} detail={error.detail} hint={error.hint} />
     {/if}
     <div class="flex-1 min-h-0 overflow-hidden">
       {@render children()}
