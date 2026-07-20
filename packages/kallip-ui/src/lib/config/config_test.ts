@@ -45,29 +45,35 @@ const validOffline: PersistedConfig = {
   offline: { daemonUrl: "http://host:3000", authToken: "t" },
 };
 
-Deno.test("loadConfig returns a valid persisted config unchanged and writes nothing", async () => {
-  const fake = fakeStorage(JSON.stringify(validOffline));
-  initConfigStorage(fake.storage);
+Deno.test(
+  "loadConfig returns a valid persisted config unchanged and writes nothing",
+  async () => {
+    const fake = fakeStorage(JSON.stringify(validOffline));
+    initConfigStorage(fake.storage);
 
-  assertEquals(await loadConfig(), validOffline);
-  // A recognized blob is neither rewritten nor cleared.
-  assertEquals(fake.saved.length, 0);
-  assertEquals(fake.cleared, 0);
-});
+    assertEquals(await loadConfig(), validOffline);
+    // A recognized blob is neither rewritten nor cleared.
+    assertEquals(fake.saved.length, 0);
+    assertEquals(fake.cleared, 0);
+  },
+);
 
-Deno.test("loadConfig wipes a legacy backend-tagged shape (no activeMode)", async () => {
-  const fake = fakeStorage(
-    JSON.stringify({
-      backend: "offline",
-      daemonUrl: "http://host:3000",
-      authToken: "t",
-    }),
-  );
-  initConfigStorage(fake.storage);
+Deno.test(
+  "loadConfig wipes a legacy backend-tagged shape (no activeMode)",
+  async () => {
+    const fake = fakeStorage(
+      JSON.stringify({
+        backend: "offline",
+        daemonUrl: "http://host:3000",
+        authToken: "t",
+      }),
+    );
+    initConfigStorage(fake.storage);
 
-  assertEquals(await loadConfig(), null);
-  assertEquals(fake.cleared, 1);
-});
+    assertEquals(await loadConfig(), null);
+    assertEquals(fake.cleared, 1);
+  },
+);
 
 Deno.test("loadConfig wipes malformed JSON", async () => {
   const fake = fakeStorage("{not json");
@@ -77,14 +83,17 @@ Deno.test("loadConfig wipes malformed JSON", async () => {
   assertEquals(fake.cleared, 1);
 });
 
-Deno.test("loadConfig returns null for empty storage without clearing", async () => {
-  const fake = fakeStorage(null);
-  initConfigStorage(fake.storage);
+Deno.test(
+  "loadConfig returns null for empty storage without clearing",
+  async () => {
+    const fake = fakeStorage(null);
+    initConfigStorage(fake.storage);
 
-  assertEquals(await loadConfig(), null);
-  // Empty storage is the fresh-install default; no spurious write.
-  assertEquals(fake.cleared, 0);
-});
+    assertEquals(await loadConfig(), null);
+    // Empty storage is the fresh-install default; no spurious write.
+    assertEquals(fake.cleared, 0);
+  },
+);
 
 Deno.test("loadConfig wipes a value with an unknown activeMode", async () => {
   const fake = fakeStorage(JSON.stringify({ activeMode: "spaceship" }));

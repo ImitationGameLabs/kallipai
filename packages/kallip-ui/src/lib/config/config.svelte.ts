@@ -50,9 +50,10 @@ class ConfigStore {
    * setActiveMode (kept orthogonal so each method has one job).
    */
   async setOffline(config: OfflineModeConfig | null): Promise<void> {
-    const next: PersistedConfig = config === null
-      ? { activeMode: "online" }
-      : { activeMode: this.value?.activeMode ?? "online", offline: config };
+    const next: PersistedConfig =
+      config === null
+        ? { activeMode: "online" }
+        : { activeMode: this.value?.activeMode ?? "online", offline: config };
     await saveConfig(next);
     this.value = next;
   }
