@@ -21,6 +21,7 @@ import type {
   TokenBudgetResponse,
   TokenBudgetUpdateRequest,
   WireAgentStatusResponse,
+  WireAgentSummary,
   WireApprovalEntry,
   WireListAgentsResponse,
   WireListApprovalsResponse,
@@ -106,6 +107,11 @@ export class DaemonClient {
       method: "POST",
       body: JSON.stringify({ text }),
     });
+  }
+
+  /** Fetch the daemon's single root agent (always present after daemon startup). */
+  getRootAgent(): Promise<WireAgentSummary> {
+    return this.json<WireAgentSummary>("/agents/root");
   }
 
   listAgents(createdBy?: AgentId): Promise<WireListAgentsResponse["agents"]> {
