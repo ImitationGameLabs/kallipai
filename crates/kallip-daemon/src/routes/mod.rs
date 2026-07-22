@@ -2,6 +2,7 @@ mod agent;
 mod budget;
 mod dirlock;
 mod restore;
+pub(crate) use agent::ensure_root_agent;
 pub use restore::restore_agents;
 #[cfg(test)]
 pub(crate) mod approval;
@@ -45,6 +46,7 @@ pub fn router() -> Router<SharedState> {
             "/agents",
             axum::routing::post(agent::create_agent).get(agent::list_agents),
         )
+        .route("/agents/root", axum::routing::get(agent::get_root_agent))
         .route(
             "/agents/{id}/message",
             axum::routing::post(message::send_message),

@@ -399,19 +399,234 @@ async fn acquire_workspace_lock<'a>(
     }
 }
 
+/// Materialize one agent end-to-end from a fully-resolved config: workspace
+/// disjoint check, agent dir + skills, workspace write-lock, task spawn, agent
+/// cap, and registration. Owns the [`WorkspaceLockGuard`] and disarms it on
+/// success so a Normal agent keeps its workspace lock for life.
+///
+/// This is the shared tail of every agent-creation path. The two callers build
+/// the head themselves and hand off:
+/// - [`create_agent`] resolves a *subagent* (supervisor validation, permission
+///   ceiling, exec-policy inheritance, pre-reserved slot) and passes
+///   `rollback_supervisor: Some(…)`.
+/// - [`ensure_root_agent`] resolves the daemon singleton *root* (env-driven
+///   config, default exec-policy) and passes `rollback_supervisor: None`.
+///
+/// `rollback_supervisor` doubles as the creation shape: `None` means this is the
+/// root, registered via [`crate::state::AgentRegistry::register_root`]; `Some`
+/// means a subagent, registered via `register_no_subagent_push` (slot
+/// pre-reserved by the caller) and retracted from that supervisor on failure.
+struct Materialize<'a> {
+    state: &'a SharedState,
+    id: AgentId,
+    token: MintedToken,
+    config: AgentConfig,
+    exec_policy: ExecPolicy,
+    rollback_supervisor: Option<AgentId>,
+}
+
+impl<'a> Materialize<'a> {
+    async fn run(self) -> Result<AgentId, ApiError> {
+        let state = self.state;
+        let id = self.id;
+        let token = self.token;
+        let rollback_supervisor = self.rollback_supervisor;
+        let is_root = self.config.created_by.is_none();
+        let mut config = self.config;
+        let exec_policy = Arc::new(std::sync::RwLock::new(self.exec_policy));
+
+        // Resolve the model tier purely by depth (positional tiers — no
+        // name/override). Carry the tier into SpawnArgs for failover.
+        let depth = config.permissions.depth();
+        let tier = state.profiles.select_profile(depth).clone();
+
+        let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
+        let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
+
+        // Create agent directory before loading skills so that agent-local
+        // skills can be resolved from the agent dir.
+        let agent_dir = persistence::create_agent_dir(
+            &id,
+            &config.workspace_root,
+            config.created_by.as_ref(),
+            &config.role,
+            &config.description,
+            config.permissions_class,
+        )
+        .map_err(ApiError::internal)?;
+
+        for skill_name in &config.skills {
+            let content = load_skill(skill_name, Some(agent_dir.as_path()))
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            store
+                .lock()
+                .await
+                .pin(
+                    &format!("skill:{skill_name}"),
+                    ChatMessage::user(format!("[skill: {skill_name}]\n{content}")),
+                )
+                .map_err(ApiError::internal)?;
+            info!(skill = skill_name, "loaded skill");
+        }
+
+        persistence::persist_exec_policy(
+            &agent_dir,
+            &exec_policy.read().unwrap_or_else(|e| e.into_inner()),
+        )
+        .map_err(ApiError::internal)?;
+
+        let prompt = config.prompt.take();
+        let log_ws = config.workspace_root.display().to_string();
+        let log_depth = config.permissions.max_depth;
+        let log_role = config.role.clone();
+        // Compute the delegation ancestor chain under a registry read lock, then
+        // drop the guard before acquiring. `created_by` is immutable post-creation,
+        // so the owned id snapshot is stable; dropping the guard keeps the critical
+        // section minimal and lets a nested lock held under an ancestor be delegated
+        // (see `DirLockManager::acquire`). A supervisor removed in the tiny window
+        // between snapshot and acquire has its lock released by `release_all`, so a
+        // stale id never matches a live holder; a dangling `created_by` is caught
+        // downstream by the supervisor-still-registered re-check.
+        let chain: Vec<AgentId> = match config.created_by.as_ref() {
+            Some(supervisor_id) => {
+                let registry = state.registry.read().await;
+                registry.supervisor_chain_ids(supervisor_id)?
+            }
+            None => Vec::new(),
+        };
+        // Auto-acquire an exclusive write-lock on the workspace so no two agents
+        // edit the same workspace concurrently. **Normal only** -- a Guest is
+        // readonly, so it neither needs nor holds a workspace write-lock. A Normal
+        // agent holds this lock for the lifetime of its task (re-acquired on every
+        // materialization path), so the workspace stays writable across restarts.
+        // Done before spawn so enforcement is active for the first command; rolled
+        // back on every failure path below.
+        let mut workspace_lock = acquire_workspace_lock(
+            state,
+            &id,
+            &config,
+            &chain,
+            rollback_supervisor.as_ref(),
+            &agent_dir,
+            &log_ws,
+        )
+        .await?;
+        let (events_tx, _) = broadcast::channel(256);
+        let agent_dir_clone = agent_dir.clone();
+        let env = SpawnArgs::default_env(&id, token.secret());
+        let (agent, identity) = match spawn_agent(SpawnArgs {
+            agent_id: id.clone(),
+            store,
+            approvals,
+            agent_dir,
+            config,
+            initial_prompt: prompt,
+            shutdown_cancel: state.shutdown.clone(),
+            events_tx,
+            auth_token_hash: token.hash().clone(),
+            env,
+            shared_state: state.clone(),
+            preset: state.preset,
+            exec_policy: exec_policy.clone(),
+            prompt_queue_size: state.prompt_queue_size,
+            prompt_channel: None,
+            tier,
+        })
+        .await
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                // The workspace lock is released by `workspace_lock`'s Drop on the
+                // `return Err` below; roll back the subagent slot + agent dir here.
+                rollback_unspawned_create(
+                    state,
+                    rollback_supervisor.as_ref(),
+                    &id,
+                    &agent_dir_clone,
+                )
+                .await;
+                return Err(ApiError::internal(e));
+            }
+        };
+        {
+            let mut registry = state.registry.write().await;
+            // Global agent count cap.
+            if registry.len() >= state.max_agents {
+                // Rollback: remove the pre-reserved subagent slot.
+                if let Some(ref supervisor_id) = rollback_supervisor
+                    && let Some(supervisor) = registry.get_mut(supervisor_id)
+                {
+                    supervisor.subagent_ids_mut().retain(|sid| sid != &id);
+                }
+                abort_agent(&agent, identity.agent_dir.as_deref());
+                // `workspace_lock` releases the workspace lock on `return Err`.
+                return Err(ApiError::unavailable(format!(
+                    "agent limit reached ({}/{max}), remove agents to create new ones",
+                    registry.len(),
+                    max = state.max_agents
+                )));
+            }
+            // Re-verify supervisor was not removed during agent spawn.
+            if let Some(ref supervisor_id) = rollback_supervisor
+                && !registry.contains_key(supervisor_id)
+            {
+                // Supervisor gone — the pre-reserved slot is already cleaned up
+                // (unregistering the supervisor removes it from the map entirely).
+                abort_agent(&agent, identity.agent_dir.as_deref());
+                // `workspace_lock` releases the workspace lock on `return Err`.
+                return Err(ApiError::internal(
+                    "supervisor agent was removed during creation",
+                ));
+            }
+            let entry = RegistryEntry::Live(AgentEntry {
+                identity,
+                agent,
+                subagent_ids: vec![],
+            });
+            if is_root {
+                // The singleton root — register_root enforces the at-most-one
+                // invariant; the eager-create caller already checked for absence.
+                registry.register_root(id.clone(), entry)?;
+            } else {
+                // Subagent: slot was pre-reserved by the caller, so skip the push.
+                registry.register_no_subagent_push(id.clone(), entry);
+            }
+        }
+        // Registered: the Normal agent now owns the workspace lock for its
+        // lifetime — disarm the guard so its `Drop` does not release it. (Guest
+        // holds no lock.) Drop the guard explicitly so its borrow of `id` ends
+        // before `id` is moved into the return value.
+        if let Some(lock) = workspace_lock.as_mut() {
+            lock.disarm();
+        }
+        drop(workspace_lock);
+        info!(id = %id, root = is_root, role = %log_role, ws = %log_ws, depth = log_depth, "created agent");
+        Ok(id)
+    }
+}
+
+/// `POST /agents` — spawn a **subagent** under an existing supervisor.
+///
+/// The daemon's single root agent is daemon-managed (eagerly created at startup
+/// by [`ensure_root_agent`]); it cannot be created over HTTP. A request with no
+/// `created_by` is rejected with `409 Conflict`. Subagent creation requires
+/// operator or direct-supervisor privilege and is gated by the per-supervisor
+/// `max_subagents` limit.
 pub async fn create_agent(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
     Json(req): Json<CreateAgentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Root agents require operator privilege.
-    if req.created_by.is_none() {
-        crate::auth::require_operator(auth.identity())?;
-    }
+    // The root is daemon-managed; clients spawn subagents with `created_by` set.
+    let Some(supervisor_id) = req.created_by else {
+        return Err(ApiError::conflict(
+            "root agent is managed by the daemon; spawn a subagent with 'created_by' set",
+        ));
+    };
 
     let id = AgentId::random();
-    // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the agent shell env
-    // (`KALLIP_AUTH_TOKEN`); only its SHA-256 is indexed for auth lookup.
+    // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the agent
+    // shell env (`KALLIP_AUTH_TOKEN`); only its SHA-256 is indexed for auth lookup.
     let token = MintedToken::generate(AGENT);
 
     let mut config = {
@@ -438,47 +653,42 @@ pub async fn create_agent(
     config.role = req.role.clone();
     config.description = req.description.clone();
     // Fleet discipline: a subagent spawn must carry a non-empty role so a
-    // superior can tell its subagents apart. Root/operator spawns may leave it
-    // unset (backward-compatible with clients that don't send `role`).
-    if req.created_by.is_some() && config.role.trim().is_empty() {
+    // superior can tell its subagents apart.
+    if config.role.trim().is_empty() {
         return Err(ApiError::bad_request(
             "subagent requires a non-empty 'role'",
         ));
     }
-    // Reject any workspace that overlaps the daemon data tree (one contains the
-    // other). With the overlap eliminated, landlock alone enforces the data-dir
-    // integrity baseline: the agent's writable set never covers daemon data
-    // except its own `agents/<id>/skills/`. Bidirectional because either direction
-    // is dangerous — a workspace inside (or equal to) the data dir lets the agent
-    // reach peers' bookkeeping; a workspace containing it lets the broad write
-    // grant cover the whole tree. `conflict` (not `bad_request`) to match the
-    // neighboring workspace↔write-lock overlap at the acquire step below.
+    // Reject any workspace that overlaps the daemon data tree BEFORE reserving
+    // the subagent slot, so a rejected workspace leaves no dangling slot.
+    // (`validate_subagent_request` already confines a subagent's workspace within
+    // its supervisor's, which is itself disjoint, so this is a backstop here; it
+    // is load-bearing for the daemon-owned root, where it is checked in
+    // `ensure_root_agent`.)
     persistence::ensure_workspace_disjoint(&config.workspace_root)
         .map_err(|e| ApiError::conflict(e.to_string()))?;
-    let env = SpawnArgs::default_env(&id, token.secret());
 
-    // Subagent: validate supervisor and delegation constraints. The daemon-global
-    // preset applies to every agent (root and subagent alike), so only the
-    // per-agent exec-policy is resolved here. Pre-reserve the subagent slot under
-    // write lock to eliminate TOCTOU.
-    let exec_policy = if let Some(ref supervisor_id) = req.created_by {
-        // Parse the optional downgrade request once, before taking the lock, so a
-        // bad spelling is a cheap client-side 400 rather than a held-write-lock
-        // rejection. The daemon is the reference monitor: a value is accepted only
-        // as a downgrade, clamped to the tier ceiling and supervisor class inside
-        // validate_subagent_request.
-        let requested_class = parse_requested_class(&req.permission_class)?;
+    // Parse the optional downgrade request once, before taking the lock, so a
+    // bad spelling is a cheap client-side 400 rather than a held-write-lock
+    // rejection. The daemon is the reference monitor: a value is accepted only
+    // as a downgrade, clamped to the tier ceiling and supervisor class inside
+    // validate_subagent_request.
+    let requested_class = parse_requested_class(&req.permission_class)?;
+    // Subagent head: validate supervisor + delegation constraints and pre-reserve
+    // the slot under write lock to eliminate TOCTOU. The daemon-global preset
+    // applies to every agent, so only the per-agent exec-policy is resolved here.
+    let exec_policy = {
         let mut registry = state.registry.write().await;
         let (permissions, exec, permission_class) = validate_subagent_request(
             &registry,
             auth.identity(),
-            supervisor_id,
+            &supervisor_id,
             &config.workspace_root,
             requested_class,
         )?;
         // Check per-agent subagent limit and pre-reserve the slot.
         let supervisor = registry
-            .get_mut(supervisor_id)
+            .get_mut(&supervisor_id)
             .ok_or_else(|| ApiError::not_found("supervisor not found"))?;
         if supervisor.subagent_ids().len() >= state.max_subagents {
             return Err(ApiError::unavailable(format!(
@@ -493,182 +703,77 @@ pub async fn create_agent(
         config.permissions = permissions;
         config.permissions_class = permission_class;
         exec
-    } else {
-        // Root/operator spawns are governed by KALLIP_ROOT_AGENT_PERMISSION_CLASS,
-        // not the request field (a documented, inert-on-this-path field). No client
-        // sends it on a root spawn today, so a value here almost certainly signals a
-        // client bug — warn (not reject) so the documented "ignored" contract holds
-        // while the stray value stays observable in default logs.
-        if let Some(class) = &req.permission_class {
-            tracing::warn!(
-                class,
-                "ignoring permission_class on root spawn; \
-                 root agents use KALLIP_ROOT_AGENT_PERMISSION_CLASS"
-            );
-        }
-        config.permissions_class = permission_class_from_env();
-        ExecPolicy::default()
     };
-    let exec_policy = Arc::new(std::sync::RwLock::new(exec_policy));
 
-    // Resolve the model tier purely by depth (positional tiers — no name/override). Carry the
-    // tier into SpawnArgs for failover.
-    let depth = config.permissions.depth();
-    let tier = state.profiles.select_profile(depth).clone();
-
-    let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
-    let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
-
-    // Create agent directory before loading skills so that agent-local
-    // skills can be resolved from the agent dir.
-    let agent_dir = persistence::create_agent_dir(
-        &id,
-        &config.workspace_root,
-        config.created_by.as_ref(),
-        &config.role,
-        &config.description,
-        config.permissions_class,
-    )
-    .map_err(ApiError::internal)?;
-
-    for skill_name in &config.skills {
-        let content = load_skill(skill_name, Some(agent_dir.as_path()))
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        store
-            .lock()
-            .await
-            .pin(
-                &format!("skill:{skill_name}"),
-                ChatMessage::user(format!("[skill: {skill_name}]\n{content}")),
-            )
-            .map_err(ApiError::internal)?;
-        info!(skill = skill_name, "loaded skill");
-    }
-
-    persistence::persist_exec_policy(
-        &agent_dir,
-        &exec_policy.read().unwrap_or_else(|e| e.into_inner()),
-    )
-    .map_err(ApiError::internal)?;
-
-    let prompt = config.prompt.take();
-    let log_ws = config.workspace_root.display().to_string();
-    let log_depth = config.permissions.max_depth;
-    // Compute the delegation ancestor chain under a registry read lock, then
-    // drop the guard before acquiring. `created_by` is immutable post-creation,
-    // so the owned id snapshot is stable; dropping the guard keeps the critical
-    // section minimal and lets a nested lock held under an ancestor be delegated
-    // (see `DirLockManager::acquire`). A supervisor removed in the tiny window
-    // between snapshot and acquire has its lock released by `release_all`, so a
-    // stale id never matches a live holder; a dangling `created_by` is caught
-    // downstream by the supervisor-still-registered re-check.
-    let chain: Vec<AgentId> = match config.created_by.as_ref() {
-        Some(supervisor_id) => {
-            let registry = state.registry.read().await;
-            registry.supervisor_chain_ids(supervisor_id)?
-        }
-        None => Vec::new(),
-    };
-    // Auto-acquire an exclusive write-lock on the workspace so no two agents edit
-    // the same workspace concurrently. **Normal only** -- a Guest is readonly (its
-    // landlock writable set is the skills carve alone), so it neither needs nor
-    // holds a workspace write-lock (holding one would block writers and mislabel
-    // the Guest as the workspace's writer in the dirlock registry). A Normal
-    // agent holds this lock for the lifetime of its task: it is re-acquired on
-    // every materialization path (restore, reactivation), not just create, so
-    // the workspace stays in the landlock writable set across daemon restarts.
-    // Done before spawn so enforcement is active for the first command; rolled
-    // back on every failure path below.
-    let mut workspace_lock = acquire_workspace_lock(
-        &state,
-        &id,
-        &config,
-        &chain,
-        req.created_by.as_ref(),
-        &agent_dir,
-        &log_ws,
-    )
-    .await?;
-    let (events_tx, _) = broadcast::channel(256);
-    let agent_dir_clone = agent_dir.clone();
-    let (agent, identity) = match spawn_agent(SpawnArgs {
-        agent_id: id.clone(),
-        store,
-        approvals,
-        agent_dir,
+    let id = Materialize {
+        state: &state,
+        id,
+        token,
         config,
-        initial_prompt: prompt,
-        shutdown_cancel: state.shutdown.clone(),
-        events_tx,
-        auth_token_hash: token.hash().clone(),
-        env,
-        shared_state: state.clone(),
-        preset: state.preset,
-        exec_policy: exec_policy.clone(),
-        prompt_queue_size: state.prompt_queue_size,
-        prompt_channel: None,
-        tier,
-    })
-    .await
-    {
-        Ok(pair) => pair,
-        Err(e) => {
-            // The workspace lock is released by `workspace_lock`'s Drop on the
-            // `return Err` below; roll back the subagent slot + agent dir here.
-            rollback_unspawned_create(&state, req.created_by.as_ref(), &id, &agent_dir_clone).await;
-            return Err(ApiError::internal(e));
-        }
-    };
-    {
-        let mut registry = state.registry.write().await;
-        // Global agent count cap.
-        if registry.len() >= state.max_agents {
-            // Rollback: remove the pre-reserved subagent slot.
-            if let Some(ref supervisor_id) = req.created_by
-                && let Some(supervisor) = registry.get_mut(supervisor_id)
-            {
-                supervisor.subagent_ids_mut().retain(|sid| sid != &id);
-            }
-            abort_agent(&agent, identity.agent_dir.as_deref());
-            // `workspace_lock` releases the workspace lock on `return Err`.
-            return Err(ApiError::unavailable(format!(
-                "agent limit reached ({}/{max}), remove agents to create new ones",
-                registry.len(),
-                max = state.max_agents
-            )));
-        }
-        // Re-verify supervisor was not removed during agent spawn.
-        if let Some(ref supervisor_id) = req.created_by
-            && !registry.contains_key(supervisor_id)
-        {
-            // Supervisor gone — the pre-reserved slot is already cleaned up
-            // (unregistering the supervisor removes it from the map entirely).
-            abort_agent(&agent, identity.agent_dir.as_deref());
-            // `workspace_lock` releases the workspace lock on `return Err`.
-            return Err(ApiError::internal(
-                "supervisor agent was removed during creation",
-            ));
-        }
-        registry.register_no_subagent_push(
-            id.clone(),
-            RegistryEntry::Live(AgentEntry {
-                identity,
-                agent,
-                subagent_ids: vec![],
-            }),
-        );
+        exec_policy,
+        rollback_supervisor: Some(supervisor_id),
     }
-    // Registered: the Normal agent now owns the workspace lock for its lifetime —
-    // disarm the guard so its `Drop` does not release it. (Guest holds no lock.)
-    if let Some(lock) = workspace_lock.as_mut() {
-        lock.disarm();
-    }
-    info!(id = %id, supervisor = ?req.created_by, role = ?req.role, ws = %log_ws, depth = log_depth, "created agent");
+    .run()
+    .await?;
 
-    Ok((
-        StatusCode::CREATED,
-        Json(CreateAgentResponse { id: id.clone() }),
-    ))
+    Ok((StatusCode::CREATED, Json(CreateAgentResponse { id })))
+}
+
+/// Ensure the daemon's single root agent exists. Called once at startup, after
+/// [`restore_agents`](super::restore::restore_agents) and before the router
+/// accepts connections, so the root is always present for clients. Idempotent:
+/// if restore already brought the root back (the common case), this is a no-op.
+///
+/// The root's config is env-driven via [`AgentConfig::load`] — notably
+/// `KALLIP_WORKSPACE_ROOT` and `KALLIP_MAX_TOOL_ROUNDS` — and its permission
+/// class comes from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`. The root is persisted
+/// by the normal spawn path, so its id is stable across restarts.
+pub async fn ensure_root_agent(state: &SharedState) -> anyhow::Result<()> {
+    {
+        let registry = state.registry.read().await;
+        if registry.root_agent().is_some() {
+            return Ok(());
+        }
+    }
+    let id = AgentId::random();
+    let token = MintedToken::generate(AGENT);
+    let mut config = AgentConfig::load(None, Vec::new(), None)?;
+    config.agent_id = Some(id.clone());
+    config.permissions_class = permission_class_from_env();
+    config.role = "root".to_string();
+    config.description = "Daemon-owned root agent".to_string();
+    // Reject any workspace that overlaps the daemon data tree (e.g. a daemon
+    // launched from inside its own data dir). Surfaced as a startup error via
+    // the `?` in `main.rs`.
+    persistence::ensure_workspace_disjoint(&config.workspace_root)
+        .map_err(|e| anyhow::anyhow!("root workspace overlaps the data tree: {e}"))?;
+    let created = Materialize {
+        state,
+        id,
+        token,
+        config,
+        exec_policy: ExecPolicy::default(),
+        rollback_supervisor: None,
+    }
+    .run()
+    .await?;
+    info!(agent = %created, "created daemon root agent");
+    Ok(())
+}
+
+/// `GET /agents/root` — return the daemon's single root agent. Always present
+/// after startup (see [`ensure_root_agent`]); a missing root is a startup
+/// invariant violation surfaced as `500`, never `404` (a 404 would invite
+/// clients back into the check-then-create pattern this refactor removes).
+pub async fn get_root_agent(
+    State(state): State<SharedState>,
+    _auth: crate::auth::AuthIdentity,
+) -> Result<Json<AgentSummary>, ApiError> {
+    let registry = state.registry.read().await;
+    let (id, entry) = registry
+        .root_agent()
+        .ok_or_else(|| ApiError::internal("root agent missing — startup invariant violated"))?;
+    Ok(Json(entry.summary(id)))
 }
 
 /// Any authenticated identity (operator or agent) may list agents.
@@ -803,6 +908,20 @@ pub async fn remove_agent(
 ) -> Result<StatusCode, ApiError> {
     let entry = {
         let mut registry = state.registry.write().await;
+        // The daemon-owned singleton root is non-removable while *live* — clients
+        // target subagents. A *faulted* root (e.g. a restore failure) is
+        // removable so the operator can recover through the API: archiving it
+        // frees the slot, and the next daemon restart re-creates a fresh root
+        // (`ensure_root_agent`). Key on identity + liveness, not on
+        // `created_by == None`, so faulted duplicate roots also stay removable.
+        if registry
+            .root_agent()
+            .is_some_and(|(root_id, entry)| root_id == &id && entry.as_live().is_some())
+        {
+            return Err(ApiError::conflict(
+                "root agent is daemon-managed and cannot be removed",
+            ));
+        }
         registry.require_superior(auth.identity(), &id)?;
         let Some(entry) = registry.get(&id) else {
             return Err(ApiError::not_found("agent not found"));
@@ -1025,7 +1144,9 @@ mod tests {
         truncate_chars,
     };
     use crate::auth::{AuthIdentity, Identity};
-    use crate::test_helpers::{add_faulted_root, add_root, make_entry, make_state};
+    use crate::test_helpers::{
+        add_faulted_root, add_faulted_sub, add_root, make_entry, make_state,
+    };
     use axum::extract::{Path, Query, State};
     use kallip_common::protocol::ListAgentsQuery;
 
@@ -1273,6 +1394,9 @@ mod tests {
         let faulted = AgentId::random();
         {
             let mut reg = state.registry.write().await;
+            // Two roots is intentionally invalid for a live daemon; this test
+            // exercises list filtering, not the singleton invariant, so it uses
+            // the raw `add_root`/`add_faulted_root` helpers (see their docs).
             add_root(&mut reg, &live);
             add_faulted_root(&mut reg, &faulted, "restore failed: boom");
         }
@@ -1292,16 +1416,18 @@ mod tests {
         assert!(agents.iter().any(|a| a.id == live));
     }
 
-    /// Removing a faulted agent succeeds (204) -- the bug was 403/404 because the
-    /// agent was never registered. The fast path skips shutdown (no task); the
-    /// archive is a best-effort no-op when the dir is absent.
+    /// Removing a faulted subagent succeeds (204) -- the bug was 403/404 because
+    /// the agent was never registered. The fast path skips shutdown (no task);
+    /// the archive is a best-effort no-op when the dir is absent.
     #[tokio::test]
     async fn remove_faulted_agent_succeeds() {
         let state = make_state();
+        let root = AgentId::random();
         let faulted = AgentId::random();
         {
             let mut reg = state.registry.write().await;
-            add_faulted_root(&mut reg, &faulted, "broken");
+            add_root(&mut reg, &root);
+            add_faulted_sub(&mut reg, &faulted, &root, "broken");
         }
         let status = remove_agent(
             State(state.clone()),
@@ -1313,6 +1439,48 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
         // Entry is gone from the registry.
         assert!(!state.registry.read().await.contains_key(&faulted));
+    }
+
+    /// A *live* daemon root is non-removable (clients target subagents).
+    #[tokio::test]
+    async fn remove_live_root_returns_conflict() {
+        let state = make_state();
+        let root = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &root);
+        }
+        let err = remove_agent(
+            State(state),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(root.clone()),
+        )
+        .await
+        .expect_err("live root is non-removable");
+        assert_eq!(err.status, 409);
+    }
+
+    /// A *faulted* root IS removable so an operator can recover from a restore
+    /// failure through the API (the next daemon restart re-creates the root).
+    /// `add_faulted_root` bypasses `register_root` to seed this single-root
+    /// faulted state (test-only; see `add_root`'s doc).
+    #[tokio::test]
+    async fn remove_faulted_root_succeeds() {
+        let state = make_state();
+        let root = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_faulted_root(&mut reg, &root, "restore failed: boom");
+        }
+        let status = remove_agent(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(root.clone()),
+        )
+        .await
+        .expect("faulted root is removable");
+        assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+        assert!(!state.registry.read().await.contains_key(&root));
     }
 
     /// Interrupting a faulted agent returns 409 (nothing to interrupt) instead

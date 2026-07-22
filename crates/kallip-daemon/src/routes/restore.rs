@@ -1,8 +1,8 @@
 //! Agent persistence restoration.
 //!
-//! Restores persisted agents top-down, level by level. Root agents
-//! (no supervisor) are restored first, then their children, and so on.
-//! Siblings within each level are restored concurrently. An agent that fails
+//! Restores persisted agents top-down, level by level. The single root agent
+//! (no supervisor) is restored first, then its children, and so on. Siblings
+//! within each level are restored concurrently. An agent that fails
 //! to restore (missing workspace, policy validation failure, spawn failure,
 //! or an absent supervisor) is registered in a `Faulted` state instead of
 //! being dropped, so the supervisor chain stays intact and the entry remains
@@ -380,21 +380,27 @@ fn faulted_from_meta(
 
 /// Restore persisted agents top-down, level by level.
 ///
-/// Root agents (no supervisor) are restored first, then their children, and
-/// so on. Siblings within each level are restored concurrently. An agent that
-/// fails to restore is registered in a `Faulted` state (not dropped), and its
-/// children are still attempted -- so the supervisor chain stays intact and
+/// The single root agent (no supervisor) is restored first, then its children,
+/// and so on. Siblings within each level are restored concurrently. An agent
+/// that fails to restore is registered in a `Faulted` state (not dropped), and
+/// its children are still attempted -- so the supervisor chain stays intact and
 /// every on-disk agent remains listable and removable.
+///
+/// **Singleton root:** the daemon owns exactly one root. If the data dir holds
+/// more than one root, restore fails fast (the operator must remove the extras);
+/// otherwise the lone root is re-registered via `register_root`. After restore,
+/// [`ensure_root_agent`](super::agent::ensure_root_agent) creates the root if the
+/// data dir was empty.
 ///
 /// **Exempt from resource limits:** `max_agents` and `max_subagents` are not
 /// enforced during restore. These agents were already running before the crash,
 /// so refusing to restore them would be counterproductive. After restore,
 /// `registry.len()` may exceed `max_agents`; new creation returns 503 until
 /// agents are removed to make room.
-pub async fn restore_agents(state: &SharedState) {
+pub async fn restore_agents(state: &SharedState) -> anyhow::Result<()> {
     let pending = persistence::scan_agents();
     if pending.is_empty() {
-        return;
+        return Ok(());
     }
 
     info!(count = pending.len(), "restoring agents");
@@ -486,6 +492,18 @@ pub async fn restore_agents(state: &SharedState) {
     roots.sort();
     orphan_children.sort();
 
+    // Singleton invariant: the daemon owns exactly one root. More than one root
+    // on disk is a legacy/corrupt state the daemon refuses to paper over; the
+    // operator must remove the extras. The common case (one root, e.g. a herald
+    // tagma) is unaffected.
+    if roots.len() > 1 {
+        anyhow::bail!(
+            "multiple root agents on disk ({count}); the daemon owns exactly one \
+             root. Remove the extras from $KALLIP_DATA_DIR/agents and restart",
+            count = roots.len()
+        );
+    }
+
     // Level-by-level BFS restore.  Siblings within each level are restored
     // concurrently; children are queued after their parent is processed,
     // whether it restored live or faulted (a faulted parent does not imply a
@@ -563,11 +581,29 @@ pub async fn restore_agents(state: &SharedState) {
 
         if !successes.is_empty() || !faulted.is_empty() {
             let mut registry = state.registry.write().await;
+            // Route the single root through `register_root` (the singleton-
+            // enforcing path); subagents use the raw inserter. The restore
+            // fail-fast above guarantees at most one root, so `register_root`
+            // cannot conflict here.
             for (id, entry) in successes {
-                registry.register(id, RegistryEntry::Live(entry));
+                let entry = RegistryEntry::Live(entry);
+                if entry.identity().config.created_by.is_none() {
+                    registry
+                        .register_root(id, entry)
+                        .map_err(|e| anyhow::anyhow!("register root during restore: {e}"))?;
+                } else {
+                    registry.register(id, entry);
+                }
             }
             for (id, entry) in faulted {
-                registry.register(id, RegistryEntry::Faulted(entry));
+                let entry = RegistryEntry::Faulted(entry);
+                if entry.identity().config.created_by.is_none() {
+                    registry
+                        .register_root(id, entry)
+                        .map_err(|e| anyhow::anyhow!("register root during restore: {e}"))?;
+                } else {
+                    registry.register(id, entry);
+                }
             }
         }
 
@@ -607,6 +643,7 @@ pub async fn restore_agents(state: &SharedState) {
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

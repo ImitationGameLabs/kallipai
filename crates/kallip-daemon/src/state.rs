@@ -64,6 +64,13 @@ pub struct AppState {
 
 /// Combined index: agent map + token-hash→id lookup + subagent reverse pointers.
 /// All mutations go through methods that maintain invariants atomically.
+///
+/// **INVARIANT: at most one root entry.** A root is an entry whose
+/// `config.created_by == None`. The daemon owns exactly one daemon-global root
+/// agent, eagerly created at startup (see `routes::agent::ensure_root_agent`).
+/// Production code inserts a root only through [`Self::register_root`], which
+/// rejects a second; [`Self::register`] is reserved for subagents and for tests
+/// that deliberately construct otherwise-invalid states.
 pub struct AgentRegistry {
     agents: HashMap<AgentId, RegistryEntry>,
     /// SHA-256 of each **live** agent's auth token → its id. Faulted entries are
@@ -412,6 +419,29 @@ impl AgentRegistry {
         self.agents.insert(id, entry);
     }
 
+    /// Insert the daemon's single root agent. This is the **only** production
+    /// path that registers a root; it rejects a second root to uphold the
+    /// singleton invariant documented on [`AgentRegistry`]. Equivalent to
+    /// [`Self::register`] for a `created_by == None` entry, plus the uniqueness
+    /// check. Callers already own the `id` (passed in), so nothing is returned
+    /// on success.
+    pub fn register_root(&mut self, id: AgentId, entry: RegistryEntry) -> Result<(), ApiError> {
+        if entry.identity().config.created_by.is_some() {
+            return Err(ApiError::internal(
+                "register_root: entry is not a root (created_by is set)",
+            ));
+        }
+        if self.root_agent().is_some() {
+            return Err(ApiError::conflict(
+                "a root agent already exists; the daemon owns exactly one root",
+            ));
+        }
+        // Delegate to the raw inserter; the root has no supervisor so the
+        // subagent-push branch is a no-op.
+        self.register(id, entry);
+        Ok(())
+    }
+
     /// Like [`Self::register`], but skips the `subagent_ids` push.
     /// Used by `create_agent` which pre-reserves the slot before spawning.
     pub fn register_no_subagent_push(&mut self, id: AgentId, entry: RegistryEntry) {
@@ -658,14 +688,15 @@ impl AgentRegistry {
         }
     }
 
-    /// Return all root agents (created_by is None), live or faulted. Callers
-    /// that need a running task (e.g. promote-request notification) must skip
-    /// [`RegistryEntry::Faulted`] entries themselves.
-    pub fn root_agents(&self) -> Vec<(&AgentId, &RegistryEntry)> {
+    /// Return the daemon's single root agent (created_by is None), live or
+    /// faulted, or `None` during the startup window before one exists. Per the
+    /// [`AgentRegistry`] invariant there is at most one root, so this is a
+    /// singleton lookup, not a filter. Callers that need a running task (e.g.
+    /// promote-request notification) must skip [`RegistryEntry::Faulted`].
+    pub fn root_agent(&self) -> Option<(&AgentId, &RegistryEntry)> {
         self.agents
             .iter()
-            .filter(|(_, e)| e.identity().config.created_by.is_none())
-            .collect()
+            .find(|(_, e)| e.identity().config.created_by.is_none())
     }
 }
 
@@ -1281,21 +1312,46 @@ mod tests {
         }
     }
 
-    // -- root_agents --
+    // -- root_agent (singleton) --
 
     #[tokio::test]
-    async fn root_agents_returns_only_roots() {
+    async fn root_agent_returns_the_single_root() {
         let mut reg = AgentRegistry::new();
-        let root1 = AgentId::random();
-        let root2 = AgentId::random();
+        assert!(reg.root_agent().is_none());
+
+        let root = AgentId::random();
         let child = AgentId::random();
-        add_root(&mut reg, &root1);
-        add_root(&mut reg, &root2);
-        add_sub(&mut reg, &child, &root1);
-        let roots: Vec<_> = reg.root_agents().into_iter().map(|(id, _)| id).collect();
-        assert_eq!(roots.len(), 2);
-        assert!(roots.contains(&&root1));
-        assert!(roots.contains(&&root2));
+        reg.register_root(
+            root.clone(),
+            RegistryEntry::Live(make_entry(None, format!("agent-{root}"))),
+        )
+        .unwrap();
+        add_sub(&mut reg, &child, &root);
+
+        let (found_id, _) = reg.root_agent().expect("root present");
+        assert_eq!(found_id, &root);
+    }
+
+    #[tokio::test]
+    async fn register_root_rejects_a_second_root() {
+        let mut reg = AgentRegistry::new();
+        let root = AgentId::random();
+        reg.register_root(
+            root.clone(),
+            RegistryEntry::Live(make_entry(None, format!("agent-{root}"))),
+        )
+        .unwrap();
+        // A second root violates the singleton invariant.
+        let dup = AgentId::random();
+        let err = reg
+            .register_root(
+                dup.clone(),
+                RegistryEntry::Live(make_entry(None, format!("agent-{dup}"))),
+            )
+            .unwrap_err();
+        assert_eq!(err.status, 409);
+        // The original root is unaffected.
+        assert_eq!(reg.root_agent().unwrap().0, &root);
     }
 
     // -- Resource limits in AppState --

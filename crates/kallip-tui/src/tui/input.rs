@@ -32,15 +32,10 @@ impl App {
             return;
         }
 
-        // Quit confirmation popup: intercept 1/2/Esc
+        // Quit confirmation popup: intercept 1/Esc
         if self.quit_confirm {
             match key.code {
-                KeyCode::Char('1') => {
-                    self.kill_on_exit = false;
-                    self.should_quit = true;
-                }
-                KeyCode::Char('2') => {
-                    self.kill_on_exit = true;
+                KeyCode::Char('1') | KeyCode::Enter => {
                     self.should_quit = true;
                 }
                 KeyCode::Esc => {

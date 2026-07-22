@@ -117,7 +117,7 @@ pub async fn submit_promote_request(
         })
     };
 
-    // Notify all root agents.
+    // Notify the daemon's single root agent.
     {
         let registry = state.registry.read().await;
         let notification = format!(
@@ -127,12 +127,11 @@ pub async fn submit_promote_request(
              Use `kallip skill promote approve {request_id}` to approve\n\
              or `kallip skill promote deny {request_id} <reason>` to deny."
         );
-        for (root_id, entry) in registry.root_agents() {
+        if let Some((root_id, entry)) = registry.root_agent() {
             // A faulted root cannot review a promotion (no prompt channel); skip it.
-            let Some(live) = entry.as_live() else {
-                continue;
-            };
-            if let Err(e) = live.agent.prompt_tx.try_send(notification.clone()) {
+            if let Some(live) = entry.as_live()
+                && let Err(e) = live.agent.prompt_tx.try_send(notification)
+            {
                 warn!(root_id = %root_id, "failed to notify root agent of promote request: {e}");
             }
         }

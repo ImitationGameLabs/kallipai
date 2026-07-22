@@ -73,8 +73,8 @@ struct Inner {
     http_stream: reqwest::Client,
     daemon: DaemonClient,
     device: DeviceKey,
-    /// The tagma's persistent root agent. Created once (on first herald start)
-    /// and reused across restarts; the daemon auto-reactivates it on message.
+    /// The daemon's single root agent id (the daemon owns/creates it at startup;
+    /// the herald binds to it via `get_root_agent` and targets it for all ops).
     root_agent: AgentId,
     /// AEAD session key + both sequence counters, all under one lock so an emit
     /// always reads a key/counter pair from the same epoch (a re-KEX rotates the

@@ -41,7 +41,7 @@ async fn scenario4_guest_spawn_downgrade() {
     ];
 
     let fx = start(world, &script, None).await;
-    let run = run_agent(&fx.daemon, &ws, script.len() + 2).await;
+    let run = run_agent(&fx.daemon).await;
 
     let records = history_records(&fx.data_root, &run.agent_id);
     let results = bash_results(&records);

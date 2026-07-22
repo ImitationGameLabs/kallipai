@@ -398,6 +398,16 @@ async fn spawn_daemon(world: &World, permission_class: Option<&str>) -> DaemonPr
     let mut env: Vec<(&str, String)> = vec![
         ("KALLIP_OPERATOR_TOKEN", OPERATOR_TOKEN.into()),
         ("KALLIP_DATA_DIR", world.data.path().display().to_string()),
+        // The daemon eagerly creates the singleton root at startup from these
+        // env vars (it owns the root; kallip-run only posts to it). The root's
+        // workspace is the scenario workspace, and a generous round cap is a
+        // safety net — scenarios terminate via the scripted terminal reply, not
+        // the cap.
+        (
+            "KALLIP_WORKSPACE_ROOT",
+            world.workspace.path().display().to_string(),
+        ),
+        ("KALLIP_MAX_TOOL_ROUNDS", "50".into()),
         ("HOME", world.home_path().display().to_string()),
         ("XDG_CONFIG_HOME", world.config_dir.display().to_string()),
         (
@@ -489,23 +499,14 @@ pub struct RunResult {
     #[allow(dead_code)]
     assistant: String,
     pub exit: String,
-    #[allow(dead_code)]
-    removed: bool,
 }
 
 /// Spawn `kallip-run` (a pure HTTP client -- it carries no sandbox logic) to
-/// drive one agent run against the daemon. Captures its single JSON stdout line.
-pub async fn run_agent(daemon: &DaemonProc, workspace: &Path, max_rounds: usize) -> RunResult {
+/// post the scenario prompt to the daemon's root agent. Captures its single JSON
+/// stdout line.
+pub async fn run_agent(daemon: &DaemonProc) -> RunResult {
     let output = Command::new(resolve_bin("kallip-run"))
-        .args([
-            "--prompt",
-            "run the scripted sandbox checks",
-            "--workspace-root",
-            &workspace.display().to_string(),
-            "--max-rounds",
-            &max_rounds.to_string(),
-            "--json",
-        ])
+        .args(["--prompt", "run the scripted sandbox checks", "--json"])
         .env_clear()
         .envs([
             ("KALLIP_DAEMON_URL", daemon.url.as_str()),

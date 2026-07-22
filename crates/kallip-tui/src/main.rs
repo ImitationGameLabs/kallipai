@@ -327,8 +327,6 @@ async fn run_tui(session: Session) -> Result<()> {
     .ok();
     ratatui::restore();
 
-    session.cleanup(app.kill_on_exit).await;
-
     // Resolve the stream end *after* the terminal is restored so the message is
     // not garbled by the alt-screen / raw mode.
     match stream_end {

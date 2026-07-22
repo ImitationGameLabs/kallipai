@@ -143,6 +143,11 @@ pub fn make_faulted_entry(created_by: Option<AgentId>, reason: &str) -> FaultedE
 }
 
 /// Register a root agent (no `created_by`).
+///
+/// Bypasses [`AgentRegistry::register_root`] (uses the raw inserter), so it can
+/// build the intentionally-invalid multi-root states some registry-primitive
+/// tests need (e.g. two unrelated roots to exercise peer/relation semantics).
+/// Production code must never register a root this way.
 pub fn add_root(registry: &mut AgentRegistry, id: &AgentId) {
     registry.register(
         id.clone(),

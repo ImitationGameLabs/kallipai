@@ -374,8 +374,7 @@ impl App {
 
         let lines = vec![
             Line::from(""),
-            Line::from("  [1] Keep agent running and quit"),
-            Line::from("  [2] Remove agent and quit"),
+            Line::from("  [1] Quit"),
             Line::from(""),
             Line::from("  Esc to cancel".dark_gray()),
         ];

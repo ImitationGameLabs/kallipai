@@ -1,16 +1,16 @@
-//! kallip-run: agent runner for scripting and benchmarking.
+//! kallip-run: post a prompt to a daemon agent and print its reply.
 //!
-//! Non-interactive CLI that creates an agent via the daemon (or resumes an
-//! existing one with `--agent`), prints the final assistant reply to stdout,
-//! and exits with a semantic exit code. Pass `--verbose` to stream the
-//! agent's procedure (reasoning, tool calls) to stderr, or `--json` for a
-//! single machine-readable object (`agentId`, `assistant`, `exit`,
-//! `removed`). Designed for scripted and automated workflows.
+//! Non-interactive CLI that targets the daemon's single root agent (or an
+//! explicit agent via `--agent`), posts the prompt, prints the final assistant
+//! reply to stdout, and exits with a semantic exit code. Pass `--verbose` to
+//! stream the agent's procedure (reasoning, tool calls) to stderr, or `--json`
+//! for a single machine-readable object (`agentId`, `assistant`, `exit`).
+//! Designed for scripted and automated workflows.
 //!
-//! By default the agent is **preserved** after completion so that logs,
-//! history, and token usage remain available for auditing, and so it can be
-//! resumed with `--agent`. Pass `--remove` to archive the agent (history and
-//! usage preserved) after the run finishes.
+//! The target is the daemon-owned singleton root (or the `--agent` id); it
+//! persists after the run. Per-run isolation is no longer provided — separate
+//! runs share the root's context. For an isolated run, point `--agent` at a
+//! dedicated subagent.
 
 use std::process::ExitCode;
 
@@ -19,30 +19,22 @@ use clap::Parser;
 use futures_util::{Stream, StreamExt};
 use kallip_client::DaemonClient;
 use kallip_common::agentid::AgentId;
-use kallip_common::protocol::{CreateAgentRequest, MaxToolRounds, SseEvent};
+use kallip_common::protocol::SseEvent;
 
 #[derive(Parser)]
 #[command(
     name = "kallip-run",
     version,
-    about = "Create an agent, run it to completion, and print the result"
+    about = "Post a prompt to an agent and print the result"
 )]
 struct Cli {
-    /// The prompt to send to the agent (new run), or the follow-up message
-    /// when resuming with `--agent`.
+    /// The prompt to send to the agent.
     #[arg(long)]
     prompt: String,
-    /// Working directory for the agent (spawn only; ignored with `--agent`).
-    #[arg(long)]
-    workspace_root: Option<String>,
-    /// Maximum tool-call rounds for this run (spawn only; ignored with `--agent`).
-    /// Overrides the daemon default (unlimited unless KALLIP_MAX_TOOL_ROUNDS is set).
-    #[arg(long)]
-    max_rounds: Option<usize>,
-    /// Resume an existing agent by id instead of spawning a new one.
+    /// Target an explicit agent by id instead of the daemon's root agent.
     #[arg(long)]
     agent: Option<AgentId>,
-    /// Emit a single JSON object on stdout: {agentId, assistant, exit, removed}.
+    /// Emit a single JSON object on stdout: {agentId, assistant, exit}.
     /// Diagnostics still go to stderr.
     #[arg(long)]
     json: bool,
@@ -51,10 +43,6 @@ struct Cli {
     /// --json, the procedure streams to stderr; the JSON object is unchanged.
     #[arg(long)]
     verbose: bool,
-    /// Archive the agent (history and usage preserved) after completion.
-    /// By default the agent is preserved and can be resumed with `--agent`.
-    #[arg(long)]
-    remove: bool,
 }
 
 /// Semantic exit codes for `kallip-run`.
@@ -103,62 +91,28 @@ async fn run() -> Result<ExitCode> {
     // completion hint on stderr.
     let (json, verbose) = (cli.json, cli.verbose);
 
-    // Open the event stream and resolve the agent id. For a resume we subscribe
-    // BEFORE posting the follow-up message: the daemon's SSE channel does not
-    // replay past events to late subscribers, so a warm resumed agent could
-    // otherwise emit before we connect. (Spawn embeds the initial prompt in the
-    // create request, so its subscribe-after-create window is pre-existing and
-    // mitigated by LLM latency.)
-    let (id, outcome) = if let Some(existing) = &cli.agent {
-        let id = existing.clone();
-        let stream = client.event_stream(&id).await?;
-        let resp = client.post_message(&id, &cli.prompt).await?;
-        // Diagnostics belong on stderr regardless of --json (which only governs
-        // stdout): a queue warning must still be visible.
-        if let Some(warning) = resp.warning {
-            eprintln!("warning: {warning}");
-        }
-        (id, consume_stream(stream, json, verbose).await)
-    } else {
-        let id = client
-            .spawn(CreateAgentRequest {
-                workspace_root: cli.workspace_root,
-                skills: vec![],
-                prompt: Some(cli.prompt),
-                created_by: std::env::var("KALLIP_ID").ok().map(AgentId::from),
-                role: String::new(),
-                description: String::new(),
-                max_tool_rounds: cli.max_rounds.map(MaxToolRounds::Limited),
-                // kallip-run does not expose an explicit downgrade today; agents
-                // land on their tier ceiling (or the root env knob for roots).
-                permission_class: None,
-            })
-            .await?;
-        let stream = client.event_stream(&id).await?;
-        (id, consume_stream(stream, json, verbose).await)
+    // Resolve the target agent: an explicit `--agent` id, or the daemon's
+    // singleton root. Subscribe BEFORE posting: the daemon's SSE channel does
+    // not replay past events to late subscribers, so a warm agent could emit
+    // before we connect.
+    let id = match &cli.agent {
+        Some(existing) => existing.clone(),
+        None => client.get_root_agent().await?.id,
     };
-
-    let removed = if cli.remove {
-        match client.remove_agent(&id).await {
-            Ok(()) => true,
-            Err(e) => {
-                // Diagnostics belong on stderr regardless of --json: a failed
-                // remove must not be silent (the JSON `removed` field is the
-                // machine-readable signal, this is the human one).
-                eprintln!("warning: failed to remove agent {id}: {e}");
-                false
-            }
-        }
-    } else {
-        false
-    };
+    let stream = client.event_stream(&id).await?;
+    let resp = client.post_message(&id, &cli.prompt).await?;
+    // Diagnostics belong on stderr regardless of --json (which only governs
+    // stdout): a queue warning must still be visible.
+    if let Some(warning) = resp.warning {
+        eprintln!("warning: {warning}");
+    }
+    let outcome = consume_stream(stream, json, verbose).await;
 
     if json {
         let obj = JsonObject {
             agent_id: &id,
             assistant: &outcome.assistant,
             exit: outcome.exit,
-            removed,
         };
         println!("{}", serde_json::to_string(&obj)?);
     } else {
@@ -166,27 +120,18 @@ async fn run() -> Result<ExitCode> {
         // separates it from the streamed procedure in --verbose mode; in the
         // minimal default the reply is on stdout, so no separator is needed.
         let sep = if verbose { "\n" } else { "" };
-        if cli.remove {
-            let msg = if removed {
-                "archived"
-            } else {
-                "remove failed (see warning above)"
-            };
-            eprintln!("{sep}agent {id} {msg}.");
-        } else {
-            let status = match outcome.exit {
-                RunExit::Success => "finished (kept)",
-                RunExit::MaxRounds => "hit max rounds (kept)",
-                RunExit::Cancelled => "cancelled (kept)",
-                RunExit::BudgetExceeded => "exceeded token budget (kept)",
-                RunExit::FailoverChainExhausted => "failover chain exhausted (kept)",
-                RunExit::Error => "errored (kept)",
-            };
-            eprintln!(
-                "{sep}agent {id} {status}. Continue with: \
-                 kallip-run --agent {id} --prompt \"<prompt>\""
-            );
-        }
+        let status = match outcome.exit {
+            RunExit::Success => "finished",
+            RunExit::MaxRounds => "hit max rounds",
+            RunExit::Cancelled => "cancelled",
+            RunExit::BudgetExceeded => "exceeded token budget",
+            RunExit::FailoverChainExhausted => "failover chain exhausted",
+            RunExit::Error => "errored",
+        };
+        eprintln!(
+            "{sep}agent {id} {status}. Continue with: \
+             kallip-run --agent {id} --prompt \"<prompt>\""
+        );
     }
 
     Ok(outcome.exit.into())
@@ -215,7 +160,6 @@ struct JsonObject<'a> {
     agent_id: &'a AgentId,
     assistant: &'a str,
     exit: RunExit,
-    removed: bool,
 }
 
 /// Consume the agent's SSE stream until a terminal event arrives.

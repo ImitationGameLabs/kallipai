@@ -188,6 +188,20 @@ impl DaemonClient {
         .await
     }
 
+    /// Fetch the daemon's single root agent. The daemon eagerly creates one
+    /// root at startup (see `ensure_root_agent`), so this always succeeds once
+    /// the daemon is accepting connections.
+    pub async fn get_root_agent(&self) -> Result<AgentSummary> {
+        self.handle_response(
+            self.with_auth(self.inner.http.get(self.url("/agents/root")))
+                .send()
+                .await
+                .context("failed to connect to daemon")?,
+            "failed to parse response",
+        )
+        .await
+    }
+
     /// List agent instances. Pass `created_by = Some(sup)` to list only a
     /// superior's direct subagents; `None` lists all agents.
     pub async fn list_agents(&self, created_by: Option<&AgentId>) -> Result<Vec<AgentSummary>> {

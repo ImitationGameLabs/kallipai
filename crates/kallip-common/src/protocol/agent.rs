@@ -60,8 +60,9 @@ pub struct CreateAgentRequest {
     pub skills: Vec<String>,
     pub prompt: Option<String>,
     pub created_by: Option<AgentId>,
-    /// Short display label for the agent ("researcher"). Required non-empty for
-    /// subagent spawns (`created_by = Some`); optional for root/operator spawns.
+    /// Short display label for the agent ("researcher"). Subagent spawns are the
+    /// only HTTP create path (`created_by = Some` is required; the daemon's root
+    /// is created at startup, not over HTTP) and require a non-empty role.
     /// Never a unique address — `AgentId` is canonical. Empty means unset.
     #[serde(default)]
     pub role: String,
@@ -77,9 +78,10 @@ pub struct CreateAgentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<MaxToolRounds>,
     /// Optional explicit FS-access permission class for a subagent spawn, as the
-    /// lowercase wire spelling (`"normal"` / `"guest"`). Honored only when
-    /// `created_by` is set (subagent path); ignored for root/operator spawns,
-    /// whose class is governed by `KALLIP_ROOT_AGENT_PERMISSION_CLASS`.
+    /// lowercase wire spelling (`"normal"` / `"guest"`). Subagent spawns are the
+    /// only HTTP create path (`created_by` is required); the daemon's own root
+    /// takes its class at startup from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`,
+    /// not from this field.
     ///
     /// `None` → grant the model tier's ceiling (`ceiling_for_tier`), preserving
     /// the historical default. An explicit value is treated as a downgrade

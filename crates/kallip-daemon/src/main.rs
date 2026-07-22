@@ -114,8 +114,12 @@ async fn main() -> Result<()> {
         kallip_runtime::config::policy_preset_from_env(),
     ));
 
-    // Restore persisted agents before accepting requests.
-    routes::restore_agents(&state).await;
+    // Restore persisted agents before accepting requests, then ensure the
+    // daemon-global root agent exists. Both run before the router accepts a single
+    // connection, so the singleton root invariant holds for every client (clients
+    // fetch it via `GET /agents/root` instead of check-then-create).
+    routes::restore_agents(&state).await?;
+    routes::ensure_root_agent(&state).await?;
 
     let app = routes::router().with_state(state.clone());
 
