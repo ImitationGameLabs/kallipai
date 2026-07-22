@@ -32,9 +32,10 @@ the full authorization matrix, see [auth.md](auth.md).
 
 | Method   | Path                                         | Purpose                                    | Auth                         |
 | -------- | -------------------------------------------- | ------------------------------------------ | ---------------------------- |
-| `POST`   | `/agents`                                    | Create a new agent instance                | operator / supervisor        |
+| `POST`   | `/agents`                                    | Create a subagent (`created_by` required)  | supervisor / operator        |
 | `GET`    | `/agents`                                    | List running agents (`?created_by=`)       | any                          |
-| `DELETE` | `/agents/{id}`                               | Stop and remove an agent                   | operator / superior          |
+| `GET`    | `/agents/root`                               | Fetch the daemon-managed root agent        | any                          |
+| `DELETE` | `/agents/{id}`                               | Stop and remove an agent (never the root)  | operator / superior          |
 | `POST`   | `/agents/{id}/interrupt`                     | Interrupt current agent operation          | operator / superior          |
 | `POST`   | `/agents/{id}/message`                       | Send a message                             | any (peer-to-peer)           |
 | `GET`    | `/agents/{id}/events`                        | Subscribe to agent events (SSE)            | any                          |
@@ -56,14 +57,18 @@ the full authorization matrix, see [auth.md](auth.md).
 
 ## Agent Management
 
-### `POST /agents` — Create agent
+### `POST /agents` — Create subagent
 
-Creates a new agent instance. When `created_by` is absent, creates a root agent
-(requires operator). When present, creates a subagent (caller must be the named
-supervisor).
+Creates a subagent under an existing supervisor. The request **must** carry
+`created_by` (the supervisor id); the caller must be that supervisor (or the
+operator).
 
-Auth: operator (root agents) or direct supervisor (subagents). See
-[auth.md](auth.md).
+The daemon's single **root agent is daemon-managed** — eagerly created at
+startup from env vars (see `GET /agents/root` and [env.md](env.md)). A request
+without `created_by` is rejected with `409 Conflict`; clients never create the
+root.
+
+Auth: operator or direct supervisor. See [auth.md](auth.md).
 
 **Request body**
 
@@ -74,19 +79,18 @@ Auth: operator (root agents) or direct supervisor (subagents). See
     "string — skill paths relative to skills root (e.g. \"code/refactoring\")"
   ],
   "prompt": "string — initial prompt (optional)",
-  "created_by": "AgentId — supervisor ID; omit for root agents (optional)",
-  "role": "string — short display label, e.g. \"researcher\" (optional; required non-empty for subagents)",
+  "created_by": "AgentId — supervisor ID (required)",
+  "role": "string — short display label, e.g. \"researcher\" (required, non-empty)",
   "description": "string — longer prose, what this agent is for (optional)",
   "max_tool_rounds": "null — use daemon default (see below)",
   "permission_class": "null — grant the tier ceiling (see below)"
 }
 ```
 
-**`role` / `description`** — display metadata, supervisor-owned. A subagent spawn
-(`created_by` present) **requires a non-empty `role`** (fleet discipline so a
-superior can tell its subagents apart); a root/operator spawn may omit it. Both
-default to `""` and are never used as an address — `AgentId` is canonical.
-Mutable later via `PUT /agents/{id}/metadata`.
+**`role` / `description`** — display metadata, supervisor-owned. A subagent
+spawn **requires a non-empty `role`** (fleet discipline so a superior can tell
+its subagents apart). Both default to `""` and are never used as an address —
+`AgentId` is canonical. Mutable later via `PUT /agents/{id}/metadata`.
 
 **`max_tool_rounds`** — override the default/env-configured max tool-call rounds for this agent. Omit or `null` to use the daemon default (`KALLIP_MAX_TOOL_ROUNDS` env var, or unlimited). To set an explicit value:
 
@@ -102,17 +106,15 @@ To force unlimited rounds (bounded only by token budget):
 
 `Limited` values must be > 0; `Limited(0)` returns 400.
 
-**`permission_class`** — optional explicit FS-access permission class for a
-subagent spawn, as the lowercase wire spelling (`"normal"` / `"guest"`).
-Honored only when `created_by` is present (subagent path); ignored for root
-agents, whose class is governed by `KALLIP_ROOT_AGENT_PERMISSION_CLASS`
-(see [env.md](env.md)). Omit or `null` to grant the model tier's ceiling
-(`ceiling_for_tier`). The daemon treats an explicit value as a **downgrade
-only**: a value above the tier ceiling or the supervisor's own granted class
-is rejected with `403 Forbidden` (never silently clamped). So a `normal`
-(root-tier) agent can spawn a read-only `guest` subagent for review work, but
-no agent can escalate a child above its tier. The granted class is observable
-on `GET /agents/{id}/permissions`.
+**`permission_class`** — optional explicit FS-access permission class for the
+subagent, as the lowercase wire spelling (`"normal"` / `"guest"`). Omit or
+`null` to grant the model tier's ceiling (`ceiling_for_tier`). The daemon
+treats an explicit value as a **downgrade only**: a value above the tier
+ceiling or the supervisor's own granted class is rejected with `403 Forbidden`
+(never silently clamped). So a `normal` (root-tier) agent can spawn a
+read-only `guest` subagent for review work, but no agent can escalate a child
+above its tier. The granted class is observable on
+`GET /agents/{id}/permissions`.
 
 > **Token budget:** All agents share a single daemon-wide token budget
 > (default: 100M tokens). Use `POST /budget` to adjust at runtime.
@@ -127,13 +129,14 @@ on `GET /agents/{id}/permissions`.
 
 Status: `201 Created`
 
-| Code | Condition                                                                                                                 |
-| ---- | ------------------------------------------------------------------------------------------------------------------------- |
-| 400  | Invalid `workspace_root`, skill loading failure, invalid skill name, or subagent spawn with an empty `role`               |
-| 403  | Not operator (root agents); supervisor has no remaining delegation depth; `workspace_root` outside supervisor's workspace |
-| 404  | Supervisor agent not found                                                                                                |
-| 503  | Agent limit reached (`KALLIP_MAX_AGENTS`), or supervisor already has max subagents (`KALLIP_MAX_SUBAGENTS`)               |
-| 500  | Session creation failure, agent spawn failure, or supervisor removed during creation                                      |
+| Code | Condition                                                                                                         |
+| ---- | ----------------------------------------------------------------------------------------------------------------- |
+| 400  | Invalid `workspace_root`, skill loading failure, invalid skill name, or subagent spawn with an empty `role`       |
+| 403  | Not the supervisor; supervisor has no remaining delegation depth; `workspace_root` outside supervisor's workspace |
+| 404  | Supervisor agent not found                                                                                        |
+| 409  | `created_by` absent (the root is daemon-managed; use `GET /agents/root`)                                          |
+| 503  | Agent limit reached (`KALLIP_MAX_AGENTS`), or supervisor already has max subagents (`KALLIP_MAX_SUBAGENTS`)       |
+| 500  | Session creation failure, agent spawn failure, or supervisor removed during creation                              |
 
 > **Subagent constraints:** The supervisor must have remaining delegation depth
 > (`max_depth > 0`), and the subagent's `workspace_root` must be within the
@@ -145,6 +148,17 @@ Status: `201 Created`
 > **Crash recovery:** Restore is exempt from resource limits. After a daemon
 > restart, the agent count may temporarily exceed `KALLIP_MAX_AGENTS`. New
 > creation requests will return 503 until agents are removed to make room.
+
+### `GET /agents/root` — Fetch the root agent
+
+Returns the daemon's single root agent. The daemon eagerly creates one root at
+startup (env-driven; see [env.md](env.md)), so this always succeeds once the
+daemon is accepting connections — clients fetch the root here instead of
+list-then-create. Any authenticated identity may call it.
+
+**Response:** a single [agent summary](#get-agents--list-agents) object (same
+shape as one element of `GET /agents`). Status `200`. A missing root is a
+startup-invariant violation surfaced as `500` (never `404`).
 
 ### `GET /agents` — List agents
 
@@ -201,12 +215,12 @@ Auth: operator or superior. See [auth.md](auth.md).
 
 Status: `204 No Content`
 
-| Code | Condition                                                                                          |
-| ---- | -------------------------------------------------------------------------------------------------- |
-| 403  | Not a superior of the target agent                                                                 |
-| 404  | Agent not found                                                                                    |
-| 409  | Agent is busy (interrupt it first), or agent has active subagents (remove or interrupt them first) |
-| 500  | Agent vanished during removal                                                                      |
+| Code | Condition                                                                                                                             |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| 403  | Not a superior of the target agent                                                                                                    |
+| 404  | Agent not found                                                                                                                       |
+| 409  | Agent is busy (interrupt it first), has active subagents (remove or interrupt them first), or is the daemon-managed (live) root agent |
+| 500  | Agent vanished during removal                                                                                                         |
 
 ### `POST /agents/{id}/interrupt` — Interrupt agent
 
@@ -734,8 +748,8 @@ Status: `201 Created`
 | 404  | Agent not found, no persistent directory, or local skill file does not exist        |
 | 500  | File I/O failure                                                                    |
 
-> **Notification:** All root agents are notified of the new request via their
-> message channels.
+> **Notification:** The daemon's single root agent is notified of the new
+> request via its message channel.
 
 ### `GET /skill-promote-requests` — List promote requests
 

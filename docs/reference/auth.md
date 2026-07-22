@@ -5,8 +5,9 @@
 All endpoints require a `Bearer` token in the `Authorization` header. The daemon
 generates two categories of token:
 
-- **Operator token** — printed once at daemon startup. Grants full access: create
-  root agents, manage any agent, approve/deny approvals.
+- **Operator token** — printed once at daemon startup. Grants full access:
+  manage any agent, approve/deny approvals. (The daemon's single root agent is
+  daemon-managed — created at startup from env, never created over HTTP.)
 - **Agent token** — generated per agent at creation, injected into the agent's shell as
   `KALLIP_AUTH_TOKEN`. Agents use this to call back to the daemon.
 
@@ -26,8 +27,9 @@ comparison additionally uses a constant-time compare.
 - **Superior** — any ancestor in the `created_by` chain (supervisor,
   grand-supervisor, etc.).
 - **Self** — the agent itself (identity matches the target agent ID).
-- **Root agent** — an agent with no `created_by` (top-level, created by the
-  operator).
+- **Root agent** — the daemon's single agent with no `created_by`. It is
+  daemon-managed (eagerly created at startup from env vars), never created or
+  removed over HTTP.
 
 ## Authorization matrix
 
@@ -35,9 +37,9 @@ comparison additionally uses a constant-time compare.
 
 | Endpoint                      | Operator | Supervisor | Superior | Any agent | Self |
 | ----------------------------- | -------- | ---------- | -------- | --------- | ---- |
-| `POST /agents` (root)         | Yes      | —          | —        | —         | —    |
 | `POST /agents` (subagent)     | Yes      | Yes        | —        | —         | —    |
 | `GET /agents`                 | Yes      | —          | —        | Yes       | —    |
+| `GET /agents/root`            | Yes      | —          | —        | Yes       | —    |
 | `DELETE /agents/{id}`         | Yes      | —          | Yes      | —         | —    |
 | `POST /agents/{id}/interrupt` | Yes      | —          | Yes      | —         | —    |
 | `POST /agents/{id}/message`   | Yes      | —          | —        | Yes       | —    |
@@ -60,10 +62,10 @@ A subagent spawn (`POST /agents` with `created_by`) accepts an optional
 the child's FS-access class below its model tier's ceiling. The daemon is the
 reference monitor: a value above the tier ceiling or the supervisor's own
 granted class is rejected with `403 Forbidden` — downgrade only, never an
-escalation. A root agent may thus spawn a read-only `guest` reviewer. The field
-is ignored on root spawns, which use `KALLIP_ROOT_AGENT_PERMISSION_CLASS`
-(see [env.md](env.md)). The granted class is reported by
-`GET /agents/{id}/permissions` (see [daemon-api.md](daemon-api.md)).
+escalation. A `normal` root may thus spawn a read-only `guest` reviewer. This
+field is subagent-only; the daemon's own root takes its class at startup from
+`KALLIP_ROOT_AGENT_PERMISSION_CLASS` (see [env.md](env.md)). The granted class is
+reported by `GET /agents/{id}/permissions` (see [daemon-api.md](daemon-api.md)).
 
 ### Context and policy
 

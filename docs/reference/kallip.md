@@ -180,7 +180,7 @@ kallip subagent interrupt $CHILD
 
 For Rust programs that need more control than the CLI offers, the
 `kallip-client` crate provides the CLI operations as async methods, plus a
-few operator/library-only paths (event streaming, root-agent spawn):
+few operator/library-only paths (event streaming, subagent spawn, root lookup):
 
 ```rust
 use kallip_client::DaemonClient;
@@ -189,19 +189,22 @@ let client = DaemonClient::builder("http://127.0.0.1:3000")
     .auth_token(token)
     .build();
 
-// Spawn a root agent (operator-only path; the CLI exposes only subagent spawns)
-let id = client.spawn(CreateAgentRequest {
-    workspace_root: Some("/project".into()),
-    skills: vec!["code-review".into()],
-    prompt: None,
-    created_by: None,
-}).await?;
+// The daemon owns a single root agent (eagerly created at startup); fetch it.
+let root = client.get_root_agent().await?;
+let id = root.id;
 
 // Send a message (fire-and-forget)
 client.post_message(&id, "Review src/main.rs").await?;
 
-// Stream events (CLI exposes status/activity instead), check status, remove
+// Stream events (CLI exposes status/activity instead), check status.
 let mut stream = client.event_stream(&id).await?;
 let usage = client.agent_status(&id).await?;
-client.remove_agent(&id).await?;
+// Note: the root cannot be removed (daemon-managed); `remove_agent` is for
+// subagents only.
 ```
+
+The root agent is daemon-managed: it is created once at startup from env vars
+(`KALLIP_WORKSPACE_ROOT`, `KALLIP_MAX_TOOL_ROUNDS`,
+`KALLIP_ROOT_AGENT_PERMISSION_CLASS`; see [env.md](env.md)) and surfaced via
+`get_root_agent()`. `spawn()` is for **subagents** only — it requires
+`created_by`.
