@@ -86,10 +86,11 @@
             in
             {
               default = workspace;
-              # Per-crate binaries (agora-only; daemon+herald). Cross-platform:
+              # Per-crate binaries (agora; lesche; daemon+herald). Cross-platform:
               # plain Rust builds. Their docker images are Linux-only (see
-              # kallip-agora-image / kallip-tagma-image below).
+              # kallip-agora-image / kallip-lesche-image / kallip-tagma-image below).
               kallip-agora = builds.agora;
+              kallip-lesche = builds.lesche;
               kallip-tagma = builds.tagma;
               kallip-tarball = import ./nix/packages/tarball.nix {
                 inherit
@@ -104,14 +105,22 @@
             # nix/packages/docker-images/.
             // (lib.optionalAttrs pkgs.stdenv.isLinux {
               # Purpose-built prod images for the split deploy
-              # (nix/prod-composes/agora.nix / tagma.nix): agora carries no
-              # toolset; tagma carries no daemon-specific baked env.
+              # (nix/prod-composes/agora.nix / tagma.nix): agora + lesche are the
+              # two server-side services (co-located, independent images); tagma
+              # carries no daemon-specific baked env.
               kallip-agora-image = import ./nix/packages/docker-images/agora.nix {
                 inherit
                   pkgs
                   common
                   ;
                 inherit (builds) agora;
+              };
+              kallip-lesche-image = import ./nix/packages/docker-images/lesche.nix {
+                inherit
+                  pkgs
+                  common
+                  ;
+                inherit (builds) lesche;
               };
               kallip-tagma-image = import ./nix/packages/docker-images/tagma.nix {
                 inherit

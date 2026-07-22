@@ -35,6 +35,10 @@ in
   workspace = buildCrate "cargo build --release";
   # The agora control-plane server (pure HTTP/Postgres; no shell-out deps).
   agora = buildCrate "cargo build --release -p kallip-agora";
+  # The lesche data-plane relay (herald tunnels, app SSE, envelope routing; pure
+  # HTTP, no shell-out deps). Its own image so the agora and lesche services
+  # deploy independently -- see nix/packages/docker-images/lesche.nix.
+  lesche = buildCrate "cargo build --release -p kallip-lesche";
   # The host/"tagma" side: daemon + herald share most of their closure, so one
   # build beats two. Excludes agora.
   tagma = buildCrate "cargo build --release -p kallip-daemon -p kallip-herald";

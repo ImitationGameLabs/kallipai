@@ -7,10 +7,12 @@
 # This is a single-mode file, so unlike arion-compose.nix there is no
 # KALLIP_ARION_MODE switch and no mkIf/mkMerge: every service is declared
 # directly. The .env at the repo root supplies KALLIP_AUTH_TOKEN (the daemon
-# operator token the herald presents),
-# KALLIP_HERALD_ENROLLMENT_CODE (first boot only), KALLIP_HERALD_AGORA_URL
-# (the separate prod-agora deploy's public HTTPS URL), and the LLM provider
-# credentials. See docs/reference/container.md.
+# operator token the herald presents), KALLIP_HERALD_ENROLLMENT_CODE (first
+# boot only), KALLIP_HERALD_AGORA_URL (the prod-agora deploy's public HTTPS
+# URL; ENROLLMENT ONLY -- the stored tagma token is reused thereafter),
+# KALLIP_HERALD_LESCHE_URL (the prod-lesche deploy's public HTTPS URL; the
+# herald holds its tunnel here and posts envelopes / key-exchange responses
+# here), and the LLM provider credentials. See docs/reference/container.md.
 { lib, ... }:
 let
   # Resolve the workspace flake. `toString ../..` is the repo root (two levels
@@ -85,8 +87,11 @@ in
         KALLIP_HERALD_STATE_DIR = "/var/lib/kallip/herald";
         KALLIP_DAEMON_URL = "http://daemon:3000";
         RUST_LOG = "info";
-        # KALLIP_HERALD_AGORA_URL is intentionally NOT set here -- it comes
-        # from .env (the prod-agora deploy's public HTTPS URL).
+        # KALLIP_HERALD_AGORA_URL (enroll-only) and KALLIP_HERALD_LESCHE_URL
+        # (tunnel + envelopes + KEX responses) are intentionally NOT set here --
+        # both come from .env. Per the per-service subdomain topology these are
+        # two distinct origins (e.g. https://agora.kallipai.com and
+        # https://lesche.kallipai.com) sharing the parent domain.
       };
     };
   };

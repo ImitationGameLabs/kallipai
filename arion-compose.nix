@@ -99,6 +99,13 @@ let
     aifed
   ];
 
+  # Dev topology note: agora and lesche are exposed on their own origins
+  # (`agora.localhost:7100`, `lesche.localhost:7200`) -- browsers resolve
+  # `*.localhost` natively and the session cookie carries `Domain=localhost`
+  # (see the agora service env) so it is shared across the two subdomains. No
+  # edge proxy in dev; each service publishes its own port. The herald (a
+  # container) reaches them via compose DNS (`agora:7100` / `lesche:7200`).
+
   # The daemon only, looping over every prebuilt [[test]] binary. Exits with
   # the overall verdict.
   testComposition = {
@@ -236,8 +243,9 @@ let
       };
 
       # Agora: run from the workspace via the host store; publish 7100 so the
-      # host browser (kallip-web at :5173) reaches it; dev WebAuthn / CORS /
-      # cookie values are localhost-friendly. (prod-agora is its own composition:
+      # host browser reaches it at http://agora.localhost:7100 (browsers resolve
+      # *.localhost natively). dev WebAuthn / CORS / cookie values are
+      # localhost-friendly. (prod-agora is its own composition:
       # nix/prod-composes/agora.nix, behind a TLS reverse proxy, no published
       # port.)
       services.agora = {
@@ -257,10 +265,55 @@ let
           KALLIP_AGORA_WEBAUTHN_ALLOW_ANY_PORT = "true";
           KALLIP_AGORA_COOKIE_SECURE = "false";
           KALLIP_AGORA_CORS_ORIGINS = "http://localhost:5173";
+          # Share the session cookie across agora.localhost and lesche.localhost
+          # (the per-subdomain dev topology). Single-origin deploys leave this
+          # unset (host-only cookie). Chrome/Firefox accept Domain=localhost and
+          # share it across *.localhost; Safari has historical quirks -- dev on
+          # Chrome/Firefox.
+          KALLIP_AGORA_SESSION_COOKIE_DOMAIN = "localhost";
+          # Dev shared secret mounting the /internal ControlPlane surface for
+          # the lesche. Hardcoded like the dev DB creds (prod reads it from
+          # .env). The lesche presents the SAME value as
+          # KALLIP_LESCHE_AGORA_TOKEN.
+          KALLIP_AGORA_INTERNAL_TOKEN = "dev-internal-secret";
           RUST_LOG = "info";
-          # TRUSTED_PROXIES left at the loopback default; the agora's boot guard
-          # logs a cosmetic warning about the 0.0.0.0 bind here -- expected in
-          # dev (no reverse proxy in front), harmless.
+          # No reverse proxy in dev (each service is reached directly), so leave
+          # TRUSTED_PROXIES at the default; the agora's boot guard clears the
+          # loopback default on the 0.0.0.0 bind and logs a cosmetic warning --
+          # expected in dev, harmless. Prod sets this to the operator's proxy
+          # CIDR via .env.
+        };
+      };
+
+      # Lesche: the data-plane relay. DB-free; authenticates requests and
+      # resolves tagma metadata through the agora's /internal surface over the
+      # compose network. Reached by the browser at http://lesche.localhost:7200
+      # and by the herald via compose DNS (lesche:7200).
+      services.lesche = {
+        service.depends_on = [ "agora" ];
+        service.useHostStore = true;
+        service.command = [ "${workspace}/bin/kallip-lesche" ];
+        service.ports = [ "7200:7200" ];
+        service.env_file = [ ".env" ];
+        # reqwest (HttpControlPlane -> agora /internal) builds its Client at
+        # startup and the rustls platform verifier loads the system trust store
+        # EAGERLY at .build() -- so the lesche needs the CA bundle at the
+        # standard paths (cacert + certLinks) even though its /internal calls
+        # are plain HTTP. Same reason the herald service carries the CA layer.
+        image.contents = [
+          workspace
+          pkgs.cacert
+          certLinks
+        ];
+        service.environment = {
+          KALLIP_LESCHE_ADDR = "0.0.0.0:7200";
+          KALLIP_LESCHE_AGORA_INTERNAL_URL = "http://agora:7100";
+          # Must equal the agora's KALLIP_AGORA_INTERNAL_TOKEN above.
+          KALLIP_LESCHE_AGORA_TOKEN = "dev-internal-secret";
+          # Allow the web app origin (Vite at :5173) to make credentialed
+          # cross-origin calls to lesche.localhost:7200.
+          KALLIP_LESCHE_CORS_ORIGINS = "http://localhost:5173";
+          RUST_LOG = "info";
         };
       };
 
@@ -288,11 +341,16 @@ let
         image.contents = [ workspace ] ++ runtimeContents;
         service.depends_on = [
           "agora"
+          "lesche"
           "daemon"
         ];
         service.environment = {
           KALLIP_HERALD_STATE_DIR = "/var/lib/kallip/herald";
+          # Reaches the two services via compose DNS (the herald is a container;
+          # it does NOT use *.localhost, which is a browser-side convention).
+          # Enroll -> agora; tunnel/envelopes/KEX -> lesche.
           KALLIP_HERALD_AGORA_URL = "http://agora:7100";
+          KALLIP_HERALD_LESCHE_URL = "http://lesche:7200";
           KALLIP_DAEMON_URL = "http://daemon:3000";
           RUST_LOG = "info";
         };
