@@ -181,7 +181,7 @@ type CeremonyReason =
 /**
  * Map a register-finish 409 message to a typed reason. The agora emits the
  * SAME 409 for both email and username collisions, distinguished only by
- * message text (`crates/kallip-agora/src/routes/auth.rs` returns
+ * message text (`crates/platform/kallip-agora/src/routes/auth.rs` returns
  * "email already registered" / "username already taken"). Match the EXACT
  * server strings so a contract drift surfaces as a visible "unknown" rather
  * than a silent misclassification. The stable long-term fix belongs at the

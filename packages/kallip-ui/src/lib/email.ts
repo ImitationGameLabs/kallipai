@@ -1,7 +1,7 @@
 // Light email shape validation for the auth pages -- immediate UX feedback
 // only, NOT canonicalization.
 //
-// The agora is authoritative: `crates/kallip-agora/src/email.rs::normalize`
+// The agora is authoritative: `crates/platform/kallip-agora/src/email.rs::normalize`
 // runs RFC 5321 validation via the `email_address` crate and produces the
 // canonical form `{local-part verbatim}@{domain lowercased}`. The local part
 // is case-sensitive (RFC 5321 sec 2.4 -- `John@x.com` and `john@x.com` are

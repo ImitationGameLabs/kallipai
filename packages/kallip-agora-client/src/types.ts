@@ -1,5 +1,5 @@
 // Response + error shapes for the agora `/v1` HTTP surface. These mirror the
-// serde DTOs in `crates/kallip-agora/src/routes/` (`auth.rs`, `tagmata.rs`,
+// serde DTOs in `crates/platform/kallip-agora/src/routes/` (`auth.rs`, `tagmata.rs`,
 // `admin.rs`). Timestamps are RFC3339 strings (time::OffsetDateTime serde)
 // unless noted.
 
@@ -89,8 +89,8 @@ export interface RenameTagmaRequest {
 
 // ---------------------------------------------------------------------------
 // Chat data-plane (E2EE relay). Mirrors the serde DTOs in
-// crates/kallip-agora-common/src/{control,message,event,herald}.rs and
-// crates/kallip-agora/src/routes/{tagmata,conversations}.rs. The agora forwards
+// crates/platform/kallip-agora-common/src/{control,message,event,herald}.rs and
+// crates/platform/kallip-agora/src/routes/{tagmata,conversations}.rs. The agora forwards
 // `Envelope.ciphertext` and the byte fields below without interpreting them;
 // every base64 string is STANDARD base64 (padded, +//), matching bytes.rs.
 // ---------------------------------------------------------------------------

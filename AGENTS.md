@@ -19,7 +19,12 @@ The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem 
 │   ├── kallip-tui/       # Interactive TUI client
 │   ├── kallip-tagma/    # HTTP API server hosting multiple agent instances
 │   ├── kallip-run/       # Agent runner for scripting and benchmarking
-│   └── kallip-client/    # Tagma client library
+│   ├── kallip-client/    # Tagma client library
+│   ├── kallip-herald/   # Host-side relay connector: links a tagma to agora
+│   └── platform/        # Public-internet relay service (agora + lesche)
+│       ├── kallip-agora/        # Control-plane relay
+│       ├── kallip-agora-common/ # Wire types for the agora relay and herald
+│       └── kallip-lesche/       # Data-plane relay
 ├── docs/                      # Project documentation
 │   ├── architecture.md       # System architecture, tagma design, policy
 │   ├── context-management.md # Agentic context management design

@@ -1,9 +1,9 @@
 [workspace]
 members = [
   "crates/kallip-common",
-  "crates/kallip-agora-common",
-  "crates/kallip-agora",
-  "crates/kallip-lesche",
+  "crates/platform/kallip-agora-common",
+  "crates/platform/kallip-agora",
+  "crates/platform/kallip-lesche",
   "crates/kallip-herald",
   "crates/kallip-runtime",
   "crates/kallip-shell",
@@ -27,9 +27,9 @@ name = "kallip"
 just-llm-client = "0.2.0"
 
 kallip-common = { path = "crates/kallip-common", default-features = false }
-kallip-agora-common = { path = "crates/kallip-agora-common" }
-kallip-agora = { path = "crates/kallip-agora" }
-kallip-lesche = { path = "crates/kallip-lesche" }
+kallip-agora-common = { path = "crates/platform/kallip-agora-common" }
+kallip-agora = { path = "crates/platform/kallip-agora" }
+kallip-lesche = { path = "crates/platform/kallip-lesche" }
 kallip-herald = { path = "crates/kallip-herald" }
 kallip-runtime = { path = "crates/kallip-runtime" }
 kallip-shell = { path = "crates/kallip-shell" }

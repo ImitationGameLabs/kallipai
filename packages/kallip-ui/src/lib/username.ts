@@ -1,7 +1,7 @@
 // Username shape validation for the register page -- immediate UX feedback
 // only, NOT the authority.
 //
-// Mirrors `crates/kallip-agora/src/username.rs::normalize` (GitHub-aligned):
+// Mirrors `crates/platform/kallip-agora/src/username.rs::normalize` (GitHub-aligned):
 // trim + ASCII-lowercase, 3-32 chars of `[a-z0-9-]` where hyphens are single
 // and interior (no leading/trailing/consecutive), no underscores. The server
 // is authoritative and re-normalizes, so this is purely a gate to avoid a

@@ -1,6 +1,6 @@
 // Standard base64 (RFC 4648 section 4) encode/decode, with padding and the
 // `+`/`/` alphabet. This is what the agora wire uses for ciphertext, public
-// keys, and signatures (see `crates/kallip-agora-common/src/bytes.rs`, which
+// keys, and signatures (see `crates/platform/kallip-agora-common/src/bytes.rs`, which
 // serializes via `general_purpose::STANDARD`). It is deliberately distinct from
 // `base64url.ts`, which is unpadded base64url for the WebAuthn ceremony.
 //

@@ -33,7 +33,7 @@ export const CSRF_HEADER = "X-Requested-With";
 export const CSRF_HEADER_VALUE = "kallip";
 
 /** Request bodies for the ceremony begins. Mirrors the agora DTOs in
- * `crates/kallip-agora/src/routes/auth.rs` (`RegisterBeginRequest`,
+ * `crates/platform/kallip-agora/src/routes/auth.rs` (`RegisterBeginRequest`,
  * `LoginBeginRequest`): email is the login id; username is the in-site handle. */
 export interface RegisterBeginRequest {
   readonly invite_code: string;

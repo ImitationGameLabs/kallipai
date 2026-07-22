@@ -9,7 +9,7 @@
 // reducer).
 //
 // Mirrors the herald's `crates/kallip-herald/src/e2e.rs` + the lesche's
-// `crates/kallip-lesche/src/routes/conversations.rs`.
+// `crates/platform/kallip-lesche/src/routes/conversations.rs`.
 
 import { type AgoraClient, type LescheClient } from "./http.ts";
 import {

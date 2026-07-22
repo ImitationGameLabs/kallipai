@@ -5,7 +5,7 @@ import { assertEquals } from "@std/assert";
 import { decodeB64, encodeB64 } from "./base64.ts";
 
 Deno.test("encodeB64 matches bytes.rs STANDARD alphabet", () => {
-  // Mirrors crates/kallip-agora-common/src/bytes.rs::ciphertext_round_trips.
+  // Mirrors crates/platform/kallip-agora-common/src/bytes.rs::ciphertext_round_trips.
   assertEquals(encodeB64(Uint8Array.of(0xde, 0xad, 0xbe, 0xef)), "3q2+7w==");
 });
 

@@ -3,7 +3,7 @@ import { classifyRegisterConflict } from "./auth.ts";
 
 // `classifyRegisterConflict` is the only code in this package whose
 // correctness depends on EXACT string matching against the agora's 409 prose
-// (crates/kallip-agora/src/routes/auth.rs: "email already registered" /
+// (crates/platform/kallip-agora/src/routes/auth.rs: "email already registered" /
 // "username already taken"). These tests pin that contract: a server-side
 // copy change must update the switch or fail here.
 
