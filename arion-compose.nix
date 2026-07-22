@@ -215,11 +215,12 @@ let
           PATH = binPath;
           HOME = "/var/lib/kallip";
           KALLIP_DATA_DIR = "/var/lib/kallip";
-          # Default workspace for clients (e.g. the TUI) that create an agent
-          # without an explicit workspace_root: AgentConfig::load otherwise
-          # falls back to the daemon's cwd, which is "/" in the container and
-          # overlaps the data dir -> 409. Pin the mounted workspace volume,
-          # which is disjoint from /var/lib/kallip.
+          # The daemon eagerly creates the singleton root agent at startup; its
+          # workspace is resolved by AgentConfig::load from KALLIP_WORKSPACE_ROOT.
+          # Pin the mounted workspace volume, which is disjoint from
+          # /var/lib/kallip (the data dir) -- a CWD fallback would be "/" in the
+          # container, overlap the data tree, and fail startup
+          # (ensure_workspace_disjoint rejects the overlap).
           KALLIP_WORKSPACE_ROOT = "/workspace";
           KALLIP_DAEMON_ADDR = "0.0.0.0:3000";
           RUST_LOG = "info";
