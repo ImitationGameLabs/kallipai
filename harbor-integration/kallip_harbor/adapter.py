@@ -61,14 +61,12 @@ class KallipAdapter(BaseInstalledAgent):
         return None
 
     # -- Declarative CLI flags for kallip-run --
-    CLI_FLAGS: list[CliFlag] = [
-        CliFlag(
-            "max_rounds",
-            cli="--max-rounds",
-            type="int",
-            env_fallback="KALLIP_MAX_TOOL_ROUNDS",
-        ),
-    ]
+    # None today. kallip-run posts the prompt to the daemon's single root agent
+    # and no longer takes spawn-time flags; a round cap, if ever wanted, would be
+    # set on the daemon via KALLIP_MAX_TOOL_ROUNDS (read at root creation), not
+    # passed per-run. Benchmark configs intentionally leave rounds uncapped so
+    # complex tasks are not cut off mid-completion.
+    CLI_FLAGS: list[CliFlag] = []
 
     # -- Declarative environment variables --
     # These are resolved from Harbor kwargs / host env / defaults, and

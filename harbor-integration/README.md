@@ -71,9 +71,12 @@ Set these on the **host** before running Harbor. They are forwarded into the con
 | `KALLIP_LLM_PROVIDER`              | No       | LLM backend: `deepseek` or `openai-compatible`. Auto-set from config `model_name` |
 | `KALLIP_LLM_MODEL`                 | No       | Model identifier. Auto-set from config `model_name`                               |
 | `KALLIP_OPERATOR_TOKEN`            | No       | Pre-set auth token; auto-generated if omitted                                     |
-| `KALLIP_MAX_TOOL_ROUNDS`           | No       | Default max tool-call rounds per run                                              |
 
 \* Set the key matching your provider.
+
+Note: tasks run uncapped (no `max_tool_rounds`); the agent runs until it
+finishes or the daemon token budget is exhausted, so complex tasks are not cut
+off mid-completion.
 
 ## Running
 
