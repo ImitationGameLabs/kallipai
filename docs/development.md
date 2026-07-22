@@ -24,13 +24,24 @@ with no code crashloops it.
 ### Phase 1 -- agora side
 
 ```sh
-arion up -d                # agora + postgres only (arion builds the workspace via the flake)
+arion up -d                # agora + lesche + postgres (arion builds the workspace via the flake)
 ```
 
-Then open the web app (`deno task dev` from `packages/kallip-web`, served at
-`:5173`), sign up, and mint a `sk-enroll-...` enrollment code. Paste it into
-`.env` as `KALLIP_HERALD_ENROLLMENT_CODE`, and set `KALLIP_AUTH_TOKEN` to the
-daemon's operator token.
+Dev uses a per-service subdomain topology with no edge proxy: the web app
+reaches the agora at `http://agora.localhost:7100` and the lesche at
+`http://lesche.localhost:7200` (browsers resolve `*.localhost` natively). The
+session cookie carries `Domain=localhost` so it is shared across the two
+subdomains. The web app (`deno task dev` from `packages/kallip-web`, served at
+`:5173`) must therefore configure **two API origins** and send
+`credentials: "include"` on its requests to both — CORS on each service already
+allows `http://localhost:5173`. The web app reads the two origins from
+`VITE_AGORA_URL` (default `http://localhost:7100`) and `VITE_LESCHE_URL` (default
+`http://localhost:7200`); set both in `.env` to the subdomain form
+(`http://agora.localhost:7100` / `http://lesche.localhost:7200`) if you prefer
+host-separated origins (the `Domain=localhost` cookie is shared either way). Open
+the web app at `:5173`, sign up, and mint a `sk-enroll-...` enrollment code.
+Paste it into `.env` as `KALLIP_HERALD_ENROLLMENT_CODE`, and set
+`KALLIP_AUTH_TOKEN` to the daemon's operator token.
 
 ### Phase 2 -- tagma side
 

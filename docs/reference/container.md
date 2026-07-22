@@ -71,13 +71,22 @@ straight out of the crane workspace (`packages.default`) and a rebuild is picked
 up without an in-compose bake; postgres uses the official `postgres:17.5` image.
 
 The daemon + herald are gated behind the `tagma` profile, so a plain `arion up`
-brings up only the agora side — the herald's first-boot enroll needs a code that
-cannot exist until a user signs up, and starting it with no code crashloops it
-(see [Herald bootstrap](#herald-bootstrap)).
+brings up only the agora + lesche side — the herald's first-boot enroll needs a
+code that cannot exist until a user signs up, and starting it with no code
+crashloops it (see [Herald bootstrap](#herald-bootstrap)).
 
-The agora publishes `7100:7100` so the web app (`deno task dev` on the host at
-`:5173`) can reach it; dev WebAuthn RP (`localhost`), CORS, and a non-secure
-cookie are hardcoded.
+Dev uses a **per-service subdomain** topology with no edge proxy. Browsers
+resolve `*.localhost` to `127.0.0.1` natively, so the web app (`deno task dev`
+on the host at `:5173`) reaches the agora at `http://agora.localhost:7100` and
+the lesche at `http://lesche.localhost:7200` directly (each service publishes
+its own port). The session cookie carries `Domain=localhost`
+(`KALLIP_AGORA_SESSION_COOKIE_DOMAIN`), so the cookie set at login on the agora
+is sent to the lesche too — both subdomains share the registrable domain
+`localhost` (same-site under `SameSite=Strict`), and CORS on each service
+allows the `http://localhost:5173` origin with credentials. Dev is validated on
+Chrome/Firefox (Safari has historical `*.localhost`/`Domain=localhost` quirks).
+The herald (a container) reaches the two services via compose DNS
+(`http://agora:7100`, `http://lesche:7200`), not `*.localhost`.
 
 ## Production
 
@@ -88,9 +97,22 @@ resolves):
 ### tagma — `arion -f nix/prod-composes/tagma.nix up -d`
 
 Brings up the daemon + herald from `packages.kallip-tagma-image`. The herald
-reaches the agora at `KALLIP_HERALD_AGORA_URL` (set in `.env` to the separate
-prod-agora deploy's public HTTPS URL) and authenticates to the co-located daemon
-with `KALLIP_AUTH_TOKEN` (set it equal to the daemon's `KALLIP_OPERATOR_TOKEN`).
+talks to the prod-deployed services over the public internet: the agora
+subdomain (`KALLIP_HERALD_AGORA_URL`, e.g. `https://agora.kallipai.com`) for
+enrollment only — the stored tagma token is reused thereafter — and the lesche
+subdomain (`KALLIP_HERALD_LESCHE_URL`, e.g. `https://lesche.kallipai.com`) for
+its tunnel, envelope POSTs, and key-exchange responses (the per-service
+subdomain topology). The herald authenticates to the co-located daemon with
+`KALLIP_AUTH_TOKEN` (set it equal to the daemon's `KALLIP_OPERATOR_TOKEN`).
+
+> **Note**: the data-plane relay (`kallip-lesche`) is a separate service from
+> the agora, reached over its `/internal/*` ControlPlane API guarded by a shared
+> secret (`KALLIP_AGORA_INTERNAL_TOKEN` on the agora, `KALLIP_LESCHE_AGORA_TOKEN`
+> on the lesche). The operator's edge HOST-routes the two subdomains to the two
+> services and the session cookie carries `Domain=<parent>`
+> (`KALLIP_AGORA_SESSION_COOKIE_DOMAIN`) so login on `agora.<d>` is recognized on
+> `lesche.<d>`. `/internal` is reached by the lesche over the private network,
+> never via the public edge.
 
 ```sh
 arion -f nix/prod-composes/tagma.nix up -d
@@ -102,12 +124,15 @@ on a public host without a firewall / TLS reverse proxy in front.
 
 ### agora — `arion -f nix/prod-composes/agora.nix up -d`
 
-Brings up the agora (from `packages.kallip-agora-image`) + postgres (official
-`postgres:17.5` image). **The agora is not published** — it sits behind a
-TLS-terminating reverse proxy (per `crates/kallip-agora/src/args.rs`), which sets
-`X-Forwarded-For`; configure `KALLIP_AGORA_TRUSTED_PROXIES` to the proxy's CIDR.
-All agora env (DB url, WebAuthn RP, CORS, cookie, admin token) and the postgres
-credentials come from `.env`.
+Brings up the agora (from `packages.kallip-agora-image`) + lesche (from
+`packages.kallip-lesche-image`) + postgres (official `postgres:17.5` image) —
+the three server-side services co-located on one host. **Neither the agora nor
+the lesche is published** — both sit behind the operator's TLS-terminating edge
+proxy, which HOST-routes `agora.<d>` → `agora:7100` and `lesche.<d>` →
+`lesche:7200` (per-service subdomains) and sets `X-Forwarded-For`; configure
+`KALLIP_AGORA_TRUSTED_PROXIES` to the proxy's CIDR. All agora/lesche env (DB
+url, WebAuthn RP, CORS, cookie domain, admin token, the internal shared secret)
+and the postgres credentials come from `.env`.
 
 ```sh
 arion -f nix/prod-composes/agora.nix up -d
