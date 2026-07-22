@@ -52,7 +52,7 @@ seccomp = ["landlock"]
 
 [dev-dependencies]
 # Dev-only: the `spawn` benchmark measures per-command spawn cost for the shell
-# backend against a bare `bash -c` floor. Not pulled by runtime/daemon
+# backend against a bare `bash -c` floor. Not pulled by runtime/tagma
 # (dev-dependencies are non-transitive).
 criterion = { workspace = true }
 

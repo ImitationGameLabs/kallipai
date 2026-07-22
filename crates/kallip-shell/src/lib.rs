@@ -24,7 +24,7 @@
 //! # Platform
 //!
 //! Intentionally Unix-only: the backend (`pgroup`) uses `nix` process-group
-//! signals, and the daemon/runtime build only on Unix. There is no Windows
+//! signals, and the tagma/runtime build only on Unix. There is no Windows
 //! build path today. This is deliberate, not a gap — `#[cfg(unix)]` gating is
 //! omitted on purpose and will be added only if/when cross-platform support is
 //! actually needed.

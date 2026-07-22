@@ -1,6 +1,6 @@
 // The app has two modes, selected by the user and recorded in the persisted
 // config's `activeMode`:
-//   - "offline" connects straight to a kallip daemon on the user's machine/LAN
+//   - "offline" connects straight to a kallip tagma on the user's machine/LAN
 //     (no identity, no tagmata);
 //   - "online" is agora passkey auth + tagmata management.
 // Centralizing the derivation here keeps the gate (`appGateDecision`), the nav

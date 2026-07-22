@@ -21,7 +21,7 @@ pub struct ApprovalAction {
     /// Why the classifier deferred this call, shown to the agent via
     /// `approval_list` so it can recover the reason even after context
     /// summarization drops the original defer response. Not forwarded to the
-    /// daemon HTTP wire type (see `ApprovalEntry`).
+    /// tagma HTTP wire type (see `ApprovalEntry`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer_reason: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
@@ -80,7 +80,7 @@ pub enum ApprovalNotification {
 
 /// Store of approval requests awaiting review.
 ///
-/// Shared between the executor (enqueue, redeem, cancel) and the daemon
+/// Shared between the executor (enqueue, redeem, cancel) and the tagma
 /// routes (approve, deny). The runner drains notifications to inject into
 /// the LLM context at the start of each round.
 #[derive(Serialize, Deserialize)]

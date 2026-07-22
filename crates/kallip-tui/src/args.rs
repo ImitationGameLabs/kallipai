@@ -8,11 +8,11 @@ use clap::Parser;
     Designed for human use. For scripting, use the `kallip` CLI instead."
 )]
 pub struct Args {
-    /// Daemon URL.
+    /// Tagma URL.
     #[arg(
         long,
-        env = "KALLIP_DAEMON_URL",
+        env = "KALLIP_TAGMA_URL",
         default_value = "http://127.0.0.1:3000"
     )]
-    pub daemon_url: String,
+    pub tagma_url: String,
 }

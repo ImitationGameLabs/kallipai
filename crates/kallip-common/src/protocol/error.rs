@@ -1,6 +1,6 @@
-//! Structured API error type for daemon-client communication.
+//! Structured API error type for tagma-client communication.
 //!
-//! All daemon HTTP routes return errors as [`ApiError`], which serializes to
+//! All tagma HTTP routes return errors as [`ApiError`], which serializes to
 //! `{"error":{"message":"..."}}` via the `IntoResponse` impl (gated behind the
 //! `axum` feature). The client library deserializes this envelope to produce
 //! typed errors instead of opaque status-code checks.
@@ -13,7 +13,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Structured error returned by the daemon HTTP API.
+/// Structured error returned by the tagma HTTP API.
 ///
 /// On the wire the body is `{"error":{"message":"..."}}` with the status code
 /// carried by the HTTP response line (not duplicated in the JSON).
@@ -109,7 +109,7 @@ impl ApiError {
 
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "daemon returned {}: {}", self.status, self.message)
+        write!(f, "tagma returned {}: {}", self.status, self.message)
     }
 }
 

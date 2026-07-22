@@ -1,4 +1,4 @@
-// Generic text/event-stream parser shared by both transports. The daemon's
+// Generic text/event-stream parser shared by both transports. The tagma's
 // authenticated SSE endpoint cannot use EventSource (it cannot set an
 // Authorization header), so both clients fetch the stream and parse the framing
 // here. Each transport then decodes its own raw event shape from the `data`

@@ -1,19 +1,19 @@
 # Architecture
 
-kallipai is a **daemon-centric** agent runtime. Unlike most coding agents
-where the UI process _is_ the agent, here the daemon is the long-lived host and
+kallipai is a **tagma-centric** agent runtime. Unlike most coding agents
+where the UI process _is_ the agent, here the tagma is the long-lived host and
 all clients are thin surfaces.
 
 For planned direction, see [roadmap.md](roadmap.md).
 
-The daemon (`kallip-daemon`) is the center: it hosts multiple isolated agent
+The tagma (`kallip-tagma`) is the center: it hosts multiple isolated agent
 instances, each running as a pair of tokio tasks (agent task + bridge task)
 behind an HTTP API. Clients — the headless CLI (`kallip`), the runner
 (`kallip-run`), or the TUI (`kallip-tui`) — connect over HTTP
 and SSE, send messages, stream events,
 and disconnect without affecting running agents.
 
-## Why a daemon?
+## Why a tagma?
 
 Most coding agents are single-process: the UI hosts the LLM loop directly. This
 works for single-session coding but breaks down when you need:
@@ -24,7 +24,7 @@ works for single-session coding but breaks down when you need:
 - **Multiple client surfaces** — headless CLI for agents, runner for scripting,
   TUI for interactive use, programmatic access via the client library
 
-The daemon makes these possible. Each agent is an isolated unit behind a stable
+The tagma makes these possible. Each agent is an isolated unit behind a stable
 HTTP API. Clients connect, send messages, stream events, and disconnect without
 affecting running agents.
 
@@ -43,7 +43,7 @@ Each agent is a pair of tokio tasks with completely isolated state:
 | `AgentConfig` (workspace, skills, system prompt) | Yes        |
 | Shell backend                                    | Yes        |
 
-Agents do not share any runtime state. The daemon holds them in a `Vec` behind
+Agents do not share any runtime state. The tagma holds them in a `Vec` behind
 an `RwLock`; lookup is by UUID.
 
 ### Lifecycle
@@ -54,14 +54,14 @@ an `RwLock`; lookup is by UUID.
    agent directory to `archived/` (history and usage preserved) and drops the
    registry entry.
 
-The daemon exposes an HTTP API for managing agents and approvals. For the full
-endpoint reference, see [daemon-api.md](reference/daemon-api.md). For
+The tagma exposes an HTTP API for managing agents and approvals. For the full
+endpoint reference, see [tagma-api.md](reference/tagma-api.md). For
 authentication and the authorization matrix, see [auth.md](reference/auth.md).
 
 ## Request flow
 
 1. Client sends `POST /agents/{id}/message` with the message text.
-2. Daemon forwards the text as a `String` to the agent's `mpsc` channel.
+2. Tagma forwards the text as a `String` to the agent's `mpsc` channel.
 3. Agent task receives the input, pushes it as a turn, and calls `run_agent_rounds`.
 4. Agent composes context, streams the LLM request, and executes any tool calls.
 5. Agent emits `AgentEvent`s (reasoning, content, tool calls, finished) to its
@@ -150,9 +150,9 @@ mapping layer. It is fail-closed: unparseable or empty input is `Deny`.
 
 ### Classify presets
 
-The classify rule-set is daemon-global, chosen once at startup by the
+The classify rule-set is tagma-global, chosen once at startup by the
 `KALLIP_POLICY_PRESET` env var (see `docs/reference/env.md`) and immutable for
-the daemon's lifetime. Every agent — root and subagent — runs under the same
+the tagma's lifetime. Every agent — root and subagent — runs under the same
 preset. The preset _is_ the rule bundle (there is no separate "mode" type):
 
 - **`default`** (also when the env var is unset) — strict: catalog commands
@@ -176,8 +176,8 @@ deliberate supervisor decision stays meaningful under every preset.
 | `kallip-common`  | Shared types, slash command definitions, and protocol types. Used by all crates.              |
 | `kallip-runtime` | Agent runtime: agent loop, context management, tool dispatch, policy engine. No network code. |
 | `kallip-shell`   | Provider-neutral shell/session tools for LLM applications. Used by the runtime.               |
-| `kallip-daemon`  | HTTP server hosting agent instances. Uses `kallip-runtime` internally.                        |
+| `kallip-tagma`   | HTTP server hosting agent instances. Uses `kallip-runtime` internally.                        |
 | `kallip`         | Headless CLI for agents. Thin wrapper over `kallip-client`. No agent logic.                   |
 | `kallip-tui`     | Interactive terminal UI. Same client library, adds ratatui rendering.                         |
 | `kallip-run`     | Agent runner for scripting and automation. Streams progress to stderr, result to stdout.      |
-| `kallip-client`  | Async HTTP client for the daemon API. Used by CLI, TUI, and runner.                           |
+| `kallip-client`  | Async HTTP client for the tagma API. Used by CLI, TUI, and runner.                            |

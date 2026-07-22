@@ -3,11 +3,11 @@
 //!
 //! The tagma owns exactly one conversation with its operator, addressed as a
 //! whole: the app sends semantic operations ([`TagmaRequest`] - send a message,
-//! interrupt), and the herald translates each to a typed daemon call against the
+//! interrupt), and the herald translates each to a typed tagma call against the
 //! tagma's single persistent root agent. Which agent(s) actually do the work is
 //! purely herald-internal and invisible to both app and agora (the root agent
 //! may spawn its own sub-tree via tools). A long-lived event pump maps the
-//! daemon's SSE stream onto the agent-free [`TagmaEvent`] vocabulary.
+//! tagma's SSE stream onto the agent-free [`TagmaEvent`] vocabulary.
 //!
 //! All app<->herald traffic rides inside E2EE envelopes (AEAD); the agora reads
 //! only routing metadata. Key exchange establishes the per-conversation session
@@ -26,9 +26,11 @@ use kallip_agora_common::event::{FailoverChainExhaustion, TagmaEvent};
 use kallip_agora_common::herald::HeraldInbound;
 use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId};
 use kallip_agora_common::message::{Envelope, Participant, TagmaReply, TagmaRequest};
-use kallip_client::DaemonClient;
+use kallip_client::TagmaClient;
 use kallip_common::agentid::AgentId;
-use kallip_common::protocol::{ApiError, FailoverChainExhaustion as DaemonFailover, SseEvent};
+use kallip_common::protocol::{
+    ApiError, FailoverChainExhaustion as WireFailoverExhaustion, SseEvent,
+};
 use std::panic::AssertUnwindSafe;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -38,7 +40,7 @@ use tracing::{debug, info, warn};
 
 use crate::e2e::{self, DeviceKey, SessionKey};
 
-/// Backoff between daemon event-stream reconnect attempts.
+/// Backoff between tagma event-stream reconnect attempts.
 const PUMP_RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
 
 /// Trace id stamped on every event-pump envelope (the pump is one logical
@@ -68,12 +70,12 @@ struct Inner {
     /// Client for the long-lived herald tunnel (`GET /v1/herald/tunnel`). Has
     /// NO total timeout: `reqwest`'s `.timeout()` is a whole-response deadline
     /// that also covers the streaming body, so any finite value would kill the
-    /// tunnel mid-flight every N seconds. Same reasoning as the daemon
+    /// tunnel mid-flight every N seconds. Same reasoning as the tagma
     /// event-pump client in `main.rs` (no-timeout, load-bearing for the stream).
     http_stream: reqwest::Client,
-    daemon: DaemonClient,
+    tagma: TagmaClient,
     device: DeviceKey,
-    /// The daemon's single root agent id (the daemon owns/creates it at startup;
+    /// The tagma's single root agent id (the tagma owns/creates it at startup;
     /// the herald binds to it via `get_root_agent` and targets it for all ops).
     root_agent: AgentId,
     /// AEAD session key + both sequence counters, all under one lock so an emit
@@ -115,7 +117,7 @@ impl Herald {
         lesche_url: String,
         tagma_id: TagmaId,
         tagma_token: String,
-        daemon: DaemonClient,
+        tagma: TagmaClient,
         device: DeviceKey,
         root_agent: AgentId,
     ) -> Self {
@@ -133,7 +135,7 @@ impl Herald {
                 http_stream: reqwest::Client::builder()
                     .build()
                     .expect("build stream reqwest client"),
-                daemon,
+                tagma,
                 device,
                 root_agent,
                 crypto: Mutex::new(CryptoState {
@@ -275,7 +277,7 @@ impl Herald {
     }
 
     /// Decrypt an app op envelope, run it against the root agent, and emit the
-    /// reply. The daemon call runs under a req_id-aware panic boundary so a bug
+    /// reply. The tagma call runs under a req_id-aware panic boundary so a bug
     /// never leaves the app hanging: a panic yields an `Error` reply for the
     /// exact `req_id`.
     async fn handle_user_op(&self, envelope: Envelope) {
@@ -344,14 +346,14 @@ impl Herald {
         }
     }
 
-    /// Translate one op into a daemon call against the root agent and produce
+    /// Translate one op into a tagma call against the root agent and produce
     /// the matching reply.
     async fn execute_op(&self, request: TagmaRequest) -> Result<TagmaReply> {
         match request {
             TagmaRequest::SendMessage { req_id, text } => {
                 let resp: kallip_common::protocol::MessageResponse = self
                     .inner
-                    .daemon
+                    .tagma
                     .post_message(&self.inner.root_agent, &text)
                     .await?;
                 Ok(TagmaReply::MessageAccepted {
@@ -362,7 +364,7 @@ impl Herald {
             }
             TagmaRequest::Interrupt { req_id } => {
                 self.inner
-                    .daemon
+                    .tagma
                     .interrupt_agent(&self.inner.root_agent)
                     .await?;
                 Ok(TagmaReply::Interrupted { req_id })
@@ -395,9 +397,9 @@ impl Herald {
         }
     }
 
-    /// Map the daemon's SSE stream onto the tagma-facing event vocabulary and
-    /// emit each event. Self-reconnecting: the daemon SSE is independent of the
-    /// agora tunnel, so this loop covers daemon restarts; the agora tunnel has
+    /// Map the tagma's SSE stream onto the tagma-facing event vocabulary and
+    /// emit each event. Self-reconnecting: the tagma SSE is independent of the
+    /// agora tunnel, so this loop covers tagma restarts; the agora tunnel has
     /// its own reconnect loop in `run`. Stops cleanly when `cancel` fires (on
     /// re-KEX or shutdown).
     async fn run_pump(self, cancel: CancellationToken) {
@@ -405,7 +407,7 @@ impl Herald {
             if cancel.is_cancelled() {
                 return;
             }
-            match self.inner.daemon.event_stream(&self.inner.root_agent).await {
+            match self.inner.tagma.event_stream(&self.inner.root_agent).await {
                 Ok(mut stream) => loop {
                     tokio::select! {
                         biased;
@@ -423,17 +425,17 @@ impl Herald {
                                 }
                             }
                             Some(Err(e)) => {
-                                warn!("daemon event stream item error: {e:#}");
+                                warn!("tagma event stream item error: {e:#}");
                                 break;
                             }
                             None => {
-                                info!("daemon event stream ended; reconnecting");
+                                info!("tagma event stream ended; reconnecting");
                                 break;
                             }
                         },
                     }
                 },
-                Err(e) => warn!("open daemon event stream: {e:#}"),
+                Err(e) => warn!("open tagma event stream: {e:#}"),
             }
             if cancel.is_cancelled() {
                 return;
@@ -565,7 +567,7 @@ impl Herald {
     }
 }
 
-/// The `req_id` of a request, extracted before any fallible daemon call so a
+/// The `req_id` of a request, extracted before any fallible tagma call so a
 /// panic during the call can still be attributed to the right op.
 fn req_id_of(request: &TagmaRequest) -> u64 {
     match request {
@@ -573,7 +575,7 @@ fn req_id_of(request: &TagmaRequest) -> u64 {
     }
 }
 
-/// Map a daemon error to an op `Error` reply, preserving the daemon's HTTP
+/// Map a tagma error to an op `Error` reply, preserving the tagma's HTTP
 /// status when the error carries one (otherwise 502 bad gateway).
 fn op_err_reply(req_id: u64, e: &anyhow::Error) -> TagmaReply {
     let status = e
@@ -587,9 +589,9 @@ fn op_err_reply(req_id: u64, e: &anyhow::Error) -> TagmaReply {
     }
 }
 
-/// Map a daemon `SseEvent` to the agent-free tagma-facing vocabulary, dropping
+/// Map a tagma `SseEvent` to the agent-free tagma-facing vocabulary, dropping
 /// variants outside the app's capability set (streaming deltas, tool events,
-/// retry/failover telemetry, approval updates) with a `debug!` so a new daemon
+/// retry/failover telemetry, approval updates) with a `debug!` so a new tagma
 /// event never vanishes silently.
 fn map_sse_event(sse: &SseEvent) -> Option<TagmaEvent> {
     Some(match sse {
@@ -618,20 +620,24 @@ fn map_sse_event(sse: &SseEvent) -> Option<TagmaEvent> {
             detail: detail.clone(),
         },
         other => {
-            debug!(target: "herald.sse_drop", event = ?other, "dropping out-of-capability daemon event");
+            debug!(target: "herald.sse_drop", event = ?other, "dropping out-of-capability tagma event");
             return None;
         }
     })
 }
 
-fn map_failover_exhaustion(reason: DaemonFailover) -> FailoverChainExhaustion {
+fn map_failover_exhaustion(reason: WireFailoverExhaustion) -> FailoverChainExhaustion {
     match reason {
-        DaemonFailover::NoFailoverConfigured => FailoverChainExhaustion::NoFailoverConfigured,
-        DaemonFailover::AllBackupsExhausted => FailoverChainExhaustion::AllBackupsExhausted,
-        DaemonFailover::AllCandidatesUnbuildable => {
+        WireFailoverExhaustion::NoFailoverConfigured => {
+            FailoverChainExhaustion::NoFailoverConfigured
+        }
+        WireFailoverExhaustion::AllBackupsExhausted => FailoverChainExhaustion::AllBackupsExhausted,
+        WireFailoverExhaustion::AllCandidatesUnbuildable => {
             FailoverChainExhaustion::AllCandidatesUnbuildable
         }
-        DaemonFailover::AllCandidatesInfeasible => FailoverChainExhaustion::AllCandidatesInfeasible,
+        WireFailoverExhaustion::AllCandidatesInfeasible => {
+            FailoverChainExhaustion::AllCandidatesInfeasible
+        }
     }
 }
 
@@ -648,10 +654,10 @@ fn parse_data_payload(event: &str) -> Option<String> {
 
 #[cfg(test)]
 mod op_tests {
-    //! Operation-level tests: a mock daemon (axum) + a mock agora that captures
+    //! Operation-level tests: a mock tagma (axum) + a mock agora that captures
     //! posted envelopes, driven by the real herald. The "app" side is simulated
     //! inline (dir-0 encrypt of the request, dir-1 decrypt of the replies). This
-    //! proves the semantic channel - encrypt -> herald op -> daemon call ->
+    //! proves the semantic channel - encrypt -> herald op -> tagma call ->
     //! encrypt reply -> decrypt - without the real agora or any TS.
 
     use super::*;
@@ -671,7 +677,7 @@ mod op_tests {
 
     /// Captured outbound envelopes, in arrival order.
     type Capture = Arc<Mutex<Vec<Envelope>>>;
-    /// Recorded message texts delivered to the mock daemon.
+    /// Recorded message texts delivered to the mock tagma.
     type Messages = Arc<Mutex<Vec<String>>>;
     /// Recorded interrupt calls.
     type Interrupts = Arc<Mutex<u64>>;
@@ -699,7 +705,7 @@ mod op_tests {
     }
 
     #[derive(Clone)]
-    struct DaemonState {
+    struct TagmaState {
         messages: Messages,
         interrupts: Interrupts,
         /// Events the `/events` stream drains, in order, then ends.
@@ -721,7 +727,7 @@ mod op_tests {
         "ok"
     }
 
-    async fn spawn_daemon(state: DaemonState) -> String {
+    async fn spawn_tagma(state: TagmaState) -> String {
         let app = Router::new()
             .route("/agents/{id}/message", post(message_handler))
             .route("/agents/{id}/interrupt", post(interrupt_handler))
@@ -734,7 +740,7 @@ mod op_tests {
     }
 
     async fn message_handler(
-        State(s): State<DaemonState>,
+        State(s): State<TagmaState>,
         axum::Json(req): axum::Json<kallip_common::protocol::MessageRequest>,
     ) -> axum::Json<kallip_common::protocol::MessageResponse> {
         s.messages.lock().await.push(req.text);
@@ -744,14 +750,14 @@ mod op_tests {
         })
     }
 
-    async fn interrupt_handler(State(s): State<DaemonState>) -> StatusCode {
+    async fn interrupt_handler(State(s): State<TagmaState>) -> StatusCode {
         let mut n = s.interrupts.lock().await;
         *n += 1;
         StatusCode::ACCEPTED
     }
 
     /// Stream the queued `SseEvent`s as `data: <json>` SSE frames, then end.
-    async fn events_handler(State(s): State<DaemonState>) -> Response {
+    async fn events_handler(State(s): State<TagmaState>) -> Response {
         let mut frames: Vec<Result<Vec<u8>, std::io::Error>> = Vec::new();
         let mut queue = s.events.lock().await;
         while let Some(ev) = queue.pop_front() {
@@ -765,7 +771,7 @@ mod op_tests {
             .unwrap()
     }
 
-    /// Build a herald wired to fresh mock agora + daemon, with a pre-shared
+    /// Build a herald wired to fresh mock agora + tagma, with a pre-shared
     /// session key installed (KEX is covered by e2e tests). Returns the capture
     /// handle and the message/interrupt recorders.
     async fn setup(events: Vec<SseEvent>) -> (Herald, SessionKey, Capture, Messages, Interrupts) {
@@ -773,23 +779,23 @@ mod op_tests {
         let messages: Messages = Arc::new(Mutex::new(Vec::new()));
         let interrupts: Interrupts = Arc::new(Mutex::new(0));
         let lesche_url = spawn_lesche(capture.clone()).await;
-        let daemon_state = DaemonState {
+        let tagma_state = TagmaState {
             messages: messages.clone(),
             interrupts: interrupts.clone(),
             events: Arc::new(Mutex::new(events.into())),
         };
-        let daemon_url = spawn_daemon(daemon_state).await;
-        let daemon = DaemonClient::builder(&daemon_url)
+        let tagma_url = spawn_tagma(tagma_state).await;
+        let tagma_client = TagmaClient::builder(&tagma_url)
             .auth_token("test")
             .build()
             .unwrap();
         let device = DeviceKey::generate();
-        let tagma = TagmaId::from("tagma".to_string());
+        let tagma_id = TagmaId::from("tagma".to_string());
         let herald = Herald::new(
             lesche_url,
-            tagma,
+            tagma_id,
             "tok".to_string(),
-            daemon,
+            tagma_client,
             device,
             AgentId::from("root".to_string()),
         );
@@ -851,7 +857,7 @@ mod op_tests {
                 },
             ))
             .await;
-        // The daemon received the text.
+        // The tagma received the text.
         assert_eq!(messages.lock().await.as_slice(), &["hello"]);
         // The app got a MessageAccepted reply.
         let replies = drain_replies(&capture, &key).await;
@@ -887,17 +893,17 @@ mod op_tests {
 
     #[tokio::test]
     async fn op_before_key_exchange_is_dropped() {
-        // A herald with no session key must drop the op silently (no daemon call,
+        // A herald with no session key must drop the op silently (no tagma call,
         // no reply).
         let capture: Capture = Arc::new(Mutex::new(Vec::new()));
         let lesche_url = spawn_lesche(capture.clone()).await;
-        let daemon_state = DaemonState {
+        let tagma_state = TagmaState {
             messages: Arc::new(Mutex::new(Vec::new())),
             interrupts: Arc::new(Mutex::new(0)),
             events: Arc::new(Mutex::new(Vec::new().into())),
         };
-        let daemon_url = spawn_daemon(daemon_state).await;
-        let daemon = DaemonClient::builder(&daemon_url)
+        let tagma_url = spawn_tagma(tagma_state).await;
+        let tagma = TagmaClient::builder(&tagma_url)
             .auth_token("test")
             .build()
             .unwrap();
@@ -905,7 +911,7 @@ mod op_tests {
             lesche_url,
             TagmaId::from("tagma".to_string()),
             "tok".to_string(),
-            daemon,
+            tagma,
             DeviceKey::generate(),
             AgentId::from("root".to_string()),
         );

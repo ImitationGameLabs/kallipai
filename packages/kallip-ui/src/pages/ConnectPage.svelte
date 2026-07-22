@@ -9,12 +9,12 @@
   import Brand from "../components/Brand.svelte";
   import Banner from "../components/Banner.svelte";
 
-  let daemonUrl = $state("http://127.0.0.1:3000");
+  let tagmaUrl = $state("http://127.0.0.1:3000");
   let authToken = $state("");
   // Field-level validation (e.g. malformed URL); shown inline.
   let error = $state<string | null>(null);
   // Raw connection failure from connectDirect; classified into the banner so
-  // internal paths (e.g. `daemon request failed: /agents`) are never shown.
+  // internal paths (e.g. `tagma request failed: /agents`) are never shown.
   let connectError = $state<unknown>(null);
   const connectView = $derived(
     connectError === null ? null : classifyError(connectError),
@@ -28,7 +28,7 @@
   $effect(() => {
     const cfg = configStore.value;
     if (!seeded && cfg?.offline) {
-      daemonUrl = cfg.offline.daemonUrl;
+      tagmaUrl = cfg.offline.tagmaUrl;
       authToken = cfg.offline.authToken;
       seeded = true;
     }
@@ -52,13 +52,13 @@
     e.preventDefault();
     error = null;
     connectError = null;
-    if (!validUrl(daemonUrl.trim())) {
-      error = "Daemon URL must be a valid http(s) URL.";
+    if (!validUrl(tagmaUrl.trim())) {
+      error = "Tagma URL must be a valid http(s) URL.";
       return;
     }
     connecting = true;
     const config: OfflineModeConfig = {
-      daemonUrl: daemonUrl.trim(),
+      tagmaUrl: tagmaUrl.trim(),
       authToken,
     };
     try {
@@ -107,22 +107,22 @@
   >
     <div class="text-center space-y-1">
       <Brand size="lg" />
-      <p class="text-sm opacity-60">Connect an offline daemon</p>
+      <p class="text-sm opacity-60">Connect an offline tagma</p>
     </div>
 
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
-        Daemon URL <span class="text-error-500">*</span>
+        Tagma URL <span class="text-error-500">*</span>
       </span>
       <input
         class="input"
         autocomplete="url"
-        bind:value={daemonUrl}
+        bind:value={tagmaUrl}
         placeholder="http://127.0.0.1:3000"
         required
       />
       <span class="block text-xs opacity-50"
-        >Base URL of the kallip daemon HTTP API.</span
+        >Base URL of the kallip tagma HTTP API.</span
       >
     </label>
 
@@ -139,7 +139,7 @@
         required
       />
       <span class="block text-xs opacity-50"
-        >Operator token accepted by the daemon.</span
+        >Operator token accepted by the tagma.</span
       >
     </label>
 

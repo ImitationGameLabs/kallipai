@@ -26,7 +26,7 @@ pub struct Envelope {
 }
 
 /// Who sent an envelope. The agora is agent-free: an agent sender is attributed
-/// only to its tagma, never to a daemon-internal agent id.
+/// only to its tagma, never to a tagma-internal agent id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Participant {
@@ -51,7 +51,7 @@ pub enum TagmaRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TagmaReply {
-    /// `SendMessage` was accepted by the daemon.
+    /// `SendMessage` was accepted by the tagma.
     MessageAccepted {
         req_id: u64,
         queue_depth: usize,
@@ -60,7 +60,7 @@ pub enum TagmaReply {
     },
     /// `Interrupt` was delivered.
     Interrupted { req_id: u64 },
-    /// An op failed. `status` mirrors the daemon/agora HTTP status where one
+    /// An op failed. `status` mirrors the tagma/agora HTTP status where one
     /// applies (502 for an internal herald panic).
     Error {
         req_id: u64,

@@ -3,7 +3,7 @@
 This is the CLI an agent uses to coordinate with other agents and manage its own
 subagents and runtime concerns.
 
-All subcommands use `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_DAEMON_URL`
+All subcommands use `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_TAGMA_URL`
 (env, default `http://127.0.0.1:3000`).
 
 ## Subcommands
@@ -14,7 +14,7 @@ All subcommands use `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_DAEMON_URL`
 kallip message <ID> <MESSAGE>
 ```
 
-Sends a message to the agent's input queue. The daemon accepts the message
+Sends a message to the agent's input queue. The tagma accepts the message
 immediately (202 Accepted) and processes it asynchronously. Poll `status` to
 observe results.
 
@@ -57,11 +57,11 @@ Scoping notes (server-enforced):
 - `subagent remove` / `subagent interrupt` authorize **any ancestor**
   (`require_superior`), so the direct-subagent framing here is a CLI
   convenience, not a server-side restriction.
-- `subagent spawn` requires a non-empty `--role`; the daemon rejects subagents
+- `subagent spawn` requires a non-empty `--role`; the tagma rejects subagents
   with an empty role.
 - `subagent spawn --permission-class {normal,guest}` explicitly **downgrades**
   the subagent's FS-access class below its tier ceiling (e.g. a `normal` parent
-  spawning a read-only `guest` reviewer). The daemon rejects a value above the
+  spawning a read-only `guest` reviewer). The tagma rejects a value above the
   tier ceiling or the parent's own class with `403`. Omit to grant the tier
   ceiling. The granted class is shown by `kallip`/`GET /agents/{id}/permissions`.
 
@@ -141,7 +141,7 @@ kallip status "$CHILD"
 
 ## Multi-agent orchestration
 
-Agents use this CLI to manage their own subagents. A single daemon can host
+Agents use this CLI to manage their own subagents. A single tagma can host
 agents across multiple projects simultaneously.
 
 ### Parallel subagents
@@ -174,7 +174,7 @@ kallip subagent interrupt $CHILD
 
 ## Environment variables
 
-`KALLIP_AUTH_TOKEN` (required) and `KALLIP_DAEMON_URL` (default `http://127.0.0.1:3000`) are the primary variables. For the complete reference including LLM provider configuration and agent tuning parameters, see [env.md](env.md).
+`KALLIP_AUTH_TOKEN` (required) and `KALLIP_TAGMA_URL` (default `http://127.0.0.1:3000`) are the primary variables. For the complete reference including LLM provider configuration and agent tuning parameters, see [env.md](env.md).
 
 ## Client library
 
@@ -183,13 +183,13 @@ For Rust programs that need more control than the CLI offers, the
 few operator/library-only paths (event streaming, subagent spawn, root lookup):
 
 ```rust
-use kallip_client::DaemonClient;
+use kallip_client::TagmaClient;
 
-let client = DaemonClient::builder("http://127.0.0.1:3000")
+let client = TagmaClient::builder("http://127.0.0.1:3000")
     .auth_token(token)
     .build();
 
-// The daemon owns a single root agent (eagerly created at startup); fetch it.
+// The tagma owns a single root agent (eagerly created at startup); fetch it.
 let root = client.get_root_agent().await?;
 let id = root.id;
 
@@ -199,11 +199,11 @@ client.post_message(&id, "Review src/main.rs").await?;
 // Stream events (CLI exposes status/activity instead), check status.
 let mut stream = client.event_stream(&id).await?;
 let usage = client.agent_status(&id).await?;
-// Note: the root cannot be removed (daemon-managed); `remove_agent` is for
+// Note: the root cannot be removed (tagma-managed); `remove_agent` is for
 // subagents only.
 ```
 
-The root agent is daemon-managed: it is created once at startup from env vars
+The root agent is tagma-managed: it is created once at startup from env vars
 (`KALLIP_WORKSPACE_ROOT`, `KALLIP_MAX_TOOL_ROUNDS`,
 `KALLIP_ROOT_AGENT_PERMISSION_CLASS`; see [env.md](env.md)) and surfaced via
 `get_root_agent()`. `spawn()` is for **subagents** only — it requires

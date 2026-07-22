@@ -1,6 +1,6 @@
 // Error taxonomy. Two distinct failure families, kept apart on purpose:
 //
-// - KallipError wraps an ApiError and represents a structured daemon/agora error
+// - KallipError wraps an ApiError and represents a structured tagma/agora error
 //   (the {"error":{"message":...}} envelope). The HTTP status rides the response
 //   line, not the JSON body, so it is carried alongside the message.
 //

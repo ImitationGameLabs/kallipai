@@ -36,24 +36,24 @@ struct Inner {
     auth_token: Option<String>,
 }
 
-/// Async client for the kallip daemon HTTP API.
+/// Async client for the kallip tagma HTTP API.
 #[derive(Clone)]
-pub struct DaemonClient {
+pub struct TagmaClient {
     inner: Arc<Inner>,
 }
 
-impl DaemonClient {
-    /// Start building a [`DaemonClient`].
+impl TagmaClient {
+    /// Start building a [`TagmaClient`].
     ///
-    /// `base_url` is required and is the daemon's HTTP root (e.g.
+    /// `base_url` is required and is the tagma's HTTP root (e.g.
     /// `http://127.0.0.1:3000`).  Chain `.auth_token()` and/or
     /// `.http_client()` to override defaults, then call `.build()`.
     ///
-    /// The default HTTP client is created lazily in [`DaemonClientBuilder::build`]
+    /// The default HTTP client is created lazily in [`TagmaClientBuilder::build`]
     /// so that callers who override it via `.http_client()` never pay the cost
     /// of constructing the default `reqwest::Client`.
-    pub fn builder(base_url: &str) -> DaemonClientBuilder {
-        DaemonClientBuilder {
+    pub fn builder(base_url: &str) -> TagmaClientBuilder {
+        TagmaClientBuilder {
             base_url: base_url.trim_end_matches('/').to_owned(),
             auth_token: None,
             http: None,
@@ -62,16 +62,16 @@ impl DaemonClient {
 
     /// Construct a client from environment variables.
     ///
-    /// Reads `KALLIP_DAEMON_URL` (default: `http://127.0.0.1:3000`) and
+    /// Reads `KALLIP_TAGMA_URL` (default: `http://127.0.0.1:3000`) and
     /// `KALLIP_AUTH_TOKEN` (required). Returns an error if the token is
     /// missing, with guidance tailored to common scenarios:
     ///
-    /// - **Agent running inside the daemon**: the token is embedded
+    /// - **Agent running inside the tagma**: the token is embedded
     ///   automatically in the spawned agent's environment, this should not happen.
-    /// - **Operator user**: copy the token from the daemon startup output and
+    /// - **Operator user**: copy the token from the tagma startup output and
     ///   `export KALLIP_AUTH_TOKEN=<token>`.
     /// - **Automation**: set `KALLIP_AUTH_TOKEN` to the same value as the
-    ///   daemon's `KALLIP_OPERATOR_TOKEN`.
+    ///   tagma's `KALLIP_OPERATOR_TOKEN`.
     pub fn from_env() -> Result<Self> {
         let (url, token) = read_env_config()?;
         Self::builder(&url).auth_token(token).build()
@@ -147,14 +147,14 @@ impl DaemonClient {
 
     // -- Agent lifecycle ------------------------------------------------------
 
-    /// Spawn a new agent instance on the daemon.
+    /// Spawn a new agent instance on the tagma.
     pub async fn spawn(&self, req: CreateAgentRequest) -> Result<AgentId> {
         let resp: CreateAgentResponse = self
             .handle_response(
                 self.with_auth(self.inner.http.post(self.url("/agents")).json(&req))
                     .send()
                     .await
-                    .context("failed to connect to daemon")?,
+                    .context("failed to connect to tagma")?,
                 "failed to parse response",
             )
             .await?;
@@ -188,15 +188,15 @@ impl DaemonClient {
         .await
     }
 
-    /// Fetch the daemon's single root agent. The daemon eagerly creates one
+    /// Fetch the tagma's single root agent. The tagma eagerly creates one
     /// root at startup (see `ensure_root_agent`), so this always succeeds once
-    /// the daemon is accepting connections.
+    /// the tagma is accepting connections.
     pub async fn get_root_agent(&self) -> Result<AgentSummary> {
         self.handle_response(
             self.with_auth(self.inner.http.get(self.url("/agents/root")))
                 .send()
                 .await
-                .context("failed to connect to daemon")?,
+                .context("failed to connect to tagma")?,
             "failed to parse response",
         )
         .await
@@ -211,7 +211,7 @@ impl DaemonClient {
         }
         let resp: ListAgentsResponse = self
             .handle_response(
-                req.send().await.context("failed to connect to daemon")?,
+                req.send().await.context("failed to connect to tagma")?,
                 "failed to parse response",
             )
             .await?;
@@ -234,7 +234,7 @@ impl DaemonClient {
             )
             .send()
             .await
-            .context("failed to connect to daemon")?,
+            .context("failed to connect to tagma")?,
             "failed to parse response",
         )
         .await
@@ -252,27 +252,27 @@ impl DaemonClient {
             )
             .send()
             .await
-            .context("failed to connect to daemon")?,
+            .context("failed to connect to tagma")?,
         )
         .await?;
         Ok(())
     }
 
     /// Remove an agent instance.
-    /// Requires superior-level auth if the daemon enforces it.
+    /// Requires superior-level auth if the tagma enforces it.
     pub async fn remove_agent(&self, id: &AgentId) -> Result<()> {
         self.ensure_success(
             self.with_auth(self.inner.http.delete(self.url(&format!("/agents/{id}"))))
                 .send()
                 .await
-                .context("failed to connect to daemon")?,
+                .context("failed to connect to tagma")?,
         )
         .await?;
         Ok(())
     }
 
     /// Interrupt the current agent operation gracefully.
-    /// Requires superior-level auth if the daemon enforces it.
+    /// Requires superior-level auth if the tagma enforces it.
     pub async fn interrupt_agent(&self, id: &AgentId) -> Result<()> {
         self.ensure_success(
             self.with_auth(
@@ -282,7 +282,7 @@ impl DaemonClient {
             )
             .send()
             .await
-            .context("failed to connect to daemon")?,
+            .context("failed to connect to tagma")?,
         )
         .await?;
         Ok(())
@@ -326,7 +326,7 @@ impl DaemonClient {
             )
             .send()
             .await
-            .context("failed to connect to daemon")?,
+            .context("failed to connect to tagma")?,
         )
         .await?;
         Ok(())
@@ -342,7 +342,7 @@ impl DaemonClient {
             self.with_auth(req)
                 .send()
                 .await
-                .context("failed to connect to daemon")?,
+                .context("failed to connect to tagma")?,
             "failed to parse response",
         )
         .await
@@ -355,7 +355,7 @@ impl DaemonClient {
             self.with_auth(req)
                 .send()
                 .await
-                .context("failed to connect to daemon")?,
+                .context("failed to connect to tagma")?,
             "failed to parse response",
         )
         .await
@@ -633,7 +633,7 @@ impl DaemonClient {
     // Token budget
     // -----------------------------------------------------------------------
 
-    /// Get the daemon-wide token budget status.
+    /// Get the tagma-wide token budget status.
     pub async fn get_token_budget(&self) -> Result<TokenBudgetResponse> {
         self.handle_response(
             self.with_auth(self.inner.http.get(self.url("/budget")))
@@ -645,7 +645,7 @@ impl DaemonClient {
         .await
     }
 
-    /// Adjust the daemon-wide token budget by a signed delta.
+    /// Adjust the tagma-wide token budget by a signed delta.
     ///
     /// Positive delta increases, negative delta decreases.
     pub async fn adjust_token_budget(&self, delta: i64) -> Result<TokenBudgetResponse> {
@@ -664,9 +664,9 @@ impl DaemonClient {
         .await
     }
 
-    /// Set the remaining daemon-wide token budget.
+    /// Set the remaining tagma-wide token budget.
     ///
-    /// The daemon computes `new_total = consumed + value`. Use `value == 0`
+    /// The tagma computes `new_total = consumed + value`. Use `value == 0`
     /// to pause all agents (remaining = 0 triggers immediate budget exceeded).
     pub async fn set_token_budget(&self, value: u64) -> Result<TokenBudgetResponse> {
         self.handle_response(
@@ -687,19 +687,19 @@ impl DaemonClient {
 
 // -- Env helpers ---------------------------------------------------------------
 
-/// Read `KALLIP_DAEMON_URL` and `KALLIP_AUTH_TOKEN` from the
+/// Read `KALLIP_TAGMA_URL` and `KALLIP_AUTH_TOKEN` from the
 /// environment.  Returns `(url, token)`.
 fn read_env_config() -> Result<(String, String)> {
-    let url = std::env::var("KALLIP_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".into());
+    let url = std::env::var("KALLIP_TAGMA_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".into());
     let token = std::env::var("KALLIP_AUTH_TOKEN").context(concat!(
         "KALLIP_AUTH_TOKEN is not set.\n",
         "\n",
         "How to obtain the token:\n",
-        "- Agent (inside daemon): token is embedded automatically, check daemon setup.\n",
-        "- Operator user: copy from daemon startup output, then:\n",
+        "- Agent (inside tagma): token is embedded automatically, check tagma setup.\n",
+        "- Operator user: copy from tagma startup output, then:\n",
         "    export KALLIP_AUTH_TOKEN=<token>\n",
-        "- Automation: start the daemon with a preset operator token:\n",
-        "    KALLIP_OPERATOR_TOKEN=<secret> kallip-daemon\n",
+        "- Automation: start the tagma with a preset operator token:\n",
+        "    KALLIP_OPERATOR_TOKEN=<secret> kallip-tagma\n",
         "  then use the same value for the client:\n",
         "    KALLIP_AUTH_TOKEN=<secret> kallip <command>",
     ))?;
@@ -708,19 +708,19 @@ fn read_env_config() -> Result<(String, String)> {
 
 // -- Builder ------------------------------------------------------------------
 
-/// Fluent builder for [`DaemonClient`].
+/// Fluent builder for [`TagmaClient`].
 ///
-/// Created via [`DaemonClient::builder`].  `base_url` is required (passed to
+/// Created via [`TagmaClient::builder`].  `base_url` is required (passed to
 /// `builder()`); `auth_token` and `http_client` are optional with sensible
 /// defaults.
-pub struct DaemonClientBuilder {
+pub struct TagmaClientBuilder {
     base_url: String,
     auth_token: Option<String>,
     http: Option<reqwest::Client>,
 }
 
-impl DaemonClientBuilder {
-    /// Set the bearer token for authenticating with the daemon.
+impl TagmaClientBuilder {
+    /// Set the bearer token for authenticating with the tagma.
     pub fn auth_token(mut self, token: impl Into<String>) -> Self {
         self.auth_token = Some(token.into());
         self
@@ -735,18 +735,18 @@ impl DaemonClientBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`DaemonClient`].
+    /// Consume the builder and produce a [`TagmaClient`].
     ///
     /// If no custom HTTP client was provided via `.http_client()`, a default
     /// `reqwest::Client` is constructed here.  Construction can fail if the
     /// system CA store is missing; callers that need to avoid this should
     /// supply their own client via `.http_client()`.
-    pub fn build(self) -> Result<DaemonClient> {
+    pub fn build(self) -> Result<TagmaClient> {
         let http = match self.http {
             Some(client) => client,
             None => reqwest::ClientBuilder::new().build()?,
         };
-        Ok(DaemonClient {
+        Ok(TagmaClient {
             inner: Arc::new(Inner {
                 base_url: self.base_url,
                 http,
@@ -758,7 +758,7 @@ impl DaemonClientBuilder {
 
 // -- Wire-format helpers for structured error deserialization ------------------
 
-/// JSON envelope matching the daemon's error response: `{"error":{"message":"..."}}`.
+/// JSON envelope matching the tagma's error response: `{"error":{"message":"..."}}`.
 #[derive(serde::Deserialize)]
 struct Envelope {
     error: Body,

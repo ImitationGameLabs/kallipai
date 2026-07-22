@@ -2,7 +2,7 @@ import type { ApprovalStatus } from "./approvals.ts";
 
 // The unified event union. One variant per semantically distinct thing that can
 // happen, abstracting away which transport produced it. Variant discriminators
-// are camelCase, mirroring the daemon SseEvent serde tag (rename_all =
+// are camelCase, mirroring the tagma SseEvent serde tag (rename_all =
 // "camelCase"), so the direct client's sseEventToDomain is close to a cast.
 //
 // Over agora only a small subset ever fires (finished, busy, error, and a

@@ -1,7 +1,7 @@
-// Persisted app mode + offline daemon credentials. Online (agora) auth is a
+// Persisted app mode + offline tagma credentials. Online (agora) auth is a
 // browser session cookie (see @kallipai/kallip-agora-client/http.ts), so it is
 // never persisted here -- the only stored state is which mode is active and the
-// offline daemon creds. Both are retained across mode switches so switching is
+// offline tagma creds. Both are retained across mode switches so switching is
 // non-destructive (re-auth-free in both directions); flipping the active mode
 // never destroys the other side's credentials.
 //
@@ -17,9 +17,9 @@ import type { AppMode } from "./mode.ts";
 import type { ConfigStorage } from "./storage.ts";
 import { localStorageConfigStorage } from "./storage.ts";
 
-/** Offline daemon credentials. Online auth has no stored equivalent. */
+/** Offline tagma credentials. Online auth has no stored equivalent. */
 export interface OfflineModeConfig {
-  readonly daemonUrl: string;
+  readonly tagmaUrl: string;
   readonly authToken: string;
 }
 
@@ -73,11 +73,21 @@ function safeParse(raw: string): unknown {
 }
 
 // Structural guard: a value is a PersistedConfig iff it carries a known
-// activeMode. `offline` (optional) is trusted as-is once the envelope is
-// recognized -- the connect path re-validates creds by actually dialing the
-// daemon.
+// activeMode and, when `offline` creds are present, they have the expected
+// string shape. A legacy shape (e.g. the pre-rename `daemonUrl` field) fails
+// here and is wiped per the rule above, rather than loading with an undefined
+// URL; the connect path still re-validates creds by actually dialing the tagma.
 function isValid(value: unknown): value is PersistedConfig {
   if (typeof value !== "object" || value === null) return false;
   const mode = (value as { activeMode?: unknown }).activeMode;
-  return mode === "online" || mode === "offline";
+  if (mode !== "online" && mode !== "offline") return false;
+  const offline = (value as { offline?: unknown }).offline;
+  if (offline !== undefined) {
+    if (typeof offline !== "object" || offline === null) return false;
+    const o = offline as { tagmaUrl?: unknown; authToken?: unknown };
+    if (typeof o.tagmaUrl !== "string" || typeof o.authToken !== "string") {
+      return false;
+    }
+  }
+  return true;
 }

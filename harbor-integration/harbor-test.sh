@@ -67,7 +67,7 @@ if [[ "$_use_cargo" == "1" ]]; then
   rm -rf "$tarball_dir"
   mkdir -p "$tarball_dir/bin"
 
-  binaries=(kallip kallip-daemon kallip-run kallip-tui)
+  binaries=(kallip kallip-tagma kallip-run kallip-tui)
   for bin in "${binaries[@]}"; do
     if [[ ! -f "target/release/$bin" ]]; then
       echo "error: expected binary not found: target/release/$bin" >&2

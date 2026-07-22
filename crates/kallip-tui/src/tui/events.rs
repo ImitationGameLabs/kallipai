@@ -4,7 +4,7 @@ use kallip_common::tokens::format_tokens_m;
 use super::{App, AppMode, ChatLine};
 
 impl App {
-    /// Handle an SSE event from the daemon.
+    /// Handle an SSE event from the tagma.
     ///
     /// Returns `true` when the event is a streaming content/reasoning delta —
     /// the high-frequency case the main loop coalesces into a frame-rate-capped
@@ -13,9 +13,9 @@ impl App {
     /// by the time this returns; a `true` only defers the *draw* to the frame
     /// cap, so the final state is always correct.
     pub fn handle_sse_event(&mut self, event: SseEvent) -> bool {
-        // A "boundary" marks a point where the daemon can interject a queued
+        // A "boundary" marks a point where the tagma can interject a queued
         // prompt: a `ToolCall` (the assistant committed tool calls, ending this
-        // streamed message) or a terminal event. The daemon's
+        // streamed message) or a terminal event. The tagma's
         // `drain_interjections` runs at the top of the next round iteration
         // (after the current tool batch), so flushing here lands the prompt in
         // time. Transient `Failover`/`Retrying` are within-stream retries, not

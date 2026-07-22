@@ -1,6 +1,6 @@
 // Online-channel transcript model + reducer. This is the independent online
 // path: NOT @kallipai/kallip-common's TranscriptState (which is shaped by the
-// daemon's full event vocabulary + streaming). The agora path has no streaming
+// tagma's full event vocabulary + streaming). The agora path has no streaming
 // (the herald drops deltas), so each `assistant_content` / `finished` is a
 // complete message, appended as its own line.
 //

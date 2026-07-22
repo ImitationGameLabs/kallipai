@@ -32,23 +32,23 @@ import {
   wireStatusToCommon,
 } from "./types.ts";
 
-export interface DaemonClientOptions {
+export interface TagmaClientOptions {
   readonly baseUrl: string;
   readonly authToken?: string;
 }
 
 /**
- * Low-level HTTP client for the kallip daemon. TypeScript counterpart to the
- * Rust `kallip-client` crate's `DaemonClient`. Browser-first: uses `fetch` with
+ * Low-level HTTP client for the kallip tagma. TypeScript counterpart to the
+ * Rust `kallip-client` crate's `TagmaClient`. Browser-first: uses `fetch` with
  * no Node globals. Throws {@link KallipError} on non-2xx (parsed from the
  * `{"error":{"message":...}}` envelope) and {@link TransportError} on network
  * failures.
  */
-export class DaemonClient {
+export class TagmaClient {
   private readonly base: string;
   private readonly token?: string;
 
-  constructor(opts: DaemonClientOptions) {
+  constructor(opts: TagmaClientOptions) {
     this.base = opts.baseUrl.replace(/\/+$/, "");
     this.token = opts.authToken;
   }
@@ -72,7 +72,7 @@ export class DaemonClient {
         ),
       });
     } catch (cause) {
-      throw new TransportError(`daemon request failed: ${path}`, { cause });
+      throw new TransportError(`tagma request failed: ${path}`, { cause });
     }
     if (!resp.ok) {
       throw new KallipError({
@@ -109,7 +109,7 @@ export class DaemonClient {
     });
   }
 
-  /** Fetch the daemon's single root agent (always present after daemon startup). */
+  /** Fetch the tagma's single root agent (always present after tagma startup). */
   getRootAgent(): Promise<WireAgentSummary> {
     return this.json<WireAgentSummary>("/agents/root");
   }

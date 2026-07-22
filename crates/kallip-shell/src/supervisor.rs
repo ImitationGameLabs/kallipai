@@ -3,7 +3,7 @@
 //! Each background task is its own `bash` process writing merged stdout/stderr
 //! to a file; a watcher task polls it to detect exit, run a stall watchdog
 //! (quiescence + tail regex) and a size watchdog, and drive a two-phase kill
-//! on cancel. Modeled on the daemon's agent registry (`state.rs`).
+//! on cancel. Modeled on the tagma's agent registry (`state.rs`).
 
 use std::collections::HashMap;
 use std::ffi::OsString;

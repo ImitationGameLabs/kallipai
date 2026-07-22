@@ -15,11 +15,11 @@ Harbor benchmarking adapter for [kallipai](../). Allows running kallip inside Ha
 The adapter runs the full kallip stack **inside the Harbor container**:
 
 ```
-install()  →  upload tarball → unpack → start daemon (background)
-run()      →  kallip-run --prompt "$instruction" (connects to localhost daemon)
+install()  →  upload tarball → unpack → start tagma (background)
+run()      →  kallip-run --prompt "$instruction" (connects to localhost tagma)
 ```
 
-Both `kallip-daemon` and `kallip-run` run inside the container so the agent has direct filesystem access to benchmark task files.
+Both `kallip-tagma` and `kallip-run` run inside the container so the agent has direct filesystem access to benchmark task files.
 
 ## Setup
 
@@ -45,11 +45,11 @@ export KALLIP_PACKAGE_PATH=./result/kallip-*-linux-x86_64.tar.gz
 
 **`kallip-tarball`** (always installed):
 
-| Binary          | Purpose                                       |
-| --------------- | --------------------------------------------- |
-| `kallip`        | Headless CLI for agent-to-agent orchestration |
-| `kallip-daemon` | HTTP server hosting agent instances           |
-| `kallip-run`    | One-shot runner for scripting/benchmarking    |
+| Binary         | Purpose                                       |
+| -------------- | --------------------------------------------- |
+| `kallip`       | Headless CLI for agent-to-agent orchestration |
+| `kallip-tagma` | HTTP server hosting agent instances           |
+| `kallip-run`   | One-shot runner for scripting/benchmarking    |
 
 **`aifed-tarball`** (opt-in via `AIFED_PACKAGE_PATH`; aifed is kallip's intended file-editing dependency — runtime adoption pending — `x86_64-linux` only):
 
@@ -75,7 +75,7 @@ Set these on the **host** before running Harbor. They are forwarded into the con
 \* Set the key matching your provider.
 
 Note: tasks run uncapped (no `max_tool_rounds`); the agent runs until it
-finishes or the daemon token budget is exhausted, so complex tasks are not cut
+finishes or the tagma token budget is exhausted, so complex tasks are not cut
 off mid-completion.
 
 ## Running
@@ -98,11 +98,11 @@ export KALLIP_LLM_DEEPSEEK_API_KEY=<your-key>
 ## How It Works
 
 1. Harbor creates a container for the benchmark task
-2. `install()` uploads the tarball, unpacks it to `/opt/kallip`, starts the daemon as a background process
+2. `install()` uploads the tarball, unpacks it to `/opt/kallip`, starts the tagma as a background process
 3. `run()` invokes `kallip-run --prompt <instruction>` — it prints the final assistant reply to stdout and a completion hint (agent id + how to continue) to stderr. Pass `--verbose` to the runner for the full reasoning/tool log.
 4. `kallip-run` exits with semantic codes: `0` success, `1` error, `2` max rounds, `3` cancelled, `4` budget exceeded
 5. Harbor evaluates the result against the task's test suite
 
 ## Limitations
 
-- **No `/health` endpoint**: Health checking uses an authenticated `GET /budget` request. A future daemon release may add an unauthenticated health endpoint.
+- **No `/health` endpoint**: Health checking uses an authenticated `GET /budget` request. A future tagma release may add an unauthenticated health endpoint.

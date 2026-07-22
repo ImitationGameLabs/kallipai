@@ -1,4 +1,4 @@
-//! SSE wire-format events for daemon-to-client streaming.
+//! SSE wire-format events for tagma-to-client streaming.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,7 @@ use crate::approval::ApprovalStatus;
 ///
 /// Defined here (not in the runtime) because it is part of the serialized event contract, so the
 /// wire crate must own the taxonomy — the same shape as [`ApprovalStatus`], which is shared
-/// between the runtime and the daemon API. Fieldless and `Copy` (common has no `anyhow`); the
+/// between the runtime and the tagma API. Fieldless and `Copy` (common has no `anyhow`); the
 /// trigger text rides in a separate `detail: String` on the carrying event. Typed here (rather
 /// than a free-text `reason: String` like [`SseEvent::Failover`]) because the exhaustion *states*
 /// are enumerable and clients branch on them, whereas a failover hop's cause is an opaque
@@ -58,7 +58,7 @@ impl std::fmt::Display for FailoverChainExhaustion {
     }
 }
 
-/// Wire-format event for SSE transport (daemon to client).
+/// Wire-format event for SSE transport (tagma to client).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SseEvent {

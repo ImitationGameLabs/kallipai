@@ -99,7 +99,7 @@
         <a
           href="/connect"
           class="font-medium text-primary-500 hover:underline cursor-pointer"
-          >Connect a daemon</a
+          >Connect a tagma</a
         >
         to send.
       </div>

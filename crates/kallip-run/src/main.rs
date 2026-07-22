@@ -1,13 +1,13 @@
-//! kallip-run: post a prompt to a daemon agent and print its reply.
+//! kallip-run: post a prompt to a tagma agent and print its reply.
 //!
-//! Non-interactive CLI that targets the daemon's single root agent (or an
+//! Non-interactive CLI that targets the tagma's single root agent (or an
 //! explicit agent via `--agent`), posts the prompt, prints the final assistant
 //! reply to stdout, and exits with a semantic exit code. Pass `--verbose` to
 //! stream the agent's procedure (reasoning, tool calls) to stderr, or `--json`
 //! for a single machine-readable object (`agentId`, `assistant`, `exit`).
 //! Designed for scripted and automated workflows.
 //!
-//! The target is the daemon-owned singleton root (or the `--agent` id); it
+//! The target is the tagma-owned singleton root (or the `--agent` id); it
 //! persists after the run. Per-run isolation is no longer provided — separate
 //! runs share the root's context. For an isolated run, point `--agent` at a
 //! dedicated subagent.
@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::Parser;
 use futures_util::{Stream, StreamExt};
-use kallip_client::DaemonClient;
+use kallip_client::TagmaClient;
 use kallip_common::agentid::AgentId;
 use kallip_common::protocol::SseEvent;
 
@@ -31,7 +31,7 @@ struct Cli {
     /// The prompt to send to the agent.
     #[arg(long)]
     prompt: String,
-    /// Target an explicit agent by id instead of the daemon's root agent.
+    /// Target an explicit agent by id instead of the tagma's root agent.
     #[arg(long)]
     agent: Option<AgentId>,
     /// Emit a single JSON object on stdout: {agentId, assistant, exit}.
@@ -39,7 +39,7 @@ struct Cli {
     #[arg(long)]
     json: bool,
     /// Stream the agent's full procedure (reasoning, tool calls, results) to
-    /// stderr. Off by default — the daemon persists execution history. With
+    /// stderr. Off by default — the tagma persists execution history. With
     /// --json, the procedure streams to stderr; the JSON object is unchanged.
     #[arg(long)]
     verbose: bool,
@@ -84,15 +84,15 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
-    let client = DaemonClient::from_env()?;
+    let client = TagmaClient::from_env()?;
 
     // Output shape is driven by two explicit flags (no TTY auto-detection):
     // the default is minimal — the final assistant reply on stdout plus a
     // completion hint on stderr.
     let (json, verbose) = (cli.json, cli.verbose);
 
-    // Resolve the target agent: an explicit `--agent` id, or the daemon's
-    // singleton root. Subscribe BEFORE posting: the daemon's SSE channel does
+    // Resolve the target agent: an explicit `--agent` id, or the tagma's
+    // singleton root. Subscribe BEFORE posting: the tagma's SSE channel does
     // not replay past events to late subscribers, so a warm agent could emit
     // before we connect.
     let id = match &cli.agent {
@@ -169,12 +169,12 @@ struct JsonObject<'a> {
 ///   unless `json` is set, in which case it is carried in the JSON object
 ///   emitted by [`run`].
 /// - `verbose` streams the procedure (`[reasoning]` / `[tool]` / …) to stderr
-///   in any mode; without it the procedure is suppressed (the daemon persists
+///   in any mode; without it the procedure is suppressed (the tagma persists
 ///   execution history).
 /// - Diagnostics (warnings, errors) always go to stderr.
 ///
 /// Defaults to [`RunExit::Error`] if the stream closes without a terminal
-/// event (daemon crash, network drop). Generic over the stream so [`run`] can
+/// event (tagma crash, network drop). Generic over the stream so [`run`] can
 /// pass the already-open stream without naming the concrete `JsonEventStream`
 /// type.
 async fn consume_stream<S, E>(mut stream: S, json: bool, verbose: bool) -> Outcome
@@ -317,7 +317,7 @@ where
                     assistant,
                 };
             }
-            // The round was interrupted; the daemon-side agent stays alive, but this
+            // The round was interrupted; the tagma-side agent stays alive, but this
             // one-shot run will not produce a `Finished`. Treat like Cancelled.
             SseEvent::Interrupted => {
                 end_reasoning(&mut in_reasoning);
@@ -348,7 +348,7 @@ where
         }
     }
 
-    // The stream ended without a terminal event (daemon crash, network drop).
+    // The stream ended without a terminal event (tagma crash, network drop).
     end_reasoning(&mut in_reasoning);
     eprintln!("stream ended without a terminal event");
 

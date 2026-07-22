@@ -166,7 +166,7 @@ pub(super) static READ_ONLY_CATALOG: &[CommandSpec] = &[
     // process: it changes the cwd of a subprocess that dies immediately, so no
     // state persists. A future persistent-session mode must re-evaluate.
     ro!("cd"),
-    // --- Agent CLI (approval/management; auth handled by the daemon) ---
+    // --- Agent CLI (approval/management; auth handled by the tagma) ---
     ro!("kallip"),
     // --- Commands whose flags/subcommands can mutate or execute ---
     CommandSpec {

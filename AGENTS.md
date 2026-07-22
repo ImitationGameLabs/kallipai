@@ -13,20 +13,20 @@ The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem 
 ├── flake.nix                  # Flake entry point
 ├── crates/                    # Rust workspace members
 │   ├── kallip-common/    # Shared types and command parsing
-│   ├── kallip-runtime/   # Agent runtime: agent context, policy, tool dispatch (daemon-only)
+│   ├── kallip-runtime/   # Agent runtime: agent context, policy, tool dispatch (tagma-only)
 │   ├── kallip-shell/     # Reusable shell/session tools for LLM applications
-│   ├── kallip/           # Headless CLI for agent (daemon client)
+│   ├── kallip/           # Headless CLI for agent (tagma client)
 │   ├── kallip-tui/       # Interactive TUI client
-│   ├── kallip-daemon/    # HTTP API server hosting multiple agent instances
+│   ├── kallip-tagma/    # HTTP API server hosting multiple agent instances
 │   ├── kallip-run/       # Agent runner for scripting and benchmarking
-│   └── kallip-client/    # Daemon client library
+│   └── kallip-client/    # Tagma client library
 ├── docs/                      # Project documentation
-│   ├── architecture.md       # System architecture, daemon design, policy
+│   ├── architecture.md       # System architecture, tagma design, policy
 │   ├── context-management.md # Agentic context management design
 │   ├── agent-wizards/        # Step-by-step guides for common agent tasks
 │   └── reference/            # Reference documentation
 │       ├── auth.md           # Authentication and authorization
-│       ├── daemon-api.md     # HTTP API endpoints
+│       ├── tagma-api.md     # HTTP API endpoints
 │       ├── env.md            # Environment variable reference
 │       ├── kallip.md     # `kallip` headless CLI for agent
 │       └── kallip-run.md # `kallip-run` agent runner for scripting

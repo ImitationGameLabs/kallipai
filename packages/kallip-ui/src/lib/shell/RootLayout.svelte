@@ -32,8 +32,8 @@
   const mode = $derived(modeOf(configStore.value));
 
   // Boot once the config has loaded. The two modes need different boot:
-  //   - offline: reconnect the daemon straight away (offline's whole point is
-  //     the daemon; on failure surface the error and the connect page will
+  //   - offline: reconnect the tagma straight away (offline's whole point is
+  //     the tagma; on failure surface the error and the connect page will
   //     prompt);
   //   - online: resolve the agora session so the gate reads a settled `user`.
   // onMount (not a reactive $effect) so this runs exactly once, with no
@@ -106,8 +106,8 @@
 
   // The banner shows a classified, human-readable message; the full error (with
   // cause chain) is mirrored to the console for diagnostics. Offline mode only
-  // contacts the daemon (boot reconnect + explicit actions), so this fires on a
-  // mid-session daemon failure -- never on an online landing.
+  // contacts the tagma (boot reconnect + explicit actions), so this fires on a
+  // mid-session tagma failure -- never on an online landing.
   const errorView = $derived(
     sessionStore.error ? classifyError(sessionStore.error) : null,
   );

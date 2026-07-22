@@ -1,0 +1,60 @@
+[package]
+name = "kallip-tagma"
+description = "Agent-team (tagma) HTTP API server hosting multiple agent instances"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallip-runtime = { workspace = true, features = ["landlock", "seccomp"] }
+kallip-common = { workspace = true, features = ["axum"] }
+just-llm-client = { workspace = true }
+reqwest = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+axum = { workspace = true }
+tower-http = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+
+[features]
+default = []
+# End-to-end sandbox integration test (tests/sandbox.rs): spawns the real
+# tagma + kallip-run binaries with a scripted wiremock LLM and asserts on
+# agent history + filesystem state across Guest/Normal/dirlock scenarios.
+# Linux-only; off by default so the normal `cargo test` checklist is
+# unaffected. Enables the landlock feature on kallip-shell so the
+# landlock-availability skip probe (`ensure_supported`) is available.
+sandbox-test = ["kallip-shell/landlock"]
+
+# The sandbox integration test is a black-box integration test (subprocesses +
+# filesystem, no crate-private imports), so it lives under `tests/` rather than
+# a `#[cfg(test)]` module in `src/`. `required-features` skips building the
+# target entirely when `sandbox-test` is off, instead of compiling an empty binary.
+[[test]]
+name = "sandbox"
+required-features = ["sandbox-test"]
+
+[dev-dependencies]
+# Wire-level assertion that the resolved User-Agent reaches the provider. reqwest applies client
+# default headers (including User-Agent) at `execute` time, not at `Request::build`, so the UA cannot
+# be read off a prepared `reqwest::Request` — only a real request to a mock server proves it (and
+# catches an upstream `just-common::build_client` change that silently overwrites our UA).
+wiremock = { workspace = true }
+# Sandbox integration test (tests/sandbox, behind the `sandbox-test` feature):
+# scratch dirs, serial execution, and the landlock runtime probe from
+# kallip-shell.
+tempfile = { workspace = true }
+temp-env = { workspace = true }
+serial_test = { workspace = true }
+kallip-shell = { workspace = true }

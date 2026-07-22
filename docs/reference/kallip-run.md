@@ -1,12 +1,12 @@
 # `kallip-run` Reference
 
-Posts a prompt to a daemon agent and prints the final assistant reply to stdout,
+Posts a prompt to a tagma agent and prints the final assistant reply to stdout,
 exiting with a semantic exit code. Designed for scripted and automated workflows
 where the caller needs machine-readable output and exit-status-driven control
 flow.
 
-By default the prompt goes to the daemon's **singleton root agent** (eagerly
-created at daemon startup). Pass `--agent <ID>` to target a specific (sub)agent
+By default the prompt goes to the tagma's **singleton root agent** (eagerly
+created at tagma startup). Pass `--agent <ID>` to target a specific (sub)agent
 instead — useful for running against a dedicated subagent when you need
 isolation, since separate runs against the root share its context. The target
 agent persists after the run.
@@ -15,7 +15,7 @@ agent persists after the run.
 kallip-run [OPTIONS] --prompt <PROMPT>
 ```
 
-Uses `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_DAEMON_URL`
+Uses `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_TAGMA_URL`
 (env, default `http://127.0.0.1:3000`).
 
 ## Options
@@ -23,7 +23,7 @@ Uses `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_DAEMON_URL`
 | Flag                | Description                                                    |
 | ------------------- | -------------------------------------------------------------- |
 | `--prompt <PROMPT>` | The prompt to send to the agent (required)                     |
-| `--agent <ID>`      | Target an explicit agent by id instead of the daemon root      |
+| `--agent <ID>`      | Target an explicit agent by id instead of the tagma root       |
 | `--json`            | Emit a single JSON object on stdout (see Output)               |
 | `--verbose`         | Stream the agent's procedure (reasoning, tool calls) to stderr |
 
@@ -41,7 +41,7 @@ Uses `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_DAEMON_URL`
 ## Output
 
 The output shape is driven by `--json` and `--verbose` (there is no TTY-based
-auto-detection). The daemon already persists the agent's full execution
+auto-detection). The tagma already persists the agent's full execution
 history, so by default the runner is **minimal**: just the final reply.
 
 | `--json` | `--verbose` | stdout                       | stderr                                                                  |
@@ -72,7 +72,7 @@ history, so by default the runner is **minimal**: just the final reply.
 `exit` is one of `success`, `error`, `max_rounds`, `cancelled`,
 `budget_exceeded`, `failover_chain_exhausted`. On a terminal error, `assistant`
 reflects whatever was
-emitted before the failure (may be partial). If the daemon is unreachable, the
+emitted before the failure (may be partial). If the tagma is unreachable, the
 agent id is unknown, or `post_message` fails, no JSON object is emitted — the
 error is printed to stderr and the exit code is `1`.
 
@@ -100,9 +100,9 @@ kallip-run --verbose --prompt "Summarize the project"
 ```
 
 A follow-up via `--agent` keeps the agent's full context. It works only against
-a daemon that still has the agent registered — the same instance, or one that
+a tagma that still has the agent registered — the same instance, or one that
 restored it from disk on startup. `--agent` does not validate the id format; an
-unknown id surfaces as a daemon error.
+unknown id surfaces as a tagma error.
 
 For the complete environment variable reference including LLM provider
 configuration, see [env.md](env.md).

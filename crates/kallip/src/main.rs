@@ -1,10 +1,10 @@
-//! kallip: daemon client CLI.
+//! kallip: tagma client CLI.
 
 mod args;
 
 use anyhow::Result;
 use clap::Parser;
-use kallip_client::{DaemonClient, PromoteDecision};
+use kallip_client::{PromoteDecision, TagmaClient};
 use kallip_common::agentid::AgentId;
 use kallip_common::policy::{ExecDecision, ExecOverride};
 use kallip_common::promote::{NO_REASON_PROVIDED, SkillPromoteStatus};
@@ -31,7 +31,7 @@ fn agent_id_from_env() -> anyhow::Result<AgentId> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = DaemonClient::from_env()?;
+    let client = TagmaClient::from_env()?;
 
     match cli.command {
         Commands::Agent(cmd) => match cmd {
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
             }
             AgentCommand::Activity(args) => {
                 // Activity is self-reported: the target is always the calling
-                // agent (KALLIP_ID); the daemon only accepts this from the
+                // agent (KALLIP_ID); the tagma only accepts this from the
                 // agent itself or an operator.
                 let id = agent_id_from_env()?;
                 client

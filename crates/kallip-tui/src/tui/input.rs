@@ -1,8 +1,8 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::command;
-use kallip_client::DaemonClient;
 use kallip_client::ListApprovalsParams;
+use kallip_client::TagmaClient;
 use kallip_common::agentid::AgentId;
 use kallip_common::command::{BudgetOp, SlashCommand};
 
@@ -19,7 +19,7 @@ impl App {
     pub async fn handle_key_event(
         &mut self,
         key: KeyEvent,
-        client: &DaemonClient,
+        client: &TagmaClient,
         agent_id: &AgentId,
     ) {
         if key.kind != KeyEventKind::Press {
@@ -193,7 +193,7 @@ impl App {
             match command::parse(&text) {
                 None => {
                     // Free-text prompt: queue it. While busy it merges with prior
-                    // queued input and is sent at the next daemon interjection
+                    // queued input and is sent at the next tagma interjection
                     // boundary; while idle it is flushed immediately as its own
                     // turn. Rendering happens in the main loop when it drains the
                     // outbox, so the user line lands after the boundary event
@@ -257,7 +257,7 @@ impl App {
     }
 
     /// Handle key events in the approvals view.
-    async fn handle_approvals_key(&mut self, key: KeyEvent, client: &DaemonClient) {
+    async fn handle_approvals_key(&mut self, key: KeyEvent, client: &TagmaClient) {
         let Some(state) = self.approvals.as_mut() else {
             self.mode = AppMode::Chat;
             return;
@@ -336,8 +336,8 @@ impl App {
         }
     }
 
-    /// Re-fetch pending approvals from the daemon.
-    async fn refresh_approvals(&mut self, client: &DaemonClient) {
+    /// Re-fetch pending approvals from the tagma.
+    async fn refresh_approvals(&mut self, client: &TagmaClient) {
         match client
             .list_approvals(&ListApprovalsParams {
                 status: Some("committed".into()),
@@ -363,12 +363,12 @@ impl App {
     /// Dispatch a parsed slash command.
     ///
     /// Two dispatch categories:
-    /// - **TUI-local** (help/quit/clear): no daemon call, handled entirely here
-    /// - **Daemon query** (status/approvals): request-response, awaits daemon endpoint directly
+    /// - **TUI-local** (help/quit/clear): no tagma call, handled entirely here
+    /// - **Tagma query** (status/approvals): request-response, awaits tagma endpoint directly
     async fn dispatch_command(
         &mut self,
         cmd: SlashCommand,
-        client: &DaemonClient,
+        client: &TagmaClient,
         agent_id: &AgentId,
     ) {
         match cmd {
@@ -388,7 +388,7 @@ impl App {
                 self.outbox = None;
                 self.pending_send_failed = false;
             }
-            // Daemon query
+            // Tagma query
             SlashCommand::Status => match client.agent_status(agent_id).await {
                 Ok(status) => {
                     let mut msg = status.context.format_summary();

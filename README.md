@@ -23,8 +23,8 @@ For planned direction, see the [roadmap](docs/roadmap.md).
 | `kallip-common`  | Shared types and command parsing                                                      |
 | `kallip-runtime` | Agent runtime: agent context management, policy engine, tool dispatch                 |
 | `kallip-shell`   | Provider-neutral shell/session tools for LLM applications (used by the runtime)       |
-| `kallip-daemon`  | HTTP API server hosting multiple agent instances                                      |
-| `kallip-client`  | Async client library for the daemon HTTP API                                          |
+| `kallip-tagma`   | HTTP API server hosting multiple agent instances                                      |
+| `kallip-client`  | Async client library for the tagma HTTP API                                           |
 | `kallip`         | Headless CLI — designed for agents to call, so an agent can manage other agents       |
 | `kallip-tui`     | Interactive terminal UI for human users, with approval prompts and markdown rendering |
 | `kallip-run`     | Agent runner for scripting and automation — CI, benchmarks, scripted workflows        |
@@ -81,7 +81,7 @@ The flow:
    continue working on other things.
 3. An `ApprovalUpdated` SSE event is emitted, visible to any client
    (TUI, CLI, or a supervisor agent).
-4. The client approves or denies the request via the daemon's approval API
+4. The client approves or denies the request via the tagma's approval API
    (`GET /approvals`, `POST /approvals/{id}`).
 5. On the next agent round, the approval notification is injected into context.
    The agent then calls `approval_redeem` to execute the stored action.
@@ -96,7 +96,7 @@ without a human in the loop. Or it can surface the decision to a human.
 KALLIP_LLM_PROVIDER=deepseek \
 KALLIP_LLM_MODEL=deepseek-v4-flash \
 KALLIP_LLM_DEEPSEEK_API_KEY=your-key \
-cargo run -p kallip-daemon
+cargo run -p kallip-tagma
 
 # TUI client
 cargo run -p kallip-tui

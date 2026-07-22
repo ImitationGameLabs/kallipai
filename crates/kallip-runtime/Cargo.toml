@@ -1,6 +1,6 @@
 [package]
 name = "kallip-runtime"
-description = "Agent runtime: agent context, policy, and tool dispatch (daemon-only)"
+description = "Agent runtime: agent context, policy, and tool dispatch (tagma-only)"
 edition = "2024"
 version.workspace = true
 license.workspace = true
@@ -34,7 +34,7 @@ tokenx-rs = { workspace = true }
 landlock = ["kallip-shell/landlock"]
 # Linux-only: install the seccomp denylist as the last step of every spawned
 # `bash`'s pre_exec (after landlock/mount-ns setup). Implies `landlock`, since
-# the install site lives in the landlock spawn path. Off by default; the daemon
+# the install site lives in the landlock spawn path. Off by default; the tagma
 # enables it. See `kallip-shell`'s `seccomp` feature.
 seccomp = ["landlock", "kallip-shell/seccomp"]
 

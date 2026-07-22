@@ -2711,37 +2711,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "futures-core",
- "futures-util",
- "just-llm-client",
- "kallip-common",
- "kallip-runtime",
- "kallip-shell",
- "reqwest",
- "serde",
- "serde_json",
- "serial_test",
- "temp-env",
- "tempfile",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "wiremock",
-]
-
-[[package]]
 name = "kallip-herald"
 version = "0.1.0"
 dependencies = [
@@ -2863,6 +2832,37 @@ dependencies = [
  "tokio-util",
  "unicode-normalization",
  "uuid",
+]
+
+[[package]]
+name = "kallip-tagma"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures-core",
+ "futures-util",
+ "just-llm-client",
+ "kallip-common",
+ "kallip-runtime",
+ "kallip-shell",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "temp-env",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]

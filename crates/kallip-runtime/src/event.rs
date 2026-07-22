@@ -1,7 +1,7 @@
 //! Runtime-internal event and outcome types.
 //!
 //! These types carry information between the agent runner/agent_task modules
-//! and the daemon bridge. They are not serialized over the wire -- the
+//! and the tagma bridge. They are not serialized over the wire -- the
 //! bridge converts them to the SSE wire-format events defined in
 //! `kallip_common::protocol::SseEvent`.
 
@@ -9,7 +9,7 @@ use kallip_common::protocol::FailoverChainExhaustion;
 
 /// Events emitted by the agent runner during execution.
 ///
-/// Sent over an internal mpsc channel from the runtime to the daemon bridge,
+/// Sent over an internal mpsc channel from the runtime to the tagma bridge,
 /// which converts them to SSE wire-format events.
 #[derive(Debug)]
 pub enum AgentEvent {

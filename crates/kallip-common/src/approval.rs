@@ -1,6 +1,6 @@
 //! Approval status and tool call content types.
 //!
-//! Shared between the runtime approval module and the daemon API.
+//! Shared between the runtime approval module and the tagma API.
 
 use serde::{Deserialize, Serialize};
 

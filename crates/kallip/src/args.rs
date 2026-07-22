@@ -58,7 +58,7 @@ pub struct SpawnArgs {
     /// Optional initial prompt for the agent.
     #[arg(long)]
     pub prompt: Option<String>,
-    /// Short display label (e.g. "researcher"). Required by the daemon when
+    /// Short display label (e.g. "researcher"). Required by the tagma when
     /// spawning a subordinate (the only spawn path: `subagent spawn`).
     #[arg(long)]
     pub role: Option<String>,
@@ -68,7 +68,7 @@ pub struct SpawnArgs {
     /// Explicitly downgrade the subagent's FS-access permission class
     /// (`normal` = home+workspace read-write, `guest` = read-only). Omit to
     /// grant the tier's default ceiling. Honored only for subagent spawns; the
-    /// daemon rejects a value above the tier ceiling or the supervisor's class.
+    /// tagma rejects a value above the tier ceiling or the supervisor's class.
     #[arg(long, value_name = "CLASS", value_parser = ["normal", "guest"])]
     pub permission_class: Option<String>,
 }
@@ -243,16 +243,16 @@ pub struct SkillPromoteSubmitArgs {
 // Budget commands
 // ---------------------------------------------------------------------------
 
-/// Manage daemon-wide token budget.
+/// Manage tagma-wide token budget.
 #[derive(Subcommand)]
 pub enum BudgetCommand {
-    /// Show daemon-wide token budget status
+    /// Show tagma-wide token budget status
     Get,
-    /// Increase daemon-wide token budget
+    /// Increase tagma-wide token budget
     Increase(BudgetAmountArgs),
-    /// Decrease daemon-wide token budget
+    /// Decrease tagma-wide token budget
     Decrease(BudgetAmountArgs),
-    /// Set remaining daemon-wide token budget (=0 pauses all agents)
+    /// Set remaining tagma-wide token budget (=0 pauses all agents)
     Set(BudgetAmountArgs),
 }
 
@@ -292,7 +292,7 @@ pub enum SubagentCommand {
 /// global lookup. Agents drive these through `bash_exec`.
 #[derive(Subcommand)]
 pub enum DirlockCommand {
-    /// Acquire the write-lock on a directory (self). On conflict the daemon
+    /// Acquire the write-lock on a directory (self). On conflict the tagma
     /// returns the holder so you can peer-message it to coordinate.
     Acquire(DirlockPathArgs),
     /// Release the write-lock on a directory (self). Idempotent.

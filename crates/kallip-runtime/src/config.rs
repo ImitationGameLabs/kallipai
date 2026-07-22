@@ -19,7 +19,7 @@ const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "calls in that round are skipped and returned as errors — re-issue them after ",
     "reviewing what happened.",
 );
-/// Effectively unlimited — the real safety net is the daemon-wide token budget.
+/// Effectively unlimited — the real safety net is the tagma-wide token budget.
 /// Individual rounds are bounded by LLM response length; the loop as a whole is
 /// bounded by token consumption. This constant only serves as a last-resort
 /// guard against a degenerate "tool calls with no progress" loop.
@@ -33,14 +33,14 @@ const DEFAULT_PINNED_BUDGET_RATIO: f64 = 0.25;
 const DEFAULT_CONTEXT_THRESHOLDS: &[u8] = &[50, 60, 70, 80];
 const DEFAULT_TOKEN_BUDGET_WARNINGS: &[u8] = &[80, 95];
 
-/// Resolve the daemon-global `bash_exec` classify preset from
+/// Resolve the tagma-global `bash_exec` classify preset from
 /// `KALLIP_POLICY_PRESET`.
 ///
 /// Unset or empty → [`PolicyPreset::Default`] (strict). Accepts `default`, `auto`,
 /// and `allow-all`. An unrecognized value is a fatal misconfiguration (the preset
 /// is structural to the sandbox), so it panics — matching the env-knob convention
-/// of [`permission_class_from_env`]. Only read once at daemon startup; the preset
-/// is immutable for the daemon's lifetime.
+/// of [`permission_class_from_env`]. Only read once at tagma startup; the preset
+/// is immutable for the tagma's lifetime.
 pub fn policy_preset_from_env() -> PolicyPreset {
     let Ok(raw) = std::env::var("KALLIP_POLICY_PRESET") else {
         return PolicyPreset::Default;
@@ -57,7 +57,7 @@ pub fn policy_preset_from_env() -> PolicyPreset {
 /// Resolve the root agent's permission class from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`.
 ///
 /// Root-only test knob, parallel to [`policy_preset_from_env`]: read in the
-/// daemon's root-create branch, never on the subagent or restore paths
+/// tagma's root-create branch, never on the subagent or restore paths
 /// (subagents derive their class from `ceiling_for_tier`; restore uses the
 /// persisted `meta.json`). Accepts lowercase `"normal"` / `"guest"` — the env-var
 /// convention, distinct from the PascalCase serde form persisted in `meta.json`.
@@ -67,7 +67,7 @@ pub fn permission_class_from_env() -> PermissionClass {
         return PermissionClass::default();
     };
     // Trim here, not inside FromStr: the wire/env convention trims surrounding
-    // whitespace, but FromStr stays trim-free so the daemon rejects untrimmed
+    // whitespace, but FromStr stays trim-free so the tagma rejects untrimmed
     // client input verbatim.
     let raw = raw.trim();
     match raw.parse::<PermissionClass>() {
@@ -135,7 +135,7 @@ impl PermissionClass {
 }
 
 /// Error returned when a [`PermissionClass`] cannot be parsed from its lowercase
-/// wire/env spelling. Surfaced by the daemon as a `400 Bad Request` body, so the
+/// wire/env spelling. Surfaced by the tagma as a `400 Bad Request` body, so the
 /// message stays client-readable and stable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsePermissionClassError(pub String);
@@ -204,7 +204,7 @@ pub struct AgentConfig {
     pub created_by: Option<AgentId>,
     pub permissions: PermissionProfile,
     /// FS-access permission class (Guest readonly / Normal home-rw) — the static
-    /// baseline axis of the sandbox (§2.3). Defaults to Normal; the daemon clamps
+    /// baseline axis of the sandbox (§2.3). Defaults to Normal; the tagma clamps
     /// it to the model tier's ceiling at spawn and re-validates on restore. Unlike
     /// `role`/`description`, this is a safety invariant, not display metadata.
     ///
@@ -366,7 +366,7 @@ impl AgentConfig {
             created_by: None,
             permissions: PermissionProfile::new(workspace_root),
             permissions_class: PermissionClass::default(),
-            // Set by the daemon at spawn (CreateAgentRequest) / restore (AgentMeta),
+            // Set by the tagma at spawn (CreateAgentRequest) / restore (AgentMeta),
             // like `agent_id` / `created_by` above.
             role: String::new(),
             description: String::new(),
@@ -392,7 +392,7 @@ impl AgentConfig {
 
     /// Pinned-context budget: the slice of [`effective_budget`](Self::effective_budget) reserved
     /// for pinned items, per `pinned_budget_ratio`. Single source of truth for the formula used
-    /// at spawn (daemon) and on within-tier failover (runtime). The private `check_context_budget`
+    /// at spawn (tagma) and on within-tier failover (runtime). The private `check_context_budget`
     /// recomputes the same value from raw args because it runs before an `AgentConfig` exists.
     pub fn pinned_budget(&self) -> usize {
         (self.effective_budget() as f64 * self.pinned_budget_ratio) as usize
@@ -443,7 +443,7 @@ impl AgentConfig {
 /// Validate the context-window-dependent budget invariants. Shared by [`AgentConfig::load`]
 /// (env values) and [`AgentConfig::set_context_window`] (profile override) so the two paths
 /// cannot drift. `pinned_budget` is recomputed locally here because `ContextStore`'s
-/// `set_pinned_budget` runs later and independently (at spawn via the daemon, and on within-tier
+/// `set_pinned_budget` runs later and independently (at spawn via the tagma, and on within-tier
 /// failover via `runner::reapply_window`).
 fn check_context_budget(
     context_window_tokens: usize,
@@ -545,7 +545,7 @@ mod tests {
         assert_eq!(PermissionClass::Normal.to_string(), "normal");
         assert_eq!(PermissionClass::Guest.to_string(), "guest");
 
-        // FromStr is trim-free: untrimmed input is rejected (the daemon must not
+        // FromStr is trim-free: untrimmed input is rejected (the tagma must not
         // silently accept " guest "). The env knob trims before parsing.
         assert!(PermissionClass::from_str(" guest ").is_err());
         assert!(PermissionClass::from_str("Normal").is_err());
@@ -560,7 +560,7 @@ mod tests {
         // The base prompt must stay at agent altitude: identity, posture, and
         // the cross-cutting async-notice model. Tool mechanics belong in each
         // tool's `description()` and the skill system belongs in the bootstrap
-        // meta-skill the daemon appends at runtime (routes/agent.rs). This guard
+        // meta-skill the tagma appends at runtime (routes/agent.rs). This guard
         // prevents tool/CLI usage from creeping back into the prompt and
         // re-duplicating those sources (drift + per-request token cost).
         let prompt = DEFAULT_SYSTEM_PROMPT;

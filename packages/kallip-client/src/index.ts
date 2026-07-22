@@ -1,10 +1,10 @@
 // @kallipai/kallip-client
 //
-// Direct daemon HTTP+SSE client. TypeScript counterpart to the Rust
-// kallip-client crate: DaemonClient (fetch + authenticated SSE) and DaemonSession
+// Direct tagma HTTP+SSE client. TypeScript counterpart to the Rust
+// kallip-client crate: TagmaClient (fetch + authenticated SSE) and TagmaSession
 // (implements @kallipai/kallip-common's Session for the UI).
 
-export { DaemonClient } from "./client.ts";
-export type { DaemonClientOptions } from "./client.ts";
-export { DaemonSession } from "./session.ts";
+export { TagmaClient } from "./client.ts";
+export type { TagmaClientOptions } from "./client.ts";
+export { TagmaSession } from "./session.ts";
 export * from "./types.ts";

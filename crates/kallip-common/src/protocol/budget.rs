@@ -10,7 +10,7 @@ pub const DEFAULT_TOKEN_BUDGET: u64 = 100_000_000;
 /// Exactly one of `set_remaining` or `delta` must be provided.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenBudgetUpdateRequest {
-    /// Set remaining budget to this value. The daemon computes the new total
+    /// Set remaining budget to this value. The tagma computes the new total
     /// as `consumed + value`. Mutually exclusive with `delta`.
     #[serde(
         default,

@@ -1,7 +1,7 @@
 //! Two-layer auth, principal-scoped: Authentication (who are you) then
-//! Authorization (can you do this). Mirrors `kallip-daemon/src/auth.rs`'s shape
+//! Authorization (can you do this). Mirrors `kallip-tagma/src/auth.rs`'s shape
 //! but resolves to agora principals (admin / user / tagma) rather than the
-//! daemon's operator/agent supervisor chain.
+//! tagma's operator/agent supervisor chain.
 //!
 //! # Origin / deputy guard
 //!

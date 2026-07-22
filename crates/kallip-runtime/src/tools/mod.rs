@@ -23,7 +23,7 @@ pub use skill::{
 };
 
 /// Inputs to [`build_tool_dispatch`], grouped to keep that function's argument
-/// list readable. The daemon assembles these from its `SpawnArgs` per agent.
+/// list readable. The tagma assembles these from its `SpawnArgs` per agent.
 pub struct ToolDispatchInputs<'a> {
     /// Shared context store (same one the main loop uses).
     pub ctx: Arc<Mutex<ContextStore>>,
@@ -32,7 +32,7 @@ pub struct ToolDispatchInputs<'a> {
     pub config: &'a AgentConfig,
     /// Extra environment handed to every spawned `bash` (agent id, auth token, ...).
     pub env: HashMap<String, String>,
-    /// Sink for background-task terminal notices; the daemon wires it to the
+    /// Sink for background-task terminal notices; the tagma wires it to the
     /// agent's prompt channel.
     pub notice_sink: Arc<dyn Fn(String) + Send + Sync>,
     /// bash_exec execution-policy overrides.
@@ -53,7 +53,7 @@ pub struct ToolDispatchInputs<'a> {
 /// Spawns a fresh isolated `bash` per command via [`ShellBuilder`] (the one-shot
 /// backend). The working directory is read fresh from `pwd` after each command and
 /// reported in the tool result — it does not persist implicitly across calls. A background task
-/// that finishes delivers a completion notice through `notice_sink` (the daemon wires it to the agent's
+/// that finishes delivers a completion notice through `notice_sink` (the tagma wires it to the agent's
 /// prompt channel, so the LLM learns without polling `bash_background_read`).
 ///
 /// Context tools share the same `ContextStore` as the main loop.
@@ -131,7 +131,7 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
         })
     };
     // Without the landlock feature the coordinator is advisory only; the params
-    // are still threaded so the daemon API is uniform across builds.
+    // are still threaded so the tagma API is uniform across builds.
     #[cfg(not(all(target_os = "linux", feature = "landlock")))]
     let _ = (&lock_manager, &agent_id, &agent_dir);
     let backend = builder.build().await?;
@@ -177,7 +177,7 @@ fn guest_hide_holes() -> Vec<PathBuf> {
             push_if_dir(home.join(sub), &mut out);
         }
     }
-    // The daemon profiles dir (holds API keys). Reuse profile::config's resolution
+    // The tagma profiles dir (holds API keys). Reuse profile::config's resolution
     // so a custom KALLIP_PROFILES_FILE location is covered, not just the default.
     if let Some(dir) = crate::profile::config::profiles_config_dir() {
         push_if_dir(dir, &mut out);

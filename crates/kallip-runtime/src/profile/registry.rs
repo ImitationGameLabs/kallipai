@@ -14,7 +14,7 @@ use just_llm_client::{ChatClient, ChatClientOptions, LlmBackend};
 
 use super::model::{Profile, Tier};
 
-/// Lazily provides [`LlmBackend`]s keyed by endpoint id. The daemon owns the implementation
+/// Lazily provides [`LlmBackend`]s keyed by endpoint id. The tagma owns the implementation
 /// (reqwest + [`just_llm_client::client::BackendFactory`]); the registry looks up the active
 /// profile's backend via [`get`](Self::get), and a failover profile's backend is built on first
 /// use. Implementations must construct a given endpoint's backend at most once under concurrent
@@ -25,7 +25,7 @@ pub trait BackendSource: Send + Sync {
 
 pub struct ProfileRegistry {
     tiers: Vec<Tier>,
-    /// Backends keyed by endpoint id. The active set is pre-built at daemon startup; failover
+    /// Backends keyed by endpoint id. The active set is pre-built at tagma startup; failover
     /// endpoints are built lazily by the [`BackendSource`] on first lookup. The registry itself
     /// never constructs — it calls [`BackendSource::get`].
     source: Arc<dyn BackendSource>,
@@ -33,8 +33,8 @@ pub struct ProfileRegistry {
 
 impl ProfileRegistry {
     /// Construct and validate: non-empty tier list, every tier non-empty. Endpoint existence,
-    /// family, and base_url are validated by the daemon when it builds the active set (see
-    /// `kallip_daemon::backend`); the registry only checks structure.
+    /// family, and base_url are validated by the tagma when it builds the active set (see
+    /// `kallip_tagma::backend`); the registry only checks structure.
     pub fn new(tiers: Vec<Tier>, source: Arc<dyn BackendSource>) -> Result<Self> {
         if tiers.is_empty() {
             bail!("profile registry has no tiers");
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn build_client_errors_when_endpoint_missing() {
-        // Endpoint existence is daemon-validated at startup; this covers the runtime lookup path.
+        // Endpoint existence is tagma-validated at startup; this covers the runtime lookup path.
         let reg = ProfileRegistry::new(
             vec![Tier {
                 profiles: vec![Profile {

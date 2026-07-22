@@ -13,12 +13,13 @@ monitor, and clean up.
 
 Every agent has a `PermissionClass` that controls filesystem access:
 
-| Class | Read | Write | Secrets | Notes |
-|-------|------|-------|---------|-------|
-| **Normal** | Broad (`/`) | Workspace + dirlocks + skills carve + `/tmp` | Readable (no hide-holes) | Default for depth 0–1 |
-| **Guest** | Broad (`/`) | **Skills carve only** | Hidden (tmpfs overlay on `~/.ssh`, `~/.gnupg`, `~/.aws`, profiles) | Default for depth 2–3 |
+| Class      | Read        | Write                                        | Secrets                                                            | Notes                 |
+| ---------- | ----------- | -------------------------------------------- | ------------------------------------------------------------------ | --------------------- |
+| **Normal** | Broad (`/`) | Workspace + dirlocks + skills carve + `/tmp` | Readable (no hide-holes)                                           | Default for depth 0–1 |
+| **Guest**  | Broad (`/`) | **Skills carve only**                        | Hidden (tmpfs overlay on `~/.ssh`, `~/.gnupg`, `~/.aws`, profiles) | Default for depth 2–3 |
 
 Key rules:
+
 - **Depth-based ceiling**: depth 0/1 → Normal, depth 2/3 → Guest. A subagent's
   class cannot exceed its tier ceiling or its supervisor's class.
 - **Explicit override**: `--permission-class guest` lets a Normal supervisor
@@ -59,7 +60,7 @@ CHILD=$(kallip subagent spawn --role worker --prompt "do work")
 ### Workspace constraints
 
 - A subagent's `--workspace-root` must be **within the supervisor's workspace**.
-- The directory must **exist** before spawn (daemon canonicalizes it).
+- The directory must **exist** before spawn (tagma canonicalizes it).
 - The subagent gets an **auto-acquired dirlock** on its workspace (Normal only;
   Guests hold no workspace lock).
 
@@ -81,7 +82,7 @@ kallip status <ID>          # context usage + state (idle/busy/faulted)
 kallip subagent list
 ```
 
-Messages are **asynchronous** — the daemon queues them and the subagent
+Messages are **asynchronous** — the tagma queues them and the subagent
 processes them in order. Poll `status` to check if the agent is `idle`
 (done), `busy` (still working), or `faulted` (restore failed — see below).
 
@@ -129,7 +130,8 @@ Always clean up test subagents after use. Removed agents are archived (not
 deleted), and their workspace dirlocks are released.
 
 ### Faulted agents (restore failure)
-If a subagent's workspace is missing when the daemon restarts, the agent is
+
+If a subagent's workspace is missing when the tagma restarts, the agent is
 restored in a `faulted` state — it has no running task but remains in the
 registry with its metadata and a `faulted_reason`. Faulted agents appear in
 `subagent list`, can be `remove`d (data is archived), but cannot receive
@@ -183,9 +185,9 @@ B=$(kallip subagent spawn --role reviewer-robustness --permission-class guest \
 - **Workspace must be a subdirectory** of the supervisor's workspace — siblings
   are rejected with 403.
 - **Workspace must exist** before spawn — `mkdir -p` first.
-- **Daemon restart releases all dirlocks** — workspaces may become writable
+- **Tagma restart releases all dirlocks** — workspaces may become writable
   again until agents are restored.
-- **Subagent env** has `KALLIP_ID`, `KALLIP_AUTH_TOKEN`, `KALLIP_DAEMON_URL`
+- **Subagent env** has `KALLIP_ID`, `KALLIP_AUTH_TOKEN`, `KALLIP_TAGMA_URL`
   but NOT `KALLIP_DATA_DIR` — use the agent's known path
   (`~/.local/share/kallip/agents/<id>/`) instead.
 - **`subagent list` only shows direct children** — use the HTTP API

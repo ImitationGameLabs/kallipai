@@ -1,6 +1,6 @@
 [package]
 name = "kallip-client"
-description = "Daemon client library for kallip"
+description = "Tagma client library for kallip"
 edition = "2024"
 version.workspace = true
 license.workspace = true

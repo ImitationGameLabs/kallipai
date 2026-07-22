@@ -41,15 +41,15 @@ allows `http://localhost:5173`. The web app reads the two origins from
 host-separated origins (the `Domain=localhost` cookie is shared either way). Open
 the web app at `:5173`, sign up, and mint a `sk-enroll-...` enrollment code.
 Paste it into `.env` as `KALLIP_HERALD_ENROLLMENT_CODE`, and set
-`KALLIP_AUTH_TOKEN` to the daemon's operator token.
+`KALLIP_AUTH_TOKEN` to the tagma's operator token.
 
 ### Phase 2 -- tagma side
 
-The daemon + herald are gated behind the `tagma` profile. arion's CLI has no
+The tagma service + herald are gated behind the `tagma` profile. arion's CLI has no
 `--profile` flag; activate it via the docker-compose env var:
 
 ```sh
-COMPOSE_PROFILES=tagma arion up -d   # adds daemon + herald; the herald enrolls
+COMPOSE_PROFILES=tagma arion up -d   # adds the tagma service + herald; the herald enrolls
 ```
 
 ## Iterating
@@ -63,18 +63,18 @@ arion up -d                           # agora side
 COMPOSE_PROFILES=tagma arion up -d    # tagma side, if you want it up
 ```
 
-Tail logs with `arion logs -f <service>` (`agora`, `daemon`, `herald`,
+Tail logs with `arion logs -f <service>` (`agora`, `tagma`, `herald`,
 `postgres`).
 
 ## Optional bind overrides
 
-By default the daemon data, the agent workspace, and shared skills live in
+By default the tagma data, the agent workspace, and shared skills live in
 docker volumes. Set these env vars (absolute, colon-free host paths) to
 bind-mount them on the host instead:
 
 | Env var                       | Mounts                   | Use case                            |
 | ----------------------------- | ------------------------ | ----------------------------------- |
-| `KALLIP_ARION_DATA_PATH`      | `/var/lib/kallip`        | keep daemon state on a known disk   |
+| `KALLIP_ARION_DATA_PATH`      | `/var/lib/kallip`        | keep tagma state on a known disk    |
 | `KALLIP_ARION_WORKSPACE_PATH` | `/workspace`             | make the agent's files host-visible |
 | `KALLIP_ARION_SKILLS_PATH`    | `/var/lib/kallip/skills` | curate shared skills on the host    |
 
@@ -84,7 +84,7 @@ former short-circuits `skill_dir()` and bypasses the bind.
 ## Integration tests
 
 Runs the workspace's `[[test]]` targets **inside the container** to confirm the
-sandbox and shell backends behave in the containerized environment the daemon
+sandbox and shell backends behave in the containerized environment the tagma
 ships in; the service exits with the overall verdict (`arion ps -a`).
 
 ```sh

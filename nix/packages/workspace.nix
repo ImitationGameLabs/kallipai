@@ -39,7 +39,7 @@ in
   # HTTP, no shell-out deps). Its own image so the agora and lesche services
   # deploy independently -- see nix/packages/docker-images/lesche.nix.
   lesche = buildCrate "cargo build --release -p kallip-lesche";
-  # The host/"tagma" side: daemon + herald share most of their closure, so one
-  # build beats two. Excludes agora.
-  tagma = buildCrate "cargo build --release -p kallip-daemon -p kallip-herald";
+  # The host/"tagma" side: the tagma service (agent server) + herald share most
+  # of their closure, so one build beats two. Excludes agora.
+  tagma = buildCrate "cargo build --release -p kallip-tagma -p kallip-herald";
 }

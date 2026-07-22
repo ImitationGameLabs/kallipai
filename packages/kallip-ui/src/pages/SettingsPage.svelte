@@ -6,13 +6,13 @@
 
   // Settings is now info-only: account actions (logout, mode switch) live in
   // the sidebar AccountMenu. Online shows the account (identity lives in
-  // agora); offline shows the daemon connection (no identity). Offline
-  // Disconnect/Reconnect stays here -- it is daemon session management, not an
+  // agora); offline shows the tagma connection (no identity). Offline
+  // Disconnect/Reconnect stays here -- it is tagma session management, not an
   // account/mode action.
   const mode = $derived(modeOf(configStore.value));
-  const offlineUrl = $derived(configStore.value?.offline?.daemonUrl ?? "");
+  const offlineUrl = $derived(configStore.value?.offline?.tagmaUrl ?? "");
 
-  // Offline: drop the daemon session without abandoning offline mode.
+  // Offline: drop the tagma session without abandoning offline mode.
   function disconnect() {
     sessionStore.detach();
   }

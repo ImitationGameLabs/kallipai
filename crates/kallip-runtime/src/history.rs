@@ -37,7 +37,7 @@ pub struct HistoryRecord {
     /// Cached token estimate for diagnostics.
     pub estimated_tokens: usize,
 
-    /// Record category: `Turn` for LLM conversation, `System` for daemon events.
+    /// Record category: `Turn` for LLM conversation, `System` for tagma events.
     #[serde(default)]
     pub kind: RecordKind,
 
@@ -53,7 +53,7 @@ pub enum RecordKind {
     /// A normal conversation turn (user, assistant, tool calls, tool results).
     #[default]
     Turn,
-    /// A daemon/system event (agent restore, compaction, etc.).
+    /// A tagma/system event (agent restore, compaction, etc.).
     System,
 }
 
@@ -62,7 +62,7 @@ pub enum RecordKind {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemEvent {
-    /// Agent restored from a previous state on daemon restart.
+    /// Agent restored from a previous state on tagma restart.
     AgentRestore,
     /// Context compaction summarized and evicted turns.
     CompactionSummary,

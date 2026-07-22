@@ -1,7 +1,7 @@
 // Headless error classification. Projects a raw thrown value (TransportError,
 // KallipError, or anything else) into the { title, detail, hint } a user-facing
 // banner can render, so we never leak internal paths like
-// `daemon request failed: /agents/<id>/events` to the user. The full error
+// `tagma request failed: /agents/<id>/events` to the user. The full error
 // (with cause chain) is logged separately to the browser console by the caller.
 //
 // Pure, no runes, no app imports — stays reusable across consuming apps.
@@ -36,19 +36,19 @@ export function classifyError(e: unknown): ErrorView {
     // a throw here would blank the layout.
     const status = e.api?.status;
     // 4xx -> the request itself was rejected (user-actionable); 5xx -> the
-    // daemon failed server-side.
+    // tagma failed server-side.
     return {
       title:
         typeof status === "number" && status >= 500
-          ? "Daemon error"
+          ? "Tagma error"
           : "Request rejected",
       detail: e.api?.message,
     };
   }
   if (isTransportError(e)) {
     return {
-      title: "Couldn't reach the daemon",
-      hint: "Check that the daemon is running and the URL in Settings is correct.",
+      title: "Couldn't reach the tagma",
+      hint: "Check that the tagma is running and the URL in Settings is correct.",
     };
   }
   return {

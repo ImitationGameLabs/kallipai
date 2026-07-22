@@ -31,7 +31,7 @@
     await agoraSession.logout();
   }
 
-  // Offline -> online: detach the daemon and flip the active mode. The agora
+  // Offline -> online: detach the tagma and flip the active mode. The agora
   // session cookie survives offline mode (we never logout() on a switch), so a
   // whoami() re-resolves the signed-in user with no re-auth. The retained
   // offline creds stay on disk for the switch back. Non-destructive, so no
@@ -43,12 +43,12 @@
   }
 
   // Online -> offline: if offline creds are already saved, reconnect to the
-  // daemon directly (re-auth-free); otherwise send the user to /connect for
+  // tagma directly (re-auth-free); otherwise send the user to /connect for
   // first-time setup. Drop open channels: offline mode does not render /chat, so
   // their SSE subscriber would keep running (against the still-valid cookie) and
   // update transcripts nobody sees. The race guard re-checks activeMode before
   // attach: if the user flipped back to online while the connect was in flight,
-  // close the stray session instead of attaching it (avoids a held daemon
+  // close the stray session instead of attaching it (avoids a held tagma
   // transport).
   async function switchToOffline() {
     channelsStore.reset();

@@ -21,7 +21,7 @@ function messageOf(e: unknown): string {
  * than the current head, so a blind prepend would misorder; insert before the
  * first entry whose `createdAt` is older.
  *
- * Timestamps are compared as epoch milliseconds, not lexically: the daemon's
+ * Timestamps are compared as epoch milliseconds, not lexically: the tagma's
  * RFC3339 serialization (Rust `time` rfc3339) omits the fractional part when
  * sub-second is zero, so a lexical compare would sort a whole-second timestamp
  * after a fractional one in the same second — an inversion. `Date.parse` on
@@ -170,7 +170,7 @@ class SessionStore {
    * POST the decision, then refetch the single approval so the row flips status
    * without waiting for an SSE event. This is what makes sub-agent approvals
    * (whose events never arrive on the attached agent's stream) feel responsive.
-   * The daemon emits the approvalUpdated SSE before returning the POST 200, so
+   * The tagma emits the approvalUpdated SSE before returning the POST 200, so
    * this optimistic read returns the already-applied status; a concurrently
    * in-flight SSE upsert for the same id is last-writer-wins and status is
    * monotonic, so it self-heals within one tick.

@@ -55,7 +55,7 @@ pub trait AgenticContext: Send + Sync {
     fn evict_turns(&mut self, count: usize) -> EvictResult;
     /// Reset context-window progressive warning state. Called after compaction
     /// or eviction. Does **not** reset token-budget warnings — those track
-    /// daemon-wide consumption and must never be reset by a single agent.
+    /// tagma-wide consumption and must never be reset by a single agent.
     fn reset_context_warnings(&mut self);
     /// Return the most recent message of `role` in the **conversation**
     /// (non-pinned) turns, scanning newest-first.

@@ -18,9 +18,9 @@ use super::model::{Endpoint, Profile, Tier};
 /// Env override for the profiles config file path.
 pub(crate) const PROFILES_FILE_ENV: &str = "KALLIP_PROFILES_FILE";
 
-/// Parsed + validated profile configuration: the data the daemon assembles into a
+/// Parsed + validated profile configuration: the data the tagma assembles into a
 /// [`super::registry::ProfileRegistry`] after building backends. Pure data — no reqwest, no
-/// backends. The daemon owns construction (see `kallip_runtime::profile`).
+/// backends. The tagma owns construction (see `kallip_runtime::profile`).
 #[derive(Debug)]
 pub struct ProfileConfig {
     /// Ordered capability tiers (selection reads `tiers[depth]`).
@@ -66,7 +66,7 @@ pub fn from_env() -> Result<ProfileConfig> {
         base_url,
     };
     // The implicit profile's window comes from the same env var `AgentConfig::load` uses as its
-    // budget-shape validation anchor — single source, no drift under static daemon env.
+    // budget-shape validation anchor — single source, no drift under static tagma env.
     let max_context_window = crate::env_util::parse_env::<usize>("KALLIP_CONTEXT_WINDOW_TOKENS")?
         .unwrap_or(crate::env_util::DEFAULT_CONTEXT_WINDOW_TOKENS);
     let profile = Profile {
@@ -209,7 +209,7 @@ fn env_str(name: &str) -> Result<String> {
 }
 
 /// Validate the parsed file: non-empty `api_key`, unique profile ids. Profile→endpoint
-/// references and backend coverage are validated when the daemon constructs `ProfileRegistry`.
+/// references and backend coverage are validated when the tagma constructs `ProfileRegistry`.
 fn validate(file: &ConfigFile) -> Result<()> {
     for (id, body) in &file.endpoints {
         if body.api_key.trim().is_empty() {

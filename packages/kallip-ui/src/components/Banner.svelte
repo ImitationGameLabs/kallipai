@@ -43,7 +43,7 @@
   const toneClass = $derived(bannerTones[tone] ?? bannerTones.error);
 
   // Inline: centered, in flow, scaled up and dropped below the chrome so it
-  // reads as a prominent notice (the offline daemon-error banner). Floating:
+  // reads as a prominent notice (the offline tagma-error banner). Floating:
   // detached, fixed well below the viewport top, for surfaces without AppShell
   // chrome (the auth pages' agora-unreachable banner).
   const rootClass = $derived(
@@ -60,7 +60,7 @@
 
 <!--
   Centered top banner. Renders as a single condition pill (e.g. "Couldn't reach
-  the daemon"); the tint and rounding live on the inner box so the banner reads
+  the tagma"); the tint and rounding live on the inner box so the banner reads
   as a discrete centered element, not a full-width bar. Content is capped so
   long messages wrap inside a readable measure. Inline by default; `floating`
   lifts it to a fixed viewport-top position for surfaces without AppShell chrome.

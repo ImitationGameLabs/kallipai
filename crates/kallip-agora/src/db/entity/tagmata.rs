@@ -1,4 +1,4 @@
-//! `tagmata` entity — a herald (a `kallip-daemon` instance) owned by a user,
+//! `tagmata` entity — a herald (a `kallip-tagma` instance) owned by a user,
 //! across its lifecycle: pending (an enrollment code minted, no device key
 //! yet), enrolled (a herald connected and pinned its Ed25519 device key), or
 //! revoked. `enrolled_at` is the phase marker (`None` = pending); the pending-

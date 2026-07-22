@@ -2,7 +2,7 @@
 //! type-tag prefix, retained at rest only as a SHA-256 hash.
 //!
 //! This is the shared core used by every kallip component that mints bearer
-//! tokens (`kallip-daemon`'s operator/agent tokens, `kallip-agora`'s
+//! tokens (`kallip-tagma`'s operator/agent tokens, `kallip-agora`'s
 //! user/tagma/enrollment tokens). Each crate defines its own closed set of
 //! [`TokenKind`] prefixes as `const`s; this module is purpose-agnostic and holds
 //! no component-specific enum.

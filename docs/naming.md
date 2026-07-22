@@ -30,7 +30,7 @@ the author and the model.
 
 It did not stay an example for long. As it grew, it stopped being a demo of the
 libraries and started being the thing we actually wanted to build. The scope
-widened from "an agent" to "an agent harness" - the daemon, the policy layer,
+widened from "an agent" to "an agent harness" - the tagma, the policy layer,
 the clients, the multi-agent shape. At that point the `just-` prefix was no
 longer doing descriptive work; it was the name of an upstream library, not a
 product.

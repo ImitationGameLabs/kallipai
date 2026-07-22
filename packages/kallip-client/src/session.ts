@@ -10,21 +10,21 @@ import type {
   SessionCapabilities,
   TokenBudget,
 } from "@kallipai/kallip-common";
-import type { DaemonClient } from "./client.ts";
+import type { TagmaClient } from "./client.ts";
 
 /**
- * A {@link Session} bound to a single daemon agent. Wraps a {@link DaemonClient}
+ * A {@link Session} bound to a single tagma agent. Wraps a {@link TagmaClient}
  * and the agent id, exposing the live event stream and the direct-only
  * management surface (interrupt, approvals, status, budget). `close()` aborts
  * the event stream.
  */
-export class DaemonSession implements Session {
+export class TagmaSession implements Session {
   readonly capabilities: SessionCapabilities = DIRECT_CAPABILITIES;
   private readonly controller = new AbortController();
   private eventsIterator?: AsyncGenerator<DomainEvent>;
 
   constructor(
-    private readonly client: DaemonClient,
+    private readonly client: TagmaClient,
     readonly agentId: AgentId,
   ) {}
 

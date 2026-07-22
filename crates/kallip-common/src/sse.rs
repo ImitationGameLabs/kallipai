@@ -1,4 +1,4 @@
-//! Server-side SSE helpers shared by `kallip-daemon` and `kallip-agora`.
+//! Server-side SSE helpers shared by `kallip-tagma` and `kallip-agora`.
 //!
 //! [`OnDrop`] runs a synchronous closure exactly once when the SSE response
 //! stream is dropped, so a per-connection resource (a presence entry, an
@@ -9,7 +9,7 @@
 //! future) is load-bearing: the closure observes the stream's inner fields
 //! before they drop. For a `BroadcastStream`, that means a still-counted
 //! receiver, so `receiver_count() == 1` reliably means "last subscriber" (see
-//! the callers in `kallip-daemon/src/sse.rs` and `kallip-agora/src/routes`).
+//! the callers in `kallip-tagma/src/sse.rs` and `kallip-agora/src/routes`).
 //! The closures passed here must do only fast, synchronous work (e.g. acquire a
 //! `std::sync` lock + mutate a map); blocking the dropping thread is
 //! negligible.

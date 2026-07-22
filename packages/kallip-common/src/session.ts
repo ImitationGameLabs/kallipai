@@ -6,8 +6,8 @@ import type {
   ListApprovalsResponse,
 } from "./approvals.ts";
 
-// Lightweight, transport-agnostic views of the daemon's status/budget payloads.
-// The direct client's wire adapter maps the full snake_case daemon structs into
+// Lightweight, transport-agnostic views of the tagma's status/budget payloads.
+// The direct client's wire adapter maps the full snake_case tagma structs into
 // these camelCase shapes.
 
 export type AgentState = "idle" | "busy" | "faulted";

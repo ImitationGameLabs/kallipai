@@ -163,7 +163,7 @@ impl BoundedCapture {
     ///
     /// Scope note: `O_NOFOLLOW` only guards the final component, so a symlink on
     /// an *intermediate* component of `spill_dir` (a parent) is still followed.
-    /// Acceptable because `spill_dir` is daemon-controlled and defaults to
+    /// Acceptable because `spill_dir` is tagma-controlled and defaults to
     /// `temp_dir()/kallip` (real parents); closing it would need `openat2` with
     /// `RESOLVE_NO_SYMLINKS`, which is Linux-5.6+ only and this file stays
     /// portable-Unix (no `cfg` gates).

@@ -147,7 +147,7 @@ export type FailoverChainExhaustion =
   | "allCandidatesUnbuildable"
   | "allCandidatesInfeasible";
 
-/** An event the tagma emits to the app (the agent-free subset of the daemon's
+/** An event the tagma emits to the app (the agent-free subset of the tagma's
  * event stream, mapped by the herald). serde tag = `type`, snake_case. There is
  * no streaming on this path: `assistant_content` / `finished` are each complete
  * messages. */
@@ -219,7 +219,7 @@ export type AgoraEvent =
 
 /**
  * Agora API error. Mirrors `kallip_common::protocol::ApiError`. This is a
- * distinct surface from `kallip-ui`'s daemon-transport `classifyError` -- the
+ * distinct surface from `kallip-ui`'s tagma-transport `classifyError` -- the
  * agora errors are rendered inline by the auth/dashboard pages, not through the
  * shared AppShell banner.
  */

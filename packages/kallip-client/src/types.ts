@@ -9,7 +9,7 @@ import type {
 } from "@kallipai/kallip-common";
 
 // ---------------------------------------------------------------------------
-// Raw daemon SSE event.
+// Raw tagma SSE event.
 //
 // The variant *tags* are camelCase (the enum has `rename_all = "camelCase"`),
 // matching DomainEvent. The struct-variant *fields* are NOT renamed (serde's
@@ -169,7 +169,7 @@ export function wireApprovalToCommon(w: WireApprovalEntry): ApprovalEntry {
 
 // ---------------------------------------------------------------------------
 // Wire agent status (snake_case) -> common AgentStatus. Only the fields the UI
-// needs are surfaced; the daemon's full ContextUsage / recent_retries are
+// needs are surfaced; the tagma's full ContextUsage / recent_retries are
 // dropped here and can be widened later.
 // ---------------------------------------------------------------------------
 

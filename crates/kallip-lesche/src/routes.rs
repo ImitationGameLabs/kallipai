@@ -22,7 +22,7 @@ pub fn router(state: SharedConvState) -> Router<()> {
 
 /// Build a CORS layer from a comma-separated allowlist. Mirrors the agora's
 /// `cors_layer` (credentials-aware, explicit method list, never a wildcard
-/// origin). The daemon has a separate permissive `cors_layer` -- do NOT copy
+/// origin). The tagma has a separate permissive `cors_layer` -- do NOT copy
 /// that one; this is the credentials-aware variant the browser app needs.
 pub fn cors_layer(origins: &str) -> CorsLayer {
     let allowed: Vec<HeaderValue> = origins

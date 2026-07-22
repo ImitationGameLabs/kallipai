@@ -6,7 +6,7 @@ mod tui;
 use anyhow::Result;
 use clap::Parser;
 use futures_util::StreamExt;
-use kallip_client::DaemonClient;
+use kallip_client::TagmaClient;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
             tok
         }
     };
-    let client = DaemonClient::builder(&args.daemon_url)
+    let client = TagmaClient::builder(&args.tagma_url)
         .auth_token(token)
         .build()?;
 
@@ -84,7 +84,7 @@ async fn run_tui(session: Session) -> Result<()> {
     let mut event_stream = session.client.event_stream(&session.agent_id).await?;
 
     // Channel for prompt delivery to the background task. Capacity is small and
-    // bounded so a stalled daemon back-pressures into a local `try_send` failure
+    // bounded so a stalled tagma back-pressures into a local `try_send` failure
     // (which re-stashes the prompt) rather than buffering an unbounded burst.
     let (action_tx, mut action_rx) = mpsc::channel::<Action>(8);
     // Feedback channel: background task reports each send outcome so the main
@@ -94,7 +94,7 @@ async fn run_tui(session: Session) -> Result<()> {
     // dropping on a full channel.
     let (feedback_tx, mut feedback_rx) = mpsc::channel::<SendOutcome>(16);
 
-    // Background task: delivers prompts to the daemon and reports the outcome.
+    // Background task: delivers prompts to the tagma and reports the outcome.
     {
         let client = session.client.clone();
         let agent_id = session.agent_id.clone();
@@ -178,7 +178,7 @@ async fn run_tui(session: Session) -> Result<()> {
     // (see `tui::input`). This keeps both wheel scrolling and native selection.
     ratatui::crossterm::execute!(std::io::stdout(), EnableAlternateScroll)?;
     let mut app = tui::App::new();
-    // Filled when the daemon event stream ends; breaks the loop and is surfaced
+    // Filled when the tagma event stream ends; breaks the loop and is surfaced
     // after the terminal is restored. Without this, a dead stream leaves the TUI
     // silently frozen — no events, prompts vanish.
     let mut stream_end: Option<session::StreamEnd> = None;
@@ -283,7 +283,7 @@ async fn run_tui(session: Session) -> Result<()> {
         // The user line is rendered optimistically, before delivery is confirmed,
         // so it lands in the right position relative to the boundary event. A
         // failed send leaves this line in place and pushes an Error line, then
-        // re-renders the same text on retry — an accepted duplicate (the daemon
+        // re-renders the same text on retry — an accepted duplicate (the tagma
         // never receives it twice).
         while let Some(merged) = app.outbox.take() {
             let outgoing = prepare_outgoing(&merged);

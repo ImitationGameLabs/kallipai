@@ -7,7 +7,7 @@ use kallip_common::id_type;
 use uuid::Uuid;
 
 id_type! {
-    /// Unique identifier for a registered agent tagma (one `kallip-daemon` instance).
+    /// Unique identifier for a registered agent tagma (one `kallip-tagma` instance).
     TagmaId
 }
 id_type! {

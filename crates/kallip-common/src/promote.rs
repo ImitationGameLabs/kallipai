@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::agentid::AgentId;
 
 /// Placeholder text used when a promote request is denied without a reason.
-/// Shared by the CLI display and daemon notification code so the wording
+/// Shared by the CLI display and tagma notification code so the wording
 /// stays consistent. The stored `deny_reason` is always `None` in this case;
 /// only renderers substitute this text.
 pub const NO_REASON_PROVIDED: &str = "(no reason provided)";

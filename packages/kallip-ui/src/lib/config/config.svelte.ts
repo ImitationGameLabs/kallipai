@@ -43,7 +43,7 @@ class ConfigStore {
   }
 
   /**
-   * Set (first-time setup / new creds) or clear (forget daemon) the offline
+   * Set (first-time setup / new creds) or clear (forget tagma) the offline
    * credentials. Clearing also drops back to online -- offline mode is not
    * meaningful without creds -- so there is a single consistent forget path.
    * Setting creds preserves the current activeMode; the caller flips it with

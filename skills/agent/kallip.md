@@ -5,7 +5,7 @@ description: kallip CLI usage — the agent's primary interface for self-managem
 
 # kallip CLI Skill
 
-`kallip` is the headless CLI that agents use to coordinate with the daemon and manage their own runtime. It is the **primary tool** for nearly all agent operations beyond raw shell commands.
+`kallip` is the headless CLI that agents use to coordinate with the tagma and manage their own runtime. It is the **primary tool** for nearly all agent operations beyond raw shell commands.
 
 ## Invocation
 
@@ -13,7 +13,7 @@ description: kallip CLI usage — the agent's primary interface for self-managem
 kallip <command>
 ```
 
-All commands require `KALLIP_AUTH_TOKEN` (env) and optionally `KALLIP_DAEMON_URL` (default `http://127.0.0.1:3000`). These are pre-set in the agent environment.
+All commands require `KALLIP_AUTH_TOKEN` (env) and optionally `KALLIP_TAGMA_URL` (default `http://127.0.0.1:3000`). These are pre-set in the agent environment.
 
 ## Command Reference
 
@@ -40,7 +40,7 @@ Update your activity label so your supervisor knows what you're doing. Keep it s
 kallip message <ID> <MESSAGE>
 ```
 
-Fire-and-forget (202 Accepted). The daemon processes asynchronously. Poll `status` or `subagent list` to observe results.
+Fire-and-forget (202 Accepted). The tagma processes asynchronously. Poll `status` or `subagent list` to observe results.
 
 ### `subagent` — Manage direct subagents
 
@@ -55,6 +55,7 @@ kallip subagent metadata <ID> [--role <ROLE>] [--description <DESC>]
 `--role` is **required** for spawn. It is a short label like `researcher`, `reviewer`. Skills can be activated via repeated `--skill` flags.
 
 Scoping (server-enforced):
+
 - `spawn` / `metadata` — restricted to **direct supervisor** only.
 - `remove` / `interrupt` — open to **any ancestor** (superior).
 
@@ -83,7 +84,7 @@ kallip policy exec-get <ID>      # show bash_exec command overrides
 
 `exec-set` controls per-command bash_exec overrides (e.g. `cargo`, `git`, `sudo`). Superior-only.
 
-### `budget` — Daemon-wide token budget
+### `budget` — Tagma-wide token budget
 
 ```bash
 kallip budget get
@@ -92,7 +93,7 @@ kallip budget increase <AMOUNT>
 kallip budget decrease <AMOUNT>
 ```
 
-Amounts support K/M/G suffixes (e.g. `100M`, `500K`, `1G`). Budget is daemon-wide, not per-agent.
+Amounts support K/M/G suffixes (e.g. `100M`, `500K`, `1G`). Budget is tagma-wide, not per-agent.
 
 ### `skill` — Skill discovery and promotion
 
@@ -120,7 +121,7 @@ kallip dirlock status                        # dirs this agent currently holds
 kallip dirlock who <DIR>                     # who holds the lock, or "unlocked"
 ```
 
-On `acquire` conflict the daemon returns the holder agent ID — message it to coordinate. `release` is idempotent.
+On `acquire` conflict the tagma returns the holder agent ID — message it to coordinate. `release` is idempotent.
 
 ## Common Patterns
 
@@ -128,6 +129,7 @@ For delegation patterns (async notification, parallel work, guest sandboxing,
 skill review), see the `agent/subagent-management` skill.
 
 Quick reference:
+
 ```bash
 # Capture child ID immediately
 CHILD=$(kallip subagent spawn --role worker --prompt "do work")
@@ -145,4 +147,4 @@ kallip dirlock release /path/to/shared
 
 - `subagent` commands use `KALLIP_ID` (current agent) as the supervisor — only meaningful inside an agent context.
 - `activity` is self-only; you cannot set another agent's activity.
-- `budget` is daemon-wide; `budget set 0` pauses **all** agents.
+- `budget` is tagma-wide; `budget set 0` pauses **all** agents.

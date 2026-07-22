@@ -12,7 +12,7 @@
 //     are /tagmata + /settings (chat is not available until the agora chat
 //     data-plane ships, so / and /approvals redirect to /tagmata).
 //
-//   - "offline" -- no auth, no identity. `connected` reflects the daemon
+//   - "offline" -- no auth, no identity. `connected` reflects the tagma
 //     session. Offline routes are / (chat), /approvals, /settings. /tagmata is
 //     unavailable and redirects to /.
 //

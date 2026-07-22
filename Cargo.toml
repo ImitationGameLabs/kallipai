@@ -9,7 +9,7 @@ members = [
   "crates/kallip-shell",
   "crates/kallip",
   "crates/kallip-tui",
-  "crates/kallip-daemon",
+  "crates/kallip-tagma",
   "crates/kallip-client",
   "crates/kallip-run",
 ]
@@ -34,7 +34,7 @@ kallip-herald = { path = "crates/kallip-herald" }
 kallip-runtime = { path = "crates/kallip-runtime" }
 kallip-shell = { path = "crates/kallip-shell" }
 kallip-client = { path = "crates/kallip-client" }
-kallip-daemon = { path = "crates/kallip-daemon" }
+kallip-tagma = { path = "crates/kallip-tagma" }
 
 anyhow = "1.0.102"
 async-trait = "0.1.89"

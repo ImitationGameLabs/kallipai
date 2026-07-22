@@ -1,9 +1,9 @@
 import type { AgentId } from "./ids.ts";
 
 // Approval domain types. Field names are camelCase here; the direct client's
-// wire adapter renames the daemon's snake_case fields (requested_by, tool_name,
+// wire adapter renames the tagma's snake_case fields (requested_by, tool_name,
 // commit_reason, deny_reason, created_at). The ApprovalStatus *values* stay
-// snake_case because the daemon serializes them snake_case even inside the
+// snake_case because the tagma serializes them snake_case even inside the
 // camelCase `approvalUpdated` SSE event, so they pass through unchanged.
 
 export type ApprovalStatus =

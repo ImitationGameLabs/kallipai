@@ -1289,7 +1289,7 @@ mod tests {
         assert!(out.cwd.exists(), "cwd must fall back to an existing dir");
     }
 
-    /// A second landlocked `bash` can `cat` a spill file the daemon parent
+    /// A second landlocked `bash` can `cat` a spill file the tagma parent
     /// wrote under `temp_dir()`: `baseline_writable` grants read on writable
     /// paths. Guards the read-back affordance the banner advertises.
     #[cfg(all(target_os = "linux", feature = "landlock"))]

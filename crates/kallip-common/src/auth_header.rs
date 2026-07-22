@@ -1,5 +1,5 @@
 //! Bearer-token extraction from an HTTP `Authorization` header, shared by
-//! `kallip-daemon` and `kallip-agora`. Available only with the `axum` feature
+//! `kallip-tagma` and `kallip-agora`. Available only with the `axum` feature
 //! (the only axum-bound symbol here is `axum::http::HeaderMap`).
 //!
 //! Both components resolve an incoming bearer token the same way: parse

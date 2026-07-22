@@ -11,9 +11,9 @@
 # Both modes consume the flake's pre-built outputs directly -- arion does no
 # Rust/crane building. Dev runs `packages.default` via useHostStore so the host
 # /nix/store is shared and rebuilds are picked up without an in-compose bake;
-# the daemon + herald are gated behind the `tagma` profile (the herald can't
-# enroll until a user signs up and mints a code). See docs/development.md for
-# the bring-up commands and flow.
+# the tagma service + herald are gated behind the `tagma` profile (the herald
+# can't enroll until a user signs up and mints a code). See docs/development.md
+# for the bring-up commands and flow.
 { pkgs, lib, ... }:
 let
   mode = builtins.getEnv "KALLIP_ARION_MODE";
@@ -59,7 +59,7 @@ let
 
   # Bind overrides: unset -> docker named volume; set to a host path ->
   # bind-mount:
-  #   - data: keep daemon state on a known disk;
+  #   - data: keep tagma state on a known disk;
   #   - workspace: make the agent's files host-visible;
   #   - skills: curate shared skills on the host.
   dataBind = bindOverride "KALLIP_ARION_DATA_PATH" "/var/lib/kallip";
@@ -106,20 +106,20 @@ let
   # edge proxy in dev; each service publishes its own port. The herald (a
   # container) reaches them via compose DNS (`agora:7100` / `lesche:7200`).
 
-  # The daemon only, looping over every prebuilt [[test]] binary. Exits with
+  # The tagma only, looping over every prebuilt [[test]] binary. Exits with
   # the overall verdict.
   testComposition = {
     config = {
       project.name = "kallipai-test";
 
-      services.daemon = {
-        # The daemon's landlock/seccomp shell sandbox needs these privileges
+      services.tagma = {
+        # The tagma's landlock/seccomp shell sandbox needs these privileges
         # (see docs/reference/container.md). No typed option for security_opt;
         # out.service is the documented escape hatch (attrsOf, merges with the
         # computed spec).
         service.capabilities.SYS_ADMIN = true;
         out.service.security_opt = [ "seccomp=unconfined" ];
-        # Adds root-level /bin/sh and /usr/bin/env symlinks. The daemon and
+        # Adds root-level /bin/sh and /usr/bin/env symlinks. The tagma and
         # agent shells don't need them (bash is resolved via PATH/toolEnv); this
         # is a convenience for `arion exec` and the iterate script below relies
         # on /bin/sh.
@@ -171,9 +171,9 @@ let
     };
   };
 
-  # The full local stack: agora + postgres + daemon + herald. The daemon +
-  # herald are gated behind the `tagma` profile (see header) so a plain
-  # `arion up` brings up only the agora side. Daemon data, the workspace, and
+  # The full local stack: agora + postgres + tagma + herald. The tagma service
+  # + herald are gated behind the `tagma` profile (see header) so a plain
+  # `arion up` brings up only the agora side. Tagma data, the workspace, and
   # shared skills default to docker volumes; each can be bind-overridden via
   # the KALLIP_ARION_*_PATH vars above.
   devComposition = {
@@ -192,9 +192,9 @@ let
       // lib.optionalAttrs (dataBind == null) { data = { }; }
       // lib.optionalAttrs (workspaceBind == null) { workspace = { }; };
 
-      # Dev daemon. The landlock/seccomp shell sandbox needs SYS_ADMIN +
+      # Dev tagma. The landlock/seccomp shell sandbox needs SYS_ADMIN +
       # seccomp=unconfined (out.service is the escape hatch for security_opt).
-      services.daemon = {
+      services.tagma = {
         service.capabilities.SYS_ADMIN = true;
         out.service.security_opt = [ "seccomp=unconfined" ];
         out.service.profiles = [ "tagma" ];
@@ -210,19 +210,19 @@ let
         image.enableRecommendedContents = true;
         image.contents = [ workspace ] ++ runtimeContents;
         service.useHostStore = true;
-        service.command = [ "${workspace}/bin/kallip-daemon" ];
+        service.command = [ "${workspace}/bin/kallip-tagma" ];
         service.environment = {
           PATH = binPath;
           HOME = "/var/lib/kallip";
           KALLIP_DATA_DIR = "/var/lib/kallip";
-          # The daemon eagerly creates the singleton root agent at startup; its
+          # The tagma eagerly creates the singleton root agent at startup; its
           # workspace is resolved by AgentConfig::load from KALLIP_WORKSPACE_ROOT.
           # Pin the mounted workspace volume, which is disjoint from
           # /var/lib/kallip (the data dir) -- a CWD fallback would be "/" in the
           # container, overlap the data tree, and fail startup
           # (ensure_workspace_disjoint rejects the overlap).
           KALLIP_WORKSPACE_ROOT = "/workspace";
-          KALLIP_DAEMON_ADDR = "0.0.0.0:3000";
+          KALLIP_TAGMA_ADDR = "0.0.0.0:3000";
           RUST_LOG = "info";
         };
       };
@@ -324,18 +324,18 @@ let
       # Its first-boot enroll() is NOT retried in code, so `restart:
       # unless-stopped` lets it come back once the code is supplied / the agora
       # is up (a bad code crashloops -- documented). Gated behind the `tagma`
-      # profile alongside the daemon. (prod-tagma's herald lives in
+      # profile alongside the tagma. (prod-tagma's herald lives in
       # nix/prod-composes/tagma.nix.)
       services.herald = {
         service.command = [ "${workspace}/bin/kallip-herald" ];
         service.volumes = [ "herald-state:/var/lib/kallip/herald" ];
         service.restart = "unless-stopped";
-        # KALLIP_AUTH_TOKEN (herald -> daemon operator token) +
+        # KALLIP_AUTH_TOKEN (herald -> tagma operator token) +
         # KALLIP_HERALD_ENROLLMENT_CODE (first run only).
         service.env_file = [ ".env" ];
         out.service.profiles = [ "tagma" ];
         service.useHostStore = true;
-        # CA layer (cacert + certLinks via runtimeContents), same as the daemon.
+        # CA layer (cacert + certLinks via runtimeContents), same as the tagma.
         # reqwest needs the trust store even for a plain-http target, so without
         # it the herald fails to build its Client at startup.
         image.enableRecommendedContents = true;
@@ -343,7 +343,7 @@ let
         service.depends_on = [
           "agora"
           "lesche"
-          "daemon"
+          "tagma"
         ];
         service.environment = {
           KALLIP_HERALD_STATE_DIR = "/var/lib/kallip/herald";
@@ -352,7 +352,7 @@ let
           # Enroll -> agora; tunnel/envelopes/KEX -> lesche.
           KALLIP_HERALD_AGORA_URL = "http://agora:7100";
           KALLIP_HERALD_LESCHE_URL = "http://lesche:7200";
-          KALLIP_DAEMON_URL = "http://daemon:3000";
+          KALLIP_TAGMA_URL = "http://tagma:3000";
           RUST_LOG = "info";
         };
       };

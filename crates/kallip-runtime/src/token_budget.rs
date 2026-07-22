@@ -1,8 +1,8 @@
-//! Daemon-wide token budget shared by all agents.
+//! Tagma-wide token budget shared by all agents.
 //!
 //! Provides [`TokenBudget`] — a wrapper around two `Arc<AtomicU64>` counters
 //! (budget limit and cumulative consumption) that is cloned from `AppState`
-//! so every agent on the daemon shares the same budget.
+//! so every agent on the tagma shares the same budget.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,10 +50,10 @@ impl TokenBudgetSnapshot {
     }
 }
 
-/// Daemon-wide token budget shared by all agents.
+/// Tagma-wide token budget shared by all agents.
 ///
 /// Wraps two `Arc<AtomicU64>` counters (budget limit and cumulative consumption)
-/// that are cloned from `AppState` so every agent on the daemon shares the same
+/// that are cloned from `AppState` so every agent on the tagma shares the same
 /// budget.
 ///
 /// `Clone` is cheap: it clones the inner `Arc`s (reference-count increment),
@@ -77,7 +77,7 @@ impl std::fmt::Debug for TokenBudget {
 impl TokenBudget {
     /// Create a fresh budget from a config limit and an initial consumption value.
     ///
-    /// Used at daemon startup to initialize the daemon-wide budget
+    /// Used at tagma startup to initialize the tagma-wide budget
     /// (`initial_consumed = 0`).
     pub fn new(budget: u64, initial_consumed: u64) -> Self {
         Self {

@@ -1,6 +1,6 @@
 # Roadmap
 
-kallipai is a daemon-centric agent runtime aimed at cross-project, multi-agent
+kallipai is a tagma-centric agent runtime aimed at cross-project, multi-agent
 coordination - early stage, not yet ready for production use. This document
 captures where the project is headed; see [architecture.md](architecture.md)
 for how it works today.

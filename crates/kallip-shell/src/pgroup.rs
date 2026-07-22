@@ -10,7 +10,7 @@
 //! Uses `nix` for typed, `unsafe`-free signal delivery (`Pid`, `Signal`).
 //!
 //! Intentionally Unix-only: `nix` is Unix-only, and every caller of this module
-//! is Unix-only today (the daemon/runtime build only on Unix). `#[cfg(unix)]`
+//! is Unix-only today (the tagma/runtime build only on Unix). `#[cfg(unix)]`
 //! gating is deliberately omitted and will be added only if cross-platform
 //! support is actually needed in the future.
 
@@ -23,7 +23,7 @@ use tokio::process::Child;
 
 use crate::error::ShellError;
 
-/// Grace period between SIGTERM and SIGKILL, mirroring the daemon's
+/// Grace period between SIGTERM and SIGKILL, mirroring the tagma's
 /// `Agent::shutdown` two-phase shape.
 const KILL_GRACE: Duration = Duration::from_secs(2);
 

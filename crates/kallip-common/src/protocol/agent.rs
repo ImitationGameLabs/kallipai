@@ -40,14 +40,14 @@ impl std::fmt::Display for AgentState {
 
 /// Round limit for an agent, set via `CreateAgentRequest::max_tool_rounds`.
 ///
-/// - `None` on the request → use daemon default (`KALLIP_MAX_TOOL_ROUNDS` env var
+/// - `None` on the request → use tagma default (`KALLIP_MAX_TOOL_ROUNDS` env var
 ///   or built-in unlimited).
 /// - `Some(Unlimited)` → force no round limit (bounded only by token budget).
 /// - `Some(Limited(N))` → explicit round limit (must be > 0).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MaxToolRounds {
-    /// No hard round limit — bounded only by the daemon-wide token budget.
+    /// No hard round limit — bounded only by the tagma-wide token budget.
     Unlimited,
     /// Explicit round limit. Must be greater than zero.
     Limited(usize),
@@ -61,7 +61,7 @@ pub struct CreateAgentRequest {
     pub prompt: Option<String>,
     pub created_by: Option<AgentId>,
     /// Short display label for the agent ("researcher"). Subagent spawns are the
-    /// only HTTP create path (`created_by = Some` is required; the daemon's root
+    /// only HTTP create path (`created_by = Some` is required; the tagma's root
     /// is created at startup, not over HTTP) and require a non-empty role.
     /// Never a unique address — `AgentId` is canonical. Empty means unset.
     #[serde(default)]
@@ -72,20 +72,20 @@ pub struct CreateAgentRequest {
     pub description: String,
     /// Override the default/env-configured max tool-call rounds for this agent.
     ///
-    /// - `None` → use daemon default (`KALLIP_MAX_TOOL_ROUNDS` or unlimited).
+    /// - `None` → use tagma default (`KALLIP_MAX_TOOL_ROUNDS` or unlimited).
     /// - `Some(MaxToolRounds::Unlimited)` → force unlimited rounds.
     /// - `Some(MaxToolRounds::Limited(N))` → explicit limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<MaxToolRounds>,
     /// Optional explicit FS-access permission class for a subagent spawn, as the
     /// lowercase wire spelling (`"normal"` / `"guest"`). Subagent spawns are the
-    /// only HTTP create path (`created_by` is required); the daemon's own root
+    /// only HTTP create path (`created_by` is required); the tagma's own root
     /// takes its class at startup from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`,
     /// not from this field.
     ///
     /// `None` → grant the model tier's ceiling (`ceiling_for_tier`), preserving
     /// the historical default. An explicit value is treated as a downgrade
-    /// request by the daemon (the reference monitor): it is rejected with
+    /// request by the tagma (the reference monitor): it is rejected with
     /// `forbidden` if it exceeds the tier ceiling or the supervisor's own
     /// granted class. The string carries no runtime type here to keep
     /// `kallip-common` free of any `kallip-runtime` dependency.
@@ -165,9 +165,9 @@ pub struct AgentStatusResponse {
     pub state: AgentState,
     pub context: ContextUsage,
     pub recent_retries: Vec<RetryRecord>,
-    /// Daemon-wide token consumption budget (shared by all agents).
+    /// Tagma-wide token consumption budget (shared by all agents).
     pub token_budget: u64,
-    /// Cumulative daemon-wide tokens consumed toward the budget.
+    /// Cumulative tagma-wide tokens consumed toward the budget.
     pub token_consumed: u64,
     /// Ephemeral, agent-self-reported current activity. Empty when idle.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -201,11 +201,11 @@ pub struct AgentPermissionsResponse {
     pub max_depth: u8,
     pub workspace_root: String,
     pub created_by: Option<AgentId>,
-    /// The daemon-global `bash_exec` classify rule-set in effect for this agent
-    /// (read-only — it is set once at daemon startup from `KALLIP_POLICY_PRESET`).
+    /// The tagma-global `bash_exec` classify rule-set in effect for this agent
+    /// (read-only — it is set once at tagma startup from `KALLIP_POLICY_PRESET`).
     pub preset: PolicyPreset,
     /// FS-access permission class actually granted to this agent, as the
-    /// lowercase wire spelling (`"normal"` / `"guest"`) — the value the daemon
+    /// lowercase wire spelling (`"normal"` / `"guest"`) — the value the tagma
     /// clamped at spawn and re-validates on restore. Surfaced here (it was
     /// previously invisible to clients) so an explicit downgrade is observable
     /// and verifiable. String-typed to keep `kallip-common` runtime-free.

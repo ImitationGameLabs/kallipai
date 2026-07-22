@@ -169,7 +169,7 @@ pub struct App {
     streaming_content: bool,
     streaming_reasoning: bool,
     /// Queued user inputs awaiting send. Consecutive entries submitted while the
-    /// agent is busy are merged (`join("\n")`) and flushed at the next daemon
+    /// agent is busy are merged (`join("\n")`) and flushed at the next tagma
     /// interjection boundary; an idle submit flushes immediately as its own turn.
     pub pending: Vec<String>,
     /// Merged prompt handed to the main loop for sending. Single slot: a second
@@ -235,7 +235,7 @@ impl App {
 
     /// Move queued user input into the outbox so the main loop can send it.
     ///
-    /// Called on idle submit and on daemon interjection boundaries (a completed
+    /// Called on idle submit and on tagma interjection boundaries (a completed
     /// assistant message, or a terminal event). No-op when nothing is pending or
     /// when a previous flush is still waiting to be consumed — the outbox is a
     /// single slot, so a second flush would silently overwrite the first.

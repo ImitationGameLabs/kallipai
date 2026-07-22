@@ -16,10 +16,10 @@
 //! surfacing.
 //!
 //! [`TagmaEvent`] is the *public, agent-free* event vocabulary the herald
-//! produces (by mapping the daemon's internal `SseEvent` stream) and the app
+//! produces (by mapping the tagma's internal `SseEvent` stream) and the app
 //! consumes, inside the AEAD envelope. It is deliberately not a re-export of the
-//! daemon's event type: the agora/herald public contract must not be coupled to
-//! daemon-internal event shapes.
+//! tagma's event type: the agora/herald public contract must not be coupled to
+//! tagma-internal event shapes.
 
 use crate::ids::TagmaId;
 use crate::message::Envelope;
@@ -48,8 +48,8 @@ pub enum AgoraEvent {
 /// An event the tagma emits to the app, carried inside an E2EE envelope as a
 /// [`crate::message::TagmaReply::Event`].
 ///
-/// This is the agent-free, tagma-facing subset of the daemon's event stream.
-/// The herald maps the daemon's `SseEvent` to this vocabulary, dropping
+/// This is the agent-free, tagma-facing subset of the tagma's event stream.
+/// The herald maps the tagma's `SseEvent` to this vocabulary, dropping
 /// streaming-delta, tool, retry, and approval variants (they are outside the
 /// app's capability set for the agora path). Approval-gated turns surface only
 /// as `Busy` followed by silence until the operator resolves the approval
@@ -82,7 +82,7 @@ pub enum TagmaEvent {
     },
 }
 
-/// Why the failover chain ran out. Mirrors the daemon's
+/// Why the failover chain ran out. Mirrors the tagma's
 /// `FailoverChainExhaustion` but lives in the agent-free public contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

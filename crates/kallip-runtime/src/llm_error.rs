@@ -19,7 +19,7 @@
 
 /// Cap on how much of an HTTP error body we render inline. The upstream transport
 /// caps error bodies at 8 MiB, so a raw fallback can be enormous; truncating keeps
-/// the user-facing message (and daemon log line) readable.
+/// the user-facing message (and tagma log line) readable.
 const BODY_DISPLAY_LIMIT: usize = 512;
 
 /// Render an LLM error into a single, human-readable string: the full `source()`

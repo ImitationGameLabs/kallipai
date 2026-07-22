@@ -10,7 +10,7 @@
 //! [`Outgoing`] carries three views of the same logical message:
 //! - `raw`     the original merged text (used to re-stash on send failure);
 //! - `display` what the TUI renders as the user's line;
-//! - `payload` what is POSTed to the daemon.
+//! - `payload` what is POSTed to the tagma.
 //!
 //! For under-threshold prompts all three are identical; for spilled prompts
 //! `display == payload` is the read instruction while `raw` keeps the content.
@@ -23,7 +23,7 @@ use tempfile::NamedTempFile;
 ///
 /// `tokenx_rs` is an estimator (CJK ~1 token/char, less precise on code), not an
 /// exact count; this gate only exists to keep a single gigantic message from
-/// being inlined. The daemon's own `enforce_pre_call_budget` enforces the real
+/// being inlined. The tagma's own `enforce_pre_call_budget` enforces the real
 /// token budget, so this is a coarse pre-filter, not a precise limit.
 const PROMPT_TOKEN_THRESHOLD: usize = 10_000;
 
@@ -33,7 +33,7 @@ pub(crate) struct Outgoing {
     pub(crate) raw: String,
     /// Text rendered as the user's chat line.
     pub(crate) display: String,
-    /// Text POSTed to the daemon.
+    /// Text POSTed to the tagma.
     pub(crate) payload: String,
 }
 

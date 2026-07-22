@@ -4,7 +4,7 @@
 #[derive(Clone, Debug)]
 pub struct Endpoint {
     pub id: String,
-    /// Backend family — dispatched by the daemon's `BackendFactory` ("deepseek" /
+    /// Backend family — dispatched by the tagma's `BackendFactory` ("deepseek" /
     /// "openai-compatible").
     pub family: String,
     pub api_key: String,

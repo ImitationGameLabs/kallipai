@@ -4,7 +4,7 @@
 //! `rable` parser and returns a final [`super::ToolDecision`] directly — there is
 //! no intermediate "safety" type and no separate mapping layer. The decision
 //! depends on the static catalog, the per-agent [`ExecPolicy`] overrides, and the
-//! daemon-global [`PolicyPreset`] (which selects the rule-set: how unclassified
+//! tagma-global [`PolicyPreset`] (which selects the rule-set: how unclassified
 //! commands resolve and whether the denylist applies).
 
 mod catalog;

@@ -20,7 +20,7 @@ use just_llm_client::types::chat::ChatMessage;
 /// token ([`AgentContext::cancel`]). Cancelled by `interrupt_agent` to abort the current
 /// round without terminating the task.
 ///
-/// Because it is a child, a lifecycle cancel (remove / daemon shutdown) propagates to it —
+/// Because it is a child, a lifecycle cancel (remove / tagma shutdown) propagates to it —
 /// so **lifecycle-cancelled ⟹ round-cancelled**. The converse (round cancelled but
 /// lifecycle not) is exactly what distinguishes an interrupt from a lifecycle cancel. This
 /// holds iff the token is always minted via [`RoundToken::new`] from the lifecycle token;
@@ -99,7 +99,7 @@ pub struct AgentContext {
     /// Wake signal triggered by external events (e.g. approval notifications).
     /// The agent task awaits this in the outer loop; callers signal via `notify_one()`.
     pub notify: Arc<Notify>,
-    /// Daemon-wide token budget shared by all agents.
+    /// Tagma-wide token budget shared by all agents.
     /// Cloned from `AppState` — same underlying Arc counters across all agents.
     pub token_budget: crate::token_budget::TokenBudget,
 }
@@ -196,7 +196,7 @@ pub async fn agent_task(
                     None => break,
                 }
             }
-            // Lifecycle cancel (remove / daemon shutdown): terminate the task.
+            // Lifecycle cancel (remove / tagma shutdown): terminate the task.
             // Per-agent interrupt never reaches here — it cancels only the current
             // round token inside `run_and_report`, not the lifecycle token.
             _ = ctx.cancel.cancelled() => {
@@ -222,7 +222,7 @@ pub async fn agent_task(
 
 /// Persist context + approval state and emit the terminal [`AgentEvent::Cancelled`].
 ///
-/// The single exit path for a lifecycle cancel (remove / daemon shutdown), shared by the
+/// The single exit path for a lifecycle cancel (remove / tagma shutdown), shared by the
 /// outer-loop cancel arm (idle) and `run_and_report`'s mid-round lifecycle-cancel branch.
 async fn terminate_cancelled(ctx: &AgentContext, agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>) {
     ctx.persist().await;

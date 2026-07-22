@@ -1,6 +1,6 @@
 //! Skill promotion: writes validated content to the shared directory.
 //!
-//! This is the I/O layer used by the daemon's approve path. The caller
+//! This is the I/O layer used by the tagma's approve path. The caller
 //! (the promote-request route handler) is responsible for frontmatter
 //! validation and the consistency check against the previous snapshot.
 

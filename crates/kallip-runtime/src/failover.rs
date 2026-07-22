@@ -28,7 +28,7 @@ use crate::profile::{ChatClient, Profile, ProfileRegistry, Tier};
 /// order, walked forward-only on a terminal endpoint failure. `profile_idx` resets to 0 on
 /// spawn/restore (a fresh [`FailoverState::new`]).
 ///
-/// `pub` + a `pub` [`new`](Self::new) so the daemon can construct an `AgentContext`; the
+/// `pub` + a `pub` [`new`](Self::new) so the tagma can construct an `AgentContext`; the
 /// accessors are `pub(crate)` (only the runtime reads the state).
 pub struct FailoverState {
     tier: Tier,
@@ -133,7 +133,7 @@ pub(crate) enum FailoverOutcome {
     },
     /// The round was cancelled during the advance.
     Cancelled,
-    /// Compaction ran and hit the daemon token budget.
+    /// Compaction ran and hit the tagma token budget.
     BudgetExceeded { consumed: u64, budget: u64 },
 }
 

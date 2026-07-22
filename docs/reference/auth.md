@@ -2,18 +2,18 @@
 
 ## Token types
 
-All endpoints require a `Bearer` token in the `Authorization` header. The daemon
+All endpoints require a `Bearer` token in the `Authorization` header. The tagma
 generates two categories of token:
 
-- **Operator token** — printed once at daemon startup. Grants full access:
-  manage any agent, approve/deny approvals. (The daemon's single root agent is
-  daemon-managed — created at startup from env, never created over HTTP.)
+- **Operator token** — printed once at tagma startup. Grants full access:
+  manage any agent, approve/deny approvals. (The tagma's single root agent is
+  tagma-managed — created at startup from env, never created over HTTP.)
 - **Agent token** — generated per agent at creation, injected into the agent's shell as
-  `KALLIP_AUTH_TOKEN`. Agents use this to call back to the daemon.
+  `KALLIP_AUTH_TOKEN`. Agents use this to call back to the tagma.
 
 Both tokens are 256-bit CSPRNG secrets with a type-tag prefix (`sk-operator-…` /
 `sk-agent-…`), so the kind is self-describing and secret scanners can flag leaks. The
-daemon **never stores a token in plaintext on long-lived state**: only its SHA-256 hash
+tagma **never stores a token in plaintext on long-lived state**: only its SHA-256 hash
 is retained (`AppState` and the agent registry index). Incoming bearer tokens are
 hashed and compared by hash. Because an attacker cannot steer a SHA-256 output,
 variable comparison/lookup time over hashes leaks nothing about the secret — timing is
@@ -27,8 +27,8 @@ comparison additionally uses a constant-time compare.
 - **Superior** — any ancestor in the `created_by` chain (supervisor,
   grand-supervisor, etc.).
 - **Self** — the agent itself (identity matches the target agent ID).
-- **Root agent** — the daemon's single agent with no `created_by`. It is
-  daemon-managed (eagerly created at startup from env vars), never created or
+- **Root agent** — the tagma's single agent with no `created_by`. It is
+  tagma-managed (eagerly created at startup from env vars), never created or
   removed over HTTP.
 
 ## Authorization matrix
@@ -59,13 +59,13 @@ supervisor).
 
 A subagent spawn (`POST /agents` with `created_by`) accepts an optional
 `permission_class` field (`"normal"` / `"guest"`) that explicitly **downgrades**
-the child's FS-access class below its model tier's ceiling. The daemon is the
+the child's FS-access class below its model tier's ceiling. The tagma is the
 reference monitor: a value above the tier ceiling or the supervisor's own
 granted class is rejected with `403 Forbidden` — downgrade only, never an
 escalation. A `normal` root may thus spawn a read-only `guest` reviewer. This
-field is subagent-only; the daemon's own root takes its class at startup from
+field is subagent-only; the tagma's own root takes its class at startup from
 `KALLIP_ROOT_AGENT_PERMISSION_CLASS` (see [env.md](env.md)). The granted class is
-reported by `GET /agents/{id}/permissions` (see [daemon-api.md](daemon-api.md)).
+reported by `GET /agents/{id}/permissions` (see [tagma-api.md](tagma-api.md)).
 
 ### Context and policy
 
@@ -75,7 +75,7 @@ reported by `GET /agents/{id}/permissions` (see [daemon-api.md](daemon-api.md)).
 | `GET /agents/{id}/permissions` | Yes      | —        | Yes       |
 
 Read-only context endpoints are accessible to any authenticated identity. The
-classify preset is daemon-global and immutable; per-command `bash_exec` overrides
+classify preset is tagma-global and immutable; per-command `bash_exec` overrides
 (`PUT /agents/{id}/exec-policy`) require operator or superior.
 
 ### Approvals
@@ -87,7 +87,7 @@ classify preset is daemon-global and immutable; per-command `bash_exec` override
 | `POST /approvals/{id}` | Yes      | Yes      | —         | Approve has additional classify gate |
 
 For **approve** decisions on a deferred `bash_exec`, an additional classify gate
-applies: the caller's own classify rule-set (the daemon-global preset plus the
+applies: the caller's own classify rule-set (the tagma-global preset plus the
 caller's `ExecPolicy` overrides) must classify the command as `allow`. This
 prevents superiors from using subordinates as proxies to run a command their own
 policy would gate. The operator identity is exempt. **Deny** decisions have no

@@ -1,4 +1,4 @@
-//! HTTP/SSE wire types for daemon-client communication.
+//! HTTP/SSE wire types for tagma-client communication.
 
 pub mod agent;
 pub mod approval;

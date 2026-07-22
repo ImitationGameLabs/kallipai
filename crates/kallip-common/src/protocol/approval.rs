@@ -1,4 +1,4 @@
-//! Approval wire types for daemon-client communication.
+//! Approval wire types for tagma-client communication.
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;

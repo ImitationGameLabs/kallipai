@@ -2,7 +2,7 @@
 //!
 //! Writes context and approval state to per-agent directories.
 //! All writes use atomic rename (temp file + rename) to prevent corruption
-//! on crash. On daemon restart, [`scan_agents`] scans for agents
+//! on crash. On tagma restart, [`scan_agents`] scans for agents
 //! that can be recovered.
 
 use std::fs;
@@ -68,11 +68,11 @@ fn canonical_data_root() -> Result<PathBuf> {
     }
 }
 
-/// Whether `workspace_root` and the daemon data root share an ancestor/descendant
+/// Whether `workspace_root` and the tagma data root share an ancestor/descendant
 /// relationship — i.e. one contains the other.
 ///
-/// Such overlap must be rejected by the daemon: an agent whose workspace *is* (or
-/// *contains*) the data tree could write daemon bookkeeping (`meta.json`,
+/// Such overlap must be rejected by the tagma: an agent whose workspace *is* (or
+/// *contains*) the data tree could write tagma bookkeeping (`meta.json`,
 /// `context.json`, `exec_policy.toml`, peers' `agents/<id>/`, ...). With the overlap
 /// eliminated, landlock alone enforces the data-dir integrity baseline (the agent's
 /// writable set never covers the data tree except its own `agents/<id>/skills/`).
@@ -88,7 +88,7 @@ pub fn workspace_overlaps_data_root(workspace_root: &Path) -> Result<bool> {
     Ok(data.starts_with(&ws) || ws.starts_with(&data))
 }
 
-/// Reject a workspace that overlaps the daemon data tree.
+/// Reject a workspace that overlaps the tagma data tree.
 ///
 /// Shared by `create_agent` and restore so the message and verdict come from one
 /// place. Returns `Ok(())` when the workspace is safely disjoint; otherwise an
@@ -97,7 +97,7 @@ pub fn workspace_overlaps_data_root(workspace_root: &Path) -> Result<bool> {
 pub fn ensure_workspace_disjoint(workspace_root: &Path) -> Result<()> {
     if workspace_overlaps_data_root(workspace_root)? {
         anyhow::bail!(
-            "workspace_root {} overlaps the daemon data directory; choose a workspace \
+            "workspace_root {} overlaps the tagma data directory; choose a workspace \
              outside the data tree",
             workspace_root.display()
         );
@@ -557,7 +557,7 @@ const RESTART_MESSAGE: &str = concat!(
     "environment variables, working directory, and background processes are no\n",
     "longer available. Review the current state of the project and re-establish\n",
     "any necessary conditions before continuing.\n",
-    "Directory write-locks do not survive a daemon restart: all locks were\n",
+    "Directory write-locks do not survive a tagma restart: all locks were\n",
     "released. Re-acquire any locks you still need (`kallip dirlock acquire\n",
     "<dir>`) before writing shared directories."
 );
@@ -619,7 +619,7 @@ mod tests {
 
     // ----- workspace/data-dir overlap guard tests -----
     // The guard backs the data-dir integrity baseline: with no workspace↔data
-    // overlap, landlock alone keeps the agent out of daemon bookkeeping.
+    // overlap, landlock alone keeps the agent out of tagma bookkeeping.
 
     #[test]
     #[serial]

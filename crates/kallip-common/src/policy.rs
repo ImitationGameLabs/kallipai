@@ -1,8 +1,8 @@
-//! Policy types shared between the runtime policy engine and the daemon API/config.
+//! Policy types shared between the runtime policy engine and the tagma API/config.
 //!
 //! Only `bash_exec` is gated (it is the arbitrary-execution surface); every other
 //! tool is the agent's own self-management and runs unconditionally. There is no
-//! per-tool decision lattice. The `bash_exec` rule-set is selected by a daemon-global
+//! per-tool decision lattice. The `bash_exec` rule-set is selected by a tagma-global
 //! [`PolicyPreset`]; per-command overrides live in [`ExecPolicy`].
 
 use std::collections::BTreeMap;
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize, de, de::Visitor};
 use std::str::FromStr;
 
-/// The daemon-global rule-set applied to `bash_exec` classification, selected once
+/// The tagma-global rule-set applied to `bash_exec` classification, selected once
 /// at startup by `KALLIP_POLICY_PRESET`.
 ///
 /// There is no separate "mode" type: the preset *is* the rule bundle. The classifier

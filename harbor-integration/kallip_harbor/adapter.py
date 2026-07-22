@@ -4,7 +4,7 @@ This module provides ``KallipAdapter``, a Harbor-compatible agent
 that runs kallip inside benchmarking containers.  It manages the
 full lifecycle:
 
-1. **install()** — upload the tarball, unpack, start the daemon
+1. **install()** — upload the tarball, unpack, start the tagma
 2. **run()**     — invoke ``kallip-run`` with the task instruction
 3. **populate_context_post_run()** — parse token usage from context.json
 
@@ -34,11 +34,11 @@ from harbor.agents.installed.base import (
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from kallip_harbor.daemon import (
+from kallip_harbor.tagma import (
     PACKAGES,
     RUN_BIN,
     RUN_LOG,
-    DaemonManager,
+    TagmaManager,
 )
 
 
@@ -46,7 +46,7 @@ class KallipAdapter(BaseInstalledAgent):
     """Harbor adapter for kallip.
 
     Subclasses ``BaseInstalledAgent`` to integrate kallip into
-    Harbor's container-based benchmarking pipeline.  The daemon runs
+    Harbor's container-based benchmarking pipeline.  The tagma runs
     inside the container, and ``kallip-run`` is invoked per task.
     """
 
@@ -61,16 +61,16 @@ class KallipAdapter(BaseInstalledAgent):
         return None
 
     # -- Declarative CLI flags for kallip-run --
-    # None today. kallip-run posts the prompt to the daemon's single root agent
+    # None today. kallip-run posts the prompt to the tagma's single root agent
     # and no longer takes spawn-time flags; a round cap, if ever wanted, would be
-    # set on the daemon via KALLIP_MAX_TOOL_ROUNDS (read at root creation), not
+    # set on the tagma via KALLIP_MAX_TOOL_ROUNDS (read at root creation), not
     # passed per-run. Benchmark configs intentionally leave rounds uncapped so
     # complex tasks are not cut off mid-completion.
     CLI_FLAGS: list[CliFlag] = []
 
     # -- Declarative environment variables --
     # These are resolved from Harbor kwargs / host env / defaults, and
-    # forwarded into the container for the daemon and runner.
+    # forwarded into the container for the tagma and runner.
     # Note: API keys are provider-specific, matching kallip's design:
     #   deepseek           → KALLIP_LLM_DEEPSEEK_API_KEY
     #   openai-compatible  → KALLIP_LLM_OPENAI_COMPAT_API_KEY
@@ -109,7 +109,7 @@ class KallipAdapter(BaseInstalledAgent):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._daemon = DaemonManager()
+        self._tagma = TagmaManager()
         self._operator_token: str = ""
 
     # ------------------------------------------------------------------
@@ -117,7 +117,7 @@ class KallipAdapter(BaseInstalledAgent):
     # ------------------------------------------------------------------
 
     async def install(self, environment: BaseEnvironment) -> None:
-        """Install kallip (+ aifed) binaries and start the daemon."""
+        """Install kallip (+ aifed) binaries and start the tagma."""
         # 1. CA certificates for reqwest TLS verification (installed once).
         await self.exec_as_root(
             environment,
@@ -184,7 +184,7 @@ class KallipAdapter(BaseInstalledAgent):
             env.setdefault("KALLIP_LLM_PROVIDER", provider)
             env.setdefault("KALLIP_LLM_MODEL", model)
 
-        # Persist daemon data under Harbor's bind-mounted /logs/agent/ so it
+        # Persist tagma data under Harbor's bind-mounted /logs/agent/ so it
         # survives on the host at <trial_dir>/agent/ for post-run inspection.
         env.setdefault("KALLIP_DATA_DIR", "/logs/agent")
 
@@ -193,16 +193,16 @@ class KallipAdapter(BaseInstalledAgent):
 
         # Nix-built binaries cannot find the system CA store after
         # patchelf rewrites the interpreter.  Point them at the FHS
-        # standard location so reqwest (used by both daemon and runner)
+        # standard location so reqwest (used by both tagma and runner)
         # can verify TLS certificates when calling LLM providers.
         env.setdefault("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
 
-        # 5. Start the daemon.
-        self._daemon.set_operator_token(self._operator_token)
-        await self._daemon.start(self, environment, env)
+        # 5. Start the tagma.
+        self._tagma.set_operator_token(self._operator_token)
+        await self._tagma.start(self, environment, env)
 
-        # 6. Wait for the daemon to become healthy.
-        await self._daemon.wait_ready(self, environment)
+        # 6. Wait for the tagma to become healthy.
+        await self._tagma.wait_ready(self, environment)
 
     # ------------------------------------------------------------------
     # run
@@ -220,7 +220,7 @@ class KallipAdapter(BaseInstalledAgent):
         flags = self.build_cli_flags()
 
         run_env = {
-            "KALLIP_DAEMON_URL": "http://127.0.0.1:3000",
+            "KALLIP_TAGMA_URL": "http://127.0.0.1:3000",
             "KALLIP_AUTH_TOKEN": self._operator_token,
             "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
         }

@@ -1,7 +1,7 @@
 //! Context-budget warning injection: notify the LLM as it approaches token limits.
 //!
 //! [`check_progressive_warnings`] fires on context-window usage (per-agent); [`check_token_budget_warnings`]
-//! on daemon-wide budget usage. Each injects a `[system]` user turn the first time a threshold is
+//! on tagma-wide budget usage. Each injects a `[system]` user turn the first time a threshold is
 //! crossed, and is a no-op below the lowest threshold. These mutate the store (push a turn + mark
 //! the threshold fired) so the warning fires once per level.
 

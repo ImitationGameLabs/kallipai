@@ -1,8 +1,8 @@
 //! `kallip-herald`: the host-side relay connector. Runs next to a
-//! `kallip-daemon`, enrolls with `kallip-agora`, holds the outbound tunnel,
+//! `kallip-tagma`, enrolls with `kallip-agora`, holds the outbound tunnel,
 //! brokers the conversation E2E key, and exposes the tagma as a single stateful
-//! entity to remote apps: it binds to the daemon-owned root agent and
-//! translates semantic operations into daemon calls.
+//! entity to remote apps: it binds to the tagma-owned root agent and
+//! translates semantic operations into tagma calls.
 
 mod e2e;
 mod herald;
@@ -15,7 +15,7 @@ use clap::Parser;
 use kallip_agora_common::bytes::Ed25519PublicKey;
 use kallip_agora_common::control::EnrollRequest;
 use kallip_agora_common::ids::TagmaId;
-use kallip_client::DaemonClient;
+use kallip_client::TagmaClient;
 use tracing::info;
 
 use std::io::Write;
@@ -46,16 +46,16 @@ struct Args {
     /// token is reused).
     #[arg(long, env = "KALLIP_HERALD_ENROLLMENT_CODE")]
     enrollment_code: Option<String>,
-    /// Local daemon URL.
+    /// Local tagma URL.
     #[arg(
         long,
-        env = "KALLIP_DAEMON_URL",
+        env = "KALLIP_TAGMA_URL",
         default_value = "http://127.0.0.1:3000"
     )]
-    daemon_url: String,
-    /// Daemon auth token (the herald acts as the operator).
+    tagma_url: String,
+    /// Tagma auth token (the herald acts as the operator).
     #[arg(long, env = "KALLIP_AUTH_TOKEN")]
-    daemon_token: String,
+    tagma_token: String,
     /// State directory (device key, tagma token). Defaults to a per-user data dir.
     #[arg(long, env = "KALLIP_HERALD_STATE_DIR")]
     state_dir: Option<String>,
@@ -97,28 +97,28 @@ async fn main() -> Result<()> {
         }
     };
 
-    // The daemon event stream is long-lived with no natural end, so the daemon
+    // The tagma event stream is long-lived with no natural end, so the tagma
     // client must NOT carry a total request timeout — reqwest's `.timeout()` is
     // a whole-request deadline that would kill the stream mid-flight. Build an
-    // explicit no-timeout client rather than relying on the DaemonClient
+    // explicit no-timeout client rather than relying on the TagmaClient
     // default; the property is load-bearing for the event pump.
-    let daemon_http = reqwest::Client::builder()
+    let tagma_http = reqwest::Client::builder()
         .build()
-        .context("build daemon http client")?;
-    let daemon = DaemonClient::builder(&args.daemon_url)
-        .auth_token(&args.daemon_token)
-        .http_client(daemon_http)
+        .context("build tagma http client")?;
+    let tagma = TagmaClient::builder(&args.tagma_url)
+        .auth_token(&args.tagma_token)
+        .http_client(tagma_http)
         .build()?;
 
-    // The daemon owns exactly one root agent (eagerly created at startup); the
-    // herald binds to it directly. The daemon must be reachable to start.
-    let root_agent = daemon.get_root_agent().await?.id;
+    // The tagma owns exactly one root agent (eagerly created at startup); the
+    // herald binds to it directly. The tagma must be reachable to start.
+    let root_agent = tagma.get_root_agent().await?.id;
 
     Herald::new(
         args.lesche_url,
         tagma_id,
         tagma_token,
-        daemon,
+        tagma,
         device,
         root_agent,
     )
@@ -132,7 +132,7 @@ fn resolve_state_dir(flag: Option<String>) -> Result<PathBuf> {
         return Ok(PathBuf::from(p));
     }
     // `KALLIP_DATA_DIR` is the shared "where does kallip keep its data" override
-    // (the daemon/tui honor the same convention by agreement, not via shared
+    // (the tagma/tui honor the same convention by agreement, not via shared
     // code). Otherwise fall back to the platform data dir namespaced as
     // `<data_dir>/kallip/herald`.
     if let Ok(dir) = std::env::var("KALLIP_DATA_DIR") {

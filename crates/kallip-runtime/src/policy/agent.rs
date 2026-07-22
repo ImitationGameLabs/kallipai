@@ -17,7 +17,7 @@ use super::classifier::Classifier;
 /// tool is unconditionally `Allow`. The `bash_exec` verdict comes from a
 /// preset-aware [`Classifier`] applied to a snapshot of the shared per-agent
 /// [`ExecPolicy`] overrides. The preset is fixed for the agent's lifetime
-/// (daemon-global, selected once at startup), while the exec-policy is
+/// (tagma-global, selected once at startup), while the exec-policy is
 /// runtime-mutable.
 #[derive(Clone, Debug)]
 pub struct AgentPolicy {

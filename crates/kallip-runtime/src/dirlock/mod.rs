@@ -1,7 +1,7 @@
 //! Directory write-lock coordinator (`DirLockManager`).
 //!
 //! Provides **write mutual exclusion** on filesystem directories across agents
-//! running in the same daemon: at most one agent may hold the write-lock on a
+//! running in the same tagma: at most one agent may hold the write-lock on a
 //! given canonical directory at a time. Locks are held at the agent-session
 //! granularity — they persist across many `bash_exec` commands and are released
 //! only explicitly ([`DirLockManager::release`]) or when the agent task dies
@@ -50,9 +50,9 @@
 //!   lifetime of its task.** This is what makes the workspace appear in
 //!   [`DirLockManager::write_paths`] and thus in the landlock writable set. It is
 //!   acquired on *every* materialization path (create, restore, reactivation),
-//!   not just create, so the workspace stays writable across daemon restarts and
+//!   not just create, so the workspace stays writable across tagma restarts and
 //!   same-workspace mutual exclusion holds after a restore. The acquire is
-//!   centralized in `kallip-daemon`'s `try_acquire_workspace_lock`; this module
+//!   centralized in `kallip-tagma`'s `try_acquire_workspace_lock`; this module
 //!   only provides the mechanism.
 //! - **Release is coupled to task death, not registry removal.** Reactivation
 //!   and `abort_agent` re-spawn or tear down an agent *without* removing its

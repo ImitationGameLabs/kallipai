@@ -42,7 +42,7 @@ function fakeStorage(initial: string | null): {
 
 const validOffline: PersistedConfig = {
   activeMode: "offline",
-  offline: { daemonUrl: "http://host:3000", authToken: "t" },
+  offline: { tagmaUrl: "http://host:3000", authToken: "t" },
 };
 
 Deno.test(
@@ -64,7 +64,7 @@ Deno.test(
     const fake = fakeStorage(
       JSON.stringify({
         backend: "offline",
-        daemonUrl: "http://host:3000",
+        tagmaUrl: "http://host:3000",
         authToken: "t",
       }),
     );
@@ -102,3 +102,34 @@ Deno.test("loadConfig wipes a value with an unknown activeMode", async () => {
   assertEquals(await loadConfig(), null);
   assertEquals(fake.cleared, 1);
 });
+
+Deno.test(
+  "loadConfig wipes a stale offline shape (pre-rename daemonUrl field)",
+  async () => {
+    // A pre-rename blob carries `daemonUrl` instead of `tagmaUrl`; it must be
+    // wiped (not loaded with an undefined URL) per the no-legacy-shapes rule.
+    const fake = fakeStorage(
+      JSON.stringify({
+        activeMode: "offline",
+        offline: { daemonUrl: "http://host:3000", authToken: "t" },
+      }),
+    );
+    initConfigStorage(fake.storage);
+
+    assertEquals(await loadConfig(), null);
+    assertEquals(fake.cleared, 1);
+  },
+);
+
+Deno.test(
+  "loadConfig wipes an offline shape missing required string fields",
+  async () => {
+    const fake = fakeStorage(
+      JSON.stringify({ activeMode: "offline", offline: { tagmaUrl: 3000 } }),
+    );
+    initConfigStorage(fake.storage);
+
+    assertEquals(await loadConfig(), null);
+    assertEquals(fake.cleared, 1);
+  },
+);

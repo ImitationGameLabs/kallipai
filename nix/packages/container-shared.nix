@@ -1,6 +1,6 @@
 { pkgs }:
 let
-  # One merged /bin tree put on PATH. The daemon spawns `bash` via PATH
+  # One merged /bin tree put on PATH. The tagma spawns `bash` via PATH
   # resolution (ShellBuilder default) and shells out to `pgrep`/`kill`, so the
   # toolset must live on PATH alongside the workspace binaries. pathsToLink
   # merges every package's /bin into a single ${toolEnv}/bin.
@@ -38,8 +38,8 @@ let
     ln -s ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/etc/pki/tls/certs/ca-bundle.crt
   '';
 
-  # aifed: the daemon's intended process-level shell-out dep (runtime adoption
-  # pending). Put on PATH so the daemon resolves it by name, like bash/pgrep.
+  # aifed: the tagma's intended process-level shell-out dep (runtime adoption
+  # pending). Put on PATH so the tagma resolves it by name, like bash/pgrep.
   inherit (pkgs) aifed;
 
   # The full container PATH, built once so prod and dev cannot drift.

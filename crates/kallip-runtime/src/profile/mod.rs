@@ -1,7 +1,7 @@
 //! Model profile registry: provider/model selection with capability tiers.
 //!
 //! Provides the data model, a TOML/env config loader (returning [`ProfileConfig`]), and re-exports
-//! the upstream [`ChatClient`]. The daemon builds backends and assembles them into a
+//! the upstream [`ChatClient`]. The tagma builds backends and assembles them into a
 //! [`ProfileRegistry`]; the runtime holds pre-built backends and does selection only.
 //!
 //! [`ChatClient`]: just_llm_client::ChatClient
