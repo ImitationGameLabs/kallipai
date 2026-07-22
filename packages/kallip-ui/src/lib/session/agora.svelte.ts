@@ -19,6 +19,7 @@ import {
   AgoraApiError,
   AgoraClient,
   type CeremonyResult,
+  LescheClient,
   loginWithPasskey,
   type MeResponse,
   registerWithPasskey,
@@ -41,6 +42,34 @@ function client(): AgoraClient {
     throw new Error("initAgora(url) must be called at app bootstrap");
   }
   return agoraClient;
+}
+
+/** The control-plane (agora) client; throws if initAgora has not been called.
+ * Exposed so peer stores (e.g. the channels store, which needs `getTagma` for
+ * the key-exchange's pinned key) can reach the same singleton. */
+export function agoraClientOrFail(): AgoraClient {
+  return client();
+}
+
+// The lesche (data-plane) client lives on a separate origin from the agora; its
+// URL is injected the same way (no import.meta.env in this library). The session
+// cookie is shared cross-subdomain, so the same credentialed fetch works.
+let lescheClient: LescheClient | null = null;
+
+/** Inject the lesche base URL and construct the data-plane client. Called once
+ * at bootstrap alongside initAgora. */
+export function initLesche(url: string): void {
+  lescheClient = new LescheClient(url);
+}
+
+/** The data-plane (lesche) client; throws if initLesche has not been called.
+ * Consumed by channelsStore (the key exchange + envelope relay) and
+ * realtimeStore (the me/events SSE) -- both peer singletons. */
+export function lescheClientOrFail(): LescheClient {
+  if (!lescheClient) {
+    throw new Error("initLesche(url) must be called at app bootstrap");
+  }
+  return lescheClient;
 }
 
 function messageOf(e: unknown): string {
@@ -102,15 +131,16 @@ class AgoraSessionStore {
       });
   }
 
-  /** Enrolled tagmata as card props. */
-  get tagmaCards(): TagmaCardProps[] {
+  /** Enrolled tagmata as card props WITHOUT presence. The registry owns
+   * identity/label/createdAt only; live presence is overlaid by the view from
+   * realtime (the agora `/v1/tagmata` no longer carries liveness). */
+  get enrolledCards(): Omit<TagmaCardProps, "presence">[] {
     return this.tagmata
       .filter((t) => t.state === "enrolled")
       .map((t) => ({
         tagmaId: t.tagma_id,
         label: t.label,
         createdAt: t.created_at,
-        online: t.online,
       }));
   }
 
@@ -211,7 +241,6 @@ class AgoraSessionStore {
           label: null,
           state: "pending" as const,
           created_at: minted.created_at,
-          online: false,
           // No masked form for a just-minted card; the plaintext (in
           // `mintedCode`) is shown until the next refresh.
         },

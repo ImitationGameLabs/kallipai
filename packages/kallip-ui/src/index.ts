@@ -31,7 +31,7 @@ export {
   initShell,
   navigate,
 } from "./lib/shell/port.ts";
-export { initAgora } from "./lib/session/agora.svelte.ts";
+export { initAgora, initLesche } from "./lib/session/agora.svelte.ts";
 export {
   initConfigStorage,
   type OfflineModeConfig,
@@ -46,6 +46,8 @@ export {
 // Reactive stores (singletons).
 export { agoraSession } from "./lib/session/agora.svelte.ts";
 export { sessionStore } from "./lib/session/session.svelte.ts";
+export { channelsStore } from "./lib/session/channels.svelte.ts";
+export { realtimeStore } from "./lib/session/realtime.svelte.ts";
 export { configStore } from "./lib/config/config.svelte.ts";
 export { connectDirect } from "./lib/session/connect.ts";
 
@@ -60,6 +62,7 @@ export {
 
 // Route page bodies (consumed by each app's thin +page.svelte wrappers).
 export { default as ChatPage } from "./pages/ChatPage.svelte";
+export { default as ChannelChatPage } from "./pages/ChannelChatPage.svelte";
 export { default as ApprovalsPage } from "./pages/ApprovalsPage.svelte";
 export { default as TagmataPage } from "./pages/TagmataPage.svelte";
 export { default as SettingsPage } from "./pages/SettingsPage.svelte";
@@ -89,11 +92,13 @@ export type {
   EnrollmentCodeCardProps,
   SectionPhase,
   TagmaCardProps,
+  TagmaPresence,
 } from "./lib/tagmata.svelte.ts";
 export {
   formatDateTime,
   isExpired,
-  onlineDotClass,
+  presenceDotClass,
+  presenceLabel,
 } from "./lib/tagmata.svelte.ts";
 
 // Headless view-models + helpers

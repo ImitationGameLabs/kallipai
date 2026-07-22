@@ -3,14 +3,20 @@
 // prop-driven and portable. The consuming app (kallip-web) maps agora-client
 // response types into these `Props` before passing them down.
 
+/** Liveness of an enrolled tagma, as shown by the dashboard dot. `checking`
+ * means presence has not yet resolved for this session (the realtime SSE has
+ * not delivered its snapshot); the card shows a neutral placeholder rather
+ * than a misleading default "offline". */
+export type TagmaPresence = "checking" | "online" | "offline";
+
 /** Props for one enrolled-tagma card (`GET /v1/tagmata` row). */
 export interface TagmaCardProps {
   readonly tagmaId: string;
   readonly label: string | null;
   /** RFC3339. */
   readonly createdAt: string;
-  /** True iff a herald tunnel is live right now (the sole liveness signal). */
-  readonly online: boolean;
+  /** Live presence, driven by the realtime SSE. See {@link TagmaPresence}. */
+  readonly presence: TagmaPresence;
 }
 
 /** Props for one pending-tagma card. `code` is the display value: the full
@@ -33,9 +39,29 @@ export interface EnrollmentCodeCardProps {
 /** Per-section load state for the dashboard (drives auto-hide + skeleton/error). */
 export type SectionPhase = "loading" | "loaded" | "error";
 
-/** Skeleton background token for the online/offline dot (mirrors connection VM). */
-export function onlineDotClass(online: boolean): string {
-  return online ? "bg-success-500" : "bg-surface-400";
+/** Skeleton background token for the presence dot. `checking` is a muted,
+ * gently pulsing dot to read as "checking", distinct from a definite offline. */
+export function presenceDotClass(presence: TagmaPresence): string {
+  switch (presence) {
+    case "online":
+      return "bg-success-500";
+    case "offline":
+      return "bg-surface-400";
+    case "checking":
+      return "bg-surface-400 animate-pulse";
+  }
+}
+
+/** Human-readable presence label for the dot caption + tooltip. */
+export function presenceLabel(presence: TagmaPresence): string {
+  switch (presence) {
+    case "online":
+      return "online";
+    case "offline":
+      return "offline";
+    case "checking":
+      return "checking…";
+  }
 }
 
 /** Locale-formatted timestamp for an RFC3339 string. */

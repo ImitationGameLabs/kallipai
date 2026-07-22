@@ -5,11 +5,13 @@
   import AccountMenu from "../../components/AccountMenu.svelte";
   import { classifyError } from "../errors.ts";
   import { agoraSession } from "../session/agora.svelte";
+  import { channelsStore } from "../session/channels.svelte";
+  import { realtimeStore } from "../session/realtime.svelte";
   import { sessionStore } from "../session/session.svelte";
   import { connectDirect } from "../session/connect.ts";
   import { configStore } from "../config/config.svelte";
   import { modeOf } from "../config/mode.ts";
-  import { navFor, type NavIcons } from "./links.ts";
+  import { navFor, pathMatches, type NavIcons } from "./links.ts";
   import { appGateDecision, isPublicRoute } from "./gate.ts";
   import { navigate } from "./port.ts";
 
@@ -37,6 +39,12 @@
   // onMount (not a reactive $effect) so this runs exactly once, with no
   // `booted` flag and no effect read-of-write hazard.
   onMount(() => {
+    // Wire the realtime SSE's inbound envelopes into channelsStore. Bound here
+    // (the shell, where both singletons are in scope) rather than via a
+    // store-to-store import, keeping realtime and channels decoupled. Idempotent
+    // and safe to run once per mount.
+    realtimeStore.setEnvelopeSink((env) => channelsStore.deliver(env));
+
     void configStore.ready.then(() => {
       const cfg = configStore.value;
       if (cfg?.activeMode === "offline" && cfg.offline) {
@@ -53,6 +61,20 @@
         void agoraSession.whoami();
       }
     });
+  });
+
+  // Run the realtime SSE feed (presence + envelope delivery) while signed-in in
+  // online mode, and tear it down otherwise. Keyed on `user?.user_id` (a stable
+  // primitive), NOT the `user` object: whoami() reassigns `user` to a fresh
+  // object on every fetch, so keying on the object would cycle the SSE on each
+  // re-fetch. user_id still changes on login-as-different-user / logout, so the
+  // cleanup fires exactly when it should.
+  $effect(() => {
+    const uid = agoraSession.user?.user_id;
+    if (mode === "online" && uid) {
+      realtimeStore.start();
+      return () => realtimeStore.stop();
+    }
   });
 
   const decision = $derived(
@@ -75,10 +97,11 @@
     }
   });
 
-  const links = $derived(navFor({ mode, icons }));
+  const links = $derived(navFor({ mode, icons, channels: channelsStore.list }));
 
+  // Segment-boundary match so sibling /chat/{id} entries do not cross-highlight.
   function isActive(href: string): boolean {
-    return href === "/" ? pathname === "/" : pathname.startsWith(href);
+    return pathMatches(pathname, href);
   }
 
   // The banner shows a classified, human-readable message; the full error (with

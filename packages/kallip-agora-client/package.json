@@ -12,6 +12,9 @@
   },
   "dependencies": {
     "@kallipai/kallip-common": "workspace:*",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
     "@std/assert": "npm:@jsr/std__assert@^1.0.19"
   }
 }

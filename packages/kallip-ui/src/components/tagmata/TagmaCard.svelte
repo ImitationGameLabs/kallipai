@@ -5,11 +5,19 @@
   // enrolled tagma is one-click irreversible and cuts the device off on its next
   // request).
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
-  import { Check, MoreVertical, Trash, X } from "@lucide/svelte";
+  import {
+    Check,
+    LoaderCircle,
+    MessageSquare,
+    MoreVertical,
+    Trash,
+    X,
+  } from "@lucide/svelte";
   import {
     type TagmaCardProps,
     formatDateTime,
-    onlineDotClass,
+    presenceDotClass,
+    presenceLabel,
   } from "../../lib/tagmata.svelte.ts";
   import RevokeTagmaDialog from "./RevokeTagmaDialog.svelte";
 
@@ -17,6 +25,7 @@
     tagma,
     onRename,
     onRevoke,
+    onOpenChannel,
   }: {
     tagma: TagmaCardProps;
     // Awaitable: the card holds the edit open through the round-trip.
@@ -24,6 +33,10 @@
     // Awaitable: the dialog stays open through the round-trip and surfaces a
     // failure inline rather than closing + dropping the error.
     onRevoke?: (id: string) => Promise<void> | void;
+    // Open an E2EE channel to this tagma's herald (online + enrolled only).
+    // Awaitable: the button shows a spinner through the key exchange and
+    // surfaces a failure inline. The handler owns navigation to the chat view.
+    onOpenChannel?: (id: string) => Promise<string> | void;
   } = $props();
 
   // Inline-edit state. `saving` holds the input open until the awaited rename
@@ -44,6 +57,24 @@
   let confirmingRevoke = $state(false);
   let revoking = $state(false);
   let revokeError = $state<string | null>(null);
+
+  // Open-channel in flight (the key exchange is a round-trip). A failure stays
+  // inline so the user sees why the channel did not open.
+  let opening = $state(false);
+  let openError = $state<string | null>(null);
+
+  async function onOpenChannelClick() {
+    if (opening || !onOpenChannel) return;
+    opening = true;
+    openError = null;
+    try {
+      await onOpenChannel(tagma.tagmaId);
+    } catch (e) {
+      openError = e instanceof Error ? e.message : String(e);
+    } finally {
+      opening = false;
+    }
+  }
 
   async function confirmRevoke() {
     if (revoking || !onRevoke) return;
@@ -159,13 +190,13 @@
       </h3>
       <span
         class="flex items-center gap-1.5 text-sm opacity-80 shrink-0"
-        title={tagma.online ? "online" : "offline"}
+        title={presenceLabel(tagma.presence)}
       >
         <span
-          class="size-2 rounded-full {onlineDotClass(tagma.online)}"
+          class="size-2 rounded-full {presenceDotClass(tagma.presence)}"
           aria-hidden="true"
         ></span>
-        {tagma.online ? "online" : "offline"}
+        {presenceLabel(tagma.presence)}
       </span>
     {/if}
   </div>
@@ -176,14 +207,36 @@
     {#if renameError}
       <p class="text-error-500 text-xs">Rename failed: {renameError}</p>
     {/if}
+    {#if openError}
+      <p class="text-error-500 text-xs">Channel failed: {openError}</p>
+    {/if}
   </div>
 
-  {#if onRename || onRevoke}
-    <!-- Kebab "settings" menu, bottom-right. Portaled + top-end placement so it
-         opens upward above the trigger and clears the centered column. Hosts
-         Rename (neutral) and Revoke (destructive). Hidden (not removed) during
-         edit so the row keeps its space. -->
-    <div class="flex justify-end" class:invisible={editing}>
+  {#if onOpenChannel || onRename || onRevoke}
+    <!-- Bottom action row. "Open channel" sits bottom-left (online + enrolled
+         only); the kebab settings menu sits bottom-right. Hidden (not removed)
+         during edit so the row keeps its space. -->
+    <div
+      class="flex items-center justify-between gap-2"
+      class:invisible={editing}
+    >
+      {#if tagma.presence === "online" && onOpenChannel}
+        <button
+          type="button"
+          class="btn btn-sm preset-tonal-surface hover:preset-filled-primary-500"
+          disabled={opening}
+          onclick={onOpenChannelClick}
+        >
+          {#if opening}
+            <LoaderCircle class="size-4 animate-spin" />
+          {:else}
+            <MessageSquare class="size-4" />
+          {/if}
+          <span>{opening ? "Opening…" : "Open channel"}</span>
+        </button>
+      {:else}
+        <span></span>
+      {/if}
       <Menu
         positioning={{ placement: "top-end" }}
         onSelect={(e) => {

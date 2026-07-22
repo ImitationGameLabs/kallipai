@@ -1,10 +1,41 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import { Navigation } from "@skeletonlabs/skeleton-svelte";
-  import type { NavItem } from "../lib/shell.ts";
+  import type { NavIndicator, NavItem } from "../lib/shell.ts";
   import type { ErrorView } from "../lib/errors.ts";
   import Brand from "./Brand.svelte";
   import Banner from "./Banner.svelte";
+
+  // AppShell owns the indicator visual tokens (mirrors how it owns the icon's
+  // `size-4`), so callers only express a domain tri-state, not a class string.
+  function navIndicatorDotClass(indicator: NavIndicator): string {
+    switch (indicator) {
+      case "live":
+        return "bg-success-500";
+      case "pending":
+        return "bg-surface-400 animate-pulse";
+      case "down":
+        return "bg-surface-400";
+      case "error":
+        return "bg-error-500";
+    }
+  }
+
+  // The dot itself is aria-hidden (decorative); this label carries the status
+  // to screen readers so an SR user learns the channel's liveness, not just its
+  // name. Rendered as visually-hidden text inside the anchor.
+  function navIndicatorLabel(indicator: NavIndicator): string {
+    switch (indicator) {
+      case "live":
+        return "live";
+      case "pending":
+        return "connecting";
+      case "down":
+        return "offline";
+      case "error":
+        return "error";
+    }
+  }
 
   let {
     links,
@@ -34,6 +65,7 @@
   {#each links as item (item.href)}
     {@const active = isActive(item.href)}
     {@const Icon = item.icon}
+    {@const indicator = item.indicator}
     <Navigation.TriggerAnchor
       href={item.href}
       aria-current={active ? "page" : undefined}
@@ -41,8 +73,16 @@
         ? "preset-filled-surface-500"
         : "preset-tonal-surface hover:preset-filled-surface-500"}
     >
-      {#if Icon}<Icon class="size-4" />{/if}
+      {#if indicator}
+        <span
+          class="size-2 rounded-full shrink-0 {navIndicatorDotClass(indicator)}"
+          aria-hidden="true"
+        ></span>
+      {:else if Icon}<Icon class="size-4" />{/if}
       <Navigation.TriggerText>{item.label}</Navigation.TriggerText>
+      {#if indicator}
+        <span class="sr-only">{navIndicatorLabel(indicator)}</span>
+      {/if}
     </Navigation.TriggerAnchor>
   {/each}
 {/snippet}

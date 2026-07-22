@@ -106,6 +106,25 @@ Deno.test(
   },
 );
 
+Deno.test("online + /chat/{id} renders for a signed-in user", () => {
+  // A protected, non-/-/approvals route falls through to render once the user is
+  // resolved; the gate does not enumerate every channel id.
+  assertEquals(
+    decide({ mode: "online", pathname: "/chat/conv-1", user: USER }),
+    { kind: "render" },
+  );
+});
+
+Deno.test("online + /chat/{id} + logged-out -> redirect /login", () => {
+  assertEquals(
+    decide({ mode: "online", pathname: "/chat/conv-1", user: null }),
+    {
+      kind: "redirect",
+      url: "/login?next=" + encodeURIComponent("/chat/conv-1"),
+    },
+  );
+});
+
 Deno.test("online + /login + signed-in -> redirect /tagmata", () => {
   assertEquals(decide({ mode: "online", pathname: "/login", user: USER }), {
     kind: "redirect",

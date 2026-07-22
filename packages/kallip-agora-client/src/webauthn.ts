@@ -1,3 +1,4 @@
+/// <reference lib="dom" />
 // WebAuthn ceremony transforms: convert between the agora's JSON wire shapes
 // (webauthn-rs serde -- every binary field is an UNPADDED base64url `String`)
 // and the browser WebAuthn API (`BufferSource` in, `ArrayBuffer` out).

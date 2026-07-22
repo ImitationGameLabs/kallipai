@@ -2,6 +2,7 @@
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
   import { ArrowRightLeft, LogOut, Settings, User } from "@lucide/svelte";
   import { agoraSession } from "../lib/session/agora.svelte";
+  import { channelsStore } from "../lib/session/channels.svelte";
   import { sessionStore } from "../lib/session/session.svelte";
   import { configStore } from "../lib/config/config.svelte";
   import { connectDirect } from "../lib/session/connect.ts";
@@ -21,9 +22,12 @@
   const connection = $derived(connectionViewModel(sessionStore));
 
   // Online: end the agora session (destroys the cookie -- distinct from
-  // switching, which keeps it). The gate then sees user===null and redirects to
-  // /login (it owns the navigation), so no manual navigate here.
+  // switching, which keeps it). Drop open channels here; the realtime SSE that
+  // fed them is torn down separately by RootLayout's $effect when `user` flips
+  // to null (no 401 reconnect churn). The gate then sees user===null and
+  // redirects to /login (it owns the navigation), so no manual navigate here.
   async function logout() {
+    channelsStore.reset();
     await agoraSession.logout();
   }
 
@@ -40,10 +44,14 @@
 
   // Online -> offline: if offline creds are already saved, reconnect to the
   // daemon directly (re-auth-free); otherwise send the user to /connect for
-  // first-time setup. The race guard re-checks activeMode before attach: if the
-  // user flipped back to online while the connect was in flight, close the
-  // stray session instead of attaching it (avoids a held daemon transport).
+  // first-time setup. Drop open channels: offline mode does not render /chat, so
+  // their SSE subscriber would keep running (against the still-valid cookie) and
+  // update transcripts nobody sees. The race guard re-checks activeMode before
+  // attach: if the user flipped back to online while the connect was in flight,
+  // close the stray session instead of attaching it (avoids a held daemon
+  // transport).
   async function switchToOffline() {
+    channelsStore.reset();
     const offline = configStore.value?.offline;
     if (!offline) {
       await navigate("/connect");

@@ -5,6 +5,9 @@
     "npm:@jsr/std__assert@^1.0.19": "1.0.19",
     "npm:@lucide/svelte@^1.24.0": "1.24.0_svelte@5.56.4",
     "npm:@neoconfetti/svelte@^2.2.2": "2.2.2_svelte@5.56.4",
+    "npm:@noble/ciphers@^2.2.0": "2.2.0",
+    "npm:@noble/curves@^2.2.0": "2.2.0",
+    "npm:@noble/hashes@^2.2.0": "2.2.0",
     "npm:@skeletonlabs/skeleton-svelte@5": "5.0.0_svelte@5.56.4",
     "npm:@skeletonlabs/skeleton@5": "5.0.0_tailwindcss@4.3.2",
     "npm:@sveltejs/adapter-static@^3.0.10": "3.0.10_@sveltejs+kit@2.69.2__@sveltejs+vite-plugin-svelte@7.2.0___svelte@5.56.4___vite@8.1.4____@types+node@26.1.1___@types+node@26.1.1__svelte@5.56.4__typescript@6.0.3__vite@8.1.4___@types+node@26.1.1__@types+node@26.1.1_@types+node@26.1.1",
@@ -128,6 +131,18 @@
       "dependencies": [
         "svelte"
       ]
+    },
+    "@noble/ciphers@2.2.0": {
+      "integrity": "sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA=="
+    },
+    "@noble/curves@2.2.0": {
+      "integrity": "sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==",
+      "dependencies": [
+        "@noble/hashes"
+      ]
+    },
+    "@noble/hashes@2.2.0": {
+      "integrity": "sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg=="
     },
     "@oxc-project/types@0.139.0": {
       "integrity": "sha512-r9gHphtCs+1M7J0pw6Sn/hh/Wpa/iQrOOkrNAlVLF/gHq+/CJmHIWKKUUhdWjcD6CIa8idarspCsASiXCXvFUw=="
@@ -1372,7 +1387,10 @@
       "packages/kallip-agora-client": {
         "packageJson": {
           "dependencies": [
-            "npm:@jsr/std__assert@^1.0.19"
+            "npm:@jsr/std__assert@^1.0.19",
+            "npm:@noble/ciphers@^2.2.0",
+            "npm:@noble/curves@^2.2.0",
+            "npm:@noble/hashes@^2.2.0"
           ]
         }
       },
