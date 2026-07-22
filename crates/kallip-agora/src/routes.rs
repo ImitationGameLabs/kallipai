@@ -1,10 +1,14 @@
 //! HTTP routes. `routes.rs` is the module root; submodules live under `routes/`.
+//!
+//! Only the control plane lives here (auth ceremonies, session/me, admin,
+//! tagmata) plus the service-to-service `/internal/*` surface that the
+//! data-plane relay (`kallip-lesche`, a separate process) consumes. The data
+//! plane (conversations, envelopes, KEX, herald tunnel, app events) lives in
+//! `kallip-lesche`.
 
 mod admin;
 mod auth;
-mod conversations;
-mod events;
-mod herald;
+mod internal;
 mod tagmata;
 
 use axum::Router;
@@ -13,11 +17,15 @@ use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
+use kallip_common::authtoken::TokenHash;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::state::SharedState;
 
-pub fn router(state: SharedState) -> Router<()> {
+/// Build the public router. `internal_token_hash`, when `Some`, mounts the
+/// `/internal/*` ControlPlane surface for the lesche (guarded by that hash);
+/// `None` runs the agora standalone with no internal surface.
+pub fn router(state: SharedState, internal_token_hash: Option<TokenHash>) -> Router<()> {
     // The unauthenticated, crypto-heavy entry surfaces are rate-limited per
     // client IP: the ceremony begins (invite-enumeration / ceremony-spam) and
     // tagma enroll (CPU + DB + token mint). Ceremony finishes are NOT
@@ -31,6 +39,10 @@ pub fn router(state: SharedState) -> Router<()> {
     let ceremony_begin = auth::begin_router().layer(rate_limit.clone());
     let enroll = tagmata::enroll_router().layer(rate_limit);
 
+    // The control-plane v1 carries `SharedState`; resolve it to a stateless
+    // `Router<()>`. The CSRF custom-header guard scopes to v1 (a no-op for
+    // non-cookie / bearer requests); it gates cookie-bearing mutating control-
+    // plane requests. The data plane (lesche) runs its own CSRF guard.
     let v1 = Router::new()
         .merge(ceremony_begin)
         .merge(auth::finish_router())
@@ -38,19 +50,30 @@ pub fn router(state: SharedState) -> Router<()> {
         .nest("/admin", admin::router())
         .merge(enroll)
         .merge(tagmata::protected_router())
-        .merge(conversations::router())
-        .merge(events::router())
-        .nest("/herald", herald::router())
-        // CSRF custom-header guard on the whole v1 surface. It is a no-op for
-        // non-cookie requests (machine / bearer), so herald + enroll paths are
-        // unaffected; it only gates cookie-bearing mutating requests. No router
-        // state needed, so plain `from_fn` suffices.
+        .with_state(state.clone())
         .layer(axum::middleware::from_fn(crate::middleware::csrf_guard));
-    Router::new()
+
+    let mut app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .nest("/v1", v1)
-        .with_state(state)
+        .with_state(state.clone())
+        .nest("/v1", v1);
+
+    // The service-to-service `/internal/*` surface: mounted only when the
+    // shared secret is configured. The `internal_guard` middleware (layer state
+    // = the expected hash) rejects any request whose bearer hash does not match
+    // before it reaches the handlers; the handlers take `State<SharedState>` for
+    // the DB.
+    if let Some(hash) = internal_token_hash {
+        let internal = internal::router()
+            .layer(axum::middleware::from_fn_with_state(
+                hash,
+                crate::middleware::internal_guard,
+            ))
+            .with_state(state);
+        app = app.nest("/internal", internal);
+    }
+    app
 }
 
 /// Liveness: the process is up.

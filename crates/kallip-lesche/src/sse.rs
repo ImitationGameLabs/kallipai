@@ -1,4 +1,4 @@
-//! Agora SSE helpers.
+//! Relay SSE helpers.
 //!
 //! [`BoxEventStream`] is the boxed event-stream type used by the herald tunnel
 //! and the app SSE. The synchronous-drop cleanup wrapper ([`OnDrop`]) is shared

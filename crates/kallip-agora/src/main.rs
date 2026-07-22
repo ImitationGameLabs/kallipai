@@ -1,14 +1,17 @@
-//! `kallip-agora`: the public-internet relay control plane.
+//! `kallip-agora`: the registry / control plane (identity, WebAuthn, tagma
+//! lifecycle, invites) for the kallip relay.
 //!
-//! Lean-B design: the agora is a **soft-state forwarder + control plane**. It
-//! holds only in-memory presence/registry/routing, brokers app<->herald
-//! end-to-end key exchange (without ever deriving the key), and forwards
-//! envelopes it cannot decrypt. It stores **no history** — conversation history
-//! lives on the host/daemon.
+//! The agora owns the durable Postgres store and exposes a narrow `ControlPlane`
+//! trait (in `kallip-agora-common`). The data-plane relay (`kallip-lesche`) is a
+//! separate process that consumes that trait over the `/internal/*` HTTP API
+//! served here (each handler wraps the DB-backed `DbControlPlane`, guarded by a
+//! shared-secret bearer). If `KALLIP_AGORA_INTERNAL_TOKEN` is unset, the
+//! `/internal` nest is not mounted and the agora runs standalone.
 
 mod args;
 mod auth;
 mod clientip;
+mod control_plane;
 mod db;
 mod email;
 #[cfg(test)]
@@ -17,7 +20,6 @@ mod middleware;
 mod ratelimit;
 mod routes;
 mod session;
-mod sse;
 mod state;
 #[cfg(test)]
 mod test_helpers;
@@ -29,7 +31,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use kallip_common::authtoken::MintedToken;
+use kallip_common::authtoken::{MintedToken, TokenHash};
 use tracing::{info, warn};
 use webauthn_rs::prelude::WebauthnBuilder;
 
@@ -62,9 +64,6 @@ async fn main() -> Result<()> {
         max_body_size_bytes: body_size_bytes(args.max_body_size_kb),
         enrollment_code_ttl: Duration::from_secs(args.enrollment_code_ttl_secs),
         invite_default_ttl_secs: args.invite_default_ttl_secs,
-        proof_skew_secs: args.proof_skew_secs,
-        max_conversations_per_user: args.max_conversations_per_user,
-        key_exchange_timeout: Duration::from_secs(args.key_exchange_timeout_secs),
     };
 
     // Connect to Postgres (retrying with a capped backoff) and apply pending
@@ -86,6 +85,7 @@ async fn main() -> Result<()> {
     let session_cfg = session::SessionCfg {
         ttl: Duration::from_secs(args.session_ttl_secs),
         cookie_secure: args.cookie_secure,
+        cookie_domain: args.cookie_domain,
     };
     let auth_rate_limiter =
         ratelimit::IpRateLimiter::new(args.auth_rate_capacity, args.auth_rate_refill_per_sec);
@@ -125,7 +125,25 @@ async fn main() -> Result<()> {
         trusted_proxies,
     ));
 
-    let app = routes::router(state.clone());
+    // The data-plane relay (`kallip-lesche`) is a separate process that calls
+    // the agora's `/internal/*` ControlPlane API. Mount that surface only when
+    // a non-empty shared secret is configured; an unset (or empty) token runs
+    // the agora standalone (no relay connected, no internal surface exposed).
+    // Treating the empty string as "unset" is load-bearing: an operator who
+    // exports `KALLIP_AGORA_INTERNAL_TOKEN=` (intending to disable) must NOT
+    // instead enable the surface with a trivially-known empty secret.
+    let internal_hash = args
+        .internal_token
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(TokenHash::of);
+    if matches!(&args.internal_token, Some(s) if s.is_empty()) {
+        warn!(
+            "KALLIP_AGORA_INTERNAL_TOKEN is set but empty; treating as unset (no /internal surface)"
+        );
+    }
+
+    let app = routes::router(state.clone(), internal_hash);
 
     // Background sweep of expired WebAuthn ceremonies. Decoupled from the
     // request path so the DELETE never adds latency to a ceremony begin.

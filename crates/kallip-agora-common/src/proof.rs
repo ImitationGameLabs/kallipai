@@ -11,8 +11,9 @@
 //!   (the agora rejects any timestamp outside `+/- proof_skew_secs`) to defeat
 //!   indefinite replay of a captured proof.
 //! - **Key-exchange proof**: the herald signs its ephemeral X25519 half (bound
-//!   to the tagma, conversation, and agent) so the app can attribute the derived
-//!   key to the pinned device identity.
+//!   to the tagma and conversation) so the app can attribute the derived key to
+//!   the pinned device identity. The agent backing the conversation is a
+//!   herald-internal concern and is intentionally not part of the transcript.
 //!
 //! Every variable-length field is length-prefixed (4-byte big-endian) so the
 //! wire contract is unambiguous. This crate performs only public-key
@@ -63,20 +64,13 @@ pub fn tunnel_transcript(tagma_id: &str, unix_secs: i64) -> Vec<u8> {
 }
 
 /// Transcript signed in a key-exchange response:
-/// `tag || tagma_id || conv_id || agent_id || app_eph || herald_eph` (each
-/// string length-prefixed; the 32-byte ephemeral keys are fixed-width).
-pub fn kex_transcript(
-    tagma_id: &str,
-    conv_id: &str,
-    agent_id: &str,
-    app_eph: &[u8],
-    herald_eph: &[u8],
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(KEX_TAG.len() + 48 + tagma_id.len() + conv_id.len() + 64);
+/// `tag || tagma_id || conv_id || app_eph || herald_eph` (each string
+/// length-prefixed; the 32-byte ephemeral keys are fixed-width).
+pub fn kex_transcript(tagma_id: &str, conv_id: &str, app_eph: &[u8], herald_eph: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEX_TAG.len() + 8 + tagma_id.len() + conv_id.len() + 64);
     out.extend_from_slice(KEX_TAG);
     framed(&mut out, tagma_id.as_bytes());
     framed(&mut out, conv_id.as_bytes());
-    framed(&mut out, agent_id.as_bytes());
     out.extend_from_slice(app_eph);
     out.extend_from_slice(herald_eph);
     out
@@ -113,14 +107,13 @@ pub fn verify_kex_proof(
     device_pubkey: &[u8],
     tagma_id: &str,
     conv_id: &str,
-    agent_id: &str,
     app_eph: &[u8],
     herald_eph: &[u8],
     sig: &[u8],
 ) -> Result<(), ProofError> {
     verify(
         device_pubkey,
-        &kex_transcript(tagma_id, conv_id, agent_id, app_eph, herald_eph),
+        &kex_transcript(tagma_id, conv_id, app_eph, herald_eph),
         sig,
     )
 }
@@ -213,107 +206,25 @@ mod tests {
         let app_eph = [0xaa; 32];
         let herald_eph = [0xbb; 32];
         let sig = signing
-            .sign(&kex_transcript(
-                "tagma",
-                "conv",
-                "agent",
-                &app_eph,
-                &herald_eph,
-            ))
+            .sign(&kex_transcript("tagma", "conv", &app_eph, &herald_eph))
             .to_bytes();
 
         // Happy path.
-        assert!(
-            verify_kex_proof(
-                &public,
-                "tagma",
-                "conv",
-                "agent",
-                &app_eph,
-                &herald_eph,
-                &sig
-            )
-            .is_ok()
-        );
+        assert!(verify_kex_proof(&public, "tagma", "conv", &app_eph, &herald_eph, &sig).is_ok());
         // Wrong conversation.
-        assert!(
-            verify_kex_proof(
-                &public,
-                "tagma",
-                "other",
-                "agent",
-                &app_eph,
-                &herald_eph,
-                &sig
-            )
-            .is_err()
-        );
+        assert!(verify_kex_proof(&public, "tagma", "other", &app_eph, &herald_eph, &sig).is_err());
         // Wrong tagma.
-        assert!(
-            verify_kex_proof(
-                &public,
-                "other",
-                "conv",
-                "agent",
-                &app_eph,
-                &herald_eph,
-                &sig
-            )
-            .is_err()
-        );
-        // Wrong agent.
-        assert!(
-            verify_kex_proof(
-                &public,
-                "tagma",
-                "conv",
-                "other",
-                &app_eph,
-                &herald_eph,
-                &sig
-            )
-            .is_err()
-        );
+        assert!(verify_kex_proof(&public, "other", "conv", &app_eph, &herald_eph, &sig).is_err());
         // Tampered ephemeral key.
         let mut bad_eph = app_eph;
         bad_eph[0] ^= 0xff;
-        assert!(
-            verify_kex_proof(
-                &public,
-                "tagma",
-                "conv",
-                "agent",
-                &bad_eph,
-                &herald_eph,
-                &sig
-            )
-            .is_err()
-        );
+        assert!(verify_kex_proof(&public, "tagma", "conv", &bad_eph, &herald_eph, &sig).is_err());
         // Different device key.
-        let other = SigningKey::from_bytes(&[0x99; 32])
-            .verifying_key()
-            .to_bytes();
-        let _ = other; // verify_kex_proof against `public` already covers this via the sig mismatch
         let other_sig = SigningKey::from_bytes(&[0x99; 32])
-            .sign(&kex_transcript(
-                "tagma",
-                "conv",
-                "agent",
-                &app_eph,
-                &herald_eph,
-            ))
+            .sign(&kex_transcript("tagma", "conv", &app_eph, &herald_eph))
             .to_bytes();
         assert!(
-            verify_kex_proof(
-                &public,
-                "tagma",
-                "conv",
-                "agent",
-                &app_eph,
-                &herald_eph,
-                &other_sig
-            )
-            .is_err()
+            verify_kex_proof(&public, "tagma", "conv", &app_eph, &herald_eph, &other_sig).is_err()
         );
     }
 

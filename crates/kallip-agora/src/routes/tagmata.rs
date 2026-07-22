@@ -34,7 +34,6 @@ use sea_orm::{
     QueryOrder, QuerySelect, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use time::OffsetDateTime;
 use tracing::warn;
 
@@ -276,11 +275,11 @@ async fn mint(
 // list
 // ---------------------------------------------------------------------------
 
-/// One row of the owner's tagma list. `online` is true iff an enrolled tagma
-/// currently has a live herald tunnel (the in-memory `Registry::presence` map);
-/// it is the sole liveness signal -- `tagmata.last_tunnel_proof_ts` is a replay
-/// guard, NOT a liveness signal, and is intentionally NOT surfaced here. A
-/// pending tagma is always `online=false` (no tunnel yet).
+/// One row of the owner's tagma list. Liveness ("is a herald tunnel currently
+/// open for this tagma") is NOT part of the registry's view: it is a data-plane
+/// concern, delivered to the app via the relay's `GET /me/events` stream as
+/// `TagmaOnline`/`TagmaOffline`. Note `tagmata.last_tunnel_proof_ts` is a replay
+/// guard, not a liveness signal, and is intentionally not surfaced.
 #[derive(Serialize)]
 struct TagmaView {
     tagma_id: String,
@@ -288,7 +287,6 @@ struct TagmaView {
     state: TagmaState,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
-    online: bool,
     /// Pending-phase display mask (`sk-enroll-abc***xyz`). Present only while
     /// pending; omitted for enrolled rows.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -309,13 +307,8 @@ enum TagmaState {
     Enrolled,
 }
 
-/// List the caller's tagmata (pending + enrolled, not revoked), newest first,
-/// each annotated with live presence.
-///
-/// Lock discipline: the DB read happens before any registry guard, and the
-/// presence check snapshots the currently-online ids under a single short
-/// `read()` (no `.await` under the lock -- `state.rs`). The snapshot is dropped
-/// before the response is built, so the lock is never held across serialization.
+/// List the caller's tagmata (pending + enrolled, not revoked), newest first.
+/// Liveness is not included; the app learns it from the relay's event stream.
 async fn list_tagmata(
     State(state): State<SharedState>,
     AuthPrincipal(principal): AuthPrincipal,
@@ -328,17 +321,10 @@ async fn list_tagmata(
         .all(&state.db)
         .await
         .map_err(map_db_err)?;
-    // Snapshot present ids under one read guard (presence is keyed by TagmaId;
-    // building the set here avoids per-row newtype construction under the lock).
-    let online_ids: HashSet<TagmaId> = {
-        let reg = state.read()?;
-        reg.presence.keys().cloned().collect()
-    };
     let items = rows
         .into_iter()
         .map(|r| {
             let id = TagmaId::from(r.id.clone());
-            let online = online_ids.contains(&id);
             let enrolled = r.enrolled_at.is_some();
             let state = if enrolled {
                 TagmaState::Enrolled
@@ -356,7 +342,6 @@ async fn list_tagmata(
                 label: r.label,
                 state,
                 created_at: r.created_at,
-                online,
                 code_masked,
                 expires_at,
             }
@@ -520,19 +505,17 @@ mod tests {
     //! `list_tagmata` presence + isolation, `mint` round-trip + cap, and
     //! `revoke` idempotence + owner isolation.
 
-    use std::time::Duration;
-
     use axum::Json;
     use axum::extract::State;
     use axum::http::StatusCode;
 
     use super::{
         MAX_LIVE_PENDING_TAGMAS, MAX_TAGMA_LABEL_LEN, MintResponse, RenameTagmaRequest, TagmaState,
-        TagmaView, list_tagmata, mint, rename_tagma, revoke_tagma,
+        list_tagmata, mint, rename_tagma, revoke_tagma,
     };
     use crate::auth::{AuthPrincipal, Principal};
     use crate::db::entity::tagmata;
-    use crate::test_helpers::{make_state, seed_presence, seed_tagma, seed_user};
+    use crate::test_helpers::{make_state, seed_tagma, seed_user};
     use kallip_agora_common::bytes::Ed25519PublicKey;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
     use time::OffsetDateTime;
@@ -545,7 +528,7 @@ mod tests {
     /// An owner with no tagmata gets `[]` (200, not 404).
     #[tokio::test]
     async fn empty_list() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let user = seed_user(&state, "alice", "alice@example.test").await;
         let Json(got) = list_tagmata(State(state), AuthPrincipal(Principal::User(user)))
             .await
@@ -553,38 +536,31 @@ mod tests {
         assert!(got.is_empty());
     }
 
-    /// An enrolled tagma with no live tunnel is `online=false`; one with
-    /// `seed_presence` is `online=true`. Both appear as enrolled in the list.
+    /// An enrolled tagma appears as enrolled in the list, with the pending-phase
+    /// fields omitted. (Live presence is no longer part of the list view; the
+    /// app learns it from the relay's event stream.)
     #[tokio::test]
-    async fn enrolled_online_and_offline_reflect_presence() {
-        let state = make_state(Duration::from_secs(2)).await;
+    async fn enrolled_tagma_lists_as_enrolled() {
+        let state = make_state().await;
         let user = seed_user(&state, "alice", "alice@example.test").await;
-        let (offline, _) = seed_tagma(&state, &user, dummy_key()).await;
-        let (online, _) = seed_tagma(&state, &user, dummy_key()).await;
-        seed_presence(&state, &online);
+        let (tagma, _) = seed_tagma(&state, &user, dummy_key()).await;
 
         let Json(got) = list_tagmata(State(state), AuthPrincipal(Principal::User(user)))
             .await
             .expect("list");
-        assert_eq!(got.len(), 2);
-        let by_id: std::collections::HashMap<String, TagmaView> =
-            got.into_iter().map(|t| (t.tagma_id.clone(), t)).collect();
-        let off = by_id.get(offline.as_ref()).expect("offline row");
-        assert!(matches!(off.state, TagmaState::Enrolled));
-        assert!(!off.online);
-        let on = by_id.get(online.as_ref()).expect("online row");
-        assert!(matches!(on.state, TagmaState::Enrolled));
-        assert!(on.online);
-        // Enrolled rows omit the pending-phase fields.
-        assert!(on.code_masked.is_none());
-        assert!(on.expires_at.is_none());
+        assert_eq!(got.len(), 1);
+        let row = &got[0];
+        assert_eq!(row.tagma_id, tagma.as_ref());
+        assert!(matches!(row.state, TagmaState::Enrolled));
+        assert!(row.code_masked.is_none());
+        assert!(row.expires_at.is_none());
     }
 
     /// A minted pending tagma appears in the list as pending with its masked
     /// code, and the once-returned plaintext hashes to the stored row.
     #[tokio::test]
     async fn mint_then_list_round_trip() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let user = seed_user(&state, "alice", "alice@example.test").await;
         let principal = AuthPrincipal(Principal::User(user.clone()));
 
@@ -618,7 +594,7 @@ mod tests {
     /// 429s even with expired rows present.
     #[tokio::test]
     async fn cap_counts_expired_pending_tagmas() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let user = seed_user(&state, "bob", "bob@example.test").await;
         let principal = AuthPrincipal(Principal::User(user.clone()));
         // Seed the cap (8) of already-expired, pending (unenrolled, unrevoked)
@@ -655,7 +631,7 @@ mod tests {
     /// original timestamp.
     #[tokio::test]
     async fn revoke_is_idempotent() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let user = seed_user(&state, "carol", "carol@example.test").await;
         let Json(MintResponse { id, .. }) = mint(
             State(state.clone()),
@@ -702,7 +678,7 @@ mod tests {
     /// Revoking another user's tagma is a 404 (no cross-user existence oracle).
     #[tokio::test]
     async fn revoke_is_owner_scoped() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let alice = seed_user(&state, "alice", "alice@example.test").await;
         let bob = seed_user(&state, "bob", "bob@example.test").await;
         let Json(MintResponse { id, .. }) =
@@ -725,7 +701,7 @@ mod tests {
     /// rejects over-length, and is owner-scoped (non-owner -> 404, no mutation).
     #[tokio::test]
     async fn rename_tagma_sets_clears_and_is_owner_scoped() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let alice = seed_user(&state, "alice", "alice@example.test").await;
         let bob = seed_user(&state, "bob", "bob@example.test").await;
         let (tagma_id, _) = seed_tagma(&state, &alice, dummy_key()).await;

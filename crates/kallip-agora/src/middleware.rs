@@ -11,6 +11,8 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use std::net::SocketAddr;
 
+use kallip_common::authtoken::TokenHash;
+
 use crate::session::{CSRF_HEADER, CSRF_HEADER_VALUE, read_session_cookie};
 use crate::state::SharedState;
 
@@ -46,6 +48,30 @@ pub async fn csrf_guard(
         if !has_marker {
             return (StatusCode::FORBIDDEN, "missing CSRF marker").into_response();
         }
+    }
+    next.run(request).await
+}
+
+/// Guard for the `/internal/*` ControlPlane surface (consumed by the lesche).
+/// Runs as `from_fn_with_state(expected_hash, internal_guard)` so the expected
+/// hash is baked into the layer, independent of the handlers'
+/// `State<SharedState>`. Rejects any request whose `Authorization: Bearer`
+/// token does not hash to the expected shared secret. The comparison is
+/// constant-time: this is a high-value service-to-service secret. A missing or
+/// non-matching bearer is `401`; the `/internal` nest is mounted only when the
+/// secret is configured, so reaching this guard at all means one is expected.
+pub async fn internal_guard(
+    State(expected): State<TokenHash>,
+    headers: HeaderMap,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let token = match kallip_common::auth_header::extract_bearer_token(&headers) {
+        Ok(t) => t,
+        Err(_) => return (StatusCode::UNAUTHORIZED, "missing bearer").into_response(),
+    };
+    if !expected.ct_eq(&TokenHash::of(token)) {
+        return (StatusCode::UNAUTHORIZED, "invalid internal token").into_response();
     }
     next.run(request).await
 }

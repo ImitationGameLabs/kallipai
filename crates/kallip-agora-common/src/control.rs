@@ -48,10 +48,11 @@ pub struct KeyExchangeInit {
 ///
 /// The signature is over
 /// [`kex_transcript`](crate::proof::kex_transcript)`(tagma_id, conversation_id,
-/// agent_id, app_ephemeral_public, herald_ephemeral_public)` - i.e. it binds
-/// the two ephemeral keys to the tagma, conversation, and bound agent, so the
-/// app can attribute the derived key unambiguously to the pinned identity. The
-/// app reconstructs this same transcript to verify.
+/// app_ephemeral_public, herald_ephemeral_public)` - i.e. it binds the two
+/// ephemeral keys to the tagma and conversation, so the app can attribute the
+/// derived key unambiguously to the pinned identity. The agent bound to the
+/// conversation is an internal concern of the herald and is not part of the
+/// transcript. The app reconstructs this same transcript to verify.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyExchangeResponse {
     pub ephemeral_public: X25519PublicKey,

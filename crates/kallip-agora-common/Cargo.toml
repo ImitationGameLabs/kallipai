@@ -16,3 +16,4 @@ base64 = { workspace = true }
 # the herald (signer), and the app SDK share one transcript + verify contract.
 ed25519-dalek = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }

@@ -303,8 +303,6 @@ mod tests {
     //! Admin invite-code CRUD round-trip + the legacy enrollment-code mint
     //! (which now validates the user against the DB).
 
-    use std::time::Duration;
-
     use axum::Json;
     use axum::extract::State;
 
@@ -319,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn invite_code_crud_round_trip() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let admin = AuthPrincipal(Principal::Admin);
 
         // Mint one invite.
@@ -386,7 +384,7 @@ mod tests {
     /// in the DB; there is no longer an in-memory index).
     #[tokio::test]
     async fn enrollment_code_rejects_unknown_user() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let admin = AuthPrincipal(Principal::Admin);
         match create_enrollment_code(
             State(state),
@@ -405,7 +403,7 @@ mod tests {
     /// A known user can be minted an enrollment code for.
     #[tokio::test]
     async fn enrollment_code_for_known_user() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let user_id = seed_user(&state, "owner", "owner@example.test").await;
         let admin = AuthPrincipal(Principal::Admin);
         let resp = create_enrollment_code(
@@ -425,7 +423,7 @@ mod tests {
     /// the original `revoked_at` (audit-relevant).
     #[tokio::test]
     async fn revoke_is_idempotent_preserving_timestamp() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let admin = AuthPrincipal(Principal::Admin);
         let created = create_invite_code(
             State(state.clone()),
@@ -480,7 +478,7 @@ mod tests {
     /// A non-64-hex path segment is rejected before any decode or DB work.
     #[tokio::test]
     async fn revoke_rejects_bad_hex_length() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let admin = AuthPrincipal(Principal::Admin);
         match revoke_invite_code(
             State(state),
@@ -499,7 +497,7 @@ mod tests {
     /// reconstructs the whole set.
     #[tokio::test]
     async fn list_invite_codes_paginates() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let admin = AuthPrincipal(Principal::Admin);
         // Mint 3 codes with a 2-per-page limit.
         let mut all = Vec::new();

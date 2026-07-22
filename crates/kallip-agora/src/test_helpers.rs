@@ -13,9 +13,7 @@ use crate::db::Db;
 use crate::db::entity::{tagma_tokens, tagmata, users};
 use crate::db::migration::Migrator;
 use kallip_agora_common::bytes::Ed25519PublicKey;
-use kallip_agora_common::herald::HeraldInbound;
-use kallip_agora_common::ids::{ConversationId, TagmaId, UserId};
-use kallip_common::agentid::AgentId;
+use kallip_agora_common::ids::{TagmaId, UserId};
 use kallip_common::authtoken::{MintedToken, TokenHash};
 use sea_orm::Statement;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database, DatabaseBackend};
@@ -23,9 +21,9 @@ use sea_orm_migration::MigratorTrait;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use time::OffsetDateTime;
-use tokio::sync::{OnceCell, broadcast};
+use tokio::sync::OnceCell;
 
-use crate::state::{AppState, BROADCAST_CAPACITY, Limits, SharedState};
+use crate::state::{AppState, Limits, SharedState};
 use crate::token::TAGMA;
 use webauthn_rs::prelude::WebauthnBuilder;
 
@@ -76,17 +74,15 @@ async fn setup_test_db() -> Db {
     db
 }
 
-/// Build an `AppState` backed by a fresh test database, with a dummy admin hash
-/// and a test `Limits`, exposing `key_exchange_timeout` so tests that exercise
-/// the synchronous KEX can pick a value matched to what they assert.
-pub async fn make_state(key_exchange_timeout: Duration) -> SharedState {
-    make_state_with(key_exchange_timeout, 100, 100).await
+/// Build an `AppState` backed by a fresh test database, with a dummy admin
+/// hash and a test `Limits`.
+pub async fn make_state() -> SharedState {
+    make_state_with(100, 100).await
 }
 
 /// Like [`make_state`] but with a custom rate-limiter shape, for tests that
 /// assert rate-limit wiring (a tight bucket trips the limiter in a few calls).
 pub async fn make_state_with(
-    key_exchange_timeout: Duration,
     auth_rate_capacity: u32,
     auth_rate_refill_per_sec: u32,
 ) -> SharedState {
@@ -96,9 +92,6 @@ pub async fn make_state_with(
         max_body_size_bytes: 1024 * 1024,
         enrollment_code_ttl: Duration::from_secs(600),
         invite_default_ttl_secs: 604_800,
-        proof_skew_secs: 60,
-        max_conversations_per_user: 64,
-        key_exchange_timeout,
     };
     let rp_origin = url::Url::parse("http://localhost:7100").expect("valid url");
     let webauthn = WebauthnBuilder::new("localhost", &rp_origin)
@@ -111,6 +104,7 @@ pub async fn make_state_with(
     let session_cfg = crate::session::SessionCfg {
         ttl: Duration::from_secs(3600),
         cookie_secure: false,
+        cookie_domain: None,
     };
     let auth_rate_limiter =
         crate::ratelimit::IpRateLimiter::new(auth_rate_capacity, auth_rate_refill_per_sec);
@@ -186,30 +180,6 @@ pub async fn seed_tagma(
     (tagma_id, plaintext)
 }
 
-/// Create a conversation owned by `owner` and bound to `(tagma, agent)`. Routes
-/// through [`Registry::create_conversation`](crate::state::Registry::create_conversation)
-/// so the count lockstep invariant holds; the cap is set comfortably above any
-/// fixture's needs. Returns the new conversation id.
-pub fn seed_conversation(
-    state: &SharedState,
-    owner: &UserId,
-    tagma: &TagmaId,
-    agent: AgentId,
-) -> ConversationId {
-    let mut reg = state.write().unwrap();
-    reg.create_conversation(owner, tagma.clone(), agent, 64)
-        .expect("seed conversation under cap")
-}
-
-/// Bring a tagma online: insert a herald-tunnel presence entry and return the
-/// broadcast sender. The caller MUST `sender.subscribe()` BEFORE spawning any
-/// handler that sends into the tunnel (broadcast only delivers to receivers
-/// alive at send time).
-pub fn seed_presence(state: &SharedState, tagma: &TagmaId) -> broadcast::Sender<HeraldInbound> {
-    let (tx, _initial_rx) = broadcast::channel::<HeraldInbound>(BROADCAST_CAPACITY);
-    {
-        let mut reg = state.write().unwrap();
-        reg.register_presence(tagma, tx.clone(), std::sync::Arc::new(()));
-    }
-    tx
-}
+// Note: data-plane fixtures (seed_conversation, seed_presence) lived here when
+// the agora was a monolith. They moved to the `kallip-lesche` test harness
+// along with the relay's soft state.

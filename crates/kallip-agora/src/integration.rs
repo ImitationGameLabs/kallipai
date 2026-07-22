@@ -4,7 +4,6 @@
 //! cannot reach.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::connect_info::MockConnectInfo;
@@ -16,6 +15,7 @@ use crate::db::entity::webauthn_challenges;
 use crate::routes;
 use crate::session::{CSRF_HEADER, CSRF_HEADER_VALUE};
 use crate::test_helpers::make_state_with;
+use kallip_common::authtoken::TokenHash;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
 use time::OffsetDateTime;
 
@@ -47,8 +47,10 @@ async fn run(app: axum::Router, request: Request<Body>) -> StatusCode {
 /// A cookie-bearing mutating request without the CSRF marker is rejected 403.
 #[tokio::test]
 async fn csrf_guard_blocks_cookie_post_without_marker() {
-    let state = make_state_with(Duration::from_secs(2), 10, 10).await;
-    let app = routes::router(state);
+    let state = make_state_with(10, 10).await;
+    // No `/internal` surface is needed for these control-plane middleware
+    // tests.
+    let app = routes::router(state, None);
     let mut request = req(
         Method::POST,
         "/v1/auth/login/begin",
@@ -65,8 +67,10 @@ async fn csrf_guard_blocks_cookie_post_without_marker() {
 /// (status is whatever the handler returns, not 403).
 #[tokio::test]
 async fn csrf_guard_passes_cookie_post_with_marker() {
-    let state = make_state_with(Duration::from_secs(2), 10, 10).await;
-    let app = routes::router(state);
+    let state = make_state_with(10, 10).await;
+    // No `/internal` surface is needed for these control-plane middleware
+    // tests.
+    let app = routes::router(state, None);
     let mut request = req(
         Method::POST,
         "/v1/auth/login/begin",
@@ -91,8 +95,10 @@ async fn csrf_guard_passes_cookie_post_with_marker() {
 /// (bearer auth is not browser-CSRFable). It must not be 403'd.
 #[tokio::test]
 async fn csrf_guard_exempts_bearer() {
-    let state = make_state_with(Duration::from_secs(2), 10, 10).await;
-    let app = routes::router(state);
+    let state = make_state_with(10, 10).await;
+    // No `/internal` surface is needed for these control-plane middleware
+    // tests.
+    let app = routes::router(state, None);
     let mut request = req(
         Method::POST,
         "/v1/auth/login/begin",
@@ -148,9 +154,11 @@ async fn seed_session(state: &crate::state::SharedState) -> String {
 /// mint without the marker is 403.
 #[tokio::test]
 async fn csrf_guard_blocks_tagma_mint_without_marker() {
-    let state = make_state_with(Duration::from_secs(2), 10, 10).await;
+    let state = make_state_with(10, 10).await;
     let cookie = seed_session(&state).await;
-    let app = routes::router(state);
+    // No `/internal` surface is needed for these control-plane middleware
+    // tests.
+    let app = routes::router(state, None);
     let mut request = req(Method::POST, "/v1/tagmata", "{}");
     request.headers_mut().append(
         axum::http::header::COOKIE,
@@ -163,9 +171,11 @@ async fn csrf_guard_blocks_tagma_mint_without_marker() {
 /// mints a code, since the seeded session authenticates).
 #[tokio::test]
 async fn tagma_mint_with_marker_returns_200() {
-    let state = make_state_with(Duration::from_secs(2), 10, 10).await;
+    let state = make_state_with(10, 10).await;
     let cookie = seed_session(&state).await;
-    let app = routes::router(state);
+    // No `/internal` surface is needed for these control-plane middleware
+    // tests.
+    let app = routes::router(state, None);
     let mut request = req(Method::POST, "/v1/tagmata", "{}");
     request.headers_mut().append(
         axum::http::header::COOKIE,
@@ -182,9 +192,11 @@ async fn tagma_mint_with_marker_returns_200() {
 /// reaches the handler (404 for an unknown id -- not 403).
 #[tokio::test]
 async fn tagma_revoke_with_marker_reaches_handler() {
-    let state = make_state_with(Duration::from_secs(2), 10, 10).await;
+    let state = make_state_with(10, 10).await;
     let cookie = seed_session(&state).await;
-    let app = routes::router(state);
+    // No `/internal` surface is needed for these control-plane middleware
+    // tests.
+    let app = routes::router(state, None);
     let mut request = req(
         Method::DELETE,
         "/v1/tagmata/00000000-0000-0000-0000-000000000000",
@@ -207,8 +219,10 @@ async fn tagma_revoke_with_marker_reaches_handler() {
 /// number of finishes never are.
 #[tokio::test]
 async fn rate_limit_begins_but_not_finishes() {
-    let state = make_state_with(Duration::from_secs(2), 2, 0).await;
-    let app = routes::router(state);
+    let state = make_state_with(2, 0).await;
+    // No `/internal` surface is needed for these control-plane middleware
+    // tests.
+    let app = routes::router(state, None);
 
     // Two begins exhaust the bucket (handler may 400 on the username; we only
     // care it is not yet 429).
@@ -253,8 +267,10 @@ async fn rate_limit_begins_but_not_finishes() {
 /// `POST /v1/tagmata/enroll` shares the begin bucket; the 3rd call is 429.
 #[tokio::test]
 async fn rate_limit_enroll() {
-    let state = make_state_with(Duration::from_secs(2), 2, 0).await;
-    let app = routes::router(state);
+    let state = make_state_with(2, 0).await;
+    // No `/internal` surface is needed for these control-plane middleware
+    // tests.
+    let app = routes::router(state, None);
     for _ in 0..2 {
         let request = req(Method::POST, "/v1/tagmata/enroll", r#"{"code":"x"}"#);
         assert_ne!(
@@ -272,7 +288,7 @@ async fn rate_limit_enroll() {
 /// The challenge GC sweep deletes only expired rows.
 #[tokio::test]
 async fn gc_sweep_deletes_expired_only() {
-    let state = make_state_with(Duration::from_secs(2), 10, 10).await;
+    let state = make_state_with(10, 10).await;
     let now = OffsetDateTime::now_utc();
     // One expired, one live.
     for expires in [
@@ -301,4 +317,74 @@ async fn gc_sweep_deletes_expired_only() {
         .expect("read challenges");
     assert_eq!(remaining.len(), 1, "only the live row remains");
     assert!(remaining[0].expires_at > now);
+}
+
+/// `/internal/*` is NOT mounted when no shared secret is configured: the whole
+/// surface is absent (404), so there is nothing to reach even with a guess.
+#[tokio::test]
+async fn internal_surface_absent_without_token() {
+    let state = make_state_with(10, 10).await;
+    let app = routes::router(state, None);
+    let mut request = req(
+        Method::POST,
+        "/internal/verify-session",
+        r#"{"cookie":"x"}"#,
+    );
+    request.headers_mut().append(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer internal-secret"),
+    );
+    assert_eq!(run(app, request).await, StatusCode::NOT_FOUND);
+}
+
+/// A request to `/internal/*` with no bearer is rejected 401.
+#[tokio::test]
+async fn internal_guard_rejects_missing_bearer() {
+    let state = make_state_with(10, 10).await;
+    let app = routes::router(state, Some(TokenHash::of("internal-secret")));
+    let request = req(
+        Method::POST,
+        "/internal/verify-session",
+        r#"{"cookie":"x"}"#,
+    );
+    assert_eq!(run(app, request).await, StatusCode::UNAUTHORIZED);
+}
+
+/// A request with the wrong bearer is rejected 401.
+#[tokio::test]
+async fn internal_guard_rejects_wrong_bearer() {
+    let state = make_state_with(10, 10).await;
+    let app = routes::router(state, Some(TokenHash::of("internal-secret")));
+    let mut request = req(
+        Method::POST,
+        "/internal/verify-session",
+        r#"{"cookie":"x"}"#,
+    );
+    request.headers_mut().append(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer sk-wrong"),
+    );
+    assert_eq!(run(app, request).await, StatusCode::UNAUTHORIZED);
+}
+
+/// The correct bearer passes the guard and reaches the handler (an unknown
+/// session maps to 404, NOT 401, proving the guard let it through).
+#[tokio::test]
+async fn internal_guard_passes_correct_bearer() {
+    let state = make_state_with(10, 10).await;
+    let app = routes::router(state, Some(TokenHash::of("internal-secret")));
+    let mut request = req(
+        Method::POST,
+        "/internal/verify-session",
+        r#"{"cookie":"x"}"#,
+    );
+    request.headers_mut().append(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer internal-secret"),
+    );
+    assert_eq!(
+        run(app, request).await,
+        StatusCode::NOT_FOUND,
+        "correct bearer reaches the handler (404 for unknown session)"
+    );
 }

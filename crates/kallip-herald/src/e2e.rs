@@ -54,14 +54,14 @@ impl DeviceKey {
 /// key, ECDH with the app's public, HKDF -> session key. Returns the response
 /// (herald ephemeral public + signature over the transcript) and the session key.
 ///
-/// The signature binds the ephemeral keys to `(tagma_id, conversation_id,
-/// agent_id)` (see [`kallip_agora_common::proof::kex_transcript`]), so the app
-/// can attribute the derived key unambiguously to the pinned identity.
+/// The signature binds the ephemeral keys to `(tagma_id, conversation_id)` (see
+/// [`kallip_agora_common::proof::kex_transcript`]), so the app can attribute the
+/// derived key unambiguously to the pinned identity. The agent backing the
+/// conversation is a herald-internal concern and is not part of the transcript.
 pub fn respond_key_exchange(
     device: &DeviceKey,
     tagma_id: &str,
     conversation_id: &str,
-    agent_id: &str,
     init: &KeyExchangeInit,
 ) -> anyhow::Result<(KeyExchangeResponse, SessionKey)> {
     let app_eph = array32(&init.ephemeral_public.0)?;
@@ -79,7 +79,7 @@ pub fn respond_key_exchange(
     let key = hkdf_sha256_32(shared.as_bytes(), HKDF_INFO);
 
     let herald_eph = eph_pub.to_bytes();
-    let transcript = kex_transcript(tagma_id, conversation_id, agent_id, &app_eph, &herald_eph);
+    let transcript = kex_transcript(tagma_id, conversation_id, &app_eph, &herald_eph);
     let signature = device.sign(&transcript);
     Ok((
         KeyExchangeResponse {
@@ -192,8 +192,7 @@ mod tests {
             ephemeral_public: X25519PublicKey(app_pub.to_bytes().to_vec()),
         };
         // Herald responds, deriving its key.
-        let (response, herald_key) =
-            respond_key_exchange(&device, "tagma", "conv", "agent", &init).unwrap();
+        let (response, herald_key) = respond_key_exchange(&device, "tagma", "conv", &init).unwrap();
         // App independently derives the key from the herald's ephemeral public.
         let herald_eph = array32(&response.ephemeral_public.0).unwrap();
         let app_key = app_derive_key(&app_secret, herald_eph);
@@ -215,7 +214,7 @@ mod tests {
             ephemeral_public: X25519PublicKey(app_eph_pub.to_vec()),
         };
         let (response, _herald_key) =
-            respond_key_exchange(&device, "tagma-7", "conv-9", "agent-3", &init).unwrap();
+            respond_key_exchange(&device, "tagma-7", "conv-9", &init).unwrap();
 
         let herald_eph = array32(&response.ephemeral_public.0).unwrap();
         // Verify via the shared agora-common verifier (the app SDK does this).
@@ -224,7 +223,6 @@ mod tests {
                 &pinned,
                 "tagma-7",
                 "conv-9",
-                "agent-3",
                 &app_eph_pub,
                 &herald_eph,
                 &response.signature.0,
@@ -238,7 +236,6 @@ mod tests {
                 &pinned,
                 "tagma-7",
                 "conv-OTHER",
-                "agent-3",
                 &app_eph_pub,
                 &herald_eph,
                 &response.signature.0,
@@ -249,7 +246,7 @@ mod tests {
         // also passes (independent of the agora-common helper).
         let key = VerifyingKey::from_bytes(&pinned).unwrap();
         let sig = Signature::from_slice(&response.signature.0).unwrap();
-        let transcript = kex_transcript("tagma-7", "conv-9", "agent-3", &app_eph_pub, &herald_eph);
+        let transcript = kex_transcript("tagma-7", "conv-9", &app_eph_pub, &herald_eph);
         assert!(key.verify(&transcript, &sig).is_ok());
     }
 
@@ -302,8 +299,10 @@ mod tests {
     fn replayed_sequence_re_decrypts_identically() {
         // The AEAD itself does not reject a reused sequence_n (that is the
         // receiver's window job); the same (key, nonce) decrypts the same
-        // ciphertext. This documents the boundary: replay protection lives in
-        // the agora's seq_seen + the receiver's E2E window, not the AEAD.
+        // ciphertext. This documents the boundary: within-epoch replay
+        // protection lives in the herald's `seen_inbound` window and cross-
+        // epoch in AEAD key rotation -- never in the AEAD itself, and the relay
+        // (lesche) does no dedup.
         let key = fresh_seed();
         let ciphertext = aead_encrypt(&key, super::DIR_APP_TO_HERALD, 5, b"once");
         assert!(decrypt(&key, 5, &ciphertext).is_some());
@@ -320,7 +319,7 @@ mod tests {
         let init = KeyExchangeInit {
             ephemeral_public: X25519PublicKey(vec![0u8; 32]),
         };
-        let result = respond_key_exchange(&device, "tagma", "conv", "agent", &init);
+        let result = respond_key_exchange(&device, "tagma", "conv", &init);
         assert!(result.is_err(), "low-order app public key must be rejected");
     }
 }

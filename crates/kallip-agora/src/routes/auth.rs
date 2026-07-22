@@ -305,7 +305,7 @@ async fn register_finish(
 
     let session = MintedToken::generate(SESSION);
     let session_hash = session.hash().as_bytes().to_vec();
-    let set_cookie = build_set_cookie(state.session_cfg, session.secret());
+    let set_cookie = build_set_cookie(&state.session_cfg, session.secret());
     let session_ttl = state.session_cfg.ttl;
 
     // One transaction: lock challenge -> invite -> username, insert user +
@@ -671,7 +671,7 @@ async fn login_finish(
     // Mint the session token up front; its hash is inserted inside the txn.
     let session = MintedToken::generate(SESSION);
     let session_hash = session.hash().as_bytes().to_vec();
-    let set_cookie = build_set_cookie(state.session_cfg, session.secret());
+    let set_cookie = build_set_cookie(&state.session_cfg, session.secret());
     let ceremony_id = req.ceremony_id;
     let user_id_for_txn = user_id.clone();
     let session_ttl = state.session_cfg.ttl;
@@ -793,7 +793,7 @@ async fn logout(
         .exec(&state.db)
         .await
         .map_err(map_db_err)?;
-    let clear = build_clear_cookie(state.session_cfg);
+    let clear = build_clear_cookie(&state.session_cfg);
     let mut resp = StatusCode::OK.into_response();
     resp.headers_mut().append(
         axum::http::header::SET_COOKIE,
@@ -874,8 +874,6 @@ mod tests {
     //! would have to re-implement CTAP signing, which `webauthn-rs` does not
     //! ship).
 
-    use std::time::Duration;
-
     use axum::Json;
     use axum::extract::State;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set};
@@ -914,7 +912,7 @@ mod tests {
     /// message reveals nothing about whether the code exists).
     #[tokio::test]
     async fn register_begin_rejects_unknown_invite() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         match register_begin(
             State(state),
             Json(RegisterBeginRequest {
@@ -935,7 +933,7 @@ mod tests {
     /// challenge row bound to the invite hash.
     #[tokio::test]
     async fn register_begin_accepts_live_invite() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let token = MintedToken::generate(INVITE);
         let hash = seed_invite(&state, &token).await;
 
@@ -969,7 +967,7 @@ mod tests {
     /// `/v1/me` returns the signed-in user's profile.
     #[tokio::test]
     async fn me_returns_signed_in_user() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let user_id = seed_user(&state, "alice", "alice@example.test").await;
         let Json(MeResponse {
             user_id: got,
@@ -995,7 +993,7 @@ mod tests {
     /// oracle for closed beta; see the handler doc comment).
     #[tokio::test]
     async fn login_begin_rejects_unknown_email() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         match login_begin(
             State(state),
             Json(LoginBeginRequest {
@@ -1013,7 +1011,7 @@ mod tests {
     /// so the response leaks no account state.
     #[tokio::test]
     async fn login_begin_rejects_disabled_user() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let user_id = seed_user(&state, "frozen", "frozen@example.test").await;
         // Flip the account to disabled.
         let mut am: users::ActiveModel = users::Entity::find_by_id(user_id.to_string())
@@ -1042,7 +1040,7 @@ mod tests {
     /// reached, bounding `webauthn_challenges` growth against a begin flood.
     #[tokio::test]
     async fn register_begin_caps_inflight_ceremonies() {
-        let state = make_state(Duration::from_secs(2)).await;
+        let state = make_state().await;
         let token = MintedToken::generate(INVITE);
         let hash = seed_invite(&state, &token).await;
         let now = OffsetDateTime::now_utc();

@@ -2639,7 +2639,6 @@ dependencies = [
  "clap",
  "cookie",
  "email_address",
- "futures-util",
  "getrandom 0.4.2",
  "hex",
  "http-body-util",
@@ -2654,7 +2653,6 @@ dependencies = [
  "testcontainers-modules",
  "time",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "tower",
  "tower-http",
@@ -2669,6 +2667,7 @@ dependencies = [
 name = "kallip-agora-common"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "ed25519-dalek",
  "kallip-common",
@@ -2765,9 +2764,39 @@ dependencies = [
  "sha2 0.11.0",
  "time",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "x25519-dalek",
+]
+
+[[package]]
+name = "kallip-lesche"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "cookie",
+ "ed25519-dalek",
+ "futures-util",
+ "kallip-agora-common",
+ "kallip-common",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
@@ -4982,6 +5011,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6179,6 +6214,7 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

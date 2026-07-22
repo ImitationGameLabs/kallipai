@@ -54,6 +54,12 @@ pub struct Args {
     /// plain-HTTP dev where TLS is terminated elsewhere / absent).
     #[arg(long, env = "KALLIP_AGORA_COOKIE_SECURE", default_value_t = true)]
     pub cookie_secure: bool,
+    /// Cookie `Domain` attribute. Set to the parent domain in a per-subdomain
+    /// deploy so the session cookie is shared across `agora.<d>` and
+    /// `lesche.<d>` (e.g. `kallipai.com` prod, `localhost` dev). Unset =
+    /// host-only (single-origin deploy).
+    #[arg(long, env = "KALLIP_AGORA_SESSION_COOKIE_DOMAIN")]
+    pub cookie_domain: Option<String>,
     /// Default invite-code lifetime in seconds when the admin does not pass one
     /// (minted via `POST /v1/admin/invite-codes`).
     #[arg(
@@ -102,24 +108,10 @@ pub struct Args {
         default_value = "600"
     )]
     pub enrollment_code_ttl_secs: u64,
-    /// Acceptable clock skew (both directions) on a herald tunnel reconnect
-    /// proof's timestamp, in seconds.
-    #[arg(long, env = "KALLIP_AGORA_PROOF_SKEW_SECS", default_value = "60")]
-    pub proof_skew_secs: i64,
-    /// Per-user cap on live conversations, bounding memory growth against
-    /// unbounded conversation creation.
-    #[arg(
-        long,
-        env = "KALLIP_AGORA_MAX_CONVERSATIONS_PER_USER",
-        default_value = "64"
-    )]
-    pub max_conversations_per_user: usize,
-    /// How long a synchronous key exchange waits for the herald's response
-    /// before failing with 504, in seconds.
-    #[arg(
-        long,
-        env = "KALLIP_AGORA_KEY_EXCHANGE_TIMEOUT_SECS",
-        default_value = "10"
-    )]
-    pub key_exchange_timeout_secs: u64,
+    /// Shared secret that `kallip-lesche` presents as `Authorization: Bearer`
+    /// to the `/internal/*` ControlPlane API. Unset = the `/internal` nest is
+    /// not mounted (agora runs standalone, no relay connected). Must equal the
+    /// lesche's `KALLIP_LESCHE_AGORA_TOKEN`.
+    #[arg(long, env = "KALLIP_AGORA_INTERNAL_TOKEN")]
+    pub internal_token: Option<String>,
 }
