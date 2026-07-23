@@ -1,0 +1,19 @@
+[package]
+name = "kallip-agora-client"
+description = "HTTP client for the kallip-agora relay (public enroll + admin surface)"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallip-agora-common = { workspace = true }
+kallip-e2ee = { workspace = true }
+kallip-common = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = { workspace = true }

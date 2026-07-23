@@ -90,6 +90,7 @@
               # plain Rust builds. Their docker images are Linux-only (see
               # kallip-agora-image / kallip-lesche-image / kallip-tagma-image below).
               kallip-agora = builds.agora;
+              kallip-admin = builds.admin;
               kallip-lesche = builds.lesche;
               kallip-tagma = builds.tagma;
               kallip-tarball = import ./nix/packages/tarball.nix {

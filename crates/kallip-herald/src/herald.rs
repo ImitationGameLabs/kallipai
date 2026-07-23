@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use futures_util::{FutureExt, StreamExt};
 use kallip_agora_common::bytes::Ciphertext;
 use kallip_agora_common::event::{FailoverChainExhaustion, TagmaEvent};
@@ -31,6 +30,7 @@ use kallip_common::agentid::AgentId;
 use kallip_common::protocol::{
     ApiError, FailoverChainExhaustion as WireFailoverExhaustion, SseEvent,
 };
+use kallip_lesche_client::LescheClient;
 use std::panic::AssertUnwindSafe;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -38,7 +38,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::e2e::{self, DeviceKey, SessionKey};
+use kallip_e2ee::{self as e2e, DeviceKey, SessionKey};
 
 /// Backoff between tagma event-stream reconnect attempts.
 const PUMP_RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
@@ -55,24 +55,14 @@ pub struct Herald {
 /// The herald's shared state. The conversation is 1:1 with the tagma, so the
 /// crypto state is single-valued (not keyed by conversation).
 struct Inner {
-    /// Lesche (data-plane relay) base URL: the herald's tunnel + envelope +
-    /// key-exchange POSTs all go here now that the relay is a separate service
-    /// from the agora.
-    lesche_url: String,
     tagma_id: TagmaId,
     /// The single conversation this tagma owns with its operator:
     /// `ConversationId::for_tagma(&tagma_id)`. Stable across reconnects.
     conversation_id: ConversationId,
-    tagma_token: String,
-    /// Client for one-shot POSTs (envelopes, key-exchange). Carries a total
-    /// timeout, which is correct for a request/reply with a natural end.
-    http_post: reqwest::Client,
-    /// Client for the long-lived herald tunnel (`GET /v1/herald/tunnel`). Has
-    /// NO total timeout: `reqwest`'s `.timeout()` is a whole-response deadline
-    /// that also covers the streaming body, so any finite value would kill the
-    /// tunnel mid-flight every N seconds. Same reasoning as the tagma
-    /// event-pump client in `main.rs` (no-timeout, load-bearing for the stream).
-    http_stream: reqwest::Client,
+    /// The data-plane relay client (tunnel SSE, envelope + KEX POSTs). Owns the
+    /// two reqwest clients internally: a timeout-bearing POST client and a
+    /// no-total-timeout stream client for the long-lived tunnel.
+    client: LescheClient,
     tagma: TagmaClient,
     device: DeviceKey,
     /// The tagma's single root agent id (the tagma owns/creates it at startup;
@@ -114,9 +104,8 @@ struct PumpHandle {
 
 impl Herald {
     pub fn new(
-        lesche_url: String,
+        client: LescheClient,
         tagma_id: TagmaId,
-        tagma_token: String,
         tagma: TagmaClient,
         device: DeviceKey,
         root_agent: AgentId,
@@ -124,17 +113,9 @@ impl Herald {
         let conversation_id = ConversationId::for_tagma(&tagma_id);
         Self {
             inner: Arc::new(Inner {
-                lesche_url,
                 tagma_id,
                 conversation_id,
-                tagma_token,
-                http_post: reqwest::Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                    .expect("build POST reqwest client"),
-                http_stream: reqwest::Client::builder()
-                    .build()
-                    .expect("build stream reqwest client"),
+                client,
                 tagma,
                 device,
                 root_agent,
@@ -163,50 +144,22 @@ impl Herald {
     /// Open the tunnel SSE and dispatch each inbound message (each on its own
     /// task so a long-running op does not stall the stream reader).
     async fn connect_and_drain(self) -> Result<()> {
-        let url = format!("{}/v1/herald/tunnel", self.inner.lesche_url);
-        // Reconnect proof: a timestamp + signature over the tunnel transcript,
-        // so a stolen tagma token alone cannot open a tunnel.
-        let unix_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let proof = self
+        // The reconnect proof (timestamp + signature over the tunnel transcript)
+        // is generated fresh per call inside the client; the lesche validates it
+        // against the tagma's monotonic high-water-mark, so this MUST be called
+        // anew on every reconnect (see LescheClient::open_tunnel).
+        let stream = self
             .inner
-            .device
-            .sign(&kallip_agora_common::proof::tunnel_transcript(
-                self.inner.tagma_id.as_ref(),
-                unix_secs,
-            ));
-        let proof_b64 = base64::engine::general_purpose::STANDARD.encode(proof);
-        let resp = self
-            .inner
-            .http_stream
-            .get(&url)
-            .bearer_auth(&self.inner.tagma_token)
-            .header("X-Device-Timestamp", unix_secs.to_string())
-            .header("X-Device-Proof", proof_b64)
-            .send()
-            .await
-            .context("tunnel GET failed")?;
-        if !resp.status().is_success() {
-            anyhow::bail!("tunnel GET returned {}", resp.status());
-        }
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("tunnel chunk")?;
-            buf.push_str(std::str::from_utf8(&chunk).context("non-utf8 SSE chunk")?);
-            while let Some(idx) = buf.find("\n\n") {
-                let event = buf[..idx].to_string();
-                buf.drain(..=idx + 1);
-                if let Some(data) = parse_data_payload(&event) {
-                    match serde_json::from_str::<HeraldInbound>(&data) {
-                        Ok(inbound) => {
-                            tokio::spawn(self.clone().dispatch(inbound));
-                        }
-                        Err(e) => warn!("invalid herald inbound JSON: {e}"),
-                    }
+            .client
+            .open_tunnel(&self.inner.device, &self.inner.tagma_id)
+            .await?;
+        tokio::pin!(stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(inbound) => {
+                    tokio::spawn(self.clone().dispatch(inbound));
                 }
+                Err(e) => warn!("tunnel stream error: {e:#}"),
             }
         }
         Ok(())
@@ -269,6 +222,8 @@ impl Herald {
         }
         self.start_pump().await;
         if let Err(e) = self
+            .inner
+            .client
             .post_key_exchange_response(&conversation_id, &response)
             .await
         {
@@ -482,7 +437,12 @@ impl Herald {
             timestamp: OffsetDateTime::now_utc(),
             ciphertext: Ciphertext(ciphertext),
         };
-        match self.post_agent_envelope(&envelope).await {
+        match self
+            .inner
+            .client
+            .post_envelope(&self.inner.conversation_id, &envelope)
+            .await
+        {
             Ok(()) => Ok(()),
             Err(e) => {
                 // Deliberately do NOT roll back `outbound_seq`. The seq was
@@ -496,74 +456,6 @@ impl Herald {
                 Err(e)
             }
         }
-    }
-
-    /// Post an agent envelope, retrying on 503 (app offline) with a bounded
-    /// backoff (500ms, 1s, 2s, 4s, 8s, 16s ~= 31s total). A dropped reply is
-    /// recovered by the app's host-history re-pull on reconnect, so the retry
-    /// only rides out transient reconnects.
-    async fn post_agent_envelope(&self, envelope: &Envelope) -> Result<()> {
-        let url = format!(
-            "{}/v1/conversations/{}/envelopes",
-            self.inner.lesche_url, self.inner.conversation_id
-        );
-        const BACKOFF: [Duration; 6] = [
-            Duration::from_millis(500),
-            Duration::from_secs(1),
-            Duration::from_secs(2),
-            Duration::from_secs(4),
-            Duration::from_secs(8),
-            Duration::from_secs(16),
-        ];
-        for wait in BACKOFF {
-            let resp = self
-                .inner
-                .http_post
-                .post(&url)
-                .bearer_auth(&self.inner.tagma_token)
-                .json(envelope)
-                .send()
-                .await
-                .context("lesche POST failed")?;
-            let status = resp.status();
-            if status.is_success() {
-                return Ok(());
-            }
-            // Retry only on 503 (peer offline). Other failures are not transient.
-            if status.as_u16() != 503 {
-                anyhow::bail!("lesche POST returned {}", status);
-            }
-            tokio::time::sleep(wait).await;
-        }
-        anyhow::bail!("lesche POST exhausted retries (app offline)")
-    }
-
-    async fn post_key_exchange_response(
-        &self,
-        conv_id: &ConversationId,
-        response: &kallip_agora_common::control::KeyExchangeResponse,
-    ) -> Result<()> {
-        let url = format!(
-            "{}/v1/conversations/{conv_id}/key-exchange/response",
-            self.inner.lesche_url
-        );
-        self.post_with_tagma_auth(&url, response).await
-    }
-
-    async fn post_with_tagma_auth<T: serde::Serialize>(&self, url: &str, body: &T) -> Result<()> {
-        let resp = self
-            .inner
-            .http_post
-            .post(url)
-            .bearer_auth(&self.inner.tagma_token)
-            .json(body)
-            .send()
-            .await
-            .context("lesche POST failed")?;
-        if !resp.status().is_success() {
-            anyhow::bail!("lesche POST returned {}", resp.status());
-        }
-        Ok(())
     }
 }
 
@@ -641,17 +533,6 @@ fn map_failover_exhaustion(reason: WireFailoverExhaustion) -> FailoverChainExhau
     }
 }
 
-/// Extract the concatenated `data:` payload from one SSE event block.
-fn parse_data_payload(event: &str) -> Option<String> {
-    let mut data = String::new();
-    for line in event.lines() {
-        if let Some(rest) = line.strip_prefix("data:") {
-            data.push_str(rest.trim_start_matches(' '));
-        }
-    }
-    (!data.is_empty()).then_some(data)
-}
-
 #[cfg(test)]
 mod op_tests {
     //! Operation-level tests: a mock tagma (axum) + a mock agora that captures
@@ -661,7 +542,6 @@ mod op_tests {
     //! encrypt reply -> decrypt - without the real agora or any TS.
 
     use super::*;
-    use crate::e2e::SessionKey;
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::response::Response;
@@ -672,6 +552,7 @@ mod op_tests {
     use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId, UserId};
     use kallip_agora_common::message::{Envelope, Participant, TagmaReply, TagmaRequest};
     use kallip_common::protocol::SseEvent;
+    use kallip_e2ee::{DIR_APP_TO_HERALD, DIR_HERALD_TO_APP, SessionKey, nonce};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -682,22 +563,16 @@ mod op_tests {
     /// Recorded interrupt calls.
     type Interrupts = Arc<Mutex<u64>>;
 
-    const DIR_APP_TO_HERALD: u32 = 0;
-    const DIR_HERALD_TO_APP: u32 = 1;
-
-    fn nonce(dir: u32, seq: u64) -> [u8; 12] {
-        let mut n = [0u8; 12];
-        n[0..4].copy_from_slice(&dir.to_be_bytes());
-        n[4..12].copy_from_slice(&seq.to_be_bytes());
-        n
-    }
-
+    /// App-side encrypt (direction 0 = app->herald). The e2e crate's `encrypt`
+    /// is hardcoded to the herald's direction (1), so the test app side builds
+    /// the AEAD with an explicit direction via the shared `nonce` + `DIR_*`.
     fn app_encrypt(key: &SessionKey, seq: u64, pt: &[u8]) -> Vec<u8> {
         let aead = ChaCha20Poly1305::new(key.into());
         aead.encrypt(&Nonce::from(nonce(DIR_APP_TO_HERALD, seq)), pt)
             .unwrap()
     }
 
+    /// App-side decrypt (direction 1 = herald->app).
     fn app_decrypt(key: &SessionKey, seq: u64, ct: &[u8]) -> Option<Vec<u8>> {
         let aead = ChaCha20Poly1305::new(key.into());
         aead.decrypt(&Nonce::from(nonce(DIR_HERALD_TO_APP, seq)), ct)
@@ -791,10 +666,10 @@ mod op_tests {
             .unwrap();
         let device = DeviceKey::generate();
         let tagma_id = TagmaId::from("tagma".to_string());
+        let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
         let herald = Herald::new(
-            lesche_url,
+            client,
             tagma_id,
-            "tok".to_string(),
             tagma_client,
             device,
             AgentId::from("root".to_string()),
@@ -907,10 +782,10 @@ mod op_tests {
             .auth_token("test")
             .build()
             .unwrap();
+        let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
         let herald = Herald::new(
-            lesche_url,
+            client,
             TagmaId::from("tagma".to_string()),
-            "tok".to_string(),
             tagma,
             DeviceKey::generate(),
             AgentId::from("root".to_string()),

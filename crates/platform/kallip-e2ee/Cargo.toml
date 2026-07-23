@@ -1,0 +1,19 @@
+[package]
+name = "kallip-e2ee"
+description = "End-to-end encryption primitives: Ed25519 device key, X3DH-style key exchange, ChaCha20-Poly1305 AEAD"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallip-agora-common = { workspace = true }
+anyhow = { workspace = true }
+ed25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+getrandom = { workspace = true }
+x25519-dalek = { workspace = true, features = ["getrandom"] }
+
+[dev-dependencies]
+x25519-dalek = { workspace = true, features = ["reusable_secrets"] }

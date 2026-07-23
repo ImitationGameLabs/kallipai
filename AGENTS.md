@@ -21,10 +21,14 @@ The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem 
 │   ├── kallip-run/       # Agent runner for scripting and benchmarking
 │   ├── kallip-client/    # Tagma client library
 │   ├── kallip-herald/   # Host-side relay connector: links a tagma to agora
-│   └── platform/        # Public-internet relay service (agora + lesche)
-│       ├── kallip-agora/        # Control-plane relay
-│       ├── kallip-agora-common/ # Wire types for the agora relay and herald
-│       └── kallip-lesche/       # Data-plane relay
+│   └── platform/        # Public-internet relay subsystem (servers + wire types + clients + admin + E2E crypto)
+│       ├── kallip-agora/        # Control-plane relay server
+│       ├── kallip-lesche/       # Data-plane relay server
+│       ├── kallip-agora-common/ # Wire types for the relay and its clients
+│       ├── kallip-e2ee/         # End-to-end encryption primitives (Ed25519 device key, X3DH KEX, AEAD)
+│       ├── kallip-agora-client/ # Agora relay HTTP client (enroll + admin surface)
+│       ├── kallip-lesche-client/ # Lesche data-plane relay HTTP client
+│       └── kallip-admin/        # Headless agora admin CLI (sk-admin HTTP client)
 ├── docs/                      # Project documentation
 │   ├── architecture.md       # System architecture, tagma design, policy
 │   ├── context-management.md # Agentic context management design

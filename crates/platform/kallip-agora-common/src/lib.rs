@@ -9,6 +9,7 @@
 //! (signer), and the app SDK share a single contract. No private-key material
 //! ever lives in this crate.
 
+pub mod admin;
 pub mod bytes;
 pub mod control;
 pub mod control_plane;

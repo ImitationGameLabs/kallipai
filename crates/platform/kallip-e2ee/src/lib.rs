@@ -1,6 +1,22 @@
-//! End-to-end crypto: Ed25519 device key, X3DH-style key agreement, and
-//! ChaCha20-Poly1305 AEAD. The agora forwards these messages but never holds a
-//! private half, so it cannot derive the session key.
+//! End-to-end encryption primitives: an Ed25519 device key, an X3DH-style key
+//! agreement, and ChaCha20-Poly1305 AEAD.
+//!
+//! This is the signing/AEAD (private-key) counterpart to the verify-only
+//! [`kallip_agora_common::proof`] module. Together the two halves define the E2E
+//! contract: a holder of this crate can sign and encrypt; a holder of only the
+//! verify half can authenticate ciphertext without ever touching a private key.
+//!
+//! # Invariant
+//!
+//! This crate holds **private-key material**. It MUST NOT become a dependency of
+//! any server or verifier process — those consume only the verify half. The
+//! split is precisely what lets a forwarding relay stay cryptographically blind.
+//!
+//! # Wire protocol
+//!
+//! `HKDF_INFO`, the direction tags, and the nonce layout are wire-protocol
+//! constants that every endpoint must match byte-for-byte. They are pinned by
+//! the regression tests at the bottom of this file; never re-version them.
 
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, aead::Aead};
 use ed25519_dalek::{Signer, SigningKey};
@@ -12,15 +28,21 @@ use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519Public};
 
 /// HKDF info string binding the derived key to this protocol/version.
-const HKDF_INFO: &[u8] = b"kallip-agora-herald-aead-v1";
+///
+/// WIRE-PROTOCOL: must match the app SDK byte-for-byte. Do not re-version.
+pub const HKDF_INFO: &[u8] = b"kallip-agora-herald-aead-v1";
 
 /// A 32-byte per-conversation AEAD session key.
 pub type SessionKey = [u8; 32];
 
 /// AEAD nonce direction tag: 0 = app->herald (herald decrypts), 1 = herald->app
 /// (herald encrypts). The counter half is the envelope's `sequence_n`.
-const DIR_APP_TO_HERALD: u32 = 0;
-const DIR_HERALD_TO_APP: u32 = 1;
+///
+/// WIRE-PROTOCOL: must match the app SDK byte-for-byte.
+pub const DIR_APP_TO_HERALD: u32 = 0;
+
+/// WIRE-PROTOCOL: must match the app SDK byte-for-byte.
+pub const DIR_HERALD_TO_APP: u32 = 1;
 
 /// The herald's long-lived Ed25519 device key, pinned at the agora at enrollment
 /// and used to sign key-exchange responses.
@@ -108,7 +130,11 @@ pub fn decrypt(key: &SessionKey, seq: u64, ciphertext: &[u8]) -> Option<Vec<u8>>
         .ok()
 }
 
-fn nonce(dir: u32, seq: u64) -> [u8; 12] {
+/// Build the 12-byte AEAD nonce: 4-byte big-endian direction tag ||
+/// 8-byte big-endian sequence counter.
+///
+/// WIRE-PROTOCOL: must match the app SDK byte-for-byte.
+pub fn nonce(dir: u32, seq: u64) -> [u8; 12] {
     let mut n = [0u8; 12];
     n[0..4].copy_from_slice(&dir.to_be_bytes());
     n[4..12].copy_from_slice(&seq.to_be_bytes());
@@ -180,6 +206,39 @@ mod tests {
     fn aead_decrypt(key: &[u8; 32], dir: u32, seq: u64, ciphertext: &[u8]) -> Option<Vec<u8>> {
         let aead = ChaCha20Poly1305::new_from_slice(key).unwrap();
         aead.decrypt(&Nonce::from(nonce(dir, seq)), ciphertext).ok()
+    }
+
+    // --- WIRE-PROTOCOL invariant guards: a careless edit fails loudly. ---
+
+    #[test]
+    fn hkdf_info_is_pinned() {
+        assert_eq!(HKDF_INFO, b"kallip-agora-herald-aead-v1");
+    }
+
+    #[test]
+    fn direction_tags_are_pinned() {
+        assert_eq!(super::DIR_APP_TO_HERALD, 0);
+        assert_eq!(super::DIR_HERALD_TO_APP, 1);
+    }
+
+    #[test]
+    fn nonce_layout_is_pinned() {
+        // 4-byte BE direction || 8-byte BE sequence.
+        assert_eq!(nonce(0, 0), [0u8; 12]);
+        assert_eq!(
+            nonce(super::DIR_HERALD_TO_APP, 1),
+            [
+                0, 0, 0, 1, // dir = 1
+                0, 0, 0, 0, 0, 0, 0, 1, // seq = 1
+            ]
+        );
+        assert_eq!(
+            nonce(super::DIR_APP_TO_HERALD, 0xffff_ffff_ffff_ffff),
+            [
+                0, 0, 0, 0, // dir = 0
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            ]
+        );
     }
 
     #[test]

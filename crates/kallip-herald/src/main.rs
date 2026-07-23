@@ -4,18 +4,17 @@
 //! entity to remote apps: it binds to the tagma-owned root agent and
 //! translates semantic operations into tagma calls.
 
-mod e2e;
 mod herald;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use kallip_agora_common::bytes::Ed25519PublicKey;
-use kallip_agora_common::control::EnrollRequest;
+use kallip_agora_client::AgoraClient;
 use kallip_agora_common::ids::TagmaId;
 use kallip_client::TagmaClient;
+use kallip_e2ee::DeviceKey;
+use kallip_lesche_client::LescheClient;
 use tracing::info;
 
 use std::io::Write;
@@ -90,7 +89,10 @@ async fn main() -> Result<()> {
                 .enrollment_code
                 .as_deref()
                 .context("no stored tagma token; --enrollment-code required for first run")?;
-            let creds = enroll(&args.agora_url, code, &device).await?;
+            let creds = AgoraClient::builder(&args.agora_url)
+                .build()?
+                .enroll(code, &device)
+                .await?;
             save_tagma(&state_dir, &creds);
             info!(tagma = %creds.0, "enrolled with agora");
             creds
@@ -114,16 +116,14 @@ async fn main() -> Result<()> {
     // herald binds to it directly. The tagma must be reachable to start.
     let root_agent = tagma.get_root_agent().await?.id;
 
-    Herald::new(
-        args.lesche_url,
-        tagma_id,
-        tagma_token,
-        tagma,
-        device,
-        root_agent,
-    )
-    .run()
-    .await;
+    // The lesche client owns the two reqwest clients the herald needs: a
+    // timeout-bearing one for POSTs and a no-total-timeout one for the tunnel
+    // SSE (see LescheClient docs). The tagma token authenticates every call.
+    let lesche = LescheClient::builder(&args.lesche_url, tagma_token).build()?;
+
+    Herald::new(lesche, tagma_id, tagma, device, root_agent)
+        .run()
+        .await;
     Ok(())
 }
 
@@ -145,14 +145,14 @@ fn resolve_state_dir(flag: Option<String>) -> Result<PathBuf> {
     Ok(base)
 }
 
-fn load_or_create_device(state_dir: &Path) -> Result<e2e::DeviceKey> {
+fn load_or_create_device(state_dir: &Path) -> Result<DeviceKey> {
     let path = state_dir.join("device.key");
     if let Ok(seed_bytes) = std::fs::read(&path)
         && let Ok(seed) = seed_bytes.as_slice().try_into()
     {
-        return Ok(e2e::DeviceKey::from_seed(seed));
+        return Ok(DeviceKey::from_seed(seed));
     }
-    let device = e2e::DeviceKey::generate();
+    let device = DeviceKey::generate();
     write_secret(&path, &device.seed())?;
     Ok(device)
 }
@@ -192,31 +192,4 @@ fn set_owner_only(path: &Path) -> Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
         .with_context(|| format!("set permissions on {path:?}"))?;
     Ok(())
-}
-
-async fn enroll(agora_url: &str, code: &str, device: &e2e::DeviceKey) -> Result<(TagmaId, String)> {
-    let public = device.public_bytes();
-    let signature = device.sign(&kallip_agora_common::proof::enroll_transcript(
-        code, &public,
-    ));
-    let req = EnrollRequest {
-        code: code.to_string(),
-        device_public_key: Ed25519PublicKey(public.to_vec()),
-        signature: kallip_agora_common::bytes::Ed25519Signature(signature.to_vec()),
-    };
-    let resp = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("build reqwest client")?
-        .post(format!("{agora_url}/v1/tagmata/enroll"))
-        .json(&req)
-        .send()
-        .await
-        .context("enrollment POST failed")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("enrollment returned {}", resp.status());
-    }
-    let body: kallip_agora_common::control::EnrollResponse =
-        resp.json().await.context("decode enrollment response")?;
-    Ok((body.tagma_id, body.tagma_token))
 }

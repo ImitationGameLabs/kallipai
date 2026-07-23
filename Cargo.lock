@@ -2629,6 +2629,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kallip-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "comfy-table",
+ "kallip-agora-client",
+ "kallip-agora-common",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+]
+
+[[package]]
 name = "kallip-agora"
 version = "0.1.0"
 dependencies = [
@@ -2661,6 +2676,21 @@ dependencies = [
  "url",
  "uuid",
  "webauthn-rs",
+]
+
+[[package]]
+name = "kallip-agora-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kallip-agora-common",
+ "kallip-common",
+ "kallip-e2ee",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]
@@ -2711,6 +2741,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kallip-e2ee"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "getrandom 0.4.2",
+ "hkdf 0.13.0",
+ "kallip-agora-common",
+ "sha2 0.11.0",
+ "x25519-dalek",
+]
+
+[[package]]
 name = "kallip-herald"
 version = "0.1.0"
 dependencies = [
@@ -2720,17 +2764,17 @@ dependencies = [
  "chacha20poly1305",
  "clap",
  "dirs",
- "ed25519-dalek",
  "futures-util",
  "getrandom 0.4.2",
- "hkdf 0.13.0",
+ "kallip-agora-client",
  "kallip-agora-common",
  "kallip-client",
  "kallip-common",
+ "kallip-e2ee",
+ "kallip-lesche-client",
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "time",
  "tokio",
  "tokio-util",
@@ -2765,6 +2809,24 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "kallip-lesche-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "base64 0.22.1",
+ "futures-core",
+ "futures-util",
+ "kallip-agora-common",
+ "kallip-e2ee",
+ "reqwest",
+ "serde_json",
+ "time",
+ "tokio",
  "wiremock",
 ]
 

@@ -35,6 +35,11 @@ in
   workspace = buildCrate "cargo build --release";
   # The agora control-plane server (pure HTTP/Postgres; no shell-out deps).
   agora = buildCrate "cargo build --release -p kallip-agora";
+  # The headless agora admin CLI (HTTP client; runs on the operator host). A
+  # separate attr so it can be built/deployed without the server. Not baked into
+  # the agora image -- the image is deliberately minimal; operators run this
+  # against any reachable agora.
+  admin = buildCrate "cargo build --release -p kallip-admin";
   # The lesche data-plane relay (herald tunnels, app SSE, envelope routing; pure
   # HTTP, no shell-out deps). Its own image so the agora and lesche services
   # deploy independently -- see nix/packages/docker-images/lesche.nix.
