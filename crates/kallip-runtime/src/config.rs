@@ -276,6 +276,16 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
+    /// Whether this is the tagma-owned root agent — the unique agent minted
+    /// with no creator (`created_by == None`). Root is the sole role allowed
+    /// to author shared skills (the landlock carve in `build_tool_dispatch`
+    /// keys off this), and is the agent looked up by `root_agent()` for
+    /// relay/restore routing. One predicate so the definition of "root"
+    /// stays in one place.
+    pub fn is_root(&self) -> bool {
+        self.created_by.is_none()
+    }
+
     /// Loads configuration from CLI arguments and environment variables.
     pub fn load(
         prompt: Option<String>,
@@ -603,13 +613,12 @@ mod tests {
             names::BG_READ,
             names::BG_KILL,
             ContextUnpinTool::NAME,
-            // The approval family and the skill-promote CLI were migrated out
-            // together; guard the whole family, not just one member.
+            // The approval family was migrated out of the prompt together; guard
+            // the whole family, not just one member.
             "approval_redeem",
             "approval_commit",
             "approval_list",
             "approval_cancel",
-            "skill promote",
         ] {
             assert!(
                 !prompt.contains(verboten),

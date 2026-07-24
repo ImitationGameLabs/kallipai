@@ -30,30 +30,26 @@ the full authorization matrix, see [auth.md](auth.md).
 
 ## Endpoint Overview
 
-| Method   | Path                                         | Purpose                                    | Auth                         |
-| -------- | -------------------------------------------- | ------------------------------------------ | ---------------------------- |
-| `POST`   | `/agents`                                    | Create a subagent (`created_by` required)  | supervisor / operator        |
-| `GET`    | `/agents`                                    | List running agents (`?created_by=`)       | any                          |
-| `GET`    | `/agents/root`                               | Fetch the tagma-managed root agent         | any                          |
-| `DELETE` | `/agents/{id}`                               | Stop and remove an agent (never the root)  | operator / superior          |
-| `POST`   | `/agents/{id}/interrupt`                     | Interrupt current agent operation          | operator / superior          |
-| `POST`   | `/agents/{id}/message`                       | Send a message                             | any (peer-to-peer)           |
-| `GET`    | `/agents/{id}/events`                        | Subscribe to agent events (SSE)            | any                          |
-| `GET`    | `/agents/{id}/status`                        | Get context usage and retry history        | any                          |
-| `GET`    | `/agents/{id}/permissions`                   | Get permission profile and classify preset | any                          |
-| `PUT`    | `/agents/{id}/metadata`                      | Update role / description                  | direct supervisor / operator |
-| `PUT`    | `/agents/{id}/activity`                      | Report current activity (self)             | self / operator              |
-| `GET`    | `/budget`                                    | Get tagma-wide token budget status         | any                          |
-| `POST`   | `/budget`                                    | Adjust or set tagma-wide token budget      | operator                     |
-| `GET`    | `/approvals`                                 | List approvals                             | any (filtered by scope)      |
-| `GET`    | `/approvals/{id}`                            | Get a single approval                      | operator / superior          |
-| `POST`   | `/approvals/{id}`                            | Approve or deny an approval                | operator / superior          |
-| `GET`    | `/agents/{id}/skills/paths`                  | Get skill directory paths                  | any                          |
-| `GET`    | `/agents/{id}/skills/{name}/meta`            | Get skill metadata                         | any                          |
-| `POST`   | `/agents/{id}/skills/{name}/promote-request` | Submit a skill promote request             | self / operator              |
-| `GET`    | `/skill-promote-requests`                    | List promote requests                      | any                          |
-| `GET`    | `/skill-promote-requests/{id}`               | Show promote request with content diff     | any                          |
-| `POST`   | `/skill-promote-requests/{id}`               | Approve or deny a promote request          | operator / root agent        |
+| Method   | Path                              | Purpose                                    | Auth                         |
+| -------- | --------------------------------- | ------------------------------------------ | ---------------------------- |
+| `POST`   | `/agents`                         | Create a subagent (`created_by` required)  | supervisor / operator        |
+| `GET`    | `/agents`                         | List running agents (`?created_by=`)       | any                          |
+| `GET`    | `/agents/root`                    | Fetch the tagma-managed root agent         | any                          |
+| `DELETE` | `/agents/{id}`                    | Stop and remove an agent (never the root)  | operator / superior          |
+| `POST`   | `/agents/{id}/interrupt`          | Interrupt current agent operation          | operator / superior          |
+| `POST`   | `/agents/{id}/message`            | Send a message                             | any (peer-to-peer)           |
+| `GET`    | `/agents/{id}/events`             | Subscribe to agent events (SSE)            | any                          |
+| `GET`    | `/agents/{id}/status`             | Get context usage and retry history        | any                          |
+| `GET`    | `/agents/{id}/permissions`        | Get permission profile and classify preset | any                          |
+| `PUT`    | `/agents/{id}/metadata`           | Update role / description                  | direct supervisor / operator |
+| `PUT`    | `/agents/{id}/activity`           | Report current activity (self)             | self / operator              |
+| `GET`    | `/budget`                         | Get tagma-wide token budget status         | any                          |
+| `POST`   | `/budget`                         | Adjust or set tagma-wide token budget      | operator                     |
+| `GET`    | `/approvals`                      | List approvals                             | any (filtered by scope)      |
+| `GET`    | `/approvals/{id}`                 | Get a single approval                      | operator / superior          |
+| `POST`   | `/approvals/{id}`                 | Approve or deny an approval                | operator / superior          |
+| `GET`    | `/agents/{id}/skills/paths`       | Get skill directory paths                  | any                          |
+| `GET`    | `/agents/{id}/skills/{name}/meta` | Get skill metadata                         | any                          |
 
 ## Agent Management
 
@@ -707,139 +703,6 @@ Status: `200 OK`
 > **Note:** `name` in the response is the display label from YAML frontmatter,
 > not the canonical skill path identifier. The skill's unique identity is its
 > path relative to the skills root (e.g. `code/refactoring`).
-
-## Skill Promote Requests
-
-The promote-request system lets any agent submit a skill for review. Root agents
-or the operator review and decide. Content is snapshotted at submission time
-(TOCTOU protection).
-
-### `POST /agents/{id}/skills/{name}/promote-request` — Submit promote request
-
-Submits the agent's local skill for promotion to the shared directory. No
-request body is required — all data is read from the local skill file on disk.
-
-Auth: the agent itself or the operator. See [auth.md](auth.md).
-
-**Path parameters**
-
-| Parameter | Type      | Description                        |
-| --------- | --------- | ---------------------------------- |
-| `id`      | `AgentId` | Agent UUID                         |
-| `name`    | `string`  | Skill path relative to skills root |
-
-**Response**
-
-```json
-{
-  "request_id": "spr_abc123def456",
-  "skill_name": "code/refactoring",
-  "status": "pending",
-  "has_existing": true
-}
-```
-
-Status: `201 Created`
-
-| Code | Condition                                                                           |
-| ---- | ----------------------------------------------------------------------------------- |
-| 400  | Invalid skill name, no valid frontmatter, or attempting to promote the `meta` skill |
-| 403  | Not the agent itself or the operator                                                |
-| 404  | Agent not found, no persistent directory, or local skill file does not exist        |
-| 500  | File I/O failure                                                                    |
-
-> **Notification:** The tagma's single root agent is notified of the new
-> request via its message channel.
-
-### `GET /skill-promote-requests` — List promote requests
-
-Lists all promote requests, optionally filtered by status.
-
-Auth: any authenticated identity. See [auth.md](auth.md).
-
-**Query parameters**
-
-| Parameter | Type     | Default | Description                                |
-| --------- | -------- | ------- | ------------------------------------------ |
-| `status`  | `string` | —       | Filter: `pending`, `approved`, or `denied` |
-
-**Response**
-
-```json
-{
-  "items": [
-    {
-      "id": "spr_abc123",
-      "skill_name": "code/refactoring",
-      "has_existing": true,
-      "requested_by": "AgentId",
-      "status": "pending | approved | denied",
-      "deny_reason": "string | null",
-      "description": "string | null",
-      "created_at": "2025-06-05T14:30:00Z",
-      "reviewed_at": "2025-06-05T15:00:00Z | null"
-    }
-  ],
-  "total": 1
-}
-```
-
-Status: `200 OK`
-
-| Code | Condition                     |
-| ---- | ----------------------------- |
-| 400  | Invalid `status` filter value |
-
-### `GET /skill-promote-requests/{id}` — Show promote request
-
-Returns full details of a promote request, including the old and new content
-for diff review.
-
-Auth: any authenticated identity. See [auth.md](auth.md).
-
-**Response**: all fields from the list entry, plus `old_content` and `new_content`:
-
-```json
-{
-  "old_content": "# Old skill content...\n | null",
-  "new_content": "# New skill content...\n"
-}
-```
-
-Status: `200 OK`
-
-| Code | Condition                 |
-| ---- | ------------------------- |
-| 404  | Promote request not found |
-
-### `POST /skill-promote-requests/{id}` — Respond to promote request
-
-Approves or denies a pending promote request. On approve, the new skill content
-is written to the shared directory.
-
-Auth: operator or root agent. See [auth.md](auth.md).
-
-**Request body**
-
-```json
-{
-  "decision": "approve | deny",
-  "reason": "string — optional; used only for deny decisions, ignored on approve"
-}
-```
-
-Status: `200 OK`
-
-| Code | Condition                                                                              |
-| ---- | -------------------------------------------------------------------------------------- |
-| 403  | Not the operator or a root agent                                                       |
-| 404  | Promote request not found                                                              |
-| 409  | Request is not in `pending` status, or shared skill was modified concurrently (TOCTOU) |
-| 500  | File I/O failure                                                                       |
-
-> **TOCTOU protection:** On approve, the shared skill file is re-read and
-> compared with the snapshotted `old_content` from submission time. If it has
-> changed, the approve is rejected with `409` and the requester must resubmit.
 
 ## SSE Event Types
 

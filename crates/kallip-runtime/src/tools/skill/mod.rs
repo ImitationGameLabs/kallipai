@@ -7,16 +7,13 @@
 //!
 //! A skill is uniquely identified by its **path relative to the skills root**
 //! (e.g. `code/refactoring`). This path determines the on-disk layout
-//! (`<skills_root>/<path>.md`) and is used for all lookups, routing,
-//! and promote operations. The `name` field in YAML frontmatter is a display
-//! label — it is returned by the metadata endpoint but is **not** used as an
-//! identifier and is not required to match the path.
+//! (`<skills_root>/<path>.md`) and is used for all lookups and routing.
+//! The `name` field in YAML frontmatter is a display label — it is returned
+//! by the metadata endpoint but is **not** used as an identifier and is not
+//! required to match the path.
 //!
 //! The [`load_skill`] function resolves skill files from the shared skill
 //! directory or an agent-local directory.
-
-pub mod promote;
-pub use promote::promote_skill_from_content;
 
 use std::path::Path;
 
@@ -151,11 +148,19 @@ pub fn skill_metadata(name: &str, agent_dir: Option<&Path>) -> Result<SkillMeta>
     }))
 }
 
-/// Validates a skill name for path traversal attacks.
+/// Validates a skill name for path traversal attacks and name collisions.
 ///
 /// Allows `/` for nested categories (e.g. `code/refactoring`) but rejects
-/// `..` components, backslashes, and empty components.
+/// `..` components, backslashes, and empty components. Also rejects the
+/// reserved [`META_SKILL_NAME`] (`bootstrap`): the meta-skill is compiled in
+/// and injected into the system prompt at spawn, so a disk file under that
+/// name must never shadow it via the read paths (`load_skill`,
+/// [`skill_metadata`]). The root agent authors shared skills directly via
+/// `bash_exec`, so this guard lives on the read side rather than the writer.
 pub fn validate_skill_name(name: &str) -> Result<()> {
+    if name == META_SKILL_NAME {
+        bail!("skill name '{name}' is reserved (compiled-in meta-skill)");
+    }
     if name.contains('\\') {
         bail!("invalid skill name: {name}");
     }
@@ -270,7 +275,7 @@ mod tests {
             "frontmatter description must not repeat the old framing"
         );
 
-        // The operations the floor no longer teaches (promote, unpin, evict)
+        // The operations the floor no longer teaches (sharing, unpin, evict)
         // live in the skill files it points at. We do NOT compile-bind those
         // files here: skills/ is a content directory the runtime loads from a
         // data dir at runtime (skill_dir()), not a build-time dependency.
@@ -311,6 +316,13 @@ mod tests {
         assert!(validate_skill_name("foo/../bar").is_err());
         assert!(validate_skill_name("foo//bar").is_err());
         assert!(validate_skill_name("foo/./bar").is_err());
+    }
+
+    #[test]
+    fn validate_skill_name_rejects_reserved_bootstrap() {
+        // The meta-skill is compiled in; a disk file under this name must never
+        // shadow it via the read paths.
+        assert!(validate_skill_name(META_SKILL_NAME).is_err());
     }
 
     #[test]

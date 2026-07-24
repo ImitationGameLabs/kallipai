@@ -437,7 +437,7 @@ impl<'a> Materialize<'a> {
         let id = self.id;
         let token = self.token;
         let rollback_supervisor = self.rollback_supervisor;
-        let is_root = self.config.created_by.is_none();
+        let is_root = self.config.is_root();
         let mut config = self.config;
         let exec_policy = Arc::new(std::sync::RwLock::new(self.exec_policy));
 

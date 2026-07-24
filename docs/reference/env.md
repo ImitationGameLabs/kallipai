@@ -162,11 +162,11 @@ Source: [`crates/kallip-tagma/src/args.rs`](../../crates/kallip-tagma/src/args.r
 
 The tagma injects these into each agent's shell environment so that CLI commands run inside an agent's shell can communicate with the tagma. They are not set by the operator — the tagma provides them automatically.
 
-| Variable            | Injection point                     | Description                                                                                                                                                                                                                                        |
-| ------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `KALLIP_TAGMA_URL`  | Tagma process (`main.rs`)           | Copied from `KALLIP_ADVERTISE_URL` at startup via `set_var`. Inherited by child processes. Read by CLI and TUI clients to connect.                                                                                                                 |
-| `KALLIP_AUTH_TOKEN` | Per-agent shell (`routes/agent.rs`) | Generated 256-bit `sk-agent-…` authentication token. Injected into shell sessions so the agent can call back to the tagma; the tagma stores and compares only its SHA-256. The CLI requires it; the TUI prompts interactively if unset.            |
-| `KALLIP_ID`         | Per-agent shell (`routes/agent.rs`) | UUID of the current agent. Available inside agent shells. Read by the CLI for the `skill` (incl. `skill promote`) and `subagent` subcommands (where it identifies the acting supervisor), and as the self-target for `activity` and `lesche send`. |
+| Variable            | Injection point                     | Description                                                                                                                                                                                                                             |
+| ------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `KALLIP_TAGMA_URL`  | Tagma process (`main.rs`)           | Copied from `KALLIP_ADVERTISE_URL` at startup via `set_var`. Inherited by child processes. Read by CLI and TUI clients to connect.                                                                                                      |
+| `KALLIP_AUTH_TOKEN` | Per-agent shell (`routes/agent.rs`) | Generated 256-bit `sk-agent-…` authentication token. Injected into shell sessions so the agent can call back to the tagma; the tagma stores and compares only its SHA-256. The CLI requires it; the TUI prompts interactively if unset. |
+| `KALLIP_ID`         | Per-agent shell (`routes/agent.rs`) | UUID of the current agent. Available inside agent shells. Read by the CLI for the `skill` and `subagent` subcommands (where it identifies the acting supervisor), and as the self-target for `activity` and `lesche send`.              |
 
 ### `ADVERTISE_URL` vs `TAGMA_URL`
 

@@ -3,12 +3,10 @@ mod auth;
 mod backend;
 mod bridge;
 mod credentials;
-mod error;
 mod messaging;
 mod relay;
 mod routes;
 mod shutdown;
-mod skill_promote;
 mod sse;
 mod state;
 mod token;
@@ -115,6 +113,15 @@ async fn main() -> Result<()> {
         profiles,
         kallip_runtime::config::policy_preset_from_env(),
     ));
+
+    // Ensure the shared skills dir exists before any agent is restored. The
+    // root agent authors shared skills via `bash_exec`, and landlock `PathBeneath`
+    // silently skips non-existent paths — so without this the root carve would be
+    // dropped on a fresh data dir and root's first write would fail opaquely. Must
+    // precede `restore_agents`: a restored root rebuilds its tool dispatch (and
+    // thus captures the landlock closure) inside restore.
+    std::fs::create_dir_all(kallip_runtime::tools::skill_dir()?)
+        .map_err(|e| anyhow::anyhow!("failed to create shared skills dir: {e}"))?;
 
     // Restore persisted agents before accepting requests, then ensure the
     // tagma-global root agent exists. Both run before the router accepts a single

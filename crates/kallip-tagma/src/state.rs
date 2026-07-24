@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use crate::skill_promote::SkillPromoteStore;
 pub use kallip_common::agentid::AgentId;
 use kallip_common::authtoken::TokenHash;
 use kallip_common::policy::{ExecPolicy, PolicyPreset};
@@ -31,16 +30,6 @@ pub struct AppState {
     /// `KALLIP_POLICY_PRESET` and immutable for the tagma's lifetime. Every agent
     /// inherits this same preset (it is not per-agent).
     pub preset: PolicyPreset,
-    pub skill_promote_store: Mutex<SkillPromoteStore>,
-    /// Serializes writes to the shared skill directory during promote-request
-    /// approval. Held across the consistency check and the actual write so
-    /// concurrent approve operations cannot interleave.
-    ///
-    /// **Lock order:** always acquired *inside* the `skill_promote_store` Mutex
-    /// (see `routes::skill_promote::handle_approve`). Never acquire in the
-    /// reverse order — the store lock is the coarse-grained gate, this lock
-    /// is the fine-grained skill-filesystem gate.
-    pub skill_write_lock: Mutex<()>,
     pub shutdown: CancellationToken,
     /// SHA-256 of the operator token. The plaintext is printed once at startup and
     /// never retained; this hash is what incoming bearer tokens are compared against.
@@ -324,8 +313,6 @@ impl AppState {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
             preset,
-            skill_promote_store: Mutex::new(SkillPromoteStore::new()),
-            skill_write_lock: Mutex::new(()),
             shutdown: CancellationToken::new(),
             operator_token_hash,
             max_agents: crate::args::MAX_AGENTS_LIMIT,
@@ -353,8 +340,6 @@ impl AppState {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
             preset,
-            skill_promote_store: Mutex::new(SkillPromoteStore::new()),
-            skill_write_lock: Mutex::new(()),
             shutdown: CancellationToken::new(),
             operator_token_hash,
             max_agents,
@@ -676,32 +661,9 @@ impl AgentRegistry {
         }
     }
 
-    /// Caller must be the operator or a root agent (created_by is None).
-    /// Used for promote-request review operations.
-    pub fn require_root_or_operator(
-        &self,
-        identity: &crate::auth::Identity,
-    ) -> Result<(), ApiError> {
-        match identity {
-            crate::auth::Identity::Operator => Ok(()),
-            crate::auth::Identity::Agent { id } => {
-                let entry = self
-                    .get(id)
-                    .ok_or_else(|| ApiError::forbidden("unknown agent"))?;
-                if entry.identity().config.created_by.is_none() {
-                    Ok(())
-                } else {
-                    Err(ApiError::forbidden(
-                        "only root agents or operators can review promote requests",
-                    ))
-                }
-            }
-        }
-    }
-
     /// Caller must be the operator or the agent identified by `target_id`.
-    /// Used for self-only actions: promote-request submission, activity
-    /// self-report. (A supervisor manages a subagent's `role`/`description` via
+    /// Used for self-only actions (e.g. activity self-report). (A supervisor
+    /// manages a subagent's `role`/`description` via
     /// [`Self::require_direct_supervisor`]; this is the complementary self-write.)
     pub fn require_self_or_operator(
         &self,
@@ -739,15 +701,15 @@ impl AgentRegistry {
         }
     }
 
-    /// Return the tagma's single root agent (created_by is None), live or
+    /// Return the tagma's single root agent (`created_by` is `None`), live or
     /// faulted, or `None` during the startup window before one exists. Per the
     /// [`AgentRegistry`] invariant there is at most one root, so this is a
-    /// singleton lookup, not a filter. Callers that need a running task (e.g.
-    /// promote-request notification) must skip [`RegistryEntry::Faulted`].
+    /// singleton lookup, not a filter. Callers that need a running task must
+    /// skip [`RegistryEntry::Faulted`].
     pub fn root_agent(&self) -> Option<(&AgentId, &RegistryEntry)> {
         self.agents
             .iter()
-            .find(|(_, e)| e.identity().config.created_by.is_none())
+            .find(|(_, e)| e.identity().config.is_root())
     }
 }
 
@@ -1278,39 +1240,6 @@ mod tests {
         match reg.require_supervisor(&Identity::Operator, &ghost) {
             Err(e) => assert_eq!(e.status, 404),
             Ok(_) => panic!("expected NOT_FOUND"),
-        }
-    }
-
-    // -- Authorization: require_root_or_operator --
-
-    #[tokio::test]
-    async fn root_or_operator_allows_operator() {
-        let reg = AgentRegistry::new();
-        reg.require_root_or_operator(&Identity::Operator).unwrap();
-    }
-
-    #[tokio::test]
-    async fn root_or_operator_allows_root_agent() {
-        let mut reg = AgentRegistry::new();
-        let root = AgentId::random();
-        add_root(&mut reg, &root);
-        reg.require_root_or_operator(&Identity::Agent { id: root })
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn root_or_operator_rejects_subagent() {
-        let mut reg = AgentRegistry::new();
-        let root = AgentId::random();
-        let child = AgentId::random();
-        add_root(&mut reg, &root);
-        add_sub(&mut reg, &child, &root);
-        match reg.require_root_or_operator(&Identity::Agent { id: child }) {
-            Err(e) => {
-                assert_eq!(e.status, 403);
-                assert!(e.message.contains("root agents"));
-            }
-            Ok(_) => panic!("expected FORBIDDEN"),
         }
     }
 

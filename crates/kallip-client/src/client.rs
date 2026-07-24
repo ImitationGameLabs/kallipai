@@ -24,10 +24,8 @@ use crate::types::{ListApprovalsParams, MessageRequest};
 use crate::{
     AgentPermissionsResponse, AgentStatusResponse, AgentSummary, ApprovalDecisionBody,
     ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ExecPolicy, ListAgentsResponse,
-    ListApprovalsResponse, ListSkillPromoteRecordsResponse, PromoteDecision, SkillMeta,
-    SkillPathsResponse, SkillPromoteDecisionBody, SkillPromoteShowResponse,
-    SkillPromoteSubmitResponse, TokenBudgetResponse, TokenBudgetUpdateRequest,
-    UpdateActivityRequest, UpdateAgentMetadataRequest,
+    ListApprovalsResponse, SkillMeta, SkillPathsResponse, TokenBudgetResponse,
+    TokenBudgetUpdateRequest, UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 
 struct Inner {
@@ -568,91 +566,6 @@ impl TagmaClient {
             "failed to parse skill meta response",
         )
         .await
-    }
-
-    // -----------------------------------------------------------------------
-    // Skill promote request (review-based promote flow)
-    // -----------------------------------------------------------------------
-
-    /// Submit a promote request for a local skill.
-    pub async fn submit_promote_request(
-        &self,
-        id: &AgentId,
-        name: &str,
-    ) -> Result<SkillPromoteSubmitResponse> {
-        let encoded = name.replace('/', "%2F");
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .post(self.url(&format!("/agents/{id}/skills/{encoded}/promote-request"))),
-            )
-            .send()
-            .await
-            .context("failed to submit promote request")?,
-            "failed to parse promote submit response",
-        )
-        .await
-    }
-
-    /// List promote requests, optionally filtered by status.
-    pub async fn list_promote_requests(
-        &self,
-        status: Option<&str>,
-    ) -> Result<ListSkillPromoteRecordsResponse> {
-        let mut req = self.inner.http.get(self.url("/skill-promote-requests"));
-        if let Some(s) = status {
-            req = req.query(&[("status", s)]);
-        }
-        self.handle_response(
-            self.with_auth(req)
-                .send()
-                .await
-                .context("failed to list promote requests")?,
-            "failed to parse promote list response",
-        )
-        .await
-    }
-
-    /// Show a promote request with full old/new content for diff review.
-    pub async fn show_promote_request(&self, id: &str) -> Result<SkillPromoteShowResponse> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/skill-promote-requests/{id}"))),
-            )
-            .send()
-            .await
-            .context("failed to show promote request")?,
-            "failed to parse promote show response",
-        )
-        .await
-    }
-
-    /// Approve or deny a promote request.
-    pub async fn respond_promote_request(
-        &self,
-        id: &str,
-        decision: PromoteDecision,
-        reason: Option<&str>,
-    ) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(
-                self.inner
-                    .http
-                    .post(self.url(&format!("/skill-promote-requests/{id}")))
-                    .json(&SkillPromoteDecisionBody {
-                        decision,
-                        reason: reason.map(|s| s.to_owned()),
-                    }),
-            )
-            .send()
-            .await
-            .context("failed to respond to promote request")?,
-        )
-        .await?;
-        Ok(())
     }
 
     // -----------------------------------------------------------------------

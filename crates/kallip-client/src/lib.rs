@@ -8,9 +8,7 @@ pub use kallip_common::policy::{ExecDecision, ExecOverride, ExecPolicy, PolicyPr
 pub use kallip_common::protocol::{
     AgentPermissionsResponse, AgentStatusResponse, AgentSummary, ApiError, ApprovalDecisionBody,
     ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ListAgentsResponse, ListApprovalsQuery,
-    ListApprovalsResponse, ListSkillPromoteRecordsResponse, MessageResponse, PromoteDecision,
-    SkillMeta, SkillPathsResponse, SkillPromoteDecisionBody, SkillPromoteShowResponse,
-    SkillPromoteSubmitResponse, TokenBudgetResponse, TokenBudgetUpdateRequest,
-    UpdateActivityRequest, UpdateAgentMetadataRequest,
+    ListApprovalsResponse, MessageResponse, SkillMeta, SkillPathsResponse, TokenBudgetResponse,
+    TokenBudgetUpdateRequest, UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 pub use types::ListApprovalsParams;

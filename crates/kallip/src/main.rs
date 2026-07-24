@@ -4,21 +4,14 @@ mod args;
 
 use anyhow::Result;
 use clap::Parser;
-use kallip_client::{PromoteDecision, TagmaClient};
+use kallip_client::TagmaClient;
 use kallip_common::agentid::AgentId;
 use kallip_common::policy::{ExecDecision, ExecOverride};
-use kallip_common::promote::{NO_REASON_PROVIDED, SkillPromoteStatus};
 use kallip_common::tokens::parse_token_amount;
-
-/// Returns the deny reason string, or the placeholder when absent.
-/// Only meaningful when `status == Denied`.
-fn deny_reason_display(reason: &Option<String>) -> &str {
-    reason.as_deref().unwrap_or(NO_REASON_PROVIDED)
-}
 
 use args::{
     AgentCommand, ApprovalCommand, BudgetCommand, Cli, Commands, DirlockCommand, LescheCommand,
-    PolicyCommand, SkillCommand, SkillPromoteCommand, SubagentCommand,
+    PolicyCommand, SkillCommand, SubagentCommand,
 };
 
 /// Read agent ID from KALLIP_ID env var.
@@ -275,77 +268,6 @@ async fn main() -> Result<()> {
                     println!("description: {desc}");
                 }
             }
-            SkillCommand::Promote(cmd) => match cmd {
-                SkillPromoteCommand::Submit(args) => {
-                    let id = agent_id_from_env()?;
-                    let resp = client.submit_promote_request(&id, &args.name).await?;
-                    println!("Skill: {}", resp.skill_name);
-                    println!("Request ID: {}", resp.request_id);
-                    println!("Status: {}", resp.status);
-                    if resp.has_existing {
-                        println!("Existing: shared skill will be overwritten on approval");
-                    } else {
-                        println!("Existing: (new skill)");
-                    }
-                }
-                SkillPromoteCommand::List { status } => {
-                    let resp = client.list_promote_requests(status.as_deref()).await?;
-                    if resp.items.is_empty() {
-                        println!("No promote requests.");
-                    } else {
-                        for r in &resp.items {
-                            println!(
-                                "{}  {}  {}  by:{}  {}",
-                                r.id, r.skill_name, r.status, r.requested_by, r.created_at
-                            );
-                            if let Some(desc) = &r.description {
-                                println!("  description: {desc}");
-                            }
-                            if r.has_existing {
-                                println!("  has_existing: true");
-                            }
-                            if r.status == SkillPromoteStatus::Denied {
-                                println!("  deny_reason: {}", deny_reason_display(&r.deny_reason));
-                            }
-                        }
-                        println!("(total: {})", resp.total);
-                    }
-                }
-                SkillPromoteCommand::Show { id } => {
-                    let resp = client.show_promote_request(&id).await?;
-                    println!("id: {}", resp.id);
-                    println!("skill: {}", resp.skill_name);
-                    println!("status: {}", resp.status);
-                    println!("requested_by: {}", resp.requested_by);
-                    println!("has_existing: {}", resp.has_existing);
-                    if let Some(desc) = &resp.description {
-                        println!("description: {desc}");
-                    }
-                    if resp.status == SkillPromoteStatus::Denied {
-                        println!("deny_reason: {}", deny_reason_display(&resp.deny_reason));
-                    }
-                    if let Some(old) = &resp.old_content {
-                        println!("\n--- old content ---");
-                        println!("{old}");
-                    } else {
-                        println!("\n--- old content: (none, new skill) ---");
-                    }
-                    println!("\n--- new content ---");
-                    println!("{}", resp.new_content);
-                }
-                SkillPromoteCommand::Approve { id } => {
-                    client
-                        .respond_promote_request(&id, PromoteDecision::Approve, None)
-                        .await?;
-                    println!("Approved.");
-                }
-                SkillPromoteCommand::Deny { id, reason } => {
-                    client
-                        .respond_promote_request(&id, PromoteDecision::Deny, reason.as_deref())
-                        .await?;
-                    println!("Denied.");
-                }
-            },
         },
         Commands::Budget(cmd) => match cmd {
             BudgetCommand::Get => {

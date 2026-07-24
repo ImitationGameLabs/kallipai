@@ -93,6 +93,14 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
     // while the rest of the data tree stays non-writable — the data-dir integrity
     // baseline. Only the agent's own skills dir (disjoint from peers' by `<id>`);
     // it does not grant write to `meta.json`/`context.json`/`exec_policy.toml`/etc.
+    //
+    // **Root carve**: the root agent additionally gets write to the *shared*
+    // skills dir (`skill_dir()` = `<data_dir>/skills/`), making it the sole
+    // author of shared skills. This is disjoint from both the workspace and the
+    // per-agent `agent_dir/skills` carve, so it is additive even for a Normal
+    // root and not subsumed by write-locks. Applies to both classes so a
+    // Guest-root test fixture keeps shared-skill authorship under one rule
+    // (production root is always Normal).
     #[cfg(all(target_os = "linux", feature = "landlock"))]
     let builder = {
         let lm = lock_manager.clone();
@@ -102,6 +110,7 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
             config.permissions_class,
             crate::config::PermissionClass::Guest
         );
+        let is_root = config.is_root();
         builder.access_source(move || {
             // Normal: write-locks + skills carve. Guest: readonly — skills carve
             // only (no write-locks), so even a lock the Guest happens to hold is
@@ -112,6 +121,16 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
                 let mut w = lm.write_paths(&aid)?;
                 w.push(skills_dir.clone());
                 w
+            };
+            // Root-only: grant the shared skills dir on top of the class set.
+            // `skill_dir()` is anyhow::Result; the closure's error type is
+            // io::Error (set by write_paths/readonly_paths above), so adapt.
+            let writable = if is_root {
+                let mut w = writable;
+                w.push(skill_dir().map_err(std::io::Error::other)?);
+                w
+            } else {
+                writable
             };
             let readonly_holes = lm.readonly_paths(&aid)?;
             // Recomputed per spawn (not snapshotted at dispatch build): a secret

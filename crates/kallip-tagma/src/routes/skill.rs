@@ -46,8 +46,11 @@ pub async fn skill_meta(
 
     let agent_dir = entry.identity().agent_dir.as_deref();
     let meta = skill_metadata(&skill_name, agent_dir).map_err(|e| {
-        if e.to_string().contains("invalid skill name") {
-            ApiError::bad_request(e.to_string())
+        let msg = e.to_string();
+        // Validation failures (traversal, reserved name) are client errors;
+        // anything else means the skill file is absent.
+        if msg.contains("invalid skill name") || msg.contains("reserved skill name") {
+            ApiError::bad_request(msg)
         } else {
             ApiError::not_found(format!("skill '{skill_name}' not found"))
         }

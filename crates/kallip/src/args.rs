@@ -213,9 +213,6 @@ pub enum SkillCommand {
     Paths(SkillPathsArgs),
     /// Show metadata for a specific skill
     Meta(SkillMetaArgs),
-    /// Manage skill promote requests (review-based promote flow)
-    #[command(subcommand)]
-    Promote(SkillPromoteCommand),
 }
 
 #[derive(Args)]
@@ -224,42 +221,6 @@ pub struct SkillPathsArgs;
 #[derive(Args)]
 pub struct SkillMetaArgs {
     /// Skill name (supports nested paths like code/refactoring).
-    pub name: String,
-}
-
-/// Skill promotion requests (review-based promote flow).
-#[derive(Subcommand)]
-pub enum SkillPromoteCommand {
-    /// Submit a promote request for the current agent's local skill.
-    Submit(SkillPromoteSubmitArgs),
-    /// List promote requests (open to all agents for visibility).
-    List {
-        /// Filter by status: pending, approved, denied.
-        #[arg(long)]
-        status: Option<String>,
-    },
-    /// Show old/new content of a promote request for diff review.
-    Show {
-        /// Request ID.
-        id: String,
-    },
-    /// Approve a pending promote request.
-    Approve {
-        /// Request ID.
-        id: String,
-    },
-    /// Deny a pending promote request.
-    Deny {
-        /// Request ID.
-        id: String,
-        /// Reason for denial.
-        reason: Option<String>,
-    },
-}
-
-#[derive(Args)]
-pub struct SkillPromoteSubmitArgs {
-    /// Skill name to promote (supports nested paths like code/refactoring).
     pub name: String,
 }
 

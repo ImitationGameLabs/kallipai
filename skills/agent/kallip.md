@@ -95,22 +95,20 @@ kallip budget decrease <AMOUNT>
 
 Amounts support K/M/G suffixes (e.g. `100M`, `500K`, `1G`). Budget is tagma-wide, not per-agent.
 
-### `skill` — Skill discovery and promotion
+### `skill` — Skill discovery
 
 ```bash
 kallip skill paths                          # show shared + local skill directories
 kallip skill meta <NAME>                    # show metadata for a skill
-kallip skill promote submit <NAME>          # request promotion of local → shared
-kallip skill promote list [--status <STATUS>]
-kallip skill promote show <ID>              # diff review of old/new content
-kallip skill promote approve <ID>           # approve (root agent)
-kallip skill promote deny <ID> [REASON]
 ```
 
 Skills live as `<name>.md` files with YAML frontmatter (`name`, `description`).
 
-- **Local** dir (writable by the agent): shown by `kallip skill paths`.
-- **Shared** dir (operator-managed): write via `promote submit` → root agent review.
+- **Local** dir (writable by every agent): shown by `kallip skill paths`.
+- **Shared** dir (writable only by the root agent): the root agent authors
+  shared skills directly via `bash_exec` (see the `skill-management` skill);
+  any other agent that wants a skill shared proposes it to root in
+  conversation.
 
 ### `dirlock` — Directory write-locks (cross-agent mutual exclusion)
 

@@ -586,7 +586,7 @@ pub async fn restore_agents(state: &SharedState) -> anyhow::Result<()> {
             // cannot conflict here.
             for (id, entry) in successes {
                 let entry = RegistryEntry::Live(entry);
-                if entry.identity().config.created_by.is_none() {
+                if entry.identity().config.is_root() {
                     registry
                         .register_root(id, entry)
                         .map_err(|e| anyhow::anyhow!("register root during restore: {e}"))?;
@@ -596,7 +596,7 @@ pub async fn restore_agents(state: &SharedState) -> anyhow::Result<()> {
             }
             for (id, entry) in faulted {
                 let entry = RegistryEntry::Faulted(entry);
-                if entry.identity().config.created_by.is_none() {
+                if entry.identity().config.is_root() {
                     registry
                         .register_root(id, entry)
                         .map_err(|e| anyhow::anyhow!("register root during restore: {e}"))?;

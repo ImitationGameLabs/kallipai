@@ -19,9 +19,5 @@ pub use approval::{
 };
 pub use budget::{DEFAULT_TOKEN_BUDGET, TokenBudgetResponse, TokenBudgetUpdateRequest};
 pub use error::ApiError;
-pub use skill::{
-    ListSkillPromoteRecordsResponse, PromoteDecision, SkillMeta, SkillPathsResponse,
-    SkillPromoteDecisionBody, SkillPromoteRecordEntry, SkillPromoteShowResponse,
-    SkillPromoteSubmitResponse,
-};
+pub use skill::{SkillMeta, SkillPathsResponse};
 pub use sse::{FailoverChainExhaustion, SseEvent};

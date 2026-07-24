@@ -82,20 +82,45 @@ Create a new subdirectory only when a category grows beyond ~6-8 skills. Depth l
 ## Skill Lifecycle
 
 ```
-discover → read index → load & pin → use → unpin → (optionally) create → (optionally) promote
+discover → read index → load & pin → use → unpin → (optionally) create → (optionally) share
 ```
 
-### Promote to shared
+### Sharing a skill with other agents
+
+Only the **root agent** can write the shared skill directory — every other
+agent's skill writes land in its own agent-local dir. If you are not root and
+a skill you created has proven value beyond your own context (other agents in
+the same project would benefit), **propose it in conversation to the root
+agent**: paste the new or changed content and explain why it's worth sharing.
+The root agent reviews and applies the change itself.
+
+If you are the root agent, you author shared skills directly. Find the shared
+directory with `kallip skill paths` (the `shared:` line), then write the file
+with `bash_exec`. To stay crash-safe, write to a temp file in that directory
+and `mv` it into place rather than redirecting `>` directly — a half-written
+`.md` would otherwise be left on a crash:
 
 ```bash
-kallip skill promote submit <category>/<name>
+# SHARED = the path printed on the `shared:` line of `kallip skill paths`.
+# <category> = the category dir (code/, agent/, ops/, ...); mkdir -p it first
+#              if it does not yet exist.
+mkdir -p "$SHARED/<category>"
+cat > "$SHARED/<category>/my-skill.md.tmp" <<'EOF'
+---
+name: My Skill
+description: ...
+---
+...body...
+EOF
+mv "$SHARED/<category>/my-skill.md.tmp" "$SHARED/<category>/my-skill.md"
 ```
 
-Promote when the skill has proven value **beyond your own context** — when other agents working in the same project would benefit. The root agent reviews and approves.
+(The `bootstrap` name is reserved for the compiled-in meta-skill and cannot be
+used for a shared file.)
 
 ## Updating Indexes
 
-When you create or promote a skill:
+When you create or share a skill:
 
 1. Add an entry to the category's `index.md`
 2. If the category is new, add it to the root `index.md`

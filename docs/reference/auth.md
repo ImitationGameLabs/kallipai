@@ -95,25 +95,14 @@ gate.
 
 ### Skills
 
-| Endpoint                                          | Operator | Any agent | Self |
-| ------------------------------------------------- | -------- | --------- | ---- |
-| `GET /agents/{id}/skills/paths`                   | Yes      | Yes       | —    |
-| `GET /agents/{id}/skills/{name}/meta`             | Yes      | Yes       | —    |
-| `POST /agents/{id}/skills/{name}/promote-request` | Yes      | —         | Yes  |
+| Endpoint                              | Operator | Any agent | Self |
+| ------------------------------------- | -------- | --------- | ---- |
+| `GET /agents/{id}/skills/paths`       | Yes      | Yes       | —    |
+| `GET /agents/{id}/skills/{name}/meta` | Yes      | Yes       | —    |
 
-Skill discovery endpoints are open to any authenticated identity. Promote
-request submission is restricted to the agent itself or the operator.
-
-### Skill promote requests
-
-| Endpoint                            | Operator | Any agent | Root agent |
-| ----------------------------------- | -------- | --------- | ---------- |
-| `GET /skill-promote-requests`       | Yes      | Yes       | —          |
-| `GET /skill-promote-requests/{id}`  | Yes      | Yes       | —          |
-| `POST /skill-promote-requests/{id}` | Yes      | —         | Yes        |
-
-Listing and viewing promote requests is open to any authenticated identity.
-Responding (approve/deny) is restricted to the operator or root agents.
+Skill endpoints are read-only discovery, open to any authenticated identity.
+The shared skill directory is written only by the root agent (via its
+`bash_exec` landlock carve); other agents propose changes in conversation.
 
 ## Agora / lesche service-to-service boundary
 
