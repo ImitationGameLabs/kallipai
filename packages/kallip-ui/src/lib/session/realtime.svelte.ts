@@ -32,14 +32,14 @@ type EnvelopeSink = (envelope: Envelope) => void;
  * presence as resolved (unknown tagmas then read offline). Bounded so a missing
  * or churning SSE connection can never strand the UI in "checking" forever --
  * the first presence event resolves presence immediately, this is only the
- * backstop for the no-event case (e.g. herald never started -> empty snapshot,
+ * backstop for the no-event case (e.g. tagma never started -> empty snapshot,
  * or the SSE can't connect). A per-connection grace timer (the previous design)
  * was deliberately NOT re-added: on a churning connection it resets every
  * reconnect and never fires, which is the exact bug this deadline replaces. */
 const RESOLVE_DEADLINE_MS = 2000;
 
 class RealtimeStore {
-  // Online tagma ids -- the PEER presence (a herald tunnel is live for this
+  // Online tagma ids -- the PEER presence (a tagma tunnel is live for this
   // tagma), shown by the /tagmata dashboard dot. `SvelteSet` (not `$state(new
   // Set())`): Svelte's `$state` proxy does not wrap Set, so a raw Set's in-place
   // `.add()/.delete()` would be invisible to reactivity. SvelteSet tracks
@@ -60,7 +60,7 @@ class RealtimeStore {
   // "checking" placeholder is bounded regardless of SSE connection health.
   private resolveDeadline: ReturnType<typeof setTimeout> | null = null;
 
-  /** Reactive liveness query: true iff a herald tunnel is live for `tagmaId`. */
+  /** Reactive liveness query: true iff a tagma tunnel is live for `tagmaId`. */
   has(tagmaId: string): boolean {
     return this.presence.has(tagmaId);
   }
@@ -128,7 +128,7 @@ class RealtimeStore {
    * snapshot on every connect, so a reconnect idempotently re-adds the
    * still-online set with no flicker. The trade-off is that a tagma whose
    * `tagma_offline` was missed during a disconnect can read stale-online until
-   * the next session reset; this is rare (the herald tunnel is the only offline
+   * the next session reset; this is rare (the tagma tunnel is the only offline
    * source and it is stable) and self-corrects on a refresh. */
   private async run(): Promise<void> {
     let backoff = 1000;

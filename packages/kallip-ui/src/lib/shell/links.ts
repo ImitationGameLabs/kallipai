@@ -1,6 +1,6 @@
 // Derive the nav link list from the app mode. The two modes are mutually
 // exclusive front-door choices (see lib/config/mode.ts):
-//   - online  -> Tagmata, plus one entry per open herald channel (online chat);
+//   - online  -> Tagmata, plus one entry per open tagma channel (online chat);
 //   - offline -> Chat + Approvals (no tagmata; no identity).
 // Settings is intentionally NOT a nav link: it lives in the AccountMenu
 // dropdown (footer) alongside the other account/system actions.

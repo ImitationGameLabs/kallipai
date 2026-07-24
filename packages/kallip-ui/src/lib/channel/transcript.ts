@@ -1,8 +1,10 @@
 // Online-channel transcript model + reducer. This is the independent online
 // path: NOT @kallipai/kallip-common's TranscriptState (which is shaped by the
 // tagma's full event vocabulary + streaming). The agora path has no streaming
-// (the herald drops deltas), so each `assistant_content` / `finished` is a
-// complete message, appended as its own line.
+// (the tagma relay does not surface streaming deltas — it maps
+// `AssistantContentDelta` to `None` at the app-facing event boundary), so each
+// `assistant_content` is a complete message
+// appended as its own line, and `idle` is a content-less status transition.
 //
 // `applyTagmaReply` is a pure reducer over the wire `TagmaReply` (from
 // @kallipai/kallip-agora-client). It is the only place that interprets a
@@ -50,7 +52,7 @@ function line(
   };
 }
 
-/** Apply one herald reply to the transcript. Pure; returns a new state. */
+/** Apply one tagma reply to the transcript. Pure; returns a new state. */
 export function applyTagmaReply(
   state: ChannelTranscript,
   reply: TagmaReply,
@@ -83,27 +85,15 @@ function applyTagmaEvent(
       // A new turn clears any stale error from the previous one.
       return { ...state, status: "busy", error: undefined };
     case "assistant_content":
-      // A complete (non-streamed) assistant message. Append as its own line;
-      // status is unchanged (busy until `finished`).
+      // A complete (non-streamed) assistant message — this is also the variant
+      // the `kallip lesche send` CLI's deliveries map to, so a deliberate
+      // message to the user lands here. Append as its own line; the agent stays
+      // busy until the `idle` event.
       return line(state, "assistant", event.content);
-    case "finished": {
-      // Turn complete. The content is the final assistant message; if the
-      // trailing assistant line already carries identical text (an immediately
-      // preceding assistant_content), just go idle instead of duplicating.
-      const last = state.lines[state.lines.length - 1];
-      if (
-        last &&
-        last.role === "assistant" &&
-        last.text === event.content.trim()
-      ) {
-        return { ...state, status: "idle", error: undefined };
-      }
-      return {
-        ...line(state, "assistant", event.content),
-        status: "idle",
-        error: undefined,
-      };
-    }
+    case "idle":
+      // The agent yielded control (called `break`). Content-less: a reply no
+      // longer rides the terminal event. Just transition to idle.
+      return { ...state, status: "idle", error: undefined };
     case "status":
       return line(state, "system", event.message);
     case "error":

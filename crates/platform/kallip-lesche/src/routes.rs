@@ -2,7 +2,7 @@
 
 mod conversations;
 mod events;
-mod herald;
+mod tunnel;
 
 use axum::Router;
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -12,12 +12,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::state::SharedConvState;
 
 /// All six data-plane routes, state-injected (`Router<()>`):
-/// `/conversations*`, `/me/events`, and `/herald/tunnel` (under `/herald`).
+/// `/conversations*`, `/me/events`, and `/tunnel`.
 pub fn router(state: SharedConvState) -> Router<()> {
     Router::new()
         .merge(conversations::router().with_state(state.clone()))
         .merge(events::router().with_state(state.clone()))
-        .nest("/herald", herald::router().with_state(state))
+        .merge(tunnel::router().with_state(state))
 }
 
 /// Build a CORS layer from a comma-separated allowlist. Mirrors the agora's

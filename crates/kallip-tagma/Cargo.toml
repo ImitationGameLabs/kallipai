@@ -8,6 +8,10 @@ license.workspace = true
 [dependencies]
 kallip-runtime = { workspace = true, features = ["landlock", "seccomp"] }
 kallip-common = { workspace = true, features = ["axum"] }
+kallip-agora-common = { workspace = true }
+kallip-agora-client = { workspace = true }
+kallip-lesche-client = { workspace = true }
+kallip-e2ee = { workspace = true }
 just-llm-client = { workspace = true }
 reqwest = { workspace = true }
 anyhow = { workspace = true }
@@ -26,6 +30,8 @@ uuid = { workspace = true }
 time = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
+url = { workspace = true }
+dirs = { workspace = true }
 
 [features]
 default = []
@@ -58,3 +64,7 @@ tempfile = { workspace = true }
 temp-env = { workspace = true }
 serial_test = { workspace = true }
 kallip-shell = { workspace = true }
+# Relay op-tests (ported from the former standalone connector): mock lesche + inline AEAD app side.
+chacha20poly1305 = { workspace = true }
+getrandom = { workspace = true }
+x25519-dalek = { workspace = true, features = ["reusable_secrets"] }

@@ -1,9 +1,9 @@
-//! Tagma lifecycle: pending (an enrollment code) -> enrolled (a herald pinned
+//! Tagma lifecycle: pending (an enrollment code) -> enrolled (a tagma pinned
 //! its device key) -> revoked.
 //!
 //! `POST /v1/tagmata/enroll` (unauthenticated, rate-limited) redeems a pending
-//! tagma's enrollment code for a long-lived tagma token, pinning the herald's
-//! Ed25519 device public key. The herald must sign the enrollment transcript
+//! tagma's enrollment code for a long-lived tagma token, pinning the tagma's
+//! Ed25519 device public key. The tagma must sign the enrollment transcript
 //! with the matching private key (proof of possession), so a stolen code alone
 //! cannot pin an attacker-chosen key. The pending row is locked `FOR UPDATE`
 //! and the full live predicate re-checked (not enrolled / not revoked / not
@@ -12,7 +12,7 @@
 //! The authenticated surface (`POST /v1/tagmata` mint, `GET /v1/tagmata` list,
 //! `GET/PATCH/DELETE /v1/tagmata/{id}`) is owner-scoped. `DELETE` revokes (sets
 //! `revoked_at`); for an enrolled tagma that flag is checked in `resolve_bearer`
-//! on every herald request, so a revoke cuts the device off on its next call.
+//! on every tagma request, so a revoke cuts the tagma off on its next call.
 //! `GET /v1/tagmata/{id}` serves the pinned key to the owning user (TOFU with
 //! change-detection on the app side) and 404s for a still-pending tagma.
 
@@ -275,7 +275,7 @@ async fn mint(
 // list
 // ---------------------------------------------------------------------------
 
-/// One row of the owner's tagma list. Liveness ("is a herald tunnel currently
+/// One row of the owner's tagma list. Liveness ("is a tagma tunnel currently
 /// open for this tagma") is NOT part of the registry's view: it is a data-plane
 /// concern, delivered to the app via the relay's `GET /me/events` stream as
 /// `TagmaOnline`/`TagmaOffline`. Note `tagmata.last_tunnel_proof_ts` is a replay
@@ -463,7 +463,7 @@ async fn rename_tagma(
 /// Idempotent + race-free via a conditional UPDATE that only touches rows still
 /// live, so two concurrent revokes cannot clobber the first-revoked timestamp.
 /// 204 either way for a row that exists and is/was the caller's. For an
-/// enrolled tagma the flag is enforced in `resolve_bearer` on the herald's next
+/// enrolled tagma the flag is enforced in `resolve_bearer` on the tagma's next
 /// request; for a pending tagma it blocks redemption in `enroll`.
 async fn revoke_tagma(
     State(state): State<SharedState>,

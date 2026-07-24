@@ -222,7 +222,7 @@ class AgoraSessionStore {
     await client().renameTagma(id, label);
     const resolved = label && label.trim() ? label.trim() : null;
     this.tagmata = this.tagmata.map((t) =>
-      t.tagma_id === id ? { ...t, label: resolved } : t,
+      t.tagma_id === id ? { ...t, label: resolved } : t
     );
   }
 
@@ -257,7 +257,7 @@ class AgoraSessionStore {
 
   /**
    * Revoke a tagma (pending or enrolled); on success drop it from the list. For
-   * an enrolled tagma the agora cuts the herald off on its next request. On
+   * an enrolled tagma the agora cuts the tagma off on its next request. On
    * error it THROWS (the caller -- the card / dialog -- surfaces it inline),
    * mirroring `renameTagma`: a single failed revoke must not blank the whole
    * dashboard the way a `tagmataError` would.

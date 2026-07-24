@@ -25,7 +25,7 @@ export type RawSseEvent =
   | { readonly type: "assistantContentDelta"; readonly delta: string }
   | { readonly type: "toolCall"; readonly name: string; readonly args: string }
   | { readonly type: "toolResult"; readonly result: string }
-  | { readonly type: "finished"; readonly content: string }
+  | { readonly type: "idle" }
   | { readonly type: "busy" }
   | { readonly type: "status"; readonly message: string }
   | { readonly type: "error"; readonly message: string }
@@ -82,8 +82,8 @@ export function sseToDomain(ev: RawSseEvent): DomainEvent {
       return { type: "toolCall", name: ev.name, args: ev.args };
     case "toolResult":
       return { type: "toolResult", result: ev.result };
-    case "finished":
-      return { type: "finished", content: ev.content };
+    case "idle":
+      return { type: "idle" };
     case "busy":
       return { type: "busy" };
     case "status":

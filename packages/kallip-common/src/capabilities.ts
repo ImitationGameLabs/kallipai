@@ -3,7 +3,7 @@ import type { TranscriptLine } from "./transcript.ts";
 // Declares what a Session can actually deliver. The UI branches on these to
 // degrade gracefully: under agora there are no streaming deltas, tool events,
 // or retry/failover telemetry, so the corresponding controls hide. Approvals
-// ride the herald tunnel as opaque bytes, so they are available on every
+// ride the tagma tunnel as opaque bytes, so they are available on every
 // transport.
 
 export interface SessionCapabilities {

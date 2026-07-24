@@ -11,9 +11,9 @@
 # Both modes consume the flake's pre-built outputs directly -- arion does no
 # Rust/crane building. Dev runs `packages.default` via useHostStore so the host
 # /nix/store is shared and rebuilds are picked up without an in-compose bake;
-# the tagma service + herald are gated behind the `tagma` profile (the herald
-# can't enroll until a user signs up and mints a code). See docs/development.md
-# for the bring-up commands and flow.
+# the tagma service is gated behind the `tagma` profile (its in-process relay
+# connector can't enroll until a user signs up and mints a code). See
+# docs/development.md for the bring-up commands and flow.
 { pkgs, lib, ... }:
 let
   mode = builtins.getEnv "KALLIP_ARION_MODE";
@@ -103,8 +103,9 @@ let
   # (`agora.localhost:7100`, `lesche.localhost:7200`) -- browsers resolve
   # `*.localhost` natively and the session cookie carries `Domain=localhost`
   # (see the agora service env) so it is shared across the two subdomains. No
-  # edge proxy in dev; each service publishes its own port. The herald (a
-  # container) reaches them via compose DNS (`agora:7100` / `lesche:7200`).
+  # edge proxy in dev; each service publishes its own port. The tagma (a
+  # container, hosting the relay connector in-process) reaches them via compose
+  # DNS (`agora:7100` / `lesche:7200`).
 
   # The tagma only, looping over every prebuilt [[test]] binary. Exits with
   # the overall verdict.
@@ -171,33 +172,41 @@ let
     };
   };
 
-  # The full local stack: agora + postgres + tagma + herald. The tagma service
-  # + herald are gated behind the `tagma` profile (see header) so a plain
-  # `arion up` brings up only the agora side. Tagma data, the workspace, and
-  # shared skills default to docker volumes; each can be bind-overridden via
-  # the KALLIP_ARION_*_PATH vars above.
+  # The full local stack: agora + postgres + tagma. The tagma service is gated
+  # behind the `tagma` profile (see header) so a plain `arion up` brings up only
+  # the agora side. Tagma data, the workspace, and shared skills default to
+  # docker volumes; each can be bind-overridden via the KALLIP_ARION_*_PATH vars
+  # above.
   devComposition = {
     config = {
       project.name = "kallipai-dev";
 
       # Named volumes must be declared at the compose top level (compose rejects
       # a reference to an undeclared named volume):
-      #   - pgdata + herald-state: always named volumes;
+      #   - pgdata: always a named volume;
       #   - data + workspace: declared only when their override env var is unset
       #     (otherwise that mount is a bind mount and no named volume is referenced).
       docker-compose.volumes = {
         pgdata = { };
-        herald-state = { };
       }
       // lib.optionalAttrs (dataBind == null) { data = { }; }
       // lib.optionalAttrs (workspaceBind == null) { workspace = { }; };
 
       # Dev tagma. The landlock/seccomp shell sandbox needs SYS_ADMIN +
       # seccomp=unconfined (out.service is the escape hatch for security_opt).
+      # The tagma also runs the in-process relay connector: it enrolls with the
+      # agora and holds its lesche tunnel, so it depends on both being up. On a
+      # missing KALLIP_RELAY_ENROLLMENT_CODE (before a user signs up) it degrades
+      # to local-only and keeps serving local agents.
       services.tagma = {
         service.capabilities.SYS_ADMIN = true;
         out.service.security_opt = [ "seccomp=unconfined" ];
         out.service.profiles = [ "tagma" ];
+        service.depends_on = [
+          "agora"
+          "lesche"
+        ];
+        service.restart = "unless-stopped";
         service.ports = [ "3000:3000" ];
         service.volumes = [
           dataVolume
@@ -223,6 +232,11 @@ let
           # (ensure_workspace_disjoint rejects the overlap).
           KALLIP_WORKSPACE_ROOT = "/workspace";
           KALLIP_TAGMA_ADDR = "0.0.0.0:3000";
+          # In-process relay connector: enroll at the agora, tunnel to the
+          # lesche (both via compose DNS). KALLIP_RELAY_ENROLLMENT_CODE comes
+          # from .env (minted after signup); until then the tagma runs local-only.
+          KALLIP_RELAY_AGORA_URL = "http://agora:7100";
+          KALLIP_RELAY_LESCHE_URL = "http://lesche:7200";
           RUST_LOG = "info";
         };
       };
@@ -289,7 +303,7 @@ let
       # Lesche: the data-plane relay. DB-free; authenticates requests and
       # resolves tagma metadata through the agora's /internal surface over the
       # compose network. Reached by the browser at http://lesche.localhost:7200
-      # and by the herald via compose DNS (lesche:7200).
+      # and by the tagma's relay connector via compose DNS (lesche:7200).
       services.lesche = {
         service.depends_on = [ "agora" ];
         service.useHostStore = true;
@@ -300,7 +314,8 @@ let
         # startup and the rustls platform verifier loads the system trust store
         # EAGERLY at .build() -- so the lesche needs the CA bundle at the
         # standard paths (cacert + certLinks) even though its /internal calls
-        # are plain HTTP. Same reason the herald service carries the CA layer.
+        # are plain HTTP. Same reason the tagma service carries the CA layer
+        # (its in-process relay connector builds a reqwest client at startup).
         image.contents = [
           workspace
           pkgs.cacert
@@ -314,45 +329,6 @@ let
           # Allow the web app origin (Vite at :5173) to make credentialed
           # cross-origin calls to lesche.localhost:7200.
           KALLIP_LESCHE_CORS_ORIGINS = "http://localhost:5173";
-          RUST_LOG = "info";
-        };
-      };
-
-      # Herald: persists its device key + tagma token in `herald-state`, so it
-      # re-enrolls only on the very first boot (using
-      # KALLIP_HERALD_ENROLLMENT_CODE from .env, minted via the agora dashboard).
-      # Its first-boot enroll() is NOT retried in code, so `restart:
-      # unless-stopped` lets it come back once the code is supplied / the agora
-      # is up (a bad code crashloops -- documented). Gated behind the `tagma`
-      # profile alongside the tagma. (prod-tagma's herald lives in
-      # nix/prod-composes/tagma.nix.)
-      services.herald = {
-        service.command = [ "${workspace}/bin/kallip-herald" ];
-        service.volumes = [ "herald-state:/var/lib/kallip/herald" ];
-        service.restart = "unless-stopped";
-        # KALLIP_AUTH_TOKEN (herald -> tagma operator token) +
-        # KALLIP_HERALD_ENROLLMENT_CODE (first run only).
-        service.env_file = [ ".env" ];
-        out.service.profiles = [ "tagma" ];
-        service.useHostStore = true;
-        # CA layer (cacert + certLinks via runtimeContents), same as the tagma.
-        # reqwest needs the trust store even for a plain-http target, so without
-        # it the herald fails to build its Client at startup.
-        image.enableRecommendedContents = true;
-        image.contents = [ workspace ] ++ runtimeContents;
-        service.depends_on = [
-          "agora"
-          "lesche"
-          "tagma"
-        ];
-        service.environment = {
-          KALLIP_HERALD_STATE_DIR = "/var/lib/kallip/herald";
-          # Reaches the two services via compose DNS (the herald is a container;
-          # it does NOT use *.localhost, which is a browser-side convention).
-          # Enroll -> agora; tunnel/envelopes/KEX -> lesche.
-          KALLIP_HERALD_AGORA_URL = "http://agora:7100";
-          KALLIP_HERALD_LESCHE_URL = "http://lesche:7200";
-          KALLIP_TAGMA_URL = "http://tagma:3000";
           RUST_LOG = "info";
         };
       };

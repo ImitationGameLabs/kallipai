@@ -8,7 +8,6 @@ members = [
   "crates/platform/kallip-agora-client",
   "crates/platform/kallip-lesche-client",
   "crates/platform/kallip-admin",
-  "crates/kallip-herald",
   "crates/kallip-runtime",
   "crates/kallip-shell",
   "crates/kallip",
@@ -37,7 +36,6 @@ kallip-lesche = { path = "crates/platform/kallip-lesche" }
 kallip-e2ee = { path = "crates/platform/kallip-e2ee" }
 kallip-agora-client = { path = "crates/platform/kallip-agora-client" }
 kallip-lesche-client = { path = "crates/platform/kallip-lesche-client" }
-kallip-herald = { path = "crates/kallip-herald" }
 kallip-runtime = { path = "crates/kallip-runtime" }
 kallip-shell = { path = "crates/kallip-shell" }
 kallip-client = { path = "crates/kallip-client" }
@@ -114,6 +112,8 @@ x25519-dalek = "3"
 chacha20poly1305 = "0.11"
 ed25519-dalek = "3"
 hkdf = "0.13"
+# Securely zero secret key material on drop.
+zeroize = "1.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rable = "0.2.0"

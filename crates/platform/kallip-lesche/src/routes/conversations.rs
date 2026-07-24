@@ -8,10 +8,10 @@
 //! attributed only to its tagma.
 //!
 //! Replay/dedup: NONE at the relay. `sequence_n` is an end-to-end (app<->
-//! herald) counter scoped to a crypto epoch, which the relay cannot see (it has
+//! tagma) counter scoped to a crypto epoch, which the relay cannot see (it has
 //! no key), so a relay-side integer window would misalign with the app's
 //! per-KEX counter reset and reject a fresh epoch's first message. Replay
-//! protection is solely the herald's job: a per-epoch `seen_inbound` window
+//! protection is solely the tagma's job: a per-epoch `seen_inbound` window
 //! (within-epoch replay) plus AEAD key rotation (cross-epoch replay).
 //!
 //! Concurrency: routing runs under a registry READ lock (broadcast `send` is
@@ -24,9 +24,9 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use kallip_agora_common::control::{KeyExchangeInit, KeyExchangeResponse};
 use kallip_agora_common::event::AgoraEvent;
-use kallip_agora_common::herald::HeraldInbound;
 use kallip_agora_common::ids::{ConversationId, TagmaId};
 use kallip_agora_common::message::{Envelope, Participant};
+use kallip_agora_common::tunnel::TunnelInbound;
 use kallip_common::protocol::ApiError;
 use serde::{Deserialize, Serialize};
 
@@ -95,7 +95,7 @@ async fn post_envelope(
     let conv_id = ConversationId::from(id);
 
     // The path is authoritative: a body claiming a different conversation_id
-    // would otherwise be trusted by the herald, which keys its decrypt state on
+    // would otherwise be trusted by the tagma, which keys its decrypt state on
     // the envelope field.
     if env.conversation_id != conv_id {
         return Err(ApiError::bad_request(
@@ -123,7 +123,7 @@ async fn post_envelope(
                 }
                 reg.presence
                     .get(&conv.tagma_id)
-                    .map(|p| Route::Herald(p.tx.clone()))
+                    .map(|p| Route::Tagma(p.tx.clone()))
             }
             Participant::Agent { tagma_id } => {
                 let authed_tagma = require_tagma(&principal)?;
@@ -136,18 +136,18 @@ async fn post_envelope(
             }
         }
     };
-    let user_sent = matches!(route, Some(Route::Herald(_)));
+    let user_sent = matches!(route, Some(Route::Tagma(_)));
 
     // Route. No relay-side replay/dedup window: `sequence_n` is an end-to-end
-    // (app<->herald) counter scoped to a crypto epoch, and the relay cannot see
-    // the epoch (no key). Replay protection is solely the herald's job -- a
+    // (app<->tagma) counter scoped to a crypto epoch, and the relay cannot see
+    // the epoch (no key). Replay protection is solely the tagma's job -- a
     // per-epoch window (`seen_inbound`) for within-epoch replay, plus AEAD
     // key rotation for cross-epoch replay. A relay-side integer window would
     // misalign with the app's per-KEX counter reset (rejecting a fresh epoch's
     // first message). A `send` failure here means no live receiver (peer
     // offline); surface 503 so the sender can retry.
     let delivered = match route {
-        Some(Route::Herald(tx)) => tx.send(HeraldInbound::Envelope { envelope: env }).is_ok(),
+        Some(Route::Tagma(tx)) => tx.send(TunnelInbound::Envelope { envelope: env }).is_ok(),
         Some(Route::App(tx)) => tx.send(AgoraEvent::Envelope { envelope: env }).is_ok(),
         None => false,
     };
@@ -163,12 +163,12 @@ async fn post_envelope(
 
 /// A resolved route target carrying its typed broadcast sender.
 enum Route {
-    Herald(tokio::sync::broadcast::Sender<HeraldInbound>),
+    Tagma(tokio::sync::broadcast::Sender<TunnelInbound>),
     App(tokio::sync::broadcast::Sender<AgoraEvent>),
 }
 
-/// App -> herald (synchronous): start a conversation key exchange and block
-/// until the herald relays its signed response back. Fails with 504 after
+/// App -> tagma (synchronous): start a conversation key exchange and block
+/// until the tagma relays its signed response back. Fails with 504 after
 /// `key_exchange_timeout`, or 409 if a KEX is already in flight.
 async fn key_exchange_init(
     State(state): State<SharedConvState>,
@@ -179,7 +179,7 @@ async fn key_exchange_init(
     let conv_id = ConversationId::from(id);
     let user = require_user(&principal)?;
 
-    // Resolve conversation ownership and the herald tunnel sender under a read
+    // Resolve conversation ownership and the tunnel sender under a read
     // lock, then release before any await.
     let sender = {
         let reg = state.read()?;
@@ -197,7 +197,7 @@ async fn key_exchange_init(
             .ok_or_else(|| ApiError::unavailable("tagma is offline"))?
     };
 
-    // Register the waiter BEFORE pushing the init: the herald's response may
+    // Register the waiter BEFORE pushing the init: the tagma's response may
     // arrive almost immediately and must find a pending entry.
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
@@ -212,7 +212,7 @@ async fn key_exchange_init(
         pending.insert(conv_id.clone(), tx);
     }
 
-    let _ = sender.send(HeraldInbound::KeyExchange {
+    let _ = sender.send(TunnelInbound::KeyExchange {
         conversation_id: conv_id.clone(),
         init,
     });
@@ -232,7 +232,7 @@ async fn key_exchange_init(
     }
 }
 
-/// Herald -> app (resolves a pending [`key_exchange_init`]). Returns 409 if no
+/// Tagma -> app (resolves a pending [`key_exchange_init`]). Returns 409 if no
 /// init is waiting.
 async fn key_exchange_response(
     State(state): State<SharedConvState>,
@@ -292,9 +292,9 @@ mod tests {
     use crate::test_support::{make_state, seed_presence};
     use kallip_agora_common::bytes::{Ciphertext, Ed25519PublicKey, X25519PublicKey};
     use kallip_agora_common::control::KeyExchangeInit;
-    use kallip_agora_common::herald::HeraldInbound;
     use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId, UserId};
     use kallip_agora_common::principal::Principal;
+    use kallip_agora_common::tunnel::TunnelInbound;
     use time::OffsetDateTime;
 
     fn user(name: &str) -> UserId {
@@ -320,7 +320,7 @@ mod tests {
     ) -> (
         TagmaId,
         ConversationId,
-        tokio::sync::broadcast::Sender<HeraldInbound>,
+        tokio::sync::broadcast::Sender<TunnelInbound>,
     ) {
         let tagma = TagmaId::from("tagma-1".to_string());
         control.enroll_tagma(
@@ -445,7 +445,7 @@ mod tests {
 
         let inbound = rx.recv().await.expect("tunnel message");
         let forwarded_conv = match inbound {
-            HeraldInbound::KeyExchange {
+            TunnelInbound::KeyExchange {
                 conversation_id, ..
             } => conversation_id,
             other => panic!("expected KeyExchange, got {other:?}"),

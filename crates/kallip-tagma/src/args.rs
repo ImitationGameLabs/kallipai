@@ -37,4 +37,29 @@ pub struct Args {
     /// User-Agent sent on outbound LLM HTTP calls. Unset = `kallip/<tagma-version>`.
     #[arg(long, env = "KALLIP_LLM_API_USER_AGENT")]
     pub llm_api_user_agent: Option<String>,
+    /// Activate the online-mode relay connector by enrolling with this agora
+    /// control-plane URL. Unset = local-only (no relay; the lesche message
+    /// route returns 503). Replaces the former standalone connector's
+    /// control-plane env var.
+    #[arg(long, env = "KALLIP_RELAY_AGORA_URL")]
+    pub relay_agora_url: Option<String>,
+    /// Lesche (data-plane relay) base URL the relay connector tunnels to. A full
+    /// URL. If unset, defaults to the agora URL's origin (scheme + host + port),
+    /// which is correct only for same-origin agora/lesche deployments — set it
+    /// explicitly otherwise. Replaces the former standalone connector's data-plane env var.
+    #[arg(long, env = "KALLIP_RELAY_LESCHE_URL")]
+    pub relay_lesche_url: Option<String>,
+    /// Single-use agora enrollment code (first run only; thereafter the stored
+    /// tagma token is reused). Replaces the former standalone connector's
+    /// enrollment-code env var.
+    #[arg(long, env = "KALLIP_RELAY_ENROLLMENT_CODE")]
+    pub relay_enrollment_code: Option<String>,
+    /// Max `kallip lesche send` deliveries per burst window. Bounds a runaway
+    /// agent message loop; process-global (today one root agent = one
+    /// conversation, so this is effectively per-conversation). Unset = 20.
+    #[arg(long, env = "KALLIP_RELAY_MESSAGE_BURST_MAX")]
+    pub relay_message_burst_max: Option<u32>,
+    /// Length in seconds of the message burst window. Unset = 10.
+    #[arg(long, env = "KALLIP_RELAY_MESSAGE_BURST_WINDOW_SECS")]
+    pub relay_message_burst_window_secs: Option<u64>,
 }

@@ -1,6 +1,6 @@
 [package]
 name = "kallip-lesche"
-description = "kallip data-plane relay: herald tunnels, app event streams, envelope relay"
+description = "kallip data-plane relay: tagma tunnels, app event streams, envelope relay"
 edition = "2024"
 version.workspace = true
 license.workspace = true

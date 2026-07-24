@@ -83,7 +83,7 @@ impl ControlPlane for DbControlPlane {
             return Ok(None);
         };
         // A revoked tagma never authenticates (the unified revoke flag cuts the
-        // herald off on its next request).
+        // tagma off on its next request).
         let tagma = tagmata::Entity::find_by_id(row.tagma_id.clone())
             .one(&self.db)
             .await
@@ -128,7 +128,12 @@ impl ControlPlane for DbControlPlane {
         &self,
         tagma_id: &TagmaId,
     ) -> Result<Option<TagmaIdentity>, ControlPlaneError> {
+        // Only an enrolled, non-revoked tagma has a usable identity. Revocation
+        // is also enforced by the bearer-auth gate (`resolve_bearer`); filtering
+        // here makes the method safe to call standalone too (defense-in-depth).
         let tagma = tagmata::Entity::find_by_id(tagma_id.to_string())
+            .filter(tagmata::Column::RevokedAt.is_null())
+            .filter(tagmata::Column::EnrolledAt.is_not_null())
             .one(&self.db)
             .await
             .map_err(map_err)?;

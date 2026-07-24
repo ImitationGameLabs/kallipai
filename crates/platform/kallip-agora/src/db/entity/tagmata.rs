@@ -1,6 +1,6 @@
-//! `tagmata` entity — a herald (a `kallip-tagma` instance) owned by a user,
+//! `tagmata` entity — an enrolled tagma owned by a user,
 //! across its lifecycle: pending (an enrollment code minted, no device key
-//! yet), enrolled (a herald connected and pinned its Ed25519 device key), or
+//! yet), enrolled (a tagma connected and pinned its Ed25519 device key), or
 //! revoked. `enrolled_at` is the phase marker (`None` = pending); the pending-
 //! phase fields (`enrollment_code_hash`, `enrollment_code_masked`,
 //! `expires_at`) are cleared on enroll, and `pinned_public_key` is `None` until
@@ -28,19 +28,19 @@ pub struct Model {
     pub created_at: OffsetDateTime,
     #[sea_orm(column_type = "Text", nullable)]
     pub label: Option<String>,
-    /// High-water-mark of the accepted herald tunnel-proof timestamp (unix
+    /// High-water-mark of the accepted tagma tunnel-proof timestamp (unix
     /// seconds). The tunnel handler accepts a proof only when this is `NULL` or
     /// strictly less than the incoming timestamp, defeating replay across agora
     /// restarts. `None` until the first connect.
     pub last_tunnel_proof_ts: Option<i64>,
     /// Revocation timestamp; `None` = live. The single revoke flag for both the
     /// pending and enrolled phases, checked on every bearer-authed request (an
-    /// enrolled revoke cuts the herald off on its next call) and at enroll (a
+    /// enrolled revoke cuts the tagma off on its next call) and at enroll (a
     /// pending revoke blocks redemption).
     #[sea_orm(column_type = "TimestampWithTimeZone", nullable)]
     pub revoked_at: Option<OffsetDateTime>,
     /// Enrollment timestamp; `None` = pending (the row carries an unredeemed
-    /// enrollment code). Set once when a herald connects.
+    /// enrollment code). Set once when a tagma connects.
     #[sea_orm(column_type = "TimestampWithTimeZone", nullable)]
     pub enrolled_at: Option<OffsetDateTime>,
     /// SHA-256 hash of the pending enrollment code; unique among live pending

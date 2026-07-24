@@ -1,11 +1,14 @@
-//! kallip-run: post a prompt to a tagma agent and print its reply.
+//! kallip-run: post a prompt to a tagma agent and observe its run.
 //!
 //! Non-interactive CLI that targets the tagma's single root agent (or an
-//! explicit agent via `--agent`), posts the prompt, prints the final assistant
-//! reply to stdout, and exits with a semantic exit code. Pass `--verbose` to
-//! stream the agent's procedure (reasoning, tool calls) to stderr, or `--json`
-//! for a single machine-readable object (`agentId`, `assistant`, `exit`).
-//! Designed for scripted and automated workflows.
+//! explicit agent via `--agent`), posts the prompt, streams the agent's
+//! procedure (reasoning, tool calls, results) to stderr in `--verbose`, and
+//! exits with a semantic exit code when the agent goes idle (calls `break`) or
+//! hits a terminal error state. It is a runtime-telemetry observer: it does
+//! **not** print the agent's message — a message is now a deliberate
+//! `kallip lesche send` CLI call addressed to the user over the relay/chat
+//! path, not a value on this stream. Use `--json` for a single machine-readable
+//! object (`agentId`, `exit`).
 //!
 //! The target is the tagma-owned singleton root (or the `--agent` id); it
 //! persists after the run. Per-run isolation is no longer provided — separate
@@ -25,7 +28,7 @@ use kallip_common::protocol::SseEvent;
 #[command(
     name = "kallip-run",
     version,
-    about = "Post a prompt to an agent and print the result"
+    about = "Post a prompt to an agent and observe its run"
 )]
 struct Cli {
     /// The prompt to send to the agent.
@@ -34,7 +37,7 @@ struct Cli {
     /// Target an explicit agent by id instead of the tagma's root agent.
     #[arg(long)]
     agent: Option<AgentId>,
-    /// Emit a single JSON object on stdout: {agentId, assistant, exit}.
+    /// Emit a single JSON object on stdout: {agentId, exit}.
     /// Diagnostics still go to stderr.
     #[arg(long)]
     json: bool,
@@ -48,7 +51,7 @@ struct Cli {
 /// Semantic exit codes for `kallip-run`.
 ///
 /// Mapped to process exit codes via `#[repr(u8)]`:
-/// 0 = success, 1 = error, 2 = max rounds exceeded,
+/// 0 = success (agent went idle), 1 = error, 2 = max rounds exceeded,
 /// 3 = cancelled, 4 = token budget exceeded, 5 = failover chain exhausted.
 ///
 /// Serialized to the JSON `"exit"` field as a snake_case string
@@ -87,8 +90,10 @@ async fn run() -> Result<ExitCode> {
     let client = TagmaClient::from_env()?;
 
     // Output shape is driven by two explicit flags (no TTY auto-detection):
-    // the default is minimal — the final assistant reply on stdout plus a
-    // completion hint on stderr.
+    // the default is minimal — a completion hint on stderr; `--verbose` streams
+    // the agent's procedure to stderr; `--json` emits a single object on stdout.
+    // No message is printed: the agent addresses the user via
+    // `kallip lesche send`, not this stream.
     let (json, verbose) = (cli.json, cli.verbose);
 
     // Resolve the target agent: an explicit `--agent` id, or the tagma's
@@ -106,22 +111,20 @@ async fn run() -> Result<ExitCode> {
     if let Some(warning) = resp.warning {
         eprintln!("warning: {warning}");
     }
-    let outcome = consume_stream(stream, json, verbose).await;
+    let exit = consume_stream(stream, verbose).await;
 
     if json {
         let obj = JsonObject {
             agent_id: &id,
-            assistant: &outcome.assistant,
-            exit: outcome.exit,
+            exit,
         };
         println!("{}", serde_json::to_string(&obj)?);
     } else {
-        // Completion hint on stderr (text modes only). A leading blank line
-        // separates it from the streamed procedure in --verbose mode; in the
-        // minimal default the reply is on stdout, so no separator is needed.
+        // Completion hint on stderr. A leading blank line separates it from the
+        // streamed procedure in --verbose mode.
         let sep = if verbose { "\n" } else { "" };
-        let status = match outcome.exit {
-            RunExit::Success => "finished",
+        let status = match exit {
+            RunExit::Success => "went idle",
             RunExit::MaxRounds => "hit max rounds",
             RunExit::Cancelled => "cancelled",
             RunExit::BudgetExceeded => "exceeded token budget",
@@ -134,7 +137,7 @@ async fn run() -> Result<ExitCode> {
         );
     }
 
-    Ok(outcome.exit.into())
+    Ok(exit.into())
 }
 
 /// End the current reasoning block, printing a trailing newline if one was
@@ -146,46 +149,35 @@ fn end_reasoning(in_reasoning: &mut bool) {
     }
 }
 
-/// Result of consuming an event stream until a terminal event.
-struct Outcome {
-    exit: RunExit,
-    assistant: String,
-}
-
 /// JSON object emitted in `--json` mode. camelCase matches the project's JSON
 /// conventions (see `SseEvent`'s `rename_all = "camelCase"`).
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct JsonObject<'a> {
     agent_id: &'a AgentId,
-    assistant: &'a str,
     exit: RunExit,
 }
 
 /// Consume the agent's SSE stream until a terminal event arrives.
 ///
-/// Output is driven by `json` and `verbose`:
-/// - The final assistant reply always goes to stdout (printed at `Finished`)
-///   unless `json` is set, in which case it is carried in the JSON object
-///   emitted by [`run`].
-/// - `verbose` streams the procedure (`[reasoning]` / `[tool]` / …) to stderr
-///   in any mode; without it the procedure is suppressed (the tagma persists
-///   execution history).
-/// - Diagnostics (warnings, errors) always go to stderr.
+/// This is a telemetry observer: it streams the agent's procedure (`[reasoning]`
+/// / `[tool]` / …) to stderr when `verbose` is set, and returns the semantic
+/// [`RunExit`] at the terminal event. It does **not** print any message — the
+/// agent addresses the user via the `kallip lesche send` CLI over the
+/// relay/chat path, not this stream. Diagnostics (warnings, errors) always go
+/// to stderr.
 ///
 /// Defaults to [`RunExit::Error`] if the stream closes without a terminal
 /// event (tagma crash, network drop). Generic over the stream so [`run`] can
 /// pass the already-open stream without naming the concrete `JsonEventStream`
 /// type.
-async fn consume_stream<S, E>(mut stream: S, json: bool, verbose: bool) -> Outcome
+async fn consume_stream<S, E>(mut stream: S, verbose: bool) -> RunExit
 where
     S: Stream<Item = Result<SseEvent, E>> + Unpin,
     E: std::fmt::Display,
 {
     // Whether a `[reasoning] …` block is currently open on stderr.
     let mut in_reasoning = false;
-    let mut assistant = String::new();
-    let exit = RunExit::Error;
 
     while let Some(result) = stream.next().await {
         let event = match result {
@@ -193,15 +185,11 @@ where
             Err(e) => {
                 end_reasoning(&mut in_reasoning);
                 eprintln!("SSE error: {e}");
-                return Outcome {
-                    exit: RunExit::Error,
-                    assistant,
-                };
+                return RunExit::Error;
             }
         };
         match event {
-            // Reasoning is streamed (verbose) but never accumulated — it is not
-            // part of the JSON object.
+            // Reasoning is streamed (verbose) but carries no terminal signal.
             SseEvent::ReasoningDelta { delta } => {
                 if verbose {
                     if !in_reasoning {
@@ -211,12 +199,15 @@ where
                     eprint!("{delta}");
                 }
             }
-            // The assistant reply is accumulated (json) or ignored (text, which
-            // uses `Finished.content`); it is never streamed to stderr.
+            // The agent's bare assistant text is telemetry here (verbose only) —
+            // it is NOT a user message. A user message is a deliberate
+            // `kallip lesche send` call.
             SseEvent::AssistantContentDelta { delta } => {
-                end_reasoning(&mut in_reasoning);
-                if json {
-                    assistant.push_str(&delta);
+                if verbose {
+                    if !in_reasoning {
+                        eprint!("[assistant] ");
+                    }
+                    eprint!("{delta}");
                 }
             }
             // Full (non-delta) events — defensive; the runtime emits deltas.
@@ -227,9 +218,9 @@ where
                 }
             }
             SseEvent::AssistantContent { content } => {
-                end_reasoning(&mut in_reasoning);
-                if json {
-                    assistant.push_str(&content);
+                if verbose {
+                    end_reasoning(&mut in_reasoning);
+                    eprintln!("[assistant] {content}");
                 }
             }
             SseEvent::ToolCall { name, .. } => {
@@ -269,79 +260,52 @@ where
                 max_attempts,
                 delay_secs,
             } => {
-                // The stream dropped mid-way and the runtime is retrying from scratch. The
-                // accumulated `assistant` buffer holds the abandoned partial — void it so the
-                // final output is the clean retried content, not partial-then-full. (Reasoning
-                // is streamed but never accumulated, so nothing else to clear.)
+                // The stream dropped mid-way and the runtime is retrying from scratch.
+                // Nothing accumulated here to void (no reply buffer); just surface it.
                 end_reasoning(&mut in_reasoning);
-                assistant.clear();
                 if verbose {
                     eprintln!(
                         "[stream reset {attempt}/{max_attempts}] {error} (retrying in {delay_secs:.1}s)"
                     );
                 }
             }
-            SseEvent::Finished { content } => {
+            SseEvent::Idle => {
+                // The agent yielded control (called `break`, or was force-idled).
+                // Terminal for this run: success.
                 end_reasoning(&mut in_reasoning);
-                if !json && !content.is_empty() {
-                    print!("{content}");
-                }
-                // `return` (not `break`) so the post-loop "stream ended"
-                // fallback below only runs when no terminal event arrived.
-                return Outcome {
-                    exit: RunExit::Success,
-                    assistant: content,
-                };
+                return RunExit::Success;
             }
             SseEvent::Error { message } => {
                 end_reasoning(&mut in_reasoning);
                 eprintln!("{message}");
-                return Outcome {
-                    exit: RunExit::Error,
-                    assistant,
-                };
+                return RunExit::Error;
             }
             SseEvent::MaxRoundsExceeded => {
                 end_reasoning(&mut in_reasoning);
                 eprintln!("max rounds exceeded");
-                return Outcome {
-                    exit: RunExit::MaxRounds,
-                    assistant,
-                };
+                return RunExit::MaxRounds;
             }
             SseEvent::Cancelled => {
                 end_reasoning(&mut in_reasoning);
                 eprintln!("cancelled");
-                return Outcome {
-                    exit: RunExit::Cancelled,
-                    assistant,
-                };
+                return RunExit::Cancelled;
             }
             // The round was interrupted; the tagma-side agent stays alive, but this
-            // one-shot run will not produce a `Finished`. Treat like Cancelled.
+            // one-shot run is over. Treat like Cancelled.
             SseEvent::Interrupted => {
                 end_reasoning(&mut in_reasoning);
                 eprintln!("interrupted");
-                return Outcome {
-                    exit: RunExit::Cancelled,
-                    assistant,
-                };
+                return RunExit::Cancelled;
             }
             SseEvent::TokenBudgetExceeded { consumed, budget } => {
                 end_reasoning(&mut in_reasoning);
                 eprintln!("token budget exceeded (consumed: {consumed}, budget: {budget})");
-                return Outcome {
-                    exit: RunExit::BudgetExceeded,
-                    assistant,
-                };
+                return RunExit::BudgetExceeded;
             }
             SseEvent::FailoverChainExhausted { reason, detail } => {
                 end_reasoning(&mut in_reasoning);
                 eprintln!("failover chain exhausted ({reason}): {detail}");
-                return Outcome {
-                    exit: RunExit::FailoverChainExhausted,
-                    assistant,
-                };
+                return RunExit::FailoverChainExhausted;
             }
             // Suppress state-transition/informational events.
             SseEvent::Busy | SseEvent::Status { .. } | SseEvent::ApprovalUpdated { .. } => {}
@@ -352,7 +316,7 @@ where
     end_reasoning(&mut in_reasoning);
     eprintln!("stream ended without a terminal event");
 
-    Outcome { exit, assistant }
+    RunExit::Error
 }
 
 #[cfg(test)]
@@ -366,53 +330,29 @@ mod tests {
     type Item = Result<SseEvent, std::io::Error>;
 
     #[tokio::test]
-    async fn json_accumulates_assistant_and_marks_success() {
+    async fn idle_marks_success() {
+        // The agent yielded control (called `break`): terminal success. No reply
+        // is captured — kallip-run is a telemetry observer.
         let events: Vec<Item> = vec![
-            // Reasoning is not accumulated in JSON (only streamed when verbose).
             Ok(SseEvent::ReasoningDelta {
                 delta: "thinking".into(),
             }),
             Ok(SseEvent::AssistantContentDelta {
-                delta: "Hello".into(),
+                delta: "narration".into(),
             }),
-            Ok(SseEvent::AssistantContentDelta {
-                delta: ", world".into(),
-            }),
-            Ok(SseEvent::Finished {
-                content: "Hello, world".into(),
-            }),
+            Ok(SseEvent::Idle),
         ];
-        let outcome = consume_stream(stream::iter(events), true, false).await;
-        assert_eq!(outcome.exit, RunExit::Success);
-        // Finished.content is authoritative and overwrites delta accumulation.
-        assert_eq!(outcome.assistant, "Hello, world");
+        let exit = consume_stream(stream::iter(events), false).await;
+        assert_eq!(exit, RunExit::Success);
     }
 
     #[tokio::test]
-    async fn json_keeps_partial_assistant_on_error() {
+    async fn stream_reset_does_not_change_exit_before_terminal() {
+        // A mid-stream drop is non-terminal telemetry now (no reply buffer to void);
+        // the run continues until a terminal event.
         let events: Vec<Item> = vec![
             Ok(SseEvent::AssistantContentDelta {
                 delta: "partial".into(),
-            }),
-            Ok(SseEvent::Error {
-                message: "boom".into(),
-            }),
-        ];
-        let outcome = consume_stream(stream::iter(events), true, false).await;
-        assert_eq!(outcome.exit, RunExit::Error);
-        assert_eq!(outcome.assistant, "partial");
-    }
-
-    #[tokio::test]
-    async fn stream_reset_voids_partial_then_accumulates_retry() {
-        // A mid-stream drop voids the accumulated partial; the retried stream's content is the
-        // only thing in the final output (no partial-then-full duplication).
-        let events: Vec<Item> = vec![
-            Ok(SseEvent::AssistantContentDelta {
-                delta: "partial-".into(),
-            }),
-            Ok(SseEvent::AssistantContentDelta {
-                delta: "abandoned".into(),
             }),
             Ok(SseEvent::StreamReset {
                 error: "connection reset".into(),
@@ -420,37 +360,23 @@ mod tests {
                 max_attempts: 2,
                 delay_secs: 0.0,
             }),
-            Ok(SseEvent::AssistantContentDelta {
-                delta: "clean".into(),
-            }),
-            Ok(SseEvent::Finished {
-                content: "clean".into(),
-            }),
+            Ok(SseEvent::Idle),
         ];
-        let outcome = consume_stream(stream::iter(events), true, false).await;
-        assert_eq!(outcome.exit, RunExit::Success);
-        assert_eq!(
-            outcome.assistant, "clean",
-            "partial before StreamReset is voided"
-        );
+        let exit = consume_stream(stream::iter(events), false).await;
+        assert_eq!(exit, RunExit::Success);
     }
 
     #[tokio::test]
-    async fn json_defaults_to_error_without_terminal_event() {
+    async fn defaults_to_error_without_terminal_event() {
         let events: Vec<Item> = vec![Ok(SseEvent::ReasoningDelta { delta: "x".into() })];
-        let outcome = consume_stream(stream::iter(events), true, false).await;
-        assert_eq!(outcome.exit, RunExit::Error);
+        let exit = consume_stream(stream::iter(events), false).await;
+        assert_eq!(exit, RunExit::Error);
     }
 
     #[tokio::test]
     async fn terminal_events_map_to_correct_exit() {
         let cases: [(SseEvent, RunExit); 6] = [
-            (
-                SseEvent::Finished {
-                    content: String::new(),
-                },
-                RunExit::Success,
-            ),
+            (SseEvent::Idle, RunExit::Success),
             (
                 SseEvent::Error {
                     message: String::new(),
@@ -476,8 +402,8 @@ mod tests {
         ];
         for (event, expected) in cases {
             let events: Vec<Item> = vec![Ok(event)];
-            let outcome = consume_stream(stream::iter(events), true, false).await;
-            assert_eq!(outcome.exit, expected);
+            let exit = consume_stream(stream::iter(events), false).await;
+            assert_eq!(exit, expected);
         }
     }
 }

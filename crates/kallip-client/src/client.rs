@@ -188,6 +188,32 @@ impl TagmaClient {
         .await
     }
 
+    /// Deliver a message to the user via the tagma's relay (`POST
+    /// /agents/{id}/lesche/messages`). The agent's `kallip lesche send`
+    /// subcommand calls this; the tagma encrypts the text and posts an
+    /// `AssistantContent` envelope. Returns the tagma's delivery verdict.
+    pub async fn post_message_delivery(
+        &self,
+        id: &AgentId,
+        text: &str,
+    ) -> Result<crate::types::LescheMessageResponse> {
+        self.handle_response(
+            self.with_auth(
+                self.inner
+                    .http
+                    .post(self.url(&format!("/agents/{id}/lesche/messages")))
+                    .json(&crate::types::LescheMessageRequest {
+                        text: text.to_owned(),
+                    }),
+            )
+            .send()
+            .await
+            .context("failed to send message")?,
+            "failed to parse message response",
+        )
+        .await
+    }
+
     /// Fetch the tagma's single root agent. The tagma eagerly creates one
     /// root at startup (see `ensure_root_agent`), so this always succeeds once
     /// the tagma is accepting connections.

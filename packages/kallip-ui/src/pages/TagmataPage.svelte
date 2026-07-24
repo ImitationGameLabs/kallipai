@@ -38,7 +38,7 @@
         : "loading",
   );
 
-  // Open an E2EE channel to an enrolled, online tagma's herald, then navigate
+  // Open an E2EE channel to an enrolled, online tagma, then navigate
   // to its chat view. The full TagmaView (label + online flag) is looked up from
   // the loaded list; the card only carries TagmaCardProps.
   async function onOpenChannel(id: string): Promise<string> {

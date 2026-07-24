@@ -9,11 +9,12 @@ purpose-built images for the split production deploy:
 - `packages.kallip-agora-image` — the agora control-plane server. Minimal:
   just the `kallip-agora` binary + the CA bundle (agora is a pure HTTP/Postgres
   server with no shell-out deps).
-- `packages.kallip-tagma-image` — the host/"tagma" side: the `kallip-tagma` +
-  `kallip-herald` binaries plus the tagma's shell toolset (the agent landlock
-  sandbox shells out to bash/coreutils/ripgrep/git/pgrep/kill). Carries no
-  tagma-specific baked env — each compose service sets its own command + env,
-  so the tagma's flavor cannot leak into the herald.
+- `packages.kallip-tagma-image` — the host/"tagma" side: the `kallip-tagma`
+  binary (agent host + in-process relay connector) + the `kallip` CLI (whose
+  `lesche send` subcommand the agent invokes to address the user) plus the tagma's
+  shell toolset (the agent landlock sandbox shells out to
+  bash/coreutils/ripgrep/git/pgrep/kill). Carries no tagma-specific baked env —
+  the compose `tagma` service sets its own command + env.
 
 The recommended way to run them is [Arion](https://docs.hercules-ci.com/arion/)
 (a Nix-native docker-compose). Local dev and the integration-test suite live in
@@ -22,11 +23,11 @@ the integration suite is the single opt-in via `KALLIP_ARION_MODE=test`. Any
 other value — including a stale `prod-tagma` / `prod-agora` — is a **hard
 error** that points at the standalone prod files, not a silent fallback:
 
-| Mode             | Command                              | Services                          | Image source                                    |
-| ---------------- | ------------------------------------ | --------------------------------- | ----------------------------------------------- |
-| **dev**          | `arion up -d` (default)              | agora + postgres                  | `packages.default`, run via `useHostStore`      |
-| **dev** +`tagma` | `COMPOSE_PROFILES=tagma arion up -d` | agora + postgres + tagma + herald | `packages.default`, run via `useHostStore`      |
-| **test**         | `KALLIP_ARION_MODE=test arion up`    | tagma (integration suite)         | `packages.kallip-integration-tests`, host store |
+| Mode             | Command                              | Services                  | Image source                                    |
+| ---------------- | ------------------------------------ | ------------------------- | ----------------------------------------------- |
+| **dev**          | `arion up -d` (default)              | agora + postgres          | `packages.default`, run via `useHostStore`      |
+| **dev** +`tagma` | `COMPOSE_PROFILES=tagma arion up -d` | agora + postgres + tagma  | `packages.default`, run via `useHostStore`      |
+| **test**         | `KALLIP_ARION_MODE=test arion up`    | tagma (integration suite) | `packages.kallip-integration-tests`, host store |
 
 Production is split into two **standalone compositions** under
 `nix/prod-composes/`, each a flat single-mode file invoked with `arion -f`
@@ -34,18 +35,18 @@ Production is split into two **standalone compositions** under
 
 | Composition | Command                                      | Services         | Image source                                    |
 | ----------- | -------------------------------------------- | ---------------- | ----------------------------------------------- |
-| **tagma**   | `arion -f nix/prod-composes/tagma.nix up -d` | tagma + herald   | `packages.kallip-tagma-image` (pre-built)       |
+| **tagma**   | `arion -f nix/prod-composes/tagma.nix up -d` | tagma            | `packages.kallip-tagma-image` (pre-built)       |
 | **agora**   | `arion -f nix/prod-composes/agora.nix up -d` | agora + postgres | `packages.kallip-agora-image` + `postgres:17.5` |
 
 The two prod halves run on **separate hosts** (the tagma host and the agora
 server) and carry distinct compose project names (`kallipai-tagma` /
 `kallipai-agora`) so their containers/volumes are unambiguous in
-`docker ps` / `docker volume ls`. The herald in the tagma composition reaches
+`docker ps` / `docker volume ls`. The tagma's in-process relay connector reaches
 the agora over its public HTTPS URL.
 
-`dev` is a **two-phase** flow (the herald cannot enroll until a user signs up
-and mints a code); see [development.md](../development.md) for the bring-up
-commands and flow.
+`dev` is a **two-phase** flow (the tagma's relay connector cannot enroll until a
+user signs up and mints a code); see [development.md](../development.md) for the
+bring-up commands and flow.
 
 ## Prerequisites
 
@@ -61,19 +62,20 @@ reads `.env` via `service.env_file`.
 
 ## Dev: `arion up` (default)
 
-The bring-up flow (two-phase, because the herald needs an enrollment code) and
-the iteration loop are documented in [development.md](../development.md). This
-section covers the dev-only mechanics.
+The bring-up flow (two-phase, because the relay connector needs an enrollment
+code) and the iteration loop are documented in
+[development.md](../development.md). This section covers the dev-only mechanics.
 
 Dev skips the image bake for the kallip services. `useHostStore` bind-mounts the
-host `/nix/store` read-only into the tagma/agora/herald containers, so they run
+host `/nix/store` read-only into the tagma/agora containers, so they run
 straight out of the crane workspace (`packages.default`) and a rebuild is picked
 up without an in-compose bake; postgres uses the official `postgres:17.5` image.
 
-The tagma + herald are gated behind the `tagma` profile, so a plain `arion up`
-brings up only the agora + lesche side — the herald's first-boot enroll needs a
-code that cannot exist until a user signs up, and starting it with no code
-crashloops it (see [Herald bootstrap](#herald-bootstrap)).
+The tagma is gated behind the `tagma` profile, so a plain `arion up` brings up
+only the agora + lesche side. The tagma's relay connector enrolls on first boot
+and needs a code that cannot exist until a user signs up — with
+`KALLIP_RELAY_AGORA_URL` set but no code it degrades to local-only (logs an
+error, keeps serving local agents; see [Relay bootstrap](#relay-bootstrap)).
 
 Dev uses a **per-service subdomain** topology with no edge proxy. Browsers
 resolve `*.localhost` to `127.0.0.1` natively, so the web app (`deno task dev`
@@ -85,7 +87,7 @@ is sent to the lesche too — both subdomains share the registrable domain
 `localhost` (same-site under `SameSite=Strict`), and CORS on each service
 allows the `http://localhost:5173` origin with credentials. Dev is validated on
 Chrome/Firefox (Safari has historical `*.localhost`/`Domain=localhost` quirks).
-The herald (a container) reaches the two services via compose DNS
+The tagma container reaches the two services via compose DNS
 (`http://agora:7100`, `http://lesche:7200`), not `*.localhost`.
 
 ## Production
@@ -96,14 +98,14 @@ resolves):
 
 ### tagma — `arion -f nix/prod-composes/tagma.nix up -d`
 
-Brings up the tagma + herald from `packages.kallip-tagma-image`. The herald
-talks to the prod-deployed services over the public internet: the agora
-subdomain (`KALLIP_HERALD_AGORA_URL`, e.g. `https://agora.kallipai.com`) for
-enrollment only — the stored tagma token is reused thereafter — and the lesche
-subdomain (`KALLIP_HERALD_LESCHE_URL`, e.g. `https://lesche.kallipai.com`) for
-its tunnel, envelope POSTs, and key-exchange responses (the per-service
-subdomain topology). The herald authenticates to the co-located tagma with
-`KALLIP_AUTH_TOKEN` (set it equal to the tagma's `KALLIP_OPERATOR_TOKEN`).
+Brings up the tagma (agent host + in-process relay connector) from
+`packages.kallip-tagma-image`. The relay connector talks to the prod-deployed
+services over the public internet: the agora subdomain
+(`KALLIP_RELAY_AGORA_URL`, e.g. `https://agora.kallipai.com`) for enrollment
+only — the stored tagma token is reused thereafter — and the lesche subdomain
+(`KALLIP_RELAY_LESCHE_URL`, e.g. `https://lesche.kallipai.com`) for its tunnel,
+envelope POSTs, and key-exchange responses (the per-service subdomain
+topology).
 
 > **Note**: the data-plane relay (`kallip-lesche`) is a separate service from
 > the agora, reached over its `/internal/*` ControlPlane API guarded by a shared
@@ -139,16 +141,20 @@ arion -f nix/prod-composes/agora.nix up -d
 arion -f nix/prod-composes/agora.nix logs -f
 ```
 
-## Herald bootstrap
+## Relay bootstrap
 
 Applies to both dev and the prod-tagma composition (the only compositions that
-run the herald). The herald enrolls on its **first** boot using
-`KALLIP_HERALD_ENROLLMENT_CODE` (a single-use `sk-enroll-...` minted via the
-agora dashboard after a user signs up). After that it persists the tagma token
-in the `herald-state` volume and reuses it. Leave the code unset on subsequent
-boots. The herald's first-boot `enroll()` is not retried in code, so the service
-is `restart: unless-stopped` — a bad/expired code crashloops (check
-`arion logs herald`).
+run the tagma with a relay configured). The tagma's relay connector enrolls on
+its **first** boot using `KALLIP_RELAY_ENROLLMENT_CODE` (a single-use
+`sk-enroll-...` minted via the agora dashboard after a user signs up). After
+that it persists the tagma token under `KALLIP_DATA_DIR/credentials/` (i.e. inside the
+`data` volume) and reuses it. Leave the code unset on subsequent boots. The
+first-boot `enroll()` is not retried in code: on a missing/unreachable agora it
+logs an error, leaves the relay unset, and keeps serving local agents (the
+lesche message route returns 503). The tagma service is
+`restart: unless-stopped`, so it comes
+back once the code is supplied / the agora is reachable (check
+`arion logs tagma`).
 
 ## Integration tests: `KALLIP_ARION_MODE=test arion up`
 
@@ -201,21 +207,21 @@ needs — on the `tagma` service only, in every composition that runs the tagma
 - `service.capabilities.SYS_ADMIN = true` (→ `cap_add: [SYS_ADMIN]`)
 - `out.service.security_opt = [ "seccomp=unconfined" ]`
 
-The agora, postgres, and herald services need no special privileges.
+The agora and postgres services need no special privileges.
 
 ## Volumes and workspaces
 
 In dev and the prod-tagma composition, tagma data and the agent workspace are
 **docker named volumes** — no host directories are created and the project tree
-stays clean. Shared skills live inside the `data` volume's `skills/` subdir.
-The agora + herald + postgres services add their own volumes in the
-compositions that run them. Test mode mounts none (its scratch tree is an
-ephemeral `/testdata` tmpfs).
+stays clean. Shared skills live inside the `data` volume's `skills/` subdir, and
+the tagma credentials (device key + tagma token) live under
+`/var/lib/kallip/credentials/` inside the `data` volume. The agora + postgres
+services add their own volumes in the compositions that run them. Test mode
+mounts none (its scratch tree is an ephemeral `/testdata` tmpfs).
 
-- `data` named volume → `/var/lib/kallip` — agent state, logs, skills (persistent; survives `arion down`, removed by `arion down -v`).
+- `data` named volume → `/var/lib/kallip` — agent state, logs, skills, and the tagma credentials (persistent; survives `arion down`, removed by `arion down -v`).
 - `workspace` named volume → `/workspace` — the agent workspace root.
 - `pgdata` named volume → `/var/lib/postgresql/data` — the agora's Postgres store (dev + the prod-agora composition).
-- `herald-state` named volume → `/var/lib/kallip/herald` — the herald's device key + tagma token, so it re-enrolls only on the first boot (dev + the prod-tagma composition).
 
 **In dev only**, data and workspace can be bind-mounted to a host path via
 their env vars, when you want the files on the host (e.g. inspect/persist tagma
@@ -262,13 +268,13 @@ Tagma (dev / the prod-tagma composition):
 | `KALLIP_LLM_*_API_KEY`  | conditional | Provider key, e.g. `KALLIP_LLM_DEEPSEEK_API_KEY`.                              |
 | `KALLIP_OPERATOR_TOKEN` | no          | If unset, a random `sk-operator-...` token is generated and printed to stdout. |
 
-Herald (dev / the prod-tagma composition) — the `.env` secrets it reads:
+Relay connector (dev / the prod-tagma composition) — activate + enroll via `.env`:
 
-| Variable                        | Required             | Notes                                                                                                                                                                          |
-| ------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `KALLIP_AUTH_TOKEN`             | **yes** (herald)     | The tagma operator token the herald presents. Set equal to `KALLIP_OPERATOR_TOKEN`. (The tagma injects a per-agent `KALLIP_AUTH_TOKEN` into agent shells that overrides this.) |
-| `KALLIP_HERALD_ENROLLMENT_CODE` | first boot only      | A `sk-enroll-...` minted via the agora dashboard. Remove after the first successful enroll.                                                                                    |
-| `KALLIP_HERALD_AGORA_URL`       | **yes** (prod-tagma) | The prod-agora deploy's public HTTPS URL. (dev hardcodes `http://agora:7100`.)                                                                                                 |
+| Variable                       | Required             | Notes                                                                                                                                                  |
+| ------------------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `KALLIP_RELAY_AGORA_URL`       | **yes** (prod-tagma) | The prod-agora deploy's public HTTPS URL, for enrollment only. Setting any value activates the relay. (Dev hardcodes `http://agora:7100`.)             |
+| `KALLIP_RELAY_LESCHE_URL`      | no                   | The prod-lesche deploy's public HTTPS URL (tunnel + envelopes + KEX). Defaults to the `KALLIP_RELAY_AGORA_URL` origin; set it for the subdomain split. |
+| `KALLIP_RELAY_ENROLLMENT_CODE` | first boot only      | A `sk-enroll-...` minted via the agora dashboard. Remove after the first successful enroll.                                                            |
 
 Agora + postgres (the prod-agora composition) — `.env` only (dev hardcodes
 localhost values):
@@ -310,7 +316,7 @@ docker run --rm \
 ```
 
 (The `kallip-tagma-image` has no default `Cmd` — pass the binary name
-`kallip-tagma` or `kallip-herald` explicitly.)
+`kallip-tagma` explicitly.)
 
 The agora runs from `kallip-agora-image` (behind your own TLS reverse proxy +
 a postgres):

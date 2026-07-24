@@ -81,9 +81,13 @@ pub enum SseEvent {
     ToolResult {
         result: String,
     },
-    Finished {
-        content: String,
-    },
+    /// The agent yielded control (called the `break` tool, or was force-idled by
+    /// the no-progress guardrail). Content-less: a message to the user is now a
+    /// deliberate `kallip lesche send` CLI call observed via
+    /// [`ToolCall`](Self::ToolCall)/ [`ToolResult`](Self::ToolResult), not the
+    /// final assistant message. This event
+    /// is a pure status transition — the task parks, awaiting external input.
+    Idle,
     MaxRoundsExceeded,
     Error {
         message: String,

@@ -40,11 +40,15 @@ in
   # the agora image -- the image is deliberately minimal; operators run this
   # against any reachable agora.
   admin = buildCrate "cargo build --release -p kallip-admin";
-  # The lesche data-plane relay (herald tunnels, app SSE, envelope routing; pure
-  # HTTP, no shell-out deps). Its own image so the agora and lesche services
-  # deploy independently -- see nix/packages/docker-images/lesche.nix.
+  # The lesche data-plane relay (tagma relay tunnels, app SSE, envelope
+  # routing; pure HTTP, no shell-out deps). Its own image so the agora and
+  # lesche services deploy independently -- see
+  # nix/packages/docker-images/lesche.nix.
   lesche = buildCrate "cargo build --release -p kallip-lesche";
-  # The host/"tagma" side: the tagma service (agent server) + herald share most
-  # of their closure, so one build beats two. Excludes agora.
-  tagma = buildCrate "cargo build --release -p kallip-tagma -p kallip-herald";
+  # The host/"tagma" side: the tagma service (agent host + in-process relay
+  # connector) and the `kallip` CLI (whose `lesche send` subcommand the agent
+  # invokes to address the user) share most of their closure, so one build
+  # beats many.
+  # Excludes agora.
+  tagma = buildCrate "cargo build --release -p kallip-tagma -p kallip";
 }

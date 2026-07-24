@@ -81,6 +81,8 @@ fn make_entry_inner(
         prompt: None,
         system_prompt: String::new(),
         max_tool_rounds: 1,
+        max_heartbeat_rounds: 3,
+        max_transient_retries: 3,
         workspace_root: PathBuf::from("/tmp"),
         context_window_tokens: 128_000,
         output_reserve_tokens: 8_192,

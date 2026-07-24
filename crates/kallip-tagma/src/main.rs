@@ -2,8 +2,10 @@ mod args;
 mod auth;
 mod backend;
 mod bridge;
+mod credentials;
 mod error;
 mod messaging;
+mod relay;
 mod routes;
 mod shutdown;
 mod skill_promote;
@@ -121,6 +123,18 @@ async fn main() -> Result<()> {
     routes::restore_agents(&state).await?;
     routes::ensure_root_agent(&state).await?;
 
+    // Optional online-mode relay: enroll + spawn the connector task. Degrades
+    // to local-only on any enrollment failure (logs error, leaves the relay
+    // unset; the lesche message route then returns 503). Local agents keep running.
+    if let Some(agora_url) = args.relay_agora_url.clone() {
+        match activate_relay(&state, &args, agora_url).await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!("relay activation failed, running local-only: {e:#}");
+            }
+        }
+    }
+
     let app = routes::router().with_state(state.clone());
 
     // Apply body size limit first (outermost layer), then tracing.
@@ -143,8 +157,86 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal(shutdown_token))
         .await?;
 
+    // Drain the relay task first (it tears down the tunnel + pump), then the
+    // agents. Both observe the tagma-wide `shutdown` token.
+    shutdown::drain_relay(&state).await;
     shutdown::graceful_agent_shutdown(&state).await;
 
+    Ok(())
+}
+
+/// Build and install the relay connector: resolve the relay state dir, load or
+/// enroll the tagma credential, build the lesche client, construct the
+/// `RelayHandle`, and spawn its long-running tunnel task. On any error the
+/// caller logs and continues local-only.
+async fn activate_relay(state: &Arc<AppState>, args: &args::Args, agora_url: String) -> Result<()> {
+    use kallip_runtime::persistence::data_dir_root;
+    let credentials_dir = data_dir_root()?.join("credentials");
+    std::fs::create_dir_all(&credentials_dir).context("create credentials dir")?;
+    credentials::set_owner_only(&credentials_dir)?;
+
+    let device = credentials::load_or_create_device(&credentials_dir)?;
+
+    // Load stored credentials, or enroll (first run).
+    let (tagma_id, tagma_token) = match credentials::load_tagma(&credentials_dir) {
+        Some((id, token)) => {
+            info!(tagma = %id, "relay: loaded stored tagma credentials");
+            (kallip_agora_common::ids::TagmaId::from(id), token)
+        }
+        None => {
+            let code = args.relay_enrollment_code.as_deref().context(
+                "no stored tagma token; KALLIP_RELAY_ENROLLMENT_CODE required for first run",
+            )?;
+            let (tagma_id, token) = kallip_agora_client::AgoraClient::builder(&agora_url)
+                .build()?
+                .enroll(code, &device)
+                .await?;
+            credentials::save_tagma(&credentials_dir, tagma_id.as_ref(), &token);
+            info!(tagma = %tagma_id, "relay: enrolled with agora");
+            (tagma_id, token)
+        }
+    };
+
+    // Resolve the root agent id (always live: ensure_root_agent ?-propagates).
+    let root_agent = {
+        let registry = state.registry.read().await;
+        let (id, _entry) = registry
+            .root_agent()
+            .context("root agent missing at relay activation")?;
+        id.clone()
+    };
+
+    // Default lesche URL to the agora origin if unset (same-origin only).
+    let lesche_url = match args.relay_lesche_url.clone() {
+        Some(u) => u,
+        None => {
+            let parsed = url::Url::parse(&agora_url).context("parse agora url")?;
+            parsed.origin().ascii_serialization()
+        }
+    };
+
+    let lesche = kallip_lesche_client::LescheClient::builder(&lesche_url, &tagma_token).build()?;
+
+    let message_limits = relay::MessageLimits {
+        max: args
+            .relay_message_burst_max
+            .unwrap_or(relay::DEFAULT_MESSAGE_BURST_MAX),
+        window: std::time::Duration::from_secs(
+            args.relay_message_burst_window_secs
+                .unwrap_or(relay::DEFAULT_MESSAGE_BURST_WINDOW.as_secs()),
+        ),
+    };
+    let handle = relay::RelayHandle::new(
+        lesche,
+        tagma_id,
+        device,
+        root_agent,
+        message_limits,
+        Arc::downgrade(state),
+    );
+    info!(tagma = %handle.tagma_id(), "relay connector active");
+    let join = tokio::spawn(handle.clone().run(state.shutdown.clone()));
+    state.set_relay(handle, join);
     Ok(())
 }
 

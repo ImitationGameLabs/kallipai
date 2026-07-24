@@ -1,23 +1,24 @@
 //! Signed-proof transcripts + public-key verifiers, shared by the agora
-//! (verifier), the herald (signer), and the future app SDK.
+//! (verifier), the responder (signer), and the future app SDK (the initiator).
 //!
 //! Three proofs gate the trust model:
-//! - **Enroll proof** (`POST /v1/tagmata`): the herald proves it holds the
+//! - **Enroll proof** (`POST /v1/tagmata`): the responder proves it holds the
 //!   private half of the device key it is pinning, so a stolen enrollment code
 //!   alone cannot pin an attacker-chosen key.
-//! - **Tunnel proof** (`GET /v1/herald/tunnel`): on every (re)connect the herald
+//! - **Tunnel proof** (`GET /v1/tunnel`): on every (re)connect the responder
 //!   proves continued possession of the pinned key, so a stolen long-lived
 //!   `tagma_token` alone cannot open a tunnel. The proof is timestamp-bounded
 //!   (the agora rejects any timestamp outside `+/- proof_skew_secs`) to defeat
 //!   indefinite replay of a captured proof.
-//! - **Key-exchange proof**: the herald signs its ephemeral X25519 half (bound
-//!   to the tagma and conversation) so the app can attribute the derived key to
-//!   the pinned device identity. The agent backing the conversation is a
-//!   herald-internal concern and is intentionally not part of the transcript.
+//! - **Key-exchange proof**: the responder signs its ephemeral X25519 half
+//!   (bound to the responder id and conversation) so the initiator can attribute
+//!   the derived key to the pinned responder identity. The agent backing the
+//!   conversation is a responder-internal concern and is intentionally not part
+//!   of the transcript.
 //!
 //! Every variable-length field is length-prefixed (4-byte big-endian) so the
 //! wire contract is unambiguous. This crate performs only public-key
-//! `verify_strict`; the signing half lives in the herald/app.
+//! `verify_strict`; the signing half lives in the endpoints.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
@@ -54,25 +55,30 @@ pub fn enroll_transcript(code: &str, device_pubkey: &[u8]) -> Vec<u8> {
 }
 
 /// Transcript signed on every tunnel (re)connect:
-/// `tag || len(tagma_id) || tagma_id || unix_secs(8 be)`.
-pub fn tunnel_transcript(tagma_id: &str, unix_secs: i64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(TUNNEL_TAG.len() + 4 + tagma_id.len() + 8);
+/// `tag || len(responder_id) || responder_id || unix_secs(8 be)`.
+pub fn tunnel_transcript(responder_id: &str, unix_secs: i64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(TUNNEL_TAG.len() + 4 + responder_id.len() + 8);
     out.extend_from_slice(TUNNEL_TAG);
-    framed(&mut out, tagma_id.as_bytes());
+    framed(&mut out, responder_id.as_bytes());
     out.extend_from_slice(&unix_secs.to_be_bytes());
     out
 }
 
 /// Transcript signed in a key-exchange response:
-/// `tag || tagma_id || conv_id || app_eph || herald_eph` (each string
-/// length-prefixed; the 32-byte ephemeral keys are fixed-width).
-pub fn kex_transcript(tagma_id: &str, conv_id: &str, app_eph: &[u8], herald_eph: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(KEX_TAG.len() + 8 + tagma_id.len() + conv_id.len() + 64);
+/// `tag || responder_id || conv_id || initiator_eph || responder_eph` (each
+/// string length-prefixed; the 32-byte ephemeral keys are fixed-width).
+pub fn kex_transcript(
+    responder_id: &str,
+    conv_id: &str,
+    initiator_eph: &[u8],
+    responder_eph: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KEX_TAG.len() + 8 + responder_id.len() + conv_id.len() + 64);
     out.extend_from_slice(KEX_TAG);
-    framed(&mut out, tagma_id.as_bytes());
+    framed(&mut out, responder_id.as_bytes());
     framed(&mut out, conv_id.as_bytes());
-    out.extend_from_slice(app_eph);
-    out.extend_from_slice(herald_eph);
+    out.extend_from_slice(initiator_eph);
+    out.extend_from_slice(responder_eph);
     out
 }
 
@@ -95,25 +101,29 @@ pub fn verify_enroll_proof(device_pubkey: &[u8], code: &str, sig: &[u8]) -> Resu
 /// The caller checks the timestamp skew separately.
 pub fn verify_tunnel_proof(
     device_pubkey: &[u8],
-    tagma_id: &str,
+    responder_id: &str,
     unix_secs: i64,
     sig: &[u8],
 ) -> Result<(), ProofError> {
-    verify(device_pubkey, &tunnel_transcript(tagma_id, unix_secs), sig)
+    verify(
+        device_pubkey,
+        &tunnel_transcript(responder_id, unix_secs),
+        sig,
+    )
 }
 
 /// Verify a key-exchange proof (signature over [`kex_transcript`]).
 pub fn verify_kex_proof(
     device_pubkey: &[u8],
-    tagma_id: &str,
+    responder_id: &str,
     conv_id: &str,
-    app_eph: &[u8],
-    herald_eph: &[u8],
+    initiator_eph: &[u8],
+    responder_eph: &[u8],
     sig: &[u8],
 ) -> Result<(), ProofError> {
     verify(
         device_pubkey,
-        &kex_transcript(tagma_id, conv_id, app_eph, herald_eph),
+        &kex_transcript(responder_id, conv_id, initiator_eph, responder_eph),
         sig,
     )
 }
@@ -123,9 +133,9 @@ mod tests {
     //! Lock the exact transcript byte layout (the wire contract for the app SDK)
     //! and exercise accept/reject of every proof.
     //!
-    //! Signing uses ed25519-dalek's `SigningKey` directly (the herald's
+    //! Signing uses ed25519-dalek's `SigningKey` directly (the device's
     //! `DeviceKey` wraps the same primitive), so these tests validate the full
-    //! sign->verify contract without depending on the herald crate.
+    //! sign->verify contract without depending on kallip-e2ee.
 
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
@@ -161,8 +171,8 @@ mod tests {
 
     #[test]
     fn length_prefixing_prevents_field_ambiguity() {
-        // A tagma_id ending in bytes that look like a length prefix must not be
-        // re-parseable as a shorter tagma_id + timestamp.
+        // A responder_id ending in bytes that look like a length prefix must not
+        // be re-parseable as a shorter responder_id + timestamp.
         let a = tunnel_transcript("AB", 0x4142_4344_4546_4748);
         let b = tunnel_transcript("ABCDEFGH", 0);
         assert_ne!(a, b, "length-prefixing must make transcripts unambiguous");
@@ -203,28 +213,78 @@ mod tests {
     #[test]
     fn kex_proof_matrix() {
         let (signing, public) = keypair();
-        let app_eph = [0xaa; 32];
-        let herald_eph = [0xbb; 32];
+        let initiator_eph = [0xaa; 32];
+        let responder_eph = [0xbb; 32];
         let sig = signing
-            .sign(&kex_transcript("tagma", "conv", &app_eph, &herald_eph))
+            .sign(&kex_transcript(
+                "tagma",
+                "conv",
+                &initiator_eph,
+                &responder_eph,
+            ))
             .to_bytes();
 
         // Happy path.
-        assert!(verify_kex_proof(&public, "tagma", "conv", &app_eph, &herald_eph, &sig).is_ok());
+        assert!(
+            verify_kex_proof(
+                &public,
+                "tagma",
+                "conv",
+                &initiator_eph,
+                &responder_eph,
+                &sig
+            )
+            .is_ok()
+        );
         // Wrong conversation.
-        assert!(verify_kex_proof(&public, "tagma", "other", &app_eph, &herald_eph, &sig).is_err());
-        // Wrong tagma.
-        assert!(verify_kex_proof(&public, "other", "conv", &app_eph, &herald_eph, &sig).is_err());
+        assert!(
+            verify_kex_proof(
+                &public,
+                "tagma",
+                "other",
+                &initiator_eph,
+                &responder_eph,
+                &sig
+            )
+            .is_err()
+        );
+        // Wrong responder.
+        assert!(
+            verify_kex_proof(
+                &public,
+                "other",
+                "conv",
+                &initiator_eph,
+                &responder_eph,
+                &sig
+            )
+            .is_err()
+        );
         // Tampered ephemeral key.
-        let mut bad_eph = app_eph;
+        let mut bad_eph = initiator_eph;
         bad_eph[0] ^= 0xff;
-        assert!(verify_kex_proof(&public, "tagma", "conv", &bad_eph, &herald_eph, &sig).is_err());
-        // Different device key.
+        assert!(
+            verify_kex_proof(&public, "tagma", "conv", &bad_eph, &responder_eph, &sig).is_err()
+        );
+        // Different responder key.
         let other_sig = SigningKey::from_bytes(&[0x99; 32])
-            .sign(&kex_transcript("tagma", "conv", &app_eph, &herald_eph))
+            .sign(&kex_transcript(
+                "tagma",
+                "conv",
+                &initiator_eph,
+                &responder_eph,
+            ))
             .to_bytes();
         assert!(
-            verify_kex_proof(&public, "tagma", "conv", &app_eph, &herald_eph, &other_sig).is_err()
+            verify_kex_proof(
+                &public,
+                "tagma",
+                "conv",
+                &initiator_eph,
+                &responder_eph,
+                &other_sig
+            )
+            .is_err()
         );
     }
 

@@ -60,6 +60,15 @@ pub struct AppState {
     /// one agent holding a dir's write-lock blocks another. The tagma build
     /// enforces locks via landlock on Linux (mandatory); advisory elsewhere.
     pub lock_manager: Arc<kallip_runtime::dirlock::DirLockManager>,
+    /// Optional online-mode relay connector (set once at startup when
+    /// `KALLIP_RELAY_AGORA_URL` is configured), plus its long-running tunnel
+    /// task's `JoinHandle` so graceful shutdown can drain it. `None` in
+    /// pure-local deployments and during the degrade-to-local-only path.
+    ///
+    /// Interior-mutable (not set via `Arc::get_mut`) because the root agent's
+    /// bridge/agent tasks already hold `Arc<AppState>` clones by the time the
+    /// relay is installed. Read under the mutex (e.g. by the lesche message route).
+    pub relay: std::sync::Mutex<Option<(crate::relay::RelayHandle, tokio::task::JoinHandle<()>)>>,
 }
 
 /// Combined index: agent map + token-hash→id lookup + subagent reverse pointers.
@@ -328,6 +337,7 @@ impl AppState {
             ),
             profiles,
             lock_manager: Arc::new(kallip_runtime::dirlock::DirLockManager::new()),
+            relay: std::sync::Mutex::new(None),
         }
     }
 
@@ -356,7 +366,26 @@ impl AppState {
             ),
             profiles,
             lock_manager: Arc::new(kallip_runtime::dirlock::DirLockManager::new()),
+            relay: std::sync::Mutex::new(None),
         }
+    }
+}
+
+impl AppState {
+    /// Install the relay connector + its run-task handle, once, at startup.
+    /// Called from `main` after `ensure_root_agent`. Must not use `Arc::get_mut`
+    /// — the root agent already holds `Arc<AppState>` clones by this point.
+    pub fn set_relay(&self, handle: crate::relay::RelayHandle, join: tokio::task::JoinHandle<()>) {
+        let mut slot = self.relay.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some((handle, join));
+    }
+
+    /// Take the relay connector + its run-task handle out so graceful shutdown
+    /// can drain the task. Returns `None` in local-only deployments. The slot is
+    /// left `None`; the lesche message route is not served during the shutdown drain.
+    pub fn take_relay(&self) -> Option<(crate::relay::RelayHandle, tokio::task::JoinHandle<()>)> {
+        let mut slot = self.relay.lock().unwrap_or_else(|e| e.into_inner());
+        slot.take()
     }
 }
 
@@ -684,6 +713,28 @@ impl AgentRegistry {
             crate::auth::Identity::Agent { id } if id == target_id => Ok(()),
             _ => Err(ApiError::forbidden(
                 "only the agent itself or operator is authorized for this action",
+            )),
+        }
+    }
+
+    /// Caller must be exactly the agent identified by `target_id` — strictly
+    /// self-only, with **no operator override**. Used for actions that speak
+    /// *as* the agent (today: `kallip lesche send`, which delivers a chat
+    /// message the end user attributes to the agent). Letting the operator in
+    /// here would let it forge an agent's voice to the user; an operator
+    /// announcement, if ever needed, is a separate route with its own sender
+    /// identity, not this one. Compare [`Self::require_self_or_operator`], which
+    /// permits the operator for self-write actions that do not impersonate the
+    /// agent.
+    pub fn require_self(
+        &self,
+        identity: &crate::auth::Identity,
+        target_id: &AgentId,
+    ) -> Result<(), ApiError> {
+        match identity {
+            crate::auth::Identity::Agent { id } if id == target_id => Ok(()),
+            _ => Err(ApiError::forbidden(
+                "only the agent itself may send as that agent",
             )),
         }
     }

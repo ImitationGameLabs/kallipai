@@ -3,8 +3,8 @@
 //! Three surfaces, all authenticated with the tagma's `sk-tagma-` bearer:
 //! - [`LescheClient::post_envelope`] — post an agent envelope, retrying on 503.
 //! - [`LescheClient::post_key_exchange_response`] — post a KEX response.
-//! - [`LescheClient::open_tunnel`] — open the long-lived herald tunnel SSE and
-//!   yield parsed [`HeraldInbound`] events.
+//! - [`LescheClient::open_tunnel`] — open the long-lived tunnel SSE and
+//!   yield parsed [`TunnelInbound`] events.
 //!
 //! # Two HTTP clients (load-bearing)
 //!
@@ -21,10 +21,10 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use futures_util::StreamExt;
 use kallip_agora_common::control::KeyExchangeResponse;
-use kallip_agora_common::herald::HeraldInbound;
 use kallip_agora_common::ids::{ConversationId, TagmaId};
 use kallip_agora_common::message::Envelope;
 use kallip_agora_common::proof::tunnel_transcript;
+use kallip_agora_common::tunnel::TunnelInbound;
 use kallip_e2ee::DeviceKey;
 
 struct Inner {
@@ -130,7 +130,7 @@ impl LescheClient {
         Ok(())
     }
 
-    /// Open the herald tunnel SSE and return a stream of parsed inbound events.
+    /// Open the tunnel SSE and return a stream of parsed inbound events.
     ///
     /// The reconnect proof (timestamp + signature over the tunnel transcript) is
     /// generated once per call and validated by the lesche against the tagma's
@@ -142,8 +142,8 @@ impl LescheClient {
         &self,
         device: &DeviceKey,
         tagma_id: &TagmaId,
-    ) -> Result<impl futures_core::Stream<Item = Result<HeraldInbound>> + use<>> {
-        let url = self.url("/v1/herald/tunnel");
+    ) -> Result<impl futures_core::Stream<Item = Result<TunnelInbound>> + use<>> {
+        let url = self.url("/v1/tunnel");
         let unix_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -169,16 +169,16 @@ impl LescheClient {
 
 /// Drive the tunnel SSE: reassemble `\n\n`-framed event blocks from the byte
 /// stream, concatenate their `data:` lines, and yield each as a parsed
-/// [`HeraldInbound`].
+/// [`TunnelInbound`].
 ///
-/// Two error classes, handled differently (mirroring the original herald
-/// reader): a malformed JSON *event* is yielded as an `Err` item and the stream
-/// keeps draining (one bad frame must not tear down the tunnel); a chunk read or
-/// UTF-8 failure is connection-level, so it is yielded and the stream ends,
-/// letting the caller reconnect.
+/// Two error classes, handled differently (mirroring the original reader): a
+/// malformed JSON *event* is yielded as an `Err` item and the stream keeps
+/// draining (one bad frame must not tear down the tunnel); a chunk read or UTF-8
+/// failure is connection-level, so it is yielded and the stream ends, letting
+/// the caller reconnect.
 fn tunnel_stream(
     resp: reqwest::Response,
-) -> impl futures_core::Stream<Item = Result<HeraldInbound>> {
+) -> impl futures_core::Stream<Item = Result<TunnelInbound>> {
     async_stream::stream! {
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
@@ -201,10 +201,10 @@ fn tunnel_stream(
                 let event = buf[..idx].to_string();
                 buf.drain(..=idx + 1);
                 if let Some(data) = parse_data_payload(&event) {
-                    match serde_json::from_str::<HeraldInbound>(&data) {
+                    match serde_json::from_str::<TunnelInbound>(&data) {
                         Ok(inbound) => yield Ok(inbound),
                         // One bad event: report it but keep draining the stream.
-                        Err(e) => yield Err(anyhow::Error::new(e).context("invalid herald inbound JSON")),
+                        Err(e) => yield Err(anyhow::Error::new(e).context("invalid tunnel inbound JSON")),
                     }
                 }
             }
@@ -341,10 +341,10 @@ mod tests {
     #[tokio::test]
     async fn open_tunnel_sends_proof_headers_and_parses_event() {
         let server = MockServer::start().await;
-        // The tunnel body: one SSE event carrying a KeyExchange HeraldInbound.
+        // The tunnel body: one SSE event carrying a KeyExchange TunnelInbound.
         let body = "data: {\"kind\":\"key_exchange\",\"conversation_id\":\"c1\",\"init\":{\"ephemeral_public\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}}\n\n";
         Mock::given(method("GET"))
-            .and(path("/v1/herald/tunnel"))
+            .and(path("/v1/tunnel"))
             .and(header("authorization", "Bearer sk-tagma-test"))
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&server)
@@ -360,12 +360,12 @@ mod tests {
         assert_eq!(collected.len(), 1);
         assert!(collected[0].is_ok(), "parsed one event");
         match collected[0].as_ref().unwrap() {
-            HeraldInbound::KeyExchange {
+            TunnelInbound::KeyExchange {
                 conversation_id, ..
             } => {
                 assert_eq!(conversation_id.as_ref(), "c1");
             }
-            HeraldInbound::Envelope { .. } => panic!("expected KeyExchange"),
+            TunnelInbound::Envelope { .. } => panic!("expected KeyExchange"),
         }
     }
 
@@ -380,7 +380,7 @@ mod tests {
         // A malformed event followed by a valid one.
         let body = format!("data: not-json\n\n{good}");
         Mock::given(method("GET"))
-            .and(path("/v1/herald/tunnel"))
+            .and(path("/v1/tunnel"))
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&server)
             .await;

@@ -3,13 +3,13 @@ use clap::Parser;
 /// CLI arguments for `kallip-lesche`, the data-plane relay.
 ///
 /// The lesche is stateless soft-state (presence, conversations, app streams are
-/// rebuilt on restart from heralds reconnecting + conversations created on
+/// rebuilt on restart from tagmas reconnecting + conversations created on
 /// demand); all durable identity / credential / tagma metadata stays in the
 /// agora, reached through the `/internal/*` ControlPlane API.
 #[derive(Parser)]
 #[command(
     name = "kallip-lesche",
-    about = "kallip data-plane relay: herald tunnels, app events, envelope routing"
+    about = "kallip data-plane relay: tagma tunnels, app events, envelope routing"
 )]
 pub struct Args {
     /// Address to listen on (behind a TLS-terminating reverse proxy).
@@ -23,11 +23,11 @@ pub struct Args {
     /// agora's `KALLIP_AGORA_INTERNAL_TOKEN`.
     #[arg(long, env = "KALLIP_LESCHE_AGORA_TOKEN")]
     pub agora_internal_token: String,
-    /// Acceptable clock skew (both directions) on a herald tunnel reconnect
+    /// Acceptable clock skew (both directions) on a tagma tunnel reconnect
     /// proof's timestamp, in seconds.
     #[arg(long, env = "KALLIP_LESCHE_PROOF_SKEW_SECS", default_value = "60")]
     pub proof_skew_secs: i64,
-    /// How long a synchronous key exchange waits for the herald's response
+    /// How long a synchronous key exchange waits for the tagma's response
     /// before failing with 504, in seconds.
     #[arg(
         long,

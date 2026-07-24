@@ -72,7 +72,7 @@ in
       # network, never via the public edge.
     };
 
-    # Lesche: the data-plane relay (herald tunnels, app SSE, envelope routing,
+    # Lesche: the data-plane relay (tagma relay tunnels, app SSE, envelope routing,
     # KEX, presence). DB-free; it authenticates requests and resolves tagma
     # metadata through the agora's /internal ControlPlane API over the private
     # compose network. Not published -- the operator's edge host-routes

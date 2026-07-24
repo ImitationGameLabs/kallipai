@@ -1,9 +1,9 @@
-//! The herald tunnel: a long-lived SSE the herald holds open to receive
-//! forwarded envelopes. Establishing it (with a fresh signed proof of the pinned
-//! device key) marks the tagma online and pushes `TagmaOnline` to the owner's
-//! app stream; disconnect removes presence (only if this tunnel is still the
-//! live one) and pushes `TagmaOffline`. A second concurrent tunnel for one
-//! tagma is rejected.
+//! The tunnel: a long-lived SSE the tagma holds open to receive forwarded
+//! envelopes. Establishing it (with a fresh signed proof of the pinned device
+//! key) marks the tagma online and pushes `TagmaOnline` to the owner's app
+//! stream; disconnect removes presence (only if this tunnel is still the live
+//! one) and pushes `TagmaOffline`. A second concurrent tunnel for one tagma is
+//! rejected.
 //!
 //! Every (re)connect must present `X-Device-Timestamp` + `X-Device-Proof`: an
 //! Ed25519 signature over the tunnel transcript, verified against the tagma's
@@ -21,8 +21,8 @@ use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use kallip_agora_common::event::AgoraEvent;
-use kallip_agora_common::herald::HeraldInbound;
 use kallip_agora_common::proof::{ProofError, verify_tunnel_proof};
+use kallip_agora_common::tunnel::TunnelInbound;
 use kallip_common::protocol::ApiError;
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
@@ -100,7 +100,7 @@ async fn tunnel(
 
     // Reserve the tunnel slot and announce presence. One live tunnel per tagma.
     let owner = identity.owner_user_id.clone();
-    let (tx, rx) = broadcast::channel::<HeraldInbound>(BROADCAST_CAPACITY);
+    let (tx, rx) = broadcast::channel::<TunnelInbound>(BROADCAST_CAPACITY);
     let id = Arc::new(());
     {
         let mut reg = state.write()?;
@@ -117,23 +117,26 @@ async fn tunnel(
             });
         }
     }
-    tracing::info!(tagma = %tagma_id, "herald tunnel established; tagma online");
+    tracing::info!(tagma = %tagma_id, "tunnel established; tagma online");
 
     let lag_tagma = tagma_id.clone();
-    let stream: BoxEventStream =
-        Box::pin(BroadcastStream::new(rx).filter_map(move |r| match r {
-            Ok(env) => Some(env),
-            Err(BroadcastStreamRecvError::Lagged(n)) => {
-                tracing::warn!(lag = n, tagma = %lag_tagma, "herald tunnel lagged; envelopes dropped");
-                None
-            }
-        }).map(|env| {
-            Ok::<Event, std::convert::Infallible>(
-                Event::default()
-                    .json_data(env)
-                    .expect("envelope serializes"),
-            )
-        }));
+    let stream: BoxEventStream = Box::pin(
+        BroadcastStream::new(rx)
+            .filter_map(move |r| match r {
+                Ok(env) => Some(env),
+                Err(BroadcastStreamRecvError::Lagged(n)) => {
+                    tracing::warn!(lag = n, tagma = %lag_tagma, "tunnel lagged; envelopes dropped");
+                    None
+                }
+            })
+            .map(|env| {
+                Ok::<Event, std::convert::Infallible>(
+                    Event::default()
+                        .json_data(env)
+                        .expect("envelope serializes"),
+                )
+            }),
+    );
 
     // Synchronous cleanup in Drop::drop: remove presence only if this tunnel is
     // still the live one, and announce offline to the owner.
@@ -151,7 +154,7 @@ async fn tunnel(
                     tagma_id: cleanup_tagma.clone(),
                 });
             }
-            tracing::info!(tagma = %cleanup_tagma, "herald tunnel closed; presence removed");
+            tracing::info!(tagma = %cleanup_tagma, "tunnel closed; presence removed");
         }
     });
     Ok(Sse::new(cleaned))

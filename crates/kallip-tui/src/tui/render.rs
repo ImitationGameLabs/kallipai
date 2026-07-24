@@ -1123,9 +1123,7 @@ mod tests {
 
         // A terminal event finalizes the stream: the tail slot is invalidated so
         // the next frame rebuilds it with full highlighting.
-        app.handle_sse_event(SseEvent::Finished {
-            content: "done".into(),
-        });
+        app.handle_sse_event(SseEvent::Idle);
         assert!(
             app.render_cache[0].is_none(),
             "finalize_streaming invalidated the deferred-highlight slot"
@@ -1148,7 +1146,7 @@ mod tests {
         });
         let _ = app.build_chat_text(80);
         assert!(app.render_cache[0].is_some());
-        app.handle_sse_event(SseEvent::Finished { content: "".into() });
+        app.handle_sse_event(SseEvent::Idle);
         assert!(
             app.render_cache[0].is_some(),
             "idle finalize must not invalidate the prior entry"

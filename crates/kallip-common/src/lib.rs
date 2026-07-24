@@ -4,6 +4,7 @@ pub mod authtoken;
 pub mod command;
 pub mod context;
 pub mod idtype;
+pub mod message;
 pub mod policy;
 pub mod promote;
 pub mod protocol;

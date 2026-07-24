@@ -33,6 +33,9 @@ pub enum Commands {
     /// Manage directory write-locks (mutual exclusion across agents)
     #[command(subcommand)]
     Dirlock(DirlockCommand),
+    /// Deliver messages to the user
+    #[command(subcommand)]
+    Lesche(LescheCommand),
 }
 
 /// Ungrouped per-agent ops, flattened into the top-level command list — they
@@ -45,6 +48,27 @@ pub enum AgentCommand {
     Status(IdArgs),
     /// Report this agent's current activity (self-only)
     Activity(ActivityArgs),
+}
+
+/// Deliver messages to the user via the tagma's relay (the lesche data-plane).
+/// Targets the calling agent (resolved from `KALLIP_ID`), like `activity`.
+///
+/// The primitive is "send a message", not "reply": a message may be a response,
+/// a proactive heads-up, or (future) a file. Today only text is supported.
+#[derive(Subcommand)]
+pub enum LescheCommand {
+    /// Send a text message to the user (via the tagma's relay, when attached).
+    Send(SendArgs),
+}
+
+/// Text payload for `kallip lesche send`. The text is a positional argument;
+/// when omitted, the entire stdin is read (multiline — pipe, heredoc, or
+/// `< file` all work).
+#[derive(Args)]
+pub struct SendArgs {
+    /// The message text. If omitted, reads the full text from stdin (multiline).
+    #[arg(allow_hyphen_values = true)]
+    pub text: Option<String>,
 }
 
 #[derive(Args)]

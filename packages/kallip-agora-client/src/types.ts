@@ -16,8 +16,9 @@ export interface CeremonyBeginResponse<T> {
   readonly options: T;
 }
 
-export type RegisterBeginResponse =
-  CeremonyBeginResponse<ServerCreationOptions>;
+export type RegisterBeginResponse = CeremonyBeginResponse<
+  ServerCreationOptions
+>;
 export type LoginBeginResponse = CeremonyBeginResponse<ServerRequestOptions>;
 
 /** Bodies the client sends to register/login `finish`. */
@@ -48,13 +49,13 @@ export interface MeResponse {
 }
 
 /** Lifecycle phase of a tagma. `pending` carries an unredeemed enrollment code;
- * `enrolled` has a herald connected with a pinned device key. Revoked tagmas are
+ * `enrolled` has a tagma connected with a pinned device key. Revoked tagmas are
  * never listed. */
 export type TagmaState = "pending" | "enrolled";
 
 /**
  * `GET /v1/tagmata`. One tagma across its lifecycle. This is the registry
- * view only -- it carries NO liveness signal. Whether a herald tunnel is
+ * view only -- it carries NO liveness signal. Whether a tagma tunnel is
  * currently open arrives via the data plane: the lesche's `GET /v1/me/events`
  * SSE stream emits `tagma_online` / `tagma_offline` events (plus an initial
  * presence snapshot on connect). The pending-phase fields `code_masked` and
@@ -89,7 +90,7 @@ export interface RenameTagmaRequest {
 
 // ---------------------------------------------------------------------------
 // Chat data-plane (E2EE relay). Mirrors the serde DTOs in
-// crates/platform/kallip-agora-common/src/{control,message,event,herald}.rs and
+// crates/platform/kallip-agora-common/src/{control,message,event,tunnel}.rs and
 // crates/platform/kallip-agora/src/routes/{tagmata,conversations}.rs. The agora forwards
 // `Envelope.ciphertext` and the byte fields below without interpreting them;
 // every base64 string is STANDARD base64 (padded, +//), matching bytes.rs.
@@ -129,14 +130,14 @@ export interface Envelope {
   readonly ciphertext: string;
 }
 
-/** App -> herald: one semantic op against the tagma, encrypted in an envelope.
+/** App -> tagma: one semantic op against the tagma, encrypted in an envelope.
  * serde tag = `op`, snake_case. `req_id` correlates the op with its TagmaReply. */
 export type TagmaRequest =
   | {
-      readonly op: "send_message";
-      readonly req_id: number;
-      readonly text: string;
-    }
+    readonly op: "send_message";
+    readonly req_id: number;
+    readonly text: string;
+  }
   | { readonly op: "interrupt"; readonly req_id: number };
 
 /** Why a failover chain ran out. Mirrors `event.rs::FailoverChainExhaustion`
@@ -148,54 +149,54 @@ export type FailoverChainExhaustion =
   | "allCandidatesInfeasible";
 
 /** An event the tagma emits to the app (the agent-free subset of the tagma's
- * event stream, mapped by the herald). serde tag = `type`, snake_case. There is
- * no streaming on this path: `assistant_content` / `finished` are each complete
- * messages. */
+ * event stream, mapped by the tagma relay). serde tag = `type`, snake_case. There is
+ * no streaming on this path: `assistant_content` is a complete message, and
+ * `idle` is a content-less status transition. */
 export type TagmaEvent =
   | { readonly type: "assistant_content"; readonly content: string }
-  | { readonly type: "finished"; readonly content: string }
+  | { readonly type: "idle" }
   | { readonly type: "busy" }
   | { readonly type: "status"; readonly message: string }
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "interrupted" }
   | { readonly type: "cancelled" }
   | {
-      readonly type: "token_budget_exceeded";
-      readonly consumed: number;
-      readonly budget: number;
-    }
+    readonly type: "token_budget_exceeded";
+    readonly consumed: number;
+    readonly budget: number;
+  }
   | { readonly type: "max_rounds_exceeded" }
   | {
-      readonly type: "failover_chain_exhausted";
-      readonly reason: FailoverChainExhaustion;
-      readonly detail: string;
-    };
+    readonly type: "failover_chain_exhausted";
+    readonly reason: FailoverChainExhaustion;
+    readonly detail: string;
+  };
 
-/** Herald -> app: either the result of a correlated op, or an unsolicited event
+/** Responder -> app: either the result of a correlated op, or an unsolicited event
  * from the tagma's event pump. serde tag = `kind`, snake_case. */
 export type TagmaReply =
   | {
-      readonly kind: "message_accepted";
-      readonly req_id: number;
-      readonly queue_depth: number;
-      readonly warning?: string;
-    }
+    readonly kind: "message_accepted";
+    readonly req_id: number;
+    readonly queue_depth: number;
+    readonly warning?: string;
+  }
   | { readonly kind: "interrupted"; readonly req_id: number }
   | {
-      readonly kind: "error";
-      readonly req_id: number;
-      readonly status: number;
-      readonly message: string;
-    }
+    readonly kind: "error";
+    readonly req_id: number;
+    readonly status: number;
+    readonly message: string;
+  }
   | { readonly kind: "event"; readonly event: TagmaEvent };
 
-/** App -> herald (relayed by the agora): start a 1-RTT key exchange, carrying
+/** App -> tagma (relayed by the agora): start a 1-RTT key exchange, carrying
  * the app's ephemeral X25519 public key (standard base64). */
 export interface KeyExchangeInit {
   readonly ephemeral_public: string;
 }
 
-/** Herald -> app: the herald's ephemeral X25519 public key plus an Ed25519
+/** Responder -> app: the tagma's ephemeral X25519 public key plus an Ed25519
  * signature over the kex transcript (standard base64). */
 export interface KeyExchangeResponse {
   readonly ephemeral_public: string;
@@ -211,11 +212,11 @@ export type AgoraEvent =
   | { readonly type: "tagma_online"; readonly tagma_id: string }
   | { readonly type: "tagma_offline"; readonly tagma_id: string }
   | {
-      readonly type: "agent_state";
-      readonly tagma_id: string;
-      readonly agent_id: string;
-      readonly state: string;
-    };
+    readonly type: "agent_state";
+    readonly tagma_id: string;
+    readonly agent_id: string;
+    readonly state: string;
+  };
 
 /**
  * Agora API error. Mirrors `kallip_common::protocol::ApiError`. This is a

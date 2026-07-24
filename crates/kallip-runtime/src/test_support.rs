@@ -61,6 +61,8 @@ pub(crate) fn test_config() -> AgentConfig {
         prompt: None,
         system_prompt: String::new(),
         max_tool_rounds: 1,
+        max_heartbeat_rounds: 3,
+        max_transient_retries: 3,
         workspace_root: PathBuf::from("/tmp"),
         context_window_tokens: 500_000,
         output_reserve_tokens: 8_192,
@@ -124,6 +126,9 @@ pub(crate) async fn ctx_from_source(
         cancel: CancellationToken::new(),
         round_cancel: Arc::new(std::sync::Mutex::new(None)),
         notify: Arc::new(tokio::sync::Notify::new()),
+        retry_notify: Arc::new(tokio::sync::Notify::new()),
+        retry_at: Arc::new(std::sync::Mutex::new(None)),
+        transient_fails: 0,
         token_budget: TokenBudget::new(1_000_000, 0),
     }
 }

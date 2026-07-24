@@ -57,10 +57,7 @@ Deno.test(
 );
 
 Deno.test("sseToDomain keeps single-word fields unchanged", () => {
-  assertEquals(sseToDomain({ type: "finished", content: "done" }), {
-    type: "finished",
-    content: "done",
-  });
+  assertEquals(sseToDomain({ type: "idle" }), { type: "idle" });
   assertEquals(
     sseToDomain({ type: "toolCall", name: "bash_exec", args: "{}" }),
     {

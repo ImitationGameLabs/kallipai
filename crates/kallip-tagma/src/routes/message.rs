@@ -29,6 +29,21 @@ pub async fn send_message(
     Path(id): Path<AgentId>,
     Json(req): Json<MessageRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
+    let response = deliver_message(&state, auth.identity().clone(), &id, &req.text).await?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+/// Deliver `text` to agent `id` as `identity`, attaching the `[From: ...]`
+/// header, enqueuing on the live prompt channel, and reactivating a dead agent.
+/// The HTTP [`send_message`] handler and the in-process relay (which calls this
+/// as [`crate::auth::Identity::Operator`], matching the old connector-over-HTTP
+/// path) share this single seam so reactivation + header formatting cannot drift.
+pub async fn deliver_message(
+    state: &SharedState,
+    identity: crate::auth::Identity,
+    id: &AgentId,
+    text: &str,
+) -> Result<MessageResponse, ApiError> {
     // Derive the sender from the caller's auth identity and render a
     // `[From: ...]` header so the receiver knows who sent the message and how
     // they relate. Computed once and reused across the fast path and the
@@ -36,14 +51,14 @@ pub async fn send_message(
     // between auth resolution and this lock; fall back to a placeholder role.
     let (sender, relation) = {
         let registry = state.registry.read().await;
-        match auth.identity() {
+        match identity {
             crate::auth::Identity::Operator => (MessageSender::Operator, SenderRelation::Operator),
             crate::auth::Identity::Agent { id: sender_id } => {
                 let role = registry
-                    .get(sender_id)
+                    .get(&sender_id)
                     .map(|e| e.identity().config.role.clone())
                     .unwrap_or_else(|| "unknown".to_owned());
-                let relation = registry.relation_of(Some(sender_id), &id);
+                let relation = registry.relation_of(Some(&sender_id), id);
                 (
                     MessageSender::Agent {
                         id: sender_id.clone(),
@@ -55,13 +70,13 @@ pub async fn send_message(
         }
     };
     info!(receiver = %id, sender = ?sender, relation = ?relation, "delivering message");
-    let envelope = format_incoming(&sender, relation, &req.text);
+    let envelope = format_incoming(&sender, relation, text);
 
     // Fast path: agent is alive, try non-blocking send.
     {
         let registry = state.registry.read().await;
         let entry = registry
-            .get(&id)
+            .get(id)
             .ok_or_else(|| ApiError::not_found("agent not found"))?;
         // A faulted agent has no prompt channel and can never run; reject up
         // front rather than falling through to reactivation (which would try to
@@ -76,7 +91,7 @@ pub async fn send_message(
             ))
         })?;
         match try_enqueue(&live.agent.prompt_tx, &envelope) {
-            EnqueueResult::Accepted(response) => return Ok((StatusCode::ACCEPTED, Json(response))),
+            EnqueueResult::Accepted(response) => return Ok(response),
             EnqueueResult::Full => {
                 let cap = live.agent.prompt_tx.max_capacity();
                 return Err(ApiError::unavailable(format!(
@@ -100,7 +115,7 @@ pub async fn send_message(
     let spawn_args = {
         let mut registry = state.registry.write().await;
         let entry = registry
-            .get_mut(&id)
+            .get_mut(id)
             .ok_or_else(|| ApiError::not_found("agent not found"))?;
         // Defensive: the fast path rejects faulted entries, so reaching here
         // means the entry is live. Reject anyway if a future refactor bypasses
@@ -111,7 +126,7 @@ pub async fn send_message(
 
         // Double-check under write lock: another request may have reactivated.
         match try_enqueue(&live.agent.prompt_tx, &envelope) {
-            EnqueueResult::Accepted(response) => return Ok((StatusCode::ACCEPTED, Json(response))),
+            EnqueueResult::Accepted(response) => return Ok(response),
             EnqueueResult::Full => {
                 let cap = live.agent.prompt_tx.max_capacity();
                 return Err(ApiError::unavailable(format!(
@@ -129,7 +144,7 @@ pub async fn send_message(
         // was blocking is freed. The workspace write-lock is re-acquired in
         // Phase 2 below (mirroring `create_agent`), so the reactivated agent
         // can write its own workspace once more.
-        state.lock_manager.release_all(&id);
+        state.lock_manager.release_all(id);
         // Create a fresh channel and install the sender immediately.
         // This "reserves" the reactivation: concurrent requests see an open
         // channel instead of a closed one, so they try_enqueue normally.
@@ -198,26 +213,26 @@ pub async fn send_message(
         },
         None => Vec::new(),
     };
-    let workspace_lock =
-        match try_acquire_workspace_lock(&state, &id, &spawn_args.config, &chain_ids) {
-            Ok(guard) => guard,
-            Err(WorkspaceAcquireFailure::Busy { holder, conflict }) => {
-                close_prompt_channel(&state, &id).await;
-                return Err(ApiError::conflict(format!(
-                    "workspace {} overlaps a write-lock on {} held by agent {}; \
+    let workspace_lock = match try_acquire_workspace_lock(state, id, &spawn_args.config, &chain_ids)
+    {
+        Ok(guard) => guard,
+        Err(WorkspaceAcquireFailure::Busy { holder, conflict }) => {
+            close_prompt_channel(state, id).await;
+            return Err(ApiError::conflict(format!(
+                "workspace {} overlaps a write-lock on {} held by agent {}; \
                  remove it or wait for release before reactivating",
-                    spawn_args.config.workspace_root.display(),
-                    conflict.display(),
-                    holder,
-                )));
-            }
-            Err(WorkspaceAcquireFailure::Other(e)) => {
-                close_prompt_channel(&state, &id).await;
-                return Err(ApiError::internal(format!(
-                    "failed to re-acquire workspace lock: {e}"
-                )));
-            }
-        };
+                spawn_args.config.workspace_root.display(),
+                conflict.display(),
+                holder,
+            )));
+        }
+        Err(WorkspaceAcquireFailure::Other(e)) => {
+            close_prompt_channel(state, id).await;
+            return Err(ApiError::internal(format!(
+                "failed to re-acquire workspace lock: {e}"
+            )));
+        }
+    };
 
     let (agent, new_identity) = match spawn_agent(spawn_args).await {
         Ok((a, new_identity)) => {
@@ -235,7 +250,7 @@ pub async fn send_message(
             // `workspace_lock`'s Drop releases the re-acquired lock as this
             // arm unwinds -- no manual `release_all` needed.
             error!(id = %id, "reactivation failed: {e:#}");
-            close_prompt_channel(&state, &id).await;
+            close_prompt_channel(state, id).await;
             warn!(id = %id, "agent left in dead state; next message will retry reactivation");
             return Err(ApiError::internal(format!("reactivation failed: {e:#}")));
         }
@@ -243,13 +258,13 @@ pub async fn send_message(
 
     {
         let mut registry = state.registry.write().await;
-        let Some(entry) = registry.get_mut(&id) else {
+        let Some(entry) = registry.get_mut(id) else {
             // Agent was removed while we were spawning. Release any locks the
             // fresh incarnation may have acquired (defense-in-depth, mirroring
             // the shutdown drain — the new task should not have run yet, but be
             // explicit).
             abort_agent(&agent, new_identity.agent_dir.as_deref());
-            state.lock_manager.release_all(&id);
+            state.lock_manager.release_all(id);
             return Err(ApiError::not_found("agent removed during reactivation"));
         };
         // Structural write-back: the entry is live (the fast path rejects
@@ -263,7 +278,7 @@ pub async fn send_message(
                 // workspace lock was disarmed on spawn success, so the manager
                 // is the only cleanup path) -- mirrors the entry-removed arm.
                 abort_agent(&agent, new_identity.agent_dir.as_deref());
-                state.lock_manager.release_all(&id);
+                state.lock_manager.release_all(id);
                 return Err(ApiError::conflict(
                     "agent became faulted during reactivation",
                 ));
@@ -275,13 +290,10 @@ pub async fn send_message(
         live.agent = agent;
     }
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(MessageResponse {
-            queue_depth: 0,
-            warning: None,
-        }),
-    ))
+    Ok(MessageResponse {
+        queue_depth: 0,
+        warning: None,
+    })
 }
 
 /// Any authenticated agent may subscribe to any other agent's event stream.

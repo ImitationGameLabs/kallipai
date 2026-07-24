@@ -3,7 +3,7 @@
 //! Only the control plane lives here (auth ceremonies, session/me, admin,
 //! tagmata) plus the service-to-service `/internal/*` surface that the
 //! data-plane relay (`kallip-lesche`, a separate process) consumes. The data
-//! plane (conversations, envelopes, KEX, herald tunnel, app events) lives in
+//! plane (conversations, envelopes, KEX, tagma tunnel, app events) lives in
 //! `kallip-lesche`.
 
 mod admin;

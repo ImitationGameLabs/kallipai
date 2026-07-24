@@ -2,14 +2,14 @@
 //!
 //! Each call is one HTTP POST to the agora's `/internal/*` surface, guarded by
 //! a shared-secret bearer. There is deliberately NO auth cache: the relay's hot
-//! paths are long-lived connections (herald tunnel, app SSE) that authenticate
+//! paths are long-lived connections (tagma tunnel, app SSE) that authenticate
 //! once at open and never re-verify mid-stream, so per-request RPC volume is
 //! low. A short-TTL in-process cache would add unbounded state and a
 //! "freshly-issued token cached as None" hazard for ~zero benefit.
 //!
 //! Revocation latency is therefore bounded by the lifetime of an open
 //! connection, not by a cache TTL: to force re-verification of a revoked tagma
-//! or a disabled user, drop the connection (herald reconnect, app reconnect).
+//! or a disabled user, drop the connection (tagma reconnect, app reconnect).
 //! That is the v1 revocation contract. The proper future step, if per-request
 //! volume ever rises enough to matter, is a JWT migration (local validation,
 //! zero per-request RPC) rather than an in-process TTL map.

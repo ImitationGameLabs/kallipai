@@ -1,9 +1,14 @@
-// E2EE crypto for the online chat data-plane. Mirrors the herald's
-// `crates/kallip-herald/src/e2e.rs` byte-for-byte: X25519 ECDH + HKDF-SHA256 key
-// derivation, ChaCha20-Poly1305 AEAD with a direction-tagged sequence nonce, and
-// Ed25519 verification of the key-exchange transcript. The agora forwards these
-// bytes but never decrypts, so the browser and the herald must agree on every
-// detail below.
+// E2EE crypto for the online chat data-plane. Mirrors the Rust relay's
+// `crates/platform/kallip-e2ee/src/lib.rs` (sign + AEAD half) and
+// `crates/platform/kallip-agora-common/src/proof.rs` (verify half) byte-for-byte:
+// X25519 ECDH + HKDF-SHA256 key derivation, ChaCha20-Poly1305 AEAD with a
+// direction-tagged sequence nonce, and Ed25519 verification of the key-exchange
+// transcript. The agora forwards these bytes but never decrypts, so the browser
+// (initiator) and the tagma relay (responder) must agree on every detail below.
+//
+// Role vocabulary: the browser is the **initiator** (starts the key exchange,
+// holds the per-conversation ephemeral key); the tagma is the **responder**
+// (holds the long-lived Ed25519 device key, signs, derives the session key).
 
 // Explicit `.js` suffixes are required by Deno's module resolution (Node would
 // resolve the bare path). Do not strip them.
@@ -12,21 +17,26 @@ import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
-/** HKDF info string binding the derived key to this protocol/version. */
+/** HKDF info string binding the derived key to this protocol/version.
+ * WIRE-PROTOCOL: must match the Rust relay byte-for-byte. */
 export const HKDF_INFO = new TextEncoder().encode(
-  "kallip-agora-herald-aead-v1",
+  "kallip-agora-aead-v1",
 );
 
 /** Key-exchange transcript domain-separation tag. */
 export const KEX_TAG = "kallip-agora-kex-v1";
 
-/** AEAD nonce direction tag: 0 = app->herald (app encrypts), 1 = herald->app. */
-export const DIR_APP_TO_HERALD = 0 as const;
-export const DIR_HERALD_TO_APP = 1 as const;
+/** AEAD nonce direction tag: 0 = initiator->responder (initiator encrypts),
+ * 1 = responder->initiator.
+ * WIRE-PROTOCOL: must match the Rust relay byte-for-byte. */
+export const DIR_INITIATOR_TO_RESPONDER = 0 as const;
+export const DIR_RESPONDER_TO_INITIATOR = 1 as const;
 
 /** The two legal AEAD direction tags; narrows the AEAD API so a bad direction
  * value is a type error, not a silent nonce mismatch. */
-export type Direction = typeof DIR_APP_TO_HERALD | typeof DIR_HERALD_TO_APP;
+export type Direction =
+  | typeof DIR_INITIATOR_TO_RESPONDER
+  | typeof DIR_RESPONDER_TO_INITIATOR;
 
 const TEXT_ENCODER = new TextEncoder();
 
@@ -43,17 +53,18 @@ function framed(out: number[], bytes: Uint8Array): void {
 }
 
 /**
- * The transcript the herald signs in a key-exchange response:
- * `tag || len(tagma_id) || tagma_id || len(conv_id) || conv_id || app_eph[32] ||
- * herald_eph[32]`. Mirrors proof.rs::kex_transcript (`kallip-agora-kex-v1`).
+ * The transcript the responder signs in a key-exchange response:
+ * `tag || len(tagma_id) || tagma_id || len(conv_id) || conv_id ||
+ * initiator_eph[32] || responder_eph[32]`. Mirrors proof.rs::kex_transcript
+ * (`kallip-agora-kex-v1`).
  */
 export function kexTranscript(
   tagmaId: string,
   convId: string,
-  appEph: Uint8Array,
-  heraldEph: Uint8Array,
+  initiatorEph: Uint8Array,
+  responderEph: Uint8Array,
 ): Uint8Array {
-  if (appEph.length !== 32 || heraldEph.length !== 32) {
+  if (initiatorEph.length !== 32 || responderEph.length !== 32) {
     throw new Error("ephemeral keys must be 32 bytes");
   }
   const out: number[] = [];
@@ -61,26 +72,26 @@ export function kexTranscript(
   for (let i = 0; i < tag.length; i++) out.push(tag[i]!);
   framed(out, TEXT_ENCODER.encode(tagmaId));
   framed(out, TEXT_ENCODER.encode(convId));
-  for (let i = 0; i < 32; i++) out.push(appEph[i]!);
-  for (let i = 0; i < 32; i++) out.push(heraldEph[i]!);
+  for (let i = 0; i < 32; i++) out.push(initiatorEph[i]!);
+  for (let i = 0; i < 32; i++) out.push(responderEph[i]!);
   return new Uint8Array(out);
 }
 
 /**
- * Verify the herald's Ed25519 key-exchange signature against the pinned device
+ * Verify the responder's Ed25519 key-exchange signature against the pinned device
  * key. `@noble/curves`'s `verify` is strict by default (RFC 8032 §5.1.7 cofactor
- * check), matching the herald's `verify_strict`. Returns false (never throws) on
+ * check), matching the Rust `verify_strict`. Returns false (never throws) on
  * a malformed key or signature.
  */
 export function verifyKeyExchange(
   pinnedKey: Uint8Array,
   tagmaId: string,
   convId: string,
-  appEph: Uint8Array,
-  heraldEph: Uint8Array,
+  initiatorEph: Uint8Array,
+  responderEph: Uint8Array,
   signature: Uint8Array,
 ): boolean {
-  const message = kexTranscript(tagmaId, convId, appEph, heraldEph);
+  const message = kexTranscript(tagmaId, convId, initiatorEph, responderEph);
   try {
     return ed25519.verify(signature, message, pinnedKey);
   } catch {
@@ -99,17 +110,17 @@ export function generateEphemeralKeyPair(): {
 }
 
 /**
- * Derive the 32-byte AEAD session key from the app's ephemeral private key and
- * the herald's ephemeral public key via X25519 ECDH + HKDF-SHA256 (no salt; the
- * shared secret is high-entropy). A non-contributory (all-zero) shared secret —
- * a low-order or identity peer public key — is rejected, mirroring the herald's
- * `was_contributory()` check.
+ * Derive the 32-byte AEAD session key from the initiator's ephemeral private key
+ * and the responder's ephemeral public key via X25519 ECDH + HKDF-SHA256 (no
+ * salt; the shared secret is high-entropy). A non-contributory (all-zero) shared
+ * secret — a low-order or identity peer public key — is rejected, mirroring the
+ * Rust relay's `was_contributory()` check.
  */
 export function deriveSessionKey(
-  appPrivateKey: Uint8Array,
-  heraldEph: Uint8Array,
+  initiatorPrivateKey: Uint8Array,
+  responderEph: Uint8Array,
 ): Uint8Array {
-  const shared = x25519.scalarMult(appPrivateKey, heraldEph);
+  const shared = x25519.scalarMult(initiatorPrivateKey, responderEph);
   let allZero = true;
   for (let i = 0; i < shared.length; i++) {
     if (shared[i] !== 0) {

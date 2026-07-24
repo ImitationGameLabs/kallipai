@@ -1,13 +1,13 @@
 // Tests for the online transcript reducer: each TagmaReply / TagmaEvent variant
 // maps to the expected lines + status, assistant content is append-only (no
-// streaming merge), and Finished de-duplicates a trailing identical line.
+// streaming merge), and `idle` is a content-less status transition.
 
 import { assertEquals } from "@std/assert";
 import {
   applyTagmaReply,
+  type ChannelTranscript,
   EMPTY_TRANSCRIPT,
   withUserLine,
-  type ChannelTranscript,
 } from "./transcript.ts";
 import type { TagmaReply } from "@kallipai/kallip-agora-client";
 
@@ -36,15 +36,15 @@ Deno.test("TagmaReply error sets status error + a system line", () => {
     kind: "error",
     req_id: 2,
     status: 502,
-    message: "herald blew up",
+    message: "tagma blew up",
   });
   assertEquals(t.status, "error");
-  assertEquals(t.error, "herald blew up");
-  assertEquals(t.lines, [{ seq: 0, role: "system", text: "herald blew up" }]);
+  assertEquals(t.error, "tagma blew up");
+  assertEquals(t.lines, [{ seq: 0, role: "system", text: "tagma blew up" }]);
 });
 
 Deno.test(
-  "busy -> assistant_content -> finished: append-only, idle at finish",
+  "busy -> assistant_content -> idle: append-only, idle at yield",
   () => {
     let t = applyTagmaReply(EMPTY_TRANSCRIPT, {
       kind: "event",
@@ -56,25 +56,23 @@ Deno.test(
       event: { type: "assistant_content", content: "Hello." },
     });
     assertEquals(t.lines, [{ seq: 0, role: "assistant", text: "Hello." }]);
-    t = applyTagmaReply(t, {
-      kind: "event",
-      event: { type: "finished", content: "Hello." },
-    });
-    // Trailing identical assistant line -> just go idle, no duplicate.
+    t = applyTagmaReply(t, { kind: "event", event: { type: "idle" } });
+    // idle is content-less: just transition, no duplicate line.
     assertEquals(t.status, "idle");
     assertEquals(t.lines, [{ seq: 0, role: "assistant", text: "Hello." }]);
   },
 );
 
-Deno.test("finished with new content appends a distinct line", () => {
+Deno.test("multiple assistant_content lines append distinctly, then idle", () => {
   let t = applyTagmaReply(EMPTY_TRANSCRIPT, {
     kind: "event",
     event: { type: "assistant_content", content: "part one" },
   });
   t = applyTagmaReply(t, {
     kind: "event",
-    event: { type: "finished", content: "part two" },
+    event: { type: "assistant_content", content: "part two" },
   });
+  t = applyTagmaReply(t, { kind: "event", event: { type: "idle" } });
   assertEquals(t.status, "idle");
   assertEquals(
     t.lines.map((l) => l.text),

@@ -14,6 +14,7 @@ import type {
   AgoraEvent,
   AuthFinishResponse,
   CreateConversationResponse,
+  Envelope,
   KeyExchangeInit,
   KeyExchangeResponse,
   LoginBeginResponse,
@@ -25,7 +26,6 @@ import type {
   RenameTagmaRequest,
   TagmaInfo,
   TagmaView,
-  Envelope,
 } from "./types.ts";
 
 /** CSRF marker the agora's `csrf_guard` checks (see `session.rs:21-24`). */
@@ -142,7 +142,7 @@ export class AgoraClient extends BaseClient {
   }
 
   /** `DELETE /v1/tagmata/{id}` — revoke (pending or enrolled). For an enrolled
-   * tagma the agora cuts the herald off on its next request. Returns on 204. */
+   * tagma the agora cuts the tagma off on its next request. Returns on 204. */
   revokeTagma(id: string): Promise<void> {
     return this.json(
       `/v1/tagmata/${encodeURIComponent(id)}`,
@@ -172,7 +172,7 @@ export class LescheClient extends BaseClient {
   }
 
   /** `POST /v1/conversations/{id}/key-exchange/init` — synchronous request/reply
-   * returning the herald's signed key-exchange response inline (200). 503 = the
+   * returning the responder's signed key-exchange response inline (200). 503 = the
    * tagma is offline, 409 = a key exchange is already in flight, 504 = timed
    * out. */
   keyExchangeInit(
@@ -180,7 +180,9 @@ export class LescheClient extends BaseClient {
     init: KeyExchangeInit,
   ): Promise<KeyExchangeResponse> {
     return this.json(
-      `/v1/conversations/${encodeURIComponent(conversationId)}/key-exchange/init`,
+      `/v1/conversations/${
+        encodeURIComponent(conversationId)
+      }/key-exchange/init`,
       "POST",
       init,
     );

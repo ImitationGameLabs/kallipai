@@ -55,6 +55,7 @@ impl AuthorizedToolExecutor {
 
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut defs = self.dispatch.tool_definitions();
+        defs.push(tools::break_definition());
         defs.push(tools::approval_list_definition());
         defs.push(tools::approval_commit_definition());
         defs.push(tools::approval_redeem_definition());

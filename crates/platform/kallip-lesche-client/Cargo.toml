@@ -1,6 +1,6 @@
 [package]
 name = "kallip-lesche-client"
-description = "HTTP client for the kallip-lesche data-plane relay (herald tunnel, envelopes, key exchange)"
+description = "HTTP client for the kallip-lesche data-plane relay (tagma tunnel, envelopes, key exchange)"
 edition = "2024"
 version.workspace = true
 license.workspace = true

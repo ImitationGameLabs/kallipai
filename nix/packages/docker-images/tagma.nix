@@ -13,13 +13,14 @@ let
     binPath
     ;
 in
-# The tagma image: the tagma (agent server) + herald binaries + the tagma's
-# shell toolset (the agent landlock sandbox shells out to
+# The tagma image: the tagma binary (agent host + in-process relay connector),
+# the `kallip` CLI (whose `reply` subcommand the agent invokes to address the
+# user), and the tagma's shell toolset (the agent landlock sandbox shells out to
 # bash/coreutils/ripgrep/git/pgrep/kill), the CA trust store, and aifed. It
 # carries NO tagma-specific baked env (no KALLIP_TAGMA_ADDR/KALLIP_DATA_DIR/...)
-# and NO default Cmd: the compose `tagma` and `herald` services each set their
-# own `command` + `environment`, so the tagma's flavor cannot leak into the
-# herald (or vice versa). Only PATH is baked, since both resolve tools via PATH.
+# and NO default Cmd: the compose `tagma` service sets its own `command` +
+# `environment`. Only PATH is baked, since the tagma + its agent shells resolve
+# tools (and `kallip lesche send`) via PATH.
 pkgs.dockerTools.buildImage {
   name = "kallip-tagma";
   tag = gitVersion;
@@ -32,7 +33,6 @@ pkgs.dockerTools.buildImage {
   ];
   config = {
     Env = [ "PATH=${binPath}" ];
-    # No Cmd: the compose service supplies the command (kallip-tagma or
-    # kallip-herald).
+    # No Cmd: the compose service supplies the command (kallip-tagma).
   };
 }

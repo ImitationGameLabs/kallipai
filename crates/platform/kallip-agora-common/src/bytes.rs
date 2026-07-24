@@ -2,7 +2,7 @@
 //!
 //! These carry AEAD ciphertext and public-key/signature material. The agora
 //! forwards them without interpreting the bytes; length/structure validation is
-//! the job of the crypto layer in the herald/app, not the wire crate.
+//! the job of the crypto layer in the tagma/app, not the wire crate.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;

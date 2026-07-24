@@ -10,45 +10,45 @@ import { failoverChainExhaustionToProse } from "./event.ts";
 export type TranscriptLine =
   | { readonly kind: "user"; readonly text: string }
   | {
-      readonly kind: "assistant";
-      readonly text: string;
-      readonly streaming?: boolean;
-    }
+    readonly kind: "assistant";
+    readonly text: string;
+    readonly streaming?: boolean;
+  }
   | {
-      readonly kind: "reasoning";
-      readonly text: string;
-      readonly streaming?: boolean;
-    }
+    readonly kind: "reasoning";
+    readonly text: string;
+    readonly streaming?: boolean;
+  }
   | { readonly kind: "toolCall"; readonly name: string; readonly args: string }
   | { readonly kind: "toolResult"; readonly result: string }
   | { readonly kind: "status"; readonly text: string }
   | { readonly kind: "error"; readonly text: string }
   | { readonly kind: "system"; readonly text: string }
   | {
-      readonly kind: "retrying";
-      readonly attempt: number;
-      readonly maxAttempts: number;
-      readonly error: string;
-      readonly delaySecs: number;
-    }
+    readonly kind: "retrying";
+    readonly attempt: number;
+    readonly maxAttempts: number;
+    readonly error: string;
+    readonly delaySecs: number;
+  }
   | {
-      readonly kind: "failover";
-      readonly from: string;
-      readonly to: string;
-      readonly reason: string;
-    }
+    readonly kind: "failover";
+    readonly from: string;
+    readonly to: string;
+    readonly reason: string;
+  }
   | {
-      readonly kind: "failoverExhausted";
-      readonly reason: string;
-      readonly detail: string;
-    }
+    readonly kind: "failoverExhausted";
+    readonly reason: string;
+    readonly detail: string;
+  }
   | {
-      readonly kind: "streamDropped";
-      readonly attempt: number;
-      readonly maxAttempts: number;
-      readonly error: string;
-      readonly delaySecs: number;
-    };
+    readonly kind: "streamDropped";
+    readonly attempt: number;
+    readonly maxAttempts: number;
+    readonly error: string;
+    readonly delaySecs: number;
+  };
 
 export interface TranscriptState {
   readonly lines: TranscriptLine[];
@@ -73,6 +73,49 @@ export function clearTranscript(state: TranscriptState): TranscriptState {
   return { ...EMPTY_TRANSCRIPT, agentBusy: state.agentBusy };
 }
 
+// The stable stdout marker the `kallip lesche send` CLI prints. A message to
+// the user is a deliberate `kallip lesche send` call observed via its tool
+// result, not the final assistant message. Recognized in any tool-result string
+// (keyed by the marker, not the tool name) so the call survives shell wrappers
+// and arg-shape variation. Returns the message text on a match, `null` otherwise.
+const MESSAGE_MARKER_KEY = '"kallip.lesche.message"';
+
+export function parseMessageMarker(result: string): string | null {
+  const idx = result.indexOf(MESSAGE_MARKER_KEY);
+  if (idx < 0) return null;
+  // The marker object starts at the `{` preceding the key.
+  const start = result.lastIndexOf("{", idx);
+  if (start < 0) return null;
+  // Walk braces to find the matching close, tolerating nested objects/strings.
+  let depth = 0;
+  let inStr = false;
+  let escape = false;
+  for (let i = start; i < result.length; i++) {
+    const ch = result[i];
+    if (inStr) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        try {
+          const obj = JSON.parse(result.slice(start, i + 1));
+          const text = obj?.["kallip.lesche.message"]?.text;
+          return typeof text === "string" ? text : null;
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 type StreamingLineKind = "assistant" | "reasoning";
 
 // Append a delta to the trailing streaming line of the given kind, creating one
@@ -89,10 +132,9 @@ function appendDelta(
       { ...last, text: last.text + delta, streaming: true },
     ];
   }
-  const line: TranscriptLine =
-    kind === "assistant"
-      ? { kind: "assistant", text: delta, streaming: true }
-      : { kind: "reasoning", text: delta, streaming: true };
+  const line: TranscriptLine = kind === "assistant"
+    ? { kind: "assistant", text: delta, streaming: true }
+    : { kind: "reasoning", text: delta, streaming: true };
   return [...lines, line];
 }
 
@@ -174,7 +216,17 @@ export function applyEvent(
         }),
       };
 
-    case "toolResult":
+    case "toolResult": {
+      // A `kallip lesche send` call announces itself with the stdout marker;
+      // render that as an assistant chat line (the actual message). Any other
+      // result renders as a tool-result line.
+      const message = parseMessageMarker(event.result);
+      if (message !== null) {
+        return {
+          ...state,
+          lines: finalizeAndPush(lines, { kind: "assistant", text: message }),
+        };
+      }
       return {
         ...state,
         lines: finalizeAndPush(lines, {
@@ -182,6 +234,7 @@ export function applyEvent(
           result: event.result,
         }),
       };
+    }
 
     case "status":
       return {
@@ -196,20 +249,18 @@ export function applyEvent(
         lines: [...lines, { kind: "error", text: event.message }],
       };
 
-    case "finished": {
+    case "idle": {
+      // The agent yielded control. Content-less: a message is a deliberate
+      // `kallip lesche send` call (rendered from its tool-result marker), not
+      // the terminal event. Finalize any in-flight streaming line and mark idle.
       const last = lines[lines.length - 1];
-      if (last && last.kind === "assistant" && last.streaming) {
-        // Deltas already accumulated the content; just finalize.
+      if (
+        last && (last.kind === "assistant" || last.kind === "reasoning") &&
+        last.streaming
+      ) {
         return { ...state, agentBusy: false, lines: finalizeStreaming(lines) };
       }
-      return {
-        ...state,
-        agentBusy: false,
-        lines: finalizeAndPush(lines, {
-          kind: "assistant",
-          text: event.content,
-        }),
-      };
+      return { ...state, agentBusy: false, lines };
     }
 
     case "retrying":

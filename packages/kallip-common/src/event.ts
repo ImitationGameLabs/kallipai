@@ -5,8 +5,8 @@ import type { ApprovalStatus } from "./approvals.ts";
 // are camelCase, mirroring the tagma SseEvent serde tag (rename_all =
 // "camelCase"), so the direct client's sseEventToDomain is close to a cast.
 //
-// Over agora only a small subset ever fires (finished, busy, error, and a
-// synthetic idle/status); the streaming/tool/retry/failover variants are
+// Over agora only a small subset ever fires (idle, busy, error, and a
+// synthetic status); the streaming/tool/retry/failover variants are
 // direct-only.
 
 export type FailoverChainExhaustion =
@@ -22,7 +22,7 @@ export type DomainEvent =
   | { readonly type: "assistantContentDelta"; readonly delta: string }
   | { readonly type: "toolCall"; readonly name: string; readonly args: string }
   | { readonly type: "toolResult"; readonly result: string }
-  | { readonly type: "finished"; readonly content: string }
+  | { readonly type: "idle" }
   | { readonly type: "busy" }
   | { readonly type: "status"; readonly message: string }
   | { readonly type: "error"; readonly message: string }
@@ -69,7 +69,7 @@ export type DomainEvent =
 // (port of kallip-tui/src/tui/events.rs is_boundary).
 const BOUNDARY_TYPES: ReadonlySet<DomainEvent["type"]> = new Set([
   "toolCall",
-  "finished",
+  "idle",
   "cancelled",
   "interrupted",
   "error",

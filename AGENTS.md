@@ -20,7 +20,6 @@ The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem 
 │   ├── kallip-tagma/    # HTTP API server hosting multiple agent instances
 │   ├── kallip-run/       # Agent runner for scripting and benchmarking
 │   ├── kallip-client/    # Tagma client library
-│   ├── kallip-herald/   # Host-side relay connector: links a tagma to agora
 │   └── platform/        # Public-internet relay subsystem (servers + wire types + clients + admin + E2E crypto)
 │       ├── kallip-agora/        # Control-plane relay server
 │       ├── kallip-lesche/       # Data-plane relay server

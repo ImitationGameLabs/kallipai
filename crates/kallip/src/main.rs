@@ -17,8 +17,8 @@ fn deny_reason_display(reason: &Option<String>) -> &str {
 }
 
 use args::{
-    AgentCommand, ApprovalCommand, BudgetCommand, Cli, Commands, DirlockCommand, PolicyCommand,
-    SkillCommand, SkillPromoteCommand, SubagentCommand,
+    AgentCommand, ApprovalCommand, BudgetCommand, Cli, Commands, DirlockCommand, LescheCommand,
+    PolicyCommand, SkillCommand, SkillPromoteCommand, SubagentCommand,
 };
 
 /// Read agent ID from KALLIP_ID env var.
@@ -73,6 +73,27 @@ async fn main() -> Result<()> {
                         },
                     )
                     .await?;
+            }
+        },
+        Commands::Lesche(cmd) => match cmd {
+            LescheCommand::Send(args) => {
+                // Self-only: send as the calling agent (KALLIP_ID). The text is
+                // the positional arg, or stdin (multiline) when omitted. Deliver
+                // via the tagma's relay first, then print the stable marker only
+                // on success — so a failed POST (relay down, burst cap, etc.)
+                // does not let local clients render a message that was never
+                // delivered.
+                let id = agent_id_from_env()?;
+                let text = match args.text {
+                    Some(t) => t,
+                    None => {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                        buf
+                    }
+                };
+                client.post_message_delivery(&id, &text).await?;
+                println!("{}", kallip_common::message::marker_line(&text));
             }
         },
         Commands::Subagent(cmd) => {

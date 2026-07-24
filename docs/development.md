@@ -17,9 +17,11 @@ images, the production split, and the integration-test mode, see
 
 ## Bring-up
 
-The stack comes up in two phases because the herald cannot enroll until a real
-user signs up in the web UI and mints an enrollment code -- starting the herald
-with no code crashloops it.
+The stack comes up in two phases because the tagma's relay connector cannot
+enroll with the agora until a real user signs up in the web UI and mints an
+enrollment code -- starting it with `KALLIP_RELAY_AGORA_URL` set but no code
+degrades the tagma to local-only (it logs an error and keeps serving local
+agents; the lesche message route returns 503).
 
 ### Phase 1 -- agora side
 
@@ -40,16 +42,18 @@ allows `http://localhost:5173`. The web app reads the two origins from
 (`http://agora.localhost:7100` / `http://lesche.localhost:7200`) if you prefer
 host-separated origins (the `Domain=localhost` cookie is shared either way). Open
 the web app at `:5173`, sign up, and mint a `sk-enroll-...` enrollment code.
-Paste it into `.env` as `KALLIP_HERALD_ENROLLMENT_CODE`, and set
-`KALLIP_AUTH_TOKEN` to the tagma's operator token.
+Paste it into `.env` as `KALLIP_RELAY_ENROLLMENT_CODE` (and set
+`KALLIP_RELAY_AGORA_URL` / `KALLIP_RELAY_LESCHE_URL` to the dev subdomains), and
+set `KALLIP_AUTH_TOKEN` to the tagma's operator token.
 
 ### Phase 2 -- tagma side
 
-The tagma service + herald are gated behind the `tagma` profile. arion's CLI has no
-`--profile` flag; activate it via the docker-compose env var:
+The tagma service (agent host + in-process relay connector) is gated behind the
+`tagma` profile. arion's CLI has no `--profile` flag; activate it via the
+docker-compose env var:
 
 ```sh
-COMPOSE_PROFILES=tagma arion up -d   # adds the tagma service + herald; the herald enrolls
+COMPOSE_PROFILES=tagma arion up -d   # adds the tagma service; it enrolls its relay
 ```
 
 ## Iterating
@@ -63,8 +67,7 @@ arion up -d                           # agora side
 COMPOSE_PROFILES=tagma arion up -d    # tagma side, if you want it up
 ```
 
-Tail logs with `arion logs -f <service>` (`agora`, `tagma`, `herald`,
-`postgres`).
+Tail logs with `arion logs -f <service>` (`agora`, `tagma`, `postgres`).
 
 ## Optional bind overrides
 

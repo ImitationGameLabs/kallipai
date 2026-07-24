@@ -159,8 +159,34 @@ enum AcquireResult {
 enum ToolExecResult {
     /// The assembled turn messages (the assistant tool-call message + tool results).
     Messages(Vec<ChatMessage>),
+    /// The agent called `break`. Carries the turn messages accumulated from the
+    /// calls *before* `break` (the assistant tool-call message + any prior results)
+    /// so the caller records them — `break` must not drop real work done earlier in
+    /// the round. `break`'s own acknowledgement is emitted as an event only, never
+    /// a persisted tool result.
+    Break(Vec<ChatMessage>),
     /// Cancelled mid-execution; partial results are dropped (mirrors the original early-return).
     Cancelled,
+}
+
+/// Outcome of one invocation of the round loop. The outer state machine in
+/// `agent_task::run_and_report` decides what to do next — this only reports what
+/// happened in this round.
+#[derive(Debug)]
+pub(crate) enum RoundOutcome {
+    /// The agent called `break`. The turn (including any tool calls preceding
+    /// `break`) is already recorded inside the loop; the task should park as Idle.
+    Break,
+    /// A bare assistant response — content but no tool calls and no `break`. This
+    /// no longer terminates the run: the outer loop injects a heartbeat prompt and
+    /// re-loops, or force-idles via the no-progress guardrail. The assistant turn
+    /// is **not** recorded yet; the outer loop records it (then the heartbeat) only
+    /// when it decides to continue.
+    BareAssistant { content: String },
+    /// Park now and surface this outcome (chain exhausted / cancelled / budget / max rounds).
+    /// Distinct from `Break`: these are non-deliberate park reasons, each surfacing its
+    /// own event so the operator keeps the signal.
+    Park(AgentOutcome),
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +199,7 @@ pub(crate) async fn run_agent_rounds(
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
     round_cancel: &CancellationToken,
-) -> Result<AgentOutcome> {
+) -> Result<RoundOutcome> {
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
 
     for round in 0..ctx.config.max_tool_rounds {
@@ -182,10 +208,10 @@ pub(crate) async fn run_agent_rounds(
         // -- Pre-call token budget check (shared tree-wide counter) --
         let snap = ctx.token_budget.snapshot();
         if snap.is_exceeded() {
-            return Ok(AgentOutcome::TokenBudgetExceeded {
+            return Ok(RoundOutcome::Park(AgentOutcome::TokenBudgetExceeded {
                 consumed: snap.consumed,
                 budget: snap.budget,
-            });
+            }));
         }
 
         // -- Approval notification injection --
@@ -215,13 +241,13 @@ pub(crate) async fn run_agent_rounds(
                         0
                     }
                 },
-                _ = round_cancel.cancelled() => return Ok(AgentOutcome::Cancelled),
+                _ = round_cancel.cancelled() => return Ok(RoundOutcome::Park(AgentOutcome::Cancelled)),
             }
         };
 
         match enforce_pre_call_budget(ctx, prompt_tokens, round_cancel).await {
             BudgetAction::Recompose => continue,
-            BudgetAction::Return(outcome) => return Ok(outcome),
+            BudgetAction::Return(outcome) => return Ok(RoundOutcome::Park(outcome)),
             BudgetAction::Proceed => {}
         }
 
@@ -229,38 +255,49 @@ pub(crate) async fn run_agent_rounds(
         // transport drops in-place) --
         let consumed = match acquire_stream(ctx, messages, tools, tx, round_cancel, round).await {
             AcquireResult::Consumed(c) => c,
-            AcquireResult::Outcome(outcome) => return Ok(outcome),
+            AcquireResult::Outcome(outcome) => return Ok(RoundOutcome::Park(outcome)),
             AcquireResult::Error(e) => return Err(e),
         };
 
         match enforce_post_stream_budget(ctx, consumed.usage.as_ref()).await {
             BudgetAction::Recompose => continue,
-            BudgetAction::Return(outcome) => return Ok(outcome),
+            BudgetAction::Return(outcome) => return Ok(RoundOutcome::Park(outcome)),
             BudgetAction::Proceed => {}
         }
 
-        // -- Finished? --
+        // -- Bare assistant response (no tool calls): the agent did not call `break`,
+        //    so this does NOT terminate the run. Surface the content to the outer
+        //    loop, which injects a heartbeat prompt and re-loops (or force-idles via
+        //    the no-progress guardrail). An empty response is malformed and errors. --
         if consumed.tool_calls.is_empty() {
-            if !consumed.content.is_empty() {
-                return Ok(AgentOutcome::Finished {
-                    content: consumed.content,
-                });
+            if consumed.content.is_empty() {
+                bail!("assistant returned neither tool calls nor final content");
             }
-            bail!("assistant returned neither tool calls nor final content");
+            return Ok(RoundOutcome::BareAssistant {
+                content: consumed.content,
+            });
         }
 
         // -- Tool execution --
-        let turn_messages =
-            match execute_tool_calls(ctx, tx, consumed, tool_timeout, round_cancel).await {
-                ToolExecResult::Cancelled => return Ok(AgentOutcome::Cancelled),
-                ToolExecResult::Messages(msgs) => msgs,
-            };
+        let turn_messages = match execute_tool_calls(ctx, tx, consumed, tool_timeout, round_cancel)
+            .await
+        {
+            ToolExecResult::Cancelled => return Ok(RoundOutcome::Park(AgentOutcome::Cancelled)),
+            ToolExecResult::Break(msgs) => {
+                // `break` parks as Idle, but the calls preceding it in this round
+                // still produced real work — record it before yielding.
+                ctx.record_turn(msgs).await;
+                ctx.persist().await;
+                return Ok(RoundOutcome::Break);
+            }
+            ToolExecResult::Messages(msgs) => msgs,
+        };
 
         ctx.record_turn(turn_messages).await;
         ctx.persist().await;
     }
 
-    Ok(AgentOutcome::MaxRoundsExceeded)
+    Ok(RoundOutcome::Park(AgentOutcome::MaxRoundsExceeded))
 }
 
 /// Consume queued interjections (prompts/commands) and record them as a single turn.
@@ -666,6 +703,23 @@ async fn execute_tool_calls(
     let mut skip: Option<(String, String)> = None;
 
     for call in consumed.tool_calls {
+        // `break` is a control-flow primitive, not a normal tool: hoist its check
+        // above the skip branch so it always terminates the round — even when an
+        // earlier call armed `skip` (e.g. a deferred bash_exec). Calls issued
+        // before `break` already ran and their results are in `turn_messages`;
+        // calls after `break` never reach here. `break` produces no persisted
+        // tool result, only an emitted ack for SSE symmetry.
+        if call.function.name == "break" {
+            tx.send(AgentEvent::ToolCall {
+                name: "break".into(),
+                args: call.function.arguments.clone(),
+            })
+            .await
+            .ok();
+            tx.send(AgentEvent::ToolResult(break_ack())).await.ok();
+            return ToolExecResult::Break(turn_messages);
+        }
+
         let result = if let Some((prior_name, reason)) = &skip {
             // Earlier call did not cleanly succeed: do not execute this one.
             skipped_tool_result(&call.function.name, prior_name, reason)
@@ -748,6 +802,12 @@ async fn execute_tool_calls(
     }
 
     ToolExecResult::Messages(turn_messages)
+}
+
+/// Synthetic acknowledgement emitted (as an event only) when the agent calls
+/// `break`. Never persisted as a tool result — the round is over.
+fn break_ack() -> String {
+    r#"{"ok":true,"tool_name":"break","result":{"parked":true}}"#.to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +966,7 @@ mod tests {
         matchers::{method, path},
     };
 
-    use crate::agent_task::RoundToken;
+    use crate::agent_task::{RoundToken, run_and_report};
     use crate::profile::BackendSource;
     use crate::test_support::{MapSource, ctx_from_source, make_ctx, profile};
 
@@ -1137,7 +1197,7 @@ mod tests {
             .await;
     }
 
-    /// Mount a 200 streaming response carrying `content` (no tool calls → `Finished`).
+    /// Mount a 200 streaming response carrying `content` (no tool calls → `BareAssistant`).
     async fn mount_ok_stream(server: &MockServer, content: &str) {
         let body = format!(
             "data: {{\"id\":\"s\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\ndata: [DONE]\n"
@@ -1153,13 +1213,28 @@ mod tests {
             .await;
     }
 
+    /// Mount a 200 streaming response that emits a single `break` tool call (no
+    /// content). Drives the round loop's `break` short-circuit path.
+    async fn mount_break_stream(server: &MockServer) {
+        let body = "data: {\"id\":\"s\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"break\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n";
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(body.to_owned().into_bytes(), "text/event-stream"),
+            )
+            .mount(server)
+            .await;
+    }
+
     /// A `MapSource` mapping endpoint id → wiremock backend.
     fn wiremock_source(map: HashMap<String, Arc<dyn LlmBackend>>) -> Arc<dyn BackendSource> {
         Arc::new(MapSource(map))
     }
 
     /// Drive one `run_agent_rounds`: seed a user turn, mint a round token, run, collect events.
-    async fn run_rounds(ctx: &mut AgentContext) -> (Result<AgentOutcome>, Vec<AgentEvent>) {
+    async fn run_rounds(ctx: &mut AgentContext) -> (Result<RoundOutcome>, Vec<AgentEvent>) {
         ctx.record_turn(vec![ChatMessage::user(
             "respond with the single word: done",
         )])
@@ -1278,7 +1353,7 @@ mod tests {
         let primary = MockServer::start().await;
         let backup = MockServer::start().await;
         mount_status(&primary, 500).await; // exhausts retries → Failover
-        mount_ok_stream(&backup, "done").await; // 200 → Finished
+        mount_ok_stream(&backup, "done").await; // 200 → BareAssistant
 
         let mut map = HashMap::new();
         map.insert("ep1".into(), wiremock_backend(&primary.uri()));
@@ -1289,8 +1364,8 @@ mod tests {
         let (outcome, events) = run_rounds(&mut ctx).await;
 
         let content = match outcome {
-            Ok(AgentOutcome::Finished { content }) => content,
-            _ => panic!("expected Finished"),
+            Ok(RoundOutcome::BareAssistant { content }) => content,
+            _ => panic!("expected BareAssistant"),
         };
         assert_eq!(content, "done");
         assert_eq!(
@@ -1303,6 +1378,64 @@ mod tests {
             vec![("p1".to_string(), "p2".to_string())],
             "exactly one failover p1→p2"
         );
+    }
+
+    #[tokio::test]
+    async fn break_tool_call_yields_break_outcome() {
+        // A `break` tool call short-circuits the round: the outcome is `Break`
+        // (not BareAssistant, not a continued tool round). This pins the
+        // R-M2/R-M3 contract — break terminates the round via the hoisted
+        // name-check in execute_tool_calls.
+        let server = MockServer::start().await;
+        mount_break_stream(&server).await;
+
+        let mut map = HashMap::new();
+        map.insert("ep1".into(), wiremock_backend(&server.uri()));
+        let profiles = vec![profile("p1", "ep1", 500_000)];
+        let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+
+        let (outcome, _events) = run_rounds(&mut ctx).await;
+        assert!(
+            matches!(outcome, Ok(RoundOutcome::Break)),
+            "expected RoundOutcome::Break, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_assistant_heartbeats_then_force_idles_at_cap() {
+        // Consecutive bare-assistant rounds (no `break`, no tool calls) must not
+        // terminate the run: the outer loop records the turn, injects a heartbeat
+        // prompt, and re-loops; it force-idles only once `no_progress` exceeds
+        // `max_heartbeat_rounds`. This pins the post-rewrite semantics.
+        let server = MockServer::start().await;
+        mount_ok_stream(&server, "musing").await; // bare assistant on every call
+        let mut map = HashMap::new();
+        map.insert("ep1".into(), wiremock_backend(&server.uri()));
+        let profiles = vec![profile("p1", "ep1", 500_000)];
+        let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+        ctx.config.max_heartbeat_rounds = 2; // force-idle once no_progress reaches 3
+        ctx.record_turn(vec![ChatMessage::user("say something")])
+            .await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+        let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx).await;
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        assert!(!terminated, "a heartbeat storm must not terminate the task");
+        let busy = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Busy))
+            .count();
+        let idle = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Idle))
+            .count();
+        assert_eq!(busy, 3, "three bare rounds ran before the cap tripped");
+        assert_eq!(idle, 1, "force-idle emits exactly one Idle");
     }
 
     #[tokio::test]
@@ -1338,11 +1471,13 @@ mod tests {
         let (outcome, events) = run_rounds(&mut ctx).await;
 
         match outcome {
-            Ok(AgentOutcome::FailoverChainExhausted {
+            Ok(RoundOutcome::Park(AgentOutcome::FailoverChainExhausted {
                 reason: FailoverChainExhaustion::NoFailoverConfigured,
                 ..
-            }) => {}
-            other => panic!("expected FailoverChainExhausted(NoFailoverConfigured), got {other:?}"),
+            })) => {}
+            other => {
+                panic!("expected Park(FailoverChainExhausted(NoFailoverConfigured)), got {other:?}")
+            }
         }
         assert_eq!(ctx.failover.profile_idx(), 0);
         assert!(
@@ -1363,8 +1498,8 @@ mod tests {
         let (outcome, events) = run_rounds(&mut ctx).await;
 
         let content = match outcome {
-            Ok(AgentOutcome::Finished { content }) => content,
-            other => panic!("expected Finished, got {other:?}"),
+            Ok(RoundOutcome::BareAssistant { content }) => content,
+            other => panic!("expected BareAssistant, got {other:?}"),
         };
         // The retried full content — not the abandoned "PARTIAL".
         assert_eq!(content, "done");
@@ -1388,11 +1523,13 @@ mod tests {
         let (outcome, events) = run_rounds(&mut ctx).await;
 
         match outcome {
-            Ok(AgentOutcome::FailoverChainExhausted {
+            Ok(RoundOutcome::Park(AgentOutcome::FailoverChainExhausted {
                 reason: FailoverChainExhaustion::NoFailoverConfigured,
                 ..
-            }) => {}
-            other => panic!("expected FailoverChainExhausted(NoFailoverConfigured), got {other:?}"),
+            })) => {}
+            other => {
+                panic!("expected Park(FailoverChainExhausted(NoFailoverConfigured)), got {other:?}")
+            }
         }
         // Two in-budget mid-stream retries ((1,2), (2,2)), then the third drop voids the partial
         // once more before failover — its `attempt` exceeds `max_attempts`, signalling the blown

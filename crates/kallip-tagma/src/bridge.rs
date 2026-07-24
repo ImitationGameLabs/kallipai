@@ -80,7 +80,7 @@ pub async fn bridge_task(
                                 warn!(id = %agent_id, "failover chain exhausted: {detail}");
                                 mark_idle(&state, &activity);
                             }
-                            AgentEvent::Finished(_)
+                            AgentEvent::Idle
                             | AgentEvent::MaxRoundsExceeded
                             | AgentEvent::Cancelled
                             | AgentEvent::Interrupted
@@ -153,7 +153,7 @@ fn convert_event(event: AgentEvent) -> Option<SseEvent> {
         AgentEvent::ReasoningDelta { delta } => Some(SseEvent::ReasoningDelta { delta }),
         AgentEvent::ToolCall { name, args } => Some(SseEvent::ToolCall { name, args }),
         AgentEvent::ToolResult(result) => Some(SseEvent::ToolResult { result }),
-        AgentEvent::Finished(content) => Some(SseEvent::Finished { content }),
+        AgentEvent::Idle => Some(SseEvent::Idle),
         AgentEvent::MaxRoundsExceeded => Some(SseEvent::MaxRoundsExceeded),
         AgentEvent::Error(msg) => Some(SseEvent::Error { message: msg }),
         AgentEvent::Status(msg) => Some(SseEvent::Status { message: msg }),
@@ -347,10 +347,7 @@ mod tests {
         ));
 
         // Drive a terminal event, then close the channel so the bridge exits.
-        agent_tx
-            .send(AgentEvent::Finished("done".into()))
-            .await
-            .ok();
+        agent_tx.send(AgentEvent::Idle).await.ok();
         drop(agent_tx);
         let exited = tokio::time::timeout(Duration::from_millis(200), bridge)
             .await
@@ -455,18 +452,15 @@ mod tests {
         ));
 
         agent_tx.send(AgentEvent::Interrupted).await.unwrap();
-        agent_tx
-            .send(AgentEvent::Finished("done".into()))
-            .await
-            .unwrap();
+        agent_tx.send(AgentEvent::Idle).await.unwrap();
 
         // Drain forwarded events until both are seen (the bridge looped past Interrupted).
         let mut saw_interrupted = false;
-        let mut saw_finished = false;
-        while !(saw_interrupted && saw_finished) {
+        let mut saw_idle = false;
+        while !(saw_interrupted && saw_idle) {
             match tokio::time::timeout(Duration::from_millis(200), events_rx.recv()).await {
                 Ok(Ok(SseEvent::Interrupted)) => saw_interrupted = true,
-                Ok(Ok(SseEvent::Finished { .. })) => saw_finished = true,
+                Ok(Ok(SseEvent::Idle)) => saw_idle = true,
                 Ok(Ok(_)) => {}
                 Ok(Err(_)) => break, // channel closed
                 Err(_) => break,     // timeout
@@ -474,8 +468,8 @@ mod tests {
         }
         assert!(saw_interrupted, "Interrupted was not forwarded");
         assert!(
-            saw_finished,
-            "Finished was not forwarded — bridge did not keep looping after Interrupted"
+            saw_idle,
+            "Idle was not forwarded — bridge did not keep looping after Interrupted"
         );
         assert_eq!(state.load(Ordering::Relaxed), AgentState::IDLE);
         drop(agent_tx);

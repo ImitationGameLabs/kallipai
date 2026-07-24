@@ -86,7 +86,7 @@
             in
             {
               default = workspace;
-              # Per-crate binaries (agora; lesche; tagma+herald). Cross-platform:
+              # Per-crate binaries (agora; lesche; tagma). Cross-platform:
               # plain Rust builds. Their docker images are Linux-only (see
               # kallip-agora-image / kallip-lesche-image / kallip-tagma-image below).
               kallip-agora = builds.agora;

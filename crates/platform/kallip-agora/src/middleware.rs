@@ -17,7 +17,7 @@ use crate::session::{CSRF_HEADER, CSRF_HEADER_VALUE, read_session_cookie};
 use crate::state::SharedState;
 
 /// CSRF guard. Stateless-changing requests (GET/HEAD/OPTIONS) and any request
-/// that carries no session cookie (machine / bearer — herald, enroll, admin
+/// that carries no session cookie (machine / bearer — tagma, enroll, admin
 /// token) pass through untouched. A cookie-bearing mutating request MUST also
 /// carry `X-Requested-With: kallip`; browsers block custom headers on
 /// cross-origin fetches without preflight, so a CSRF-forged form/fetch cannot

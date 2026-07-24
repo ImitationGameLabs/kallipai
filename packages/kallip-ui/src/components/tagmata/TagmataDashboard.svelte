@@ -1,7 +1,7 @@
 <script lang="ts">
   // The tagmata dashboard: a centered column listing the owner's tagmata across
   // their lifecycle -- pending tagmas (an enrollment code, not yet connected)
-  // first, then enrolled tagmas (a herald connected). One section, one load
+  // first, then enrolled tagmas (a tagma connected). One section, one load
   // phase (pending + enrolled are a single agora list now). The "New Tagma"
   // primary action is appended after the list (1 tagma -> 2nd, 2 -> 3rd...); on
   // the first-run empty state it promotes to a centered hero. Prop-driven; the
@@ -34,14 +34,14 @@
     busy?: boolean;
     onMint?: () => void;
     // Revoke works for both pending and enrolled (the agora cuts an enrolled
-    // herald off on its next request). Awaitable so the enrolled dialog can hold
+    // tagma off on its next request). Awaitable so the enrolled dialog can hold
     // open through the round-trip.
     onRevoke?: (id: string) => Promise<void> | void;
     onCopyCode?: (id: string, secret: string) => void;
     // Rename works for both pending and enrolled. Awaitable: the card holds the
     // inline edit open through the round-trip.
     onRename?: (id: string, label: string) => Promise<void> | void;
-    // Open an E2EE channel to an enrolled, online tagma's herald. Awaitable:
+    // Open an E2EE channel to an enrolled, online tagma. Awaitable:
     // the card shows a spinner through the key exchange.
     onOpenChannel?: (id: string) => Promise<string> | void;
     // Id of the code whose secret was just copied (drives the "Copied" label).

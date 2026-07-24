@@ -4,7 +4,7 @@
 //! session cookie plus a custom `X-Requested-With` header the browser cannot
 //! synthesize cross-origin without a preflight). Stateless-changing requests
 //! (GET/HEAD/OPTIONS) and any request that carries no session cookie (the
-//! bearer-authenticated machine routes this relay serves -- herald tunnel,
+//! bearer-authenticated machine routes this relay serves -- tagma tunnel,
 //! envelope POST, key-exchange) pass through untouched. A cookie-bearing
 //! mutating request MUST also carry `X-Requested-With: kallip`. A request
 //! carrying BOTH a session cookie and a valid bearer is exempt: the bearer

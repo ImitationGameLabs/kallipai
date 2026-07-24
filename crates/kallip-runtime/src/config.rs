@@ -24,6 +24,15 @@ const DEFAULT_SYSTEM_PROMPT: &str = concat!(
 /// bounded by token consumption. This constant only serves as a last-resort
 /// guard against a degenerate "tool calls with no progress" loop.
 const DEFAULT_MAX_TOOL_ROUNDS: usize = usize::MAX;
+/// Default cap on consecutive heartbeat rounds (bare-assistant re-loops) before
+/// the harness force-idles the agent. Bounds "self-monologue" token burn; the
+/// tagma-wide token budget remains the overall hard ceiling. Three is a firm
+/// nudge: one accidental bare response, a reminder, then a stop.
+const DEFAULT_MAX_HEARTBEAT_ROUNDS: u32 = 3;
+/// Default cap on consecutive transient (failover-chain-exhausted) parks that get
+/// a timed retry. After this (or the `retry_timeout` wall clock), the agent hard-
+/// parks and surfaces to the operator instead of re-hammering a downed provider.
+const DEFAULT_MAX_TRANSIENT_RETRIES: u32 = 3;
 const DEFAULT_SUMMARY_MAX_TOKENS: u32 = 1_200;
 const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 8_192;
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
@@ -188,6 +197,15 @@ pub struct AgentConfig {
     pub prompt: Option<String>,
     pub system_prompt: String,
     pub max_tool_rounds: usize,
+    /// Max consecutive heartbeat rounds (bare-assistant re-loops) before the
+    /// harness force-idles. The sole bound on bare-assistant storms —
+    /// `max_tool_rounds` does not bound heartbeats (each heartbeat re-enters the
+    /// round loop fresh). Default 3 (`KALLIP_MAX_HEARTBEAT_ROUNDS`).
+    pub max_heartbeat_rounds: u32,
+    /// Max consecutive transient (failover-chain-exhausted) parks that earn a
+    /// timed retry before the agent hard-parks and surfaces. Default 3
+    /// (`KALLIP_MAX_TRANSIENT_RETRIES`).
+    pub max_transient_retries: u32,
     pub workspace_root: PathBuf,
     pub context_window_tokens: usize,
     pub output_reserve_tokens: usize,
@@ -235,6 +253,8 @@ impl Default for AgentConfig {
             prompt: None,
             system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
             max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
+            max_heartbeat_rounds: DEFAULT_MAX_HEARTBEAT_ROUNDS,
+            max_transient_retries: DEFAULT_MAX_TRANSIENT_RETRIES,
             workspace_root: PathBuf::new(),
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             output_reserve_tokens: DEFAULT_OUTPUT_RESERVE_TOKENS,
@@ -266,6 +286,10 @@ impl AgentConfig {
             std::env::var("KALLIP_SYSTEM_PROMPT").unwrap_or_else(|_| DEFAULT_SYSTEM_PROMPT.into());
         let max_tool_rounds =
             parse_env::<usize>("KALLIP_MAX_TOOL_ROUNDS")?.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS);
+        let max_heartbeat_rounds = parse_env::<u32>("KALLIP_MAX_HEARTBEAT_ROUNDS")?
+            .unwrap_or(DEFAULT_MAX_HEARTBEAT_ROUNDS);
+        let max_transient_retries = parse_env::<u32>("KALLIP_MAX_TRANSIENT_RETRIES")?
+            .unwrap_or(DEFAULT_MAX_TRANSIENT_RETRIES);
         let workspace_root = workspace_root
             .or_else(|| {
                 std::env::var("KALLIP_WORKSPACE_ROOT")
@@ -315,6 +339,12 @@ impl AgentConfig {
         if max_tool_rounds == 0 {
             bail!("KALLIP_MAX_TOOL_ROUNDS must be greater than zero");
         }
+        if max_heartbeat_rounds == 0 {
+            bail!("KALLIP_MAX_HEARTBEAT_ROUNDS must be greater than zero");
+        }
+        if max_transient_retries == 0 {
+            bail!("KALLIP_MAX_TRANSIENT_RETRIES must be greater than zero");
+        }
         if !(0.0..1.0).contains(&pinned_budget_ratio) {
             bail!("KALLIP_PINNED_BUDGET_RATIO must be between 0.0 and 1.0 (exclusive)");
         }
@@ -352,6 +382,8 @@ impl AgentConfig {
             prompt,
             system_prompt,
             max_tool_rounds,
+            max_heartbeat_rounds,
+            max_transient_retries,
             workspace_root: workspace_root.clone(),
             context_window_tokens,
             output_reserve_tokens,
@@ -612,6 +644,8 @@ mod tests {
             prompt: None,
             system_prompt: String::new(),
             max_tool_rounds: usize::MAX,
+            max_heartbeat_rounds: DEFAULT_MAX_HEARTBEAT_ROUNDS,
+            max_transient_retries: DEFAULT_MAX_TRANSIENT_RETRIES,
             workspace_root: PathBuf::from("/tmp"),
             context_window_tokens: 100_000,
             output_reserve_tokens: 8_192,
@@ -650,6 +684,8 @@ mod tests {
             prompt: None,
             system_prompt: String::new(),
             max_tool_rounds: usize::MAX,
+            max_heartbeat_rounds: DEFAULT_MAX_HEARTBEAT_ROUNDS,
+            max_transient_retries: DEFAULT_MAX_TRANSIENT_RETRIES,
             workspace_root: PathBuf::from("/tmp"),
             context_window_tokens: 100_000,
             output_reserve_tokens: 8_192,
@@ -688,6 +724,8 @@ mod tests {
             prompt: None,
             system_prompt: String::new(),
             max_tool_rounds: usize::MAX,
+            max_heartbeat_rounds: DEFAULT_MAX_HEARTBEAT_ROUNDS,
+            max_transient_retries: DEFAULT_MAX_TRANSIENT_RETRIES,
             workspace_root: PathBuf::from("/tmp"),
             context_window_tokens: 100_000,
             output_reserve_tokens: 8_192,

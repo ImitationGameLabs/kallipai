@@ -33,7 +33,7 @@
     // Awaitable: the dialog stays open through the round-trip and surfaces a
     // failure inline rather than closing + dropping the error.
     onRevoke?: (id: string) => Promise<void> | void;
-    // Open an E2EE channel to this tagma's herald (online + enrolled only).
+    // Open an E2EE channel to this tagma (online + enrolled only).
     // Awaitable: the button shows a spinner through the key exchange and
     // surfaces a failure inline. The handler owns navigation to the chat view.
     onOpenChannel?: (id: string) => Promise<string> | void;

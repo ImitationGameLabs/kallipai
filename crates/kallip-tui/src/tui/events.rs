@@ -23,7 +23,7 @@ impl App {
         let is_boundary = matches!(
             event,
             SseEvent::ToolCall { .. }
-                | SseEvent::Finished { .. }
+                | SseEvent::Idle
                 | SseEvent::Cancelled
                 | SseEvent::Interrupted
                 | SseEvent::Error { .. }
@@ -58,17 +58,23 @@ impl App {
                 self.auto_scroll = true;
             }
             SseEvent::ToolResult { result } => {
-                self.chat_lines.push(ChatLine::ToolResult(result));
+                // A `kallip lesche send` CLI call announces itself with a stable
+                // stdout marker ({"kallip.lesche.message":{"text":...}}); render
+                // that as the actual assistant chat line. Any other tool result
+                // renders verbatim.
+                if let Some(message) = parse_message_marker(&result) {
+                    self.chat_lines.push(ChatLine::Assistant(message));
+                } else {
+                    self.chat_lines.push(ChatLine::ToolResult(result));
+                }
                 self.auto_scroll = true;
             }
-            SseEvent::Finished { content } => {
-                // Finalize before clearing the flags: while a flag is still set,
-                // the trailing entry is the in-flight partial whose cache slot
-                // holds the deferred (unhighlighted) render and must be rebuilt.
+            SseEvent::Idle => {
+                // The agent yielded control. Content-less: a message to the user
+                // is a deliberate `kallip lesche send` call (rendered from its
+                // ToolResult marker above), not the final assistant message.
+                // Finalize any in-flight streaming text and mark the agent idle.
                 self.finalize_streaming();
-                if !self.streaming_content && !content.is_empty() {
-                    self.chat_lines.push(ChatLine::Assistant(content));
-                }
                 self.streaming_content = false;
                 self.streaming_reasoning = false;
                 self.agent_busy = false;
@@ -191,8 +197,8 @@ impl App {
                 }
                 // Clear the streaming flags: the pushed `StreamDropped` line is what makes the
                 // next delta start a fresh entry (`append_streaming_delta` no longer tail-matches
-                // `Assistant`/`Reasoning`); these flags only gate `Finished`'s dedup gate, but
-                // clearing them keeps the "is a turn streaming?" state truthful after a void.
+                // `Assistant`/`Reasoning`); these flags only gate `Idle`'s finalize, but clearing
+                // them keeps the "is a turn streaming?" state truthful after a void.
                 //
                 // `finalize_streaming()` is intentionally NOT called here, unlike the other
                 // flag-clearing arms: the tail-walk above already invalidated every slot it
@@ -218,6 +224,61 @@ impl App {
 
         is_delta
     }
+}
+
+/// The stable stdout marker the `kallip lesche send` CLI prints, recognized in
+/// any `ToolResult` so the TUI renders the agent's deliberate message as an
+/// assistant chat line. Keyed by the marker prefix (not the tool name) so the
+/// call survives shell wrappers, aliases, and arg-shape variation. Returns the
+/// message text on a match, `None` for any other tool result.
+///
+/// The CLI always emits exactly one JSON line of this shape as its stdout; the
+/// envelope wrapper around it (the executor's `{"ok":true,"tool_name":...,
+/// "result":<output>}`) is parsed best-effort — the marker is matched anywhere in
+/// the result string so a wrapper that embeds the CLI's stdout verbatim still
+/// recognizes it.
+fn parse_message_marker(result: &str) -> Option<String> {
+    // The marker object embeds the key "kallip.lesche.message"; find it anywhere
+    // in the result, then parse the enclosing {...} object (robust to the
+    // executor's wrapper and to shell wrappers around the CLI call).
+    const MARKER: &str = r#""kallip.lesche.message""#;
+    let idx = result.find(MARKER)?;
+    let start = result[..idx].rfind('{')?;
+    // Walk braces from `start` to the matching close, tolerating nested
+    // objects and strings, then parse and extract `.["kallip.lesche.message"].text`.
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escape = false;
+    for (i, ch) in result[start..].char_indices() {
+        if in_str {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_str = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let obj: serde_json::Value =
+                        serde_json::from_str(&result[start..start + i + 1]).ok()?;
+                    return obj
+                        .get("kallip.lesche.message")
+                        .and_then(|m| m.get("text"))
+                        .and_then(|t| t.as_str())
+                        .map(String::from);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -251,10 +312,8 @@ mod tests {
     }
 
     #[test]
-    fn finished_is_a_boundary() {
-        assert_boundary_flushes(SseEvent::Finished {
-            content: "done".into(),
-        });
+    fn idle_is_a_boundary() {
+        assert_boundary_flushes(SseEvent::Idle);
     }
 
     #[test]

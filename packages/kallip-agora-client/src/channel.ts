@@ -8,16 +8,16 @@
 // semantics; that is the UI store's job (see kallip-ui's channel transcript
 // reducer).
 //
-// Mirrors the herald's `crates/kallip-herald/src/e2e.rs` + the lesche's
-// `crates/platform/kallip-lesche/src/routes/conversations.rs`.
+// Mirrors the Rust relay's `crates/platform/kallip-e2ee/src/lib.rs` + the
+// lesche's `crates/platform/kallip-lesche/src/routes/conversations.rs`.
 
 import { type AgoraClient, type LescheClient } from "./http.ts";
 import {
   aeadDecrypt,
   aeadEncrypt,
   deriveSessionKey,
-  DIR_APP_TO_HERALD,
-  DIR_HERALD_TO_APP,
+  DIR_INITIATOR_TO_RESPONDER,
+  DIR_RESPONDER_TO_INITIATOR,
   generateEphemeralKeyPair,
   verifyKeyExchange,
 } from "./crypto.ts";
@@ -33,7 +33,7 @@ import type {
 /**
  * Open an E2EE channel to `tagmaId` for `userId`: fetch the pinned key from the
  * agora, resolve the conversation + run the 1-RTT key exchange on the lesche,
- * verify the herald's signature against the agora-pinned key, and derive the
+ * verify the responder's signature against the agora-pinned key, and derive the
  * session key. The channel keeps the lesche client (only `postEnvelope` is
  * needed after open). Throws if the tagma is offline / not owned / the signature
  * fails to verify.
@@ -48,19 +48,27 @@ export async function openRelayChannel(
   const pinnedKey = decodeB64(info.pinned_public_key);
   const { conversation_id: convId } = await lesche.createConversation(tagmaId);
 
-  const { privateKey: appPriv, publicKey: appEph } = generateEphemeralKeyPair();
-  const init: KeyExchangeInit = { ephemeral_public: encodeB64(appEph) };
+  const { privateKey: initiatorPriv, publicKey: initiatorEph } =
+    generateEphemeralKeyPair();
+  const init: KeyExchangeInit = { ephemeral_public: encodeB64(initiatorEph) };
   const resp = await lesche.keyExchangeInit(convId, init);
-  const heraldEph = decodeB64(resp.ephemeral_public);
+  const responderEph = decodeB64(resp.ephemeral_public);
   const signature = decodeB64(resp.signature);
   if (
-    !verifyKeyExchange(pinnedKey, tagmaId, convId, appEph, heraldEph, signature)
+    !verifyKeyExchange(
+      pinnedKey,
+      tagmaId,
+      convId,
+      initiatorEph,
+      responderEph,
+      signature,
+    )
   ) {
     throw new Error(
       "key-exchange signature failed to verify against the pinned key",
     );
   }
-  const sessionKey = deriveSessionKey(appPriv, heraldEph);
+  const sessionKey = deriveSessionKey(initiatorPriv, responderEph);
 
   return new RelayChannel(lesche, convId, tagmaId, userId, sessionKey);
 }
@@ -91,7 +99,7 @@ export class RelayChannel {
 
   /** Decrypt an inbound envelope and append its `TagmaReply` to the queue.
    * Called by the SSE demux. A ciphertext that fails to decrypt (wrong key,
-   * tampering, wrong nonce) is dropped: the herald is the only legitimate
+   * tampering, wrong nonce) is dropped: the responder is the only legitimate
    * sender under `dir=1`, so a failure means corruption or a replay under the
    * wrong sequence, neither of which the app can recover. */
   enqueue(envelope: Envelope): void {
@@ -110,7 +118,7 @@ export class RelayChannel {
         const ciphertext = decodeB64(envelope.ciphertext);
         const plaintext = aeadDecrypt(
           this.sessionKey,
-          DIR_HERALD_TO_APP,
+          DIR_RESPONDER_TO_INITIATOR,
           envelope.sequence_n,
           ciphertext,
         );
@@ -138,7 +146,7 @@ export class RelayChannel {
   }
 
   /** Send a user message. Resolves once the lesche accepts the envelope (202);
-   * the herald's `message_accepted`/`error` reply flows through `replies`. */
+   * the tagma's `message_accepted`/`error` reply flows through `replies`. */
   send(text: string): Promise<void> {
     return this.sendRequest({
       op: "send_message",
@@ -165,7 +173,7 @@ export class RelayChannel {
     const sequence_n = this.sendSeq++;
     const ciphertext = aeadEncrypt(
       this.sessionKey,
-      DIR_APP_TO_HERALD,
+      DIR_INITIATOR_TO_RESPONDER,
       sequence_n,
       plaintext,
     );

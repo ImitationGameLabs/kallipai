@@ -83,7 +83,17 @@ The core loop (`run_agent_rounds` in `kallip-runtime`) iterates up to
 5. Stream the LLM request with tool definitions.
 6. If the response has tool calls, execute each through the policy gate.
 7. Push the assistant message and tool results as a new turn.
-8. Repeat until no tool calls remain (finished) or max rounds exceeded.
+8. Repeat until the agent calls the `break` tool.
+
+A bare assistant response (no tool calls, no `break`) does **not** end the run:
+the harness records it, injects a heartbeat prompt, and re-enters the loop. Only
+`break` parks the agent (emitting an `Idle` event) — so the agent decides when to
+yield. A no-progress guardrail (`max_heartbeat_rounds`, default 3) force-idles
+after a bounded storm of bare responses. `FailoverChainExhausted` parks with a
+timed retry (bounded by `max_transient_retries`); permanent errors, budget
+exhaustion, and max-rounds park and surface to the operator. Messages to the
+user are decoupled from all of this: the agent addresses the user by running the
+`kallip lesche send` CLI through `bash_exec`, not by ending a turn.
 
 ## Policy and approval
 
@@ -171,13 +181,13 @@ deliberate supervisor decision stays meaningful under every preset.
 
 ## Crate responsibilities
 
-| Crate            | Role                                                                                          |
-| ---------------- | --------------------------------------------------------------------------------------------- |
-| `kallip-common`  | Shared types, slash command definitions, and protocol types. Used by all crates.              |
-| `kallip-runtime` | Agent runtime: agent loop, context management, tool dispatch, policy engine. No network code. |
-| `kallip-shell`   | Provider-neutral shell/session tools for LLM applications. Used by the runtime.               |
-| `kallip-tagma`   | HTTP server hosting agent instances. Uses `kallip-runtime` internally.                        |
-| `kallip`         | Headless CLI for agents. Thin wrapper over `kallip-client`. No agent logic.                   |
-| `kallip-tui`     | Interactive terminal UI. Same client library, adds ratatui rendering.                         |
-| `kallip-run`     | Agent runner for scripting and automation. Streams progress to stderr, result to stdout.      |
-| `kallip-client`  | Async HTTP client for the tagma API. Used by CLI, TUI, and runner.                            |
+| Crate            | Role                                                                                                                                                                                       |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `kallip-common`  | Shared types, slash command definitions, and protocol types. Used by all crates.                                                                                                           |
+| `kallip-runtime` | Agent runtime: agent loop, context management, tool dispatch, policy engine. No network code.                                                                                              |
+| `kallip-shell`   | Provider-neutral shell/session tools for LLM applications. Used by the runtime.                                                                                                            |
+| `kallip-tagma`   | HTTP server hosting agent instances. Uses `kallip-runtime` internally.                                                                                                                     |
+| `kallip`         | Headless CLI for agents. Thin wrapper over `kallip-client`. No agent logic.                                                                                                                |
+| `kallip-tui`     | Interactive terminal UI. Same client library, adds ratatui rendering.                                                                                                                      |
+| `kallip-run`     | Agent runner for scripting and automation. Streams progress to stderr; emits a semantic exit code (and an optional JSON object on stdout with `--json`). Does not print the agent's user-facing messages. |
+| `kallip-client`  | Async HTTP client for the tagma API. Used by CLI, TUI, and runner.                                                                                                                         |

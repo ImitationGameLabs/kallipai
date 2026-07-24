@@ -2,7 +2,7 @@
 //!
 //! The agora sees only the [`Envelope`] (routing metadata + opaque ciphertext).
 //! The [`TagmaRequest`] / [`TagmaReply`] inside is the E2E payload shared
-//! between app and herald; the agora never decrypts it.
+//! between app and tagma; the agora never decrypts it.
 
 use crate::bytes::Ciphertext;
 use crate::event::TagmaEvent;
@@ -34,8 +34,8 @@ pub enum Participant {
     Agent { tagma_id: TagmaId },
 }
 
-/// App -> herald: one semantic operation against the tagma, encrypted inside an
-/// envelope. The herald owns the agent(s) that realize the op; the app never
+/// App -> tagma: one semantic operation against the tagma, encrypted inside an
+/// envelope. The tagma owns the agent(s) that realize the op; the app never
 /// names an agent. `req_id` correlates the op with its [`TagmaReply`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -46,7 +46,7 @@ pub enum TagmaRequest {
     Interrupt { req_id: u64 },
 }
 
-/// Herald -> app: either the result of a correlated op, or an unsolicited
+/// Tagma -> app: either the result of a correlated op, or an unsolicited
 /// event from the tagma's event pump. The agora never decrypts this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -61,14 +61,14 @@ pub enum TagmaReply {
     /// `Interrupt` was delivered.
     Interrupted { req_id: u64 },
     /// An op failed. `status` mirrors the tagma/agora HTTP status where one
-    /// applies (502 for an internal herald panic).
+    /// applies (502 for an internal tagma panic).
     Error {
         req_id: u64,
         status: u16,
         message: String,
     },
     /// An unsolicited tagma event. Has no `req_id`: it is produced by the
-    /// herald's event pump, not in reply to any single op.
+    /// tagma's event pump, not in reply to any single op.
     Event { event: TagmaEvent },
 }
 

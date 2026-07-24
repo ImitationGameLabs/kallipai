@@ -51,6 +51,20 @@ speculatively — a skill you don't use occupies a pin slot. Loaded notes stay
 in context across turns; unpin them when the task moves on. The
 `skill-management` notes cover creating and promoting your own; the
 `context-management` notes cover what to keep and what to evict.
+
+# Two control primitives you cannot do without
+
+You run continuously: a plain response with no tool call does **not** end your
+turn — the harness re-prompts you. To end the current run and park until the
+next input arrives, call the `break` tool (call it last in a round). To address
+the user — deliver a message they will see — run
+`kallip lesche send "<text>"` (or pipe to its stdin) via `bash_exec`; the
+`kallip` command is auto-allowed and needs no approval. So a finished turn that
+delivers a message and yields is: `kallip lesche send`, then `break`. You may
+also do work and `break` without sending anything, or send a message and keep
+working — the two are independent. Sending is not only for responses: use it
+whenever you need to reach the user (a proactive heads-up, a partial result, a
+question), not just to answer.
 "#;
 
 /// Returns the shared skill directory.
@@ -208,8 +222,11 @@ mod tests {
         // The compiled meta-skill (appended to every agent's prompt at spawn,
         // routes/agent.rs) is the ONLY guaranteed surface an agent sees before
         // it discovers anything. It is kept deliberately thin: a universal
-        // judgment stance plus a discovery pointer. It teaches no operations
-        // -- those live in the skill files this test also pins down below.
+        // judgment stance, a discovery pointer, and the two control primitives
+        // the agent cannot behave correctly without (it would loop forever
+        // without `break`, and could never address the user without
+        // `kallip lesche send`). All other operations live in the skill files this
+        // test also pins down below.
         //
         // Assert against the RAW constant so frontmatter regressions are
         // caught (meta_skill_content() strips frontmatter).
@@ -226,6 +243,16 @@ mod tests {
         assert!(
             DEFAULT_META_SKILL.contains("weigh") || DEFAULT_META_SKILL.contains("judgment"),
             "floor must establish the judgment stance: {DEFAULT_META_SKILL}"
+        );
+
+        // --- Positive: the two non-negotiable control primitives ---
+        assert!(
+            DEFAULT_META_SKILL.contains("break"),
+            "floor must name the `break` yield primitive: {DEFAULT_META_SKILL}"
+        );
+        assert!(
+            DEFAULT_META_SKILL.contains("kallip lesche send"),
+            "floor must name the `kallip lesche send` user-address primitive: {DEFAULT_META_SKILL}"
         );
 
         // --- Negative: deliberately dropped, paired with the positives above

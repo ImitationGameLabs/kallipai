@@ -1,4 +1,4 @@
-//! `tagma_tokens` entity — a herald's long-lived bearer (`sk-tagma-...`), keyed
+//! `tagma_tokens` entity — a tagma's long-lived bearer (`sk-tagma-...`), keyed
 //! by its SHA-256 hash. Revocation lives on the owning `tagmata` row
 //! (`tagmata.revoked_at`), the single source of truth, rather than here.
 

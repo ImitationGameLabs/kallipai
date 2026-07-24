@@ -14,7 +14,7 @@
 //! A `User` principal is reached ONLY via the `kallip_session` cookie; a
 //! `Tagma` principal is reached ONLY via an `sk-tagma-` bearer; the admin ONLY
 //! via an `sk-admin-` bearer. So the deputy threats a multi-origin design would
-//! face — a session cookie authenticating a herald route, a tagma bearer
+//! face — a session cookie authenticating a tagma route, a tagma bearer
 //! reaching `/v1/me` — are already impossible by construction: `require_tagma`
 //! never sees a `User` and `require_user` never sees a `Tagma`.
 
@@ -28,7 +28,7 @@ pub enum Principal {
     Admin,
     /// A signed-in user. Reached via the session cookie.
     User(UserId),
-    /// A herald's long-lived tagma token. Always via bearer.
+    /// A tagma's long-lived tagma token. Always via bearer.
     Tagma(TagmaId),
 }
 
@@ -49,9 +49,9 @@ pub fn require_user(principal: &Principal) -> Result<&UserId, ApiError> {
     }
 }
 
-/// The authenticated tagma (for the herald routes). Reached via tagma bearer
+/// The authenticated tagma (for the tagma routes). Reached via tagma bearer
 /// only; a cookie-sourced principal never resolves to `Tagma`, so this is the
-/// deputy guard for herald routes.
+/// deputy guard for tagma routes.
 pub fn require_tagma(principal: &Principal) -> Result<&TagmaId, ApiError> {
     match principal {
         Principal::Tagma(id) => Ok(id),

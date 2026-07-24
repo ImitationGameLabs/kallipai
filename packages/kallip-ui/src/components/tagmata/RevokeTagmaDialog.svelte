@@ -1,6 +1,6 @@
 <script lang="ts">
   // A confirm modal for revoking an enrolled tagma. Revocation is one-click
-  // irreversible AND functionally immediate (the agora cuts the herald off on
+  // irreversible AND functionally immediate (the agora cuts the tagma off on
   // its next request), so it gets a second-chance confirmation the pending-code
   // revoke does not. Plain controlled overlay (the trigger is a Menu item, not a
   // button, so a programmatic `open` is simpler than wiring Dialog.Trigger).

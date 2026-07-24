@@ -494,8 +494,7 @@ pub async fn restore_agents(state: &SharedState) -> anyhow::Result<()> {
 
     // Singleton invariant: the tagma owns exactly one root. More than one root
     // on disk is a legacy/corrupt state the tagma refuses to paper over; the
-    // operator must remove the extras. The common case (one root, e.g. a herald
-    // tagma) is unaffected.
+    // operator must remove the extras. The common case (one root) is unaffected.
     if roots.len() > 1 {
         anyhow::bail!(
             "multiple root agents on disk ({count}); the tagma owns exactly one \

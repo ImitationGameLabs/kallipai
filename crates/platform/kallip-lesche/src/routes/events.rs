@@ -2,7 +2,7 @@
 //! user carries envelope deliveries for all of their conversations plus presence
 //! transitions (`TagmaOnline`/`TagmaOffline`). On open, the stream emits the
 //! current presence snapshot for the user's online tagmata; changes then arrive
-//! incrementally as herald tunnels connect/disconnect.
+//! incrementally as tagma tunnels connect/disconnect.
 //!
 //! If a slow client falls behind the broadcast capacity, the channel drops
 //! events server-side (logged at `warn`); the client must reconnect/resync.

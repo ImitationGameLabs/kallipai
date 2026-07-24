@@ -21,31 +21,36 @@ Deno.test("assistantContentDelta appends to a streaming assistant line", () => {
 });
 
 Deno.test(
-  "finished finalizes the trailing streaming line and clears busy",
+  "idle finalizes the trailing streaming line and clears busy (no content)",
   () => {
     let s = EMPTY_TRANSCRIPT;
     s = applyEvent(s, {
       type: "assistantContentDelta",
       delta: "streaming text",
     });
-    s = applyEvent(s, { type: "finished", content: "streaming text" });
+    s = applyEvent(s, { type: "idle" });
     const last = lastLine(s);
     assertEquals(last?.kind, "assistant");
     assertEquals((last as { text: string }).text, "streaming text");
     assertEquals((last as { streaming?: boolean }).streaming, false);
     assertEquals(s.agentBusy, false);
+    // idle is content-less: it must not append a new line.
+    assertEquals(s.lines.length, 1);
   },
 );
 
 Deno.test(
-  "finished without prior deltas pushes the full content (agora path)",
+  "message marker in a toolResult renders as an assistant line",
   () => {
     let s = EMPTY_TRANSCRIPT;
-    s = applyEvent(s, { type: "finished", content: "a full reply" });
+    s = applyEvent(s, {
+      type: "toolResult",
+      result:
+        '{"ok":true,"tool_name":"bash_exec","result":{"kallip.lesche.message":{"text":"hi there"}}}',
+    });
     const last = lastLine(s);
     assertEquals(last?.kind, "assistant");
-    assertEquals((last as { text: string }).text, "a full reply");
-    assertEquals(s.lines.length, 1);
+    assertEquals((last as { text: string }).text, "hi there");
   },
 );
 
@@ -79,13 +84,15 @@ Deno.test("streamReset finalizes trailing streaming and drops a line", () => {
 });
 
 Deno.test("error and terminal events clear agentBusy", () => {
-  for (const ev of [
-    { type: "error", message: "boom" },
-    { type: "interrupted" },
-    { type: "cancelled" },
-    { type: "maxRoundsExceeded" },
-    { type: "tokenBudgetExceeded", consumed: 100, budget: 50 },
-  ] as DomainEvent[]) {
+  for (
+    const ev of [
+      { type: "error", message: "boom" },
+      { type: "interrupted" },
+      { type: "cancelled" },
+      { type: "maxRoundsExceeded" },
+      { type: "tokenBudgetExceeded", consumed: 100, budget: 50 },
+    ] as DomainEvent[]
+  ) {
     let s = applyEvent(EMPTY_TRANSCRIPT, { type: "busy" });
     s = applyEvent(s, ev);
     assertEquals(s.agentBusy, false, `expected busy cleared for ${ev.type}`);
@@ -109,7 +116,7 @@ Deno.test("withUserLine appends a user line", () => {
 Deno.test("isBoundary matches the turn-boundary set", () => {
   const boundary: DomainEvent["type"][] = [
     "toolCall",
-    "finished",
+    "idle",
     "cancelled",
     "interrupted",
     "error",

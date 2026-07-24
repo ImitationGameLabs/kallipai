@@ -2,13 +2,13 @@
 //! the in-memory soft-state `Registry` (presence, conversations, app streams)
 //! and the relay-only `pending_key_exchange` window.
 //!
-//! Everything here is soft-state, rebuilt on restart (presence from heralds
+//! Everything here is soft-state, rebuilt on restart (presence from tagmata
 //! reconnecting, conversations create-on-demand). The durable identity /
 //! credential / provisioning layer lives in the registry behind
 //! [`ControlPlane`]; this crate never reads or writes it directly. The relay
 //! keeps NO replay/dedup window: `sequence_n` is an end-to-end (app<->
-//! herald) counter scoped to a crypto epoch the relay cannot see, so replay
-//! protection lives entirely at the herald (per-epoch `seen_inbound` + AEAD
+//! tagma) counter scoped to a crypto epoch the relay cannot see, so replay
+//! protection lives entirely at the tagma (per-epoch `seen_inbound` + AEAD
 //! key rotation).
 //!
 //! # Lock-discipline invariants (authoritative)
@@ -31,8 +31,8 @@ use std::time::Duration;
 use kallip_agora_common::control::KeyExchangeResponse;
 use kallip_agora_common::control_plane::ControlPlane;
 use kallip_agora_common::event::AgoraEvent;
-use kallip_agora_common::herald::HeraldInbound;
 use kallip_agora_common::ids::{ConversationId, TagmaId, UserId};
+use kallip_agora_common::tunnel::TunnelInbound;
 use kallip_common::protocol::ApiError;
 use tokio::sync::{broadcast, oneshot};
 
@@ -55,7 +55,7 @@ pub struct ConversationsState {
     /// Acceptable clock skew (both directions) on a tunnel reconnect proof's
     /// timestamp, in seconds.
     pub proof_skew_secs: i64,
-    /// How long `key_exchange_init` waits for the herald's response before 504.
+    /// How long `key_exchange_init` waits for the tagma's response before 504.
     pub key_exchange_timeout: Duration,
 }
 
@@ -78,7 +78,7 @@ impl ConversationsState {
 /// In-memory index of presence, conversations, and per-user app streams.
 pub struct Registry {
     pub conversations: HashMap<ConversationId, ConversationRecord>,
-    /// tagma_id -> the tagma's live herald tunnel. A tagma is "online" iff it
+    /// tagma_id -> the tagma's live tunnel. A tagma is "online" iff it
     /// has an entry. `owner` routes presence events; `id` is a per-connection
     /// identity token so a stale tunnel's cleanup cannot remove a freshly
     /// reconnected tunnel's presence.
@@ -90,11 +90,11 @@ pub struct Registry {
     app_streams: HashMap<UserId, broadcast::Sender<AgoraEvent>>,
 }
 
-/// One live herald tunnel: the outbound broadcast, the owning user (for presence
+/// One live tunnel: the outbound broadcast, the owning user (for presence
 /// routing), and a per-connection identity token used to make presence removal
 /// race-free across reconnects.
 pub struct PresenceEntry {
-    pub tx: broadcast::Sender<HeraldInbound>,
+    pub tx: broadcast::Sender<TunnelInbound>,
     pub owner: UserId,
     pub id: Arc<()>,
 }
@@ -157,14 +157,14 @@ impl Registry {
         conv_id
     }
 
-    /// Register a live herald tunnel for `tagma`, owned by `owner`, capturing the
+    /// Register a live tagma tunnel for `tagma`, owned by `owner`, capturing the
     /// per-connection identity token `id` so a stale tunnel's cleanup cannot
     /// remove a fresh reconnect's presence.
     pub fn register_presence(
         &mut self,
         tagma: &TagmaId,
         owner: UserId,
-        tx: broadcast::Sender<HeraldInbound>,
+        tx: broadcast::Sender<TunnelInbound>,
         id: Arc<()>,
     ) {
         self.presence
@@ -209,9 +209,9 @@ mod tests {
         let a1 = TagmaId::from("a1".to_string());
         let a2 = TagmaId::from("a2".to_string());
         let b1 = TagmaId::from("b1".to_string());
-        let (tx_a1, _) = broadcast::channel::<HeraldInbound>(8);
-        let (tx_a2, _) = broadcast::channel::<HeraldInbound>(8);
-        let (tx_b1, _) = broadcast::channel::<HeraldInbound>(8);
+        let (tx_a1, _) = broadcast::channel::<TunnelInbound>(8);
+        let (tx_a2, _) = broadcast::channel::<TunnelInbound>(8);
+        let (tx_b1, _) = broadcast::channel::<TunnelInbound>(8);
         reg.register_presence(&a1, alice.clone(), tx_a1, Arc::new(()));
         reg.register_presence(&a2, alice.clone(), tx_a2, Arc::new(()));
         reg.register_presence(&b1, bob.clone(), tx_b1, Arc::new(()));

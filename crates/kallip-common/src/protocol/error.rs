@@ -98,6 +98,14 @@ impl ApiError {
         }
     }
 
+    /// 502 Bad Gateway (an upstream relay delivery failed).
+    pub fn bad_gateway(msg: impl Into<String>) -> Self {
+        Self {
+            status: 502,
+            message: msg.into(),
+        }
+    }
+
     /// 504 Gateway Timeout
     pub fn gateway_timeout(msg: impl Into<String>) -> Self {
         Self {

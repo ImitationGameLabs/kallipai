@@ -99,6 +99,22 @@ pub struct AgentContext {
     /// Wake signal triggered by external events (e.g. approval notifications).
     /// The agent task awaits this in the outer loop; callers signal via `notify_one()`.
     pub notify: Arc<Notify>,
+    /// Wake signal for the timed transient-retry path. A separate [`Notify`] (not
+    /// `notify`) so the approval arm's `has_notifications()` guard stays the single
+    /// authority for approval wakes — see the outer-loop comment. Driven by a
+    /// best-effort spawned sleep task armed by `schedule_transient_retry`.
+    pub retry_notify: Arc<Notify>,
+    /// The armed transient-retry deadline, or `None` when no retry is pending. The
+    /// retry select arm is authoritative: it re-enters only when this is `Some(t)`
+    /// with `t <= now`, then clears it. Cleared on every non-retry wake so a stale
+    /// stored permit (a sleep that fired after a different arm won the race) cannot
+    /// trigger a spurious round.
+    pub retry_at: Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
+    /// Consecutive transient (failover-chain-exhausted) parks. Survives outer-loop
+    /// wakes so a retry sequence accumulates; reset on any non-transient round
+    /// outcome. Hard-parks (surfaces to the operator) once it exceeds
+    /// `config.max_transient_retries`.
+    pub transient_fails: u32,
     /// Tagma-wide token budget shared by all agents.
     /// Cloned from `AppState` — same underlying Arc counters across all agents.
     pub token_budget: crate::token_budget::TokenBudget,
@@ -188,6 +204,7 @@ pub async fn agent_task(
             input = prompt_rx.recv() => {
                 match input {
                     Some(text) => {
+                        clear_transient_retry(&ctx);
                         ctx.record_turn(vec![ChatMessage::user(&text)]).await;
                         if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
                             break;
@@ -208,12 +225,26 @@ pub async fn agent_task(
                 // Guard: drain may have already consumed the notification during
                 // the previous round.  Skip the LLM call if nothing is pending.
                 // NOTE: This guard assumes all notify_one() producers push data
-                // to ApprovalStore::notifications.  If additional wakeup sources
-                // are added, either use a separate Notify or update this check.
-                if ctx.approvals.lock().await.has_notifications()
-                    && run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await
-                {
-                    break;
+                // to ApprovalStore::notifications.  The transient-retry path uses
+                // a separate Notify (`retry_notify`) so this stays the single
+                // authority for approval wakes.
+                if ctx.approvals.lock().await.has_notifications() {
+                    clear_transient_retry(&ctx);
+                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
+                        break;
+                    }
+                }
+            }
+            // Timed transient retry: the spawned sleep from `schedule_transient_retry`
+            // fired. The guard is authoritative — a stored permit is only honored when
+            // the armed deadline has actually passed, so a wake that raced a hard-park
+            // or a different arm is a no-op.
+            _ = ctx.retry_notify.notified() => {
+                if transient_retry_due(&ctx) {
+                    clear_transient_retry(&ctx);
+                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
+                        break;
+                    }
                 }
             }
         }
@@ -229,86 +260,179 @@ async fn terminate_cancelled(ctx: &AgentContext, agent_tx: &tokio::sync::mpsc::S
     agent_tx.send(AgentEvent::Cancelled).await.ok();
 }
 
-/// Run agent rounds for one prompt and send results via channel.
+/// Run agent rounds for one external wake and send results via channel.
 ///
-/// Owns the round-token lifecycle: mints a fresh child of the lifecycle token, publishes it
-/// into `ctx.round_cancel` (so `interrupt_agent` can reach it), runs the round, then clears
-/// the slot. Returns `true` only on a lifecycle cancel (the task should terminate); every
-/// other outcome — including interrupt and budget-exceeded — returns `false` so the outer
-/// loop continues and the task stays alive.
+/// Owns the heartbeat loop: a bare-assistant round (no `break`, no tool calls) no
+/// longer terminates the run — the harness records the assistant turn, injects a
+/// heartbeat prompt, and re-enters the round loop. The no-progress guardrail
+/// (`config.max_heartbeat_rounds`) force-idles after a bounded storm. Only `break`
+/// (or a non-deliberate park reason) returns.
+///
+/// Owns the round-token lifecycle per iteration: mints a fresh child of the
+/// lifecycle token, publishes it into `ctx.round_cancel` (so `interrupt_agent` can
+/// reach it), runs the round, then clears the slot. Returns `true` only on a
+/// lifecycle cancel (the task should terminate); every other outcome returns
+/// `false` so the outer loop continues and the task stays alive.
 pub async fn run_and_report(
     ctx: &mut AgentContext,
     agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
 ) -> bool {
-    let round = RoundToken::new(&ctx.cancel);
-    // Publish the round token for the duration of this round so `interrupt_agent`
-    // can cancel it. `Some` only while the round is in flight.
-    *ctx.round_cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(round.clone());
+    let mut no_progress: u32 = 0;
+    loop {
+        let round = RoundToken::new(&ctx.cancel);
+        // Publish the round token for the duration of this round so `interrupt_agent`
+        // can cancel it. `Some` only while the round is in flight.
+        *ctx.round_cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(round.clone());
 
-    agent_tx.send(AgentEvent::Busy).await.ok();
-    let result = runner::run_agent_rounds(ctx, agent_tx, prompt_rx, round.handle()).await;
+        agent_tx.send(AgentEvent::Busy).await.ok();
+        let result = runner::run_agent_rounds(ctx, agent_tx, prompt_rx, round.handle()).await;
 
-    // Always clear the slot: a stale token cancelled by a later interrupt would be a
-    // no-op (nobody selects on it), but clearing keeps the invariant tight.
-    *ctx.round_cancel.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        // Always clear the slot: a stale token cancelled by a later interrupt would be a
+        // no-op (nobody selects on it), but clearing keeps the invariant tight.
+        *ctx.round_cancel.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
-    match result {
-        Ok(AgentOutcome::Finished { content }) => {
-            ctx.record_turn(vec![ChatMessage::assistant(&content)])
-                .await;
-            agent_tx.send(AgentEvent::Finished(content)).await.ok();
-            false
-        }
-        Ok(AgentOutcome::MaxRoundsExceeded) => {
-            agent_tx.send(AgentEvent::MaxRoundsExceeded).await.ok();
-            false
-        }
-        Ok(AgentOutcome::Cancelled) => match CancelKind::classify(&ctx.cancel) {
-            // Lifecycle cancel propagated to the round token → terminate.
-            CancelKind::Lifecycle => {
-                tracing::info!("agent task: lifecycle cancel mid-round, persisting and exiting");
-                terminate_cancelled(ctx, agent_tx).await;
-                true
+        match result {
+            Ok(runner::RoundOutcome::Break) => {
+                // Deliberate yield: park as Idle. Any tool calls preceding `break`
+                // were already recorded inside the round loop.
+                ctx.transient_fails = 0;
+                agent_tx.send(AgentEvent::Idle).await.ok();
+                return false;
             }
-            // Only the round token was cancelled (interrupt) → emit Interrupted, keep living.
-            CancelKind::Interrupt => {
-                agent_tx.send(AgentEvent::Interrupted).await.ok();
-                false
+            Ok(runner::RoundOutcome::BareAssistant { content }) => {
+                // No `break`, no tool calls — heartbeat and continue. Reset the
+                // transient-retry counter (a real response is progress).
+                ctx.transient_fails = 0;
+                no_progress += 1;
+                if no_progress > ctx.config.max_heartbeat_rounds {
+                    // Self-monologue guardrail: force-idle instead of looping forever.
+                    agent_tx.send(AgentEvent::Idle).await.ok();
+                    return false;
+                }
+                ctx.record_turn(vec![ChatMessage::assistant(&content)])
+                    .await;
+                ctx.record_turn(vec![ChatMessage::user(HEARTBEAT_TEXT)])
+                    .await;
+                continue;
             }
-        },
-        Ok(AgentOutcome::TokenBudgetExceeded { consumed, budget }) => {
-            // Non-fatal: the task stays alive. The round's turns are already
-            // recorded (in-memory store + history file); they flush to
-            // `context.json` on the next `persist()`. The next round re-checks the
-            // budget and succeeds once the operator raises it.
-            agent_tx
-                .send(AgentEvent::TokenBudgetExceeded { consumed, budget })
-                .await
-                .ok();
-            false
-        }
-        Ok(AgentOutcome::FailoverChainExhausted { reason, detail }) => {
-            // Non-fatal: the task stays alive. The failover chain ran out — the operator may
-            // reconfigure failover (or fix backup credentials) and re-prompt. No turn to record
-            // (no assistant content) and no extra persist (the failover arm already flushed the
-            // endpoint's retry records before exhausting the chain).
-            agent_tx
-                .send(AgentEvent::FailoverChainExhausted { reason, detail })
-                .await
-                .ok();
-            false
-        }
-        Err(e) => {
-            agent_tx
-                .send(AgentEvent::Error(crate::llm_error::render_error(
-                    e.as_ref(),
-                )))
-                .await
-                .ok();
-            false
+            Ok(runner::RoundOutcome::Park(AgentOutcome::Cancelled)) => {
+                ctx.transient_fails = 0;
+                match CancelKind::classify(&ctx.cancel) {
+                    // Lifecycle cancel propagated to the round token → terminate.
+                    CancelKind::Lifecycle => {
+                        tracing::info!(
+                            "agent task: lifecycle cancel mid-round, persisting and exiting"
+                        );
+                        terminate_cancelled(ctx, agent_tx).await;
+                        return true;
+                    }
+                    // Only the round token was cancelled (interrupt) → keep living.
+                    CancelKind::Interrupt => {
+                        agent_tx.send(AgentEvent::Interrupted).await.ok();
+                        return false;
+                    }
+                }
+            }
+            Ok(runner::RoundOutcome::Park(AgentOutcome::FailoverChainExhausted {
+                reason,
+                detail,
+            })) => {
+                // Transient: the whole chain is down. Schedule a timed retry (bounded
+                // by `max_transient_retries`) and park; the outer loop's retry arm
+                // re-enters after the backoff. On the last attempt, hard-park and
+                // surface so the operator can reconfigure failover.
+                ctx.transient_fails = ctx.transient_fails.saturating_add(1);
+                agent_tx
+                    .send(AgentEvent::FailoverChainExhausted { reason, detail })
+                    .await
+                    .ok();
+                if ctx.transient_fails <= ctx.config.max_transient_retries {
+                    schedule_transient_retry(ctx);
+                }
+                return false;
+            }
+            Ok(runner::RoundOutcome::Park(AgentOutcome::TokenBudgetExceeded {
+                consumed,
+                budget,
+            })) => {
+                // Non-fatal: the task stays alive. The next round re-checks the budget
+                // and succeeds once the operator raises it.
+                ctx.transient_fails = 0;
+                agent_tx
+                    .send(AgentEvent::TokenBudgetExceeded { consumed, budget })
+                    .await
+                    .ok();
+                return false;
+            }
+            Ok(runner::RoundOutcome::Park(AgentOutcome::MaxRoundsExceeded)) => {
+                ctx.transient_fails = 0;
+                agent_tx.send(AgentEvent::MaxRoundsExceeded).await.ok();
+                return false;
+            }
+            Ok(runner::RoundOutcome::Park(AgentOutcome::Idle)) => {
+                // Not produced by the round loop today (only Break/BareAssistant/Park
+                // are); parked here for exhaustiveness and forward-compat.
+                ctx.transient_fails = 0;
+                agent_tx.send(AgentEvent::Idle).await.ok();
+                return false;
+            }
+            Err(e) => {
+                // Permanent (Fatal) error — park and surface; the operator acts.
+                ctx.transient_fails = 0;
+                agent_tx
+                    .send(AgentEvent::Error(crate::llm_error::render_error(
+                        e.as_ref(),
+                    )))
+                    .await
+                    .ok();
+                return false;
+            }
         }
     }
+}
+
+/// The synthetic user turn injected after a bare-assistant round, nudging the
+/// agent to either make progress, reply, or call `break`. Persisted like an
+/// approval notification (bounded by the no-progress guardrail).
+const HEARTBEAT_TEXT: &str = "[system] You produced a response with no tool action and did not \
+call `break`. If you are done or blocked, call `break`. Otherwise continue your work.";
+
+/// Arm a timed retry for the transient (failover-chain-exhausted) path: back off
+/// and notify `retry_at` after the delay. The spawned sleep is best-effort and
+/// cancel-aware — the outer-loop guard is authoritative, so a wake that fires after
+/// a hard-park or a different-arm win is a no-op (the guard re-checks `retry_at`).
+fn schedule_transient_retry(ctx: &AgentContext) {
+    // `transient_fails` was just incremented (1-based); backoff uses a 0-based index.
+    let attempt = ctx.transient_fails.saturating_sub(1);
+    let delay = crate::retry::backoff_delay(&ctx.config.retry_policy, attempt);
+    let deadline = tokio::time::Instant::now() + delay;
+    *ctx.retry_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(deadline);
+    let notify = ctx.retry_notify.clone();
+    let cancel = ctx.cancel.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => notify.notify_one(),
+            _ = cancel.cancelled() => {}
+        }
+    });
+}
+
+/// Clear an armed transient-retry deadline. Called on every non-retry wake so a
+/// stale stored permit (a sleep that fired after a different arm won the race)
+/// cannot trigger a spurious round via the retry arm's guard.
+fn clear_transient_retry(ctx: &AgentContext) {
+    *ctx.retry_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Whether a transient retry is genuinely due right now. The retry select arm's
+/// authority: a stored permit is only honored when the armed deadline has passed.
+fn transient_retry_due(ctx: &AgentContext) -> bool {
+    ctx.retry_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|t| t <= tokio::time::Instant::now())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

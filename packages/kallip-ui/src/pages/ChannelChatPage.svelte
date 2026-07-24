@@ -1,5 +1,5 @@
 <script lang="ts">
-  // One online conversation over an E2EE herald channel (the independent online
+  // One online conversation over an E2EE tagma channel (the independent online
   // path -- its own lean transcript view, not the offline TranscriptView). The
   // transport is a RelayChannel owned by channelsStore; this page just renders
   // its ChannelTranscript and feeds sends through the reused Composer input.

@@ -36,8 +36,8 @@ function messageOf(e: unknown): string {
 }
 
 /** Build a synthetic `error` reply from a thrown exception, so a send/interrupt
- * failure routes through the same reducer as a herald-side error. `req_id` and
- * `status` are sentinels (the failure did not originate from a herald reply). */
+ * failure routes through the same reducer as a tagma-side error. `req_id` and
+ * `status` are sentinels (the failure did not originate from a tagma reply). */
 function syntheticErrorReply(message: string): TagmaReply {
   return { kind: "error", req_id: 0, status: 0, message };
 }
@@ -45,7 +45,7 @@ function syntheticErrorReply(message: string): TagmaReply {
 /** Map a channel's transport status to a sidebar dot. This is OUR channel
  * transport (the KEX/drain lifecycle), distinct from the dashboard's
  * `TagmaPresence` / `realtimeStore` presence, which is the PEER presence (a
- * herald tunnel is live). `error` (KEX/drain failure) is kept distinct from
+ * tagma tunnel is live). `error` (KEX/drain failure) is kept distinct from
  * `offline` (peer went away) so the sidebar can flag "click to retry" vs
  * "asleep". */
 function channelIndicator(

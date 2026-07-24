@@ -26,7 +26,12 @@ pub enum AgentEvent {
         args: String,
     },
     ToolResult(String),
-    Finished(String),
+    /// The agent yielded control by calling the `break` tool (or the harness
+    /// force-idled it after the no-progress guardrail). Content-less: a message
+    /// to the user is now a deliberate `kallip lesche send` CLI call, not the
+    /// final assistant message, so this event carries no text — it is a pure
+    /// status transition (the task parks, awaiting external input).
+    Idle,
     MaxRoundsExceeded,
     Error(String),
     Status(String),
@@ -90,9 +95,9 @@ pub enum AgentEvent {
 /// Outcome of running the agent round loop.
 #[derive(Debug)]
 pub enum AgentOutcome {
-    Finished {
-        content: String,
-    },
+    /// The agent deliberately yielded (via `break`) or was force-idled by the
+    /// no-progress guardrail. Content-less — see [`AgentEvent::Idle`].
+    Idle,
     MaxRoundsExceeded,
     Cancelled,
     TokenBudgetExceeded {

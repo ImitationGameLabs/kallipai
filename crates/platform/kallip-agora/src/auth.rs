@@ -8,7 +8,7 @@
 //! A `User` principal is reached ONLY via the `kallip_session` cookie; a
 //! `Tagma` principal is reached ONLY via an `sk-tagma-` bearer; the admin ONLY
 //! via the `sk-admin-` bearer. So the deputy threats a multi-origin design
-//! would face — a session cookie authenticating a herald route, a tagma bearer
+//! would face — a session cookie authenticating a tagma route, a tagma bearer
 //! reaching `/v1/me` — are already impossible by construction: `require_tagma`
 //! never sees a `User` and `require_user` never sees a `Tagma`. An
 //! `Origin { Bearer, Cookie }` tag on each principal is therefore not yet

@@ -1,18 +1,19 @@
-// RelayChannel end-to-end round-trip against a TS mock that plays the herald's
-// role (KEX + AEAD) using the same crypto.ts. Validates the full transport
-// (openRelayChannel -> send -> encrypt -> lesche -> herald-decrypt -> herald
-// encrypt reply -> app decrypt -> TagmaReply) without the live backend. The
-// cross-endpoint check against the real Rust herald happens in Phase 2.
+// RelayChannel end-to-end round-trip against a TS mock that plays the tagma
+// relay's role (KEX + AEAD) using the same crypto.ts. Validates the full
+// transport (openRelayChannel -> send -> encrypt -> lesche -> responder-decrypt
+// -> responder encrypt reply -> initiator decrypt -> TagmaReply) without the
+// live backend. The cross-endpoint check against the real Rust relay happens in
+// Phase 2.
 
-import { assertExists, assertEquals } from "@std/assert";
+import { assertEquals, assertExists } from "@std/assert";
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import {
   aeadDecrypt,
   aeadEncrypt,
-  DIR_APP_TO_HERALD,
-  DIR_HERALD_TO_APP,
+  DIR_INITIATOR_TO_RESPONDER,
+  DIR_RESPONDER_TO_INITIATOR,
   HKDF_INFO,
   kexTranscript,
 } from "./crypto.ts";
@@ -30,18 +31,18 @@ import type {
 
 const enc = new TextEncoder();
 
-/** A minimal herald-side mock split across the agora/lesche boundary: the
+/** A minimal tagma-relay mock split across the agora/lesche boundary: the
  * pinned key is served by the `agora` mock (getTagma), the conversation + KEX +
  * envelope relay by the `lesche` mock. On each posted envelope the lesche mock
- * decrypts the app's request and enqueues a `Finished` reply back into the
- * channel. */
+ * decrypts the initiator's request and enqueues an `assistant_content` reply
+ * back into the channel. */
 function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
   const devicePub = ed25519.getPublicKey(deviceSecret);
-  let heraldKey: Uint8Array | null = null;
+  let responderKey: Uint8Array | null = null;
   let channel: RelayChannel | null = null;
-  let heraldSeq = 0;
-  // Captured state for assertions: the app-originated sequence numbers seen and
-  // the most-recent decrypted request.
+  let responderSeq = 0;
+  // Captured state for assertions: the initiator-originated sequence numbers
+  // seen and the most-recent decrypted request.
   const receivedSeqs: number[] = [];
   let lastRequest: TagmaRequest | null = null;
 
@@ -55,40 +56,41 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
       return { conversation_id: convId };
     },
     keyExchangeInit(_c: string, init: KeyExchangeInit): KeyExchangeResponse {
-      const appEph = decodeB64(init.ephemeral_public);
-      const hpriv = x25519.utils.randomSecretKey();
-      const hpub = x25519.getPublicKey(hpriv);
-      const shared = x25519.scalarMult(hpriv, appEph);
-      heraldKey = hkdf(sha256, shared, new Uint8Array(), HKDF_INFO, 32);
+      const initiatorEph = decodeB64(init.ephemeral_public);
+      const rpriv = x25519.utils.randomSecretKey();
+      const rpub = x25519.getPublicKey(rpriv);
+      const shared = x25519.scalarMult(rpriv, initiatorEph);
+      responderKey = hkdf(sha256, shared, new Uint8Array(), HKDF_INFO, 32);
       const sig = ed25519.sign(
-        kexTranscript(tagmaId, convId, appEph, hpub),
+        kexTranscript(tagmaId, convId, initiatorEph, rpub),
         deviceSecret,
       );
-      return { ephemeral_public: encodeB64(hpub), signature: encodeB64(sig) };
+      return { ephemeral_public: encodeB64(rpub), signature: encodeB64(sig) };
     },
     postEnvelope(_c: string, envelope: Envelope): void {
-      // Herald decrypts the app's request (dir=0).
+      // Responder decrypts the initiator's request (dir=0).
       const pt = aeadDecrypt(
-        heraldKey!,
-        DIR_APP_TO_HERALD,
+        responderKey!,
+        DIR_INITIATOR_TO_RESPONDER,
         envelope.sequence_n,
         decodeB64(envelope.ciphertext),
       );
-      assertExists(pt, "herald must decrypt the app's envelope");
+      assertExists(pt, "responder must decrypt the initiator's envelope");
       const req = JSON.parse(new TextDecoder().decode(pt)) as TagmaRequest;
       lastRequest = req;
       receivedSeqs.push(envelope.sequence_n);
       const text = req.op === "send_message" ? req.text : "";
-      // Herald encrypts a Finished reply (dir=1, its own counter) and feeds it
-      // back to the channel via the SSE-demux path.
+      // Responder encrypts an assistant_content reply (dir=1, its own counter)
+      // and feeds it back to the channel via the SSE-demux path — the reply is
+      // the `kallip lesche send` CLI's delivery, surfaced as assistant content.
       const reply: TagmaReply = {
         kind: "event",
-        event: { type: "finished", content: `echo:${text}` },
+        event: { type: "assistant_content", content: `echo:${text}` },
       };
-      const seq = heraldSeq++;
+      const seq = responderSeq++;
       const ct = aeadEncrypt(
-        heraldKey!,
-        DIR_HERALD_TO_APP,
+        responderKey!,
+        DIR_RESPONDER_TO_INITIATOR,
         seq,
         enc.encode(JSON.stringify(reply)),
       );
@@ -114,7 +116,7 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
 }
 
 Deno.test(
-  "openRelayChannel + send round-trips against a mock herald",
+  "openRelayChannel + send round-trips against a mock tagma relay",
   async () => {
     const tagmaId = "tagma-1";
     const convId = "conv-1";
@@ -142,10 +144,11 @@ Deno.test(
     const first = await iter.next();
     assertEquals(first.done, false);
     const reply = first.value as TagmaReply;
-    if (reply.kind !== "event")
+    if (reply.kind !== "event") {
       throw new Error(`expected event, got ${reply.kind}`);
-    if (reply.event.type !== "finished") {
-      throw new Error(`expected finished, got ${reply.event.type}`);
+    }
+    if (reply.event.type !== "assistant_content") {
+      throw new Error(`expected assistant_content, got ${reply.event.type}`);
     }
     assertEquals(reply.event.content, "echo:hello");
     channel.close();
@@ -227,7 +230,7 @@ Deno.test(
     const iter = channel.replies();
     const first = await iter.next();
     const reply = first.value as TagmaReply;
-    if (reply.kind !== "event" || reply.event.type !== "finished") {
+    if (reply.kind !== "event" || reply.event.type !== "assistant_content") {
       throw new Error(
         `tampered envelope was not dropped; got ${JSON.stringify(reply)}`,
       );

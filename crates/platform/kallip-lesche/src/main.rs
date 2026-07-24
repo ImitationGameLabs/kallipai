@@ -1,13 +1,13 @@
 //! `kallip-lesche`: the kallip data-plane relay (λέσχη -- the Greek conversation
 //! hall, beside the agora).
 //!
-//! The lesche owns every agent/human communication surface -- herald tunnels,
+//! The lesche owns every agent/human communication surface -- tagma tunnels,
 //! app event streams, envelope routing, key exchange, presence -- as in-memory
 //! soft-state rebuilt on restart. It never touches the durable store: it
 //! authenticates requests, resolves tagma metadata, and advances the
 //! tunnel-proof replay guard through a narrow `ControlPlane` trait implemented
 //! by an HTTP client (`HttpControlPlane`) that calls the agora's `/internal/*`
-//! API. All app<->herald business evolution happens in this crate and the shared
+//! API. All app<->tagma business evolution happens in this crate and the shared
 //! `kallip-agora-common` wire types, never in the registry.
 
 mod args;
@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     // The registry is reached only through the HTTP ControlPlane client. There
-    // is intentionally no auth cache: long-lived connections (herald tunnel, app
+    // is intentionally no auth cache: long-lived connections (tagma tunnel, app
     // SSE) authenticate once at open, and the remaining verify calls are
     // human-paced, so uncached per-request RPC is negligible load. See
     // `control_plane_http`.

@@ -193,6 +193,45 @@ fn guest_hide_holes() -> Vec<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Control tool definitions (handled by the runner/executor, not the dispatcher)
+// ---------------------------------------------------------------------------
+
+/// The `break` tool — the agent's explicit "yield control" primitive.
+///
+/// Calling `break` is the *only* way the agent reaches the idle/parked state on
+/// its own. A bare assistant message (no tool calls) does **not** stop the agent:
+/// the harness injects a heartbeat prompt and keeps looping. So when the agent is
+/// done with the current run — including having delivered any message via the
+/// external `kallip lesche send` CLI — or is blocked waiting on an external
+/// event, it must call `break` to park until the next input arrives.
+///
+/// The runtime treats `break` as a control-flow signal, not a normal tool: it
+/// short-circuits the round loop (see `runner::execute_tool_calls`) and produces
+/// no persisted tool result. Tool calls issued in the same round **before**
+/// `break` still execute and are recorded; calls **after** `break` are abandoned
+/// (mirroring the existing stop-on-non-success rule), so the agent should call
+/// `break` last.
+pub fn break_definition() -> ToolDefinition {
+    ToolDefinition {
+        kind: ToolType::Function,
+        function: FunctionDefinition {
+            name: "break".into(),
+            description: Some(
+                "Yield control and park until the next input arrives. This is the ONLY way to \
+                 end the current run: a plain response with no tool call does not stop the loop, \
+                 it triggers a heartbeat continuation. Call `break` when you have finished the \
+                 request (delivering any message to the user first) or when you are blocked waiting \
+                 on something. Call it LAST in a round — any tool calls after `break` in the same \
+                 round are not executed."
+                    .into(),
+            ),
+            parameters: Some(json!({"type":"object","properties":{}})),
+            strict: None,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Approval meta-tool definitions (handled by executor, not dispatcher)
 // ---------------------------------------------------------------------------
 

@@ -9,7 +9,8 @@ use kallip_common::authtoken::TokenKind;
 /// only its hash is retained.
 pub const ADMIN: TokenKind = TokenKind("sk-admin-");
 
-/// Long-lived tagma token — held by a `kallip-herald` to reopen its tunnel.
+/// Long-lived tagma token — held by the tagma's in-process relay connector to
+/// reopen its tunnel.
 /// Hash-indexed.
 pub const TAGMA: TokenKind = TokenKind("sk-tagma-");
 

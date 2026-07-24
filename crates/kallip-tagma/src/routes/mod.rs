@@ -10,6 +10,10 @@ pub(crate) mod approval;
 mod approval;
 mod context;
 mod message;
+/// The in-process message-delivery seam shared by the `send_message` route and
+/// the relay's `execute_op`.
+pub(crate) use message::deliver_message;
+mod lesche;
 mod skill;
 mod skill_promote;
 
@@ -50,6 +54,10 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/agents/{id}/message",
             axum::routing::post(message::send_message),
+        )
+        .route(
+            "/agents/{id}/lesche/messages",
+            axum::routing::post(lesche::post_message),
         )
         .route(
             "/agents/{id}/events",

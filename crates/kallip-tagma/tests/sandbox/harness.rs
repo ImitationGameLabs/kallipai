@@ -226,9 +226,13 @@ fn render_tool_call(call_id: &str, command: &str) -> String {
     format!("data: {open}\n\ndata: {close}\n\ndata: [DONE]\n\n")
 }
 
-/// Render an SSE body carrying a final assistant content message (no tool calls),
-/// which makes the round loop exit `Finished` with `exit == "success"`.
-fn render_end(content: &str) -> String {
+/// Render an SSE body carrying a single `break` tool call (no content), which
+/// makes the round loop park as `Idle` with `exit == "success"`. Ending a run now
+/// means the agent calls `break`; a bare assistant content message no longer
+/// terminates (it triggers a heartbeat re-loop). The carried `content` is kept
+/// for API stability but is unused — a message to the user is a separate
+/// `kallip lesche send` tool call, not the terminal event.
+fn render_end(_content: &str) -> String {
     let open = json!({
         "id": "chatcmpl-2",
         "object": "chat.completion.chunk",
@@ -236,7 +240,15 @@ fn render_end(content: &str) -> String {
         "model": "test-model",
         "choices": [{
             "index": 0,
-            "delta": { "content": content },
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_end",
+                    "type": "function",
+                    "function": { "name": "break", "arguments": "{}" }
+                }]
+            },
             "finish_reason": null
         }]
     });
@@ -245,7 +257,7 @@ fn render_end(content: &str) -> String {
         "object": "chat.completion.chunk",
         "created": 1,
         "model": "test-model",
-        "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }]
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]
     });
     format!("data: {open}\n\ndata: {close}\n\ndata: [DONE]\n\n")
 }
@@ -492,12 +504,13 @@ async fn wait_ready(port: u16, timeout: Duration) -> bool {
 }
 
 /// Parsed `kallip-run --json` output (camelCase, per `main.rs::JsonObject`).
+/// `kallip-run` is a telemetry observer — it no longer carries an `assistant`
+/// reply field (messages to the user are deliberate `kallip lesche send` calls,
+/// not this stream).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunResult {
     pub agent_id: String,
-    #[allow(dead_code)]
-    assistant: String,
     pub exit: String,
 }
 

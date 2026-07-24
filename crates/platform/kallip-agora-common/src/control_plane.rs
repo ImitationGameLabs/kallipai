@@ -4,7 +4,7 @@
 //! the tunnel-proof replay guard through this trait.
 //!
 //! Keeping the surface small and stable is the point of the control-plane /
-//! data-plane split: app↔herald business evolution happens inside the lesche
+//! data-plane split: app↔tagma business evolution happens inside the lesche
 //! and the shared wire types, never here. The lesche runs as a separate service
 //! and reaches this trait over the `/internal/*` HTTP API via an RPC client impl
 //! (`HttpControlPlane`); the on-wire contract for that API lives in
@@ -14,7 +14,7 @@ use crate::bytes::Ed25519PublicKey;
 use crate::ids::{TagmaId, UserId};
 use crate::principal::Principal;
 
-/// A tagma's registry identity, fetched once at herald-tunnel connect time to
+/// A tagma's registry identity, fetched once at tagma-tunnel connect time to
 /// both verify the reconnect proof (pinned key) and route presence to the
 /// owning user.
 #[derive(Debug, Clone)]
@@ -62,7 +62,7 @@ pub trait ControlPlane: Send + Sync + 'static {
     ) -> Result<bool, ControlPlaneError>;
 
     /// The tagma's pinned public key + owner, or `None` if the tagma is unknown
-    /// / has no pinned key. Backs the herald-tunnel reconnect: the relay
+    /// / has no pinned key. Backs the tagma-tunnel reconnect: the relay
     /// verifies the Ed25519 proof against the pinned key locally, and uses the
     /// owner to route presence.
     async fn tagma_identity(

@@ -2752,35 +2752,7 @@ dependencies = [
  "kallip-agora-common",
  "sha2 0.11.0",
  "x25519-dalek",
-]
-
-[[package]]
-name = "kallip-herald"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.22.1",
- "chacha20poly1305",
- "clap",
- "dirs",
- "futures-util",
- "getrandom 0.4.2",
- "kallip-agora-client",
- "kallip-agora-common",
- "kallip-client",
- "kallip-common",
- "kallip-e2ee",
- "kallip-lesche-client",
- "reqwest",
- "serde",
- "serde_json",
- "time",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -2902,11 +2874,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chacha20poly1305",
  "clap",
+ "dirs",
  "futures-core",
  "futures-util",
+ "getrandom 0.4.2",
  "just-llm-client",
+ "kallip-agora-client",
+ "kallip-agora-common",
  "kallip-common",
+ "kallip-e2ee",
+ "kallip-lesche-client",
  "kallip-runtime",
  "kallip-shell",
  "reqwest",
@@ -2923,8 +2902,10 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "wiremock",
+ "x25519-dalek",
 ]
 
 [[package]]

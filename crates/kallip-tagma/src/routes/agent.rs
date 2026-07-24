@@ -92,6 +92,9 @@ impl SpawnArgs {
 pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, AgentIdentity)> {
     let cancel = args.shutdown_cancel.child_token();
     let notify = Arc::new(Notify::new());
+    // Separate wake signal for the timed transient-retry path (kept distinct from
+    // `notify` so the approval arm's guard stays the sole authority for approval wakes).
+    let retry_notify = Arc::new(Notify::new());
     // Round-scoped interrupt slot: `Some` only while a round runs. Shared with the agent
     // task so `interrupt_agent` can cancel the current round without terminating the task.
     let round_cancel: Arc<std::sync::Mutex<Option<kallip_runtime::agent_task::RoundToken>>> =
@@ -189,6 +192,9 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         cancel: cancel.clone(),
         round_cancel: round_cancel.clone(),
         notify: notify.clone(),
+        retry_notify: retry_notify.clone(),
+        retry_at: Arc::new(std::sync::Mutex::new(None)),
+        transient_fails: 0,
         token_budget: token_budget.clone(),
     };
 
