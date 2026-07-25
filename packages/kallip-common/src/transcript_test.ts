@@ -39,20 +39,17 @@ Deno.test(
   },
 );
 
-Deno.test(
-  "message marker in a toolResult renders as an assistant line",
-  () => {
-    let s = EMPTY_TRANSCRIPT;
-    s = applyEvent(s, {
-      type: "toolResult",
-      result:
-        '{"ok":true,"tool_name":"bash_exec","result":{"kallip.lesche.message":{"text":"hi there"}}}',
-    });
-    const last = lastLine(s);
-    assertEquals(last?.kind, "assistant");
-    assertEquals((last as { text: string }).text, "hi there");
-  },
-);
+Deno.test("message marker in a toolResult renders as an assistant line", () => {
+  let s = EMPTY_TRANSCRIPT;
+  s = applyEvent(s, {
+    type: "toolResult",
+    result:
+      '{"ok":true,"tool_name":"bash_exec","result":{"kallip.lesche.message":{"text":"hi there"}}}',
+  });
+  const last = lastLine(s);
+  assertEquals(last?.kind, "assistant");
+  assertEquals((last as { text: string }).text, "hi there");
+});
 
 Deno.test("toolCall finalizes any trailing streaming content", () => {
   let s = EMPTY_TRANSCRIPT;
@@ -84,15 +81,13 @@ Deno.test("streamReset finalizes trailing streaming and drops a line", () => {
 });
 
 Deno.test("error and terminal events clear agentBusy", () => {
-  for (
-    const ev of [
-      { type: "error", message: "boom" },
-      { type: "interrupted" },
-      { type: "cancelled" },
-      { type: "maxRoundsExceeded" },
-      { type: "tokenBudgetExceeded", consumed: 100, budget: 50 },
-    ] as DomainEvent[]
-  ) {
+  for (const ev of [
+    { type: "error", message: "boom" },
+    { type: "interrupted" },
+    { type: "cancelled" },
+    { type: "maxRoundsExceeded" },
+    { type: "tokenBudgetExceeded", consumed: 100, budget: 50 },
+  ] as DomainEvent[]) {
     let s = applyEvent(EMPTY_TRANSCRIPT, { type: "busy" });
     s = applyEvent(s, ev);
     assertEquals(s.agentBusy, false, `expected busy cleared for ${ev.type}`);

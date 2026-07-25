@@ -20,7 +20,7 @@ export interface NavIcons {
  * channel's transport status as a nav dot tri-state (the store maps its
  * ChannelState.status to this). */
 export interface NavChannel {
-  convId: string;
+  conversationId: string;
   label: string | null;
   indicator: NavIndicator;
 }
@@ -45,7 +45,7 @@ export function navFor(args: {
       // Open chats use a status dot (no icon) as the leading mark, so each
       // channel reads as its own destination, distinct from the Tagmata entry.
       links.push({
-        href: `/chat/${c.convId}`,
+        href: `/chat/${c.conversationId}`,
         label: c.label ?? "Unnamed tagma",
         indicator: c.indicator,
       });

@@ -189,7 +189,19 @@ async fn main() -> Result<()> {
 /// caller logs and continues local-only.
 async fn activate_relay(state: &Arc<AppState>, args: &args::Args, agora_url: String) -> Result<()> {
     use kallip_runtime::persistence::data_dir_root;
-    let credentials_dir = data_dir_root()?.join("credentials");
+    // Resolve the data root once and lock it owner-only before creating any
+    // subtree under it. `data_dir_root()` is shared with the agent store
+    // (`agents/`/`archived/`/`skills/`, holding plaintext `history.ndjson` /
+    // `ContextStore`) and `credentials/`/`relay/`; create_dir_all makes those
+    // under the process umask (often 0o755), which would otherwise leak the
+    // directory names AND let other users traverse in. 0o700 on the root closes
+    // traversal for every subtree (set_permissions is non-recursive, but the
+    // root boundary is what matters).
+    let data_root = data_dir_root()?;
+    std::fs::create_dir_all(&data_root).context("create data root dir")?;
+    credentials::set_owner_only(&data_root)?;
+
+    let credentials_dir = data_root.join("credentials");
     std::fs::create_dir_all(&credentials_dir).context("create credentials dir")?;
     credentials::set_owner_only(&credentials_dir)?;
 
@@ -203,7 +215,7 @@ async fn activate_relay(state: &Arc<AppState>, args: &args::Args, agora_url: Str
         }
         None => {
             let code = args.relay_enrollment_code.as_deref().context(
-                "no stored tagma token; KALLIP_RELAY_ENROLLMENT_CODE required for first run",
+                "no stored tagma token; KALLIP_TAGMA_RELAY_ENROLLMENT_CODE required for first run",
             )?;
             let (tagma_id, token) = kallip_agora_client::AgoraClient::builder(&agora_url)
                 .build()?
@@ -235,6 +247,43 @@ async fn activate_relay(state: &Arc<AppState>, args: &args::Args, agora_url: Str
 
     let lesche = kallip_lesche_client::LescheClient::builder(&lesche_url, &tagma_token).build()?;
 
+    // Open the chat-history store alongside the credentials dir: a sibling
+    // `relay/` subdir, owner-only. The store is the source of truth a
+    // reconnecting or freshly-paired device pulls via `TagmaControl::History`.
+    let relay_dir = data_root.join("relay");
+    std::fs::create_dir_all(&relay_dir).context("create relay dir")?;
+    credentials::set_owner_only(&relay_dir)?;
+    let history_path = relay_dir.join("chat_history.sqlite");
+    let history = relay::chat_history::open(&history_path)
+        .await
+        .context("open chat_history store")?;
+    // `open()` primed the schema, creating the SQLite WAL siblings
+    // (`chat_history.sqlite-wal`/`-shm`) alongside the main file; they inherit
+    // the process umask (often 0o644). The 0o700 `relay_dir` is the real
+    // protection (other users cannot traverse in); chmod the siblings too as
+    // defense-in-depth, best-effort.
+    for entry in std::fs::read_dir(&relay_dir).context("read relay dir")? {
+        match entry {
+            Ok(e) => {
+                if let Err(e) = credentials::set_owner_only(&e.path()) {
+                    tracing::warn!(error = %e, "relay dir entry chmod failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "relay dir entry read failed"),
+        }
+    }
+    // A config of 0 is a foot-gun: ttl=0 makes GC cut off at `now` (deletes
+    // everything), cap=0 trims to zero. Treat 0 (and unset) as "use the
+    // default" rather than silently wiping history.
+    let history_ttl_days = args
+        .relay_history_ttl_days
+        .filter(|&v| v > 0)
+        .unwrap_or(relay::chat_history::DEFAULT_HISTORY_TTL_DAYS);
+    let history_cap = args
+        .relay_history_cap
+        .filter(|&v| v > 0)
+        .unwrap_or(relay::chat_history::DEFAULT_HISTORY_CAP);
+
     let message_limits = relay::MessageLimits {
         max: args
             .relay_message_burst_max
@@ -251,8 +300,35 @@ async fn activate_relay(state: &Arc<AppState>, args: &args::Args, agora_url: Str
         root_agent,
         message_limits,
         Arc::downgrade(state),
+        Some(history.clone()),
     );
     info!(tagma = %handle.tagma_id(), "relay connector active");
+
+    // Best-effort GC sweep: trim by TTL + cap on an interval, honoring the
+    // tagma-wide shutdown token. Failures are logged inside `gc`, not
+    // propagated, so a GC fault never takes the relay down.
+    {
+        let shutdown = state.shutdown.clone();
+        let db = history.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let ttl_secs = history_ttl_days.saturating_mul(24 * 3600);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => return,
+                    _ = interval.tick() => {
+                        let reaped = relay::chat_history::gc(&db, ttl_secs, history_cap).await;
+                        if reaped > 0 {
+                            tracing::info!(reaped, "chat_history gc");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     let join = tokio::spawn(handle.clone().run(state.shutdown.clone()));
     state.set_relay(handle, join);
     Ok(())

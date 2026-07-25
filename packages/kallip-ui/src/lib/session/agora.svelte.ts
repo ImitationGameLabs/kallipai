@@ -222,7 +222,7 @@ class AgoraSessionStore {
     await client().renameTagma(id, label);
     const resolved = label && label.trim() ? label.trim() : null;
     this.tagmata = this.tagmata.map((t) =>
-      t.tagma_id === id ? { ...t, label: resolved } : t
+      t.tagma_id === id ? { ...t, label: resolved } : t,
     );
   }
 

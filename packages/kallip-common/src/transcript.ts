@@ -10,45 +10,45 @@ import { failoverChainExhaustionToProse } from "./event.ts";
 export type TranscriptLine =
   | { readonly kind: "user"; readonly text: string }
   | {
-    readonly kind: "assistant";
-    readonly text: string;
-    readonly streaming?: boolean;
-  }
+      readonly kind: "assistant";
+      readonly text: string;
+      readonly streaming?: boolean;
+    }
   | {
-    readonly kind: "reasoning";
-    readonly text: string;
-    readonly streaming?: boolean;
-  }
+      readonly kind: "reasoning";
+      readonly text: string;
+      readonly streaming?: boolean;
+    }
   | { readonly kind: "toolCall"; readonly name: string; readonly args: string }
   | { readonly kind: "toolResult"; readonly result: string }
   | { readonly kind: "status"; readonly text: string }
   | { readonly kind: "error"; readonly text: string }
   | { readonly kind: "system"; readonly text: string }
   | {
-    readonly kind: "retrying";
-    readonly attempt: number;
-    readonly maxAttempts: number;
-    readonly error: string;
-    readonly delaySecs: number;
-  }
+      readonly kind: "retrying";
+      readonly attempt: number;
+      readonly maxAttempts: number;
+      readonly error: string;
+      readonly delaySecs: number;
+    }
   | {
-    readonly kind: "failover";
-    readonly from: string;
-    readonly to: string;
-    readonly reason: string;
-  }
+      readonly kind: "failover";
+      readonly from: string;
+      readonly to: string;
+      readonly reason: string;
+    }
   | {
-    readonly kind: "failoverExhausted";
-    readonly reason: string;
-    readonly detail: string;
-  }
+      readonly kind: "failoverExhausted";
+      readonly reason: string;
+      readonly detail: string;
+    }
   | {
-    readonly kind: "streamDropped";
-    readonly attempt: number;
-    readonly maxAttempts: number;
-    readonly error: string;
-    readonly delaySecs: number;
-  };
+      readonly kind: "streamDropped";
+      readonly attempt: number;
+      readonly maxAttempts: number;
+      readonly error: string;
+      readonly delaySecs: number;
+    };
 
 export interface TranscriptState {
   readonly lines: TranscriptLine[];
@@ -132,9 +132,10 @@ function appendDelta(
       { ...last, text: last.text + delta, streaming: true },
     ];
   }
-  const line: TranscriptLine = kind === "assistant"
-    ? { kind: "assistant", text: delta, streaming: true }
-    : { kind: "reasoning", text: delta, streaming: true };
+  const line: TranscriptLine =
+    kind === "assistant"
+      ? { kind: "assistant", text: delta, streaming: true }
+      : { kind: "reasoning", text: delta, streaming: true };
   return [...lines, line];
 }
 
@@ -255,7 +256,8 @@ export function applyEvent(
       // the terminal event. Finalize any in-flight streaming line and mark idle.
       const last = lines[lines.length - 1];
       if (
-        last && (last.kind === "assistant" || last.kind === "reasoning") &&
+        last &&
+        (last.kind === "assistant" || last.kind === "reasoning") &&
         last.streaming
       ) {
         return { ...state, agentBusy: false, lines: finalizeStreaming(lines) };

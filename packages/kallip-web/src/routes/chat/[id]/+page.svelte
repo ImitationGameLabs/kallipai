@@ -3,4 +3,4 @@
   import { ChannelChatPage } from "@kallipai/kallip-ui";
 </script>
 
-<ChannelChatPage convId={page.params.id ?? ""} />
+<ChannelChatPage conversationId={page.params.id ?? ""} />

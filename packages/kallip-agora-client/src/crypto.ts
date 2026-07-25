@@ -19,9 +19,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 
 /** HKDF info string binding the derived key to this protocol/version.
  * WIRE-PROTOCOL: must match the Rust relay byte-for-byte. */
-export const HKDF_INFO = new TextEncoder().encode(
-  "kallip-agora-aead-v1",
-);
+export const HKDF_INFO = new TextEncoder().encode("kallip-agora-aead-v1");
 
 /** Key-exchange transcript domain-separation tag. */
 export const KEX_TAG = "kallip-agora-kex-v1";
@@ -60,7 +58,7 @@ function framed(out: number[], bytes: Uint8Array): void {
  */
 export function kexTranscript(
   tagmaId: string,
-  convId: string,
+  conversationId: string,
   initiatorEph: Uint8Array,
   responderEph: Uint8Array,
 ): Uint8Array {
@@ -71,7 +69,7 @@ export function kexTranscript(
   const tag = TEXT_ENCODER.encode(KEX_TAG);
   for (let i = 0; i < tag.length; i++) out.push(tag[i]!);
   framed(out, TEXT_ENCODER.encode(tagmaId));
-  framed(out, TEXT_ENCODER.encode(convId));
+  framed(out, TEXT_ENCODER.encode(conversationId));
   for (let i = 0; i < 32; i++) out.push(initiatorEph[i]!);
   for (let i = 0; i < 32; i++) out.push(responderEph[i]!);
   return new Uint8Array(out);
@@ -86,12 +84,17 @@ export function kexTranscript(
 export function verifyKeyExchange(
   pinnedKey: Uint8Array,
   tagmaId: string,
-  convId: string,
+  conversationId: string,
   initiatorEph: Uint8Array,
   responderEph: Uint8Array,
   signature: Uint8Array,
 ): boolean {
-  const message = kexTranscript(tagmaId, convId, initiatorEph, responderEph);
+  const message = kexTranscript(
+    tagmaId,
+    conversationId,
+    initiatorEph,
+    responderEph,
+  );
   try {
     return ed25519.verify(signature, message, pinnedKey);
   } catch {

@@ -50,7 +50,7 @@ pub struct AppState {
     /// enforces locks via landlock on Linux (mandatory); advisory elsewhere.
     pub lock_manager: Arc<kallip_runtime::dirlock::DirLockManager>,
     /// Optional online-mode relay connector (set once at startup when
-    /// `KALLIP_RELAY_AGORA_URL` is configured), plus its long-running tunnel
+    /// `KALLIP_TAGMA_RELAY_AGORA_URL` is configured), plus its long-running tunnel
     /// task's `JoinHandle` so graceful shutdown can drain it. `None` in
     /// pure-local deployments and during the degrade-to-local-only path.
     ///

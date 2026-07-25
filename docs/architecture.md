@@ -58,6 +58,35 @@ The tagma exposes an HTTP API for managing agents and approvals. For the full
 endpoint reference, see [tagma-api.md](reference/tagma-api.md). For
 authentication and the authorization matrix, see [auth.md](reference/auth.md).
 
+## Online relay and chat history
+
+The tagma optionally participates in the public-internet relay (agora control
+plane + lesche data plane) so a user's app can reach it from anywhere and hold
+an E2EE conversation. The in-process relay connector (`relay/` module) enrolls
+with the agora on first boot, then holds a long-lived lesche tunnel: it
+encrypts outbound agent replies into lesche envelopes and decrypts inbound
+user messages. See [container.md](reference/container.md) for the deployment
+topology and `KALLIP_TAGMA_RELAY_*` in [env.md](reference/env.md) for the
+knobs. Unset = pure-local (the lesche message route returns 503).
+
+The connector persists the **wire transcript** of that conversation to a
+SQLite store (`<KALLIP_DATA_DIR>/relay/chat_history.sqlite`), both directions
+in arrival order. This is the source of truth a reconnecting or
+freshly-paired device pulls via `TagmaControl::History` (cursor-based:
+`after` for incremental catch-up, `before` for scroll-up, or the recent
+window for a first-time device), so the user sees what they missed while
+offline. It is **plaintext at rest**, consistent with the host-trust model
+(the agent's own `history.ndjson` / `ContextStore` are plaintext on the same
+host; E2EE protects transit, not the endpoint). Retention is bounded by a TTL
+(default 30d) and a runaway-row cap (default 100k); see
+`KALLIP_TAGMA_RELAY_HISTORY_*`. The tagma hosts exactly one conversation
+today (the id is derived from the tagma id).
+
+The app keeps a per-device IndexedDB cache of already-rendered lines
+(`kallip-relay` DB) so a refresh restores the conversation instantly and only
+asks the tagma for an incremental delta. It is a disposable derived mirror
+(re-pulled on demand), also plaintext, cleared on logout.
+
 ## Request flow
 
 1. Client sends `POST /agents/{id}/message` with the message text.
@@ -181,13 +210,13 @@ deliberate supervisor decision stays meaningful under every preset.
 
 ## Crate responsibilities
 
-| Crate            | Role                                                                                                                                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `kallip-common`  | Shared types, slash command definitions, and protocol types. Used by all crates.                                                                                                           |
-| `kallip-runtime` | Agent runtime: agent loop, context management, tool dispatch, policy engine. No network code.                                                                                              |
-| `kallip-shell`   | Provider-neutral shell/session tools for LLM applications. Used by the runtime.                                                                                                            |
-| `kallip-tagma`   | HTTP server hosting agent instances. Uses `kallip-runtime` internally.                                                                                                                     |
-| `kallip`         | Headless CLI for agents. Thin wrapper over `kallip-client`. No agent logic.                                                                                                                |
-| `kallip-tui`     | Interactive terminal UI. Same client library, adds ratatui rendering.                                                                                                                      |
+| Crate            | Role                                                                                                                                                                                                      |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kallip-common`  | Shared types, slash command definitions, and protocol types. Used by all crates.                                                                                                                          |
+| `kallip-runtime` | Agent runtime: agent loop, context management, tool dispatch, policy engine. No network code.                                                                                                             |
+| `kallip-shell`   | Provider-neutral shell/session tools for LLM applications. Used by the runtime.                                                                                                                           |
+| `kallip-tagma`   | HTTP server hosting agent instances. Uses `kallip-runtime` internally.                                                                                                                                    |
+| `kallip`         | Headless CLI for agents. Thin wrapper over `kallip-client`. No agent logic.                                                                                                                               |
+| `kallip-tui`     | Interactive terminal UI. Same client library, adds ratatui rendering.                                                                                                                                     |
 | `kallip-run`     | Agent runner for scripting and automation. Streams progress to stderr; emits a semantic exit code (and an optional JSON object on stdout with `--json`). Does not print the agent's user-facing messages. |
-| `kallip-client`  | Async HTTP client for the tagma API. Used by CLI, TUI, and runner.                                                                                                                         |
+| `kallip-client`  | Async HTTP client for the tagma API. Used by CLI, TUI, and runner.                                                                                                                                        |

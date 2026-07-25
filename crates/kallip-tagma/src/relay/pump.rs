@@ -72,10 +72,14 @@ impl RelayHandle {
                             // `Lagged` window (a slow post_envelope already
                             // represents the full backpressure, same as the old
                             // HTTP-SSE pump).
-                            if let Err(e) = self.emit(
+                            // emit_event appends to chat_history first (so a
+                            // 503 while the app is offline no longer loses the
+                            // frame), then live-emits under the cancel token.
+                            if let Err(e) = self.emit_event(
                                 &trace,
                                 kallip_agora_common::message::TagmaReply::Event {
                                     event: tagma_ev,
+                                    history_id: 0,
                                 },
                                 Some(&cancel),
                             )

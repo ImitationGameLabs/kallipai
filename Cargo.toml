@@ -65,6 +65,8 @@ reqwest = { version = "0.13.2", default-features = false, features = [
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
+# Match sea-orm's sqlx (0.8); the tagma names SqliteConnectOptions for PRAGMAs.
+sqlx = { version = "0.8", default-features = false }
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = [
   "macros",

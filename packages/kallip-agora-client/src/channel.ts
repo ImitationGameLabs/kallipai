@@ -26,6 +26,7 @@ import type {
   Envelope,
   KeyExchangeInit,
   Participant,
+  TagmaControl,
   TagmaReply,
   TagmaRequest,
 } from "./types.ts";
@@ -34,9 +35,11 @@ import type {
  * Open an E2EE channel to `tagmaId` for `userId`: fetch the pinned key from the
  * agora, resolve the conversation + run the 1-RTT key exchange on the lesche,
  * verify the responder's signature against the agora-pinned key, and derive the
- * session key. The channel keeps the lesche client (only `postEnvelope` is
- * needed after open). Throws if the tagma is offline / not owned / the signature
- * fails to verify.
+ * session key. History is pull-based: the channel does NOT auto-request it; the
+ * UI store hydrates its local cache and then sends a `TagmaControl::History`
+ * (`after: maxRendered` for incremental, or `latest` for an empty cache) to
+ * fetch what it is missing, drained through the normal `replies()` stream.
+ * Throws if the tagma is offline / not owned / the signature fails to verify.
  */
 export async function openRelayChannel(
   agora: AgoraClient,
@@ -46,19 +49,20 @@ export async function openRelayChannel(
 ): Promise<RelayChannel> {
   const info = await agora.getTagma(tagmaId);
   const pinnedKey = decodeB64(info.pinned_public_key);
-  const { conversation_id: convId } = await lesche.createConversation(tagmaId);
+  const { conversation_id: conversationId } =
+    await lesche.createConversation(tagmaId);
 
   const { privateKey: initiatorPriv, publicKey: initiatorEph } =
     generateEphemeralKeyPair();
   const init: KeyExchangeInit = { ephemeral_public: encodeB64(initiatorEph) };
-  const resp = await lesche.keyExchangeInit(convId, init);
+  const resp = await lesche.keyExchangeInit(conversationId, init);
   const responderEph = decodeB64(resp.ephemeral_public);
   const signature = decodeB64(resp.signature);
   if (
     !verifyKeyExchange(
       pinnedKey,
       tagmaId,
-      convId,
+      conversationId,
       initiatorEph,
       responderEph,
       signature,
@@ -69,8 +73,7 @@ export async function openRelayChannel(
     );
   }
   const sessionKey = deriveSessionKey(initiatorPriv, responderEph);
-
-  return new RelayChannel(lesche, convId, tagmaId, userId, sessionKey);
+  return new RelayChannel(lesche, conversationId, tagmaId, userId, sessionKey);
 }
 
 /**
@@ -91,7 +94,7 @@ export class RelayChannel {
    * the key-exchange verification the factory performs. */
   constructor(
     private readonly lesche: LescheClient,
-    readonly convId: string,
+    readonly conversationId: string,
     readonly tagmaId: string,
     private readonly userId: string,
     private readonly sessionKey: Uint8Array,
@@ -104,13 +107,17 @@ export class RelayChannel {
    * wrong sequence, neither of which the app can recover. */
   enqueue(envelope: Envelope): void {
     if (this.closed) return; // a late envelope after close is dropped
-    if (envelope.conversation_id !== this.convId) return;
+    if (envelope.conversation_id !== this.conversationId) return;
     // The reply flows out via `replies` once a consumer is draining.
     this.inbound.push(envelope);
     this.resolveDrain?.();
   }
 
-  /** The decrypted `TagmaReply` stream. Ends when `close()` is called. */
+  /** The decrypted `TagmaReply` stream. Ends when `close()` is called. The
+   * channel is a pure transport: it does NOT dedup — ordering/dedup by
+   * `history_id` is the UI store's job (it owns the rendered cursor and the
+   * local cache), since dedup needs to span both batch replay and live frames
+   * across a reconnect. */
   async *replies(): AsyncGenerator<TagmaReply> {
     while (!this.closed) {
       while (this.inbound.length > 0) {
@@ -129,7 +136,7 @@ export class RelayChannel {
           // spam from a sustained mismatch.
           if (this.decryptFailures++ === 0) {
             console.warn(
-              `[RelayChannel ${this.convId}] dropped an undecryptable inbound envelope (seq=${envelope.sequence_n}); a persistent failure means the session key is wrong.`,
+              `[RelayChannel ${this.conversationId}] dropped an undecryptable inbound envelope (seq=${envelope.sequence_n}); a persistent failure means the session key is wrong.`,
             );
           }
           continue;
@@ -160,6 +167,27 @@ export class RelayChannel {
     return this.sendRequest({ op: "interrupt", req_id: this.nextReqId++ });
   }
 
+  /** Request a batch of chat history (cursor-based). `after` = incremental
+   * catch-up (rows newer than the rendered high-water mark); `before` =
+   * scroll-up lazy load (rows older than the oldest id in view); both null =
+   * the most recent `limit` rows (a first-time device). The matching rows and a
+   * `history_batch_end` marker flow through `replies()`. The same encrypted
+   * envelope channel as a `TagmaRequest`; lesche is unaware. */
+  history(opts: {
+    after?: number | null;
+    before?: number | null;
+    limit?: number;
+  }): Promise<void> {
+    const ctrl: TagmaControl = {
+      op: "history",
+      req_id: this.nextReqId++,
+      after: opts.after ?? null,
+      before: opts.before ?? null,
+      limit: opts.limit ?? 50,
+    };
+    return this.sendControl(ctrl);
+  }
+
   /** Stop the channel. The `replies` generator ends; further enqueues are
    * dropped. Does not close the underlying agora SSE (owned by the demux). */
   close(): void {
@@ -169,7 +197,20 @@ export class RelayChannel {
   }
 
   private async sendRequest(req: TagmaRequest): Promise<void> {
-    const plaintext = new TextEncoder().encode(JSON.stringify(req));
+    return this.sendPayload(req);
+  }
+
+  private async sendControl(ctrl: TagmaControl): Promise<void> {
+    return this.sendPayload(ctrl);
+  }
+
+  /** Encrypt + POST one app->tagma payload (a `TagmaRequest` that drives the
+   * agent, or a `TagmaControl` plumbing op). Both share the envelope channel;
+   * the relay dispatches by the `op` discriminant. */
+  private async sendPayload(
+    payload: TagmaRequest | TagmaControl,
+  ): Promise<void> {
+    const plaintext = new TextEncoder().encode(JSON.stringify(payload));
     const sequence_n = this.sendSeq++;
     const ciphertext = aeadEncrypt(
       this.sessionKey,
@@ -179,13 +220,13 @@ export class RelayChannel {
     );
     const sender: Participant = { kind: "user", user_id: this.userId };
     const envelope: Envelope = {
-      conversation_id: this.convId,
+      conversation_id: this.conversationId,
       sender,
       sequence_n,
       trace_id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       ciphertext: encodeB64(ciphertext),
     };
-    await this.lesche.postEnvelope(this.convId, envelope);
+    await this.lesche.postEnvelope(this.conversationId, envelope);
   }
 }

@@ -180,9 +180,9 @@ export class LescheClient extends BaseClient {
     init: KeyExchangeInit,
   ): Promise<KeyExchangeResponse> {
     return this.json(
-      `/v1/conversations/${
-        encodeURIComponent(conversationId)
-      }/key-exchange/init`,
+      `/v1/conversations/${encodeURIComponent(
+        conversationId,
+      )}/key-exchange/init`,
       "POST",
       init,
     );

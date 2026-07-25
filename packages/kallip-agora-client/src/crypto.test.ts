@@ -214,36 +214,42 @@ Deno.test(
   },
 );
 
-Deno.test("KEX + AEAD round-trip: initiator and a simulated responder agree", () => {
-  // Internal consistency: both endpoints here import the same crypto.ts, so
-  // this cannot by itself catch a TS<->Rust HKDF drift — the pinned tests
-  // above (the HKDF_INFO literal + the derived vector) are that gate, plus
-  // the live integration. This test validates that deriveSessionKey and a
-  // hand-rolled HKDF agree, and that dir-tagged AEAD round-trips.
-  const initiator = generateEphemeralKeyPair();
-  const responderPriv = x25519.utils.randomSecretKey();
-  const responderPub = x25519.getPublicKey(responderPriv);
-  const initiatorKey = deriveSessionKey(initiator.privateKey, responderPub);
-  // Responder side (mirrors kallip-e2ee): same ECDH -> same key.
-  const responderShared = x25519.scalarMult(responderPriv, initiator.publicKey);
-  const responderKey = hkdf(
-    sha256,
-    responderShared,
-    new Uint8Array(),
-    HKDF_INFO,
-    32,
-  );
-  assertEquals(Array.from(initiatorKey), Array.from(responderKey));
-  // Initiator encrypts (dir=0); responder decrypts (dir=0).
-  const plaintext = enc.encode("over the relay");
-  const ct = aeadEncrypt(
-    initiatorKey,
-    DIR_INITIATOR_TO_RESPONDER,
-    0,
-    plaintext,
-  );
-  assertEquals(
-    aeadDecrypt(responderKey, DIR_INITIATOR_TO_RESPONDER, 0, ct),
-    plaintext,
-  );
-});
+Deno.test(
+  "KEX + AEAD round-trip: initiator and a simulated responder agree",
+  () => {
+    // Internal consistency: both endpoints here import the same crypto.ts, so
+    // this cannot by itself catch a TS<->Rust HKDF drift — the pinned tests
+    // above (the HKDF_INFO literal + the derived vector) are that gate, plus
+    // the live integration. This test validates that deriveSessionKey and a
+    // hand-rolled HKDF agree, and that dir-tagged AEAD round-trips.
+    const initiator = generateEphemeralKeyPair();
+    const responderPriv = x25519.utils.randomSecretKey();
+    const responderPub = x25519.getPublicKey(responderPriv);
+    const initiatorKey = deriveSessionKey(initiator.privateKey, responderPub);
+    // Responder side (mirrors kallip-e2ee): same ECDH -> same key.
+    const responderShared = x25519.scalarMult(
+      responderPriv,
+      initiator.publicKey,
+    );
+    const responderKey = hkdf(
+      sha256,
+      responderShared,
+      new Uint8Array(),
+      HKDF_INFO,
+      32,
+    );
+    assertEquals(Array.from(initiatorKey), Array.from(responderKey));
+    // Initiator encrypts (dir=0); responder decrypts (dir=0).
+    const plaintext = enc.encode("over the relay");
+    const ct = aeadEncrypt(
+      initiatorKey,
+      DIR_INITIATOR_TO_RESPONDER,
+      0,
+      plaintext,
+    );
+    assertEquals(
+      aeadDecrypt(responderKey, DIR_INITIATOR_TO_RESPONDER, 0, ct),
+      plaintext,
+    );
+  },
+);

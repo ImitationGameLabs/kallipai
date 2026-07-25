@@ -43,7 +43,9 @@ pub async fn post_message(
         slot.as_ref()
             .map(|(handle, _)| handle.clone())
             .ok_or_else(|| {
-                ApiError::unavailable("relay not active (no KALLIP_RELAY_AGORA_URL configured)")
+                ApiError::unavailable(
+                    "relay not active (no KALLIP_TAGMA_RELAY_AGORA_URL configured)",
+                )
             })?
     };
     match relay.emit_message(req.text).await {
@@ -70,7 +72,7 @@ mod tests {
     use axum::extract::{Path, State};
     use kallip_common::agentid::AgentId;
 
-    /// With no relay active (pure-local tagma, no `KALLIP_RELAY_AGORA_URL`) the
+    /// With no relay active (pure-local tagma, no `KALLIP_TAGMA_RELAY_AGORA_URL`) the
     /// route returns 503 unavailable rather than touching the relay. Authed as
     /// the agent itself (self-only) so the 403 check does not short-circuit.
     #[tokio::test]

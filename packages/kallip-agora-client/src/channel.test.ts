@@ -25,6 +25,7 @@ import type {
   Envelope,
   KeyExchangeInit,
   KeyExchangeResponse,
+  TagmaControl,
   TagmaReply,
   TagmaRequest,
 } from "./types.ts";
@@ -42,9 +43,32 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
   let channel: RelayChannel | null = null;
   let responderSeq = 0;
   // Captured state for assertions: the initiator-originated sequence numbers
-  // seen and the most-recent decrypted request.
+  // seen and the most-recent decrypted request/control.
   const receivedSeqs: number[] = [];
-  let lastRequest: TagmaRequest | null = null;
+  let lastRequest: TagmaRequest | TagmaControl | null = null;
+
+  /** Encrypt `reply` (dir=1, the responder's counter) and feed it back through
+   * the channel's SSE-demux path. A no-op until `setChannel` wires the channel
+   * (a real tagma's post-KEX replay would be dropped the same way if it landed
+   * before the SSE demux is wired — the next reconnect re-replays). */
+  function respond(reply: TagmaReply) {
+    if (!channel) return;
+    const seq = responderSeq++;
+    const ct = aeadEncrypt(
+      responderKey!,
+      DIR_RESPONDER_TO_INITIATOR,
+      seq,
+      enc.encode(JSON.stringify(reply)),
+    );
+    channel.enqueue({
+      conversation_id: convId,
+      sender: { kind: "agent", tagma_id: tagmaId },
+      sequence_n: seq,
+      trace_id: "trace",
+      timestamp: new Date().toISOString(),
+      ciphertext: encodeB64(ct),
+    });
+  }
 
   const agora = {
     getTagma(_id: string) {
@@ -76,32 +100,20 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
         decodeB64(envelope.ciphertext),
       );
       assertExists(pt, "responder must decrypt the initiator's envelope");
-      const req = JSON.parse(new TextDecoder().decode(pt)) as TagmaRequest;
+      const req = JSON.parse(new TextDecoder().decode(pt)) as
+        | TagmaRequest
+        | TagmaControl;
       lastRequest = req;
       receivedSeqs.push(envelope.sequence_n);
-      const text = req.op === "send_message" ? req.text : "";
-      // Responder encrypts an assistant_content reply (dir=1, its own counter)
-      // and feeds it back to the channel via the SSE-demux path — the reply is
-      // the `kallip lesche send` CLI's delivery, surfaced as assistant content.
-      const reply: TagmaReply = {
-        kind: "event",
-        event: { type: "assistant_content", content: `echo:${text}` },
-      };
-      const seq = responderSeq++;
-      const ct = aeadEncrypt(
-        responderKey!,
-        DIR_RESPONDER_TO_INITIATOR,
-        seq,
-        enc.encode(JSON.stringify(reply)),
-      );
-      channel!.enqueue({
-        conversation_id: convId,
-        sender: { kind: "agent", tagma_id: tagmaId },
-        sequence_n: seq,
-        trace_id: "trace",
-        timestamp: new Date().toISOString(),
-        ciphertext: encodeB64(ct),
-      });
+      // A history control op carries no agent action; the mock just records it
+      // (a real tagma would reply with the batch). Otherwise echo the text.
+      if (req.op === "send_message") {
+        respond({
+          kind: "event",
+          event: { type: "assistant_content", content: `echo:${req.text}` },
+          history_id: 0,
+        });
+      }
     },
   };
   return {
@@ -110,6 +122,8 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
     setChannel: (c: RelayChannel) => {
       channel = c;
     },
+    /** Push a raw responder reply (for dedup tests). */
+    respond,
     receivedSeqs,
     lastRequest: () => lastRequest,
   };
@@ -134,7 +148,7 @@ Deno.test(
       tagmaId,
       userId,
     );
-    assertEquals(channel.convId, convId);
+    assertEquals(channel.conversationId, convId);
     assertEquals(channel.tagmaId, tagmaId);
     setChannel(channel);
 
@@ -217,7 +231,7 @@ Deno.test(
     // A garbage-ciphertext envelope (the SSE demux would route this in) that
     // cannot decrypt under the session key.
     channel.enqueue({
-      conversation_id: channel.convId,
+      conversation_id: channel.conversationId,
       sender: { kind: "agent", tagma_id: "tagma-d" },
       sequence_n: 99,
       trace_id: "t",
@@ -273,3 +287,71 @@ Deno.test(
     channel.close();
   },
 );
+
+Deno.test(
+  "replies yields every frame without dedup (dedup is the UI store's job)",
+  async () => {
+    // The channel is a pure transport: it does NOT dedup by history_id. Two
+    // deliveries of the same frame both yield — ordering/dedup across batch
+    // replay and live frames is the UI store's responsibility (it owns the
+    // rendered cursor and the local cache).
+    const { agora, lesche, setChannel, respond } = makeMock(
+      ed25519.utils.randomSecretKey(),
+      "tagma-h",
+      "conv-h",
+    );
+    const channel = await openRelayChannel(
+      agora as unknown as AgoraClient,
+      lesche as unknown as LescheClient,
+      "tagma-h",
+      "u",
+    );
+    setChannel(channel);
+
+    const event = (id: number): TagmaReply => ({
+      kind: "event",
+      event: { type: "status", message: `m${id}` },
+      history_id: id,
+    });
+    respond(event(1));
+    respond(event(1)); // duplicate — yielded again; the store drops it
+    respond(event(2));
+
+    const iter = channel.replies();
+    const a = (await iter.next()).value as TagmaReply;
+    const b = (await iter.next()).value as TagmaReply;
+    const c = (await iter.next()).value as TagmaReply;
+    assertEquals((a as { event: { message: string } }).event.message, "m1");
+    assertEquals(
+      (b as { event: { message: string } }).event.message,
+      "m1",
+      "the channel yields the duplicate; the store dedups",
+    );
+    assertEquals((c as { event: { message: string } }).event.message, "m2");
+    channel.close();
+  },
+);
+
+Deno.test("history() sends a cursor-based history control op", async () => {
+  const { agora, lesche, setChannel, lastRequest } = makeMock(
+    ed25519.utils.randomSecretKey(),
+    "tagma-c",
+    "conv-c",
+  );
+  const channel = await openRelayChannel(
+    agora as unknown as AgoraClient,
+    lesche as unknown as LescheClient,
+    "tagma-c",
+    "u",
+  );
+  setChannel(channel);
+  await channel.history({ after: 5, limit: 20 });
+  const req = lastRequest();
+  if (!req || req.op !== "history") {
+    throw new Error(`expected history control op, got ${JSON.stringify(req)}`);
+  }
+  assertEquals(req.after, 5);
+  assertEquals(req.before, null);
+  assertEquals(req.limit, 20);
+  channel.close();
+});

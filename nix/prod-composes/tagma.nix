@@ -8,10 +8,10 @@
 # This is a single-mode file, so unlike arion-compose.nix there is no
 # KALLIP_ARION_MODE switch and no mkIf/mkMerge: every service is declared
 # directly. The .env at the repo root supplies KALLIP_AUTH_TOKEN (the tagma
-# operator token), KALLIP_RELAY_ENROLLMENT_CODE (first boot only),
-# KALLIP_RELAY_AGORA_URL (the prod-agora deploy's public HTTPS URL; ENROLLMENT
-# ONLY -- the stored tagma token is reused thereafter), and
-# KALLIP_RELAY_LESCHE_URL (the prod-lesche deploy's public HTTPS URL; the tagma
+# operator token), KALLIP_TAGMA_RELAY_ENROLLMENT_CODE (first boot only),
+# KALLIP_TAGMA_RELAY_AGORA_URL (the prod-agora deploy's public HTTPS URL;
+# ENROLLMENT ONLY -- the stored tagma token is reused thereafter), and
+# KALLIP_TAGMA_RELAY_LESCHE_URL (the prod-lesche deploy's public HTTPS URL; the tagma
 # holds its tunnel here and posts envelopes / key-exchange responses here), and
 # the LLM provider credentials. See docs/reference/container.md.
 { lib, ... }:
@@ -68,9 +68,9 @@ in
         KALLIP_WORKSPACE_ROOT = "/workspace";
         KALLIP_TAGMA_ADDR = "0.0.0.0:3000";
         RUST_LOG = "info";
-        # KALLIP_AUTH_TOKEN (operator token), KALLIP_RELAY_ENROLLMENT_CODE (first
-        # run only), KALLIP_RELAY_AGORA_URL (enroll-only), and
-        # KALLIP_RELAY_LESCHE_URL (tunnel + envelopes + KEX responses) come from
+        # KALLIP_AUTH_TOKEN (operator token), KALLIP_TAGMA_RELAY_ENROLLMENT_CODE
+        # (first run only), KALLIP_TAGMA_RELAY_AGORA_URL (enroll-only), and
+        # KALLIP_TAGMA_RELAY_LESCHE_URL (tunnel + envelopes + KEX responses) come from
         # .env. Per the per-service subdomain topology the agora and lesche are
         # two distinct origins (e.g. https://agora.kallipai.com and
         # https://lesche.kallipai.com) sharing the parent domain.

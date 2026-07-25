@@ -197,7 +197,7 @@ let
       # seccomp=unconfined (out.service is the escape hatch for security_opt).
       # The tagma also runs the in-process relay connector: it enrolls with the
       # agora and holds its lesche tunnel, so it depends on both being up. On a
-      # missing KALLIP_RELAY_ENROLLMENT_CODE (before a user signs up) it degrades
+      # missing KALLIP_TAGMA_RELAY_ENROLLMENT_CODE (before a user signs up) it degrades
       # to local-only and keeps serving local agents.
       services.tagma = {
         service.capabilities.SYS_ADMIN = true;
@@ -234,10 +234,11 @@ let
           KALLIP_WORKSPACE_ROOT = "/workspace";
           KALLIP_TAGMA_ADDR = "0.0.0.0:3000";
           # In-process relay connector: enroll at the agora, tunnel to the
-          # lesche (both via compose DNS). KALLIP_RELAY_ENROLLMENT_CODE comes
-          # from .env (minted after signup); until then the tagma runs local-only.
-          KALLIP_RELAY_AGORA_URL = "http://agora:7100";
-          KALLIP_RELAY_LESCHE_URL = "http://lesche:7200";
+          # lesche (both via compose DNS). KALLIP_TAGMA_RELAY_ENROLLMENT_CODE
+          # comes from .env (minted after signup); until then the tagma runs
+          # local-only.
+          KALLIP_TAGMA_RELAY_AGORA_URL = "http://agora:7100";
+          KALLIP_TAGMA_RELAY_LESCHE_URL = "http://lesche:7200";
           # Seed source for <data_dir>/skills/ on first boot (read-only bundled
           # defaults). Set here rather than baked into the image because dev
           # builds its image ad-hoc via image.contents/useHostStore (not

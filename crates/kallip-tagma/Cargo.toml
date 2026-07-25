@@ -12,6 +12,9 @@ kallip-agora-common = { workspace = true }
 kallip-agora-client = { workspace = true }
 kallip-lesche-client = { workspace = true }
 kallip-e2ee = { workspace = true }
+sea-orm = { workspace = true, features = ["sqlx-sqlite"] }
+sea-orm-migration = { workspace = true, features = ["sqlx-sqlite"] }
+sqlx = { workspace = true }
 just-llm-client = { workspace = true }
 reqwest = { workspace = true }
 anyhow = { workspace = true }

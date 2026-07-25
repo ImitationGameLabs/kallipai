@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use kallip_agora_common::event::{FailoverChainExhaustion, TagmaEvent};
 use kallip_agora_common::ids::TraceId;
-use kallip_agora_common::message::{TagmaReply, TagmaRequest};
+use kallip_agora_common::message::TagmaReply;
 use kallip_common::protocol::{
     ApiError, FailoverChainExhaustion as WireFailoverExhaustion, SseEvent,
 };
@@ -76,14 +76,6 @@ fn map_failover_exhaustion(reason: WireFailoverExhaustion) -> FailoverChainExhau
     }
 }
 
-/// The `req_id` of a request, extracted before any fallible tagma call so a
-/// panic during the call can still be attributed to the right op.
-pub(super) fn req_id_of(request: &TagmaRequest) -> u64 {
-    match request {
-        TagmaRequest::SendMessage { req_id, .. } | TagmaRequest::Interrupt { req_id } => *req_id,
-    }
-}
-
 /// Map a tagma error to an op `Error` reply, preserving the tagma's HTTP status
 /// when the error carries one (otherwise 502 bad gateway). Only the `ApiError`'s
 /// HTTP-facing message crosses the E2E boundary; arbitrary anyhow chains (which
@@ -127,9 +119,9 @@ impl Default for MessageLimits {
     }
 }
 
-/// Default cap unless `KALLIP_RELAY_MESSAGE_BURST_MAX` overrides it.
+/// Default cap unless `KALLIP_TAGMA_RELAY_MESSAGE_BURST_MAX` overrides it.
 pub(crate) const DEFAULT_MESSAGE_BURST_MAX: u32 = 20;
-/// Default window unless `KALLIP_RELAY_MESSAGE_BURST_WINDOW_SECS` overrides it.
+/// Default window unless `KALLIP_TAGMA_RELAY_MESSAGE_BURST_WINDOW_SECS` overrides it.
 pub(crate) const DEFAULT_MESSAGE_BURST_WINDOW: Duration = Duration::from_secs(10);
 
 /// A simple fixed-window burst limiter for message deliveries: at most

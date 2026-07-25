@@ -41,25 +41,34 @@ pub struct Args {
     /// control-plane URL. Unset = local-only (no relay; the lesche message
     /// route returns 503). Replaces the former standalone connector's
     /// control-plane env var.
-    #[arg(long, env = "KALLIP_RELAY_AGORA_URL")]
+    #[arg(long, env = "KALLIP_TAGMA_RELAY_AGORA_URL")]
     pub relay_agora_url: Option<String>,
     /// Lesche (data-plane relay) base URL the relay connector tunnels to. A full
     /// URL. If unset, defaults to the agora URL's origin (scheme + host + port),
     /// which is correct only for same-origin agora/lesche deployments — set it
     /// explicitly otherwise. Replaces the former standalone connector's data-plane env var.
-    #[arg(long, env = "KALLIP_RELAY_LESCHE_URL")]
+    #[arg(long, env = "KALLIP_TAGMA_RELAY_LESCHE_URL")]
     pub relay_lesche_url: Option<String>,
     /// Single-use agora enrollment code (first run only; thereafter the stored
     /// tagma token is reused). Replaces the former standalone connector's
     /// enrollment-code env var.
-    #[arg(long, env = "KALLIP_RELAY_ENROLLMENT_CODE")]
+    #[arg(long, env = "KALLIP_TAGMA_RELAY_ENROLLMENT_CODE")]
     pub relay_enrollment_code: Option<String>,
     /// Max `kallip lesche send` deliveries per burst window. Bounds a runaway
     /// agent message loop; process-global (today one root agent = one
     /// conversation, so this is effectively per-conversation). Unset = 20.
-    #[arg(long, env = "KALLIP_RELAY_MESSAGE_BURST_MAX")]
+    #[arg(long, env = "KALLIP_TAGMA_RELAY_MESSAGE_BURST_MAX")]
     pub relay_message_burst_max: Option<u32>,
     /// Length in seconds of the message burst window. Unset = 10.
-    #[arg(long, env = "KALLIP_RELAY_MESSAGE_BURST_WINDOW_SECS")]
+    #[arg(long, env = "KALLIP_TAGMA_RELAY_MESSAGE_BURST_WINDOW_SECS")]
     pub relay_message_burst_window_secs: Option<u64>,
+    /// Chat-history retention in days. Rows older than this are GC'd; a device
+    /// that reconnects after the window only sees what remains. Unset = 30.
+    #[arg(long, env = "KALLIP_TAGMA_RELAY_HISTORY_TTL_DAYS")]
+    pub relay_history_ttl_days: Option<u64>,
+    /// Chat-history row cap. When exceeded, the oldest rows are trimmed
+    /// regardless of age. Unset = 100000 (a runaway backstop, not a usage
+    /// quota; normal use within the TTL window should never reach it).
+    #[arg(long, env = "KALLIP_TAGMA_RELAY_HISTORY_CAP")]
+    pub relay_history_cap: Option<u64>,
 }

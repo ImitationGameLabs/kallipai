@@ -9,16 +9,16 @@
   import { channelsStore } from "../lib/session/channels.svelte";
   import { navigate } from "../lib/shell/port.ts";
 
-  let { convId }: { convId: string } = $props();
+  let { conversationId }: { conversationId: string } = $props();
 
   // Resolves to undefined for a deep link to a channel that is not currently
   // open (channelsStore only knows channels opened this session).
-  const channelState = $derived(channelsStore.get(convId));
+  const channelState = $derived(channelsStore.get(conversationId));
 
   // The composer is created once; its closures re-read the reactive state on
   // each submit/canSubmit call.
   const composer = createComposer({
-    send: (text) => channelsStore.send(convId, text),
+    send: (text) => channelsStore.send(conversationId, text),
     canSubmit: () =>
       channelState?.status === "open" &&
       channelState.transcript.status !== "busy",
@@ -40,7 +40,7 @@
 <svelte:head><title>KallipAI · channel</title></svelte:head>
 
 {#if !channelState}
-  <!-- Deep link to a channel that was not opened this session. The convId is a
+  <!-- Deep link to a channel that was not opened this session. The conversationId is a
        server-derived value the client does not reverse-resolve, so route the
        user back to the tagma list rather than guessing. -->
   <div class="h-full grid place-items-center p-6">
@@ -70,7 +70,7 @@
             Send a message to start the conversation.
           </p>
         {/if}
-        {#each channelState.transcript.lines as line (line.seq)}
+        {#each channelState.transcript.lines as line (line.historyId)}
           {#if line.role === "system"}
             <p
               class="text-xs opacity-60 text-center whitespace-pre-wrap break-words"
@@ -114,7 +114,7 @@
       {disabled}
       {busy}
       pendingCount={channelState.pending.length}
-      oninterrupt={() => channelsStore.interrupt(convId)}
+      oninterrupt={() => channelsStore.interrupt(conversationId)}
     />
   </div>
 {/if}

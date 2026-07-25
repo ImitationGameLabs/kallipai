@@ -19,7 +19,7 @@ images, the production split, and the integration-test mode, see
 
 The stack comes up in two phases because the tagma's relay connector cannot
 enroll with the agora until a real user signs up in the web UI and mints an
-enrollment code -- starting it with `KALLIP_RELAY_AGORA_URL` set but no code
+enrollment code -- starting it with `KALLIP_TAGMA_RELAY_AGORA_URL` set but no code
 degrades the tagma to local-only (it logs an error and keeps serving local
 agents; the lesche message route returns 503).
 
@@ -42,8 +42,8 @@ allows `http://localhost:5173`. The web app reads the two origins from
 (`http://agora.localhost:7100` / `http://lesche.localhost:7200`) if you prefer
 host-separated origins (the `Domain=localhost` cookie is shared either way). Open
 the web app at `:5173`, sign up, and mint a `sk-enroll-...` enrollment code.
-Paste it into `.env` as `KALLIP_RELAY_ENROLLMENT_CODE` (and set
-`KALLIP_RELAY_AGORA_URL` / `KALLIP_RELAY_LESCHE_URL` to the dev subdomains), and
+Paste it into `.env` as `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` (and set
+`KALLIP_TAGMA_RELAY_AGORA_URL` / `KALLIP_TAGMA_RELAY_LESCHE_URL` to the dev subdomains), and
 set `KALLIP_AUTH_TOKEN` to the tagma's operator token.
 
 ### Phase 2 -- tagma side

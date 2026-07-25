@@ -38,20 +38,9 @@ export type {
 } from "./types.ts";
 export { AgoraApiError } from "./types.ts";
 
-// Chat data-plane (E2EE relay). Only the transport surface is re-exported; the
-// crypto primitives in ./crypto.ts are internals (tests import them directly).
-export type {
-  AgoraEvent,
-  CreateConversationResponse,
-  Envelope,
-  FailoverChainExhaustion,
-  KeyExchangeInit,
-  KeyExchangeResponse,
-  Participant,
-  TagmaEvent,
-  TagmaInfo,
-  TagmaReply,
-  TagmaRequest,
-} from "./types.ts";
-export { decodeB64, encodeB64 } from "./base64.ts";
-export { RelayChannel, openRelayChannel } from "./channel.ts";
+// Chat data-plane (E2EE relay). Only the surface actually consumed by the UI
+// is re-exported; the rest (crypto primitives in ./crypto.ts, base64 helpers,
+// internal wire types) is package-private.
+export type { AgoraEvent, Envelope, TagmaEvent, TagmaReply } from "./types.ts";
+export { openRelayChannel, RelayChannel } from "./channel.ts";
+export { clear as clearConvCache, loadAll, put } from "./cache.ts";

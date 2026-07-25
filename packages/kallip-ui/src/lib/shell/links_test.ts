@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { navFor, pathMatches, type NavIcons } from "./links.ts";
+import { navFor, type NavIcons, pathMatches } from "./links.ts";
 
 // navFor only stores the icon components; dummies suffice.
 const icons = {
@@ -21,9 +21,9 @@ Deno.test("navFor online appends one entry per open channel", () => {
     mode: "online",
     icons,
     channels: [
-      { convId: "c1", label: "Laptop", indicator: "live" },
-      { convId: "c2", label: null, indicator: "down" },
-      { convId: "c3", label: "Phone", indicator: "pending" },
+      { conversationId: "c1", label: "Laptop", indicator: "live" },
+      { conversationId: "c2", label: null, indicator: "down" },
+      { conversationId: "c3", label: "Phone", indicator: "pending" },
     ],
   });
   // Channels use an indicator dot, not an icon, so they read as their own

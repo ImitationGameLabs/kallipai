@@ -16,9 +16,8 @@ export interface CeremonyBeginResponse<T> {
   readonly options: T;
 }
 
-export type RegisterBeginResponse = CeremonyBeginResponse<
-  ServerCreationOptions
->;
+export type RegisterBeginResponse =
+  CeremonyBeginResponse<ServerCreationOptions>;
 export type LoginBeginResponse = CeremonyBeginResponse<ServerRequestOptions>;
 
 /** Bodies the client sends to register/login `finish`. */
@@ -134,11 +133,25 @@ export interface Envelope {
  * serde tag = `op`, snake_case. `req_id` correlates the op with its TagmaReply. */
 export type TagmaRequest =
   | {
-    readonly op: "send_message";
-    readonly req_id: number;
-    readonly text: string;
-  }
+      readonly op: "send_message";
+      readonly req_id: number;
+      readonly text: string;
+    }
   | { readonly op: "interrupt"; readonly req_id: number };
+
+/** App -> tagma: a control op that does NOT drive the agent (today: the
+ * cursor-based history pull). Carried in the same encrypted envelope channel as
+ * TagmaRequest; the relay dispatches by the `op` discriminant (disjoint from
+ * TagmaRequest's). serde tag = `op`, snake_case. */
+export type TagmaControl = {
+  readonly op: "history";
+  readonly req_id: number;
+  /** rows with id > after (incremental catch-up). */
+  readonly after: number | null;
+  /** rows with id < before (scroll-up lazy load). */
+  readonly before: number | null;
+  readonly limit: number;
+};
 
 /** Why a failover chain ran out. Mirrors `event.rs::FailoverChainExhaustion`
  * (serde `rename_all = "camelCase"`). */
@@ -161,34 +174,59 @@ export type TagmaEvent =
   | { readonly type: "interrupted" }
   | { readonly type: "cancelled" }
   | {
-    readonly type: "token_budget_exceeded";
-    readonly consumed: number;
-    readonly budget: number;
-  }
+      readonly type: "token_budget_exceeded";
+      readonly consumed: number;
+      readonly budget: number;
+    }
   | { readonly type: "max_rounds_exceeded" }
   | {
-    readonly type: "failover_chain_exhausted";
-    readonly reason: FailoverChainExhaustion;
-    readonly detail: string;
-  };
+      readonly type: "failover_chain_exhausted";
+      readonly reason: FailoverChainExhaustion;
+      readonly detail: string;
+    };
 
-/** Responder -> app: either the result of a correlated op, or an unsolicited event
- * from the tagma's event pump. serde tag = `kind`, snake_case. */
+/** Responder -> app: either the result of a correlated op, or an unsolicited
+ * event from the tagma's event pump. serde tag = `kind`, snake_case. */
 export type TagmaReply =
   | {
-    readonly kind: "message_accepted";
-    readonly req_id: number;
-    readonly queue_depth: number;
-    readonly warning?: string;
-  }
+      readonly kind: "message_accepted";
+      readonly req_id: number;
+      readonly queue_depth: number;
+      readonly warning?: string;
+      /** `chat_history.id` of the **inbound** row the tagma appended for this
+       * user message; the app stamps its optimistic local user line with this id
+       * so it can be deduped against a later history replay. `0` (or absent)
+       * means no row was recorded and must not be used for dedup. The ack itself
+       * is never stored or replayed. */
+      readonly history_id?: number;
+    }
   | { readonly kind: "interrupted"; readonly req_id: number }
   | {
-    readonly kind: "error";
-    readonly req_id: number;
-    readonly status: number;
-    readonly message: string;
-  }
-  | { readonly kind: "event"; readonly event: TagmaEvent };
+      readonly kind: "error";
+      readonly req_id: number;
+      readonly status: number;
+      readonly message: string;
+    }
+  | {
+      readonly kind: "event";
+      readonly event: TagmaEvent;
+      /** `chat_history.id` of the outbound row the tagma appended for this event;
+       * a stable id the app uses to order/dedup frames across batch replay and
+       * live delivery. `0` (or absent) means the row was not recorded and must
+       * not be used for dedup. */
+      readonly history_id?: number;
+    }
+  | {
+      readonly kind: "user_message";
+      readonly history_id: number;
+      readonly text: string;
+    }
+  | {
+      readonly kind: "history_batch_end";
+      readonly req_id: number;
+      readonly count: number;
+      readonly more: boolean;
+    };
 
 /** App -> tagma (relayed by the agora): start a 1-RTT key exchange, carrying
  * the app's ephemeral X25519 public key (standard base64). */
@@ -212,11 +250,11 @@ export type AgoraEvent =
   | { readonly type: "tagma_online"; readonly tagma_id: string }
   | { readonly type: "tagma_offline"; readonly tagma_id: string }
   | {
-    readonly type: "agent_state";
-    readonly tagma_id: string;
-    readonly agent_id: string;
-    readonly state: string;
-  };
+      readonly type: "agent_state";
+      readonly tagma_id: string;
+      readonly agent_id: string;
+      readonly state: string;
+    };
 
 /**
  * Agora API error. Mirrors `kallip_common::protocol::ApiError`. This is a

@@ -44,9 +44,9 @@
   async function onOpenChannel(id: string): Promise<string> {
     const tagma = agoraSession.tagmata.find((t) => t.tagma_id === id);
     if (!tagma) throw new Error("tagma no longer available; refresh the list");
-    const convId = await channelsStore.open(tagma);
-    await navigate(`/chat/${convId}`);
-    return convId;
+    const conversationId = await channelsStore.open(tagma);
+    await navigate(`/chat/${conversationId}`);
+    return conversationId;
   }
 </script>
 

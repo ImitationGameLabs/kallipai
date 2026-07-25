@@ -74,7 +74,7 @@ up without an in-compose bake; postgres uses the official `postgres:17.5` image.
 The tagma is gated behind the `tagma` profile, so a plain `arion up` brings up
 only the agora + lesche side. The tagma's relay connector enrolls on first boot
 and needs a code that cannot exist until a user signs up — with
-`KALLIP_RELAY_AGORA_URL` set but no code it degrades to local-only (logs an
+`KALLIP_TAGMA_RELAY_AGORA_URL` set but no code it degrades to local-only (logs an
 error, keeps serving local agents; see [Relay bootstrap](#relay-bootstrap)).
 
 Dev uses a **per-service subdomain** topology with no edge proxy. Browsers
@@ -101,9 +101,10 @@ resolves):
 Brings up the tagma (agent host + in-process relay connector) from
 `packages.kallip-tagma-image`. The relay connector talks to the prod-deployed
 services over the public internet: the agora subdomain
-(`KALLIP_RELAY_AGORA_URL`, e.g. `https://agora.kallipai.com`) for enrollment
-only — the stored tagma token is reused thereafter — and the lesche subdomain
-(`KALLIP_RELAY_LESCHE_URL`, e.g. `https://lesche.kallipai.com`) for its tunnel,
+(`KALLIP_TAGMA_RELAY_AGORA_URL`, e.g. `https://agora.kallipai.com`) for
+enrollment only — the stored tagma token is reused thereafter — and the lesche
+subdomain (`KALLIP_TAGMA_RELAY_LESCHE_URL`, e.g. `https://lesche.kallipai.com`)
+for its tunnel,
 envelope POSTs, and key-exchange responses (the per-service subdomain
 topology).
 
@@ -145,7 +146,7 @@ arion -f nix/prod-composes/agora.nix logs -f
 
 Applies to both dev and the prod-tagma composition (the only compositions that
 run the tagma with a relay configured). The tagma's relay connector enrolls on
-its **first** boot using `KALLIP_RELAY_ENROLLMENT_CODE` (a single-use
+its **first** boot using `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` (a single-use
 `sk-enroll-...` minted via the agora dashboard after a user signs up). After
 that it persists the tagma token under `KALLIP_DATA_DIR/credentials/` (i.e. inside the
 `data` volume) and reuses it. Leave the code unset on subsequent boots. The
@@ -270,11 +271,11 @@ Tagma (dev / the prod-tagma composition):
 
 Relay connector (dev / the prod-tagma composition) — activate + enroll via `.env`:
 
-| Variable                       | Required             | Notes                                                                                                                                                  |
-| ------------------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `KALLIP_RELAY_AGORA_URL`       | **yes** (prod-tagma) | The prod-agora deploy's public HTTPS URL, for enrollment only. Setting any value activates the relay. (Dev hardcodes `http://agora:7100`.)             |
-| `KALLIP_RELAY_LESCHE_URL`      | no                   | The prod-lesche deploy's public HTTPS URL (tunnel + envelopes + KEX). Defaults to the `KALLIP_RELAY_AGORA_URL` origin; set it for the subdomain split. |
-| `KALLIP_RELAY_ENROLLMENT_CODE` | first boot only      | A `sk-enroll-...` minted via the agora dashboard. Remove after the first successful enroll.                                                            |
+| Variable                             | Required             | Notes                                                                                                                                                        |
+| ------------------------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `KALLIP_TAGMA_RELAY_AGORA_URL`       | **yes** (prod-tagma) | The prod-agora deploy's public HTTPS URL, for enrollment only. Setting any value activates the relay. (Dev hardcodes `http://agora:7100`.)                   |
+| `KALLIP_TAGMA_RELAY_LESCHE_URL`      | no                   | The prod-lesche deploy's public HTTPS URL (tunnel + envelopes + KEX). Defaults to the `KALLIP_TAGMA_RELAY_AGORA_URL` origin; set it for the subdomain split. |
+| `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` | first boot only      | A `sk-enroll-...` minted via the agora dashboard. Remove after the first successful enroll.                                                                  |
 
 Agora + postgres (the prod-agora composition) — `.env` only (dev hardcodes
 localhost values):
