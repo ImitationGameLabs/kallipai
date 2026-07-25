@@ -65,8 +65,8 @@ let
   dataBind = bindOverride "KALLIP_ARION_DATA_PATH" "/var/lib/kallip";
   workspaceBind = bindOverride "KALLIP_ARION_WORKSPACE_PATH" "/workspace";
   # Skills overlay the data volume's skills/ subdir (no named volume of their
-  # own). NOTE: KALLIP_SKILLS_ROOT (if set via .env) short-circuits skill_dir()
-  # and bypasses this bind, so leave it unset when using skillsBind.
+  # own). NOTE: KALLIP_SKILLS_ROOT (if set via .env) redirects skill_dir() away
+  # from this bind-mount target, so leave it unset when using skillsBind.
   skillsBind = bindOverride "KALLIP_ARION_SKILLS_PATH" "/var/lib/kallip/skills";
 
   dataVolume = if dataBind != null then dataBind else "data:/var/lib/kallip";
@@ -87,6 +87,7 @@ let
     certLinks
     aifed
     binPath
+    skillsSeed
     ;
 
   # The runtime image tail common to dev and test (the mode-specific package --
@@ -237,6 +238,12 @@ let
           # from .env (minted after signup); until then the tagma runs local-only.
           KALLIP_RELAY_AGORA_URL = "http://agora:7100";
           KALLIP_RELAY_LESCHE_URL = "http://lesche:7200";
+          # Seed source for <data_dir>/skills/ on first boot (read-only bundled
+          # defaults). Set here rather than baked into the image because dev
+          # builds its image ad-hoc via image.contents/useHostStore (not
+          # kallip-tagma-image) -- mirrors how PATH is handled above. The store
+          # path is reachable directly via the shared host /nix/store.
+          KALLIP_SKILLS_SEED = skillsSeed;
           RUST_LOG = "info";
         };
       };

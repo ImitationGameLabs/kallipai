@@ -100,6 +100,13 @@
                   workspace
                   ;
               };
+              # Curated shared-skill tree (read-only bundled defaults). Pure
+              # markdown, cross-platform. The tagma seeds <data_dir>/skills/
+              # from this on first boot; container-shared.nix imports the same
+              # file so deployments reference a bit-identical store path.
+              kallip-shared-skills = import ./nix/packages/shared-skills.nix {
+                inherit pkgs;
+              };
             }
             # Container images: scratch + nix closure via dockerTools. Linux-only
             # (the buildImage closure is Linux-native). See

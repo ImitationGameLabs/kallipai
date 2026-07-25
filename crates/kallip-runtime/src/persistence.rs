@@ -248,7 +248,11 @@ pub fn archive_agent_dir(agent_id: &AgentId) -> Result<()> {
 /// the symlink path keeps this correct if that ever changes. On any error a
 /// partial `dst` is left in place for diagnosis — the caller must NOT delete
 /// `src` unless this returns `Ok`.
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+///
+/// Uses `fs::copy`, so the source mode bits are preserved — nix-store files
+/// (0444) land read-only, which is the desired contract for seeded curated
+/// skills (the agent authors NEW files alongside them, not over them).
+pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;

@@ -82,7 +82,7 @@ bind-mount them on the host instead:
 | `KALLIP_ARION_SKILLS_PATH`    | `/var/lib/kallip/skills` | curate shared skills on the host    |
 
 Leave `KALLIP_SKILLS_ROOT` unset when using `KALLIP_ARION_SKILLS_PATH` -- the
-former short-circuits `skill_dir()` and bypasses the bind.
+former redirects `skill_dir()` away from the bind-mount target.
 
 ## Integration tests
 

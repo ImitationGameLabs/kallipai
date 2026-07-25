@@ -18,8 +18,8 @@ pub mod context;
 pub mod skill;
 
 pub use skill::{
-    META_SKILL_NAME, load_skill, meta_skill_content, parse_frontmatter_meta, skill_dir,
-    skill_metadata, validate_skill_name,
+    META_SKILL_NAME, load_skill, meta_skill_content, parse_frontmatter_meta, seed_skills_if_empty,
+    skill_dir, skill_metadata, validate_skill_name,
 };
 
 /// Inputs to [`build_tool_dispatch`], grouped to keep that function's argument

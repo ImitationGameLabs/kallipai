@@ -44,6 +44,16 @@ let
 
   # The full container PATH, built once so prod and dev cannot drift.
   binPath = "${toolEnv}/bin:${aifed}/bin";
+
+  # Curated shared-skill tree (read-only bundled defaults). The tagma copies
+  # this into the mutable <data_dir>/skills/ on first boot via the
+  # KALLIP_SKILLS_SEED env var below. Same file the flake exposes as
+  # `kallip-shared-skills`, so the image/compose and the flake output agree
+  # bit-for-bit. let-local: only the derived `skillsSeed` path is consumed by
+  # the image/compose; the package itself is not part of the public surface
+  # (callers that want the package use the flake output).
+  sharedSkills = import ./shared-skills.nix { inherit pkgs; };
+  skillsSeed = "${sharedSkills}/share/kallip/skills";
 in
 {
   inherit
@@ -51,5 +61,6 @@ in
     certLinks
     aifed
     binPath
+    skillsSeed
     ;
 }

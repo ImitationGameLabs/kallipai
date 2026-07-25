@@ -123,6 +123,17 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(kallip_runtime::tools::skill_dir()?)
         .map_err(|e| anyhow::anyhow!("failed to create shared skills dir: {e}"))?;
 
+    // Seed the shipped skill defaults into the now-existing (and empty on a
+    // fresh data dir) shared skills dir. Same ordering rationale as create_dir
+    // above: a restored root rebuilds its tool dispatch inside restore, so the
+    // seed must land first for root to see the curated tree. Seeding is
+    // best-effort: skills are optional context (the meta-skill is compiled in,
+    // agents degrade gracefully with an empty dir), so a failure is logged and
+    // the tagma continues rather than aborting boot.
+    if let Err(e) = kallip_runtime::tools::seed_skills_if_empty() {
+        tracing::warn!("skill seed failed: {e:#}; skipping");
+    }
+
     // Restore persisted agents before accepting requests, then ensure the
     // tagma-global root agent exists. Both run before the router accepts a single
     // connection, so the singleton root invariant holds for every client (clients
