@@ -12,6 +12,7 @@ pub const DEFAULT_TRUSTED_PROXIES: &str = "127.0.0.0/8, ::1/128";
 #[derive(Parser)]
 #[command(
     name = "kallip-agora",
+    version,
     about = "Public-internet relay control plane for kallip agent tagmata"
 )]
 pub struct Args {

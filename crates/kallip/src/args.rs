@@ -4,6 +4,7 @@ use kallip_common::agentid::AgentId;
 #[derive(Parser)]
 #[command(
     name = "kallip",
+    version,
     about = "Headless CLI for agents to coordinate with and manage other agents"
 )]
 pub struct Cli {

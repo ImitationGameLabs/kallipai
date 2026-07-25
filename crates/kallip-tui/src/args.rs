@@ -4,6 +4,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(
     name = "kallip-tui",
+    version,
     about = "Interactive client for kallip (TUI).\n\
     Designed for human use. For scripting, use the `kallip` CLI instead."
 )]

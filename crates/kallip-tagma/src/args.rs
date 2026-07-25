@@ -9,6 +9,7 @@ pub(crate) const MAX_SUBAGENTS_LIMIT: usize = 100;
 #[derive(Parser)]
 #[command(
     name = "kallip-tagma",
+    version,
     about = "HTTP API server hosting multiple agent instances"
 )]
 pub struct Args {

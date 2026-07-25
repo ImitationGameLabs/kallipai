@@ -22,6 +22,7 @@ use kallip_agora_common::admin::{
 #[derive(Parser)]
 #[command(
     name = "kallip-admin",
+    version,
     about = "Headless admin CLI for kallip-agora (HTTP client)",
     after_help = "The admin token (sk-admin-...) is read from the KALLIP_AGORA_ADMIN_TOKEN \
                   environment variable. It is deliberately not a CLI flag: a flag leaks into \

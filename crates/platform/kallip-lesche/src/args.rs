@@ -9,6 +9,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(
     name = "kallip-lesche",
+    version,
     about = "kallip data-plane relay: tagma tunnels, app events, envelope routing"
 )]
 pub struct Args {
