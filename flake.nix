@@ -121,7 +121,7 @@
                   pkgs
                   common
                   ;
-                inherit (builds) agora;
+                inherit (builds) agora admin;
               };
               kallip-lesche-image = import ./nix/packages/docker-images/lesche.nix {
                 inherit

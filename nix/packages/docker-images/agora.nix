@@ -2,23 +2,26 @@
   pkgs,
   common,
   agora,
+  admin,
 }:
 let
   inherit (common) gitVersion;
 in
-# The minimal agora image: just the binary + the CA trust store (for any
-# outbound TLS). No shell toolset, no baked env (agora reads everything from its
-# env at runtime). The compose service (nix/prod-composes/agora.nix) supplies
-# the command + environment.
+# The minimal agora image: the binary + the CA trust store + the `kallip-admin`
+# CLI for in-container operator tasks. No shell toolset; agora reads everything
+# else from its env at runtime. The compose service (nix/prod-composes/agora.nix)
+# supplies the command + environment.
 pkgs.dockerTools.buildImage {
   name = "kallip-agora";
   tag = gitVersion;
   copyToRoot = [
     agora
+    admin
     pkgs.cacert
   ];
   config = {
     Cmd = [ "${agora}/bin/kallip-agora" ];
+    Env = [ "PATH=${admin}/bin" ];
     ExposedPorts = {
       "7100/tcp" = { };
     };

@@ -222,7 +222,7 @@ let
         service.useHostStore = true;
         service.command = [ "${workspace}/bin/kallip-tagma" ];
         service.environment = {
-          PATH = binPath;
+          PATH = "${workspace}/bin:${binPath}";
           HOME = "/var/lib/kallip";
           KALLIP_DATA_DIR = "/var/lib/kallip";
           # The tagma eagerly creates the singleton root agent at startup; its
@@ -279,6 +279,7 @@ let
         # `arion logs agora`).
         service.env_file = [ ".env" ];
         service.environment = {
+          PATH = "${workspace}/bin";
           KALLIP_AGORA_ADDR = "0.0.0.0:7100";
           KALLIP_AGORA_DATABASE_URL = "postgres://kallip:kallip@postgres:5432/kallip";
           KALLIP_AGORA_WEBAUTHN_RP_ID = "localhost";

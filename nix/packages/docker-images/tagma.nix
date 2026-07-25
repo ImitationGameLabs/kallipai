@@ -39,7 +39,7 @@ pkgs.dockerTools.buildImage {
   ];
   config = {
     Env = [
-      "PATH=${binPath}"
+      "PATH=${tagma}/bin:${binPath}"
       "KALLIP_SKILLS_SEED=${skillsSeed}"
     ];
     # No Cmd: the compose service supplies the command (kallip-tagma).
