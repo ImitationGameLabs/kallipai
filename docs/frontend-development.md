@@ -34,9 +34,10 @@ assume it.
 | `deno task check`           | Type / svelte checks across all JS/TS packages                          |
 | `deno task test`            | Run tests for the packages that define them                             |
 | `deno task sync`            | `svelte-kit sync` for `kallip-web`                                      |
-| `deno task fmt`             | Prettier `--write .` across the repo (respects `.prettierignore`)       |
-| `deno task fmt:file <path>` | Prettier `--write` a single file or path (format just what you touched) |
-| `deno task fmt:check`       | Prettier `--check .` (CI-style, no writes)                              |
+| `deno task fmt`             | Prettier (TS/Svelte/CSS/JSON) + rumdl (Markdown) across the repo        |
+| `deno task fmt:file <path>` | Prettier `--write` a single non-md file (format just what you touched)  |
+| `deno task fmt:md <path>`   | rumdl `fmt` a single Markdown file                                      |
+| `deno task fmt:check`       | Prettier `--check .` + rumdl `fmt --check .` (CI-style, no writes)      |
 | `deno task lint`            | `deno lint`                                                             |
 
 ### Single package (run inside the package directory)
@@ -75,11 +76,21 @@ re-shells out to `rustup target add` and fails unless the target is named
 explicitly. The full toolchain rationale lives in
 [nix/devshells/tauri.nix](../nix/devshells/tauri.nix).
 
-## Formatting and Prettier plugins
+## Formatting
 
-Format via `deno task fmt:file <path>` for files you just edited (keeps diffs
-minimal) or `deno task fmt` for the whole tree. Both load plugins correctly
-because Prettier is launched the Deno way, from the repo root.
+Two formatters, split by file type:
+
+- **Prettier** owns TS / Svelte / CSS / JSON. Format with `deno task fmt:file
+  <path>` (one file) or `deno task fmt` (whole tree). Both load plugins correctly
+  because Prettier is launched the Deno way, from the repo root. Prettier comes
+  from the root `devDependencies` (self-contained in `node_modules`), not the
+  nix devshell.
+- **rumdl** owns Markdown. Format with `deno task fmt:md <path>` (one file) or
+  `deno task fmt` (whole tree). rumdl is provided by the nix devshell. Markdown
+  is in `.prettierignore` so Prettier never touches it: Prettier pads/aligns
+  table columns, which reflows every row on any one-line edit; rumdl does not.
+  rumdl is configured via `.rumdl.toml` (disables line-length and the
+  `$ `-prompt rule).
 
 Prettier plugins are **declared per package** in a local `.prettierrc.json`,
 scoped to where they are actually used:
@@ -98,7 +109,7 @@ tooling); the per-package config only declares which plugins apply where.
 > interaction between the two plugins). Keep the order above.
 
 `.prettierignore` excludes `node_modules`, `.svelte-kit`, `build`, `dist`,
-`deno.lock`, `target`, and `crates`.
+`deno.lock`, `target`, `crates`, and `**/*.md` (rumdl's domain).
 
 ## Looking up package versions
 

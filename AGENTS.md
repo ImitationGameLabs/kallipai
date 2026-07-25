@@ -8,7 +8,7 @@ The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem 
 
 ## Directory Structure
 
-```
+```text
 .
 ├── flake.nix                  # Flake entry point
 ├── crates/                    # Rust workspace members
@@ -87,7 +87,7 @@ After modifying TOML files:
 
 After modifying Markdown files:
 
-- `deno task fmt:file <markdown file>` - Format specific file (run individually for each modified file)
+- `deno task fmt:md <markdown file>` - Format with rumdl (run individually for each modified file). Markdown uses rumdl, not prettier -- rumdl does not align table columns, so a one-row edit never reflows the rest of the table.
 
 After modifying Rust code:
 

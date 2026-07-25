@@ -108,7 +108,7 @@ content.
 
 ### Skill file format
 
-```
+```text
 <data-dir>/skills/
 └── my-skill.md
 ```

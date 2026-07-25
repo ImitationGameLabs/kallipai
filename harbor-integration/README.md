@@ -14,7 +14,7 @@ Harbor benchmarking adapter for [kallipai](../). Allows running kallip inside Ha
 
 The adapter runs the full kallip stack **inside the Harbor container**:
 
-```
+```text
 install()  →  upload tarball → unpack → start tagma (background)
 run()      →  kallip-run --prompt "$instruction" (connects to localhost tagma)
 ```

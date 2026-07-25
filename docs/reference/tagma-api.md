@@ -712,7 +712,7 @@ field that identifies the event variant.
 
 Example SSE frame:
 
-```
+```text
 data: {"type":"assistantContentDelta","delta":"Hello, "}
 ```
 

@@ -96,7 +96,7 @@ lifetime. This means:
 - **Nested delegation is allowed**: a child whose workspace is inside the
   parent's workspace acquires its own lock via the delegation chain.
 
-```
+```text
 Parent workspace:    /project
 ├── parent can write /project/*          (holds the lock)
 ├── child WS:        /project/sub

@@ -1,0 +1,11 @@
+# rumdl (markdown formatter/linter) config. Markdown formatting lives here;
+# prettier no longer touches markdown (see .prettierignore) because prettier
+# pads/aligns table columns, reflowing every row on any one-line edit.
+[global]
+disable = [
+  "MD013", # line-length: tables and code blocks are intentionally long; not auto-reflowable
+  "MD014", # commands-show-output: keep the `$ ` shell-prompt convention in CLI docs
+]
+# Disable the on-disk cache: it writes a .rumdl_cache/ dir into the repo root,
+# which prettier then tries to format. rumdl is fast enough (~20ms) without it.
+cache = false

@@ -90,7 +90,7 @@ kallip-run --json --prompt "Refactor the config loader"
 The target agent persists after the run. Its id is printed in the completion
 hint, and you can continue the same session:
 
-```
+```text
 $ kallip-run --prompt "Refactor the config loader"
 
 agent a3f1b2c4-5678-90ab-cdef-1234567890ab went idle. Continue with: kallip-run --agent a3f1b2c4-5678-90ab-cdef-1234567890ab --prompt "<prompt>"

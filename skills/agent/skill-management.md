@@ -81,7 +81,7 @@ Create a new subdirectory only when a category grows beyond ~6-8 skills. Depth l
 
 ## Skill Lifecycle
 
-```
+```text
 discover → read index → load & pin → use → unpin → (optionally) create → (optionally) share
 ```
 

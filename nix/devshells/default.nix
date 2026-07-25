@@ -31,8 +31,10 @@ common.craneLib.devShell {
       # TOML toolkit (linter, formatter)
       taplo
 
-      # Markdown formatter
-      prettier
+      # Markdown formatter (prettier pads/aligns tables, reflowing every row on
+      # a one-line edit; rumdl does not). TS/Svelte/CSS formatting still uses
+      # prettier from node_modules via `deno task fmt`.
+      rumdl
 
       # Temporary workaround for copilot-cli direnv integration bug
       # See: https://github.com/github/copilot-cli/issues/731

@@ -6,3 +6,6 @@
 target
 crates
 **/src-tauri/gen
+# Markdown is formatted by rumdl (see .rumdl.toml), not prettier -- prettier
+# pads/aligns table columns, which reflows every row on a one-line edit.
+**/*.md
