@@ -44,6 +44,15 @@
     // store-to-store import, keeping realtime and channels decoupled. Idempotent
     // and safe to run once per mount.
     realtimeStore.setEnvelopeSink((env) => channelsStore.deliver(env));
+    // Wire presence transitions to auto-connect: an offline -> online tagma is
+    // opened on demand. Same shell-binding discipline as the envelope sink.
+    realtimeStore.setPresenceSink((tagmaId, online) => {
+      if (!online) return;
+      const tagma = agoraSession.tagmata.find(
+        (t) => t.tagma_id === tagmaId && t.state === "enrolled",
+      );
+      if (tagma) void channelsStore.ensureOpen(tagma);
+    });
 
     void configStore.ready.then(() => {
       const cfg = configStore.value;
@@ -58,7 +67,38 @@
             sessionStore.error = e;
           });
       } else {
+        // Resolve the session; the gate reads the settled `user`. The tagma
+        // registry fetch + auto-open are driven by the user_id $effect below
+        // (which also re-fires on re-login, unlike this one-shot onMount).
         void agoraSession.whoami();
+      }
+    });
+  });
+
+  // Load the tagma registry + auto-open channels for online tagmas. Keyed on
+  // `user?.user_id` (a stable primitive, NOT the `user` object -- whoami
+  // reassigns `user` to a fresh object on every fetch): fires at boot, on
+  // re-login (a different user_id), and on a mode flip back to online (the
+  // cookie survives offline mode, so user_id is stable but `mode` changes).
+  // RootLayout.onMount runs once per SPA session, so a re-login would otherwise
+  // never re-fetch the registry; this effect is what makes it happen.
+  //
+  // The post-refresh sweep opens channels for tagmas already showing online at
+  // that moment -- it covers the boot ordering where the SSE presence snapshot
+  // landed before the registry loaded (the presence sink misses those, since
+  // the registry was empty when they fired). Live transitions and snapshots
+  // arriving after the sweep are handled by the presence sink. `ensureOpen` is
+  // idempotent, so a transition the sink already handled and the sweep both
+  // touch is opened exactly once.
+  $effect(() => {
+    const uid = agoraSession.user?.user_id;
+    if (mode !== "online" || !uid) return;
+    void agoraSession.refreshTagmata().then(() => {
+      if (!agoraSession.user) return; // logged out mid-flight: gate redirects.
+      for (const t of agoraSession.tagmata) {
+        if (t.state === "enrolled" && realtimeStore.has(t.tagma_id)) {
+          void channelsStore.ensureOpen(t);
+        }
       }
     });
   });

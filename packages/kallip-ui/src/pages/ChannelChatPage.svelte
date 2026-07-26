@@ -42,14 +42,16 @@
 <svelte:head><title>KallipAI · channel</title></svelte:head>
 
 {#if !channelState}
-  <!-- Deep link to a channel that was not opened this session. The conversationId is a
-       server-derived value the client does not reverse-resolve, so route the
-       user back to the tagma list rather than guessing. -->
+  <!-- No open channel for this conversation yet. Channels auto-connect at boot
+       and on presence transitions, so this is normally a brief resolving window
+       while the key exchange runs. The conversationId is a server-derived value
+       the client does not reverse-resolve, so if auto-connect does not open it
+       (bogus id, revoked, or offline tagma) the user needs a way out -- route
+       them to the tagmata list rather than guessing or stranding them on a
+       bare spinner. -->
   <div class="h-full grid place-items-center p-6">
     <div class="text-center flex flex-col gap-3 max-w-sm">
-      <p class="text-sm opacity-80">
-        This channel is not open. Open it from the tagmata list.
-      </p>
+      <p class="text-sm opacity-80">Opening channel…</p>
       <button
         type="button"
         class="btn preset-tonal-surface self-center"
@@ -112,7 +114,8 @@
         {/if}
         {#if channelState.status === "offline"}
           <p class="text-xs text-error-500 text-center">
-            The tagma is offline. Reopen the channel to reconnect.
+            The tagma is offline. The channel will reconnect automatically when
+            it returns.
           </p>
         {/if}
       </div>

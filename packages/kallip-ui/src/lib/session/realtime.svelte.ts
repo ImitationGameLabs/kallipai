@@ -9,7 +9,8 @@
 // from channels.svelte.ts, which is now pure per-channel chat state. Realtime is
 // started/stopped by RootLayout (reactive to online mode + a signed-in user);
 // it must run before any channel opens, because the /tagmata dashboard reads
-// presence to light the online dot + gate the "Open channel" button.
+// presence to light the online dot and the presence sink drives auto-connect
+// (the shell opens a channel on an offline -> online transition).
 //
 // Dependency direction is one-way: realtime -> agora (the lesche client port).
 // It does NOT import channels -- the envelope sink is bound by the shell
@@ -28,6 +29,15 @@ import { lescheClientOrFail } from "./agora.svelte.ts";
  * `channelsStore.deliver`. `null` (the default) drops envelopes -- harmless
  * before the shell wires it, since no channel can be open yet. */
 type EnvelopeSink = (envelope: Envelope) => void;
+
+/** Sink for tagma presence transitions. Bound by the shell; the online
+ * transition drives channelsStore auto-connect (it opens a channel to that
+ * tagma). The offline transition is currently a no-op in the shell (a channel
+ * detects peer-offline via its own drain), but the bidirectional signature
+ * keeps the door open for future peer-offline eviction. Fired only on actual
+ * transitions (not on every reconnect snapshot re-send), so a healthy session
+ * is not flooded with no-op opens. */
+type PresenceSink = (tagmaId: string, online: boolean) => void;
 
 /** Maximum time the dashboard shows the "checking" placeholder before treating
  * presence as resolved (unknown tagmas then read offline). Bounded so a missing
@@ -64,6 +74,7 @@ class RealtimeStore {
   private running = false;
   private abort: AbortController | null = null;
   private envelopeSink: EnvelopeSink | null = null;
+  private presenceSink: PresenceSink | null = null;
   // One-shot per session; force-resolves presence after the deadline so the
   // "checking" placeholder is bounded regardless of SSE connection health.
   private resolveDeadline: ReturnType<typeof setTimeout> | null = null;
@@ -91,6 +102,12 @@ class RealtimeStore {
   /** Bind the inbound-envelope handler. Called once by the shell at boot. */
   setEnvelopeSink(sink: EnvelopeSink | null): void {
     this.envelopeSink = sink;
+  }
+
+  /** Bind the presence-transition handler. Called once by the shell at boot;
+   * drives channelsStore auto-connect on offline -> online transitions. */
+  setPresenceSink(sink: PresenceSink | null): void {
+    this.presenceSink = sink;
   }
 
   /** Start the SSE subscriber, idempotently. Safe to call repeatedly. Clears
@@ -182,15 +199,24 @@ class RealtimeStore {
   private dispatch(ev: LescheEvent): void {
     switch (ev.type) {
       case "tagma_online":
+        // Transition only: the lesche re-sends the presence snapshot on every
+        // SSE reconnect, and the no-clear-on-reconnect policy (see `run`)
+        // leaves the set populated, so a re-send for an already-online tagma
+        // is a no-op here. Firing the sink only on a real transition keeps a
+        // healthy reconnect from flooding channelsStore with redundant opens.
+        if (this.presence.has(ev.tagma_id)) break;
         this.presence.add(ev.tagma_id);
+        this.presenceSink?.(ev.tagma_id, true);
         break;
       case "tagma_offline":
+        if (!this.presence.has(ev.tagma_id)) break;
         this.presence.delete(ev.tagma_id);
         // Evict the last status snapshot so an offline tagma does not keep
         // rendering stale agent counts/budget -- `statusFor` returns undefined
         // (the card hides its line, the header shows "waiting…") until the
         // tagma reconnects and a fresh snapshot arrives.
         this.status.delete(ev.tagma_id);
+        this.presenceSink?.(ev.tagma_id, false);
         break;
       case "envelope":
         this.envelopeSink?.(ev.envelope);

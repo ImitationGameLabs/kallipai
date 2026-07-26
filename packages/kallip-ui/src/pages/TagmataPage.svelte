@@ -1,17 +1,15 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { agoraSession } from "../lib/session/agora.svelte";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { realtimeStore } from "../lib/session/realtime.svelte";
-  import { navigate } from "../lib/shell/port.ts";
   import type { TagmaCardProps } from "../lib/tagmata.svelte.ts";
   import TagmataDashboard from "../components/tagmata/TagmataDashboard.svelte";
 
-  // Fetch the registry on mount. Liveness (the online dot) is NOT here -- it is
-  // pushed by realtime's SSE presence and overlaid per-card below.
-  onMount(() => {
-    void agoraSession.refreshTagmata();
-  });
+  // The registry is fetched by RootLayout's user_id $effect (it drives
+  // auto-connect, so it must load regardless of which page the user lands on,
+  // and re-load on re-login); this view reads it reactively. Liveness (the
+  // online dot) is NOT here -- it is pushed by realtime's SSE presence and
+  // overlaid per-card below.
 
   // The registry's enrolled cards joined with realtime presence + status: the
   // sole place both are derived. While realtime has not yet resolved (the SSE
@@ -40,17 +38,6 @@
         ? "loaded"
         : "loading",
   );
-
-  // Open an E2EE channel to an enrolled, online tagma, then navigate
-  // to its chat view. The full TagmaView (label + online flag) is looked up from
-  // the loaded list; the card only carries TagmaCardProps.
-  async function onOpenChannel(id: string): Promise<string> {
-    const tagma = agoraSession.tagmata.find((t) => t.tagma_id === id);
-    if (!tagma) throw new Error("tagma no longer available; refresh the list");
-    const conversationId = await channelsStore.open(tagma);
-    await navigate(`/chat/${conversationId}`);
-    return conversationId;
-  }
 </script>
 
 <svelte:head><title>KallipAI · tagmata</title></svelte:head>
@@ -62,10 +49,14 @@
     {phase}
     busy={agoraSession.minting}
     onMint={() => agoraSession.mintTagma()}
-    onRevoke={(id) => agoraSession.revokeTagma(id)}
+    onRevoke={async (id) => {
+      await agoraSession.revokeTagma(id);
+      // Tear down the revoked tagma's open channel + purge its cache, so a
+      // shared device does not keep the previous user's plaintext transcript.
+      channelsStore.closeByTagma(id);
+    }}
     onCopyCode={(id, secret) => agoraSession.copySecret(id, secret)}
     onRename={(id, label) => agoraSession.renameTagma(id, label)}
-    {onOpenChannel}
     copiedCodeId={agoraSession.copiedCodeId}
   />
 {:else if agoraSession.authError}

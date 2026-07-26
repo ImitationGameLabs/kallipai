@@ -146,6 +146,14 @@ class ChannelsStore {
    * reactivity of each entry still comes from ChannelState's own runes. */
   private channels = new SvelteMap<string, ChannelState>();
 
+  /** tagmaIds with an in-flight `open()` started by `ensureOpen`. Guards
+   * auto-connect against duplicate/racing opens (a presence snapshot re-send
+   * plus a live transition, or a flap) for the same tagma. Plain (not
+   * reactive): it is only a concurrency guard, never rendered. Named
+   * `pendingOpens` (not `opening`) to avoid colliding with the
+   * `ChannelState.status === "opening"` transport state. */
+  private pendingOpens = new Set<string>();
+
   /** Snapshot for the sidebar: conversationId/label/indicator per open channel.
    * Reading `c.status` here also subscribes the indicator to mid-life status
    * changes (e.g. drain flipping open -> offline). */
@@ -236,6 +244,39 @@ class ChannelsStore {
     return channel.conversationId;
   }
 
+  /** Idempotent, best-effort auto-open driven by the shell on presence
+   * transitions and at boot. Skips tagmas already open or with an open in
+   * flight. A dead channel (offline / error from a dropped tagma) is torn down
+   * first WITHOUT purging its cache, so the re-KEX rehydrates the prior
+   * transcript. Open failures are logged and swallowed: auto-connect is
+   * best-effort, and the next presence transition retries. */
+  async ensureOpen(tagma: TagmaView): Promise<void> {
+    if (this.pendingOpens.has(tagma.tagma_id)) return;
+    const existing = this.findByTagma(tagma.tagma_id);
+    if (
+      existing &&
+      (existing.status === "open" || existing.status === "opening")
+    ) {
+      return;
+    }
+    // Tear down a dead transport before re-opening. tearDown (not close):
+    // preserve the IndexedDB cache so open() rehydrates the transcript. The
+    // old drain's finally/catch are object-identity-guarded (see the invariant
+    // on `drain`), so they no-op against the fresh ChannelState open() inserts.
+    if (existing) this.tearDown(existing.conversationId);
+    this.pendingOpens.add(tagma.tagma_id);
+    try {
+      await this.open(tagma);
+    } catch (e) {
+      console.warn(
+        `[channels] auto-open failed for tagma ${tagma.tagma_id}:`,
+        e instanceof Error ? e.message : e,
+      );
+    } finally {
+      this.pendingOpens.delete(tagma.tagma_id);
+    }
+  }
+
   /** Send a prompt. Renders the optimistic user line immediately (so it is
    * visible before the turn even starts), enqueues it, and lets the
    * single-in-flight pump POST it. Busy/idle is irrelevant -- the tagma accepts
@@ -252,15 +293,41 @@ class ChannelsStore {
     return Promise.resolve();
   }
 
+  /** Close + drop a channel by tagma id. Finds the conversation via
+   * `findByTagma` and delegates to `close(conversationId)` (full close, cache
+   * purged). Used by revoke: a revoked tagma must not leave plaintext behind on
+   * a shared device. No-op if no channel is open for the tagma. */
+  closeByTagma(tagmaId: string): void {
+    const ch = this.findByTagma(tagmaId);
+    if (ch) this.close(ch.conversationId);
+  }
+
   /** Close + drop a channel. Drops its IndexedDB cache too, so a conv that is
    * closed (and thus absent from the map at logout) does not leave plaintext
    * behind on a shared device. */
   close(conversationId: string): void {
+    this.tearDown(conversationId);
+    void clearConvCache(conversationId);
+  }
+
+  /** Detach a channel's transport + state without purging its IndexedDB cache.
+   * Used by `close` (then the cache is purged) and by `ensureOpen` on reconnect
+   * (the cache is preserved so the re-KEX rehydrates the prior transcript). */
+  private tearDown(conversationId: string): void {
     const ch = this.channels.get(conversationId);
     if (ch?.liveWatchdog) clearTimeout(ch.liveWatchdog);
     ch?.channel?.close();
     this.channels.delete(conversationId);
-    void clearConvCache(conversationId);
+  }
+
+  /** Find the open channel for a tagma, if any. The map is keyed by
+   * conversationId (server-derived), but auto-connect and revoke key off
+   * tagmaId; this is the reverse lookup. */
+  private findByTagma(tagmaId: string): ChannelState | undefined {
+    for (const ch of this.channels.values()) {
+      if (ch.tagmaId === tagmaId) return ch;
+    }
+    return undefined;
   }
 
   /** Route an inbound envelope (handed off by realtime.svelte.ts's SSE demux)
@@ -282,6 +349,7 @@ class ChannelsStore {
       ch.channel?.close();
     }
     this.channels.clear();
+    this.pendingOpens.clear();
     for (const conversationId of conversationIds) {
       void clearConvCache(conversationId);
     }
@@ -321,13 +389,27 @@ class ChannelsStore {
   }
 
   /** Drain a channel's reply stream into its transcript. Ends when the channel
-   * is closed (replies generator ends); the channel then reads as offline. */
+   * is closed (replies generator ends); the channel then reads as offline.
+   *
+   * INVARIANT: every mutation of `ch` here is guarded by the object-identity
+   * check `this.channels.get(conversationId) === ch`. `ensureOpen` reconnects
+   * by replacing the map entry under the same (server-derived) conversationId,
+   * so a stale drain closure (from the dead channel) must NOT touch the fresh
+   * `ChannelState` that took its place -- neither its status nor its transcript
+   * / cache / pending-send state. The `for await` guard below stops a stale
+   * drain (whose `RelayChannel.replies()` may still yield envelopes queued
+   * before `close`) as soon as the replacement lands. Keep these guards on any
+   * future drain mutation. */
   private async drain(conversationId: string): Promise<void> {
     const ch = this.channels.get(conversationId);
     if (!ch?.channel) return;
     const channel = ch.channel;
     try {
       for await (const reply of channel.replies()) {
+        // Stale drain after `ensureOpen` replaced this entry: stop before
+        // mutating the detached `ch` (which would also re-POST via the closed
+        // transport's send pump).
+        if (this.channels.get(conversationId) !== ch) return;
         this.applyReply(conversationId, ch, reply);
       }
     } catch {

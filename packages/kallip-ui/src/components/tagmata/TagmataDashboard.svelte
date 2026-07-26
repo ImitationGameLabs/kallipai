@@ -24,7 +24,6 @@
     onRevoke,
     onCopyCode,
     onRename,
-    onOpenChannel,
     copiedCodeId,
   }: {
     pending: EnrollmentCodeCardProps[];
@@ -41,9 +40,6 @@
     // Rename works for both pending and enrolled. Awaitable: the card holds the
     // inline edit open through the round-trip.
     onRename?: (id: string, label: string) => Promise<void> | void;
-    // Open an E2EE channel to an enrolled, online tagma. Awaitable:
-    // the card shows a spinner through the key exchange.
-    onOpenChannel?: (id: string) => Promise<string> | void;
     // Id of the code whose secret was just copied (drives the "Copied" label).
     copiedCodeId?: string | null;
   } = $props();
@@ -99,7 +95,7 @@
           />
         {/each}
         {#each enrolled as t (t.tagmaId)}
-          <TagmaCard tagma={t} {onRename} {onRevoke} {onOpenChannel} />
+          <TagmaCard tagma={t} {onRename} {onRevoke} />
         {/each}
         {#if onMint}
           <button
