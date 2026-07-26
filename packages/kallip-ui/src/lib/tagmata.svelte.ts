@@ -9,6 +9,31 @@
  * than a misleading default "offline". */
 export type TagmaPresence = "checking" | "online" | "offline";
 
+/** A tagma agent's lifecycle state. Mirrors the tagma's `AgentState` wire enum
+ * (`idle` / `busy` / `faulted`); `faulted` is also reported for the root during
+ * the transient zero-root recovery window. */
+export type TagmaAgentState = "idle" | "busy" | "faulted";
+
+/** A tagma's live runtime snapshot, fed by the `tagma_status` SSE event. The
+ * root agent (the conversation peer) is reported separately from subagents
+ * (spawned helpers) so the UI can distinguish "root processing the user's
+ * turn" from "helpers doing background work". TS-idiomatic camelCase; the wire
+ * variant is snake_case and mapped at the realtime dispatch boundary.
+ * `undefined` while no snapshot has arrived yet (freshly connected dashboard,
+ * or an offline tagma). */
+export interface TagmaStatusSummary {
+  /** The root agent's lifecycle state. */
+  readonly rootState: TagmaAgentState;
+  /** Every subagent entry, including faulted. */
+  readonly subagentsTotal: number;
+  /** Subagents currently in the `busy` state. */
+  readonly subagentsActive: number;
+  /** Tagma-wide token budget (limit). */
+  readonly tokenBudget: number;
+  /** Cumulative tokens consumed against the budget. */
+  readonly tokenConsumed: number;
+}
+
 /** Props for one enrolled-tagma card (`GET /v1/tagmata` row). */
 export interface TagmaCardProps {
   readonly tagmaId: string;
@@ -17,6 +42,10 @@ export interface TagmaCardProps {
   readonly createdAt: string;
   /** Live presence, driven by the realtime SSE. See {@link TagmaPresence}. */
   readonly presence: TagmaPresence;
+  /** Live aggregate status, driven by the `tagma_status` SSE event. Omitted
+   * while no snapshot has arrived (e.g. offline tagma); the card hides the
+   * status line then. See {@link TagmaStatusSummary}. */
+  readonly status?: TagmaStatusSummary;
 }
 
 /** Props for one pending-tagma card. `code` is the display value: the full
@@ -68,6 +97,32 @@ export function presenceLabel(presence: TagmaPresence): string {
 export function formatDateTime(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+/** Compact token-count formatting: `12k`, `1.2M`, or the raw number below 1k.
+ * Uses SI suffixes (not locale-aware compact notation) for a stable, compact
+ * dashboard readout. */
+export function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 100) / 10}k`;
+  return String(n);
+}
+
+/** One-line status summary for a tagma card: `2/4 agents · 12k/50k tokens`.
+ * Aggregate (root + subagents) — the dashboard card stays a glanceable summary;
+ * the channel-chat header is where root/sub are shown separately. The root
+ * always counts toward the total (1) even when `rootState === "faulted"`.
+ * Caller checks for `undefined` before calling (no status yet -> hidden). */
+export function formatTagmaStatusLine(s: TagmaStatusSummary): string {
+  // Root counts as 1 slot (present even when faulted); active adds root only
+  // when it is busy.
+  const total = 1 + s.subagentsTotal;
+  const active = (s.rootState === "busy" ? 1 : 0) + s.subagentsActive;
+  const agents = `${active}/${total} ${total === 1 ? "agent" : "agents"}`;
+  const tokens = `${formatTokenCount(s.tokenConsumed)}/${formatTokenCount(
+    s.tokenBudget,
+  )} tokens`;
+  return `${agents} · ${tokens}`;
 }
 
 /** Whether an RFC3339 expiry has already passed. */

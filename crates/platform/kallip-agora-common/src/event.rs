@@ -12,8 +12,10 @@
 //! The presence variants (`TagmaOnline`, `TagmaOffline`) are emitted by the
 //! data-plane relay (`kallip-lesche`) on the app event stream when a
 //! tagma tunnel connects/disconnects (and as a snapshot when the stream
-//! opens). `AgentState` remains reserved for future per-agent lifecycle
-//! surfacing.
+//! opens). `TagmaStatus` carries a tagma's live aggregate runtime state
+//! (agent counts + token budget); like presence it is plaintext and
+//! user-scoped, pushed by the tagma on a periodic snapshot and rebroadcast
+//! by the lesche.
 //!
 //! [`TagmaEvent`] is the *public, agent-free* event vocabulary the tagma
 //! produces (by mapping the tagma's internal `SseEvent` stream) and the app
@@ -23,9 +25,12 @@
 
 use crate::ids::TagmaId;
 use crate::message::Envelope;
-use kallip_common::agentid::AgentId;
-use kallip_common::protocol::AgentState;
 use serde::{Deserialize, Serialize};
+
+// Re-exported so downstream crates (e.g. `kallip-lesche-client`) can construct
+// a [`TagmaStatusPayload`] without a direct `kallip_common` dependency. Also
+// brought into scope for this module's own use.
+pub use kallip_common::protocol::AgentState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -36,13 +41,42 @@ pub enum AgoraEvent {
     TagmaOnline { tagma_id: TagmaId },
     /// A tagma went offline (tunnel dropped, past the reconnect grace window).
     TagmaOffline { tagma_id: TagmaId },
-    /// A surfaced agent's lifecycle state changed.
-    #[allow(dead_code)]
-    AgentState {
+    /// A tagma's live runtime state, snapshotted by the tagma and rebroadcast
+    /// by the lesche. Plaintext and user-scoped like the presence pair (the
+    /// lesche can read it): agent state and token budget are operator
+    /// metadata, not conversation content. Emitted on a periodic snapshot, so
+    /// a dropped frame just means slightly-stale data. The root agent (the
+    /// conversation peer) is reported separately from subagents (spawned
+    /// helpers) so the UI can distinguish "root processing the user's turn"
+    /// from "helpers doing background work".
+    TagmaStatus {
         tagma_id: TagmaId,
-        agent_id: AgentId,
-        state: AgentState,
+        /// The root agent's lifecycle state. `Faulted` is also the safe
+        /// fallback reported when no root entry is registered (a
+        /// production-unreachable state under normal startup ordering).
+        root_state: AgentState,
+        subagents_total: u32,
+        subagents_active: u32,
+        token_budget: u64,
+        token_consumed: u64,
     },
+}
+
+/// `POST /v1/tagmata/{tagma_id}/status` request body — the tagma's periodic
+/// runtime snapshot, rebroadcast by the lesche as an
+/// [`AgoraEvent::TagmaStatus`] on the owner's app event stream.
+///
+/// `tagma_id` is intentionally absent: the path is authoritative, and the
+/// lesche asserts it matches the authenticated tagma before rebroadcast
+/// (mirroring `post_envelope`'s `conversation_id` check). Field names mirror
+/// the [`AgoraEvent::TagmaStatus`] variant; keep them in sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagmaStatusPayload {
+    pub root_state: AgentState,
+    pub subagents_total: u32,
+    pub subagents_active: u32,
+    pub token_budget: u64,
+    pub token_consumed: u64,
 }
 
 /// An event the tagma emits to the app, carried inside an E2EE envelope as a

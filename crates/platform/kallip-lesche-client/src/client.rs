@@ -1,8 +1,9 @@
 //! Async HTTP client for the kallip-lesche data-plane relay.
 //!
-//! Three surfaces, all authenticated with the tagma's `sk-tagma-` bearer:
+//! Four surfaces, all authenticated with the tagma's `sk-tagma-` bearer:
 //! - [`LescheClient::post_envelope`] — post an agent envelope, retrying on 503.
 //! - [`LescheClient::post_key_exchange_response`] — post a KEX response.
+//! - [`LescheClient::post_status`] — post a periodic aggregate status snapshot.
 //! - [`LescheClient::open_tunnel`] — open the long-lived tunnel SSE and
 //!   yield parsed [`TunnelInbound`] events.
 //!
@@ -21,6 +22,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use futures_util::StreamExt;
 use kallip_agora_common::control::KeyExchangeResponse;
+use kallip_agora_common::event::TagmaStatusPayload;
 use kallip_agora_common::ids::{ConversationId, TagmaId};
 use kallip_agora_common::message::Envelope;
 use kallip_agora_common::proof::tunnel_transcript;
@@ -121,6 +123,31 @@ impl LescheClient {
             .post(&url)
             .bearer_auth(&self.inner.tagma_token)
             .json(response)
+            .send()
+            .await
+            .context("lesche POST failed")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("lesche POST returned {}", resp.status());
+        }
+        Ok(())
+    }
+
+    /// Post the tagma's periodic aggregate status snapshot (agent counts + token
+    /// budget). Not retried: status is idempotent and the next tick supersedes
+    /// a dropped POST, so retrying would only amplify a transient stall. A
+    /// failure here is logged by the caller, not surfaced to the agent.
+    pub async fn post_status(
+        &self,
+        tagma_id: &TagmaId,
+        payload: &TagmaStatusPayload,
+    ) -> Result<()> {
+        let url = self.url(&format!("/v1/tagmata/{tagma_id}/status"));
+        let resp = self
+            .inner
+            .http_post
+            .post(&url)
+            .bearer_auth(&self.inner.tagma_token)
+            .json(payload)
             .send()
             .await
             .context("lesche POST failed")?;
@@ -273,6 +300,7 @@ impl LescheClientBuilder {
 mod tests {
     use super::*;
     use kallip_agora_common::bytes::Ciphertext;
+    use kallip_agora_common::event::AgentState;
     use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId};
     use kallip_agora_common::message::{Envelope, Participant};
     use wiremock::matchers::{header, method, path};
@@ -336,6 +364,57 @@ mod tests {
             .await
             .expect_err("401");
         assert!(err.to_string().contains("401"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn post_status_posts_payload_to_tagma_status_path() {
+        let server = MockServer::start().await;
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/tagmata/{tagma_id}/status")))
+            .and(header("authorization", "Bearer sk-tagma-test"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        client(&server)
+            .post_status(
+                &tagma_id,
+                &TagmaStatusPayload {
+                    root_state: AgentState::Busy,
+                    subagents_total: 3,
+                    subagents_active: 2,
+                    token_budget: 50_000,
+                    token_consumed: 12_000,
+                },
+            )
+            .await
+            .expect("202 ok");
+    }
+
+    #[tokio::test]
+    async fn post_status_bails_on_non_success() {
+        let server = MockServer::start().await;
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        // 503 is NOT retried for status (unlike envelopes) -- it bails.
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/tagmata/{tagma_id}/status")))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let err = client(&server)
+            .post_status(
+                &tagma_id,
+                &TagmaStatusPayload {
+                    root_state: AgentState::Idle,
+                    subagents_total: 0,
+                    subagents_active: 0,
+                    token_budget: 0,
+                    token_consumed: 0,
+                },
+            )
+            .await
+            .expect_err("503");
+        assert!(err.to_string().contains("503"), "got: {err}");
     }
 
     #[tokio::test]

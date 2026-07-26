@@ -20,6 +20,7 @@ pub(crate) mod chat_history;
 mod crypto;
 mod ops;
 mod pump;
+mod status_pump;
 
 use std::sync::{Arc, Weak};
 
@@ -84,6 +85,10 @@ struct Inner {
     /// The running event pump, if any. Restarted on each KEX so a re-KEX can
     /// reset the outbound counter with no in-flight emits under the old key.
     pump: Mutex<Option<PumpHandle>>,
+    /// The running status pump, if any. Bounded to the tunnel's lifetime
+    /// (started on tunnel-up, stopped on tunnel-down), NOT the KEX epoch --
+    /// status is plaintext and key-independent.
+    status_pump: Mutex<Option<PumpHandle>>,
     /// In-flight per-envelope op tasks, so shutdown can abort and drain them
     /// rather than leaving them fire-and-forget. See [`RelayHandle::stop_dispatch`].
     dispatch: Mutex<tokio::task::JoinSet<()>>,
@@ -118,6 +123,7 @@ impl RelayHandle {
                 root_agent,
                 crypto: Mutex::new(CryptoState::new()),
                 pump: Mutex::new(None),
+                status_pump: Mutex::new(None),
                 dispatch: Mutex::new(tokio::task::JoinSet::new()),
                 state,
                 message_limiter: Mutex::new(MessageLimiter::new(message_limits)),
@@ -167,6 +173,7 @@ impl RelayHandle {
     /// shutdown branches of [`RelayHandle::run`].
     async fn stop_workers(&self) {
         self.stop_pump().await;
+        self.stop_status_pump().await;
         self.stop_dispatch().await;
     }
 
@@ -183,13 +190,16 @@ impl RelayHandle {
     }
 
     /// Open the tunnel SSE and dispatch each inbound message (each on its own
-    /// task so a long-running op does not stall the stream reader).
+    /// task so a long-running op does not stall the stream reader). The status
+    /// pump is bounded to this tunnel session: started once the tunnel is up,
+    /// stopped when the stream ends so a reconnect installs a fresh pump.
     async fn connect_and_drain(self) -> Result<()> {
         let stream = self
             .inner
             .client
             .open_tunnel(&self.inner.device, &self.inner.tagma_id)
             .await?;
+        self.start_status_pump().await;
         tokio::pin!(stream);
         while let Some(item) = stream.next().await {
             match item {
@@ -203,6 +213,7 @@ impl RelayHandle {
                 Err(e) => warn!("relay tunnel stream error: {e}"),
             }
         }
+        self.stop_status_pump().await;
         Ok(())
     }
 

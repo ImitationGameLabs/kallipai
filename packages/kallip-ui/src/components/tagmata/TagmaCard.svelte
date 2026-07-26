@@ -16,6 +16,7 @@
   import {
     type TagmaCardProps,
     formatDateTime,
+    formatTagmaStatusLine,
     presenceDotClass,
     presenceLabel,
   } from "../../lib/tagmata.svelte.ts";
@@ -204,6 +205,9 @@
   <div class="flex flex-col gap-1 text-sm opacity-80">
     <p class="font-mono text-sm break-all">{tagma.tagmaId}</p>
     <p>enrolled {formatDateTime(tagma.createdAt)}</p>
+    {#if tagma.status}
+      <p class="text-xs opacity-70">{formatTagmaStatusLine(tagma.status)}</p>
+    {/if}
     {#if renameError}
       <p class="text-error-500 text-xs">Rename failed: {renameError}</p>
     {/if}

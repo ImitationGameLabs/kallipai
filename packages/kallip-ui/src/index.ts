@@ -83,6 +83,7 @@ export { default as TranscriptView } from "./components/TranscriptView.svelte";
 export { default as Composer } from "./components/Composer.svelte";
 export { default as ApprovalsView } from "./components/ApprovalsView.svelte";
 export { default as ApprovalRow } from "./components/ApprovalRow.svelte";
+export { default as TagmaStatusHeader } from "./components/TagmaStatusHeader.svelte";
 
 // Tagmata dashboard
 export { default as TagmataDashboard } from "./components/tagmata/TagmataDashboard.svelte";
@@ -91,11 +92,15 @@ export { default as EnrollmentCodeCard } from "./components/tagmata/EnrollmentCo
 export type {
   EnrollmentCodeCardProps,
   SectionPhase,
+  TagmaAgentState,
   TagmaCardProps,
   TagmaPresence,
+  TagmaStatusSummary,
 } from "./lib/tagmata.svelte.ts";
 export {
   formatDateTime,
+  formatTagmaStatusLine,
+  formatTokenCount,
   isExpired,
   presenceDotClass,
   presenceLabel,

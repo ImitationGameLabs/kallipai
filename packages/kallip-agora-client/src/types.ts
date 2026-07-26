@@ -241,19 +241,23 @@ export interface KeyExchangeResponse {
   readonly signature: string;
 }
 
-/** An event on the app's multiplexed SSE stream (`GET /v1/me/events`). serde tag
- * = `type`, snake_case. `envelope` plus `tagma_online` / `tagma_offline` are
- * emitted today (the presence pair is the sole liveness signal); `agent_state`
- * remains reserved. */
+/** An event on the app's multiplexed SSE stream (`GET /v1/me/events`). serde
+ * tag = `type`, snake_case. `envelope` carries E2EE conversation content;
+ * `tagma_online` / `tagma_offline` are the plaintext presence pair; `tagma_status`
+ * is the tagma's periodic aggregate runtime snapshot (agent counts + token
+ * budget), plaintext and user-scoped like presence. */
 export type AgoraEvent =
   | { readonly type: "envelope"; readonly envelope: Envelope }
   | { readonly type: "tagma_online"; readonly tagma_id: string }
   | { readonly type: "tagma_offline"; readonly tagma_id: string }
   | {
-      readonly type: "agent_state";
+      readonly type: "tagma_status";
       readonly tagma_id: string;
-      readonly agent_id: string;
-      readonly state: string;
+      readonly root_state: "idle" | "busy" | "faulted";
+      readonly subagents_total: number;
+      readonly subagents_active: number;
+      readonly token_budget: number;
+      readonly token_consumed: number;
     };
 
 /**

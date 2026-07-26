@@ -2,6 +2,7 @@
 
 mod conversations;
 mod events;
+mod status;
 mod tunnel;
 
 use axum::Router;
@@ -11,12 +12,13 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::state::SharedConvState;
 
-/// All six data-plane routes, state-injected (`Router<()>`):
-/// `/conversations*`, `/me/events`, and `/tunnel`.
+/// Data-plane routes, state-injected (`Router<()>`): `/conversations*`,
+/// `/me/events`, `/tagmata/{id}/status`, and `/tunnel`.
 pub fn router(state: SharedConvState) -> Router<()> {
     Router::new()
         .merge(conversations::router().with_state(state.clone()))
         .merge(events::router().with_state(state.clone()))
+        .merge(status::router().with_state(state.clone()))
         .merge(tunnel::router().with_state(state))
 }
 

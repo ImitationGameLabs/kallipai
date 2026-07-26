@@ -13,10 +13,12 @@
     void agoraSession.refreshTagmata();
   });
 
-  // The registry's enrolled cards joined with realtime presence: the sole
-  // place presence is derived. While realtime has not yet resolved (the SSE
+  // The registry's enrolled cards joined with realtime presence + status: the
+  // sole place both are derived. While realtime has not yet resolved (the SSE
   // snapshot is in flight), show "checking" rather than a misleading default
-  // "offline"; once resolved, map the presence set to online/offline.
+  // "offline"; once resolved, map the presence set to online/offline. The
+  // status snapshot overlays as-is (`undefined` while none has arrived, which
+  // the card reads as "hide the status line").
   const enrolled = $derived(
     agoraSession.enrolledCards.map(
       (c): TagmaCardProps => ({
@@ -26,6 +28,7 @@
             ? "online"
             : "offline"
           : "checking",
+        status: realtimeStore.statusFor(c.tagmaId),
       }),
     ),
   );

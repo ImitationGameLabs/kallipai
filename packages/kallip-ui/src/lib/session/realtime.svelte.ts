@@ -20,7 +20,8 @@ import {
   type AgoraEvent,
   type Envelope,
 } from "@kallipai/kallip-agora-client";
-import { SvelteSet } from "svelte/reactivity";
+import { SvelteMap, SvelteSet } from "svelte/reactivity";
+import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
 import { lescheClientOrFail } from "./agora.svelte.ts";
 
 /** Sink for inbound conversation envelopes. Bound by the shell to
@@ -46,6 +47,13 @@ class RealtimeStore {
   // membership natively. Distinct from `ChannelState.status` (OUR channel
   // transport), shown by the sidebar dot via channels.svelte.ts `channelIndicator`.
   private presence = new SvelteSet<string>();
+  // Per-tagma aggregate status snapshots, fed by the `tagma_status` SSE event.
+  // `SvelteMap` (not `$state(new Map())`): Svelte's `$state` proxy does not
+  // wrap Map, so a raw Map's in-place `.set()` would be invisible to
+  // reactivity. SvelteMap tracks entries natively. Consumed by both the
+  // /tagmata dashboard cards and the channel-chat status header via
+  // `statusFor` -- one source of truth for both surfaces.
+  private status = new SvelteMap<string, TagmaStatusSummary>();
   // False until presence has been resolved for this session -- either the first
   // presence event arrives, or the one-shot `resolveDeadline` (armed in `start`)
   // fires. The dashboard shows a "checking" placeholder only while this is
@@ -63,6 +71,13 @@ class RealtimeStore {
   /** Reactive liveness query: true iff a tagma tunnel is live for `tagmaId`. */
   has(tagmaId: string): boolean {
     return this.presence.has(tagmaId);
+  }
+
+  /** Reactive status query: the latest aggregate snapshot for `tagmaId`, or
+   * `undefined` while none has arrived (freshly connected, or offline tagma).
+   * Both the dashboard card and the channel-chat header read from here. */
+  statusFor(tagmaId: string): TagmaStatusSummary | undefined {
+    return this.status.get(tagmaId);
   }
 
   /** True once presence has been resolved for this session -- either the first
@@ -87,6 +102,7 @@ class RealtimeStore {
     this.running = true;
     this.clearResolveDeadline();
     this.presence.clear();
+    this.status.clear();
     this.resolvedState = false;
     this.resolveDeadline = setTimeout(
       () => this.markResolved(),
@@ -105,6 +121,7 @@ class RealtimeStore {
     this.abort = null;
     this.clearResolveDeadline();
     this.presence.clear();
+    this.status.clear();
     this.resolvedState = false;
   }
 
@@ -169,12 +186,25 @@ class RealtimeStore {
         break;
       case "tagma_offline":
         this.presence.delete(ev.tagma_id);
+        // Evict the last status snapshot so an offline tagma does not keep
+        // rendering stale agent counts/budget -- `statusFor` returns undefined
+        // (the card hides its line, the header shows "waiting…") until the
+        // tagma reconnects and a fresh snapshot arrives.
+        this.status.delete(ev.tagma_id);
         break;
       case "envelope":
         this.envelopeSink?.(ev.envelope);
         break;
-      case "agent_state":
-        // Reserved; the lesche does not emit it yet.
+      case "tagma_status":
+        // Map the snake_case wire fields to the camelCase internal shape at
+        // this single dispatch boundary, so consumers read idiomatic TS.
+        this.status.set(ev.tagma_id, {
+          rootState: ev.root_state,
+          subagentsTotal: ev.subagents_total,
+          subagentsActive: ev.subagents_active,
+          tokenBudget: ev.token_budget,
+          tokenConsumed: ev.token_consumed,
+        });
         break;
     }
   }

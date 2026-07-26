@@ -4,6 +4,7 @@
   // transport is a RelayChannel owned by channelsStore; this page just renders
   // its ChannelTranscript and feeds sends through the reused Composer input.
   import Composer from "../components/Composer.svelte";
+  import TagmaStatusHeader from "../components/TagmaStatusHeader.svelte";
   import { createComposer } from "../lib/composer.svelte.ts";
   import { createAutoScroll } from "../lib/transcript.svelte.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
@@ -59,6 +60,7 @@
   </div>
 {:else}
   <div class="flex flex-col h-full">
+    <TagmaStatusHeader tagmaId={channelState.tagmaId} />
     <div
       class="flex-1 min-h-0 overflow-auto"
       bind:this={scroll.viewport}
@@ -94,9 +96,6 @@
             </div>
           {/if}
         {/each}
-        {#if busy}
-          <p class="text-xs opacity-60 text-center">working…</p>
-        {/if}
         {#if channelState.transcript.status === "error" && channelState.transcript.error}
           <p class="text-xs text-error-500 text-center">
             {channelState.transcript.error}
