@@ -65,8 +65,8 @@ function maybeNotifyBackground(label: string | null, reply: TagmaReply): void {
   }
 }
 
-/** Build a synthetic `error` reply from a thrown exception, so a send/interrupt
- * failure routes through the same reducer as a tagma-side error. `req_id` and
+/** Build a synthetic `error` reply from a thrown exception, so a send failure
+ * routes through the same reducer as a tagma-side error. `req_id` and
  * `status` are sentinels (the failure did not originate from a tagma reply). */
 function syntheticErrorReply(message: string): TagmaReply {
   return { kind: "error", req_id: 0, status: 0, message };
@@ -247,21 +247,6 @@ class ChannelsStore {
     // sendNow catches its own errors and writes them to the transcript.
     void this.sendNow(ch, trimmed);
     return Promise.resolve();
-  }
-
-  /** Interrupt the in-flight turn. */
-  async interrupt(conversationId: string): Promise<void> {
-    const ch = this.channels.get(conversationId);
-    if (!ch?.channel) return;
-    try {
-      await ch.channel.interrupt();
-    } catch (e) {
-      ch.transcript = applyTagmaReply(
-        ch.transcript,
-        syntheticErrorReply(messageOf(e)),
-        (ch.syntheticSeq -= 1),
-      );
-    }
   }
 
   /** Close + drop a channel. Drops its IndexedDB cache too, so a conv that is

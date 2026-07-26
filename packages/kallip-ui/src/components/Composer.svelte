@@ -1,19 +1,15 @@
 <script lang="ts">
-  import { ArrowUp, Square } from "@lucide/svelte";
+  import { ArrowUp } from "@lucide/svelte";
   import type { ComposerModel } from "../lib/composer.svelte";
 
   let {
     composer,
     disabled,
-    busy,
     pendingCount,
-    oninterrupt,
   }: {
     composer: ComposerModel;
     disabled: boolean;
-    busy: boolean;
     pendingCount: number;
-    oninterrupt: () => void;
   } = $props();
 
   let area: HTMLTextAreaElement | undefined = $state();
@@ -46,13 +42,6 @@
       void composer.submit();
     }
   }
-
-  // The single circular action: sends when idle, interrupts when busy (the icon
-  // swaps to a stop square, Claude-style).
-  function onAction() {
-    if (busy) oninterrupt();
-    else void composer.submit();
-  }
 </script>
 
 <div class="pt-3 px-3 pb-6">
@@ -76,16 +65,12 @@
       <div class="flex justify-end pt-1">
         <button
           type="button"
-          onclick={onAction}
-          disabled={!busy && !composer.canSend}
-          aria-label={busy ? "Interrupt" : "Send"}
+          onclick={() => void composer.submit()}
+          disabled={!composer.canSend}
+          aria-label="Send"
           class="size-9 shrink-0 rounded-full preset-filled-primary-500 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          {#if busy}
-            <Square class="size-4" aria-hidden="true" />
-          {:else}
-            <ArrowUp class="size-5" aria-hidden="true" />
-          {/if}
+          <ArrowUp class="size-5" aria-hidden="true" />
         </button>
       </div>
     </div>

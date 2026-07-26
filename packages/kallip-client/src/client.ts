@@ -121,12 +121,6 @@ export class TagmaClient {
     );
   }
 
-  interruptAgent(id: AgentId): Promise<void> {
-    return this.request(`/agents/${id}/interrupt`, { method: "POST" }).then(
-      () => undefined,
-    );
-  }
-
   removeAgent(id: AgentId): Promise<void> {
     return this.request(`/agents/${id}`, { method: "DELETE" }).then(
       () => undefined,

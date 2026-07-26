@@ -166,11 +166,6 @@ export class RelayChannel {
     });
   }
 
-  /** Interrupt the in-flight turn. */
-  interrupt(): Promise<void> {
-    return this.sendRequest({ op: "interrupt", req_id: this.nextReqId++ });
-  }
-
   /** Request a batch of chat history (cursor-based). `after` = incremental
    * catch-up (rows newer than the rendered high-water mark); `before` =
    * scroll-up lazy load (rows older than the oldest id in view); both null =

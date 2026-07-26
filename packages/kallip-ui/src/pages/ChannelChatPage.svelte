@@ -20,9 +20,10 @@
   // each submit/canSubmit call.
   const composer = createComposer({
     send: (text) => channelsStore.send(conversationId, text),
-    canSubmit: () =>
-      channelState?.status === "open" &&
-      channelState.transcript.status !== "busy",
+    // Busy is not a gate: `ChannelsStore.send` queues a busy-time send into
+    // `pending` and drains it at the idle boundary, so a mid-turn prompt is
+    // buffered rather than dropped.
+    canSubmit: () => channelState?.status === "open",
   });
 
   const disabled = $derived(!channelState || channelState.status !== "open");
@@ -111,9 +112,7 @@
     <Composer
       {composer}
       {disabled}
-      {busy}
       pendingCount={channelState.pending.length}
-      oninterrupt={() => channelsStore.interrupt(conversationId)}
     />
   </div>
 {/if}

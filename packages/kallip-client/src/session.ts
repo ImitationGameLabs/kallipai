@@ -15,8 +15,8 @@ import type { TagmaClient } from "./client.ts";
 /**
  * A {@link Session} bound to a single tagma agent. Wraps a {@link TagmaClient}
  * and the agent id, exposing the live event stream and the direct-only
- * management surface (interrupt, approvals, status, budget). `close()` aborts
- * the event stream.
+ * management surface (approvals, status, budget). `close()` aborts the event
+ * stream.
  */
 export class TagmaSession implements Session {
   readonly capabilities: SessionCapabilities = DIRECT_CAPABILITIES;
@@ -41,10 +41,6 @@ export class TagmaSession implements Session {
 
   async send(text: string): Promise<void> {
     await this.client.postMessage(this.agentId, text);
-  }
-
-  async interrupt(): Promise<void> {
-    await this.client.interruptAgent(this.agentId);
   }
 
   close(): Promise<void> {

@@ -15,7 +15,7 @@ export interface SessionCapabilities {
   readonly approvals: boolean;
   /** retry / failover / streamReset telemetry. */
   readonly retryTelemetry: boolean;
-  /** Management surface exists (status, budget, interrupt, policy). */
+  /** Management surface exists (status, budget, policy). */
   readonly management: boolean;
   /** Line kinds the transcript will ever contain on this transport. */
   readonly lineKinds: ReadonlySet<TranscriptLine["kind"]>;

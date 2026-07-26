@@ -25,9 +25,7 @@
     <Composer
       {composer}
       {disabled}
-      busy={sessionStore.busy}
       pendingCount={sessionStore.pending.length}
-      oninterrupt={() => sessionStore.interrupt()}
     />
   </div>
 {/if}

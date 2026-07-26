@@ -74,7 +74,7 @@ class SessionStore {
 
   /**
    * Record a connection error only if `session` is still the live session. A
-   * stale attach/send/interrupt superseded by a newer attach() or torn down by
+   * stale attach/send superseded by a newer attach() or torn down by
    * detach() has this.session reassigned (or nulled) synchronously before its
    * async error resolves, so the guard stops it from clobbering the live
    * connection. Callers must pass the session captured at call start, not
@@ -126,15 +126,6 @@ class SessionStore {
     this.transcript = withUserLine(this.transcript, trimmed);
     try {
       await session.send(trimmed);
-    } catch (e) {
-      this.recordError(session, e);
-    }
-  }
-
-  async interrupt(): Promise<void> {
-    const session = this.session;
-    try {
-      await session?.interrupt?.();
     } catch (e) {
       this.recordError(session, e);
     }

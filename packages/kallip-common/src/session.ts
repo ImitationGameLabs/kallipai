@@ -36,9 +36,6 @@ export interface Session {
   /** Send a user prompt / message. */
   send(text: string): Promise<void>;
 
-  /** Interrupt a busy turn (direct only). */
-  interrupt?(): Promise<void>;
-
   /** Tear down the session (closes the event stream). */
   close(): Promise<void>;
 

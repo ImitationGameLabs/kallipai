@@ -167,27 +167,6 @@ Deno.test(
   },
 );
 
-Deno.test("interrupt sends an interrupt op with a fresh req_id", async () => {
-  const { lesche, pinnedKeyB64, setChannel, lastRequest } = makeMock(
-    ed25519.utils.randomSecretKey(),
-    "tagma-i",
-    "conv-i",
-  );
-  const channel = await openRelayChannel(
-    lesche as unknown as LescheClient,
-    "tagma-i",
-    "u",
-    pinnedKeyB64,
-  );
-  setChannel(channel);
-  await channel.interrupt();
-  const req = lastRequest();
-  if (!req || req.op !== "interrupt") {
-    throw new Error(`expected interrupt op, got ${JSON.stringify(req)}`);
-  }
-  channel.close();
-});
-
 Deno.test(
   "send increments sequence_n from 0 (the AEAD nonce counter)",
   async () => {
