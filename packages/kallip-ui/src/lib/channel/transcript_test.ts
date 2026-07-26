@@ -202,7 +202,9 @@ Deno.test("user_message (replay echo) appends a user line", () => {
 Deno.test("withUserLine appends a pending user line and flips to busy", () => {
   const t = withUserLine(EMPTY_TRANSCRIPT, "  hi there  ", -1);
   assertEquals(t.status, "busy");
-  assertEquals(t.lines, [{ historyId: -1, role: "user", text: "hi there" }]);
+  assertEquals(t.lines, [
+    { historyId: -1, role: "user", text: "hi there", status: "sending" },
+  ]);
   // Empty / whitespace-only is a no-op.
   assertEquals(withUserLine(EMPTY_TRANSCRIPT, "   ", -2), EMPTY_TRANSCRIPT);
 });
@@ -212,7 +214,9 @@ Deno.test(
   () => {
     let t = withUserLine(EMPTY_TRANSCRIPT, "hi", -1);
     t = replaceLineId(t, -1, 42);
-    assertEquals(t.lines, [{ historyId: 42, role: "user", text: "hi" }]);
+    assertEquals(t.lines, [
+      { historyId: 42, role: "user", text: "hi", status: "sent" },
+    ]);
     // No-op when the pending local id is absent.
     assertEquals(replaceLineId(t, -999, 5), t);
   },

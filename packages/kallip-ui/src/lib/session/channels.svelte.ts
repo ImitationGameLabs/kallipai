@@ -97,7 +97,10 @@ function channelIndicator(
  * its own (class instances are not deep-proxied by $state). */
 export class ChannelState {
   transcript: ChannelTranscript = $state(EMPTY_TRANSCRIPT);
-  pending: string[] = $state([]);
+  /** Rendered optimistic user lines awaiting their POST. Each entry's line is
+   * already in `transcript` (status `"sending"`); the single-in-flight send
+   * pump drains this one ack at a time. */
+  pending: { localId: number; text: string }[] = $state([]);
   status: "opening" | "open" | "offline" | "error" = $state("opening");
   // The transport; plain (not reactive). Set once openRelayChannel resolves.
   channel: RelayChannel | null = null;
@@ -110,9 +113,9 @@ export class ChannelState {
    * (`history_batch_end` received). Before that, inbound frames are catch-up
    * (old) and must not fire notifications; after, they are live. */
   live: boolean = $state(false);
-  /** The synthetic negative id of the in-flight optimistic user line awaiting
-   * its `MessageAccepted` ack, or `null` when none is pending. At most one
-   * (sends are serialized on the `busy` status). */
+  /** The synthetic negative id of the ONE in-flight POST (its ack has not yet
+   * landed), or `null` when the pump is idle. Single-in-flight so the
+   * `MessageAccepted` ack unambiguously correlates to this line. */
   pendingLocalId: number | null = $state(null);
   /** Source of synthetic negative ids for lines without a real `history_id`
    * (optimistic user lines, ack-class errors). Decremented per use; not
@@ -233,19 +236,19 @@ class ChannelsStore {
     return channel.conversationId;
   }
 
-  /** Send a prompt, or queue it if the agent is mid-turn. */
+  /** Send a prompt. Renders the optimistic user line immediately (so it is
+   * visible before the turn even starts), enqueues it, and lets the
+   * single-in-flight pump POST it. Busy/idle is irrelevant -- the tagma accepts
+   * mid-turn messages and may coalesce them; each message is its own send with
+   * its own ack. */
   send(conversationId: string, text: string): Promise<void> {
     const ch = this.channels.get(conversationId);
     const trimmed = text.trim();
     if (!ch || !ch.channel || trimmed === "") return Promise.resolve();
-    if (ch.transcript.status === "busy") {
-      ch.pending = [...ch.pending, trimmed];
-      return Promise.resolve();
-    }
-    // Fire-and-forget: sendNow renders the optimistic line synchronously, then
-    // POSTs. Not awaited so the composer does not block on the network round-trip;
-    // sendNow catches its own errors and writes them to the transcript.
-    void this.sendNow(ch, trimmed);
+    const localId = (ch.syntheticSeq -= 1);
+    ch.transcript = withUserLine(ch.transcript, trimmed, localId);
+    ch.pending = [...ch.pending, { localId, text: trimmed }];
+    void this.pumpPending(ch);
     return Promise.resolve();
   }
 
@@ -286,18 +289,30 @@ class ChannelsStore {
 
   // --- internals -----------------------------------------------------------
 
-  /** Render one optimistic user line + POST it. The line carries a synthetic
-   * negative id until the `MessageAccepted` ack replaces it with the inbound
-   * row id. */
-  private async sendNow(ch: ChannelState, text: string): Promise<void> {
-    const localId = (ch.syntheticSeq -= 1);
-    ch.pendingLocalId = localId;
-    ch.transcript = withUserLine(ch.transcript, text, localId);
+  /** Single-in-flight send pump. POSTs the next queued optimistic line (if any,
+   * and if no POST is already outstanding) and leaves its `localId` in
+   * `pendingLocalId` so the `MessageAccepted` ack can correlate. Self-driving:
+   * called from `send` (on enqueue) and the ack handler (on promotion). */
+  private async pumpPending(ch: ChannelState): Promise<void> {
+    if (ch.pendingLocalId !== null) return;
+    const next = ch.pending.shift();
+    if (next === undefined) return;
+    ch.pendingLocalId = next.localId;
+    // The optimistic line was rendered in `send`; here we only POST it.
     try {
-      await ch.channel!.send(text);
+      await ch.channel!.send(next.text);
     } catch (e) {
+      // POST failed before the tagma could ack: drop the optimistic line and
+      // surface the failure through the same reducer path as a tagma-side
+      // error. Do not auto-pump -- a POST failure usually means the channel is
+      // broken; the next send/ack resumes the pump once it recovers.
       ch.transcript = applyTagmaReply(
-        ch.transcript,
+        {
+          ...ch.transcript,
+          lines: ch.transcript.lines.filter(
+            (l) => l.historyId !== next.localId,
+          ),
+        },
         syntheticErrorReply(messageOf(e)),
         (ch.syntheticSeq -= 1),
       );
@@ -314,23 +329,35 @@ class ChannelsStore {
     try {
       for await (const reply of channel.replies()) {
         this.applyReply(conversationId, ch, reply);
-        if (ch.transcript.status === "idle") {
-          await this.flushPending(conversationId);
-        }
       }
     } catch {
       if (this.channels.get(conversationId) === ch) {
         ch.status = "error";
-        // Channel is dead: a pending optimistic line can never be ack'd now.
-        // Drop the pending id so a (impossible) later ack no-ops cleanly.
-        ch.pendingLocalId = null;
+        // Channel is dead: the in-flight POST and any queued optimistic lines
+        // can never send. Abandon them so the badge stops showing "queued",
+        // the pump does not wedge, and the UI does not leave them pulsing.
+        this.abandonPending(ch);
       }
     } finally {
       if (this.channels.get(conversationId) === ch && ch.status === "open") {
         ch.status = "offline";
-        ch.pendingLocalId = null;
+        this.abandonPending(ch);
       }
     }
+  }
+
+  /** Drop all unsent optimistic state: the in-flight slot, the queued pending
+   * entries, and their rendered `"sending"` lines. Used when the channel dies
+   * (error/offline) -- none of those messages can ever deliver, so leaving them
+   * would mislead (a stuck pulse, a stale "queued" badge). The channel-status
+   * banner is the surfaced signal. */
+  private abandonPending(ch: ChannelState): void {
+    ch.pending = [];
+    ch.pendingLocalId = null;
+    ch.transcript = {
+      ...ch.transcript,
+      lines: ch.transcript.lines.filter((l) => l.status !== "sending"),
+    };
   }
 
   /** Apply one reply to the transcript + cache + cursor. Dedup is by
@@ -363,26 +390,30 @@ class ChannelsStore {
       });
       if (cl.historyId > ch.maxRendered) ch.maxRendered = cl.historyId;
     }
-    // Promote the pending optimistic user line on its ack, and cache the now
-    // confirmed user message so it survives a refresh.
-    if (
-      reply.kind === "message_accepted" &&
-      (reply.history_id ?? 0) > 0 &&
-      ch.pendingLocalId !== null
-    ) {
-      const ackId = reply.history_id!;
-      ch.transcript = replaceLineId(ch.transcript, ch.pendingLocalId, ackId);
-      const confirmed = ch.transcript.lines.find((l) => l.historyId === ackId);
-      if (confirmed) {
-        void cachePut({
-          conversationId,
-          historyId: ackId,
-          role: "user",
-          text: confirmed.text,
-        });
+    // The `MessageAccepted` ack closes the in-flight send. When it carries a
+    // real `history_id` (> 0), promote the optimistic line to that id, mark it
+    // sent, cache it, and advance the cursor. Either way (a 0-id ack means the
+    // row was not durable -- a tagma-side anomaly), clear the in-flight slot so
+    // the pump does not wedge, then pump the next queued message.
+    if (reply.kind === "message_accepted" && ch.pendingLocalId !== null) {
+      const ackId = reply.history_id ?? 0;
+      if (ackId > 0) {
+        ch.transcript = replaceLineId(ch.transcript, ch.pendingLocalId, ackId);
+        const confirmed = ch.transcript.lines.find(
+          (l) => l.historyId === ackId,
+        );
+        if (confirmed) {
+          void cachePut({
+            conversationId,
+            historyId: ackId,
+            role: "user",
+            text: confirmed.text,
+          });
+        }
+        if (ackId > ch.maxRendered) ch.maxRendered = ackId;
       }
-      if (ackId > ch.maxRendered) ch.maxRendered = ackId;
       ch.pendingLocalId = null;
+      void this.pumpPending(ch);
     }
     if (reply.kind === "history_batch_end") {
       // Normal catch-up completion: cancel the open() watchdog (no longer
@@ -394,14 +425,6 @@ class ChannelsStore {
       ch.live = true;
     }
     if (ch.live) maybeNotifyBackground(ch.label, reply);
-  }
-
-  private async flushPending(conversationId: string): Promise<void> {
-    const ch = this.channels.get(conversationId);
-    if (!ch?.channel || ch.pending.length === 0) return;
-    const text = ch.pending.join("\n");
-    ch.pending = [];
-    await this.sendNow(ch, text);
   }
 }
 

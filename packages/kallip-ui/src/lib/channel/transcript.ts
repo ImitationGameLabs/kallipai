@@ -27,6 +27,10 @@ export interface ChannelLine {
   readonly historyId: number;
   readonly role: ChannelRole;
   readonly text: string;
+  /** Per-line delivery status for an optimistic user line. Absent (≡ "sent")
+   * for confirmed/replayed lines and for all non-user lines; `"sending"` from
+   * the moment the line is rendered until its `MessageAccepted` ack lands. */
+  readonly status?: "sending" | "sent";
 }
 
 type ChannelStatus = "idle" | "busy" | "error";
@@ -185,9 +189,10 @@ function applyTagmaEvent(
   }
 }
 
-/** Append a pending user line (synthetic negative `localId`) and mark the
- * channel busy (a turn is starting). The store replaces `localId` with the
- * real `history_id` when the `MessageAccepted` ack lands. */
+/** Append a pending user line (synthetic negative `localId`, status
+ * `"sending"`) and mark the channel busy (a turn is starting). The store
+ * replaces `localId` with the real `history_id` and flips status to `"sent"`
+ * when the `MessageAccepted` ack lands. */
 export function withUserLine(
   state: ChannelTranscript,
   text: string,
@@ -195,15 +200,21 @@ export function withUserLine(
 ): ChannelTranscript {
   const trimmed = text.trim();
   if (trimmed === "") return state;
-  return { ...line(state, localId, "user", trimmed), status: "busy" };
+  return {
+    ...state,
+    lines: [
+      ...state.lines,
+      { historyId: localId, role: "user", text: trimmed, status: "sending" },
+    ],
+    status: "busy",
+  };
 }
 
 /** Replace the pending line carrying `localId` with a confirmed `historyId`
- * (the inbound row id from the `MessageAccepted` ack). No-op if the pending
- * line is gone (e.g. already replaced, or cleared on reconnect), or if a line
- * with `historyId` already exists (defensive: sends are serialized on `busy`
- * so at most one optimistic line is pending, but an ack id colliding with an
- * already-rendered line would otherwise duplicate the Svelte/cache key). */
+ * (the inbound row id from the `MessageAccepted` ack) and flip its status to
+ * `"sent"`. No-op if the pending line is gone (already replaced, or cleared on
+ * reconnect), or if a line with `historyId` already exists (an ack id colliding
+ * with an already-rendered line would otherwise duplicate the Svelte/cache key). */
 export function replaceLineId(
   state: ChannelTranscript,
   localId: number,
@@ -214,7 +225,7 @@ export function replaceLineId(
   return {
     ...state,
     lines: state.lines.map((l) =>
-      l.historyId === localId ? { ...l, historyId } : l,
+      l.historyId === localId ? { ...l, historyId, status: "sent" } : l,
     ),
   };
 }

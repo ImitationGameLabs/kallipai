@@ -1,7 +1,6 @@
 import {
   applyEvent,
   EMPTY_TRANSCRIPT,
-  isBoundary,
   withUserLine,
 } from "@kallipai/kallip-common";
 import type {
@@ -46,14 +45,12 @@ function upsertById(
 
 /**
  * The app's session state, held as a Svelte 5 rune class singleton. Owns the
- * active {@link Session}, the transcript (driven by the common reducer), and the
- * pending-input queue that is flushed at turn boundaries — the web counterpart
- * of kallip-tui's App + send pipeline.
+ * active {@link Session} and the transcript (driven by the common reducer) —
+ * the web counterpart of kallip-tui's App + send pipeline.
  */
 class SessionStore {
   session: Session | null = $state(null);
   transcript: TranscriptState = $state(EMPTY_TRANSCRIPT);
-  pending: string[] = $state([]);
   // Raw error object (TransportError/KallipError/other); the layout banner
   // classifies it for display. Unknown so any thrown value is preserved.
   error: unknown = $state(null);
@@ -90,7 +87,6 @@ class SessionStore {
     this.detach();
     this.session = session;
     this.transcript = EMPTY_TRANSCRIPT;
-    this.pending = [];
     this.error = null;
     this.approvals = [];
     this.approvalsLoaded = false;
@@ -105,7 +101,6 @@ class SessionStore {
         // upserts the full entry by id, and status is monotonic.
         if (event.type === "approvalUpdated")
           void this.upsertApproval(event.id);
-        if (isBoundary(event)) await this.flushPending();
       }
     } catch (e) {
       this.recordError(session, e);
@@ -114,15 +109,13 @@ class SessionStore {
     }
   }
 
-  /** Send a prompt, or queue it if the agent is mid-turn. */
+  /** Send a prompt. Renders the optimistic user line immediately, then POSTs.
+   * The tagma accepts mid-turn messages and may coalesce them; each message is
+   * its own send (no client-side queue, no busy deferral). */
   async send(text: string): Promise<void> {
     const session = this.session;
     const trimmed = text.trim();
     if (!session || !trimmed) return;
-    if (this.transcript.agentBusy) {
-      this.pending = [...this.pending, trimmed];
-      return;
-    }
     this.transcript = withUserLine(this.transcript, trimmed);
     try {
       await session.send(trimmed);
@@ -194,23 +187,9 @@ class SessionStore {
     this.session?.close().catch(() => {});
     this.session = null;
     this.transcript = EMPTY_TRANSCRIPT;
-    this.pending = [];
     this.approvals = [];
     this.approvalsLoaded = false;
     this.approvalsError = null;
-  }
-
-  private async flushPending(): Promise<void> {
-    const session = this.session;
-    if (!session || this.pending.length === 0) return;
-    const text = this.pending.join("\n");
-    this.pending = [];
-    this.transcript = withUserLine(this.transcript, text);
-    try {
-      await session.send(text);
-    } catch (e) {
-      this.recordError(session, e);
-    }
   }
 }
 

@@ -22,10 +22,6 @@
     <div class="flex-1 min-h-0">
       <TranscriptView lines={sessionStore.transcript.lines} {composer} />
     </div>
-    <Composer
-      {composer}
-      {disabled}
-      pendingCount={sessionStore.pending.length}
-    />
+    <Composer {composer} {disabled} pendingCount={0} />
   </div>
 {/if}

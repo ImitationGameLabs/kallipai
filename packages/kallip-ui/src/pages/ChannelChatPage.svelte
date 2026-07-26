@@ -20,9 +20,9 @@
   // each submit/canSubmit call.
   const composer = createComposer({
     send: (text) => channelsStore.send(conversationId, text),
-    // Busy is not a gate: `ChannelsStore.send` queues a busy-time send into
-    // `pending` and drains it at the idle boundary, so a mid-turn prompt is
-    // buffered rather than dropped.
+    // Busy is not a gate: `ChannelsStore.send` renders the optimistic line at
+    // once and POSTs as soon as the previous POST's ack lands (single-in-flight
+    // pump), so a mid-turn prompt is buffered rather than dropped.
     canSubmit: () => channelState?.status === "open",
   });
 
@@ -90,10 +90,18 @@
                 class="max-w-[80%] whitespace-pre-wrap break-words rounded-base px-3 py-2 text-sm {line.role ===
                 'user'
                   ? 'preset-filled-primary-500'
-                  : 'preset-tonal-surface'}"
+                  : 'preset-tonal-surface'} {line.status === 'sending'
+                  ? 'opacity-60'
+                  : ''}"
               >
                 {line.text}
               </div>
+              {#if line.role === "user" && line.status === "sending"}
+                <span
+                  class="self-center ml-2 text-xs opacity-50 animate-pulse"
+                  aria-label="sending">··</span
+                >
+              {/if}
             </div>
           {/if}
         {/each}
