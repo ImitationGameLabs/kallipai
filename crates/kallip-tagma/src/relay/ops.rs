@@ -4,12 +4,12 @@
 
 use std::time::Duration;
 
-use kallip_agora_common::event::{FailoverChainExhaustion, TagmaEvent};
 use kallip_agora_common::ids::TraceId;
-use kallip_agora_common::message::TagmaReply;
 use kallip_common::protocol::{
     ApiError, FailoverChainExhaustion as WireFailoverExhaustion, SseEvent,
 };
+use kallip_lesche_common::event::{FailoverChainExhaustion, TagmaEvent};
+use kallip_lesche_common::message::TagmaReply;
 use tracing::debug;
 
 /// Trace id stamped on every event-pump envelope (the pump is one logical

@@ -2,7 +2,7 @@
 //!
 //! The tagma periodically snapshots its aggregate runtime state (agent counts
 //! and token budget) and POSTs it here; the lesche rebroadcasts it as an
-//! [`AgoraEvent::TagmaStatus`] on the owner's app event stream. Like presence,
+//! [`LescheEvent::TagmaStatus`] on the owner's app event stream. Like presence,
 //! status is plaintext and user-scoped, so the lesche can read it -- agent
 //! counts and token budget are operator metadata, not conversation content.
 //! The relay does not parse or validate the numbers and does not rate-limit;
@@ -16,9 +16,9 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::post;
-use kallip_agora_common::event::{AgoraEvent, TagmaStatusPayload};
 use kallip_agora_common::ids::TagmaId;
 use kallip_common::protocol::ApiError;
+use kallip_lesche_common::event::{LescheEvent, TagmaStatusPayload};
 use tracing::debug;
 
 use crate::auth::{AuthPrincipal, require_tagma};
@@ -66,7 +66,7 @@ async fn post_status(
     // does not retry; the next periodic snapshot supersedes this one.
     if let Some(tx) = app_tx
         && tx
-            .send(AgoraEvent::TagmaStatus {
+            .send(LescheEvent::TagmaStatus {
                 tagma_id: path_tagma.clone(),
                 root_state: payload.root_state,
                 subagents_total: payload.subagents_total,
@@ -86,10 +86,10 @@ mod tests {
     use super::*;
     use crate::test_support::{make_state, seed_presence};
     use kallip_agora_common::bytes::Ed25519PublicKey;
-    use kallip_agora_common::event::AgoraEvent;
     use kallip_agora_common::ids::{TagmaId, UserId};
     use kallip_agora_common::principal::Principal;
     use kallip_common::protocol::AgentState;
+    use kallip_lesche_common::event::LescheEvent;
 
     fn user(name: &str) -> UserId {
         UserId::from(name.to_string())
@@ -129,7 +129,7 @@ mod tests {
         assert_eq!(status, StatusCode::ACCEPTED);
 
         match rx.recv().await.expect("event delivered") {
-            AgoraEvent::TagmaStatus {
+            LescheEvent::TagmaStatus {
                 tagma_id,
                 root_state,
                 subagents_total,

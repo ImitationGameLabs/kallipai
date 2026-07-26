@@ -2,6 +2,7 @@
 members = [
   "crates/kallip-common",
   "crates/platform/kallip-agora-common",
+  "crates/platform/kallip-lesche-common",
   "crates/platform/kallip-agora",
   "crates/platform/kallip-lesche",
   "crates/platform/kallip-e2ee",
@@ -31,6 +32,7 @@ just-llm-client = "0.2.0"
 
 kallip-common = { path = "crates/kallip-common", default-features = false }
 kallip-agora-common = { path = "crates/platform/kallip-agora-common" }
+kallip-lesche-common = { path = "crates/platform/kallip-lesche-common" }
 kallip-agora = { path = "crates/platform/kallip-agora" }
 kallip-lesche = { path = "crates/platform/kallip-lesche" }
 kallip-e2ee = { path = "crates/platform/kallip-e2ee" }

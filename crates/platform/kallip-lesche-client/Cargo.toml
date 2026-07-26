@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 kallip-agora-common = { workspace = true }
+kallip-lesche-common = { workspace = true }
 kallip-e2ee = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }

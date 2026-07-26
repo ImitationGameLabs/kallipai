@@ -77,7 +77,7 @@ impl RelayHandle {
                             // frame), then live-emits under the cancel token.
                             if let Err(e) = self.emit_event(
                                 &trace,
-                                kallip_agora_common::message::TagmaReply::Event {
+                                kallip_lesche_common::message::TagmaReply::Event {
                                     event: tagma_ev,
                                     history_id: 0,
                                 },

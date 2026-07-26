@@ -4,8 +4,8 @@
 //! runs *before* a conversation has an E2E key).
 
 use crate::control::KeyExchangeInit;
-use crate::ids::ConversationId;
 use crate::message::Envelope;
+use kallip_agora_common::ids::ConversationId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -23,8 +23,8 @@
 //! tagma's event type: the agora/tagma public contract must not be coupled to
 //! tagma-internal event shapes.
 
-use crate::ids::TagmaId;
 use crate::message::Envelope;
+use kallip_agora_common::ids::TagmaId;
 use serde::{Deserialize, Serialize};
 
 // Re-exported so downstream crates (e.g. `kallip-lesche-client`) can construct
@@ -34,7 +34,7 @@ pub use kallip_common::protocol::AgentState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum AgoraEvent {
+pub enum LescheEvent {
     /// An envelope was delivered for one of the user's conversations.
     Envelope { envelope: Envelope },
     /// A tagma came online (it established a live, key-verified tunnel).
@@ -64,12 +64,12 @@ pub enum AgoraEvent {
 
 /// `POST /v1/tagmata/{tagma_id}/status` request body — the tagma's periodic
 /// runtime snapshot, rebroadcast by the lesche as an
-/// [`AgoraEvent::TagmaStatus`] on the owner's app event stream.
+/// [`LescheEvent::TagmaStatus`] on the owner's app event stream.
 ///
 /// `tagma_id` is intentionally absent: the path is authoritative, and the
 /// lesche asserts it matches the authenticated tagma before rebroadcast
 /// (mirroring `post_envelope`'s `conversation_id` check). Field names mirror
-/// the [`AgoraEvent::TagmaStatus`] variant; keep them in sync.
+/// the [`LescheEvent::TagmaStatus`] variant; keep them in sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagmaStatusPayload {
     pub root_state: AgentState,

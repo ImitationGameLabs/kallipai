@@ -6,7 +6,6 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-kallip-agora-common = { workspace = true }
 anyhow = { workspace = true }
 ed25519-dalek = { workspace = true }
 chacha20poly1305 = { workspace = true }

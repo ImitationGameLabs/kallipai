@@ -20,10 +20,11 @@ use axum::response::sse::{Event, Sse};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use kallip_agora_common::event::AgoraEvent;
-use kallip_agora_common::proof::{ProofError, verify_tunnel_proof};
-use kallip_agora_common::tunnel::TunnelInbound;
+use kallip_agora_common::proof::ProofError;
 use kallip_common::protocol::ApiError;
+use kallip_lesche_common::event::LescheEvent;
+use kallip_lesche_common::proof::verify_tunnel_proof;
+use kallip_lesche_common::tunnel::TunnelInbound;
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -112,7 +113,7 @@ async fn tunnel(
         // never *creates* an app stream (only `me_events` may); if the owner is
         // not connected now, they get this tagma in their snapshot on connect.
         if let Some(app_tx) = reg.app_stream(&owner) {
-            let _ = app_tx.send(AgoraEvent::TagmaOnline {
+            let _ = app_tx.send(LescheEvent::TagmaOnline {
                 tagma_id: tagma_id.clone(),
             });
         }
@@ -150,7 +151,7 @@ async fn tunnel(
         };
         if reg.take_presence_if_owned(&cleanup_tagma, &cleanup_id) {
             if let Some(app_tx) = reg.app_stream(&cleanup_owner) {
-                let _ = app_tx.send(AgoraEvent::TagmaOffline {
+                let _ = app_tx.send(LescheEvent::TagmaOffline {
                     tagma_id: cleanup_tagma.clone(),
                 });
             }

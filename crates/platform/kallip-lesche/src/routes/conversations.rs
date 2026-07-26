@@ -22,12 +22,12 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::post;
-use kallip_agora_common::control::{KeyExchangeInit, KeyExchangeResponse};
-use kallip_agora_common::event::AgoraEvent;
 use kallip_agora_common::ids::{ConversationId, TagmaId};
-use kallip_agora_common::message::{Envelope, Participant};
-use kallip_agora_common::tunnel::TunnelInbound;
 use kallip_common::protocol::ApiError;
+use kallip_lesche_common::control::{KeyExchangeInit, KeyExchangeResponse};
+use kallip_lesche_common::event::LescheEvent;
+use kallip_lesche_common::message::{Envelope, Participant};
+use kallip_lesche_common::tunnel::TunnelInbound;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthPrincipal, require_tagma, require_user};
@@ -148,7 +148,7 @@ async fn post_envelope(
     // offline); surface 503 so the sender can retry.
     let delivered = match route {
         Some(Route::Tagma(tx)) => tx.send(TunnelInbound::Envelope { envelope: env }).is_ok(),
-        Some(Route::App(tx)) => tx.send(AgoraEvent::Envelope { envelope: env }).is_ok(),
+        Some(Route::App(tx)) => tx.send(LescheEvent::Envelope { envelope: env }).is_ok(),
         None => false,
     };
     if !delivered {
@@ -164,7 +164,7 @@ async fn post_envelope(
 /// A resolved route target carrying its typed broadcast sender.
 enum Route {
     Tagma(tokio::sync::broadcast::Sender<TunnelInbound>),
-    App(tokio::sync::broadcast::Sender<AgoraEvent>),
+    App(tokio::sync::broadcast::Sender<LescheEvent>),
 }
 
 /// App -> tagma (synchronous): start a conversation key exchange and block
@@ -291,10 +291,10 @@ mod tests {
     use super::*;
     use crate::test_support::{make_state, seed_presence};
     use kallip_agora_common::bytes::{Ciphertext, Ed25519PublicKey, X25519PublicKey};
-    use kallip_agora_common::control::KeyExchangeInit;
     use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId, UserId};
     use kallip_agora_common::principal::Principal;
-    use kallip_agora_common::tunnel::TunnelInbound;
+    use kallip_lesche_common::control::KeyExchangeInit;
+    use kallip_lesche_common::tunnel::TunnelInbound;
     use time::OffsetDateTime;
 
     fn user(name: &str) -> UserId {
@@ -305,8 +305,8 @@ mod tests {
         X25519PublicKey(vec![0u8; 32])
     }
 
-    fn dummy_response() -> kallip_agora_common::control::KeyExchangeResponse {
-        kallip_agora_common::control::KeyExchangeResponse {
+    fn dummy_response() -> kallip_lesche_common::control::KeyExchangeResponse {
+        kallip_lesche_common::control::KeyExchangeResponse {
             ephemeral_public: X25519PublicKey(vec![1u8; 32]),
             signature: kallip_agora_common::bytes::Ed25519Signature(vec![2u8; 64]),
         }

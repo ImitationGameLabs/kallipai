@@ -18,6 +18,7 @@
 
 pub(crate) mod chat_history;
 mod crypto;
+mod kex;
 mod ops;
 mod pump;
 mod status_pump;
@@ -27,12 +28,14 @@ use std::sync::{Arc, Weak};
 use anyhow::{Context, Result};
 use futures_util::{FutureExt, StreamExt};
 use kallip_agora_common::bytes::Ciphertext;
-use kallip_agora_common::event::TagmaEvent;
 use kallip_agora_common::ids::{ConversationId, TagmaId};
-use kallip_agora_common::message::{Envelope, Participant, TagmaControl, TagmaReply, TagmaRequest};
-use kallip_agora_common::tunnel::TunnelInbound;
 use kallip_e2ee::{self as e2e, DeviceKey};
 use kallip_lesche_client::LescheClient;
+use kallip_lesche_common::event::TagmaEvent;
+use kallip_lesche_common::message::{
+    Envelope, Participant, TagmaControl, TagmaReply, TagmaRequest,
+};
+use kallip_lesche_common::tunnel::TunnelInbound;
 use std::panic::AssertUnwindSafe;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -247,9 +250,9 @@ impl RelayHandle {
     async fn handle_kex(
         &self,
         conversation_id: ConversationId,
-        init: kallip_agora_common::control::KeyExchangeInit,
+        init: kallip_lesche_common::control::KeyExchangeInit,
     ) {
-        let (response, key) = match e2e::respond_key_exchange(
+        let (response, key) = match kex::respond_key_exchange(
             &self.inner.device,
             self.inner.tagma_id.as_ref(),
             conversation_id.as_ref(),
@@ -852,13 +855,13 @@ mod op_tests {
     use axum::{Router, routing::post};
     use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, aead::Aead};
     use kallip_agora_common::bytes::Ciphertext;
-    use kallip_agora_common::control::KeyExchangeInit;
     use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId, UserId};
-    use kallip_agora_common::message::{Envelope, Participant, TagmaReply, TagmaRequest};
     use kallip_common::protocol::SseEvent;
     use kallip_e2ee::{
         DIR_INITIATOR_TO_RESPONDER, DIR_RESPONDER_TO_INITIATOR, DeviceKey, SessionKey, nonce,
     };
+    use kallip_lesche_common::control::KeyExchangeInit;
+    use kallip_lesche_common::message::{Envelope, Participant, TagmaReply, TagmaRequest};
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;

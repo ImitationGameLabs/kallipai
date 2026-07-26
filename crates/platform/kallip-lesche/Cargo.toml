@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 kallip-agora-common = { workspace = true }
+kallip-lesche-common = { workspace = true }
 kallip-common = { workspace = true, features = ["axum"] }
 axum = { workspace = true }
 tokio = { workspace = true }

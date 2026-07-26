@@ -1,0 +1,17 @@
+[package]
+name = "kallip-lesche-common"
+description = "Wire types for the kallip-lesche data-plane relay"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallip-common = { workspace = true }
+kallip-agora-common = { workspace = true }
+serde = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+# Proof-transcript tests sign + verify end-to-end without depending on kallip-e2ee.
+ed25519-dalek = { workspace = true }
+serde_json = { workspace = true }

@@ -1,10 +1,11 @@
 //! End-to-end encryption primitives: an Ed25519 device key, an X3DH-style key
 //! agreement, and ChaCha20-Poly1305 AEAD.
 //!
-//! This is the signing/AEAD (private-key) counterpart to the verify-only
-//! [`kallip_agora_common::proof`] module. Together the two halves define the E2E
-//! contract: a holder of this crate can sign and encrypt; a holder of only the
-//! verify half can authenticate ciphertext without ever touching a private key.
+//! This is the signing/AEAD (private-key) half of the E2E contract; the
+//! verify-only half lives in `kallip_agora_common::proof` (a separate crate, not
+//! a dependency of this one). Together the two halves define the contract: a
+//! holder of this crate can sign and encrypt; a holder of only the verify half
+//! can authenticate ciphertext without ever touching a private key.
 //!
 //! The two protocol roles are the **initiator** (the party that starts the key
 //! exchange, holding a per-conversation ephemeral key) and the **responder**
@@ -27,9 +28,6 @@
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, aead::Aead};
 use ed25519_dalek::{Signer, SigningKey};
 use hkdf::Hkdf;
-use kallip_agora_common::bytes::{Ed25519Signature, X25519PublicKey};
-use kallip_agora_common::control::{KeyExchangeInit, KeyExchangeResponse};
-use kallip_agora_common::proof::kex_transcript;
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519Public};
 use zeroize::Zeroize;
@@ -121,28 +119,19 @@ impl DeviceKey {
     }
 }
 
-/// Respond to an initiator's key-exchange init: generate the responder's
-/// ephemeral X25519 key, ECDH with the initiator's public, HKDF -> session key.
-/// Returns the response (responder ephemeral public + signature over the
-/// transcript) and the session key.
-///
-/// The signature binds the ephemeral keys to `(responder_id, conversation_id)`
-/// (see [`kallip_agora_common::proof::kex_transcript`]), so the initiator can
-/// attribute the derived key unambiguously to the pinned identity. The agent
-/// backing the conversation is a responder-internal concern and is not part of
-/// the transcript.
-pub fn respond_key_exchange(
-    device: &DeviceKey,
-    responder_id: &str,
-    conversation_id: &str,
-    init: &KeyExchangeInit,
-) -> anyhow::Result<(KeyExchangeResponse, SessionKey)> {
-    let initiator_eph = array32(&init.ephemeral_public.0)?;
+/// Responder side of the X25519 ECDH + HKDF-SHA256 key agreement: generate an
+/// ephemeral keypair, ECDH with the initiator's public key, reject a
+/// non-contributory (low-order) peer, and HKDF-derive the 32-byte session key.
+/// Returns `(responder_ephemeral_public, session_key)`. Pure bytes in/out -- no
+/// wire types; the caller wraps these in whatever envelope it speaks.
+pub fn derive_responder_session_key(
+    initiator_eph_pub: [u8; 32],
+) -> anyhow::Result<([u8; 32], SessionKey)> {
     // EphemeralSecret enforces single-use at compile time: `diffie_hellman`
     // consumes it. Take the public half first, then ECDH.
     let eph_secret = EphemeralSecret::random();
     let eph_pub = X25519Public::from(&eph_secret);
-    let shared = eph_secret.diffie_hellman(&X25519Public::from(initiator_eph));
+    let shared = eph_secret.diffie_hellman(&X25519Public::from(initiator_eph_pub));
     // Reject a non-contributory (low-order/identity) peer key: otherwise an
     // attacker-chosen low-order public key forces an all-zero shared secret and
     // thus a publicly-known AEAD session key.
@@ -150,22 +139,7 @@ pub fn respond_key_exchange(
         anyhow::bail!("non-contributory key exchange (low-order public key)");
     }
     let key = hkdf_sha256_32(shared.as_bytes(), HKDF_INFO);
-
-    let responder_eph = eph_pub.to_bytes();
-    let transcript = kex_transcript(
-        responder_id,
-        conversation_id,
-        &initiator_eph,
-        &responder_eph,
-    );
-    let signature = device.sign(&transcript);
-    Ok((
-        KeyExchangeResponse {
-            ephemeral_public: X25519PublicKey(responder_eph.to_vec()),
-            signature: Ed25519Signature(signature.to_vec()),
-        },
-        SessionKey::new(key),
-    ))
+    Ok((eph_pub.to_bytes(), SessionKey::new(key)))
 }
 
 /// Encrypt a responder->initiator plaintext (direction 1, counter = `seq`).
@@ -211,11 +185,6 @@ fn fresh_seed() -> [u8; 32] {
     seed
 }
 
-fn array32(v: &[u8]) -> anyhow::Result<[u8; 32]> {
-    v.try_into()
-        .map_err(|_| anyhow::anyhow!("expected a 32-byte X25519 public key"))
-}
-
 // --- HKDF-SHA256 (RFC 5869), single 32-byte output block ---
 
 /// Derive a 32-byte AEAD session key from an X25519 shared secret via
@@ -237,30 +206,10 @@ mod tests {
 
     use super::nonce;
     use super::{
-        DeviceKey, HKDF_INFO, array32, decrypt, encrypt, fresh_seed, hkdf_sha256_32,
-        respond_key_exchange,
+        HKDF_INFO, decrypt, derive_responder_session_key, encrypt, fresh_seed, hkdf_sha256_32,
     };
     use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, aead::Aead};
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-    use kallip_agora_common::bytes::X25519PublicKey;
-    use kallip_agora_common::control::KeyExchangeInit;
-    use kallip_agora_common::proof::{kex_transcript, verify_kex_proof};
     use x25519_dalek::{PublicKey as X25519Public, ReusableSecret};
-
-    /// Initiator-side key derivation (mirrors the responder's HKDF step). The
-    /// initiator holds its ephemeral across the KEX round-trip, so
-    /// `ReusableSecret` (not `EphemeralSecret`) models it.
-    fn initiator_derive_key(
-        initiator_secret: &ReusableSecret,
-        responder_eph: [u8; 32],
-    ) -> [u8; 32] {
-        let shared = initiator_secret.diffie_hellman(&X25519Public::from(responder_eph));
-        assert!(
-            shared.was_contributory(),
-            "test initiator key must be contributory"
-        );
-        hkdf_sha256_32(shared.as_bytes(), HKDF_INFO)
-    }
 
     /// Encrypt with an explicit direction (simulates either endpoint).
     fn aead_encrypt(key: &[u8; 32], dir: u32, seq: u64, plaintext: &[u8]) -> Vec<u8> {
@@ -309,76 +258,24 @@ mod tests {
     }
 
     #[test]
-    fn key_exchange_both_sides_agree() {
-        let device = DeviceKey::generate();
+    fn derive_responder_session_key_agrees_with_initiator() {
         // The initiator generates an ephemeral keypair and publishes the public half.
         let initiator_secret = ReusableSecret::random();
-        let initiator_pub = X25519Public::from(&initiator_secret);
-        let init = KeyExchangeInit {
-            ephemeral_public: X25519PublicKey(initiator_pub.to_bytes().to_vec()),
-        };
-        // The responder responds, deriving its key.
-        let (response, responder_key) =
-            respond_key_exchange(&device, "tagma", "conv", &init).unwrap();
-        // The initiator independently derives the key from the responder's
+        let initiator_pub = X25519Public::from(&initiator_secret).to_bytes();
+        // The responder derives its key from the initiator's public.
+        let (responder_pub, responder_key) = derive_responder_session_key(initiator_pub).unwrap();
+        // The initiator independently derives the same key from the responder's
         // ephemeral public.
-        let responder_eph = array32(&response.ephemeral_public.0).unwrap();
-        let initiator_key = initiator_derive_key(&initiator_secret, responder_eph);
+        let shared = initiator_secret.diffie_hellman(&X25519Public::from(responder_pub));
+        assert!(
+            shared.was_contributory(),
+            "test initiator key must be contributory"
+        );
+        let initiator_key = hkdf_sha256_32(shared.as_bytes(), HKDF_INFO);
         assert_eq!(
             initiator_key, *responder_key,
-            "both sides must derive the same key"
+            "both sides must derive the same session key"
         );
-    }
-
-    #[test]
-    fn kex_signature_binds_conversation_and_verifies_against_pinned_key() {
-        // The initiator side: it knows the responder's pinned public key
-        // (fetched via GET /v1/tagmata) and reconstructs the transcript to
-        // verify the response signature, then derives the same key.
-        let device = DeviceKey::generate();
-        let pinned = device.public_bytes();
-        let initiator_secret = ReusableSecret::random();
-        // The transcript binds the initiator's PUBLIC ephemeral key (the bytes
-        // the responder sees in `init.ephemeral_public`), not its private seed.
-        let initiator_eph_pub = X25519Public::from(&initiator_secret).to_bytes();
-        let init = KeyExchangeInit {
-            ephemeral_public: X25519PublicKey(initiator_eph_pub.to_vec()),
-        };
-        let (response, _responder_key) =
-            respond_key_exchange(&device, "tagma-7", "conv-9", &init).unwrap();
-
-        let responder_eph = array32(&response.ephemeral_public.0).unwrap();
-        // Verify via the shared agora-common verifier (the app SDK does this).
-        assert!(
-            verify_kex_proof(
-                &pinned,
-                "tagma-7",
-                "conv-9",
-                &initiator_eph_pub,
-                &responder_eph,
-                &response.signature.0,
-            )
-            .is_ok(),
-            "response signature must verify against the pinned key for this binding"
-        );
-        // A different conversation must NOT verify (cross-wiring is closed).
-        assert!(
-            verify_kex_proof(
-                &pinned,
-                "tagma-7",
-                "conv-OTHER",
-                &initiator_eph_pub,
-                &responder_eph,
-                &response.signature.0,
-            )
-            .is_err()
-        );
-        // Belt-and-suspenders: the raw dalek verify over the same transcript
-        // also passes (independent of the agora-common helper).
-        let key = VerifyingKey::from_bytes(&pinned).unwrap();
-        let sig = Signature::from_slice(&response.signature.0).unwrap();
-        let transcript = kex_transcript("tagma-7", "conv-9", &initiator_eph_pub, &responder_eph);
-        assert!(key.verify(&transcript, &sig).is_ok());
     }
 
     #[test]
@@ -448,13 +345,8 @@ mod tests {
         // the DH output is the identity for any private key, so the session key
         // would be publicly known. The responder must refuse such a key exchange
         // rather than derive a key from a non-contributory result.
-        let device = DeviceKey::generate();
-        let init = KeyExchangeInit {
-            ephemeral_public: X25519PublicKey(vec![0u8; 32]),
-        };
-        let result = respond_key_exchange(&device, "tagma", "conv", &init);
         assert!(
-            result.is_err(),
+            derive_responder_session_key([0u8; 32]).is_err(),
             "low-order initiator public key must be rejected"
         );
     }

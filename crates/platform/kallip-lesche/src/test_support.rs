@@ -152,11 +152,11 @@ pub fn seed_presence(
     tagma: &TagmaId,
     owner: UserId,
 ) -> (
-    tokio::sync::broadcast::Sender<kallip_agora_common::tunnel::TunnelInbound>,
+    tokio::sync::broadcast::Sender<kallip_lesche_common::tunnel::TunnelInbound>,
     Arc<()>,
 ) {
     let (tx, _rx) =
-        tokio::sync::broadcast::channel::<kallip_agora_common::tunnel::TunnelInbound>(128);
+        tokio::sync::broadcast::channel::<kallip_lesche_common::tunnel::TunnelInbound>(128);
     let id = Arc::new(());
     let mut reg = state.registry.write().unwrap();
     reg.register_presence(tagma, owner, tx.clone(), id.clone());

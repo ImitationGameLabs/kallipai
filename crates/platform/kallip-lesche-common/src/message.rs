@@ -4,9 +4,9 @@
 //! The [`TagmaRequest`] / [`TagmaReply`] inside is the E2E payload shared
 //! between app and tagma; the agora never decrypts it.
 
-use crate::bytes::Ciphertext;
 use crate::event::TagmaEvent;
-use crate::ids::{ConversationId, TagmaId, TraceId, UserId};
+use kallip_agora_common::bytes::Ciphertext;
+use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId, UserId};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 

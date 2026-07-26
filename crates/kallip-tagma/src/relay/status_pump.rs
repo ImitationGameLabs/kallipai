@@ -1,6 +1,6 @@
 //! The status pump: snapshots the tagma's aggregate runtime state (agent
 //! counts + token budget) on a fixed cadence and posts it to the lesche, which
-//! rebroadcasts it as an `AgoraEvent::TagmaStatus` on the owner's app event
+//! rebroadcasts it as a `LescheEvent::TagmaStatus` on the owner's app event
 //! stream. Unlike the event [`pump`](super::pump), it is bounded to the tunnel
 //! session (not the KEX epoch): status is plaintext and key-independent, so it
 //! needs none of the pump's drain-before-rotation semantics.
@@ -11,8 +11,8 @@
 
 use std::time::Duration;
 
-use kallip_agora_common::event::TagmaStatusPayload;
 use kallip_common::protocol::AgentState;
+use kallip_lesche_common::event::TagmaStatusPayload;
 use kallip_runtime::token_budget::TokenBudget;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;

@@ -38,9 +38,9 @@ macro_rules! base64_bytes {
 }
 
 base64_bytes! {
-    /// AEAD ciphertext (incl. the Poly1305 tag) carried inside an
-    /// [`Envelope`](crate::message::Envelope). Opaque to the agora; decrypted
-    /// only by the receiving endpoint.
+    /// AEAD ciphertext (incl. the Poly1305 tag) carried inside an envelope
+    /// (`kallip_lesche_common::message::Envelope`). Opaque to the agora;
+    /// decrypted only by the receiving endpoint.
     Ciphertext
 }
 base64_bytes! {

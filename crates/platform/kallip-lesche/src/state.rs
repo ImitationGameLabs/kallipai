@@ -28,12 +28,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use kallip_agora_common::control::KeyExchangeResponse;
 use kallip_agora_common::control_plane::ControlPlane;
-use kallip_agora_common::event::AgoraEvent;
 use kallip_agora_common::ids::{ConversationId, TagmaId, UserId};
-use kallip_agora_common::tunnel::TunnelInbound;
 use kallip_common::protocol::ApiError;
+use kallip_lesche_common::control::KeyExchangeResponse;
+use kallip_lesche_common::event::LescheEvent;
+use kallip_lesche_common::tunnel::TunnelInbound;
 use tokio::sync::{broadcast, oneshot};
 
 pub type SharedConvState = Arc<ConversationsState>;
@@ -87,7 +87,7 @@ pub struct Registry {
     /// creator is `me_events`; it carries agent envelopes and presence events.
     /// Private: mutate only via [`Registry::open_app_stream`] /
     /// [`Registry::remove_app_stream_if_last`].
-    app_streams: HashMap<UserId, broadcast::Sender<AgoraEvent>>,
+    app_streams: HashMap<UserId, broadcast::Sender<LescheEvent>>,
 }
 
 /// One live tunnel: the outbound broadcast, the owning user (for presence
@@ -117,16 +117,16 @@ impl Registry {
     /// The live app event-stream sender for `user`, if any. Read-only access for
     /// routing agent envelopes and presence events; creation is
     /// [`Self::open_app_stream`].
-    pub fn app_stream(&self, user: &UserId) -> Option<&broadcast::Sender<AgoraEvent>> {
+    pub fn app_stream(&self, user: &UserId) -> Option<&broadcast::Sender<LescheEvent>> {
         self.app_streams.get(user)
     }
 
     /// Ensure an app event-stream channel exists for `user` and return a sender
     /// clone. Sole creator of `app_streams` entries.
-    pub fn open_app_stream(&mut self, user: &UserId) -> broadcast::Sender<AgoraEvent> {
+    pub fn open_app_stream(&mut self, user: &UserId) -> broadcast::Sender<LescheEvent> {
         self.app_streams
             .entry(user.clone())
-            .or_insert_with(|| broadcast::channel::<AgoraEvent>(BROADCAST_CAPACITY).0)
+            .or_insert_with(|| broadcast::channel::<LescheEvent>(BROADCAST_CAPACITY).0)
             .clone()
     }
 
@@ -135,7 +135,7 @@ impl Registry {
     pub fn remove_app_stream_if_last(
         &mut self,
         user: &UserId,
-        sender: &broadcast::Sender<AgoraEvent>,
+        sender: &broadcast::Sender<LescheEvent>,
     ) {
         if sender.receiver_count() == 1 {
             self.app_streams.remove(user);
@@ -195,8 +195,8 @@ impl Default for Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kallip_agora_common::event::AgoraEvent;
     use kallip_agora_common::ids::TagmaId;
+    use kallip_lesche_common::event::LescheEvent;
 
     /// `register_presence` stores the owner so presence events can be routed to
     /// the owning user's app stream, and the snapshot iteration (what
@@ -237,11 +237,11 @@ mod tests {
         let tx = reg.open_app_stream(&alice);
         let mut rx = tx.subscribe();
         // Simulate the tunnel handler's online announcement.
-        tx.send(AgoraEvent::TagmaOnline {
+        tx.send(LescheEvent::TagmaOnline {
             tagma_id: TagmaId::from("a1".to_string()),
         })
         .expect("send");
         let ev = rx.recv().await.expect("receive");
-        assert!(matches!(ev, AgoraEvent::TagmaOnline { .. }));
+        assert!(matches!(ev, LescheEvent::TagmaOnline { .. }));
     }
 }

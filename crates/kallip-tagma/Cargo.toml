@@ -9,6 +9,7 @@ license.workspace = true
 kallip-runtime = { workspace = true, features = ["landlock", "seccomp"] }
 kallip-common = { workspace = true, features = ["axum"] }
 kallip-agora-common = { workspace = true }
+kallip-lesche-common = { workspace = true }
 kallip-agora-client = { workspace = true }
 kallip-lesche-client = { workspace = true }
 kallip-e2ee = { workspace = true }
@@ -71,3 +72,6 @@ kallip-shell = { workspace = true }
 chacha20poly1305 = { workspace = true }
 getrandom = { workspace = true }
 x25519-dalek = { workspace = true, features = ["reusable_secrets"] }
+# KEX unit tests (relay::kex): initiator-side HKDF to assert both sides agree.
+hkdf = { workspace = true }
+sha2 = { workspace = true }

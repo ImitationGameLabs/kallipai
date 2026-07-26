@@ -11,8 +11,8 @@ use axum::Router;
 use axum::extract::State;
 use axum::response::sse::{Event, Sse};
 use axum::routing::get;
-use kallip_agora_common::event::AgoraEvent;
 use kallip_common::protocol::ApiError;
+use kallip_lesche_common::event::LescheEvent;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -44,7 +44,7 @@ async fn me_events(
         let reg = state.read()?;
         for (tagma_id, entry) in reg.presence.iter() {
             if entry.owner == user_id {
-                let _ = tx.send(AgoraEvent::TagmaOnline {
+                let _ = tx.send(LescheEvent::TagmaOnline {
                     tagma_id: tagma_id.clone(),
                 });
             }

@@ -21,13 +21,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use futures_util::StreamExt;
-use kallip_agora_common::control::KeyExchangeResponse;
-use kallip_agora_common::event::TagmaStatusPayload;
 use kallip_agora_common::ids::{ConversationId, TagmaId};
-use kallip_agora_common::message::Envelope;
-use kallip_agora_common::proof::tunnel_transcript;
-use kallip_agora_common::tunnel::TunnelInbound;
 use kallip_e2ee::DeviceKey;
+use kallip_lesche_common::control::KeyExchangeResponse;
+use kallip_lesche_common::event::TagmaStatusPayload;
+use kallip_lesche_common::message::Envelope;
+use kallip_lesche_common::proof::tunnel_transcript;
+use kallip_lesche_common::tunnel::TunnelInbound;
 
 struct Inner {
     base_url: String,
@@ -300,9 +300,9 @@ impl LescheClientBuilder {
 mod tests {
     use super::*;
     use kallip_agora_common::bytes::Ciphertext;
-    use kallip_agora_common::event::AgentState;
     use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId};
-    use kallip_agora_common::message::{Envelope, Participant};
+    use kallip_lesche_common::event::AgentState;
+    use kallip_lesche_common::message::{Envelope, Participant};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
