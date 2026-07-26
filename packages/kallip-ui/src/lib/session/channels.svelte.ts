@@ -234,15 +234,19 @@ class ChannelsStore {
   }
 
   /** Send a prompt, or queue it if the agent is mid-turn. */
-  async send(conversationId: string, text: string): Promise<void> {
+  send(conversationId: string, text: string): Promise<void> {
     const ch = this.channels.get(conversationId);
     const trimmed = text.trim();
-    if (!ch || !ch.channel || trimmed === "") return;
+    if (!ch || !ch.channel || trimmed === "") return Promise.resolve();
     if (ch.transcript.status === "busy") {
       ch.pending = [...ch.pending, trimmed];
-      return;
+      return Promise.resolve();
     }
-    this.sendNow(conversationId, ch, trimmed);
+    // Fire-and-forget: sendNow renders the optimistic line synchronously, then
+    // POSTs. Not awaited so the composer does not block on the network round-trip;
+    // sendNow catches its own errors and writes them to the transcript.
+    void this.sendNow(ch, trimmed);
+    return Promise.resolve();
   }
 
   /** Interrupt the in-flight turn. */
@@ -300,11 +304,7 @@ class ChannelsStore {
   /** Render one optimistic user line + POST it. The line carries a synthetic
    * negative id until the `MessageAccepted` ack replaces it with the inbound
    * row id. */
-  private async sendNow(
-    conversationId: string,
-    ch: ChannelState,
-    text: string,
-  ): Promise<void> {
+  private async sendNow(ch: ChannelState, text: string): Promise<void> {
     const localId = (ch.syntheticSeq -= 1);
     ch.pendingLocalId = localId;
     ch.transcript = withUserLine(ch.transcript, text, localId);
@@ -416,7 +416,7 @@ class ChannelsStore {
     if (!ch?.channel || ch.pending.length === 0) return;
     const text = ch.pending.join("\n");
     ch.pending = [];
-    await this.sendNow(conversationId, ch, text);
+    await this.sendNow(ch, text);
   }
 }
 

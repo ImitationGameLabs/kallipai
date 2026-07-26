@@ -200,11 +200,11 @@ export class RelayChannel {
     this.resolveDrain = null;
   }
 
-  private async sendRequest(req: TagmaRequest): Promise<void> {
+  private sendRequest(req: TagmaRequest): Promise<void> {
     return this.sendPayload(req);
   }
 
-  private async sendControl(ctrl: TagmaControl): Promise<void> {
+  private sendControl(ctrl: TagmaControl): Promise<void> {
     return this.sendPayload(ctrl);
   }
 
