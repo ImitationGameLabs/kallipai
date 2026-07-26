@@ -5,7 +5,7 @@
 // inbound conversation `envelope` delivery (handed to channelsStore via a
 // shell-wired sink).
 //
-// The SSE loop (backoff, AgoraApiError 401 stop, abort) was moved here verbatim
+// The SSE loop (backoff, LescheApiError 401 stop, abort) was moved here verbatim
 // from channels.svelte.ts, which is now pure per-channel chat state. Realtime is
 // started/stopped by RootLayout (reactive to online mode + a signed-in user);
 // it must run before any channel opens, because the /tagmata dashboard reads
@@ -16,10 +16,10 @@
 // (RootLayout), keeping the two stores decoupled.
 
 import {
-  AgoraApiError,
-  type AgoraEvent,
+  LescheApiError,
+  type LescheEvent,
   type Envelope,
-} from "@kallipai/kallip-agora-client";
+} from "@kallipai/kallip-lesche-client";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
 import { lescheClientOrFail } from "./agora.svelte.ts";
@@ -164,7 +164,7 @@ class RealtimeStore {
       } catch (e) {
         // A 401 means the session is gone -- stop rather than hot-looping
         // reconnects against an unsigned user.
-        if (e instanceof AgoraApiError && e.status === 401) {
+        if (e instanceof LescheApiError && e.status === 401) {
           this.running = false;
           this.clearResolveDeadline();
           this.presence.clear();
@@ -179,7 +179,7 @@ class RealtimeStore {
     }
   }
 
-  private dispatch(ev: AgoraEvent): void {
+  private dispatch(ev: LescheEvent): void {
     switch (ev.type) {
       case "tagma_online":
         this.presence.add(ev.tagma_id);

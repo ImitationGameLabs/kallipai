@@ -18,9 +18,9 @@ import {
   kexTranscript,
 } from "./crypto.ts";
 import { openRelayChannel, type RelayChannel } from "./channel.ts";
-import { AgoraApiError } from "./types.ts";
+import { LescheApiError } from "./types.ts";
 import { decodeB64, encodeB64 } from "./base64.ts";
-import type { AgoraClient, LescheClient } from "./http.ts";
+import type { LescheClient } from "./http.ts";
 import type {
   Envelope,
   KeyExchangeInit,
@@ -32,13 +32,15 @@ import type {
 
 const enc = new TextEncoder();
 
-/** A minimal tagma-relay mock split across the agora/lesche boundary: the
- * pinned key is served by the `agora` mock (getTagma), the conversation + KEX +
- * envelope relay by the `lesche` mock. On each posted envelope the lesche mock
+/** A minimal tagma-relay mock for the data plane: the conversation + KEX +
+ * envelope relay are served by the `lesche` mock; the pinned device key (TOFU
+ * from the agora in production) is returned as `pinnedKeyB64` for the caller to
+ * pass into `openRelayChannel`. On each posted envelope the lesche mock
  * decrypts the initiator's request and enqueues an `assistant_content` reply
  * back into the channel. */
 function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
   const devicePub = ed25519.getPublicKey(deviceSecret);
+  const pinnedKeyB64 = encodeB64(devicePub);
   let responderKey: Uint8Array | null = null;
   let channel: RelayChannel | null = null;
   let responderSeq = 0;
@@ -70,11 +72,6 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
     });
   }
 
-  const agora = {
-    getTagma(_id: string) {
-      return { tagma_id: tagmaId, pinned_public_key: encodeB64(devicePub) };
-    },
-  };
   const lesche = {
     createConversation(_t: string) {
       return { conversation_id: convId };
@@ -117,8 +114,8 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
     },
   };
   return {
-    agora,
     lesche,
+    pinnedKeyB64,
     setChannel: (c: RelayChannel) => {
       channel = c;
     },
@@ -136,17 +133,17 @@ Deno.test(
     const convId = "conv-1";
     const userId = "user-1";
     const deviceSecret = ed25519.utils.randomSecretKey();
-    const { agora, lesche, setChannel } = makeMock(
+    const { lesche, pinnedKeyB64, setChannel } = makeMock(
       deviceSecret,
       tagmaId,
       convId,
     );
 
     const channel = await openRelayChannel(
-      agora as unknown as AgoraClient,
       lesche as unknown as LescheClient,
       tagmaId,
       userId,
+      pinnedKeyB64,
     );
     assertEquals(channel.conversationId, convId);
     assertEquals(channel.tagmaId, tagmaId);
@@ -171,16 +168,16 @@ Deno.test(
 );
 
 Deno.test("interrupt sends an interrupt op with a fresh req_id", async () => {
-  const { agora, lesche, setChannel, lastRequest } = makeMock(
+  const { lesche, pinnedKeyB64, setChannel, lastRequest } = makeMock(
     ed25519.utils.randomSecretKey(),
     "tagma-i",
     "conv-i",
   );
   const channel = await openRelayChannel(
-    agora as unknown as AgoraClient,
     lesche as unknown as LescheClient,
     "tagma-i",
     "u",
+    pinnedKeyB64,
   );
   setChannel(channel);
   await channel.interrupt();
@@ -194,16 +191,16 @@ Deno.test("interrupt sends an interrupt op with a fresh req_id", async () => {
 Deno.test(
   "send increments sequence_n from 0 (the AEAD nonce counter)",
   async () => {
-    const { agora, lesche, setChannel, receivedSeqs } = makeMock(
+    const { lesche, pinnedKeyB64, setChannel, receivedSeqs } = makeMock(
       ed25519.utils.randomSecretKey(),
       "tagma-s",
       "conv-s",
     );
     const channel = await openRelayChannel(
-      agora as unknown as AgoraClient,
       lesche as unknown as LescheClient,
       "tagma-s",
       "u",
+      pinnedKeyB64,
     );
     setChannel(channel);
     await channel.send("a");
@@ -216,16 +213,16 @@ Deno.test(
 Deno.test(
   "an undecryptable inbound envelope is dropped, not yielded",
   async () => {
-    const { agora, lesche, setChannel } = makeMock(
+    const { lesche, pinnedKeyB64, setChannel } = makeMock(
       ed25519.utils.randomSecretKey(),
       "tagma-d",
       "conv-d",
     );
     const channel = await openRelayChannel(
-      agora as unknown as AgoraClient,
       lesche as unknown as LescheClient,
       "tagma-d",
       "u",
+      pinnedKeyB64,
     );
     setChannel(channel);
     // A garbage-ciphertext envelope (the SSE demux would route this in) that
@@ -256,22 +253,22 @@ Deno.test(
 Deno.test(
   "send surfaces a postEnvelope 503 (tagma offline) as a rejection",
   async () => {
-    const { agora, lesche, setChannel } = makeMock(
+    const { lesche, pinnedKeyB64, setChannel } = makeMock(
       ed25519.utils.randomSecretKey(),
       "tagma-503",
       "conv-503",
     );
     const channel = await openRelayChannel(
-      agora as unknown as AgoraClient,
       lesche as unknown as LescheClient,
       "tagma-503",
       "u",
+      pinnedKeyB64,
     );
     setChannel(channel);
     // Swap postEnvelope to a 503 (the lesche returns 503 "tagma offline").
     const overridable = lesche as unknown as { postEnvelope: () => void };
     overridable.postEnvelope = () => {
-      throw new AgoraApiError(503, "tagma is offline");
+      throw new LescheApiError(503, "tagma is offline");
     };
     let caught: unknown;
     try {
@@ -279,9 +276,9 @@ Deno.test(
     } catch (e) {
       caught = e;
     }
-    if (!(caught instanceof AgoraApiError) || caught.status !== 503) {
+    if (!(caught instanceof LescheApiError) || caught.status !== 503) {
       throw new Error(
-        `expected AgoraApiError(503), got ${JSON.stringify(caught)}`,
+        `expected LescheApiError(503), got ${JSON.stringify(caught)}`,
       );
     }
     channel.close();
@@ -295,16 +292,16 @@ Deno.test(
     // deliveries of the same frame both yield — ordering/dedup across batch
     // replay and live frames is the UI store's responsibility (it owns the
     // rendered cursor and the local cache).
-    const { agora, lesche, setChannel, respond } = makeMock(
+    const { lesche, pinnedKeyB64, setChannel, respond } = makeMock(
       ed25519.utils.randomSecretKey(),
       "tagma-h",
       "conv-h",
     );
     const channel = await openRelayChannel(
-      agora as unknown as AgoraClient,
       lesche as unknown as LescheClient,
       "tagma-h",
       "u",
+      pinnedKeyB64,
     );
     setChannel(channel);
 
@@ -333,16 +330,16 @@ Deno.test(
 );
 
 Deno.test("history() sends a cursor-based history control op", async () => {
-  const { agora, lesche, setChannel, lastRequest } = makeMock(
+  const { lesche, pinnedKeyB64, setChannel, lastRequest } = makeMock(
     ed25519.utils.randomSecretKey(),
     "tagma-c",
     "conv-c",
   );
   const channel = await openRelayChannel(
-    agora as unknown as AgoraClient,
     lesche as unknown as LescheClient,
     "tagma-c",
     "u",
+    pinnedKeyB64,
   );
   setChannel(channel);
   await channel.history({ after: 5, limit: 20 });

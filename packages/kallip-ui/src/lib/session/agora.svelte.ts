@@ -19,12 +19,12 @@ import {
   AgoraApiError,
   AgoraClient,
   type CeremonyResult,
-  LescheClient,
   loginWithPasskey,
   type MeResponse,
   registerWithPasskey,
   type TagmaView,
 } from "@kallipai/kallip-agora-client";
+import { LescheClient } from "@kallipai/kallip-lesche-client";
 import type {
   EnrollmentCodeCardProps,
   TagmaCardProps,

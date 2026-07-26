@@ -1,3 +1,4 @@
+/// <reference lib="dom" />
 // The per-device IndexedDB cache of already-loaded chat lines: a durable
 // mirror of what the app has rendered, so a refresh/reopen restores the
 // conversation from local state and only asks the tagma for an incremental
@@ -7,7 +8,7 @@
 // tuples. It deliberately does NOT interpret `role` (a UI concept owned by
 // kallip-ui's transcript reducer) — the UI writes tuples it extracted via its
 // own `contentLineOf`, and reads them back as-is. Keeping the semantics out of
-// this layer means the relay-client never depends on the UI's role vocabulary.
+// this layer means this package never depends on the UI's role vocabulary.
 //
 // No key carries a secret; the cache is plaintext, consistent with the
 // host/device trust model (the tagma's SQLite store is plaintext too). Logout

@@ -7,7 +7,7 @@
 // `idle` is a content-less status transition.
 //
 // `applyTagmaReply` is a pure reducer over the wire `TagmaReply` (from
-// @kallipai/kallip-agora-client). It is the only place that interprets a
+// @kallipai/kallip-lesche-client). It is the only place that interprets a
 // TagmaReply into view state, so it is unit-tested in transcript_test.ts.
 //
 // Lines are keyed by `historyId` (the tagma `chat_history.id`): a stable,
@@ -16,7 +16,7 @@
 // negative id minted by the store; they are never cached and are replaced by
 // the real id when the `MessageAccepted` ack lands.
 
-import type { TagmaEvent, TagmaReply } from "@kallipai/kallip-agora-client";
+import type { TagmaEvent, TagmaReply } from "@kallipai/kallip-lesche-client";
 
 type ChannelRole = "user" | "assistant" | "system";
 

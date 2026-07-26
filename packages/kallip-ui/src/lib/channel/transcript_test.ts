@@ -11,7 +11,7 @@ import {
   replaceLineId,
   withUserLine,
 } from "./transcript.ts";
-import type { TagmaReply } from "@kallipai/kallip-agora-client";
+import type { TagmaReply } from "@kallipai/kallip-lesche-client";
 
 function reply(r: TagmaReply, lineId = 1): ChannelTranscript {
   return applyTagmaReply(EMPTY_TRANSCRIPT, r, lineId);

@@ -19,6 +19,7 @@
   },
   "peerDependencies": {
     "@kallipai/kallip-agora-client": "workspace:*",
+    "@kallipai/kallip-lesche-client": "workspace:*",
     "@kallipai/kallip-client": "workspace:*",
     "@lucide/svelte": "^1.24.0",
     "@skeletonlabs/skeleton": "^5.0.0",

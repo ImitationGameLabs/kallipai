@@ -1,11 +1,11 @@
 // meEvents shaping: a canned SSE body is parsed (via the shared @kallipai/
-// kallip-common parseSseStream) into AgoraEvents. This validates the fetch +
+// kallip-common parseSseStream) into LescheEvents. This validates the fetch +
 // SSE wiring; it does not re-test SSE framing itself.
 
 import { assertEquals } from "@std/assert";
 import { LescheClient } from "./http.ts";
 
-Deno.test("meEvents parses an SSE stream into AgoraEvents", async () => {
+Deno.test("meEvents parses an SSE stream into LescheEvents", async () => {
   const envelope = {
     conversation_id: "c1",
     sender: { kind: "agent", tagma_id: "t1" },

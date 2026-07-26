@@ -8,8 +8,9 @@
 //     classification) are pure.
 //   - App layer (session stores, config facade, auth gate, route page bodies):
 //     added when kallip-app converged on agora login. This tier depends on the
-//     transport clients (@kallipai/kallip-client, @kallipai/kallip-agora-client)
-//     as peerDeps, and stays free of `$app/*` -- navigation is injected via
+//     transport clients (@kallipai/kallip-client, @kallipai/kallip-agora-client,
+//     @kallipai/kallip-lesche-client) as peerDeps, and stays free of `$app/*` --
+//     navigation is injected via
 //     initShell(), the agora URL via initAgora(), storage via initConfigStorage().
 //
 // SPLIT PENDING: the app tier should eventually live in its own package

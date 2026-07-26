@@ -10,13 +10,16 @@
 // key exchange + envelope relay (see openRelayChannel). Both are injected
 // singletons from agora.svelte.ts.
 
+import { type TagmaView } from "@kallipai/kallip-agora-client";
 import {
   type Envelope,
   openRelayChannel,
   type RelayChannel,
   type TagmaReply,
-  type TagmaView,
-} from "@kallipai/kallip-agora-client";
+  clearConvCache,
+  loadAll,
+  put as cachePut,
+} from "@kallipai/kallip-lesche-client";
 import { SvelteMap } from "svelte/reactivity";
 import {
   agoraClientOrFail,
@@ -32,11 +35,6 @@ import {
   replaceLineId,
   withUserLine,
 } from "../channel/transcript.ts";
-import {
-  clearConvCache,
-  loadAll,
-  put as cachePut,
-} from "@kallipai/kallip-agora-client";
 import type { NavIndicator } from "../shell.ts";
 
 function messageOf(e: unknown): string {
@@ -176,12 +174,15 @@ class ChannelsStore {
     if (!userId) throw new Error("not signed in");
 
     // KEX is synchronous HTTP; inbound replies flow only through realtime's SSE
-    // demux into `deliver`, which begins well before the user can send.
+    // demux into `deliver`, which begins well before the user can send. The
+    // pinned device key is TOFU from the agora (control plane); the lesche
+    // client takes it as a base64 string so it has no agora dependency.
+    const info = await agoraClientOrFail().getTagma(tagma.tagma_id);
     const channel = await openRelayChannel(
-      agoraClientOrFail(),
       lescheClientOrFail(),
       tagma.tagma_id,
       userId,
+      info.pinned_public_key,
     );
     const state = new ChannelState(
       channel.conversationId,

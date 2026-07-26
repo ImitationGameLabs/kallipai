@@ -1387,10 +1387,7 @@
       "packages/kallip-agora-client": {
         "packageJson": {
           "dependencies": [
-            "npm:@jsr/std__assert@^1.0.19",
-            "npm:@noble/ciphers@^2.2.0",
-            "npm:@noble/curves@^2.2.0",
-            "npm:@noble/hashes@^2.2.0"
+            "npm:@jsr/std__assert@^1.0.19"
           ]
         }
       },
@@ -1429,6 +1426,16 @@
         "packageJson": {
           "dependencies": [
             "npm:@jsr/std__assert@^1.0.19"
+          ]
+        }
+      },
+      "packages/kallip-lesche-client": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@jsr/std__assert@^1.0.19",
+            "npm:@noble/ciphers@^2.2.0",
+            "npm:@noble/curves@^2.2.0",
+            "npm:@noble/hashes@^2.2.0"
           ]
         }
       },

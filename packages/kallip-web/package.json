@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@kallipai/kallip-agora-client": "workspace:*",
+    "@kallipai/kallip-lesche-client": "workspace:*",
     "@kallipai/kallip-client": "workspace:*",
     "@kallipai/kallip-common": "workspace:*",
     "@kallipai/kallip-ui": "workspace:*",

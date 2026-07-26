@@ -1,22 +1,15 @@
-// Browser clients for the agora suite. The control plane (agora: passkey
-// ceremonies, /me, tagma lifecycle, pinned-key fetch) and the data plane
-// (lesche: conversations, key exchange, envelopes, app SSE) are separate
-// services on separate origins, so they get separate clients sharing a common
-// base. Every fetch carries `credentials: "include"` (the session cookie is the
-// auth; it is shared cross-subdomain between agora and lesche) and every non-GET
-// carries the CSRF marker (`X-Requested-With: kallip`), which both services'
-// `csrf_guard` requires on cookie-bearing mutating requests. Non-2xx responses
-// become `AgoraApiError` (`{ status, message }`).
+// Browser client for the agora control-plane relay. The agora (default :7100)
+// is the control plane: passkey ceremonies, `/me`, and the tagma lifecycle. It
+// shares a session cookie cross-subdomain with the lesche (data plane), so every
+// fetch carries `credentials: "include"` (the session cookie is the auth) and
+// every non-GET carries the CSRF marker (`X-Requested-With: kallip`), which the
+// agora's `csrf_guard` requires on cookie-bearing mutating requests. Non-2xx
+// responses become `AgoraApiError` (`{ status, message }`). The data-plane
+// client lives in `@kallipai/kallip-lesche-client`.
 
-import { parseSseStream } from "@kallipai/kallip-common";
 import { AgoraApiError } from "./types.ts";
 import type {
-  AgoraEvent,
   AuthFinishResponse,
-  CreateConversationResponse,
-  Envelope,
-  KeyExchangeInit,
-  KeyExchangeResponse,
   LoginBeginResponse,
   LoginFinishRequest,
   MeResponse,
@@ -46,13 +39,15 @@ export interface LoginBeginRequest {
 }
 
 /**
- * Shared base for the agora-suite browser clients (the agora control plane and
- * the lesche data plane): a base URL + the JSON/CSRF fetch helper. Both
- * services accept the session cookie (`credentials: "include"`) and require the
- * `X-Requested-With` CSRF marker on cookie-bearing mutating requests. Non-2xx
- * responses become `AgoraApiError` (`{ status, message }`).
+ * Shared base for the agora browser client: a base URL + the JSON/CSRF fetch
+ * helper. The session cookie (`credentials: "include"`) is the auth; the
+ * `X-Requested-With` CSRF marker is required on cookie-bearing mutating
+ * requests. Non-2xx responses become `AgoraApiError` (`{ status, message }`).
+ *
+ * Internal to this package: the agora surface has a single client, so the base
+ * is not re-exported.
  */
-export abstract class BaseClient {
+abstract class BaseClient {
   constructor(protected readonly baseUrl: string) {}
 
   /** JSON fetch with the CSRF marker on non-GETs; `AgoraApiError` on non-2xx. */
@@ -88,7 +83,7 @@ export abstract class BaseClient {
  * Control-plane client (the agora service, default :7100): passkey ceremonies,
  * `/me`, and the tagma lifecycle. Also exposes `getTagma` — the pinned device
  * key is TOFU from the control plane, even though the key exchange itself runs
- * on the lesche (see {@link LescheClient}).
+ * on the lesche (see `@kallipai/kallip-lesche-client`).
  */
 export class AgoraClient extends BaseClient {
   // -- auth ceremonies ------------------------------------------------------
@@ -129,7 +124,7 @@ export class AgoraClient extends BaseClient {
 
   /** `GET /v1/tagmata` — the caller's tagmata (pending + enrolled, not revoked),
    * newest first. Registry view only; liveness is NOT included (it arrives via
-   * `meEvents`). */
+   * the lesche's `meEvents`). */
   listTagmata(): Promise<TagmaView[]> {
     return this.json("/v1/tagmata", "GET");
   }
@@ -155,69 +150,6 @@ export class AgoraClient extends BaseClient {
    * app verifies the lesche's key-exchange signature against it. */
   getTagma(id: string): Promise<TagmaInfo> {
     return this.json(`/v1/tagmata/${encodeURIComponent(id)}`, "GET");
-  }
-}
-
-/**
- * Data-plane client (the lesche service, default :7200): conversation setup,
- * the synchronous key exchange, envelope posting, and the multiplexed app SSE.
- * The session cookie is shared cross-subdomain with the agora
- * (`KALLIP_AGORA_SESSION_COOKIE_DOMAIN`), so the same credentialed fetch works.
- */
-export class LescheClient extends BaseClient {
-  /** `POST /v1/conversations { tagma_id }` — resolve the single conversation a
-   * tagma owns with its operator (idempotent). */
-  createConversation(tagmaId: string): Promise<CreateConversationResponse> {
-    return this.json("/v1/conversations", "POST", { tagma_id: tagmaId });
-  }
-
-  /** `POST /v1/conversations/{id}/key-exchange/init` — synchronous request/reply
-   * returning the responder's signed key-exchange response inline (200). 503 = the
-   * tagma is offline, 409 = a key exchange is already in flight, 504 = timed
-   * out. */
-  keyExchangeInit(
-    conversationId: string,
-    init: KeyExchangeInit,
-  ): Promise<KeyExchangeResponse> {
-    return this.json(
-      `/v1/conversations/${encodeURIComponent(
-        conversationId,
-      )}/key-exchange/init`,
-      "POST",
-      init,
-    );
-  }
-
-  /** `POST /v1/conversations/{id}/envelopes` — route an encrypted envelope to
-   * the other endpoint. Returns on 202 Accepted. 503 = the peer is offline,
-   * 409 = stale/duplicate sequence_n. */
-  postEnvelope(conversationId: string, envelope: Envelope): Promise<void> {
-    return this.json(
-      `/v1/conversations/${encodeURIComponent(conversationId)}/envelopes`,
-      "POST",
-      envelope,
-    );
-  }
-
-  /** `GET /v1/me/events` — the multiplexed SSE stream of the user's conversation
-   * deliveries plus tagma presence (`tagma_online` / `tagma_offline`, with an
-   * initial presence snapshot on connect). A long-lived fetch parsed with the
-   * shared `parseSseStream`; each `data:` payload is an `AgoraEvent`. The
-   * caller owns reconnect/backoff; the generator ends when the stream closes
-   * or `signal` aborts. */
-  async *meEvents(signal?: AbortSignal): AsyncGenerator<AgoraEvent> {
-    const resp = await fetch(this.baseUrl + "/v1/me/events", {
-      method: "GET",
-      headers: { accept: "text/event-stream" },
-      credentials: "include",
-      signal,
-    });
-    if (!resp.ok) {
-      throw await agoraError(resp);
-    }
-    for await (const ev of parseSseStream(resp, signal)) {
-      yield JSON.parse(ev.data) as AgoraEvent;
-    }
   }
 }
 

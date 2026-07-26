@@ -1,9 +1,9 @@
 // E2EE crypto for the online chat data-plane. Mirrors the Rust relay's
 // `crates/platform/kallip-e2ee/src/lib.rs` (sign + AEAD half) and
-// `crates/platform/kallip-agora-common/src/proof.rs` (verify half) byte-for-byte:
+// `crates/platform/kallip-lesche-common/src/proof.rs` (verify half) byte-for-byte:
 // X25519 ECDH + HKDF-SHA256 key derivation, ChaCha20-Poly1305 AEAD with a
 // direction-tagged sequence nonce, and Ed25519 verification of the key-exchange
-// transcript. The agora forwards these bytes but never decrypts, so the browser
+// transcript. The lesche forwards these bytes but never decrypts, so the browser
 // (initiator) and the tagma relay (responder) must agree on every detail below.
 //
 // Role vocabulary: the browser is the **initiator** (starts the key exchange,

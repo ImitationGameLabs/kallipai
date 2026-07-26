@@ -11,7 +11,7 @@
 // Mirrors the Rust relay's `crates/platform/kallip-e2ee/src/lib.rs` + the
 // lesche's `crates/platform/kallip-lesche/src/routes/conversations.rs`.
 
-import { type AgoraClient, type LescheClient } from "./http.ts";
+import { type LescheClient } from "./http.ts";
 import {
   aeadDecrypt,
   aeadEncrypt,
@@ -32,23 +32,27 @@ import type {
 } from "./types.ts";
 
 /**
- * Open an E2EE channel to `tagmaId` for `userId`: fetch the pinned key from the
- * agora, resolve the conversation + run the 1-RTT key exchange on the lesche,
- * verify the responder's signature against the agora-pinned key, and derive the
- * session key. History is pull-based: the channel does NOT auto-request it; the
- * UI store hydrates its local cache and then sends a `TagmaControl::History`
+ * Open an E2EE channel to `tagmaId` for `userId`: resolve the conversation + run
+ * the 1-RTT key exchange on the lesche, verify the responder's signature
+ * against the agora-pinned key (`pinnedKeyB64`, the standard-base64 Ed25519
+ * public key the agora's `GET /v1/tagmata/{id}` returns verbatim), and derive
+ * the session key. The pinned key is fetched from the agora by the caller (the
+ * control-plane client is not a dependency of this package); the caller passes
+ * the base64 string as-is so no base64 helper leaks across the boundary.
+ *
+ * History is pull-based: the channel does NOT auto-request it; the UI store
+ * hydrates its local cache and then sends a `TagmaControl::History`
  * (`after: maxRendered` for incremental, or `latest` for an empty cache) to
  * fetch what it is missing, drained through the normal `replies()` stream.
  * Throws if the tagma is offline / not owned / the signature fails to verify.
  */
 export async function openRelayChannel(
-  agora: AgoraClient,
   lesche: LescheClient,
   tagmaId: string,
   userId: string,
+  pinnedKeyB64: string,
 ): Promise<RelayChannel> {
-  const info = await agora.getTagma(tagmaId);
-  const pinnedKey = decodeB64(info.pinned_public_key);
+  const pinnedKey = decodeB64(pinnedKeyB64);
   const { conversation_id: conversationId } =
     await lesche.createConversation(tagmaId);
 
