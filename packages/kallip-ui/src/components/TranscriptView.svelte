@@ -3,6 +3,7 @@
   import { createAutoScroll } from "../lib/transcript.svelte";
   import type { ComposerModel } from "../lib/composer.svelte";
   import Markdown from "./Markdown.svelte";
+  import CopyButton from "./CopyButton.svelte";
   import Brand from "./Brand.svelte";
   import ToolCallCard from "./tools/ToolCallCard.svelte";
   import ToolResultCard from "./tools/ToolResultCard.svelte";
@@ -68,10 +69,10 @@
       transcript reducer is append-only (it never reorders/removes/mutates in
       place); if that ever changes, switch to a stable per-line id.
     -->
-    <div class="max-w-3xl mx-auto space-y-3">
+    <div class="max-w-[80rem] mx-auto space-y-3">
       {#each lines as line, i (i)}
         {#if line.kind === "user"}
-          <div class="flex justify-end">
+          <div class="group flex flex-col items-end">
             <div class="max-w-[80%]">
               <div
                 class="text-right text-xs uppercase tracking-wide opacity-40 mb-1"
@@ -84,9 +85,10 @@
                 {line.text}
               </div>
             </div>
+            <CopyButton getText={() => line.text} />
           </div>
         {:else if line.kind === "assistant"}
-          <div class="border-l-2 border-primary-500 pl-3">
+          <div class="group border-l-2 border-primary-500 pl-3">
             <div class="text-xs uppercase tracking-wide opacity-40 mb-1">
               assistant
             </div>
@@ -101,6 +103,7 @@
               <div class="text-sm">
                 <Markdown source={line.text} />
               </div>
+              <CopyButton getText={() => line.text} />
             {/if}
           </div>
         {:else if line.kind === "reasoning"}

@@ -80,6 +80,7 @@ export type { NavItem } from "./lib/shell.ts";
 
 // Components
 export { default as Markdown } from "./components/Markdown.svelte";
+export { default as CopyButton } from "./components/CopyButton.svelte";
 export { default as TranscriptView } from "./components/TranscriptView.svelte";
 export { default as Composer } from "./components/Composer.svelte";
 export { default as ApprovalsView } from "./components/ApprovalsView.svelte";

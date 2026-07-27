@@ -4,6 +4,8 @@
   // transport is a RelayChannel owned by channelsStore; this page just renders
   // its ChannelTranscript and feeds sends through the reused Composer input.
   import Composer from "../components/Composer.svelte";
+  import Markdown from "../components/Markdown.svelte";
+  import CopyButton from "../components/CopyButton.svelte";
   import TagmaStatusHeader from "../components/TagmaStatusHeader.svelte";
   import { createComposer } from "../lib/composer.svelte.ts";
   import { createAutoScroll } from "../lib/transcript.svelte.ts";
@@ -69,7 +71,7 @@
       bind:this={scroll.viewport}
       onscroll={scroll.onScroll}
     >
-      <div class="mx-auto w-full max-w-2xl p-4 flex flex-col gap-3">
+      <div class="mx-auto w-full max-w-[80rem] p-4 flex flex-col gap-3">
         {#if channelState.transcript.lines.length === 0 && !busy}
           <p class="text-sm opacity-60 text-center mt-8">
             Send a message to start the conversation.
@@ -84,25 +86,31 @@
             </p>
           {:else}
             <div
-              class="flex {line.role === 'user'
-                ? 'justify-end'
-                : 'justify-start'}"
+              class="group flex flex-col {line.role === 'user'
+                ? 'items-end'
+                : 'items-start'}"
             >
               <div
-                class="max-w-[80%] whitespace-pre-wrap break-words rounded-base px-3 py-2 text-sm {line.role ===
+                class="max-w-[80%] min-w-0 rounded-base px-3 py-2 text-sm {line.role ===
                 'user'
-                  ? 'preset-filled-primary-500'
+                  ? 'preset-filled-primary-500 whitespace-pre-wrap break-words'
                   : 'preset-tonal-surface'} {line.status === 'sending'
                   ? 'opacity-60'
                   : ''}"
               >
-                {line.text}
+                {#if line.role === "assistant"}
+                  <Markdown source={line.text} />
+                {:else}
+                  {line.text}
+                {/if}
               </div>
               {#if line.role === "user" && line.status === "sending"}
                 <span
-                  class="self-center ml-2 text-xs opacity-50 animate-pulse"
+                  class="text-xs opacity-50 animate-pulse"
                   aria-label="sending">··</span
                 >
+              {:else}
+                <CopyButton getText={() => line.text} />
               {/if}
             </div>
           {/if}
