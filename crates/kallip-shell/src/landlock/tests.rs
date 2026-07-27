@@ -226,6 +226,8 @@ async fn readonly_hole_blocks_write_under_writable_ancestor() {
             hole_target.display(),
             sib_target.display(),
         ))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
@@ -298,6 +300,8 @@ async fn nested_readonly_holes_both_block_under_writable_ancestor() {
             h1_target.display(),
             sib_target.display(),
         ))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
@@ -360,6 +364,8 @@ async fn narrow_read_denies_paths_outside_allowlist() {
             workspace.join("readable").display(),
             secret.join("secret").display(),
         ))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
@@ -419,6 +425,8 @@ async fn broad_read_with_hide_hole_hides_secret() {
             secret.join("key").display(),
             secret.display(),
         ))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
@@ -484,6 +492,8 @@ async fn combo_disjoint_readonly_and_hide_both_effective() {
             hide_key = hide.join("key").display(),
             hide = hide.display(),
         ))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
@@ -553,6 +563,8 @@ async fn combo_hide_ancestor_shadows_readonly_hole() {
             parent = parent.display(),
             ro_target = ro_target.display(),
         ))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
@@ -627,6 +639,8 @@ async fn combo_bind_ancestor_and_hide_descendant_both_effective() {
             secret_key = secret_key.display(),
             secret = secret.display(),
         ))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
@@ -662,5 +676,95 @@ async fn combo_bind_ancestor_and_hide_descendant_both_effective() {
     assert!(
         stdout.contains("entries=0"),
         "the nested hide-hole dir was not empty; stdout={stdout}, stderr={stderr}"
+    );
+}
+
+/// The subagent carve scenario: a writable path NESTED under a readonly-hole
+/// ancestor. Models the Normal subagent whose `workspace_root` is under its
+/// supervisor's locked `/workspace` (which appears in the subagent's
+/// `readonly_holes`). Without the writable child overlay emitted in [`apply`],
+/// the ro self-bind on the ancestor makes the whole subtree read-only and the
+/// subagent cannot write its own workspace. Covers both a shallow carve (leaf
+/// directly under the ancestor) and a multi-level chain (root -> sub1 -> sub2)
+/// to exercise the descendant-first sort across more than two depths.
+#[tokio::test]
+async fn writable_child_under_readonly_ancestor_succeeds() {
+    if skip_if_unsupported() || userns_unavailable() {
+        return;
+    }
+    let Some(base) = non_baseline_parent() else {
+        return;
+    };
+    // Ancestor locked by a peer → readonly hole for this agent.
+    let ancestor = unique_dir(&base, "ancestor");
+    // Shallow writable carve directly under the ancestor.
+    let leaf = unique_dir(&ancestor, "leaf");
+    // Multi-level chain: a writable mid dir, with a writable leaf below it.
+    let mid = unique_dir(&ancestor, "mid");
+    let deep = unique_dir(&mid, "deep");
+    // A non-carved sibling under the ancestor must stay read-only (the positive
+    // control that the ancestor is still ro outside the carve, i.e. we did not
+    // simply widen the whole subtree to writable).
+    std::fs::write(ancestor.join("other"), b"readable").unwrap();
+
+    let decision = AccessDecision {
+        read: ReadPolicy::Broad,
+        writable: vec![leaf.clone(), deep.clone()],
+        readonly_holes: vec![ancestor.clone()],
+        hide_holes: vec![],
+    };
+
+    let leaf_target = leaf.join("f");
+    let deep_target = deep.join("f");
+    let other = ancestor.join("other");
+    let mut cmd = tokio::process::Command::new("bash");
+    cmd.arg("-c")
+        .arg(format!(
+            "echo x > '{leaf_target}'; echo \"leaf_rc=$?\"; \
+             echo x > '{deep_target}'; echo \"deep_rc=$?\"; \
+             echo x > '{other}' 2>/dev/null; echo \"other_write_rc=$?\"",
+            leaf_target = leaf_target.display(),
+            deep_target = deep_target.display(),
+            other = other.display(),
+        ))
+        // Pipe so `wait_with_output` captures the echoes (tokio does NOT
+        // auto-pipe unlike `std::process::Command::output`).
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    apply(&mut cmd, &decision).expect("apply should succeed");
+    let output = cmd
+        .spawn()
+        .expect("spawn should succeed")
+        .wait_with_output()
+        .await
+        .expect("wait should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("leaf_rc=0"),
+        "shallow writable carve under the ro ancestor was blocked; \
+         stdout={stdout}, stderr={stderr}"
+    );
+    assert!(
+        leaf_target.exists(),
+        "the shallow carve write did not create a file; stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("deep_rc=0"),
+        "multi-level writable carve under the ro ancestor was blocked; \
+         stdout={stdout}, stderr={stderr}"
+    );
+    assert!(
+        deep_target.exists(),
+        "the multi-level carve write did not create a file; stdout={stdout}"
+    );
+    // The ancestor stays read-only outside the carve: this is the positive
+    // control proving the fix did not simply widen the whole subtree.
+    assert!(
+        !stdout.contains("other_write_rc=0"),
+        "write under the readonly-hole ancestor unexpectedly succeeded; \
+         stdout={stdout}, stderr={stderr}"
     );
 }

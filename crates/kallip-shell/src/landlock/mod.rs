@@ -125,18 +125,58 @@ pub fn apply(cmd: &mut tokio::process::Command, decision: &AccessDecision) -> io
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let ns = libsandbox::prepare_user_mount_ns(uid, gid);
-        // Peer locked workspaces → read-only: self-bind + non-recursive RO
-        // remount (the original readonly-hole semantics, which a recursive
-        // remount would regress by also locking nested mounts).
-        let binds = decision
-            .readonly_holes
-            .iter()
-            .map(|p| {
-                libsandbox::prepare_bind(
-                    p,
-                    libsandbox::Permission::ReadOnly,
-                    libsandbox::RemountRecursion::NonRecursive,
-                )
+        // Bind-mount plan, composed from two sources:
+        //   * readonly holes (peers' locked workspaces) → read-only self-bind +
+        //     non-recursive RO remount;
+        //   * any of THIS agent's writable paths that nests under one of those
+        //     holes → a read-write self-bind so the nested carve (a subagent's
+        //     own workspace under its supervisor's locked root) stays writable.
+        //
+        // Without the writable child overlay, the ro self-bind on the ancestor
+        // (recursive bind, non-recursive remount) makes the whole subtree
+        // read-only at the VFS layer, and landlock's write grant cannot help —
+        // the documented libsandbox invariant is "install writable children
+        // BEFORE their read-only ancestors" so the ancestor's non-recursive RO
+        // remount preserves the nested child mount's writability. Sort the merged
+        // list descendant-first (more path components first): a strict descendant
+        // has strictly more components than its ancestor, so this puts every child
+        // before every ancestor it nests under; ties can't be prefix-related.
+        let mut bind_specs: Vec<(std::path::PathBuf, libsandbox::Permission)> = Vec::new();
+        for w in &decision.writable {
+            if decision
+                .readonly_holes
+                .iter()
+                .any(|hole| is_strict_descendant(w, hole))
+            {
+                bind_specs.push((w.clone(), libsandbox::Permission::ReadWrite));
+            }
+        }
+        for hole in &decision.readonly_holes {
+            bind_specs.push((hole.clone(), libsandbox::Permission::ReadOnly));
+        }
+        // Defense-in-depth at this security boundary: a future caller could push
+        // a duplicate writable path. Collapse identical paths (a path always
+        // carries one permission in the construction above) before sorting.
+        bind_specs.sort_by(|(a, _), (b, _)| a.cmp(b));
+        bind_specs.dedup_by(|(a, _), (b, _)| a == b);
+        // Descendant-first: deepest paths install BEFORE their read-only
+        // ancestors, so the ancestor's non-recursive RO remount preserves a
+        // nested writable child mount's writability — the invariant pinned by
+        // libsandbox's `readonly_ancestor_with_writable_child_overlay` test.
+        // Flipping this to ancestor-first silently revokes child writability.
+        // A strict descendant has strictly more path components than its
+        // ancestor, so descending component-count puts every child first; the
+        // path tie-break is cosmetic (equal-depth entries are prefix-disjoint).
+        bind_specs.sort_by(|(a, _), (b, _)| {
+            b.components()
+                .count()
+                .cmp(&a.components().count())
+                .then_with(|| a.cmp(b))
+        });
+        let binds = bind_specs
+            .into_iter()
+            .map(|(p, perm)| {
+                libsandbox::prepare_bind(&p, perm, libsandbox::RemountRecursion::NonRecursive)
             })
             .collect::<libsandbox::Result<Vec<_>>>()
             .map_err(ioify)?;
@@ -204,6 +244,18 @@ pub fn apply(cmd: &mut tokio::process::Command, decision: &AccessDecision) -> io
         });
     }
     Ok(())
+}
+
+/// Component-wise strict descendant test: `child != ancestor` and `child` starts
+/// with `ancestor` as a path prefix. `Path::starts_with` is component-wise on
+/// Unix, so `/a/b` does not match `/a/bb` (the same property the dirlock overlap
+/// check leans on). Used in [`apply`] to decide which writable paths need a
+/// mount-layer overlay to escape a read-only ancestor bind. The `!=` guard
+/// defends equality, which is impossible today by construction (dirlock excludes
+/// an agent's own locks from its `readonly_paths`) but cheap to keep as
+/// defense-in-depth against a future caller.
+fn is_strict_descendant(child: &std::path::Path, ancestor: &std::path::Path) -> bool {
+    child != ancestor && child.starts_with(ancestor)
 }
 
 /// Probe landlock support exactly once, process-wide. Delegates to libsandbox's
