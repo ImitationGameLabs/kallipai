@@ -102,6 +102,9 @@ pub(crate) struct HistoryRow {
     pub id: i64,
     pub direction: String,
     pub payload: Vec<u8>,
+    /// Unix seconds the row was appended. Surfaced to the wire as the frame's
+    /// `created_at` so replayed history shows its original send time.
+    pub created_at: i64,
 }
 
 /// Open (or create) the chat-history SQLite database at `path` and apply any
@@ -129,16 +132,18 @@ pub(crate) async fn open(path: &Path) -> Result<Db> {
     Ok(db)
 }
 
-/// Append one outbound frame and return its row id (the `history_id` stamped
-/// onto the wire reply). `kind` is the reply discriminant; `payload` is the
-/// serialized `TagmaReply`.
+/// Append one outbound frame and return `(row id, created_at)` — the id is the
+/// `history_id` stamped onto the wire reply, the `created_at` is the same Unix
+/// seconds just written so live stamping uses the DB's authoritative value with
+/// zero skew. `kind` is the reply discriminant; `payload` is the serialized
+/// `TagmaReply`.
 pub(crate) async fn append(
     db: &Db,
     conversation_id: &str,
     direction: &str,
     kind: &str,
     payload: &[u8],
-) -> Result<i64> {
+) -> Result<(i64, i64)> {
     let now = unix_secs();
     let row = entities::chat_history::ActiveModel {
         conversation_id: sea_orm::Set(conversation_id.to_string()),
@@ -152,7 +157,7 @@ pub(crate) async fn append(
         .exec(db)
         .await
         .context("append chat_history")?;
-    Ok(res.last_insert_id)
+    Ok((res.last_insert_id, now))
 }
 
 /// Read the most recent `n` rows for a conversation, oldest-first (i.e. in the
@@ -176,6 +181,7 @@ pub(crate) async fn read_last_n(db: &Db, conversation_id: &str, n: u64) -> Resul
             id: m.id,
             direction: m.direction,
             payload: m.payload,
+            created_at: m.created_at,
         })
         .collect())
 }
@@ -204,6 +210,7 @@ pub(crate) async fn read_after(
             id: m.id,
             direction: m.direction,
             payload: m.payload,
+            created_at: m.created_at,
         })
         .collect())
 }
@@ -235,6 +242,7 @@ pub(crate) async fn read_before(
             id: m.id,
             direction: m.direction,
             payload: m.payload,
+            created_at: m.created_at,
         })
         .collect())
 }
@@ -322,7 +330,10 @@ mod tests {
             let _db = open(&path).await.unwrap();
         }
         let db = open(&path).await.unwrap();
-        let id = append(&db, "c1", "outbound", "event", b"x").await.unwrap();
+        let id = append(&db, "c1", "outbound", "event", b"x")
+            .await
+            .unwrap()
+            .0;
         assert!(id > 0);
         assert_eq!(read_last_n(&db, "c1", 10).await.unwrap().len(), 1);
     }
@@ -330,9 +341,18 @@ mod tests {
     #[tokio::test]
     async fn append_returns_monotonic_ids() {
         let (db, _d) = open_tmp().await;
-        let a = append(&db, "c1", "outbound", "event", b"{}").await.unwrap();
-        let b = append(&db, "c1", "outbound", "event", b"{}").await.unwrap();
-        let c = append(&db, "c1", "outbound", "event", b"{}").await.unwrap();
+        let a = append(&db, "c1", "outbound", "event", b"{}")
+            .await
+            .unwrap()
+            .0;
+        let b = append(&db, "c1", "outbound", "event", b"{}")
+            .await
+            .unwrap()
+            .0;
+        let c = append(&db, "c1", "outbound", "event", b"{}")
+            .await
+            .unwrap()
+            .0;
         assert!(a < b && b < c, "ids must be monotonic: {a},{b},{c}");
     }
 
@@ -341,7 +361,12 @@ mod tests {
         let (db, _d) = open_tmp().await;
         let mut ids = Vec::new();
         for _ in 0..5 {
-            ids.push(append(&db, "c1", "outbound", "event", b"x").await.unwrap());
+            ids.push(
+                append(&db, "c1", "outbound", "event", b"x")
+                    .await
+                    .unwrap()
+                    .0,
+            );
         }
         // Asking for the last 3 returns ids[2..5], oldest-first for replay.
         let got = read_last_n(&db, "c1", 3).await.unwrap();
@@ -391,17 +416,26 @@ mod tests {
     async fn read_after_returns_newer_both_directions_oldest_first() {
         let (db, _d) = open_tmp().await;
         // Interleave inbound/outbound; ids are assigned in append order.
-        let a = append(&db, "c1", "outbound", "event", b"o1").await.unwrap();
+        let a = append(&db, "c1", "outbound", "event", b"o1")
+            .await
+            .unwrap()
+            .0;
         let b = append(&db, "c1", "inbound", "send_message", b"u1")
             .await
-            .unwrap();
-        let c = append(&db, "c1", "outbound", "event", b"o2").await.unwrap();
+            .unwrap()
+            .0;
+        let c = append(&db, "c1", "outbound", "event", b"o2")
+            .await
+            .unwrap()
+            .0;
         let d = append(&db, "c1", "inbound", "send_message", b"u2")
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         let _e = append(&db, "c2", "outbound", "event", b"other")
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         // after=b -> rows c, d (both directions, oldest-first), c2 invisible.
         let got = read_after(&db, "c1", b, 50).await.unwrap();
         assert_eq!(got.len(), 2);
@@ -420,14 +454,22 @@ mod tests {
     #[tokio::test]
     async fn read_before_returns_older_both_directions_oldest_first() {
         let (db, _d) = open_tmp().await;
-        let a = append(&db, "c1", "outbound", "event", b"o1").await.unwrap();
+        let a = append(&db, "c1", "outbound", "event", b"o1")
+            .await
+            .unwrap()
+            .0;
         let b = append(&db, "c1", "inbound", "send_message", b"u1")
             .await
-            .unwrap();
-        let c = append(&db, "c1", "outbound", "event", b"o2").await.unwrap();
+            .unwrap()
+            .0;
+        let c = append(&db, "c1", "outbound", "event", b"o2")
+            .await
+            .unwrap()
+            .0;
         let d = append(&db, "c1", "inbound", "send_message", b"u2")
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         // before=d -> rows a, b, c oldest-first (the chunk older than d).
         let got = read_before(&db, "c1", d, 50).await.unwrap();
         assert_eq!(got.len(), 3);
@@ -441,5 +483,21 @@ mod tests {
         assert_eq!(got[1].id, c);
         // before=a (the oldest) returns nothing.
         assert!(read_before(&db, "c1", a, 50).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_surfaces_created_at() {
+        // HistoryRow.created_at is what the relay stamps onto replayed frames,
+        // so a read must surface the row's append time (not drop it).
+        let (db, _d) = open_tmp().await;
+        let before = unix_secs();
+        append(&db, "c1", "outbound", "event", b"x").await.unwrap();
+        let after = unix_secs();
+        let got = read_last_n(&db, "c1", 1).await.unwrap();
+        let created_at = got[0].created_at;
+        assert!(
+            before <= created_at && created_at <= after,
+            "created_at {created_at} should be within [{before},{after}]"
+        );
     }
 }

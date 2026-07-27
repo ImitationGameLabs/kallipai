@@ -2,7 +2,7 @@
 // maps to the expected lines + status, assistant content is append-only (no
 // streaming merge), and `idle` is a content-less status transition.
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   applyTagmaReply,
   cacheLineOf,
@@ -62,6 +62,7 @@ Deno.test("TagmaReply error sets status error + a system line", () => {
       historyId: 1,
       role: "system",
       text: "tagma blew up",
+      createdAt: undefined,
     },
   ]);
 });
@@ -84,6 +85,7 @@ Deno.test(
         kind: "event",
         event: { type: "assistant_content", content: "Hello." },
         history_id: 2,
+        created_at: "2026-07-26T12:00:00Z",
       },
       2,
     );
@@ -92,6 +94,7 @@ Deno.test(
         historyId: 2,
         role: "assistant",
         text: "Hello.",
+        createdAt: "2026-07-26T12:00:00Z",
       },
     ]);
     t = applyTagmaReply(t, { kind: "event", event: { type: "idle" } }, 3);
@@ -102,6 +105,7 @@ Deno.test(
         historyId: 2,
         role: "assistant",
         text: "Hello.",
+        createdAt: "2026-07-26T12:00:00Z",
       },
     ]);
   },
@@ -144,7 +148,7 @@ Deno.test("status / interrupted / cancelled produce system lines", () => {
       event: { type: "status", message: "thinking" },
       history_id: 1,
     }).lines,
-    [{ historyId: 1, role: "system", text: "thinking" }],
+    [{ historyId: 1, role: "system", text: "thinking", createdAt: undefined }],
   );
   const intr = reply(
     {
@@ -190,33 +194,64 @@ Deno.test(
   },
 );
 
-Deno.test("user_message (replay echo) appends a user line", () => {
+Deno.test("user_message (replay echo) appends a user line + createdAt", () => {
   const t = applyTagmaReply(
     EMPTY_TRANSCRIPT,
-    { kind: "user_message", history_id: 7, text: "hello" },
+    {
+      kind: "user_message",
+      history_id: 7,
+      text: "hello",
+      created_at: "2026-07-26T12:00:00Z",
+    },
     7,
   );
-  assertEquals(t.lines, [{ historyId: 7, role: "user", text: "hello" }]);
+  assertEquals(t.lines, [
+    {
+      historyId: 7,
+      role: "user",
+      text: "hello",
+      createdAt: "2026-07-26T12:00:00Z",
+    },
+  ]);
 });
 
-Deno.test("withUserLine appends a pending user line and flips to busy", () => {
+Deno.test("withUserLine stamps a client-side createdAt", () => {
   const t = withUserLine(EMPTY_TRANSCRIPT, "  hi there  ", -1);
   assertEquals(t.status, "busy");
-  assertEquals(t.lines, [
-    { historyId: -1, role: "user", text: "hi there", status: "sending" },
-  ]);
+  assertEquals(t.lines.length, 1);
+  assertEquals(t.lines[0]!.historyId, -1);
+  assertEquals(t.lines[0]!.role, "user");
+  assertEquals(t.lines[0]!.text, "hi there");
+  assertEquals(t.lines[0]!.status, "sending");
+  // A client-side ISO stamp is present so the optimistic line shows a time
+  // immediately; the ack refines it via replaceLineId.
+  assertEquals(typeof t.lines[0]!.createdAt, "string");
+  assert(t.lines[0]!.createdAt!.length > 0);
   // Empty / whitespace-only is a no-op.
   assertEquals(withUserLine(EMPTY_TRANSCRIPT, "   ", -2), EMPTY_TRANSCRIPT);
 });
 
 Deno.test(
-  "replaceLineId promotes a pending line to its real history id",
+  "replaceLineId promotes a pending line and refines createdAt from the ack",
   () => {
     let t = withUserLine(EMPTY_TRANSCRIPT, "hi", -1);
-    t = replaceLineId(t, -1, 42);
+    const optimistic = t.lines[0]!.createdAt;
+    // The ack carries the authoritative created_at; it overwrites the
+    // optimistic client-side stamp.
+    t = replaceLineId(t, -1, 42, "2026-07-26T12:00:00Z");
     assertEquals(t.lines, [
-      { historyId: 42, role: "user", text: "hi", status: "sent" },
+      {
+        historyId: 42,
+        role: "user",
+        text: "hi",
+        status: "sent",
+        createdAt: "2026-07-26T12:00:00Z",
+      },
     ]);
+    // No createdAt arg -> the optimistic stamp survives the promotion.
+    let t2 = withUserLine(EMPTY_TRANSCRIPT, "hi", -3);
+    t2 = replaceLineId(t2, -3, 50);
+    assertEquals(t2.lines[0]!.createdAt, optimistic);
     // No-op when the pending local id is absent.
     assertEquals(replaceLineId(t, -999, 5), t);
   },
@@ -225,22 +260,34 @@ Deno.test(
 Deno.test(
   "cacheLineOf caches content frames with a real history id only",
   () => {
-    // assistant_content with real id -> cached.
+    // assistant_content with real id -> cached (createdAt carried through).
     assertEquals(
       cacheLineOf({
         kind: "event",
         event: { type: "assistant_content", content: "hi" },
         history_id: 5,
+        created_at: "2026-07-26T12:00:00Z",
       }),
-      { historyId: 5, role: "assistant", text: "hi" },
+      {
+        historyId: 5,
+        role: "assistant",
+        text: "hi",
+        createdAt: "2026-07-26T12:00:00Z",
+      },
     );
-    // user_message with real id -> cached.
+    // user_message with real id -> cached (createdAt carried through).
     assertEquals(
-      cacheLineOf({ kind: "user_message", history_id: 6, text: "q" }),
+      cacheLineOf({
+        kind: "user_message",
+        history_id: 6,
+        text: "q",
+        created_at: "2026-07-26T12:05:00Z",
+      }),
       {
         historyId: 6,
         role: "user",
         text: "q",
+        createdAt: "2026-07-26T12:05:00Z",
       },
     );
     // status-only event (busy) -> not cached.

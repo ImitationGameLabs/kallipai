@@ -205,13 +205,16 @@ class ChannelsStore {
     // restores the conversation instantly and we only pull a delta.
     const cached = await loadAll(channel.conversationId);
     if (cached.length > 0) {
-      const lines: ChannelLine[] = cached.map(({ historyId, role, text }) => ({
-        historyId,
-        // The cache stores role as an opaque string (it is a UI concept); cast
-        // back to the reducer's role union, which the values round-trip as.
-        role: role as ChannelLine["role"],
-        text,
-      }));
+      const lines: ChannelLine[] = cached.map(
+        ({ historyId, role, text, createdAt }) => ({
+          historyId,
+          // The cache stores role as an opaque string (it is a UI concept); cast
+          // back to the reducer's role union, which the values round-trip as.
+          role: role as ChannelLine["role"],
+          text,
+          createdAt,
+        }),
+      );
       state.transcript = { lines, status: "idle" };
       state.maxRendered = cached[cached.length - 1]!.historyId;
     }
@@ -469,27 +472,38 @@ class ChannelsStore {
         historyId: cl.historyId,
         role: cl.role,
         text: cl.text,
+        createdAt: cl.createdAt,
       });
       if (cl.historyId > ch.maxRendered) ch.maxRendered = cl.historyId;
     }
     // The `MessageAccepted` ack closes the in-flight send. When it carries a
     // real `history_id` (> 0), promote the optimistic line to that id, mark it
-    // sent, cache it, and advance the cursor. Either way (a 0-id ack means the
-    // row was not durable -- a tagma-side anomaly), clear the in-flight slot so
-    // the pump does not wedge, then pump the next queued message.
+    // sent, refine its `createdAt` to the server's authoritative value, cache
+    // it, and advance the cursor. Either way (a 0-id ack means the row was not
+    // durable -- a tagma-side anomaly), clear the in-flight slot so the pump
+    // does not wedge, then pump the next queued message.
     if (reply.kind === "message_accepted" && ch.pendingLocalId !== null) {
       const ackId = reply.history_id ?? 0;
       if (ackId > 0) {
-        ch.transcript = replaceLineId(ch.transcript, ch.pendingLocalId, ackId);
+        ch.transcript = replaceLineId(
+          ch.transcript,
+          ch.pendingLocalId,
+          ackId,
+          reply.created_at,
+        );
         const confirmed = ch.transcript.lines.find(
           (l) => l.historyId === ackId,
         );
+        // The ack isn't cacheable via `cacheLineOf` (acks are live-only and
+        // return null there), so the promoted user line is cached directly
+        // from the post-replaceLineId transcript here.
         if (confirmed) {
           void cachePut({
             conversationId,
             historyId: ackId,
             role: "user",
             text: confirmed.text,
+            createdAt: confirmed.createdAt,
           });
         }
         if (ackId > ch.maxRendered) ch.maxRendered = ackId;

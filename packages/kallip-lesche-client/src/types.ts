@@ -102,6 +102,9 @@ export type TagmaReply =
        * means no row was recorded and must not be used for dedup. The ack itself
        * is never stored or replayed. */
       readonly history_id?: number;
+      /** RFC 3339 send time of the inbound row. Absent on acks with no durable
+       * row and on payloads serialized before the field existed. */
+      readonly created_at?: string;
     }
   | { readonly kind: "interrupted"; readonly req_id: number }
   | {
@@ -118,11 +121,17 @@ export type TagmaReply =
        * live delivery. `0` (or absent) means the row was not recorded and must
        * not be used for dedup. */
       readonly history_id?: number;
+      /** RFC 3339 send time of the outbound row. Absent on frames with no
+       * durable row and on payloads serialized before the field existed. */
+      readonly created_at?: string;
     }
   | {
       readonly kind: "user_message";
       readonly history_id: number;
       readonly text: string;
+      /** RFC 3339 send time of the original inbound row. Absent on payloads
+       * serialized before the field existed. */
+      readonly created_at?: string;
     }
   | {
       readonly kind: "history_batch_end";

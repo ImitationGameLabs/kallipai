@@ -92,6 +92,11 @@ pub enum TagmaReply {
         warning: Option<String>,
         #[serde(default)]
         history_id: i64,
+        /// When this inbound row was appended (RFC 3339). Absent on acks with no
+        /// durable row (`history_id == 0`) and on payloads serialized before the
+        /// field existed. The authoritative send time for the user's line.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
     },
     /// `Interrupt` was delivered.
     Interrupted { req_id: u64 },
@@ -113,13 +118,24 @@ pub enum TagmaReply {
         event: TagmaEvent,
         #[serde(default)]
         history_id: i64,
+        /// When the outbound row was appended (RFC 3339). Absent on frames with
+        /// no durable row and on payloads serialized before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
     },
     /// Replay-only echo of a user-authored message (an inbound `chat_history`
     /// row), produced by `handle_history` so the app can reconstruct the user
     /// side of a past conversation. Never emitted on the live path: live user
     /// messages come from the app's own optimistic render + `MessageAccepted`.
     /// `history_id` is the inbound row id; the app dedups/orders by it.
-    UserMessage { history_id: i64, text: String },
+    UserMessage {
+        history_id: i64,
+        text: String,
+        /// When the inbound row was originally appended (RFC 3339). Absent on
+        /// payloads serialized before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
+    },
     /// The sole completion signal for a `TagmaControl::History` batch. The
     /// relay emits the batch's rows (each as `Event` or `UserMessage`) and then
     /// this marker carrying the same `req_id`. `count` is the rows sent;
@@ -141,6 +157,35 @@ impl TagmaReply {
             _ => {}
         }
     }
+
+    /// Stamp the row's `created_at` (Unix seconds) onto this reply as an RFC
+    /// 3339 string. Covers the three durable variants: `Event` (outbound row),
+    /// `MessageAccepted` (live inbound ack), `UserMessage` (replayed inbound).
+    /// Unlike [`set_history_id`](Self::set_history_id) -- which skips
+    /// `UserMessage` because its `history_id` is a required field set at
+    /// construction -- this covers `UserMessage` too, since its `created_at`
+    /// defaults to `None` and is stamped from the row by the replay path.
+    pub fn set_created_at(&mut self, secs: i64) {
+        let formatted = format_created_at(secs);
+        match self {
+            TagmaReply::Event { created_at, .. }
+            | TagmaReply::MessageAccepted { created_at, .. }
+            | TagmaReply::UserMessage { created_at, .. } => *created_at = Some(formatted),
+            _ => {}
+        }
+    }
+}
+
+/// Format a Unix-seconds `created_at` as an RFC 3339 string. `from_unix_timestamp`
+/// yields UTC, which `time`'s `Rfc3339` renders with a `Z` suffix
+/// (`2026-07-26T12:34:56Z`). Falls back to the epoch for inputs outside the
+/// representable range (never expected for a real `created_at`).
+fn format_created_at(secs: i64) -> String {
+    use time::format_description::well_known::Rfc3339;
+    OffsetDateTime::from_unix_timestamp(secs)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .format(&Rfc3339)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -207,6 +252,7 @@ mod tests {
                 queue_depth: 0,
                 warning: None,
                 history_id: 0,
+                created_at: None,
             })
             .unwrap(),
             serde_json::to_string(&TagmaReply::MessageAccepted {
@@ -214,6 +260,7 @@ mod tests {
                 queue_depth: 2,
                 warning: Some("queue growing".into()),
                 history_id: 7,
+                created_at: None,
             })
             .unwrap(),
             serde_json::to_string(&TagmaReply::Interrupted { req_id: 9 }).unwrap(),
@@ -226,16 +273,19 @@ mod tests {
             serde_json::to_string(&TagmaReply::Event {
                 event: TagmaEvent::Busy,
                 history_id: 0,
+                created_at: None,
             })
             .unwrap(),
             serde_json::to_string(&TagmaReply::Event {
                 event: TagmaEvent::Busy,
                 history_id: 42,
+                created_at: None,
             })
             .unwrap(),
             serde_json::to_string(&TagmaReply::UserMessage {
                 history_id: 11,
                 text: "hi".into(),
+                created_at: None,
             })
             .unwrap(),
             serde_json::to_string(&TagmaReply::HistoryBatchEnd {
@@ -248,35 +298,47 @@ mod tests {
         for json in cases {
             let _: TagmaReply = serde_json::from_str(&json).unwrap();
         }
-        // `warning` is omitted when None.
+        // `warning` and `created_at` are omitted when None.
         let none_json = serde_json::to_string(&TagmaReply::MessageAccepted {
             req_id: 1,
             queue_depth: 0,
             warning: None,
             history_id: 0,
+            created_at: None,
         })
         .unwrap();
         assert!(!none_json.contains("warning"));
-        // `history_id` defaults to 0 when absent, so an Event serialized
-        // without it (a stored payload before the stamp, or an older peer)
+        assert!(!none_json.contains("created_at"));
+        // `history_id` / `created_at` default when absent, so an Event serialized
+        // without them (a stored payload from before the stamp, or an older peer)
         // still parses.
         let unstamped = r#"{"kind":"event","event":{"type":"busy"}}"#;
         let parsed: TagmaReply = serde_json::from_str(unstamped).unwrap();
-        assert!(matches!(parsed, TagmaReply::Event { history_id: 0, .. }));
+        assert!(matches!(
+            parsed,
+            TagmaReply::Event {
+                history_id: 0,
+                created_at: None,
+                ..
+            }
+        ));
         // `history_id` round-trips a non-zero value and the field name is pinned.
         let stamped = serde_json::to_string(&TagmaReply::Event {
             event: TagmaEvent::Busy,
             history_id: 42,
+            created_at: None,
         })
         .unwrap();
         assert!(
             stamped.contains("\"history_id\":42"),
             "history_id field name pinned: {stamped}"
         );
-        // UserMessage / HistoryBatchEnd field names are pinned.
+        // UserMessage / HistoryBatchEnd field names are pinned (created_at is
+        // omitted when None, so the UserMessage form is unchanged).
         let um = serde_json::to_string(&TagmaReply::UserMessage {
             history_id: 11,
             text: "hi".into(),
+            created_at: None,
         })
         .unwrap();
         assert_eq!(um, r#"{"kind":"user_message","history_id":11,"text":"hi"}"#);
@@ -294,6 +356,7 @@ mod tests {
         let mut ev = TagmaReply::Event {
             event: TagmaEvent::Busy,
             history_id: 0,
+            created_at: None,
         };
         ev.set_history_id(99);
         assert!(matches!(ev, TagmaReply::Event { history_id: 99, .. }));
@@ -302,6 +365,7 @@ mod tests {
             queue_depth: 0,
             warning: None,
             history_id: 0,
+            created_at: None,
         };
         ack.set_history_id(99);
         assert!(matches!(
@@ -310,6 +374,53 @@ mod tests {
         ));
         let mut interrupted = TagmaReply::Interrupted { req_id: 1 };
         interrupted.set_history_id(99);
+        assert!(matches!(interrupted, TagmaReply::Interrupted { req_id: 1 }));
+    }
+
+    #[test]
+    fn set_created_at_formats_and_covers_durable_variants() {
+        // `time`'s Rfc3339 special-cases UTC to a `Z` suffix (not `+00:00`).
+        assert_eq!(format_created_at(1_785_069_296), "2026-07-26T12:34:56Z");
+
+        let mut ev = TagmaReply::Event {
+            event: TagmaEvent::Busy,
+            history_id: 0,
+            created_at: None,
+        };
+        ev.set_created_at(1_785_069_296);
+        assert!(
+            matches!(ev, TagmaReply::Event { ref created_at, .. } if created_at.as_deref() == Some("2026-07-26T12:34:56Z"))
+        );
+
+        let mut ack = TagmaReply::MessageAccepted {
+            req_id: 1,
+            queue_depth: 0,
+            warning: None,
+            history_id: 0,
+            created_at: None,
+        };
+        ack.set_created_at(1_785_069_296);
+        assert!(matches!(
+            ack,
+            TagmaReply::MessageAccepted { ref created_at, .. }
+                if created_at.as_deref() == Some("2026-07-26T12:34:56Z")
+        ));
+
+        let mut um = TagmaReply::UserMessage {
+            history_id: 11,
+            text: "hi".into(),
+            created_at: None,
+        };
+        um.set_created_at(1_785_069_296);
+        assert!(matches!(
+            um,
+            TagmaReply::UserMessage { ref created_at, .. }
+                if created_at.as_deref() == Some("2026-07-26T12:34:56Z")
+        ));
+
+        // Non-durable variants are left untouched (no field to stamp).
+        let mut interrupted = TagmaReply::Interrupted { req_id: 1 };
+        interrupted.set_created_at(1_785_069_296);
         assert!(matches!(interrupted, TagmaReply::Interrupted { req_id: 1 }));
     }
 

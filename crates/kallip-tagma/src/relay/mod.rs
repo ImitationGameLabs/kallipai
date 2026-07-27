@@ -385,10 +385,11 @@ impl RelayHandle {
     /// Run a `TagmaRequest` against the root agent and emit the reply, under a
     /// req_id-aware panic boundary. A `SendMessage` is first appended to
     /// `chat_history` as an inbound row (the durable source of truth for the
-    /// user side of the conversation); the row id is stamped onto the
-    /// `MessageAccepted` reply so the app can dedup its optimistic user line.
-    /// `Interrupt` carries no content and is not stored — its visible effect is
-    /// the agent's outbound `Interrupted` event, which the pump already stores.
+    /// user side of the conversation); the row id and `created_at` are stamped
+    /// onto the `MessageAccepted` reply so the app can dedup its optimistic user
+    /// line and show the authoritative send time. `Interrupt` carries no content
+    /// and is not stored — its visible effect is the agent's outbound
+    /// `Interrupted` event, which the pump already stores.
     async fn handle_agent_op(
         &self,
         trace: &kallip_agora_common::ids::TraceId,
@@ -397,8 +398,10 @@ impl RelayHandle {
     ) {
         // Persist the inbound user message before running the op, so it is
         // durable even if the reply POST fails (the app re-pulls it on
-        // reconnect via `UserMessage` echo).
-        let inbound_id = match (&request, self.inner.history.clone()) {
+        // reconnect via `UserMessage` echo). Carry both the row id and the
+        // `created_at` the append just wrote, so the live ack stamps the
+        // authoritative send time with zero skew.
+        let inbound: Option<(i64, i64)> = match (&request, self.inner.history.clone()) {
             (TagmaRequest::SendMessage { .. }, Some(db)) => match serde_json::to_vec(&request) {
                 Ok(payload) => {
                     match chat_history::append(
@@ -410,7 +413,7 @@ impl RelayHandle {
                     )
                     .await
                     {
-                        Ok(id) => Some(id),
+                        Ok((id, created_at)) => Some((id, created_at)),
                         Err(e) => {
                             warn!(req_id, "inbound history append failed: {e:#}");
                             None
@@ -443,8 +446,9 @@ impl RelayHandle {
                 }
             }
         };
-        if let Some(id) = inbound_id {
+        if let Some((id, created_at)) = inbound {
             reply.set_history_id(id);
+            reply.set_created_at(created_at);
         }
         // Op replies pass `cancel: None`: an in-flight reply POST is left to
         // complete across a re-KEX rather than aborted. This is safe by key
@@ -575,6 +579,7 @@ impl RelayHandle {
                 "outbound" => match serde_json::from_slice::<TagmaReply>(&row.payload) {
                     Ok(mut r) => {
                         r.set_history_id(row.id);
+                        r.set_created_at(row.created_at);
                         r
                     }
                     Err(e) => {
@@ -583,10 +588,15 @@ impl RelayHandle {
                     }
                 },
                 "inbound" => match serde_json::from_slice::<TagmaRequest>(&row.payload) {
-                    Ok(TagmaRequest::SendMessage { text, .. }) => TagmaReply::UserMessage {
-                        history_id: row.id,
-                        text,
-                    },
+                    Ok(TagmaRequest::SendMessage { text, .. }) => {
+                        let mut r = TagmaReply::UserMessage {
+                            history_id: row.id,
+                            text,
+                            created_at: None,
+                        };
+                        r.set_created_at(row.created_at);
+                        r
+                    }
                     Ok(other) => {
                         warn!(id = row.id, "unexpected inbound kind: {other:?}; skipping");
                         continue;
@@ -664,6 +674,9 @@ impl RelayHandle {
                     // Stamped by `handle_agent_op` with the inbound row id; 0
                     // until then (and when no history store is configured).
                     history_id: 0,
+                    // Stamped by `handle_agent_op` with the inbound row's
+                    // created_at; absent until then.
+                    created_at: None,
                 })
             }
             TagmaRequest::Interrupt { req_id } => {
@@ -730,7 +743,10 @@ impl RelayHandle {
             )
             .await
             {
-                Ok(id) => reply.set_history_id(id),
+                Ok((id, created_at)) => {
+                    reply.set_history_id(id);
+                    reply.set_created_at(created_at);
+                }
                 Err(e) => warn!(
                     error = %e,
                     "outbound chat_history append failed; live-only fallback",
@@ -815,6 +831,7 @@ impl RelayHandle {
             TagmaReply::Event {
                 event: TagmaEvent::AssistantContent { content: text },
                 history_id: 0,
+                created_at: None,
             },
             None,
         )
@@ -1443,7 +1460,9 @@ mod op_tests {
         handle.handle_history(&trace, 1, None, None, 50).await;
         let replies = drain_replies(&capture, &key).await;
         let um = replies.iter().find_map(|r| match r {
-            TagmaReply::UserMessage { history_id, text } if *history_id == ack_id => Some(text),
+            TagmaReply::UserMessage {
+                history_id, text, ..
+            } if *history_id == ack_id => Some(text),
             _ => None,
         });
         assert_eq!(
@@ -1472,6 +1491,7 @@ mod op_tests {
                         content: "o0".into(),
                     },
                     history_id: 0,
+                    created_at: None,
                 },
                 None,
             )
@@ -1498,6 +1518,7 @@ mod op_tests {
                         content: "o1".into(),
                     },
                     history_id: 0,
+                    created_at: None,
                 },
                 None,
             )
@@ -1562,6 +1583,7 @@ mod op_tests {
                         message: format!("e{i}"),
                     },
                     history_id: 0,
+                    created_at: None,
                 })
                 .unwrap(),
             )
@@ -1608,11 +1630,13 @@ mod op_tests {
                             message: format!("e{i}"),
                         },
                         history_id: 0,
+                        created_at: None,
                     })
                     .unwrap(),
                 )
                 .await
-                .unwrap(),
+                .unwrap()
+                .0,
             );
         }
         let trace = kallip_agora_common::ids::TraceId::from("test".to_string());

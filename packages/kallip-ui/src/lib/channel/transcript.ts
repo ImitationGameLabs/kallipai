@@ -27,6 +27,10 @@ export interface ChannelLine {
   readonly historyId: number;
   readonly role: ChannelRole;
   readonly text: string;
+  /** RFC 3339 send time. For confirmed lines, the tagma row's `created_at`;
+   * for an optimistic user line, the client-side render time until the ack
+   * refines it. Absent on old cached rows and on system/status lines. */
+  readonly createdAt?: string;
   /** Per-line delivery status for an optimistic user line. Absent (≡ "sent")
    * for confirmed/replayed lines and for all non-user lines; `"sending"` from
    * the moment the line is rendered until its `MessageAccepted` ack lands. */
@@ -55,12 +59,13 @@ function line(
   historyId: number,
   role: ChannelRole,
   text: string,
+  createdAt?: string,
 ): ChannelTranscript {
   const trimmed = text.trim();
   if (trimmed === "") return state;
   return {
     ...state,
-    lines: [...state.lines, { historyId, role, text: trimmed }],
+    lines: [...state.lines, { historyId, role, text: trimmed, createdAt }],
   };
 }
 
@@ -128,9 +133,15 @@ export function applyTagmaReply(
       };
     case "user_message":
       // Replay-only echo of a user-authored message.
-      return line(state, reply.history_id, "user", reply.text);
+      return line(
+        state,
+        reply.history_id,
+        "user",
+        reply.text,
+        reply.created_at,
+      );
     case "event":
-      return applyTagmaEvent(state, reply.event, lineId);
+      return applyTagmaEvent(state, reply.event, lineId, reply.created_at);
   }
 }
 
@@ -138,10 +149,11 @@ function applyTagmaEvent(
   state: ChannelTranscript,
   event: TagmaEvent,
   lineId: number,
+  createdAt?: string,
 ): ChannelTranscript {
   const content = contentLineForEvent(event);
   const withLine = content
-    ? line(state, lineId, content.role, content.text)
+    ? line(state, lineId, content.role, content.text, createdAt)
     : state;
   switch (event.type) {
     case "busy":
@@ -204,7 +216,16 @@ export function withUserLine(
     ...state,
     lines: [
       ...state.lines,
-      { historyId: localId, role: "user", text: trimmed, status: "sending" },
+      {
+        historyId: localId,
+        role: "user",
+        text: trimmed,
+        // Client-side render time (millis precision); the ack refines this to
+        // the server's whole-second `created_at` via `replaceLineId`. The
+        // precision gap is invisible to the minute-granularity formatter.
+        createdAt: new Date().toISOString(),
+        status: "sending",
+      },
     ],
     status: "busy",
   };
@@ -212,20 +233,30 @@ export function withUserLine(
 
 /** Replace the pending line carrying `localId` with a confirmed `historyId`
  * (the inbound row id from the `MessageAccepted` ack) and flip its status to
- * `"sent"`. No-op if the pending line is gone (already replaced, or cleared on
- * reconnect), or if a line with `historyId` already exists (an ack id colliding
- * with an already-rendered line would otherwise duplicate the Svelte/cache key). */
+ * `"sent"`. `createdAt`, when given, refines the optimistic client-side stamp
+ * to the server's authoritative send time. No-op if the pending line is gone
+ * (already replaced, or cleared on reconnect), or if a line with `historyId`
+ * already exists (an ack id colliding with an already-rendered line would
+ * otherwise duplicate the Svelte/cache key). */
 export function replaceLineId(
   state: ChannelTranscript,
   localId: number,
   historyId: number,
+  createdAt?: string,
 ): ChannelTranscript {
   if (!state.lines.some((l) => l.historyId === localId)) return state;
   if (state.lines.some((l) => l.historyId === historyId)) return state;
   return {
     ...state,
     lines: state.lines.map((l) =>
-      l.historyId === localId ? { ...l, historyId, status: "sent" } : l,
+      l.historyId === localId
+        ? {
+            ...l,
+            historyId,
+            status: "sent",
+            ...(createdAt !== undefined ? { createdAt } : {}),
+          }
+        : l,
     ),
   };
 }
@@ -234,12 +265,20 @@ export function replaceLineId(
  * content (acks, batch markers, status-only events) or has no real `history_id`
  * (synthetic / un-stored frames are not cached). The single source of truth for
  * what the cache persists, shared with the reducer via `contentLineForEvent`. */
-export function cacheLineOf(
-  reply: TagmaReply,
-): { historyId: number; role: ChannelRole; text: string } | null {
+export function cacheLineOf(reply: TagmaReply): {
+  historyId: number;
+  role: ChannelRole;
+  text: string;
+  createdAt?: string;
+} | null {
   if (reply.kind === "user_message") {
     return reply.history_id > 0
-      ? { historyId: reply.history_id, role: "user", text: reply.text }
+      ? {
+          historyId: reply.history_id,
+          role: "user",
+          text: reply.text,
+          createdAt: reply.created_at,
+        }
       : null;
   }
   if (reply.kind === "event") {
@@ -247,7 +286,12 @@ export function cacheLineOf(
     if (id <= 0) return null;
     const content = contentLineForEvent(reply.event);
     return content
-      ? { historyId: id, role: content.role, text: content.text }
+      ? {
+          historyId: id,
+          role: content.role,
+          text: content.text,
+          createdAt: reply.created_at,
+        }
       : null;
   }
   return null;

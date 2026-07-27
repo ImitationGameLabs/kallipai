@@ -17,12 +17,15 @@
 /** One cached content line. `historyId` is the tagma `chat_history.id`; the
  * (conversationId, historyId) pair is the IndexedDB primary key. `role` is an
  * opaque string the UI (which owns the role vocabulary) writes and reads back
- * -- this layer does not interpret it. `text` is the rendered line. */
+ * -- this layer does not interpret it. `text` is the rendered line. `createdAt`
+ * is the RFC 3339 send time; absent on rows cached before the field existed
+ * (reads tolerate `undefined`). */
 export interface CachedLine {
   readonly conversationId: string;
   readonly historyId: number;
   readonly role: string;
   readonly text: string;
+  readonly createdAt?: string;
 }
 
 const DB_NAME = "kallip-relay";

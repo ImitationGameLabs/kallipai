@@ -80,6 +80,7 @@ impl RelayHandle {
                                 kallip_lesche_common::message::TagmaReply::Event {
                                     event: tagma_ev,
                                     history_id: 0,
+                                    created_at: None,
                                 },
                                 Some(&cancel),
                             )

@@ -9,6 +9,7 @@
   import TagmaStatusHeader from "../components/TagmaStatusHeader.svelte";
   import { createComposer } from "../lib/composer.svelte.ts";
   import { createAutoScroll } from "../lib/transcript.svelte.ts";
+  import { timelineMarkers } from "../lib/channel/timeline.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { navigate } from "../lib/shell/port.ts";
 
@@ -30,6 +31,11 @@
 
   const disabled = $derived(!channelState || channelState.status !== "open");
   const busy = $derived(channelState?.transcript.status === "busy");
+  // Per-line date divider / time label: a new group on day change or a >5min
+  // gap; otherwise consecutive lines share the previous group's timestamp.
+  const markers = $derived(
+    channelState ? timelineMarkers(channelState.transcript.lines) : [],
+  );
 
   // Reuse the shared stick-to-tail controller (same primitive the offline
   // TranscriptView uses): pins to the bottom as lines arrive, but stops once the
@@ -77,7 +83,20 @@
             Send a message to start the conversation.
           </p>
         {/if}
-        {#each channelState.transcript.lines as line (line.historyId)}
+        {#each channelState.transcript.lines as line, i (line.historyId)}
+          {@const m = markers[i]}
+          {#if m?.dateDivider}
+            <div
+              class="self-center text-xs opacity-50 my-2 text-center max-w-[80%]"
+            >
+              {m.dateDivider}{#if m.timeLabel}
+                <span class="opacity-70">· {m.timeLabel}</span>{/if}
+            </div>
+          {:else if m?.timeLabel}
+            <div class="self-center text-xs opacity-50 mt-2 text-center">
+              {m.timeLabel}
+            </div>
+          {/if}
           {#if line.role === "system"}
             <p
               class="text-xs opacity-60 text-center whitespace-pre-wrap break-words"
