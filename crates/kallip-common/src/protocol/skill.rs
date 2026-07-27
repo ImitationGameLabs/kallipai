@@ -7,8 +7,6 @@ use serde::{Deserialize, Serialize};
 pub struct SkillPathsResponse {
     /// Absolute path to the shared skill directory.
     pub shared: String,
-    /// Absolute path to the agent-local skill directory, if available.
-    pub local: Option<String>,
 }
 
 /// Skill metadata parsed from YAML frontmatter.

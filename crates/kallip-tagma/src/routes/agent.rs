@@ -139,13 +139,6 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     // the returned `Agent`.
     let activity = Arc::new(std::sync::Mutex::new(String::new()));
 
-    // Ensure the agent's local-skills dir exists before any landlock apply. The
-    // sandbox baseline grants write on `agent_dir/skills` (so the agent can author
-    // local skills); landlock `PathBeneath` silently skips non-existent paths, so
-    // a missing dir would drop the grant and make skill authoring fail with EACCES.
-    // Idempotent; the dir already exists for restored agents.
-    std::fs::create_dir_all(args.agent_dir.join("skills")).map_err(ApiError::internal)?;
-
     let dispatch = build_tool_dispatch(ToolDispatchInputs {
         ctx: args.store.clone(),
         config: &args.config,
@@ -154,7 +147,6 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         exec_policy: args.exec_policy.clone(),
         lock_manager: args.shared_state.lock_manager.clone(),
         agent_id: args.agent_id.clone(),
-        agent_dir: args.agent_dir.clone(),
     })
     .await?;
 
@@ -449,8 +441,8 @@ impl<'a> Materialize<'a> {
         let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
         let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
 
-        // Create agent directory before loading skills so that agent-local
-        // skills can be resolved from the agent dir.
+        // Create the agent directory before persisting the exec policy and the
+        // agent's metadata files.
         let agent_dir = persistence::create_agent_dir(
             &id,
             &config.workspace_root,
@@ -462,8 +454,8 @@ impl<'a> Materialize<'a> {
         .map_err(ApiError::internal)?;
 
         for skill_name in &config.skills {
-            let content = load_skill(skill_name, Some(agent_dir.as_path()))
-                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let content =
+                load_skill(skill_name).map_err(|e| ApiError::bad_request(e.to_string()))?;
             store
                 .lock()
                 .await

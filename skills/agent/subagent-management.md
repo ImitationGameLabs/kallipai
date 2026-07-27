@@ -13,10 +13,10 @@ monitor, and clean up.
 
 Every agent has a `PermissionClass` that controls filesystem access:
 
-| Class      | Read        | Write                                        | Secrets                                                            | Notes                 |
-| ---------- | ----------- | -------------------------------------------- | ------------------------------------------------------------------ | --------------------- |
-| **Normal** | Broad (`/`) | Workspace + dirlocks + skills carve + `/tmp` | Readable (no hide-holes)                                           | Default for depth 0–1 |
-| **Guest**  | Broad (`/`) | **Skills carve only**                        | Hidden (tmpfs overlay on `~/.ssh`, `~/.gnupg`, `~/.aws`, profiles) | Default for depth 2–3 |
+| Class      | Read        | Write                            | Secrets                                                            | Notes                 |
+| ---------- | ----------- | -------------------------------- | ------------------------------------------------------------------ | --------------------- |
+| **Normal** | Broad (`/`) | Workspace + dirlocks + `/tmp`    | Readable (no hide-holes)                                           | Default for depth 0–1 |
+| **Guest**  | Broad (`/`) | Read-only (`/tmp` baseline only) | Hidden (tmpfs overlay on `~/.ssh`, `~/.gnupg`, `~/.aws`, profiles) | Default for depth 2–3 |
 
 Key rules:
 
@@ -26,8 +26,9 @@ Key rules:
   spawn a Guest child directly (downgrade only — never upgrade).
 - **Both classes** get `readonly_holes` for peer workspaces (other agents'
   locked directories are bind-mounted read-only).
-- **Data tree** (`$KALLIP_DATA_DIR/agents/<id>/`) is read-only except the
-  `skills/` subdirectory (the "skills carve") for both classes.
+- **Data tree** (`$KALLIP_DATA_DIR/agents/<id>/`) is read-only for both
+  classes. Shared skills live in the shared skill directory, writable only by
+  the root agent.
 
 ## Spawning Subagents
 
@@ -161,7 +162,7 @@ or status-polling needed.
 ```bash
 kallip subagent spawn --role sandbox --permission-class guest \
   --workspace-root $WS/sandbox --prompt "Run untrusted code safely"
-# Guest: workspace RO, secrets hidden, skills carve writable only
+# Guest: read-only (workspace RO, no writes), secrets hidden
 ```
 
 ### Independent review (2+1 pattern)

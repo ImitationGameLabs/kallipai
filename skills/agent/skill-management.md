@@ -1,6 +1,6 @@
 ---
 name: Skill System
-description: How to discover, navigate, create, and organize skills using the index-tree structure — the skill system's own organizational principles
+description: How to discover, navigate, author, and organize skills using the index-tree structure — the skill system's own organizational principles
 ---
 
 # Skill Management
@@ -82,17 +82,17 @@ Create a new subdirectory only when a category grows beyond ~6-8 skills. Depth l
 ## Skill Lifecycle
 
 ```text
-discover → read index → load & pin → use → unpin → (optionally) create → (optionally) share
+discover → read index → load & pin → use → unpin → (optionally) author or propose
 ```
 
-### Sharing a skill with other agents
+### Authoring and sharing skills
 
-Only the **root agent** can write the shared skill directory — every other
-agent's skill writes land in its own agent-local dir. If you are not root and
-a skill you created has proven value beyond your own context (other agents in
-the same project would benefit), **propose it in conversation to the root
-agent**: paste the new or changed content and explain why it's worth sharing.
-The root agent reviews and applies the change itself.
+There is one tagma-wide skill collection, in the shared skill directory, and
+only the **root agent** can write it. If you are not root, you cannot write
+skill files yourself: a skill you want added to the shared collection must be
+**proposed in conversation to the root agent** — paste the new or changed
+content and explain why it is worth sharing. The root agent reviews and authors
+it.
 
 If you are the root agent, you author shared skills directly. Find the shared
 directory with `kallip skill paths` (the `shared:` line), then write the file

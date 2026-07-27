@@ -227,8 +227,7 @@ mounts none (its scratch tree is an ephemeral `/testdata` tmpfs).
 **In dev only**, data and workspace can be bind-mounted to a host path via
 their env vars, when you want the files on the host (e.g. inspect/persist tagma
 state, or have the agent work on a checkout). Shared skills can be overlaid on
-the data volume's `skills/` subdir the same way (agent-local skills under
-`/var/lib/kallip/agents/<id>/skills/` are unaffected). Prod-tagma uses plain
+the data volume's `skills/` subdir the same way. Prod-tagma uses plain
 named volumes — if you need tagma state on a specific disk, pin it at the
 docker layer (data-root) or edit the compose:
 

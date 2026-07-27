@@ -256,9 +256,6 @@ async fn main() -> Result<()> {
                 let id = agent_id_from_env()?;
                 let paths = client.skill_paths(&id).await?;
                 println!("shared: {}", paths.shared);
-                if let Some(local) = &paths.local {
-                    println!("local:  {local}");
-                }
             }
             SkillCommand::Meta(args) => {
                 let id = agent_id_from_env()?;

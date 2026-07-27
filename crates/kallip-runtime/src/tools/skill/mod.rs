@@ -13,7 +13,7 @@
 //! required to match the path.
 //!
 //! The [`load_skill`] function resolves skill files from the shared skill
-//! directory or an agent-local directory.
+//! directory.
 
 use std::path::{Path, PathBuf};
 
@@ -46,7 +46,7 @@ you are doing, read it, then in the next turn pin what you read with
 `context_pin_last` (kind `tool-result`, label `skill:<name>`); don't load
 speculatively — a skill you don't use occupies a pin slot. Loaded notes stay
 in context across turns; unpin them when the task moves on. The
-`skill-management` notes cover creating and promoting your own; the
+`skill-management` notes cover authoring and sharing skills; the
 `context-management` notes cover what to keep and what to evict.
 
 # Two control primitives you cannot do without
@@ -205,22 +205,10 @@ pub fn parse_frontmatter_meta(content: &str) -> Option<SkillMeta> {
     })
 }
 
-/// Resolves a skill file to its raw content.
+/// Resolves a skill file to its raw content from the shared skill directory.
 ///
-/// Checks the agent-local directory first (if `agent_dir` is provided),
-/// then falls back to the shared skill directory. Returns the raw file
-/// content including frontmatter.
-fn resolve_skill_content(name: &str, agent_dir: Option<&Path>) -> Result<String> {
-    // Try agent-local first.
-    if let Some(sd) = agent_dir {
-        let local_path = sd.join("skills").join(format!("{name}.md"));
-        if local_path.exists() {
-            return std::fs::read_to_string(&local_path)
-                .with_context(|| format!("failed to read local skill '{name}'"));
-        }
-    }
-
-    // Fall back to shared.
+/// Returns the raw file content including frontmatter.
+fn resolve_skill_content(name: &str) -> Result<String> {
     let path = skill_dir()?.join(format!("{name}.md"));
     std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read skill '{name}' from {}", path.display()))
@@ -230,9 +218,9 @@ fn resolve_skill_content(name: &str, agent_dir: Option<&Path>) -> Result<String>
 ///
 /// If the file has no frontmatter, `name` defaults to the last path
 /// component of the skill name.
-pub fn skill_metadata(name: &str, agent_dir: Option<&Path>) -> Result<SkillMeta> {
+pub fn skill_metadata(name: &str) -> Result<SkillMeta> {
     validate_skill_name(name)?;
-    let content = resolve_skill_content(name, agent_dir)?;
+    let content = resolve_skill_content(name)?;
 
     Ok(parse_frontmatter_meta(&content).unwrap_or_else(|| {
         let default_name = name.rsplit('/').next().unwrap_or(name).to_owned();
@@ -269,12 +257,10 @@ pub fn validate_skill_name(name: &str) -> Result<()> {
 
 /// Reads a skill file, strips frontmatter, and returns the body.
 ///
-/// Checks the agent-local directory first (if `agent_dir` is provided),
-/// then falls back to the shared skill directory. Local takes precedence
-/// on name collision.
-pub fn load_skill(name: &str, agent_dir: Option<&Path>) -> Result<String> {
+/// Resolves the file from the shared skill directory.
+pub fn load_skill(name: &str) -> Result<String> {
     validate_skill_name(name)?;
-    let content = resolve_skill_content(name, agent_dir)?;
+    let content = resolve_skill_content(name)?;
     Ok(strip_frontmatter(&content).trim().to_owned())
 }
 
@@ -702,7 +688,7 @@ mod tests {
 
     #[test]
     fn load_skill_rejects_backslash() {
-        assert!(load_skill("foo\\bar", None).is_err());
+        assert!(load_skill("foo\\bar").is_err());
     }
 
     #[test]

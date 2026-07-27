@@ -1,7 +1,7 @@
 //! Scenario 1 -- Guest root agent.
 //!
 //! Secrets masked by empty tmpfs hide-holes; workspace, data tree, and home
-//! writes denied; only the agent-local skills carve is writable.
+//! writes denied (Guest is read-only).
 
 use super::harness::*;
 
@@ -20,7 +20,6 @@ async fn scenario1_guest() {
         Reply::Tool(format!("echo x >> {agent_data}/meta.json")), // 2: data tree RO
         Reply::Tool("mkdir -p $HOME/elsewhere && echo x > $HOME/elsewhere/x".into()), // 3: home RO
         Reply::Tool("cat $HOME/.config/kallip/profiles.toml".into()), // 4: profiles hide-hole
-        Reply::Tool(format!("touch {agent_data}/skills/local.md")), // 5: skills carve
         Reply::End("done"),
     ];
 
@@ -31,8 +30,8 @@ async fn scenario1_guest() {
 
     assert_eq!(run.exit, "success", "{}", fx.tagma.diagnostics());
     assert!(
-        results.len() >= 6,
-        "expected >=6 bash results, got {}",
+        results.len() >= 5,
+        "expected >=5 bash results, got {}",
         results.len()
     );
 
@@ -46,20 +45,11 @@ async fn scenario1_guest() {
     expect(&results, 2, "guest data-tree write denied", false);
     expect(&results, 3, "guest home write denied", false);
     expect(&results, 4, "guest profiles read denied (hide-hole)", false);
-    expect(&results, 5, "guest skills carve writable", true);
 
     // FS corroboration.
     assert!(
         !ws.join("probe.txt").exists(),
         "workspace probe.txt must not exist"
-    );
-    assert!(
-        fx.data_root
-            .join("agents")
-            .join(&run.agent_id)
-            .join("skills/local.md")
-            .exists(),
-        "skills carve file must exist"
     );
     // The host key is untouched (the tmpfs overlay is per-namespace).
     assert_eq!(

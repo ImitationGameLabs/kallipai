@@ -532,7 +532,7 @@ impl TagmaClient {
 
     // -- Skills ---------------------------------------------------------------
 
-    /// Get skill directory paths for an agent (shared + local).
+    /// Get the shared skill directory path for an agent.
     pub async fn skill_paths(&self, id: &AgentId) -> Result<SkillPathsResponse> {
         self.handle_response(
             self.with_auth(

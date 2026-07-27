@@ -98,13 +98,12 @@ Amounts support K/M/G suffixes (e.g. `100M`, `500K`, `1G`). Budget is tagma-wide
 ### `skill` — Skill discovery
 
 ```bash
-kallip skill paths                          # show shared + local skill directories
+kallip skill paths                          # show the shared skill directory
 kallip skill meta <NAME>                    # show metadata for a skill
 ```
 
 Skills live as `<name>.md` files with YAML frontmatter (`name`, `description`).
 
-- **Local** dir (writable by every agent): shown by `kallip skill paths`.
 - **Shared** dir (writable only by the root agent): the root agent authors
   shared skills directly via `bash_exec` (see the `skill-management` skill);
   any other agent that wants a skill shared proposes it to root in

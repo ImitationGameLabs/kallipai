@@ -9,28 +9,24 @@ use kallip_runtime::tools::{skill_dir, skill_metadata};
 
 use crate::state::SharedState;
 
-/// GET /agents/{id}/skills/paths — return shared and agent-local skill directory paths.
+/// GET /agents/{id}/skills/paths — return the shared skill directory path.
 pub async fn skill_paths(
     State(state): State<SharedState>,
     _auth: crate::auth::AuthIdentity,
     Path(id): Path<AgentId>,
 ) -> Result<impl IntoResponse, ApiError> {
     let registry = state.registry.read().await;
-    let entry = registry
-        .get(&id)
-        .ok_or_else(|| ApiError::not_found("agent not found"))?;
+    if !registry.contains_key(&id) {
+        return Err(ApiError::not_found("agent not found"));
+    }
+    drop(registry);
 
     let shared = skill_dir()
         .map_err(ApiError::internal)?
         .to_string_lossy()
         .into_owned();
-    let local = entry
-        .identity()
-        .agent_dir
-        .as_ref()
-        .map(|d| d.join("skills").to_string_lossy().into_owned());
 
-    Ok(Json(SkillPathsResponse { shared, local }))
+    Ok(Json(SkillPathsResponse { shared }))
 }
 
 /// GET /agents/{id}/skills/{name}/meta — return skill metadata.
@@ -40,12 +36,12 @@ pub async fn skill_meta(
     Path((id, skill_name)): Path<(AgentId, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let registry = state.registry.read().await;
-    let entry = registry
-        .get(&id)
-        .ok_or_else(|| ApiError::not_found("agent not found"))?;
+    if !registry.contains_key(&id) {
+        return Err(ApiError::not_found("agent not found"));
+    }
+    drop(registry);
 
-    let agent_dir = entry.identity().agent_dir.as_deref();
-    let meta = skill_metadata(&skill_name, agent_dir).map_err(|e| {
+    let meta = skill_metadata(&skill_name).map_err(|e| {
         let msg = e.to_string();
         // Validation failures (traversal, reserved name) are client errors;
         // anything else means the skill file is absent.

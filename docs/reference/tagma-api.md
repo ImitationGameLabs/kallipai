@@ -48,7 +48,7 @@ the full authorization matrix, see [auth.md](auth.md).
 | `GET`    | `/approvals`                      | List approvals                             | any (filtered by scope)      |
 | `GET`    | `/approvals/{id}`                 | Get a single approval                      | operator / superior          |
 | `POST`   | `/approvals/{id}`                 | Approve or deny an approval                | operator / superior          |
-| `GET`    | `/agents/{id}/skills/paths`       | Get skill directory paths                  | any                          |
+| `GET`    | `/agents/{id}/skills/paths`       | Get the shared skill directory path        | any                          |
 | `GET`    | `/agents/{id}/skills/{name}/meta` | Get skill metadata                         | any                          |
 
 ## Agent Management
@@ -650,9 +650,9 @@ Status: `200 OK`
 
 ## Skills
 
-### `GET /agents/{id}/skills/paths` — Skill directory paths
+### `GET /agents/{id}/skills/paths` — Skill directory path
 
-Returns the shared and agent-local skill directory paths.
+Returns the shared skill directory path.
 
 Auth: any authenticated identity. See [auth.md](auth.md).
 
@@ -660,8 +660,7 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 ```json
 {
-  "shared": "/path/to/shared/skills",
-  "local": "/path/to/agent/skills | null"
+  "shared": "/path/to/shared/skills"
 }
 ```
 

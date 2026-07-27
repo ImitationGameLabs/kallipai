@@ -102,7 +102,8 @@ gate.
 
 Skill endpoints are read-only discovery, open to any authenticated identity.
 The shared skill directory is written only by the root agent (via its
-`bash_exec` landlock carve); other agents propose changes in conversation.
+`bash_exec` landlock carve); other agents cannot write skill files and must
+propose changes in conversation instead.
 
 ## Agora / lesche service-to-service boundary
 

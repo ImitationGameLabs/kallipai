@@ -22,7 +22,7 @@ pub enum Commands {
     /// Manage agent permissions and bash_exec exec-policy overrides
     #[command(subcommand)]
     Policy(PolicyCommand),
-    /// Skill discovery and promotion
+    /// Skill discovery
     #[command(subcommand)]
     Skill(SkillCommand),
     /// Manage agent token budget
@@ -210,7 +210,7 @@ pub struct ExecSetArgs {
 
 #[derive(Subcommand)]
 pub enum SkillCommand {
-    /// Show skill directory paths
+    /// Show the shared skill directory path
     Paths(SkillPathsArgs),
     /// Show metadata for a specific skill
     Meta(SkillMetaArgs),

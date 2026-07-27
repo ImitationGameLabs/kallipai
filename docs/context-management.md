@@ -86,8 +86,10 @@ Skills are a natural consequence of agentic context management:
 
 1. The agent accumulates experience — effective patterns for a CLI tool, debugging
    strategies, project-specific conventions.
-2. It distills that experience into a markdown file:
-   `<data-dir>/skills/<name>.md` (with optional YAML frontmatter).
+2. That experience is distilled into a markdown file in the tagma-wide shared
+   skill directory: `<data-dir>/skills/<name>.md` (with optional YAML
+   frontmatter). The root agent is the sole author of that directory; any other
+   agent that wants a skill added proposes it in conversation to root.
 
    The data directory is determined by `KALLIP_DATA_DIR` env var (used
    verbatim), or the platform default if unset:

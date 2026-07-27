@@ -42,10 +42,6 @@ pub struct ToolDispatchInputs<'a> {
     pub lock_manager: Arc<DirLockManager>,
     /// The agent's identity (used to look up its locks in `lock_manager`).
     pub agent_id: AgentId,
-    /// The agent's on-disk dir (`<data_root>/agents/<id>/`). Its `skills/`
-    /// subdirectory is carved writable so the agent can author local skills
-    /// (the data-dir integrity baseline).
-    pub agent_dir: PathBuf,
 }
 
 /// Builds the tool registry exposed by `kallip`.
@@ -66,7 +62,6 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
         exec_policy,
         lock_manager,
         agent_id,
-        agent_dir,
     } = inputs;
     let builder = ShellBuilder::new()
         .initial_cwd(config.workspace_root.clone())
@@ -81,46 +76,35 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
     // (Linux + `landlock`). The closure composes the decision fresh per spawn.
     // Both classes read broadly; the class distinction is on WRITE and secret
     // visibility:
-    // - **Normal**: writable = write-locks + skills carve; secrets readable
+    // - **Normal**: writable = its write-locks (held dirlocks); secrets readable
     //   (mitigated by proxy tools, design doc §4.5).
-    // - **Guest**: readonly — writable is the skills carve only (no workspace
-    //   write); secret dirs are hidden by mount-ns tmpfs overlays so a broad-read
-    //   Guest can read source/caches (`~/.cargo`) without reaching keys/tokens.
+    // - **Guest**: read-only — no write-locks granted; secret dirs are hidden by
+    //   mount-ns tmpfs overlays so a broad-read Guest can read source/caches
+    //   (`~/.cargo`) without reaching keys/tokens.
     //
     // `readonly_holes` (peers' locked workspaces, mount-ns bind-ro) apply to both.
     //
-    // The skills carve (`agent_dir/skills`) lets either class author local skills
-    // while the rest of the data tree stays non-writable — the data-dir integrity
-    // baseline. Only the agent's own skills dir (disjoint from peers' by `<id>`);
-    // it does not grant write to `meta.json`/`context.json`/`exec_policy.toml`/etc.
-    //
     // **Root carve**: the root agent additionally gets write to the *shared*
     // skills dir (`skill_dir()` = `<data_dir>/skills/`), making it the sole
-    // author of shared skills. This is disjoint from both the workspace and the
-    // per-agent `agent_dir/skills` carve, so it is additive even for a Normal
-    // root and not subsumed by write-locks. Applies to both classes so a
-    // Guest-root test fixture keeps shared-skill authorship under one rule
-    // (production root is always Normal).
+    // author of shared skills. This is disjoint from the workspace and not
+    // subsumed by write-locks. Applies to both classes so a Guest-root test
+    // fixture keeps shared-skill authorship under one rule (production root is
+    // always Normal).
     #[cfg(all(target_os = "linux", feature = "landlock"))]
     let builder = {
         let lm = lock_manager.clone();
         let aid = agent_id.clone();
-        let skills_dir = agent_dir.join("skills");
         let is_guest = matches!(
             config.permissions_class,
             crate::config::PermissionClass::Guest
         );
         let is_root = config.is_root();
         builder.access_source(move || {
-            // Normal: write-locks + skills carve. Guest: readonly — skills carve
-            // only (no write-locks), so even a lock the Guest happens to hold is
-            // not writable under landlock.
+            // Normal: its held write-locks. Guest: read-only (no writable paths).
             let writable = if is_guest {
-                vec![skills_dir.clone()]
+                Vec::new()
             } else {
-                let mut w = lm.write_paths(&aid)?;
-                w.push(skills_dir.clone());
-                w
+                lm.write_paths(&aid)?
             };
             // Root-only: grant the shared skills dir on top of the class set.
             // `skill_dir()` is anyhow::Result; the closure's error type is
@@ -152,7 +136,7 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
     // Without the landlock feature the coordinator is advisory only; the params
     // are still threaded so the tagma API is uniform across builds.
     #[cfg(not(all(target_os = "linux", feature = "landlock")))]
-    let _ = (&lock_manager, &agent_id, &agent_dir);
+    let _ = (&lock_manager, &agent_id);
     let backend = builder.build().await?;
     let backend = Arc::new(Mutex::new(backend));
 

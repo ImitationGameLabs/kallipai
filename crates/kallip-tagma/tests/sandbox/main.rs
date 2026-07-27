@@ -17,10 +17,10 @@
 //!   bodies, one per permission/dirlock concern.
 //!
 //!  1. **Guest** root agent -- secrets hidden (`.ssh` empty tmpfs), writes
-//!     denied everywhere except the skills carve.
+//!     denied everywhere (Guest is read-only).
 //!  2. **Normal** root agent -- workspace/home-lock/`/tmp` writable; tagma data
-//!     tree read-only (read ok, write denied); skills carve writable; `.ssh` and
-//!     `profiles.toml` readable (Normal has no hide-holes).
+//!     tree read-only (read ok, write denied); `.ssh` and `profiles.toml`
+//!     readable (Normal has no hide-holes).
 //!  3. **Subagent + dirlock** -- a child's nested workspace becomes a readonly
 //!     hole to the parent (delegation carve), while the parent keeps writing its
 //!     own workspace; a second subagent locking an overlapping path is rejected
