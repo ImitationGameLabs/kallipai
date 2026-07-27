@@ -70,5 +70,5 @@ A good eviction summary preserves:
 
 - **Never pin and forget.** Every pin costs tokens every turn. Audit periodically with `context_status`.
 - **Don't wait for auto-compaction.** It uses a generic summarize strategy; your hand-written summary will always be better.
-- **Don't pin transient data.** Tool outputs, intermediate results — these belong in working turns, not pins.
+- **Don't pin transient data.** Tool outputs, intermediate results — these belong in working turns, not pins. (The pinned root skill index — the output of `kallip skill index`, label `skill:index` — is the exception: it is a reference you reuse every turn, not transient working data.)
 - **Don't evict reflexively at threshold warnings.** The 50% checkpoint is advisory — assess whether you're mid-task, near a natural boundary, or can reclaim space by unpinning instead.

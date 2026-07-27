@@ -8,16 +8,16 @@ use kallip_common::AgentId;
 use kallip_common::policy::PolicyPreset;
 
 const DEFAULT_SYSTEM_PROMPT: &str = concat!(
-    "You are a minimal coding agent. ",
-    "Keep answers concise and prefer the least risky tool that accomplishes the task; ",
-    "each tool's own description explains its usage. ",
-    "Some tool actions are asynchronous — a backgrounded bash task or a deferred ",
+    "# Posture\n\n",
+    "Keep answers concise. Prefer the least risky tool that accomplishes the task; ",
+    "each tool's own description explains its usage.\n\n",
+    "# Tool and round model\n\n",
+    "Some tool actions are asynchronous — a backgrounded task or a deferred ",
     "(pending-approval) action completes later and surfaces a notice in context; ",
-    "read the notice and follow its instruction. ",
-    "Tool calls within one round run in order; if a call does not succeed cleanly ",
-    "(non-zero exit, denied, timed out, or deferred pending approval) the remaining ",
-    "calls in that round are skipped and returned as errors — re-issue them after ",
-    "reviewing what happened.",
+    "read the notice and follow its instruction. Tool calls within one round run ",
+    "in order; if a call does not succeed cleanly (non-zero exit, denied, timed ",
+    "out, or deferred pending approval) the remaining calls in that round are ",
+    "skipped and returned as errors — re-issue them after reviewing what happened.",
 );
 /// Effectively unlimited — the real safety net is the tagma-wide token budget.
 /// Individual rounds are bounded by LLM response length; the loop as a whole is
@@ -599,14 +599,22 @@ mod tests {
 
     #[test]
     fn default_system_prompt_stays_high_altitude() {
-        // The base prompt must stay at agent altitude: identity, posture, and
-        // the cross-cutting async-notice model. Tool mechanics belong in each
-        // tool's `description()` and the skill system belongs in the bootstrap
-        // meta-skill the tagma appends at runtime (routes/agent.rs). This guard
+        // The base prompt must stay at agent altitude: posture and the
+        // tool/round execution model. Agent identity is injected per-agent by
+        // the tagma (routes/agent.rs `compose_system_prompt`); tool mechanics
+        // belong in each tool's `description()` and the skill system belongs in
+        // the bootstrap meta-skill the tagma appends at runtime. This guard
         // prevents tool/CLI usage from creeping back into the prompt and
         // re-duplicating those sources (drift + per-request token cost).
         let prompt = DEFAULT_SYSTEM_PROMPT;
-        assert!(prompt.contains("minimal coding agent"));
+        assert!(
+            prompt.contains("# Posture"),
+            "must keep the posture section"
+        );
+        assert!(
+            prompt.contains("# Tool and round model"),
+            "must keep the tool/round-model section"
+        );
         assert!(prompt.contains("asynchronous"));
         for verboten in [
             names::BASH_EXEC,

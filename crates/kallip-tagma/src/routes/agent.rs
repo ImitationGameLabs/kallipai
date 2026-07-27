@@ -24,7 +24,7 @@ use kallip_runtime::history::HistoryWriter;
 use kallip_runtime::persistence;
 use kallip_runtime::policy::{AgentPolicy, AuthorizedToolExecutor};
 use kallip_runtime::tools::{
-    ToolDispatchInputs, build_tool_dispatch, load_skill, meta_skill_content,
+    ToolDispatchInputs, build_tool_dispatch, load_skill, meta_skill_content, skill_dir,
 };
 use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -44,6 +44,14 @@ use crate::token::AGENT;
 
 pub(crate) struct SpawnArgs {
     pub agent_id: AgentId,
+    /// The tagma root agent for this spawn. Computed by the caller
+    /// (Materialize::run / restore_one / reactivation), never re-derived inside
+    /// spawn_agent: create/restore derive it as `supervisor_chain_ids(...).last()`
+    /// (or `self.agent_id` for a root spawn), while reactivation resolves it
+    /// authoritatively via `resolve_root_agent(registry.root_agent())`.
+    /// Surfaced to the agent via `KALLIP_ROOT_AGENT_ID` and baked into the
+    /// identity section of the system prompt.
+    pub root_agent_id: AgentId,
     pub store: Arc<tokio::sync::Mutex<ContextStore>>,
     pub approvals: Arc<tokio::sync::Mutex<ApprovalStore>>,
     pub agent_dir: PathBuf,
@@ -72,14 +80,177 @@ pub(crate) struct SpawnArgs {
     )>,
 }
 
+/// Inject the per-agent identity env vars into an existing env map.
+///
+/// `KALLIP_ROOT_AGENT_ID` is always set; `KALLIP_SUPERVISOR_AGENT_ID` is set
+/// only when `supervisor_agent_id` is `Some` — for the root agent it is left
+/// **unset** (not set to empty) so root-ness is detectable by env absence
+/// rather than empty-string parsing. Always re-derives from the caller's
+/// current `supervisor` and `root` (overwriting any prior values), so it is
+/// safe to call on a reused env map. Shared by fresh spawns (via
+/// [`SpawnArgs::default_env`]) and the reactivation path (which reuses the
+/// dead incarnation's env map).
+pub(crate) fn inject_identity_env(
+    env: &mut HashMap<String, String>,
+    supervisor_agent_id: Option<&AgentId>,
+    root_agent_id: &AgentId,
+) {
+    if let Some(supervisor) = supervisor_agent_id {
+        env.insert("KALLIP_SUPERVISOR_AGENT_ID".into(), supervisor.to_string());
+    } else {
+        env.remove("KALLIP_SUPERVISOR_AGENT_ID");
+    }
+    env.insert("KALLIP_ROOT_AGENT_ID".into(), root_agent_id.to_string());
+}
+
+/// Resolve the root agent id for a spawn. The root is the tagma's single
+/// registered root ([`Registry::root_agent`](crate::state::Registry::root_agent)),
+/// always knowable at runtime and independent of the supervisor chain — so a
+/// broken chain never degrades the root identity to self.
+///
+/// `registry_root` is `None` only when the registry has no root, which violates
+/// the single-root invariant a live tagma maintains; the `expect` surfaces that
+/// impossible state loudly instead of silently substituting a wrong id.
+pub(crate) fn resolve_root_agent(registry_root: Option<&AgentId>) -> AgentId {
+    registry_root
+        .cloned()
+        .expect("a live tagma always has a registered root agent")
+}
+
 impl SpawnArgs {
     /// Build the standard env map for an agent.
-    pub fn default_env(agent_id: &AgentId, auth_token: &str) -> HashMap<String, String> {
+    pub fn default_env(
+        agent_id: &AgentId,
+        auth_token: &str,
+        supervisor_agent_id: Option<&AgentId>,
+        root_agent_id: &AgentId,
+    ) -> HashMap<String, String> {
         let mut env = HashMap::new();
         env.insert("KALLIP_ID".into(), agent_id.to_string());
         env.insert("KALLIP_AUTH_TOKEN".into(), auth_token.to_owned());
+        inject_identity_env(&mut env, supervisor_agent_id, root_agent_id);
         env
     }
+}
+
+/// Per-agent identity section injected at the head of every system prompt. This
+/// is the ONLY part of the prompt that varies across agents; the static-shared
+/// bulk (base prompt + bootstrap meta-skill) that follows is byte-identical for
+/// every agent. Kept as `const` templates with `{placeholder}` substitution
+/// (see `compose_system_prompt`) so the prose stays readable and the per-agent
+/// diff is reviewable in one place.
+const IDENTITY_ROOT: &str = "\
+# Your identity
+
+You are the root agent of this tagma — the leader of a multi-agent system. \
+You own the conversation with the user and may spawn subagents to delegate \
+scoped work.
+
+- agent id: `{agent_id}`
+- role: `{role}`
+- permission class: `{permission_class}` ({permission_class_hint})
+- skills path: `{skills_path}`
+
+# Operating as the root
+
+Spawn a subagent with `kallip subagent spawn` (run via bash_exec; the kallip \
+command is auto-allowed). Subagents report back by messaging your id; \
+inter-agent messages arrive as input carrying a `[From: agent ...]` header. \
+Address the user with `kallip lesche send \"<text>\"`.";
+
+const IDENTITY_SUBAGENT: &str = "\
+# Your identity
+
+You are a subagent in a multi-agent system — you assist your supervisor and \
+the root agent in completing their work.
+
+- agent id: `{agent_id}`
+- role: `{role}`
+- description: `{description}`
+- permission class: `{permission_class}` ({permission_class_hint})
+- supervisor: `{supervisor_id}`
+- root agent: `{root_id}`
+- skills path: `{skills_path}`
+
+# Operating as a subagent
+
+Inter-agent messages arrive as input carrying a `[From: agent ...]` header. \
+Report results to your supervisor with `kallip message {supervisor_id} \
+\"<text>\"`; escalate to the root with `kallip message {root_id} ...`. \
+Do not address the user directly — the root owns the user conversation and \
+the lesche route rejects non-root callers.";
+
+/// Compose the full system prompt for an agent: a per-agent `# Your identity`
+/// section (templated from config + spawn-time ids) followed by the
+/// static-shared bulk (the base prompt from `config.system_prompt`, then the
+/// bootstrap meta-skill).
+///
+/// The identity section is the only part that differs across agents. The
+/// static-shared tail is byte-identical for every agent within a deployment
+/// (because `config.system_prompt` resolves a tagma-global env var or the
+/// shared default), so provider prefix-caching of that suffix is preserved.
+fn compose_system_prompt(
+    config: &AgentConfig,
+    agent_id: AgentId,
+    root_agent_id: AgentId,
+) -> String {
+    // `format!` requires a string literal, so the const template is rendered
+    // with plain `{placeholder}` substitution. The placeholder spelling is the
+    // singular `permission_class` for prose readability; the struct field is the
+    // historical-plural `permissions_class`. Substitution order matters:
+    // user-controlled free text (`role`, `description`) is substituted LAST so
+    // a value containing a `{...}` fragment cannot be re-scanned by an earlier
+    // placeholder's pass — its literal braces survive by design (pinned by
+    // `compose_system_prompt_user_text_with_braces_is_not_rescanned`). The
+    // remaining placeholders are all agent-controlled ids or enum names (no
+    // braces), so tests assert no `{`/`}` from them remains in the rendered
+    // output; a typo'd placeholder name (leaving a literal `{...}`) fails
+    // loudly.
+    let permission_class_hint = match config.permissions_class {
+        PermissionClass::Normal => "owns a read-write workspace",
+        PermissionClass::Guest => "readonly workspace, no home write",
+    };
+    // Absolute skills dir, resolved the same way `skill_dir()` does for the
+    // tool layer — surfacing it here spares the agent from probing XDG paths.
+    // Failure is near-impossible in a running tagma (skill loading already
+    // depends on it); fall back to a placeholder rather than abort the prompt.
+    let skills_path = skill_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unresolved>".to_owned());
+    let identity = if config.is_root() {
+        IDENTITY_ROOT
+            .replace("{agent_id}", agent_id.as_ref())
+            .replace("{permission_class}", &config.permissions_class.to_string())
+            .replace("{permission_class_hint}", permission_class_hint)
+            .replace("{skills_path}", &skills_path)
+            // User-controlled — substitute last so its value is not re-scanned.
+            .replace("{role}", &config.role)
+    } else {
+        IDENTITY_SUBAGENT
+            .replace("{agent_id}", agent_id.as_ref())
+            .replace("{permission_class}", &config.permissions_class.to_string())
+            .replace("{permission_class_hint}", permission_class_hint)
+            .replace(
+                "{supervisor_id}",
+                // Reached only when `!config.is_root()`, i.e. `created_by` is Some.
+                config
+                    .created_by
+                    .clone()
+                    .expect("subagent has created_by")
+                    .as_ref(),
+            )
+            .replace("{root_id}", root_agent_id.as_ref())
+            .replace("{skills_path}", &skills_path)
+            // User-controlled — substitute last so their values are not re-scanned.
+            .replace("{description}", &config.description)
+            .replace("{role}", &config.role)
+    };
+    let mut full = identity;
+    full.push_str("\n\n");
+    full.push_str(&config.system_prompt);
+    full.push_str("\n\n");
+    full.push_str(meta_skill_content());
+    full
 }
 
 /// Reconstruct runtime resources shared by create and restore.
@@ -100,13 +271,11 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     let round_cancel: Arc<std::sync::Mutex<Option<kallip_runtime::agent_task::RoundToken>>> =
         Arc::new(std::sync::Mutex::new(None));
 
-    let system_prompt = {
-        let meta = meta_skill_content();
-        let mut sp = args.config.system_prompt.clone();
-        sp.push_str("\n\n");
-        sp.push_str(meta);
-        sp
-    };
+    let system_prompt = compose_system_prompt(
+        &args.config,
+        args.agent_id.clone(),
+        args.root_agent_id.clone(),
+    );
     let client = {
         // Install the active profile's declared context window (authoritative on both paths — the
         // implicit env profile derives it from KALLIP_CONTEXT_WINDOW_TOKENS), then build the
@@ -492,6 +661,10 @@ impl<'a> Materialize<'a> {
             }
             None => Vec::new(),
         };
+        // The root is the chain's terminal ancestor (or self for a root spawn,
+        // where the chain is empty). Reused for env injection and the identity
+        // section; not re-derived inside spawn_agent.
+        let root_agent_id = chain.last().cloned().unwrap_or_else(|| id.clone());
         // Auto-acquire an exclusive write-lock on the workspace so no two agents
         // edit the same workspace concurrently. **Normal only** -- a Guest is
         // readonly, so it neither needs nor holds a workspace write-lock. A Normal
@@ -511,9 +684,15 @@ impl<'a> Materialize<'a> {
         .await?;
         let (events_tx, _) = broadcast::channel(256);
         let agent_dir_clone = agent_dir.clone();
-        let env = SpawnArgs::default_env(&id, token.secret());
+        let env = SpawnArgs::default_env(
+            &id,
+            token.secret(),
+            config.created_by.as_ref(),
+            &root_agent_id,
+        );
         let (agent, identity) = match spawn_agent(SpawnArgs {
             agent_id: id.clone(),
+            root_agent_id: root_agent_id.clone(),
             store,
             approvals,
             agent_dir,
@@ -1134,11 +1313,13 @@ fn resolve_granted_class(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use super::{
         AgentConfig, AgentId, MAX_ACTIVITY_CHARS, PermissionClass, PermissionProfile,
-        acquire_workspace_lock, interrupt_agent, list_agents, remove_agent, resolve_granted_class,
+        acquire_workspace_lock, compose_system_prompt, inject_identity_env, interrupt_agent,
+        list_agents, meta_skill_content, remove_agent, resolve_granted_class, resolve_root_agent,
         truncate_chars,
     };
     use crate::auth::{AuthIdentity, Identity};
@@ -1174,6 +1355,178 @@ mod tests {
         let mut s = "x".repeat(MAX_ACTIVITY_CHARS + 100);
         truncate_chars(&mut s, MAX_ACTIVITY_CHARS);
         assert_eq!(s.chars().count(), MAX_ACTIVITY_CHARS);
+    }
+
+    // -- inject_identity_env (shared by fresh spawn + reactivation) --
+
+    #[test]
+    fn inject_identity_env_sets_root_always_and_supervisor_only_for_subagents() {
+        let root = AgentId::from("root-1".to_owned());
+        let sup = AgentId::from("sup-1".to_owned());
+
+        // Root: supervisor unset, root set to self.
+        let mut env = HashMap::new();
+        inject_identity_env(&mut env, None, &root);
+        assert_eq!(
+            env.get("KALLIP_ROOT_AGENT_ID").map(String::as_str),
+            Some("root-1")
+        );
+        assert!(
+            !env.contains_key("KALLIP_SUPERVISOR_AGENT_ID"),
+            "root must have no supervisor env (absent, not empty)"
+        );
+
+        // Subagent: both set.
+        let mut env = HashMap::new();
+        inject_identity_env(&mut env, Some(&sup), &root);
+        assert_eq!(
+            env.get("KALLIP_ROOT_AGENT_ID").map(String::as_str),
+            Some("root-1")
+        );
+        assert_eq!(
+            env.get("KALLIP_SUPERVISOR_AGENT_ID").map(String::as_str),
+            Some("sup-1")
+        );
+    }
+
+    #[test]
+    fn inject_identity_env_clears_stale_supervisor_on_root() {
+        // A reused env map may carry a stale `KALLIP_SUPERVISOR_AGENT_ID` from a
+        // prior incarnation. The helper advertises "safe on a reused map", so
+        // passing `None` (root) must REMOVE the stale key, not leave it.
+        let root = AgentId::from("root-1".to_owned());
+        let mut env = HashMap::new();
+        env.insert("KALLIP_SUPERVISOR_AGENT_ID".into(), "stale-sup".into());
+        inject_identity_env(&mut env, None, &root);
+        assert!(
+            !env.contains_key("KALLIP_SUPERVISOR_AGENT_ID"),
+            "stale supervisor key must be removed on root, not left dangling: {env:?}"
+        );
+        assert_eq!(
+            env.get("KALLIP_ROOT_AGENT_ID").map(String::as_str),
+            Some("root-1")
+        );
+    }
+
+    #[test]
+    fn resolve_root_agent_returns_registry_root() {
+        // The root is the tagma's single registered root, resolved
+        // independently of any supervisor chain.
+        let root = AgentId::from("root-1".to_owned());
+        assert_eq!(resolve_root_agent(Some(&root)), root);
+    }
+
+    // -- compose_system_prompt (per-agent identity section) --
+
+    /// Minimal config exercising only the fields `compose_system_prompt` reads.
+    fn identity_config(created_by: Option<AgentId>, role: &str, description: &str) -> AgentConfig {
+        AgentConfig {
+            created_by,
+            role: role.into(),
+            description: description.into(),
+            permissions_class: PermissionClass::Normal,
+            // Synthetic base so this test exercises composition mechanics, not
+            // the (separately guarded) content of DEFAULT_SYSTEM_PROMPT.
+            system_prompt: "TEST BASE BODY".into(),
+            ..AgentConfig::default()
+        }
+    }
+
+    #[test]
+    fn compose_system_prompt_root_has_no_unsubstituted_placeholder() {
+        // The `.replace()` chain must consume every `{placeholder}`. A typo'd
+        // name would leave a literal `{...}` in the production prompt; the
+        // compiler can't catch it, so this generic check does.
+        let cfg = identity_config(None, "root", "");
+        let id = AgentId::from("root-1".to_owned());
+        let prompt = compose_system_prompt(&cfg, id.clone(), id.clone());
+        // The id value must actually render — guards against a `.replace` that
+        // silently substitutes an empty/wrong value without leaving braces.
+        assert!(prompt.contains("root-1"), "own id must render: {prompt}");
+        assert!(
+            !prompt.contains('{') && !prompt.contains('}'),
+            "unsubstituted placeholder in root prompt: {prompt}"
+        );
+    }
+
+    #[test]
+    fn compose_system_prompt_subagent_has_no_unsubstituted_placeholder() {
+        // Distinct placeholder set from the root template — exercise both.
+        let cfg = identity_config(
+            Some(AgentId::from("sup-1".to_owned())),
+            "researcher",
+            "gathers sources",
+        );
+        let id = AgentId::from("sub-1".to_owned());
+        let root = AgentId::from("root-1".to_owned());
+        let prompt = compose_system_prompt(&cfg, id.clone(), root.clone());
+        // Values must actually render (not just "no braces left") — guards
+        // against a `.replace` silently substituting empty/wrong values.
+        assert!(prompt.contains("sub-1"), "own id must render: {prompt}");
+        assert!(prompt.contains("root-1"), "root id must render: {prompt}");
+        assert!(
+            !prompt.contains('{') && !prompt.contains('}'),
+            "unsubstituted placeholder in subagent prompt: {prompt}"
+        );
+    }
+
+    #[test]
+    fn compose_system_prompt_user_text_with_braces_is_not_rescanned() {
+        // User-controlled `role`/`description` are substituted LAST; a value
+        // containing a `{...}` fragment must survive as a literal and NOT be
+        // re-scanned by an earlier placeholder's pass. We exercise this by
+        // embedding the `{permission_class}` token (substituted earlier to
+        // `Normal`) in the user text — the literal must appear in the prompt,
+        // proving the role/description slot was not re-scanned.
+        let root_cfg = identity_config(None, "{permission_class}", "");
+        let root_id = AgentId::from("root-1".to_owned());
+        let root_prompt = compose_system_prompt(&root_cfg, root_id.clone(), root_id.clone());
+        // The real permission class renders in its own line...
+        assert!(
+            root_prompt.contains("- permission class:"),
+            "permission-class line must render: {root_prompt}"
+        );
+        // ...and the literal token from the user-controlled role survives
+        // unsubstituted (it was inserted only after the `{permission_class}` pass).
+        assert!(
+            root_prompt.contains("{permission_class}"),
+            "user-text brace fragment must survive as a literal: {root_prompt}"
+        );
+
+        // Same contract for the subagent `description` slot.
+        let sub_cfg = identity_config(
+            Some(AgentId::from("sup-1".to_owned())),
+            "researcher",
+            "desc {permission_class} end",
+        );
+        let sub_prompt =
+            compose_system_prompt(&sub_cfg, AgentId::from("sub-1".to_owned()), root_id.clone());
+        assert!(
+            sub_prompt.contains("desc {permission_class} end"),
+            "user-text brace fragment must survive as a literal: {sub_prompt}"
+        );
+    }
+
+    #[test]
+    fn compose_system_prompt_static_tail_identical_across_variants() {
+        // The static-shared tail (base + meta-skill) is the byte-identical,
+        // cache-friendly suffix across every agent. Verify both variants end
+        // with exactly that tail built from the same config base.
+        let root_cfg = identity_config(None, "root", "");
+        let sub_cfg = identity_config(Some(AgentId::from("sup-1".to_owned())), "researcher", "x");
+        let root_id = AgentId::from("root-1".to_owned());
+        let root_prompt = compose_system_prompt(&root_cfg, root_id.clone(), root_id.clone());
+        let sub_prompt =
+            compose_system_prompt(&sub_cfg, AgentId::from("sub-1".to_owned()), root_id.clone());
+        let tail = format!("{}\n\n{}", root_cfg.system_prompt, meta_skill_content());
+        assert!(
+            root_prompt.ends_with(&tail),
+            "root prompt must end with the shared static tail"
+        );
+        assert!(
+            sub_prompt.ends_with(&tail),
+            "subagent prompt must end with the shared static tail"
+        );
     }
 
     // -- resolve_granted_class (the §2.3 reference-monitor decision, extracted) --

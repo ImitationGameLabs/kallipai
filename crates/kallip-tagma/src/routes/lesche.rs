@@ -1,4 +1,4 @@
-//! `POST /agents/{id}/lesche/messages` — the agent's "speak to the user"
+//! `POST /agents/{id}/lesche/messages` — the root agent's "speak to the user"
 //! primitive.
 //!
 //! The agent invokes `kallip lesche send` (a subcommand of the `kallip` CLI)
@@ -6,6 +6,11 @@
 //! here. The tagma, holding the E2E key in-process, delivers the text as an
 //! `AssistantContent` envelope over the relay. This replaces the former
 //! standalone connector's unix-socket reply path.
+//!
+//! Root-only: the conversation with the user is owned by the single root
+//! agent, so delivering a user-facing message is the root's job. A subagent
+//! that tries is rejected (it must route outward communication through its
+//! supervisor).
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -22,12 +27,15 @@ pub(super) struct LescheMessageRequest {
     pub text: String,
 }
 
-/// Deliver a message to the user. Strictly self-only — only the agent itself
-/// (authenticated by its own per-agent token) may send as that agent. The
-/// operator is deliberately **not** authorized here: a message is something the
-/// end user attributes to the agent, so letting the operator post one would
-/// forge the agent's voice. (An operator announcement, if ever needed, is a
-/// separate route with its own sender identity, not this one.)
+/// Deliver a message to the user. Self-only AND root-only — only the root
+/// agent itself (authenticated by its own per-agent token) may deliver a
+/// user-facing message. The operator is deliberately **not** authorized here: a
+/// message is something the end user attributes to the agent, so letting the
+/// operator post one would forge the agent's voice. (An operator announcement,
+/// if ever needed, is a separate route with its own sender identity, not this
+/// one.) Subagents are rejected too: the conversation with the user is owned by
+/// the root, and a subagent must route outward communication through its
+/// supervisor.
 pub async fn post_message(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
@@ -37,6 +45,18 @@ pub async fn post_message(
     {
         let registry = state.registry.read().await;
         registry.require_self(auth.identity(), &id)?;
+        // Root-only: the relay emits a single agent-free `AssistantContent`
+        // envelope over the tagma conversation, and that conversation is owned
+        // by the root. A subagent has no attributed voice to the user.
+        let is_root = registry
+            .root_agent()
+            .is_some_and(|(root_id, _)| root_id == &id);
+        if !is_root {
+            return Err(ApiError::forbidden(
+                "delivering messages to the user requires the root agent; \
+                 subagents must route outward communication through their supervisor",
+            ));
+        }
     }
     let relay = {
         let slot = state.relay.lock().unwrap_or_else(|e| e.into_inner());
@@ -154,6 +174,42 @@ mod tests {
         )
         .await
         .expect_err("peer agent -> forbidden");
+        assert_eq!(
+            err.status, 403,
+            "expected 403 forbidden, got {}",
+            err.status
+        );
+    }
+
+    /// A subagent may not deliver a user-facing message even when posting as
+    /// itself (self-only passes) — the conversation with the user is owned by
+    /// the root, so a subagent must route outward communication through its
+    /// supervisor.
+    #[tokio::test]
+    async fn message_forbidden_for_subagent() {
+        let state = make_state();
+        let root = AgentId::random();
+        let sub = AgentId::random();
+        {
+            let mut registry = state.registry.write().await;
+            registry.register(
+                root.clone(),
+                RegistryEntry::Live(make_entry(None, "root".into())),
+            );
+            registry.register(
+                sub.clone(),
+                RegistryEntry::Live(make_entry(Some(root), "sub".into())),
+            );
+        }
+
+        let err = post_message(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: sub.clone() }),
+            Path(sub),
+            Json(LescheMessageRequest { text: "hi".into() }),
+        )
+        .await
+        .expect_err("subagent -> forbidden");
         assert_eq!(
             err.status, 403,
             "expected 403 forbidden, got {}",

@@ -250,6 +250,12 @@ async fn restore_one(
         .iter()
         .map(|n| n.agent_id.clone())
         .collect();
+    // The root is the chain's terminal ancestor (or self for a root restore,
+    // where the chain is empty).
+    let root_agent_id = chain_ids
+        .last()
+        .cloned()
+        .unwrap_or_else(|| p.agent_id.clone());
 
     // Resolve the model tier purely by depth (positional tiers — no persisted binding). Warn if
     // the agent's depth exceeds the tier list: it clamps to the lowest-capability tier.
@@ -271,7 +277,12 @@ async fn restore_one(
     // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the agent shell env;
     // only its SHA-256 is indexed for auth lookup.
     let token = MintedToken::generate(AGENT);
-    let env = SpawnArgs::default_env(&p.agent_id, token.secret());
+    let env = SpawnArgs::default_env(
+        &p.agent_id,
+        token.secret(),
+        p.meta.created_by.as_ref(),
+        &root_agent_id,
+    );
 
     let exec_policy = Arc::new(std::sync::RwLock::new(exec_policy));
 
@@ -308,6 +319,7 @@ async fn restore_one(
 
     let (agent, identity) = spawn_agent(SpawnArgs {
         agent_id: p.agent_id.clone(),
+        root_agent_id: root_agent_id.clone(),
         store,
         approvals,
         agent_dir: restored.agent_dir,

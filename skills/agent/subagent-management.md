@@ -95,16 +95,16 @@ lifetime. This means:
 - **Agent A cannot write Agent B's workspace** (bind-mounted read-only).
 - **A supervisor cannot write a subagent's workspace** (the subagent holds the lock).
 - **Nested delegation is allowed**: a child whose workspace is inside the
-  parent's workspace acquires its own lock via the delegation chain.
+  supervisor's workspace acquires its own lock via the delegation chain.
 
 ```text
-Parent workspace:    /project
-├── parent can write /project/*          (holds the lock)
+Supervisor workspace: /project
+├── supervisor can write /project/*              (holds the lock)
 ├── child WS:        /project/sub
-│   ├── child can write /project/sub/*   (child holds nested lock)
-│   └── parent CANNOT write /project/sub/*  (readonly hole in parent's view)
+│   ├── child can write /project/sub/*           (child holds nested lock)
+│   └── supervisor CANNOT write /project/sub/*   (readonly hole in supervisor's view)
 └── sibling WS:      /project/other
-    └── parent CANNOT write /project/other/* (sibling child holds the lock)
+    └── supervisor CANNOT write /project/other/* (sibling child holds the lock)
 ```
 
 If you need to write to a shared directory, use explicit dirlock:
@@ -188,11 +188,16 @@ B=$(kallip subagent spawn --role reviewer-robustness --permission-class guest \
 - **Workspace must exist** before spawn — `mkdir -p` first.
 - **Tagma restart releases all dirlocks** — workspaces may become writable
   again until agents are restored.
-- **Subagent env** has `KALLIP_ID`, `KALLIP_AUTH_TOKEN`, `KALLIP_TAGMA_URL`
-  but NOT `KALLIP_DATA_DIR` — use the agent's known path
+- **Subagent env** has `KALLIP_ID`, `KALLIP_AUTH_TOKEN`, `KALLIP_TAGMA_URL`,
+  `KALLIP_SUPERVISOR_AGENT_ID` (the supervisor), and `KALLIP_ROOT_AGENT_ID`
+  (the root) — but NOT `KALLIP_DATA_DIR`. Use the agent's known path
   (`~/.local/share/kallip/agents/<id>/`) instead.
+  (`KALLIP_SUPERVISOR_AGENT_ID` is absent, not empty, for the root agent.)
 - **`subagent list` only shows direct children** — use the HTTP API
   (`GET /agents?created_by=<id>`) for the same, or check grandchildren via
-  their parent.
-- **Messages carry no sender ID.** Subagent messages arrive as bare text with no indication of which agent sent them. Have subagents prefix their messages with their role or a tag (e.g. `CLARITY_REVIEW: ...`).
+  their supervisor.
+- **Inter-agent messages carry a sender header.** Messages arrive with a
+  `[From: agent <id> (role: <role>, <relation>)]` header automatically
+  attached, so you always know which agent spoke and the hierarchy relation —
+  no need to have subagents role-tag their messages.
 - **Long results should go to files.** `kallip message` is fine for short results. For long output (reviews, analysis, logs), have the subagent write to a file in its workspace and reference the path in the message — the supervisor reads it.

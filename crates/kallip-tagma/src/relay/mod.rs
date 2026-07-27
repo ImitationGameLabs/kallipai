@@ -181,11 +181,11 @@ impl RelayHandle {
     }
 
     /// Abort and reap all in-flight op-dispatch tasks. Only safe on a process-
-    /// tearing-down path: `deliver_message`'s Phase 2 (spawn-agent → install) is
-    /// not abort-safe mid-flight, so aborting a dispatch there can leak spawned
-    /// tasks or leave a disarmed workspace lock. Both `run` shutdown branches
-    /// are process-exit paths, so this is acceptable; a future non-shutdown
-    /// caller must first make `deliver_message` abort-safe.
+    /// tearing-down path: `deliver_message`'s spawn step (spawn-agent → install)
+    /// is not abort-safe mid-flight, so aborting a dispatch there can leak
+    /// spawned tasks or leave a disarmed workspace lock. Both `run` shutdown
+    /// branches are process-exit paths, so this is acceptable; a future
+    /// non-shutdown caller must first make `deliver_message` abort-safe.
     async fn stop_dispatch(&self) {
         let mut set = self.inner.dispatch.lock().await;
         set.abort_all();

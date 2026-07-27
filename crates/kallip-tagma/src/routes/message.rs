@@ -104,15 +104,16 @@ pub async fn deliver_message(
 
     // Slow path: agent is dead, reactivate.
     //
-    // Two-phase approach to avoid holding the write lock during spawn:
-    //   1. Write lock: abort old handles, create fresh channel, install sender
-    //      (pre-send the message so it occupies a slot). Concurrent requests
-    //      now see an open channel and won't fall through to reactivation.
-    //   2. No lock:    spawn new agent using the pre-created channel.
-    //      Then re-acquire write lock to install the full Agent struct.
+    // Split into a reserve step and a spawn step so the write lock is not held
+    // during spawn:
+    //   - Reserve step (write lock): abort old handles, create a fresh channel,
+    //     install the sender, and pre-send the message so it occupies a slot.
+    //     Concurrent requests then see an open channel and won't fall through.
+    //   - Spawn step (no lock): spawn the new agent on the pre-created channel,
+    //     then re-acquire the write lock to install the full Agent struct.
 
-    // Phase 1: Pre-reserve under write lock — install fresh channel + message.
-    let spawn_args = {
+    // Reserve step (under the write lock): install a fresh channel + message.
+    let mut spawn_args = {
         let mut registry = state.registry.write().await;
         let entry = registry
             .get_mut(id)
@@ -142,8 +143,8 @@ pub async fn deliver_message(
         // Release the dead incarnation's directory write-locks before re-spawn,
         // so the new incarnation starts with an empty lock set and any peer it
         // was blocking is freed. The workspace write-lock is re-acquired in
-        // Phase 2 below (mirroring `create_agent`), so the reactivated agent
-        // can write its own workspace once more.
+        // the spawn step below (mirroring `create_agent`), so the reactivated
+        // agent can write its own workspace once more.
         state.lock_manager.release_all(id);
         // Create a fresh channel and install the sender immediately.
         // This "reserves" the reactivation: concurrent requests see an open
@@ -168,6 +169,10 @@ pub async fn deliver_message(
 
         SpawnArgs {
             agent_id: id.clone(),
+            // Placeholder — the supervisor chain (needed to resolve the real
+            // root) is walked after this block, under the registry read-lock.
+            // Correct as-is for a root reactivation (chain empty ⇒ self).
+            root_agent_id: id.clone(),
             store: live.agent.store.clone(),
             approvals: live.agent.approvals.clone(),
             agent_dir: live.identity.agent_dir.clone().unwrap_or_default(),
@@ -188,9 +193,9 @@ pub async fn deliver_message(
         }
     }; // Write lock released. Concurrent requests see open channel.
 
-    // Phase 2: re-acquire the workspace write-lock, then spawn outside the lock.
+    // Spawn step: re-acquire the workspace write-lock, then spawn outside the lock.
     //
-    // The dead incarnation's locks were released in Phase 1; re-acquire the
+    // The dead incarnation's locks were released in the reserve step above; re-acquire the
     // workspace lock (Normal only) so the agent can write its own workspace --
     // mirrors `create_agent` and closes the post-reactivation EACCES gap. On
     // conflict (a peer legitimately grabbed the workspace while this agent was
@@ -198,21 +203,43 @@ pub async fn deliver_message(
     // would silently reproduce the exact EACCES gap this re-acquire exists to
     // close. The sender gets holder/conflict; a retry re-attempts once the peer
     // releases. The guard's `Drop` releases the lock if spawn fails below.
-    let chain_ids: Vec<AgentId> = match spawn_args.config.created_by.as_ref() {
-        Some(sup) => match state.registry.read().await.supervisor_chain_ids(sup) {
-            Ok(ids) => ids,
-            Err(e) => {
-                warn!(
-                    id = %id,
-                    supervisor = %sup,
-                    "supervisor chain broken on reactivation ({e}); \
-                     proceeding with empty carve-out"
-                );
-                Vec::new()
-            }
-        },
-        None => Vec::new(),
+    // Walk the supervisor chain and resolve the root under one registry
+    // read-lock, then drop the guard before the workspace-lock acquire below.
+    // The reactivation path does not call `default_env` (it reuses the dead
+    // incarnation's env map), so the identity env vars are injected via the
+    // shared helper further down.
+    //
+    // The root is resolved authoritatively from the registry's single root,
+    // independent of the supervisor chain: a broken chain (warned, empty
+    // `chain_ids`) degrades only the workspace carve-out below, never the root
+    // identity — so a reactivated subagent never sees its own id as `root`.
+    let (chain_ids, root_agent_id) = {
+        let registry = state.registry.read().await;
+        let chain_ids: Vec<AgentId> = match spawn_args.config.created_by.as_ref() {
+            Some(sup) => match registry.supervisor_chain_ids(sup) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(
+                        id = %id,
+                        supervisor = %sup,
+                        "supervisor chain broken on reactivation ({e}); \
+                         proceeding with empty carve-out"
+                    );
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        let root_agent_id =
+            super::agent::resolve_root_agent(registry.root_agent().map(|(rid, _)| rid));
+        (chain_ids, root_agent_id)
     };
+    spawn_args.root_agent_id = root_agent_id.clone();
+    super::agent::inject_identity_env(
+        &mut spawn_args.env,
+        spawn_args.config.created_by.as_ref(),
+        &root_agent_id,
+    );
     let workspace_lock = match try_acquire_workspace_lock(state, id, &spawn_args.config, &chain_ids)
     {
         Ok(guard) => guard,
@@ -273,7 +300,7 @@ pub async fn deliver_message(
         let live = match entry {
             RegistryEntry::Live(live) => live,
             RegistryEntry::Faulted(_) => {
-                // The entry became faulted between Phase 1 and Phase 2. Abort
+                // The entry became faulted between the reserve and spawn steps. Abort
                 // the fresh spawn and release any locks it acquired (the
                 // workspace lock was disarmed on spawn success, so the manager
                 // is the only cleanup path) -- mirrors the entry-removed arm.
@@ -284,8 +311,8 @@ pub async fn deliver_message(
                 ));
             }
         };
-        // No try_enqueue double-check needed: the sender we installed in
-        // Phase 1 is still there, and the new Agent's prompt_tx is the same
+        // No try_enqueue double-check needed: the sender we installed in the
+        // reserve step is still there, and the new Agent's prompt_tx is the same
         // sender (passed through prompt_channel).
         live.agent = agent;
     }

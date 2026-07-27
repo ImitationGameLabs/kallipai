@@ -9,26 +9,27 @@ Skills are your accumulated experience, distilled into reusable guidance. This s
 
 ## The Index Tree
 
-Skills are organized as a navigable tree. Every category directory has an
-`index.md` that acts as a local guide — what this category covers and how to
-choose within it — and the root `skills/index.md` lists the top-level
-categories. Read the root index for the live category layout; don't rely on a
-memorized snapshot, because the tree grows as skills are added.
+Skills are organized as a navigable tree of directories. There are no
+hand-maintained index files — the index is **generated on demand** by
+`kallip skill index <dir>` from each skill's frontmatter, so the listing is
+always consistent with the files. A category directory carries a `README.md`
+whose frontmatter `description` is what the generated index shows for that
+category.
 
 ## How to Find a Skill
 
 Navigate top-down, never blind-scan:
 
-1. **Read root `index.md`** → identify which category matches your task
-2. **Read `<category>/index.md`** → find the specific skill within that category
-3. **Confirm with `kallip skill meta <category>/<name>`** → check description matches
+1. **`kallip skill index <skills-path>`** → see the top-level categories
+2. **`kallip skill index <skills-path>/<category>`** → see the skills in that category
+3. **Confirm with `kallip skill meta <skills-path>/<category>/<name>`** → check description matches
 4. **Load**: read the skill file, then in the next turn pin it with `context_pin_last` (kind `tool-result`, label: `skill:<name>`)
 
-Each `index.md` answers one question: _"this directory covers what, and how do I pick?"_ Two reads max to locate any skill.
+Each index answers one question: _"this directory covers what, and how do I pick?"_ Two index runs max to locate any skill.
 
-### Index files are transient — don't pin them
+### The root index is pinned; category indexes are transient
 
-`index.md` files are navigation aids. Read them, use them to locate the skill you need, then let them go. They do not belong in pinned context. Only pin the actual skill you'll use across turns.
+The root index (`kallip skill index <skills-path>`) is your always-on map of the library — the bootstrap floor tells you to run it once and pin the output (label `skill:index`) so it persists across turns and you never start a task blind to what skills exist. A category index is different: run it transiently to locate a skill, then let the result go — it does not belong in pinned context. Beyond the root index, only pin the actual skill you'll use across turns.
 
 ## Creating a Skill
 
@@ -68,7 +69,6 @@ Choose a category by asking: _what domain does this belong to?_
 | -------- | ------------------------------------------------------------ |
 | `code/`  | Writing, editing, reviewing code; working with codebases     |
 | `agent/` | Agent self-management (context, skills, subagents, workflow) |
-| `ops/`   | Operations, tooling, infrastructure, external systems        |
 
 Create a new subdirectory only when a category grows beyond ~6-8 skills. Depth limit: **two levels** (`category/skill.md`). Beyond that, navigation cost outweighs organization benefit.
 
@@ -82,7 +82,7 @@ Create a new subdirectory only when a category grows beyond ~6-8 skills. Depth l
 ## Skill Lifecycle
 
 ```text
-discover → read index → load & pin → use → unpin → (optionally) author or propose
+discover → kallip skill index → load & pin → use → unpin → (optionally) author or propose
 ```
 
 ### Authoring and sharing skills
@@ -94,15 +94,15 @@ skill files yourself: a skill you want added to the shared collection must be
 content and explain why it is worth sharing. The root agent reviews and authors
 it.
 
-If you are the root agent, you author shared skills directly. Find the shared
-directory with `kallip skill paths` (the `shared:` line), then write the file
+If you are the root agent, you author shared skills directly. The shared
+directory is the `skills path` in your identity facts; write the file there
 with `bash_exec`. To stay crash-safe, write to a temp file in that directory
 and `mv` it into place rather than redirecting `>` directly — a half-written
 `.md` would otherwise be left on a crash:
 
 ```bash
-# SHARED = the path printed on the `shared:` line of `kallip skill paths`.
-# <category> = the category dir (code/, agent/, ops/, ...); mkdir -p it first
+# SHARED = the `skills path` from your identity facts.
+# <category> = the category dir (code/, agent/, ...); mkdir -p it first
 #              if it does not yet exist.
 mkdir -p "$SHARED/<category>"
 cat > "$SHARED/<category>/my-skill.md.tmp" <<'EOF'
@@ -118,14 +118,9 @@ mv "$SHARED/<category>/my-skill.md.tmp" "$SHARED/<category>/my-skill.md"
 (The `bootstrap` name is reserved for the compiled-in meta-skill and cannot be
 used for a shared file.)
 
-## Updating Indexes
-
-When you create or share a skill:
-
-1. Add an entry to the category's `index.md`
-2. If the category is new, add it to the root `index.md`
-
-An index that doesn't list its skills is worse than no index — it misleads.
+No index update is needed when you add a skill — `kallip skill index` generates
+the listing from each file's frontmatter, so a new skill file (or a new
+category directory with a `README.md`) appears automatically.
 
 ## Skill Evolution
 

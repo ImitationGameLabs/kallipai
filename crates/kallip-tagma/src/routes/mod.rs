@@ -14,7 +14,6 @@ mod message;
 /// the relay's `execute_op`.
 pub(crate) use message::deliver_message;
 mod lesche;
-mod skill;
 
 use axum::Router;
 use kallip_common::protocol::{ListAgentsResponse, ListApprovalsQuery, MessageRequest};
@@ -102,13 +101,5 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/approvals/{id}",
             axum::routing::get(approval::get_approval).post(approval::respond_approval),
-        )
-        .route(
-            "/agents/{id}/skills/paths",
-            axum::routing::get(skill::skill_paths),
-        )
-        .route(
-            "/agents/{id}/skills/{name}/meta",
-            axum::routing::get(skill::skill_meta),
         )
 }

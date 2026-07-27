@@ -93,18 +93,6 @@ prevents superiors from using subordinates as proxies to run a command their own
 policy would gate. The operator identity is exempt. **Deny** decisions have no
 gate.
 
-### Skills
-
-| Endpoint                              | Operator | Any agent | Self |
-| ------------------------------------- | -------- | --------- | ---- |
-| `GET /agents/{id}/skills/paths`       | Yes      | Yes       | —    |
-| `GET /agents/{id}/skills/{name}/meta` | Yes      | Yes       | —    |
-
-Skill endpoints are read-only discovery, open to any authenticated identity.
-The shared skill directory is written only by the root agent (via its
-`bash_exec` landlock carve); other agents cannot write skill files and must
-propose changes in conversation instead.
-
 ## Agora / lesche service-to-service boundary
 
 The cloud relay is split into two services: the **agora** (control plane:

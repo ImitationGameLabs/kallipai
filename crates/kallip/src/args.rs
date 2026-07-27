@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 use kallip_common::agentid::AgentId;
 
@@ -210,19 +212,28 @@ pub struct ExecSetArgs {
 
 #[derive(Subcommand)]
 pub enum SkillCommand {
-    /// Show the shared skill directory path
-    Paths(SkillPathsArgs),
+    /// Generate the skill index for a directory from each file's frontmatter
+    ///
+    /// Reads the directory at `path` directly and prints a markdown index of
+    /// its entries: each `.md` skill (from its frontmatter) and each
+    /// subdirectory (from its `README.md` frontmatter). The agent passes the
+    /// `skills path` from its identity facts, then pins this output.
+    Index(SkillIndexArgs),
     /// Show metadata for a specific skill
     Meta(SkillMetaArgs),
 }
 
 #[derive(Args)]
-pub struct SkillPathsArgs;
+pub struct SkillIndexArgs {
+    /// Absolute path of the skill directory to index.
+    pub path: PathBuf,
+}
 
 #[derive(Args)]
 pub struct SkillMetaArgs {
-    /// Skill name (supports nested paths like code/refactoring).
-    pub name: String,
+    /// Path to the skill — the stem (`<skills>/agent/kallip`) or the full
+    /// `<skills>/agent/kallip.md`. Read directly from the filesystem.
+    pub path: PathBuf,
 }
 
 // ---------------------------------------------------------------------------

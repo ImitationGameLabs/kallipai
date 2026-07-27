@@ -19,5 +19,5 @@ pub use approval::{
 };
 pub use budget::{DEFAULT_TOKEN_BUDGET, TokenBudgetResponse, TokenBudgetUpdateRequest};
 pub use error::ApiError;
-pub use skill::{SkillMeta, SkillPathsResponse};
+pub use skill::{SkillMeta, parse_frontmatter, parse_frontmatter_description};
 pub use sse::{FailoverChainExhaustion, SseEvent};

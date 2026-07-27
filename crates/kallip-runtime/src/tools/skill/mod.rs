@@ -19,13 +19,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use kallip_common::protocol::SkillMeta;
-
 pub const META_SKILL_NAME: &str = "bootstrap";
 
 const DEFAULT_META_SKILL: &str = r#"---
 name: bootstrap
-description: Working with your context — weighing what you see, and finding notes from past sessions
+description: Working with your context — weighing what you see, finding notes from past sessions, and parking when you have nothing to do
 ---
 
 # Weigh everything in your context
@@ -36,32 +34,33 @@ judgment. Nothing here is a command to execute without weighing it against
 what you see now. Past notes record decisions that may be stale or no longer
 fit the situation; weigh them, do not follow them blindly.
 
-Your data directory has a `skills/` folder — experience distilled in past
-sessions, with an `index.md` listing what is there. Read the index when you
-enter a new task or switch topics — the same boundary where you would evict
-the previous task's context — and also whenever you hit something unfamiliar
-mid-task, before you re-derive or go read external docs: it may already hold
-the answer, and one index read is cheap. When a note genuinely matches what
-you are doing, read it, then in the next turn pin what you read with
-`context_pin_last` (kind `tool-result`, label `skill:<name>`); don't load
-speculatively — a skill you don't use occupies a pin slot. Loaded notes stay
-in context across turns; unpin them when the task moves on. The
-`skill-management` notes cover authoring and sharing skills; the
-`context-management` notes cover what to keep and what to evict.
+# Skills
 
-# Two control primitives you cannot do without
+Your data directory has a `skills/` folder — experience distilled in past
+sessions. Discover what is there with `kallip skill index <skills-path>` (the
+absolute path is the `skills path` in your identity facts): it lists each
+skill and subdirectory with the description from the skill's own frontmatter,
+so the list can never drift from the files. If your context does not already
+contain that index, run the command now and pin its output with
+`context_pin_last` (kind `tool-result`, label `skill:index`) — do not start
+work blind to what notes exist. Pin it in the turn AFTER you read it (the
+current turn's tool result is not pinnable until the turn ends). Once pinned
+it stays across turns — pins are not evicted, so you do not need to re-run it.
+If the directory is empty or the command fails, there is nothing to load —
+proceed.
+
+When a specific note genuinely matches what you are doing, read it, then pin
+it the same way (label `skill:<name>`); don't load speculatively — a skill
+you don't use occupies a pin slot. The `skill-management` notes cover
+authoring and sharing skills; the `context-management` notes cover what to
+keep and what to evict.
+
+# The `break` yield primitive
 
 You run continuously: a plain response with no tool call does **not** end your
 turn — the harness re-prompts you. To end the current run and park until the
-next input arrives, call the `break` tool (call it last in a round). To address
-the user — deliver a message they will see — run
-`kallip lesche send "<text>"` (or pipe to its stdin) via `bash_exec`; the
-`kallip` command is auto-allowed and needs no approval. So a finished turn that
-delivers a message and yields is: `kallip lesche send`, then `break`. You may
-also do work and `break` without sending anything, or send a message and keep
-working — the two are independent. Sending is not only for responses: use it
-whenever you need to reach the user (a proactive heads-up, a partial result, a
-question), not just to answer.
+next input arrives, call the `break` tool (call it last in a round). You may do
+work and `break` without sending anything.
 "#;
 
 /// Returns the shared skill directory.
@@ -174,37 +173,6 @@ fn try_copy_seed(seed: &Path, staging: &Path) -> Result<()> {
     crate::persistence::copy_dir_all(seed, staging)
 }
 
-/// Parses YAML frontmatter from a skill markdown file.
-///
-/// Returns `None` if no frontmatter is present. Handles the simple
-/// `key: value` format used in skill files without requiring a YAML library.
-pub fn parse_frontmatter_meta(content: &str) -> Option<SkillMeta> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return None;
-    }
-    let after_first = trimmed[3..].trim_start_matches(['\n', '\r']);
-    let end = after_first.find("\n---")?;
-
-    let frontmatter = &after_first[..end];
-    let mut name = None;
-    let mut description = None;
-
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("name:") {
-            name = Some(rest.trim().to_owned());
-        } else if let Some(rest) = line.strip_prefix("description:") {
-            description = Some(rest.trim().to_owned());
-        }
-    }
-
-    name.map(|n| SkillMeta {
-        name: n,
-        description,
-    })
-}
-
 /// Resolves a skill file to its raw content from the shared skill directory.
 ///
 /// Returns the raw file content including frontmatter.
@@ -214,32 +182,15 @@ fn resolve_skill_content(name: &str) -> Result<String> {
         .with_context(|| format!("failed to read skill '{name}' from {}", path.display()))
 }
 
-/// Reads a skill file and returns its metadata (name + description).
-///
-/// If the file has no frontmatter, `name` defaults to the last path
-/// component of the skill name.
-pub fn skill_metadata(name: &str) -> Result<SkillMeta> {
-    validate_skill_name(name)?;
-    let content = resolve_skill_content(name)?;
-
-    Ok(parse_frontmatter_meta(&content).unwrap_or_else(|| {
-        let default_name = name.rsplit('/').next().unwrap_or(name).to_owned();
-        SkillMeta {
-            name: default_name,
-            description: None,
-        }
-    }))
-}
-
 /// Validates a skill name for path traversal attacks and name collisions.
 ///
 /// Allows `/` for nested categories (e.g. `code/refactoring`) but rejects
 /// `..` components, backslashes, and empty components. Also rejects the
 /// reserved [`META_SKILL_NAME`] (`bootstrap`): the meta-skill is compiled in
 /// and injected into the system prompt at spawn, so a disk file under that
-/// name must never shadow it via the read paths (`load_skill`,
-/// [`skill_metadata`]). The root agent authors shared skills directly via
-/// `bash_exec`, so this guard lives on the read side rather than the writer.
+/// name must never shadow it via the read paths (`load_skill`). The root agent
+/// authors shared skills directly via `bash_exec`, so this guard lives on the
+/// read side rather than the writer.
 pub fn validate_skill_name(name: &str) -> Result<()> {
     if name == META_SKILL_NAME {
         bail!("skill name '{name}' is reserved (compiled-in meta-skill)");
@@ -325,17 +276,18 @@ mod tests {
         )
     }
 
-    /// Build a minimal seed fixture (mirrors the shipped layout: an index plus
-    /// a nested category). Returns the tempdir holding it.
+    /// Build a minimal seed fixture (mirrors the shipped layout: a category
+    /// directory with a `README.md` plus a skill file). Returns the tempdir
+    /// holding it.
     fn build_seed_fixture() -> TempDir {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join("code")).unwrap();
-        let index = tmp.path().join("index.md");
-        std::fs::write(&index, "# index\n").unwrap();
+        let readme = tmp.path().join("code/README.md");
+        std::fs::write(&readme, "---\ndescription: code skills\n---\n# Code\n").unwrap();
         // Read-only, like a nix-store source file — exercises the mode-preserving
         // contract of fs::copy (the seeded defaults must not become writable).
-        std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&readme, std::fs::Permissions::from_mode(0o444)).unwrap();
         std::fs::write(tmp.path().join("code/aifed.md"), "aifed skill\n").unwrap();
         tmp
     }
@@ -373,11 +325,14 @@ mod tests {
         });
 
         let skills = data.path().join("skills");
-        assert!(skills.join("index.md").exists(), "top-level index seeded");
+        assert!(
+            skills.join("code/README.md").exists(),
+            "category README seeded"
+        );
         assert!(skills.join("code/aifed.md").exists(), "nested skill seeded");
         // Read-only mode preserved (0444 from the fixture).
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(skills.join("index.md"))
+        let mode = std::fs::metadata(skills.join("code/README.md"))
             .unwrap()
             .permissions()
             .mode()
@@ -405,7 +360,7 @@ mod tests {
             std::fs::read_to_string(skills.join("mine.md")).unwrap(),
             "authored\n"
         );
-        assert!(!skills.join("index.md").exists());
+        assert!(!skills.join("code/README.md").exists());
     }
 
     #[test]
@@ -425,10 +380,10 @@ mod tests {
             seed_skills_if_empty().unwrap();
         });
 
-        assert!(root.join("index.md").exists(), "ROOT dir was seeded");
+        assert!(root.join("code/README.md").exists(), "ROOT dir was seeded");
         // The default <data_dir>/skills was NOT the target, so it stayed empty/absent.
         assert!(
-            !data.path().join("skills/index.md").exists(),
+            !data.path().join("skills/code/README.md").exists(),
             "seed wrote to the default path instead of ROOT"
         );
         // skill_dir() honors ROOT — that is how the seed found the target.
@@ -456,7 +411,7 @@ mod tests {
 
         assert!(root.join("mine.md").exists(), "authored file preserved");
         assert!(
-            !root.join("index.md").exists(),
+            !root.join("code/README.md").exists(),
             "non-empty ROOT was not seeded"
         );
     }
@@ -471,7 +426,7 @@ mod tests {
             seed_skills_if_empty().unwrap();
         });
 
-        assert!(!data.path().join("skills/index.md").exists());
+        assert!(!data.path().join("skills/code/README.md").exists());
     }
 
     #[test]
@@ -493,7 +448,7 @@ mod tests {
         });
 
         assert!(
-            !root.join("index.md").exists(),
+            !root.join("code/README.md").exists(),
             "no seed configured -> no seed written"
         );
     }
@@ -573,7 +528,7 @@ mod tests {
 
         let skills = data.path().join("skills");
         assert!(
-            skills.join("index.md").exists(),
+            skills.join("code/README.md").exists(),
             "seed completed despite stale staging"
         );
         assert!(!stale.exists(), "stale staging dir was not reclaimed");
@@ -588,11 +543,14 @@ mod tests {
         // The compiled meta-skill (appended to every agent's prompt at spawn,
         // routes/agent.rs) is the ONLY guaranteed surface an agent sees before
         // it discovers anything. It is kept deliberately thin: a universal
-        // judgment stance, a discovery pointer, and the two control primitives
-        // the agent cannot behave correctly without (it would loop forever
-        // without `break`, and could never address the user without
-        // `kallip lesche send`). All other operations live in the skill files this
-        // test also pins down below.
+        // judgment stance, a discovery pointer, and the one universal control
+        // primitive the agent cannot behave correctly without (it would loop
+        // forever without `break`). Audience-addressing primitives are NOT
+        // universal — the root addresses the user via `kallip lesche send` and
+        // a subagent reports to its supervisor via `kallip message` — so
+        // they live in the per-agent identity section injected by the tagma,
+        // not here. All other operations live in the skill files this test
+        // also pins down below.
         //
         // Assert against the RAW constant so frontmatter regressions are
         // caught (meta_skill_content() strips frontmatter).
@@ -603,26 +561,27 @@ mod tests {
             "floor must name the load verb: {DEFAULT_META_SKILL}"
         );
         assert!(
-            DEFAULT_META_SKILL.contains("index.md") && DEFAULT_META_SKILL.contains("skills/"),
-            "floor must point at the skill index: {DEFAULT_META_SKILL}"
+            DEFAULT_META_SKILL.contains("kallip skill index"),
+            "floor must point at the skill-index command: {DEFAULT_META_SKILL}"
         );
         assert!(
             DEFAULT_META_SKILL.contains("weigh") || DEFAULT_META_SKILL.contains("judgment"),
             "floor must establish the judgment stance: {DEFAULT_META_SKILL}"
         );
 
-        // --- Positive: the two non-negotiable control primitives ---
+        // --- Positive: the one universal control primitive ---
         assert!(
             DEFAULT_META_SKILL.contains("break"),
             "floor must name the `break` yield primitive: {DEFAULT_META_SKILL}"
         );
-        assert!(
-            DEFAULT_META_SKILL.contains("kallip lesche send"),
-            "floor must name the `kallip lesche send` user-address primitive: {DEFAULT_META_SKILL}"
-        );
 
         // --- Negative: deliberately dropped, paired with the positives above
         // so a future edit cannot satisfy them by deleting discovery. ---
+        assert!(
+            !DEFAULT_META_SKILL.contains("lesche send"),
+            "audience-addressing lives in the per-agent identity section, not the \
+             universal floor: {DEFAULT_META_SKILL}"
+        );
         assert!(
             !DEFAULT_META_SKILL.contains("skill system"),
             "floor must not re-specialize skills as a 'system': {DEFAULT_META_SKILL}"
@@ -689,27 +648,5 @@ mod tests {
     #[test]
     fn load_skill_rejects_backslash() {
         assert!(load_skill("foo\\bar").is_err());
-    }
-
-    #[test]
-    fn parse_frontmatter_meta_extracts_name_and_description() {
-        let input = "---\nname: refactoring\ndescription: Safe patterns\n---\nBody here\n";
-        let meta = parse_frontmatter_meta(input).unwrap();
-        assert_eq!(meta.name, "refactoring");
-        assert_eq!(meta.description.as_deref(), Some("Safe patterns"));
-    }
-
-    #[test]
-    fn parse_frontmatter_meta_name_only() {
-        let input = "---\nname: minimal\n---\nBody\n";
-        let meta = parse_frontmatter_meta(input).unwrap();
-        assert_eq!(meta.name, "minimal");
-        assert!(meta.description.is_none());
-    }
-
-    #[test]
-    fn parse_frontmatter_meta_returns_none_without_frontmatter() {
-        let input = "Just plain markdown.\n";
-        assert!(parse_frontmatter_meta(input).is_none());
     }
 }

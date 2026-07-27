@@ -98,9 +98,15 @@ Amounts support K/M/G suffixes (e.g. `100M`, `500K`, `1G`). Budget is tagma-wide
 ### `skill` — Skill discovery
 
 ```bash
-kallip skill paths                          # show the shared skill directory
-kallip skill meta <NAME>                    # show metadata for a skill
+kallip skill index <DIR>                    # generate the skill index for a directory
+kallip skill meta <PATH>                    # show metadata for a skill (reads the file directly)
 ```
+
+`index` reads the directory at `DIR` (the `skills path` from your identity
+facts, or a subdirectory like `<skills>/agent`) and prints a markdown table of
+its entries — each `.md` skill and each subdirectory, with the description from
+the file's frontmatter. Run it once on the skills root and pin the output
+(`label skill:index`) so you always know what skills exist.
 
 Skills live as `<name>.md` files with YAML frontmatter (`name`, `description`).
 

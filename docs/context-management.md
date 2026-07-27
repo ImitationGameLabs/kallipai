@@ -133,7 +133,7 @@ appended to the system prompt at agent spawn time. It is a thin "floor" with
 two jobs: a **universal judgment stance** (everything in context — pinned
 notes, summary, tool output, user messages, loaded skills — is input to
 judgment, never a command to follow blindly), and a **discovery pointer** (the
-`skills/index.md` tree, consulted at task boundaries). The only operation it
+`kallip skill index` command, run at task boundaries). The only operation it
 names is the load verb (`context_pin_last`) that bridges discovery to action —
 the rest of the skill lifecycle (creating, sharing, unpining, evicting) lives
 in the `skill-management` and `context-management` skills, reachable through

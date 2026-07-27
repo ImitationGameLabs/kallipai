@@ -48,8 +48,6 @@ the full authorization matrix, see [auth.md](auth.md).
 | `GET`    | `/approvals`                      | List approvals                             | any (filtered by scope)      |
 | `GET`    | `/approvals/{id}`                 | Get a single approval                      | operator / superior          |
 | `POST`   | `/approvals/{id}`                 | Approve or deny an approval                | operator / superior          |
-| `GET`    | `/agents/{id}/skills/paths`       | Get the shared skill directory path        | any                          |
-| `GET`    | `/agents/{id}/skills/{name}/meta` | Get skill metadata                         | any                          |
 
 ## Agent Management
 
@@ -647,61 +645,6 @@ Status: `200 OK`
 > the approve is rejected with 403. This prevents a superior from using
 > subordinates as proxies to run a command its own policy would gate. The
 > operator identity is exempt. Deny decisions have no gate.
-
-## Skills
-
-### `GET /agents/{id}/skills/paths` — Skill directory path
-
-Returns the shared skill directory path.
-
-Auth: any authenticated identity. See [auth.md](auth.md).
-
-**Response**
-
-```json
-{
-  "shared": "/path/to/shared/skills"
-}
-```
-
-Status: `200 OK`
-
-| Code | Condition       |
-| ---- | --------------- |
-| 404  | Agent not found |
-
-### `GET /agents/{id}/skills/{name}/meta` — Skill metadata
-
-Returns metadata parsed from the skill's YAML frontmatter.
-
-Auth: any authenticated identity. See [auth.md](auth.md).
-
-**Path parameters**
-
-| Parameter | Type      | Description                                                  |
-| --------- | --------- | ------------------------------------------------------------ |
-| `id`      | `AgentId` | Agent UUID                                                   |
-| `name`    | `string`  | Skill path relative to skills root (e.g. `code/refactoring`) |
-
-**Response**
-
-```json
-{
-  "name": "string — display label from frontmatter",
-  "description": "string | null"
-}
-```
-
-Status: `200 OK`
-
-| Code | Condition                           |
-| ---- | ----------------------------------- |
-| 400  | Invalid skill name                  |
-| 404  | Agent not found, or skill not found |
-
-> **Note:** `name` in the response is the display label from YAML frontmatter,
-> not the canonical skill path identifier. The skill's unique identity is its
-> path relative to the skills root (e.g. `code/refactoring`).
 
 ## SSE Event Types
 

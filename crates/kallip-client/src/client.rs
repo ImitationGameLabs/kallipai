@@ -24,8 +24,8 @@ use crate::types::{ListApprovalsParams, MessageRequest};
 use crate::{
     AgentPermissionsResponse, AgentStatusResponse, AgentSummary, ApprovalDecisionBody,
     ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ExecPolicy, ListAgentsResponse,
-    ListApprovalsResponse, SkillMeta, SkillPathsResponse, TokenBudgetResponse,
-    TokenBudgetUpdateRequest, UpdateActivityRequest, UpdateAgentMetadataRequest,
+    ListApprovalsResponse, TokenBudgetResponse, TokenBudgetUpdateRequest, UpdateActivityRequest,
+    UpdateAgentMetadataRequest,
 };
 
 struct Inner {
@@ -528,44 +528,6 @@ impl TagmaClient {
             )
             .await?;
         Ok(resp.holder)
-    }
-
-    // -- Skills ---------------------------------------------------------------
-
-    /// Get the shared skill directory path for an agent.
-    pub async fn skill_paths(&self, id: &AgentId) -> Result<SkillPathsResponse> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/skills/paths"))),
-            )
-            .send()
-            .await
-            .context("failed to get skill paths")?,
-            "failed to parse skill paths response",
-        )
-        .await
-    }
-
-    /// Get skill metadata (name + description) for a specific skill.
-    ///
-    /// The skill name is URL-encoded so that nested paths like
-    /// `code/refactoring` survive as a single path segment.
-    pub async fn skill_meta(&self, id: &AgentId, name: &str) -> Result<SkillMeta> {
-        let encoded = name.replace('/', "%2F");
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/skills/{encoded}/meta"))),
-            )
-            .send()
-            .await
-            .context("failed to get skill meta")?,
-            "failed to parse skill meta response",
-        )
-        .await
     }
 
     // -----------------------------------------------------------------------
