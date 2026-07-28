@@ -40,11 +40,58 @@ allows `http://localhost:5173`. The web app reads the two origins from
 `VITE_AGORA_URL` (default `http://localhost:7100`) and `VITE_LESCHE_URL` (default
 `http://localhost:7200`); set both in `.env` to the subdomain form
 (`http://agora.localhost:7100` / `http://lesche.localhost:7200`) if you prefer
-host-separated origins (the `Domain=localhost` cookie is shared either way). Open
-the web app at `:5173`, sign up, and mint a `sk-enroll-...` enrollment code.
-Paste it into `.env` as `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` (and set
+host-separated origins (the `Domain=localhost` cookie is shared either way).
+
+#### Register a test user (first bring-up only)
+
+Signup is invite-gated, so a fresh database needs an invite code before anyone
+can register. The `pgdata` volume persists across `arion down` / `up`, so this
+sub-flow runs **once per volume** -- check before doing it:
+
+```sh
+KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test kallip-admin --agora-url http://localhost:7100 users list
+```
+
+If `users list` already shows a row, a test account exists -- skip to minting
+the enrollment code below. If the table is empty (fresh volume, or after a
+`down -v` reset), mint an invite code and register:
+
+```sh
+KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test kallip-admin --agora-url http://localhost:7100 invite-codes new
+# -> sk-invite-...   (plaintext returned once; the server stores only its hash)
+```
+
+Open the web app at `:5173` and sign up using that `sk-invite-...` code. Once
+signed in, mint a `sk-enroll-...` enrollment code in the web UI and paste it
+into `.env` as `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` (and set
 `KALLIP_TAGMA_RELAY_AGORA_URL` / `KALLIP_TAGMA_RELAY_LESCHE_URL` to the dev subdomains), and
 set `KALLIP_AUTH_TOKEN` to the tagma's operator token.
+
+##### The admin token
+
+`kallip-admin` authenticates with the agora's admin token. The clean path is to
+pin it **before** first boot so the same known value works on every run: make
+sure `.env` contains
+
+```text
+KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test
+```
+
+then run `arion up -d`. The agora loads it via `env_file` and `kallip-admin`
+always authenticates with `sk-admin-test` -- no log scraping.
+
+If the agora is **already running** without this pinned (e.g. an older stack
+booted before you set it), its token was generated randomly at startup and
+cannot be changed short of recreating the container. Either `arion up -d` to
+recreate it with the pinned value, or fall back to grepping the current token
+out of **agora's** logs (not tagma's):
+
+```sh
+TOK=$(arion logs agora 2>&1 | grep -oP 'sk-admin-[A-Za-z0-9_-]+' | tail -1)
+KALLIP_AGORA_ADMIN_TOKEN="$TOK" kallip-admin --agora-url http://localhost:7100 ...
+```
+
+`sk-admin-test` is a dev-only fixture; prod must set a strong secret.
 
 ### Phase 2 -- tagma side
 
@@ -95,3 +142,24 @@ KALLIP_ARION_MODE=test arion up
 ```
 
 See [container.md](reference/container.md) for which suites run.
+
+## Reset (clean slate)
+
+When the backend changes in a way that invalidates existing data (a schema
+reset, an incompatible wire format, or you simply want to start over), tear down
+**including volumes** and re-run bring-up from Phase 1. `down -v` wipes `pgdata`
+plus the tagma `data` / `workspace` volumes, so the test user, the enrollment
+code, and all tagma state are gone -- the invite-code sub-flow is needed again:
+
+```sh
+COMPOSE_PROFILES=tagma arion down -v   # stop everything AND delete volumes
+arion up -d                            # agora side (Phase 1)
+# ...mint invite code, register, mint enrollment code, fill .env...
+COMPOSE_PROFILES=tagma arion up -d     # tagma side (Phase 2)
+```
+
+`COMPOSE_PROFILES=tagma` is set on the `down` too so the tagma container is
+included in the teardown. Volume removal is scoped to the project as a whole,
+so `down -v` wipes every named volume regardless of which profile is active --
+to keep tagma state, back up or bind-mount the volumes (see "Optional bind
+overrides") instead of relying on `down -v`.
