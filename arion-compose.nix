@@ -59,8 +59,8 @@ let
 
   # Bind overrides: unset -> docker named volume; set to a host path ->
   # bind-mount:
-  #   - data: keep tagma state on a known disk;
-  #   - workspace: make the agent's files host-visible;
+  #   - tagma_data: keep tagma state on a known disk;
+  #   - tagma_workspace: make the agent's files host-visible;
   #   - skills: curate shared skills on the host.
   dataBind = bindOverride "KALLIP_ARION_DATA_PATH" "/var/lib/kallip";
   workspaceBind = bindOverride "KALLIP_ARION_WORKSPACE_PATH" "/workspace";
@@ -69,8 +69,8 @@ let
   # from this bind-mount target, so leave it unset when using skillsBind.
   skillsBind = bindOverride "KALLIP_ARION_SKILLS_PATH" "/var/lib/kallip/skills";
 
-  dataVolume = if dataBind != null then dataBind else "data:/var/lib/kallip";
-  workspaceVolume = if workspaceBind != null then workspaceBind else "workspace:/workspace";
+  dataVolume = if dataBind != null then dataBind else "tagma_data:/var/lib/kallip";
+  workspaceVolume = if workspaceBind != null then workspaceBind else "tagma_workspace:/workspace";
 
   # Load via git+file URL (not a bare path) so getFlake applies fetchGit's VCS
   # filtering and the resolved packages match `nix build .#*` bit-for-bit.
@@ -183,15 +183,18 @@ let
       project.name = "kallipai-dev";
 
       # Named volumes must be declared at the compose top level (compose rejects
-      # a reference to an undeclared named volume):
-      #   - pgdata: always a named volume;
-      #   - data + workspace: declared only when their override env var is unset
-      #     (otherwise that mount is a bind mount and no named volume is referenced).
+      # a reference to an undeclared named volume). The `kallipai-dev` project
+      # name prefixes every volume, so the internal names only carry the
+      # meaningful suffix (`tagma_data`, `tagma_workspace`, `agora_pgdata`):
+      #   - agora_pgdata: always a named volume;
+      #   - tagma_data + tagma_workspace: declared only when their override env
+      #     var is unset (otherwise that mount is a bind mount and no named
+      #     volume is referenced).
       docker-compose.volumes = {
-        pgdata = { };
+        agora_pgdata = { };
       }
-      // lib.optionalAttrs (dataBind == null) { data = { }; }
-      // lib.optionalAttrs (workspaceBind == null) { workspace = { }; };
+      // lib.optionalAttrs (dataBind == null) { tagma_data = { }; }
+      // lib.optionalAttrs (workspaceBind == null) { tagma_workspace = { }; };
 
       # Dev tagma. The landlock/seccomp shell sandbox needs SYS_ADMIN +
       # seccomp=unconfined (out.service is the escape hatch for security_opt).
@@ -214,7 +217,7 @@ let
           workspaceVolume
         ]
         # skills has no named volume of its own: unset -> skills live inside
-        # the `data` volume's skills/ subdir; set -> a bind overlays it.
+        # the `tagma_data` volume's skills/ subdir; set -> a bind overlays it.
         ++ lib.optional (skillsBind != null) skillsBind;
         service.env_file = [ ".env" ];
         image.enableRecommendedContents = true;
@@ -255,7 +258,7 @@ let
       # postgres lives in nix/prod-composes/agora.nix and reads creds from .env.)
       services.postgres = {
         service.image = "postgres:17.5";
-        service.volumes = [ "pgdata:/var/lib/postgresql/data" ];
+        service.volumes = [ "agora_pgdata:/var/lib/postgresql/data" ];
         # dev-only hardcoded credentials. (environment wins over env_file, so
         # these MUST stay dev-only -- prod reads them from .env.)
         service.environment = {
