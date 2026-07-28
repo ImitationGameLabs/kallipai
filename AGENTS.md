@@ -28,6 +28,14 @@ The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem 
 │       ├── kallip-agora-client/ # Agora relay HTTP client (enroll + admin surface)
 │       ├── kallip-lesche-client/ # Lesche data-plane relay HTTP client
 │       └── kallip-admin/        # Headless agora admin CLI (sk-admin HTTP client)
+├── packages/                  # JS/TS workspace (Deno-first; see below)
+│   ├── kallip-common/         # Transport-agnostic shared types + SSE parser
+│   ├── kallip-client/         # Direct tagma HTTP+SSE client (offline path)
+│   ├── kallip-agora-client/   # Agora control-plane + WebAuthn client
+│   ├── kallip-lesche-client/  # Lesche data-plane client (online E2EE path)
+│   ├── kallip-ui/             # Shared SvelteKit UI library
+│   ├── kallip-web/            # SvelteKit web app
+│   └── kallip-app/            # Tauri (Android) app shell
 ├── docs/                      # Project documentation
 │   ├── architecture.md       # System architecture, tagma design, policy
 │   ├── context-management.md # Agentic context management design
@@ -47,7 +55,7 @@ The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem 
 
 ## Frontend development
 
-When working on anything under `packages/` (the JS/TS workspace: `kallip-web`, `kallip-ui`, `kallip-app`, `kallip-client`, `kallip-common`, `kallip-agora-client`), read [frontend-development.md](docs/frontend-development.md) first. It defines the Deno-first toolchain: every action (dev, build, check, fmt, lint, installing deps) goes through `deno task`. Do not drop down to `npm`/`npx`/`pnpm`/`yarn` or hand-invoke `node_modules/.bin/*`; if a workflow is missing, add a `scripts` entry and call it via `deno task`.
+When working on anything under `packages/`, read [frontend-development.md](docs/frontend-development.md) first. It defines the Deno-first toolchain: every action (dev, build, check, fmt, lint, installing deps) goes through `deno task`. Do not drop down to `npm`/`npx`/`pnpm`/`yarn` or hand-invoke `node_modules/.bin/*`; if a workflow is missing, add a `scripts` entry and call it via `deno task`.
 
 ## Common Tasks
 

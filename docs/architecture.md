@@ -69,9 +69,11 @@ user messages. See [container.md](reference/container.md) for the deployment
 topology and `KALLIP_TAGMA_RELAY_*` in [env.md](reference/env.md) for the
 knobs. Unset = pure-local (the lesche message route returns 503).
 
-The connector persists the **wire transcript** of that conversation to a
-SQLite store (`<KALLIP_DATA_DIR>/relay/chat_history.sqlite`), both directions
-in arrival order. This is the source of truth a reconnecting or
+The connector persists the **authored transcript** of that conversation to a
+SQLite store (`<KALLIP_DATA_DIR>/relay/chat_history.sqlite`) — authored messages
+only, in arrival order. Runtime signals (busy/idle, turn terminals, errors) are
+deliberately not persisted: they are ephemeral operator metadata, logged for
+observability but never replayed. This is the source of truth a reconnecting or
 freshly-paired device pulls via `TagmaControl::History` (cursor-based:
 `after` for incremental catch-up, `before` for scroll-up, or the recent
 window for a first-time device), so the user sees what they missed while
@@ -82,10 +84,29 @@ host; E2EE protects transit, not the endpoint). Retention is bounded by a TTL
 `KALLIP_TAGMA_RELAY_HISTORY_*`. The tagma hosts exactly one conversation
 today (the id is derived from the tagma id).
 
-The app keeps a per-device IndexedDB cache of already-rendered lines
+The app keeps a per-device IndexedDB cache of already-rendered authored lines
 (`kallip-relay` DB) so a refresh restores the conversation instantly and only
 asks the tagma for an incremental delta. It is a disposable derived mirror
 (re-pulled on demand), also plaintext, cleared on logout.
+
+## External chat-room API (authored vs signal)
+
+The tagma exposes two event surfaces (see [tagma-api.md](reference/tagma-api.md)).
+The **internal** stream carries the full rich event vocabulary for the TUI/CLI.
+The **external chat-room API** is the frontend's conversation surface. The tagma
+projects each internal event into two channels with different destinations:
+
+- **Authored** — conversation content (a complete assistant message). It crosses
+  the E2EE envelope on the relayed path and is persisted in `chat_history`
+  (replayable on reconnect).
+- **Signal** — runtime/operator metadata (busy/idle presence, turn terminals,
+  errors). It crosses a plaintext channel, is ephemeral (never persisted, never
+  replayed), and is application-logged for observability. busy/idle live here,
+  not in the encrypted envelope, so the envelope stays content-only.
+
+The direct (offline) path serves the same external vocabulary with no relay and
+no E2EE. Streaming deltas, tool events, retry/failover telemetry, and approvals
+stay internal-only — they never reach the frontend.
 
 ## Request flow
 
@@ -97,8 +118,10 @@ asks the tagma for an incremental delta. It is a disposable derived mirror
    `mpsc` channel.
 6. Bridge task receives `AgentEvent`s, converts them to `SseEvent`s, and
    broadcasts via a `broadcast` channel.
-7. Client, subscribed to `GET /agents/{id}/events`, receives the streamed SSE
-   events.
+7. A client subscribed to the internal event stream receives the full rich
+   vocabulary (TUI, `kallip`, `kallip-run`). A frontend client subscribes to the
+   external chat-room stream instead, where the tagma splits each event into the
+   authored + signal channels above (and persists the authored half).
 
 ## Agent loop
 

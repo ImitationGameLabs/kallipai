@@ -1,9 +1,17 @@
 # Frontend package development
 
-This guide covers the JS/TS workspace packages under `packages/` (`kallip-web`,
-`kallip-ui`, `kallip-app`, `kallip-client`, `kallip-common`, `kallip-agora-client`).
-They share a single toolchain, **Deno**, laid out as an npm-style workspace but
-never driven by npm. The Rust crates under `crates/` are unrelated (cargo).
+This guide covers the JS/TS workspace packages under `packages/` (`kallip-common`,
+`kallip-client`, `kallip-agora-client`, `kallip-lesche-client`, `kallip-ui`,
+`kallip-web`, `kallip-app`). They share a single toolchain, **Deno**, laid out as
+an npm-style workspace but never driven by npm. The Rust crates under `crates/`
+are unrelated (cargo).
+
+The frontend reaches the tagma over two transports behind one `Transport` seam
+(in `kallip-ui/src/lib/session/`): `DirectTransport` for the offline path
+(consuming `/agents/{id}/external/events` via `kallip-client`) and a
+`RelayChannel` from `kallip-lesche-client` for the online E2EE path. Both reduce
+through the shared `kallip-ui/src/lib/transcript.ts` reducer
+(`applyTagmaReply` / `applySignal`).
 
 The short version: **everything goes through `deno task`. Never drop down to
 `npm` / `npx` / `pnpm` / `yarn`, and never hand-invoke `node_modules/.bin/*`.**

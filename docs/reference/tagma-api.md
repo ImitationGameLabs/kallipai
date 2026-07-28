@@ -1,10 +1,16 @@
 # Tagma HTTP API
 
 The tagma (`kallip-tagma`) exposes an HTTP API at `KALLIP_TAGMA_ADDR`
-(default `127.0.0.1:3000`). Clients — the agent CLI (`kallip`), the runner (`kallip-run`), TUI,
-or the client library — connect over HTTP to manage agents, stream events,
-and handle
-approvals.
+(default `127.0.0.1:3000`). Two event surfaces sit side by side:
+
+- The **internal event stream** (`GET /agents/{id}/events`) carries the full
+  rich `SseEvent` vocabulary (streaming deltas, tool events, retry/failover
+  telemetry) and is consumed by the agent CLI (`kallip`), the runner
+  (`kallip-run`), and the TUI.
+- The **external chat-room API** (`GET /agents/{id}/external/events`) is the
+  frontend's sole window onto a conversation: a single multiplexed SSE carrying
+  authored messages, runtime signals, and status snapshots (see
+  [External chat-room API](#external-chat-room-api)).
 
 All endpoints require authentication. For token types, role definitions, and
 the full authorization matrix, see [auth.md](auth.md).
@@ -37,8 +43,10 @@ the full authorization matrix, see [auth.md](auth.md).
 | `GET`    | `/agents/root`                    | Fetch the tagma-managed root agent         | any                          |
 | `DELETE` | `/agents/{id}`                    | Stop and remove an agent (never the root)  | operator / superior          |
 | `POST`   | `/agents/{id}/interrupt`          | Interrupt current agent operation          | operator / superior          |
-| `POST`   | `/agents/{id}/message`            | Send a message                             | any (peer-to-peer)           |
-| `GET`    | `/agents/{id}/events`             | Subscribe to agent events (SSE)            | any                          |
+| `POST`   | `/agents/{id}/message`            | Send a user message (inbound)              | any (peer-to-peer)           |
+| `POST`   | `/agents/{id}/lesche/messages`    | Deliver an agent-authored message (root)   | self (root agent)            |
+| `GET`    | `/agents/{id}/events`             | Internal event stream (SSE, rich vocab)    | any                          |
+| `GET`    | `/agents/{id}/external/events`    | External chat-room stream (SSE, frontend)  | any                          |
 | `GET`    | `/agents/{id}/status`             | Get context usage and retry history        | any                          |
 | `GET`    | `/agents/{id}/permissions`        | Get permission profile and classify preset | any                          |
 | `PUT`    | `/agents/{id}/metadata`           | Update role / description                  | direct supervisor / operator |
@@ -64,7 +72,7 @@ root.
 
 Auth: operator or direct supervisor. See [auth.md](auth.md).
 
-**Request body**
+#### Request body
 
 ```json
 {
@@ -113,7 +121,7 @@ above its tier. The granted class is observable on
 > **Token budget:** All agents share a single tagma-wide token budget
 > (default: 100M tokens). Use `POST /budget` to adjust at runtime.
 
-**Response**
+#### Response
 
 ```json
 {
@@ -162,13 +170,13 @@ restricts the result to a superior's direct subagents.
 
 Auth: any authenticated identity. Response contains no secrets. See [auth.md](auth.md).
 
-**Query params**
+#### Query params
 
 | Param        | Description                                                                                                                                                                                   |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `created_by` | `AgentId` — only list the direct subagents of this superior. Omit to list all. Any string is accepted (AgentId is not UUID-validated); a value that matches no superior yields an empty list. |
 
-**Response**
+#### Response
 
 ```json
 {
@@ -240,7 +248,7 @@ callers can gauge expected latency.
 Auth: any authenticated identity. Inter-agent communication is peer-to-peer;
 no supervisor relationship is required. See [auth.md](auth.md).
 
-**Request body**
+#### Request body
 
 ```json
 {
@@ -248,7 +256,7 @@ no supervisor relationship is required. See [auth.md](auth.md).
 }
 ```
 
-**Response**
+#### Response
 
 ```json
 {
@@ -280,15 +288,20 @@ Status: `202 Accepted`
 > tagma returns `503` instead of accepting the message. Callers should wait
 > and retry.
 
-### `GET /agents/{id}/events` — Subscribe to event stream
+### `GET /agents/{id}/events` — Internal event stream
 
-Opens an SSE connection to receive real-time agent events. See
-[SSE Event Types](#sse-event-types) for the event format.
+Opens an SSE connection to receive the full, rich agent event vocabulary
+(streaming deltas, tool calls/results, retry/failover telemetry, approvals).
+This is the surface the TUI, `kallip`, and `kallip-run` consume; the browser
+frontend uses the [external chat-room stream](#external-chat-room-api) instead.
+See [SSE Event Types](#sse-event-types) for the event format.
 
 Auth: any authenticated identity. See [auth.md](auth.md).
 
-**Response**: Server-Sent Events stream (`Content-Type: text/event-stream`).
-Each event is a JSON object with a `type` field. Keep-alive is enabled.
+#### Response
+
+Server-Sent Events stream (`Content-Type: text/event-stream`). Each event is a
+JSON object with a `type` field. Keep-alive is enabled.
 
 Status: `200 OK`
 
@@ -299,6 +312,64 @@ Status: `200 OK`
 > **Lagged messages:** If the client reads too slowly, lagged messages are
 > silently skipped. For high-volume monitoring, consume events promptly.
 
+## External chat-room API
+
+The external chat-room API is the frontend's conversation surface. The tagma's
+internal rich vocabulary is projected (`project_external`) into two channels,
+each with a different destination and persistence policy:
+
+- **Authored messages** (`AuthoredEvent`) are conversation content. They cross
+  the E2EE envelope on the relayed (online) path and are persisted in
+  `chat_history`, so a reconnect replays them. Today the only variant is
+  `assistant_content` (a complete assistant message — there is no streaming on
+  this surface).
+- **Runtime signals** (`SignalEvent`) are operator metadata (busy/idle
+  presence, turn terminals, errors). They cross a plaintext channel, are
+  ephemeral (never persisted, never replayed), and are written to the tagma's
+  application log (`tracing`) for observability.
+
+### `GET /agents/{id}/external/events` — External chat-room stream
+
+A single multiplexed SSE carrying the conversation to a frontend client.
+Root-only: the direct conversation is the root agent's, so a non-root id is
+rejected. The stream discriminates frames by the SSE `event:` field name (not a
+JSON `type` field); each frame's `data:` is the JSON payload:
+
+| `event:` name | `data:` payload | Meaning                                                     |
+| ------------- | --------------- | ----------------------------------------------------------- |
+| `authored`    | `TagmaReply`    | An authored message (ack / op error / replayed user row / `assistant_content`). |
+| `signal`      | `SignalEvent`   | A runtime signal (busy/idle/interrupted/cancelled/terminals/error). |
+| `status`      | `TagmaStatusPayload` | An aggregate runtime snapshot (root state, subagent counts, token budget). Ephemeral. |
+
+The `TagmaReply` shape mirrors the relay's envelope payload (`kind`-tagged,
+snake_case): `event` (authored `assistant_content`), `user_message` (a replayed
+inbound row), `message_accepted` (an ack), `error`, `interrupted`, and
+`history_batch_end`. The relayed path carries the same payload inside the E2EE
+envelope; the direct (offline) path serves it plaintext with no relay and no
+E2EE. Status snapshots are pushed on a fixed cadence; the transcript is driven
+by signals (busy/idle), not by these snapshots.
+
+Auth: any authenticated identity. See [auth.md](auth.md). Status: `200 OK` (`404`
+on a non-root id, `503` if direct serving is not initialized).
+
+### `POST /agents/{id}/lesche/messages` — Deliver an agent-authored message
+
+The root agent's "speak to the user" primitive. The agent invokes the
+`kallip lesche send` CLI through `bash_exec`; the tagma synthesizes an
+`assistant_content` message, persists it to `chat_history`, and fans it out as
+an `authored` frame on the external stream (or, on the relayed path, as an
+encrypted envelope). Self-only and root-only: only the root agent may deliver a
+user-facing message (an operator announcement is a separate concern).
+
+#### Request body
+
+```json
+{ "text": "string — the message to deliver" }
+```
+
+Status: `200 OK` (`{ "ok": true }`); `403` (operator or non-root agent);
+`429` (burst cap); `502` (delivery failure); `503` (no serving path).
+
 ## Context & Policy
 
 ### `GET /agents/{id}/status` — Agent status
@@ -308,7 +379,7 @@ history.
 
 Auth: any authenticated identity. See [auth.md](auth.md).
 
-**Response**
+#### Response
 
 ```json
 {
@@ -367,7 +438,7 @@ effect.
 
 Auth: any authenticated identity. See [auth.md](auth.md).
 
-**Response**
+#### Response
 
 ```json
 {
@@ -405,7 +476,7 @@ must be provided.
 Auth: **direct supervisor** or operator (a grandparent may not relabel a
 grandchild). See [auth.md](auth.md).
 
-**Request body**
+#### Request body
 
 ```json
 {
@@ -414,7 +485,9 @@ grandchild). See [auth.md](auth.md).
 }
 ```
 
-**Response** — the updated [`AgentSummary`](#get-agents--list-agents):
+#### Response
+
+The updated [`AgentSummary`](#get-agents--list-agents):
 
 ```json
 {
@@ -453,7 +526,7 @@ clears it (the bridge also auto-clears on terminal events). Truncated to 256 cha
 
 Auth: **the agent itself** or operator (`require_self_or_operator`). See [auth.md](auth.md).
 
-**Request body**
+#### Request body
 
 ```json
 {
@@ -484,7 +557,7 @@ Returns the tagma-wide token budget, cumulative consumption, and remaining token
 
 Auth: any authenticated identity. See [auth.md](auth.md).
 
-**Response**
+#### Response
 
 ```json
 {
@@ -503,7 +576,7 @@ must be provided. The change affects all agents immediately.
 
 Auth: operator only. See [auth.md](auth.md).
 
-**Request body (set remaining)**
+#### Request body (set remaining)
 
 ```json
 {
@@ -514,7 +587,7 @@ Auth: operator only. See [auth.md](auth.md).
 The tagma computes `new_total = consumed + set_remaining`. Use `set_remaining: 0`
 to pause all agents (remaining = 0 triggers immediate budget exceeded).
 
-**Request body (delta adjustment)**
+#### Request body (delta adjustment)
 
 ```json
 {
@@ -525,7 +598,7 @@ to pause all agents (remaining = 0 triggers immediate budget exceeded).
 Adjusts the total budget by a signed delta. Positive increases, negative
 decreases. The new budget must remain above tokens already consumed.
 
-**Response**
+#### Response
 
 ```json
 {
@@ -548,6 +621,12 @@ Status: `200 OK`
 
 ## Approvals
 
+> These endpoints and the `approvalUpdated` event are part of the **internal**
+> event surface. The external chat-room API does not carry approvals and the
+> browser frontend does not render them; these are consumed by the TUI and
+> admin/automation clients over the internal event stream
+> (`GET /agents/{id}/events`).
+
 ### `GET /approvals` — List approvals
 
 Lists approval entries across all agents where the caller is a superior. Results
@@ -556,7 +635,7 @@ can be filtered and paginated.
 Auth: any authenticated identity. Results are filtered — each caller only sees
 approvals for agents where they are a superior. See [auth.md](auth.md).
 
-**Query parameters**
+#### Query parameters
 
 | Parameter      | Type      | Default | Description                                                                  |
 | -------------- | --------- | ------- | ---------------------------------------------------------------------------- |
@@ -566,7 +645,7 @@ approvals for agents where they are a superior. See [auth.md](auth.md).
 | `status`       | `string`  | —       | Filter by status: `committed`, `approved`, `denied`, `redeemed`, `cancelled` |
 | `order`        | `string`  | `desc`  | Sort order by `created_at`: `asc` or `desc`                                  |
 
-**Response**
+#### Response
 
 ```json
 {
@@ -603,7 +682,9 @@ Returns a single approval entry by ID.
 
 Auth: operator or superior of the owning agent. See [auth.md](auth.md).
 
-**Response**: same as a single `ApprovalEntry` object from the list response.
+#### Response
+
+Same as a single `ApprovalEntry` object from the list response.
 
 Status: `200 OK`
 
@@ -620,7 +701,7 @@ can redeem the stored tool action on its next round.
 Auth: operator or superior. An additional policy gate applies for approve
 decisions — see note below.
 
-**Request body**
+#### Request body
 
 ```json
 {
@@ -648,9 +729,16 @@ Status: `200 OK`
 
 ## SSE Event Types
 
-The event stream (`GET /agents/{id}/events`) delivers JSON objects via
-Server-Sent Events. Each SSE `data` field contains a JSON object with a `type`
-field that identifies the event variant.
+These are the **internal** event stream's variants (`GET /agents/{id}/events`),
+consumed by the TUI, `kallip`, and `kallip-run`. The
+[external chat-room stream](#external-chat-room-api) is a separate surface that
+does not use this vocabulary -- it discriminates frames by the SSE `event:`
+field (`authored` / `signal` / `status`) and carries only complete authored
+messages + runtime signals.
+
+The internal event stream delivers JSON objects via Server-Sent Events. Each SSE
+`data` field contains a JSON object with a `type` field that identifies the
+event variant.
 
 Example SSE frame:
 

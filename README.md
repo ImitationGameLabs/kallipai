@@ -82,8 +82,8 @@ The flow:
 1. The tool call is **deferred** — stored in a queue with an approval ID.
 2. A deferred result is returned to the LLM immediately, so the agent can
    continue working on other things.
-3. An `ApprovalUpdated` SSE event is emitted, visible to any client
-   (TUI, CLI, or a supervisor agent).
+3. An `ApprovalUpdated` event is emitted on the tagma's **internal** event
+   stream, visible to the TUI, CLI, or a supervisor agent.
 4. The client approves or denies the request via the tagma's approval API
    (`GET /approvals`, `POST /approvals/{id}`).
 5. On the next agent round, the approval notification is injected into context.
