@@ -1,7 +1,7 @@
 // Derive the nav link list from the app mode. The two modes are mutually
 // exclusive front-door choices (see lib/config/mode.ts):
 //   - online  -> Tagmata, plus one entry per open tagma channel (online chat);
-//   - offline -> Chat + Approvals (no tagmata; no identity).
+//   - offline -> Chat (the single local conversation at /chat/local).
 // Settings is intentionally NOT a nav link: it lives in the AccountMenu
 // dropdown (footer) alongside the other account/system actions.
 // Icons are injected by the caller so this package does not depend on an icon
@@ -12,7 +12,6 @@ import type { NavIndicator, NavItem } from "../shell.ts";
 
 export interface NavIcons {
   chat: Component;
-  approvals: Component;
   tagmata: Component;
 }
 
@@ -32,10 +31,7 @@ export function navFor(args: {
 }): NavItem[] {
   const { mode, icons, channels } = args;
   if (mode === "offline") {
-    return [
-      { href: "/", label: "Chat", icon: icons.chat },
-      { href: "/approvals", label: "Approvals", icon: icons.approvals },
-    ];
+    return [{ href: "/chat/local", label: "Chat", icon: icons.chat }];
   }
   const links: NavItem[] = [
     { href: "/tagmata", label: "Tagmata", icon: icons.tagmata },

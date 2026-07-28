@@ -286,7 +286,7 @@ Deno.test(
 
     const event = (id: number): TagmaReply => ({
       kind: "event",
-      event: { type: "status", message: `m${id}` },
+      event: { type: "assistant_content", content: `m${id}` },
       history_id: id,
     });
     respond(event(1));
@@ -297,13 +297,13 @@ Deno.test(
     const a = (await iter.next()).value as TagmaReply;
     const b = (await iter.next()).value as TagmaReply;
     const c = (await iter.next()).value as TagmaReply;
-    assertEquals((a as { event: { message: string } }).event.message, "m1");
+    assertEquals((a as { event: { content: string } }).event.content, "m1");
     assertEquals(
-      (b as { event: { message: string } }).event.message,
+      (b as { event: { content: string } }).event.content,
       "m1",
       "the channel yields the duplicate; the store dedups",
     );
-    assertEquals((c as { event: { message: string } }).event.message, "m2");
+    assertEquals((c as { event: { content: string } }).event.content, "m2");
     channel.close();
   },
 );

@@ -3,7 +3,6 @@
   import { ArrowRightLeft, LogOut, Settings, User } from "@lucide/svelte";
   import { agoraSession } from "../lib/session/agora.svelte";
   import { channelsStore } from "../lib/session/channels.svelte";
-  import { sessionStore } from "../lib/session/session.svelte";
   import { configStore } from "../lib/config/config.svelte";
   import { connectDirect } from "../lib/session/connect.ts";
   import { navigate } from "../lib/shell/port.ts";
@@ -19,7 +18,12 @@
   // mode, so `user` can hold a stale MeResponse while offline (see the invariant
   // on `agoraSession.user`). Offline UI must never act on it.
   const mode = $derived(modeOf(configStore.value));
-  const connection = $derived(connectionViewModel(sessionStore));
+  const connection = $derived(
+    connectionViewModel({
+      connected: channelsStore.localConnected,
+      connecting: false,
+    }),
+  );
 
   // Online: end the agora session (destroys the cookie -- distinct from
   // switching, which keeps it). Drop open channels here; the realtime SSE that
@@ -37,38 +41,45 @@
   // offline creds stay on disk for the switch back. Non-destructive, so no
   // confirm. The gate owns post-switch routing.
   async function switchToOnline() {
-    sessionStore.detach();
+    channelsStore.detachLocal();
     await configStore.setActiveMode("online");
     void agoraSession.whoami();
   }
 
   // Online -> offline: if offline creds are already saved, reconnect to the
   // tagma directly (re-auth-free); otherwise send the user to /connect for
-  // first-time setup. Drop open channels: offline mode does not render /chat, so
-  // their SSE subscriber would keep running (against the still-valid cookie) and
-  // update transcripts nobody sees. The race guard re-checks activeMode before
-  // attach: if the user flipped back to online while the connect was in flight,
-  // close the stray session instead of attaching it (avoids a held tagma
-  // transport).
+  // first-time setup. Drop open channels: offline mode does not render online
+  // chats, so their SSE subscriber would keep running (against the still-valid
+  // cookie) and update transcripts nobody sees. The race guard re-checks
+  // activeMode before attachLocal: if the user flipped back to online while the
+  // connect was in flight, close the stray transport instead of attaching it
+  // (avoids a held tagma transport).
   async function switchToOffline() {
-    channelsStore.reset();
+    // Mode switch: tear down transports but PRESERVE the IndexedDB cache so the
+    // offline path rehydrates from the same rows the online path wrote.
+    channelsStore.tearDownAll();
     const offline = configStore.value?.offline;
     if (!offline) {
       await navigate("/connect");
       return;
     }
     await configStore.setActiveMode("offline");
-    let session;
+    let connection;
     try {
-      session = await connectDirect(offline);
+      connection = await connectDirect(offline);
     } catch (e) {
-      sessionStore.error = e;
+      channelsStore.localError = e;
       return;
     }
     if (configStore.value?.activeMode === "offline") {
-      await sessionStore.attach(session);
+      await channelsStore.attachLocal(
+        connection.transport,
+        connection.conversationId,
+      );
     } else {
-      session.close().catch(() => {});
+      // Mode flipped before attach landed: tear down the transport we opened.
+      // close() is synchronous (it only aborts the SSE fetch).
+      connection.transport.close();
     }
   }
 

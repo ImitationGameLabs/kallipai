@@ -5,6 +5,20 @@
 // lesche forwards `Envelope.ciphertext` and the byte fields below without
 // interpreting them; every base64 string is STANDARD base64 (padded, +//),
 // matching agora-common's bytes.rs.
+//
+// The chat wire types (`AuthoredEvent`, `SignalEvent`, `TagmaReply`,
+// `FailoverChainExhausted`) live in `@kallipai/kallip-common` and are
+// re-exported here, because the direct (offline) client shares them — the
+// external chat-room vocabulary is transport-agnostic.
+
+// Re-export the shared chat vocabulary (one source of truth in kallip-common).
+export type {
+  AuthoredEvent,
+  FailoverChainExhausted,
+  SignalEvent,
+  TagmaReply,
+} from "@kallipai/kallip-common";
+import type { SignalEvent } from "@kallipai/kallip-common";
 
 /** `POST /v1/conversations { tagma_id }` -- resolves the single conversation a
  * tagma owns with its operator (idempotent; id derived from the tagma). */
@@ -56,90 +70,6 @@ export type TagmaControl = {
   readonly limit: number;
 };
 
-/** Why a failover chain ran out. Mirrors `event.rs::FailoverChainExhaustion`
- * (serde `rename_all = "camelCase"`). */
-export type FailoverChainExhaustion =
-  | "noFailoverConfigured"
-  | "allBackupsExhausted"
-  | "allCandidatesUnbuildable"
-  | "allCandidatesInfeasible";
-
-/** An event the tagma emits to the app (the agent-free subset of the tagma's
- * event stream, mapped by the tagma relay). serde tag = `type`, snake_case. There is
- * no streaming on this path: `assistant_content` is a complete message, and
- * `idle` is a content-less status transition. */
-export type TagmaEvent =
-  | { readonly type: "assistant_content"; readonly content: string }
-  | { readonly type: "idle" }
-  | { readonly type: "busy" }
-  | { readonly type: "status"; readonly message: string }
-  | { readonly type: "error"; readonly message: string }
-  | { readonly type: "interrupted" }
-  | { readonly type: "cancelled" }
-  | {
-      readonly type: "token_budget_exceeded";
-      readonly consumed: number;
-      readonly budget: number;
-    }
-  | { readonly type: "max_rounds_exceeded" }
-  | {
-      readonly type: "failover_chain_exhausted";
-      readonly reason: FailoverChainExhaustion;
-      readonly detail: string;
-    };
-
-/** Responder -> app: either the result of a correlated op, or an unsolicited
- * event from the tagma's event pump. serde tag = `kind`, snake_case. */
-export type TagmaReply =
-  | {
-      readonly kind: "message_accepted";
-      readonly req_id: number;
-      readonly queue_depth: number;
-      readonly warning?: string;
-      /** `chat_history.id` of the **inbound** row the tagma appended for this
-       * user message; the app stamps its optimistic local user line with this id
-       * so it can be deduped against a later history replay. `0` (or absent)
-       * means no row was recorded and must not be used for dedup. The ack itself
-       * is never stored or replayed. */
-      readonly history_id?: number;
-      /** RFC 3339 send time of the inbound row. Absent on acks with no durable
-       * row and on payloads serialized before the field existed. */
-      readonly created_at?: string;
-    }
-  | { readonly kind: "interrupted"; readonly req_id: number }
-  | {
-      readonly kind: "error";
-      readonly req_id: number;
-      readonly status: number;
-      readonly message: string;
-    }
-  | {
-      readonly kind: "event";
-      readonly event: TagmaEvent;
-      /** `chat_history.id` of the outbound row the tagma appended for this event;
-       * a stable id the app uses to order/dedup frames across batch replay and
-       * live delivery. `0` (or absent) means the row was not recorded and must
-       * not be used for dedup. */
-      readonly history_id?: number;
-      /** RFC 3339 send time of the outbound row. Absent on frames with no
-       * durable row and on payloads serialized before the field existed. */
-      readonly created_at?: string;
-    }
-  | {
-      readonly kind: "user_message";
-      readonly history_id: number;
-      readonly text: string;
-      /** RFC 3339 send time of the original inbound row. Absent on payloads
-       * serialized before the field existed. */
-      readonly created_at?: string;
-    }
-  | {
-      readonly kind: "history_batch_end";
-      readonly req_id: number;
-      readonly count: number;
-      readonly more: boolean;
-    };
-
 /** App -> tagma (relayed by the lesche): start a 1-RTT key exchange, carrying
  * the app's ephemeral X25519 public key (standard base64). */
 export interface KeyExchangeInit {
@@ -157,7 +87,9 @@ export interface KeyExchangeResponse {
  * tag = `type`, snake_case. `envelope` carries E2EE conversation content;
  * `tagma_online` / `tagma_offline` are the plaintext presence pair; `tagma_status`
  * is the tagma's periodic aggregate runtime snapshot (agent counts + token
- * budget), plaintext and user-scoped like presence. */
+ * budget); `tagma_signal` carries per-event runtime signals (busy/idle presence,
+ * turn terminals, errors). All non-envelope variants are plaintext and
+ * user-scoped like presence — operator metadata, not conversation content. */
 export type LescheEvent =
   | { readonly type: "envelope"; readonly envelope: Envelope }
   | { readonly type: "tagma_online"; readonly tagma_id: string }
@@ -170,6 +102,11 @@ export type LescheEvent =
       readonly subagents_active: number;
       readonly token_budget: number;
       readonly token_consumed: number;
+    }
+  | {
+      readonly type: "tagma_signal";
+      readonly tagma_id: string;
+      readonly event: SignalEvent;
     };
 
 /**

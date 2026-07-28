@@ -10,11 +10,11 @@
 //     `null` = resolved logged-out, object = signed in. `authError` is set when
 //     whoami failed with a non-auth error (e.g. agora unreachable). Online routes
 //     are /tagmata + /settings (chat is not available until the agora chat
-//     data-plane ships, so / and /approvals redirect to /tagmata).
+//     data-plane ships, so / redirects to /tagmata).
 //
-//   - "offline" -- no auth, no identity. `connected` reflects the tagma
-//     session. Offline routes are / (chat), /approvals, /settings. /tagmata is
-//     unavailable and redirects to /.
+//   - "offline" -- no auth, no identity. `connected` reflects the local tagma
+//     transport. Offline routes are /chat/local (chat) + /settings. /tagmata
+//     is unavailable and redirects to /chat/local; `/` redirects to /chat/local.
 //
 // Public (front-door) routes are /login, /register (online) and /connect
 // (offline). The gate owns all post-mode-flip / post-connect navigation: pages
@@ -63,8 +63,9 @@ export function appGateDecision(args: {
 
   if (pub) {
     if (args.mode === "offline") {
-      // Already set up -> straight to chat (one redirect, not via /connect).
-      if (args.connected) return { kind: "redirect", url: "/" };
+      // Already set up -> straight to the local chat (one redirect, not via
+      // /connect).
+      if (args.connected) return { kind: "redirect", url: "/chat/local" };
       // Not connected: the form is the right place.
       if (args.pathname === "/connect") return { kind: "render" };
       // /login,/register are the wrong door for an offline user.
@@ -85,13 +86,27 @@ export function appGateDecision(args: {
 
   // Protected routes.
   if (args.mode === "offline") {
-    if (args.pathname === "/tagmata") return { kind: "redirect", url: "/" };
-    // /, /approvals, /settings: pages own their disconnected empty state.
+    // /tagmata is unavailable offline; `/` is the old offline root. Both go to
+    // the local chat. A non-local /chat/{id} deep link is meaningless offline
+    // (no relay conversations exist) -- collapse it to /chat/local too.
+    if (
+      args.pathname === "/tagmata" ||
+      args.pathname === "/" ||
+      args.pathname === "/chat/local"
+    ) {
+      return args.pathname === "/chat/local"
+        ? { kind: "render" }
+        : { kind: "redirect", url: "/chat/local" };
+    }
+    if (args.pathname.startsWith("/chat/")) {
+      return { kind: "redirect", url: "/chat/local" };
+    }
+    // /settings: page owns its disconnected empty state.
     return { kind: "render" };
   }
 
   // online protected
-  if (args.pathname === "/" || args.pathname === "/approvals") {
+  if (args.pathname === "/") {
     return { kind: "redirect", url: "/tagmata" };
   }
   if (args.user === null) {

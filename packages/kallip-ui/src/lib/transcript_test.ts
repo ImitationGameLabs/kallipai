@@ -1,20 +1,28 @@
-// Tests for the online transcript reducer: each TagmaReply / TagmaEvent variant
-// maps to the expected lines + status, assistant content is append-only (no
-// streaming merge), and `idle` is a content-less status transition.
+// Tests for the conversation transcript reducer. Authored content (assistant
+// messages) arrives via applyTagmaReply; runtime signals (busy/idle, terminals,
+// errors) arrives via applySignal. Each variant maps to the expected lines +
+// status; assistant content is append-only (no streaming merge); busy/idle are
+// content-less status transitions.
 
 import { assert, assertEquals } from "@std/assert";
 import {
+  applySignal,
   applyTagmaReply,
   cacheLineOf,
-  type ChannelTranscript,
+  type ConversationTranscript,
   EMPTY_TRANSCRIPT,
+  markLineSent,
   replaceLineId,
   withUserLine,
 } from "./transcript.ts";
-import type { TagmaReply } from "@kallipai/kallip-lesche-client";
+import type { SignalEvent, TagmaReply } from "@kallipai/kallip-lesche-client";
 
-function reply(r: TagmaReply, lineId = 1): ChannelTranscript {
+function reply(r: TagmaReply, lineId = 1): ConversationTranscript {
   return applyTagmaReply(EMPTY_TRANSCRIPT, r, lineId);
+}
+
+function signal(s: SignalEvent, lineId = 1): ConversationTranscript {
+  return applySignal(EMPTY_TRANSCRIPT, s, lineId);
 }
 
 Deno.test(
@@ -68,17 +76,12 @@ Deno.test("TagmaReply error sets status error + a system line", () => {
 });
 
 Deno.test(
-  "busy -> assistant_content -> idle: append-only, idle at yield",
+  "busy (signal) -> assistant_content (reply) -> idle (signal): append-only",
   () => {
-    let t = applyTagmaReply(
-      EMPTY_TRANSCRIPT,
-      {
-        kind: "event",
-        event: { type: "busy" },
-      },
-      1,
-    );
+    // busy arrives via the signal channel, not the envelope.
+    let t = applySignal(EMPTY_TRANSCRIPT, { type: "busy" }, 1);
     assertEquals(t.status, "busy");
+    // assistant_content arrives via the envelope (authored).
     t = applyTagmaReply(
       t,
       {
@@ -97,8 +100,8 @@ Deno.test(
         createdAt: "2026-07-26T12:00:00Z",
       },
     ]);
-    t = applyTagmaReply(t, { kind: "event", event: { type: "idle" } }, 3);
-    // idle is content-less: just transition, no duplicate line.
+    // idle arrives via the signal channel.
+    t = applySignal(t, { type: "idle" }, 3);
     assertEquals(t.status, "idle");
     assertEquals(t.lines, [
       {
@@ -112,7 +115,7 @@ Deno.test(
 );
 
 Deno.test(
-  "multiple assistant_content lines append distinctly, then idle",
+  "multiple assistant_content lines append distinctly, then idle (signal)",
   () => {
     let t = applyTagmaReply(
       EMPTY_TRANSCRIPT,
@@ -132,7 +135,7 @@ Deno.test(
       },
       2,
     );
-    t = applyTagmaReply(t, { kind: "event", event: { type: "idle" } }, 3);
+    t = applySignal(t, { type: "idle" }, 3);
     assertEquals(t.status, "idle");
     assertEquals(
       t.lines.map((l) => l.text),
@@ -141,58 +144,41 @@ Deno.test(
   },
 );
 
-Deno.test("status / interrupted / cancelled produce system lines", () => {
-  assertEquals(
-    reply({
-      kind: "event",
-      event: { type: "status", message: "thinking" },
-      history_id: 1,
-    }).lines,
-    [{ historyId: 1, role: "system", text: "thinking", createdAt: undefined }],
-  );
-  const intr = reply(
-    {
-      kind: "event",
-      event: { type: "interrupted" },
-      history_id: 2,
-    },
-    2,
-  );
+Deno.test("interrupted / cancelled signals produce system lines + idle", () => {
+  const intr = signal({ type: "interrupted" }, 2);
   assertEquals(intr.status, "idle");
   assertEquals(intr.lines.length, 1);
   assertEquals(intr.lines[0]!.role, "system");
-  assertEquals(
-    reply({ kind: "event", event: { type: "cancelled" } }).status,
-    "idle",
-  );
+  assertEquals(signal({ type: "cancelled" }).status, "idle");
 });
 
 Deno.test(
-  "token_budget_exceeded / max_rounds / failover set error + system",
+  "token_budget_exceeded / max_rounds / failover signals set error + system",
   () => {
-    const tb = reply({
-      kind: "event",
-      event: { type: "token_budget_exceeded", consumed: 9000, budget: 8000 },
-      history_id: 1,
+    const tb = signal({
+      type: "token_budget_exceeded",
+      consumed: 9000,
+      budget: 8000,
     });
     assertEquals(tb.status, "error");
     assertEquals(tb.lines[0]!.role, "system");
-    assertEquals(
-      reply({ kind: "event", event: { type: "max_rounds_exceeded" } }).status,
-      "error",
-    );
-    const fo = reply({
-      kind: "event",
-      event: {
-        type: "failover_chain_exhausted",
-        reason: "noFailoverConfigured",
-        detail: "no backups",
-      },
+    assertEquals(signal({ type: "max_rounds_exceeded" }).status, "error");
+    const fo = signal({
+      type: "failover_chain_exhausted",
+      reason: "noFailoverConfigured",
+      detail: "no backups",
     });
     assertEquals(fo.status, "error");
     assertEquals(fo.error, "Model failover exhausted");
   },
 );
+
+Deno.test("error signal sets status error + a system line", () => {
+  const t = signal({ type: "error", message: "boom" });
+  assertEquals(t.status, "error");
+  assertEquals(t.error, "boom");
+  assertEquals(t.lines[0]!.role, "system");
+});
 
 Deno.test("user_message (replay echo) appends a user line + createdAt", () => {
   const t = applyTagmaReply(
@@ -258,7 +244,32 @@ Deno.test(
 );
 
 Deno.test(
-  "cacheLineOf caches content frames with a real history id only",
+  "markLineSent flips a sending line to sent without changing its id",
+  () => {
+    // The direct path has no history-id ack, so the optimistic line keeps its
+    // synthetic id and only its status flips.
+    let t = withUserLine(EMPTY_TRANSCRIPT, "hi", -1);
+    assertEquals(t.lines[0]!.status, "sending");
+    t = markLineSent(t, -1);
+    assertEquals(t.lines, [
+      {
+        historyId: -1,
+        role: "user",
+        text: "hi",
+        status: "sent",
+        createdAt: t.lines[0]!.createdAt,
+      },
+    ]);
+    // Idempotent: re-marking a sent line is a no-op (the line is unchanged).
+    const sent = t;
+    assertEquals(markLineSent(sent, -1), sent);
+    // No-op when the local id is absent (line already cleared on detach).
+    assertEquals(markLineSent(EMPTY_TRANSCRIPT, -1), EMPTY_TRANSCRIPT);
+  },
+);
+
+Deno.test(
+  "cacheLineOf caches authored frames with a real history id only",
   () => {
     // assistant_content with real id -> cached (createdAt carried through).
     assertEquals(
@@ -289,15 +300,6 @@ Deno.test(
         text: "q",
         createdAt: "2026-07-26T12:05:00Z",
       },
-    );
-    // status-only event (busy) -> not cached.
-    assertEquals(
-      cacheLineOf({
-        kind: "event",
-        event: { type: "busy" },
-        history_id: 7,
-      }),
-      null,
     );
     // event with no history id -> not cached (synthetic / un-stored).
     assertEquals(

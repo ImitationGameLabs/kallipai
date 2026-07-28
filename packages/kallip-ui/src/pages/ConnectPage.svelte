@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { sessionStore } from "../lib/session/session.svelte";
   import { agoraSession } from "../lib/session/agora.svelte";
+  import { channelsStore } from "../lib/session/channels.svelte";
   import { connectDirect } from "../lib/session/connect.ts";
   import { configStore } from "../lib/config/config.svelte";
   import type { OfflineModeConfig } from "../lib/config/config.ts";
@@ -62,10 +62,10 @@
       authToken,
     };
     try {
-      const session = await connectDirect(config);
+      const { transport, conversationId } = await connectDirect(config);
       await configStore.setOffline(config);
       await configStore.setActiveMode("offline");
-      await sessionStore.attach(session);
+      await channelsStore.attachLocal(transport, conversationId);
     } catch (e) {
       // Full error (with cause chain) to the console; the banner shows only the
       // classified, path-free message.

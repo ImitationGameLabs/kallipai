@@ -10,15 +10,15 @@
   // the palette's guaranteed range.
   //
   // Root state is encoded with three redundant channels (icon shape, motion,
-  // color) so it does not rely on color alone (colorblind-safe). Fed by the
-  // `tagma_status` SSE event via realtimeStore, so it shares one source of truth
-  // with the /tagmata dashboard cards (which render an aggregate). Sits above
-  // the transcript in ChannelChatPage, width-matched to the chat column.
+  // color) so it does not rely on color alone (colorblind-safe). Pure/presentational:
+  // takes the snapshot as a prop, so it is transport-agnostic (the conversation
+  // owns the snapshot -- drained from the direct SSE offline, routed from the
+  // realtime feed online). Sits above the transcript in ChannelChatPage,
+  // width-matched to the chat column.
   //
   // When no snapshot has arrived yet (freshly connected, or an offline tagma)
   // the header stays mounted in a slim "waiting" state so layout does not shift
   // when the first tick lands (<= STATUS_INTERVAL, ~2s).
-  import { realtimeStore } from "../lib/session/realtime.svelte";
   import {
     formatTokenCount,
     type TagmaAgentState,
@@ -26,12 +26,7 @@
   } from "../lib/tagmata.svelte.ts";
   import { Circle, LoaderCircle, TriangleAlert } from "@lucide/svelte";
 
-  let { tagmaId }: { tagmaId: string } = $props();
-
-  // Reactive snapshot read; `undefined` until the first `tagma_status` event.
-  const status = $derived<TagmaStatusSummary | undefined>(
-    realtimeStore.statusFor(tagmaId),
-  );
+  let { status }: { status: TagmaStatusSummary | undefined } = $props();
 
   // Budget fill width, clamped to [0, 100]. 0 budget -> 0% (avoids div-by-zero).
   const budgetPct = $derived(

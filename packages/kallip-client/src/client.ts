@@ -3,33 +3,11 @@ import {
   TransportError,
   parseSseStream,
 } from "@kallipai/kallip-common";
+import type { AgentId } from "@kallipai/kallip-common";
 import type {
-  AgentId,
-  AgentStatus,
-  ApprovalEntry,
-  DomainEvent,
-  ListApprovalsParams,
-  ListApprovalsResponse,
-  TokenBudget,
-} from "@kallipai/kallip-common";
-import type {
-  ApprovalDecisionBody,
-  CreateAgentRequest,
-  CreateAgentResponse,
+  ExternalHistoryResponse,
   MessageResponse,
-  RawSseEvent,
-  TokenBudgetResponse,
-  TokenBudgetUpdateRequest,
-  WireAgentStatusResponse,
   WireAgentSummary,
-  WireApprovalEntry,
-  WireListAgentsResponse,
-  WireListApprovalsResponse,
-} from "./types.ts";
-import {
-  sseToDomain,
-  wireApprovalToCommon,
-  wireStatusToCommon,
 } from "./types.ts";
 
 export interface TagmaClientOptions {
@@ -93,14 +71,7 @@ export class TagmaClient {
     }).then((r) => r.json() as Promise<T>);
   }
 
-  // --- agent lifecycle ---
-
-  spawn(req: CreateAgentRequest): Promise<AgentId> {
-    return this.json<CreateAgentResponse>("/agents", {
-      method: "POST",
-      body: JSON.stringify(req),
-    }).then((r) => r.id);
-  }
+  // --- agent surface ---
 
   postMessage(id: AgentId, text: string): Promise<MessageResponse> {
     return this.json<MessageResponse>(`/agents/${id}/message`, {
@@ -114,27 +85,19 @@ export class TagmaClient {
     return this.json<WireAgentSummary>("/agents/root");
   }
 
-  listAgents(createdBy?: AgentId): Promise<WireListAgentsResponse["agents"]> {
-    const qs = createdBy ? `?created_by=${encodeURIComponent(createdBy)}` : "";
-    return this.json<WireListAgentsResponse>(`/agents${qs}`).then(
-      (r) => r.agents,
-    );
-  }
-
-  removeAgent(id: AgentId): Promise<void> {
-    return this.request(`/agents/${id}`, { method: "DELETE" }).then(
-      () => undefined,
-    );
-  }
-
   // --- streaming events ---
 
-  /** Subscribe to the agent's SSE stream, yielding DomainEvents until close. */
-  async *eventStream(
+  /** Subscribe to the agent's external event stream (the chat-room API): one
+   * multiplexed SSE discriminated by the `event:` field ("authored" | "signal"
+   * | "status"). Yields raw `{ event, data }` frames; the caller decodes each
+   * payload per its event name. This is the frontend's sole window onto the
+   * tagma -- authored assistant messages, runtime signals, and status
+   * snapshots all arrive here. */
+  async *externalEventStream(
     id: AgentId,
     signal?: AbortSignal,
-  ): AsyncGenerator<DomainEvent> {
-    const resp = await this.request(`/agents/${id}/events`, {
+  ): AsyncGenerator<{ readonly event: string; readonly data: string }> {
+    const resp = await this.request(`/agents/${id}/external/events`, {
       method: "GET",
       signal,
     });
@@ -145,73 +108,29 @@ export class TagmaClient {
       );
     }
     for await (const raw of parseSseStream(resp, signal)) {
-      let parsed: RawSseEvent;
-      try {
-        parsed = JSON.parse(raw.data) as RawSseEvent;
-      } catch (cause) {
-        throw new TransportError("invalid SSE payload", { cause });
-      }
-      yield sseToDomain(parsed);
+      // Keepalive / comment frames carry no `event:` name; skip them. Every
+      // real frame on this stream is discriminated by its event name.
+      if (!raw.event) continue;
+      yield { event: raw.event, data: raw.data };
     }
   }
 
-  // --- approvals ---
-
-  async listApprovals(
-    params?: ListApprovalsParams,
-  ): Promise<ListApprovalsResponse> {
-    const r = await this.json<WireListApprovalsResponse>(
-      `/approvals${buildApprovalQuery(params)}`,
-    );
-    return { items: r.items.map(wireApprovalToCommon), total: r.total };
-  }
-
-  async getApproval(id: string): Promise<ApprovalEntry> {
-    const w = await this.json<WireApprovalEntry>(`/approvals/${id}`);
-    return wireApprovalToCommon(w);
-  }
-
-  respondApproval(
-    id: string,
-    decision: "approve" | "deny",
-    reason?: string,
-  ): Promise<void> {
-    const body: ApprovalDecisionBody = {
-      decision,
-      ...(reason ? { reason } : {}),
-    };
-    return this.request(`/approvals/${id}`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }).then(() => undefined);
-  }
-
-  // --- status / budget ---
-
-  agentStatus(id: AgentId): Promise<AgentStatus> {
-    return this.json<WireAgentStatusResponse>(`/agents/${id}/status`).then(
-      wireStatusToCommon,
-    );
-  }
-
-  getTokenBudget(): Promise<TokenBudget> {
-    return this.json<TokenBudgetResponse>("/budget");
-  }
-
-  adjustTokenBudget(delta: number): Promise<TokenBudget> {
-    const body: TokenBudgetUpdateRequest = { delta };
-    return this.json<TokenBudgetResponse>("/budget", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-  }
-
-  setTokenBudget(value: number): Promise<TokenBudget> {
-    const body: TokenBudgetUpdateRequest = { set_remaining: value };
-    return this.json<TokenBudgetResponse>("/budget", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+  /** Pull a cursor-driven history window for the direct (offline) path. The
+   * direct SSE is live-only, so the frontend asks for back-log here using its
+   * `maxRendered` high-water mark — symmetric with the relay's
+   * `TagmaControl::History`. Omit `after`/`before` for the most recent `limit`
+   * (a first-time device with an empty cache). */
+  externalHistory(
+    id: AgentId,
+    opts: { after?: number | null; before?: number | null; limit?: number },
+  ): Promise<ExternalHistoryResponse> {
+    const params = new URLSearchParams();
+    if (opts.after != null) params.set("after", String(opts.after));
+    if (opts.before != null) params.set("before", String(opts.before));
+    if (opts.limit != null) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    const path = `/agents/${id}/external/history${qs ? `?${qs}` : ""}`;
+    return this.json<ExternalHistoryResponse>(path);
   }
 }
 
@@ -229,16 +148,4 @@ async function readErrorMessage(resp: Response): Promise<string> {
     }
   }
   return resp.statusText;
-}
-
-function buildApprovalQuery(params?: ListApprovalsParams): string {
-  if (!params) return "";
-  const q = new URLSearchParams();
-  if (params.status) q.set("status", params.status);
-  if (params.limit != null) q.set("limit", String(params.limit));
-  if (params.offset != null) q.set("offset", String(params.offset));
-  if (params.requestedBy) q.set("requested_by", params.requestedBy);
-  if (params.order) q.set("order", params.order);
-  const s = q.toString();
-  return s ? `?${s}` : "";
 }

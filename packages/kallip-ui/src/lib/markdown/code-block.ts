@@ -2,7 +2,7 @@
 // button. `Markdown.svelte` runs marked + DOMPurify (DEFAULTS ONLY) and then
 // injects {@html}; we cannot bake the button into the marked output because
 // DOMPurify would strip any inline handler and the project forbids widening its
-// config (see lib/tools/markdown.ts). So the button is injected here, against
+// config (see markdown.ts). So the button is injected here, against
 // the already-sanitized DOM.
 //
 // INVARIANT: the two SVG strings below are the ONLY markup injected into the
@@ -65,9 +65,9 @@ function flashCopied(button: HTMLButtonElement): void {
 }
 
 // Svelte action: decorate every <pre> under `node` at mount and route copies
-// through one delegated listener. <Markdown> mounts once with finalized text in
-// both consumers (TranscriptView finalizes before mounting; ChannelLine has no
-// streaming flag), so mount-time decoration covers everything -- no observer.
+// through one delegated listener. <Markdown> mounts once with finalized text
+// (ConversationLine has no streaming flag), so mount-time decoration covers
+// everything -- no observer.
 export function enhanceCodeBlocks(node: HTMLElement): {
   destroy: () => void;
 } {

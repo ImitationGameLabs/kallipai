@@ -20,6 +20,7 @@ import {
   LescheApiError,
   type LescheEvent,
   type Envelope,
+  type SignalEvent,
 } from "@kallipai/kallip-lesche-client";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
@@ -38,6 +39,22 @@ type EnvelopeSink = (envelope: Envelope) => void;
  * transitions (not on every reconnect snapshot re-send), so a healthy session
  * is not flooded with no-op opens. */
 type PresenceSink = (tagmaId: string, online: boolean) => void;
+
+/** Sink for inbound runtime signals (busy/idle presence, turn terminals,
+ * errors). Bound by the shell to `channelsStore.deliverSignal`. `null` (the
+ * default) drops signals -- harmless before the shell wires it. */
+type SignalSink = (tagmaId: string, signal: SignalEvent) => void;
+
+/** Sink for aggregate status snapshots. Bound by the shell to
+ * `channelsStore.deliverStatus`, which routes each snapshot to the open
+ * relay conversation for that tagma so its chat header has a uniform status
+ * source (mirroring how the direct path drains status off its own SSE).
+ * `undefined` evicts (a tagma went offline). `null` (the default) drops -- the
+ * /tagmata dashboard still reads `statusFor` directly off this store's map. */
+type StatusSink = (
+  tagmaId: string,
+  snapshot: TagmaStatusSummary | undefined,
+) => void;
 
 /** Maximum time the dashboard shows the "checking" placeholder before treating
  * presence as resolved (unknown tagmas then read offline). Bounded so a missing
@@ -75,6 +92,8 @@ class RealtimeStore {
   private abort: AbortController | null = null;
   private envelopeSink: EnvelopeSink | null = null;
   private presenceSink: PresenceSink | null = null;
+  private signalSink: SignalSink | null = null;
+  private statusSink: StatusSink | null = null;
   // One-shot per session; force-resolves presence after the deadline so the
   // "checking" placeholder is bounded regardless of SSE connection health.
   private resolveDeadline: ReturnType<typeof setTimeout> | null = null;
@@ -108,6 +127,19 @@ class RealtimeStore {
    * drives channelsStore auto-connect on offline -> online transitions. */
   setPresenceSink(sink: PresenceSink | null): void {
     this.presenceSink = sink;
+  }
+
+  /** Bind the inbound-signal handler. Called once by the shell at boot; routes
+   * `tagma_signal` events (busy/idle, terminals, errors) into channelsStore. */
+  setSignalSink(sink: SignalSink | null): void {
+    this.signalSink = sink;
+  }
+
+  /** Bind the status-snapshot handler. Called once by the shell at boot; routes
+   * `tagma_status` snapshots (and offline evictions) into channelsStore so the
+   * owning relay conversation's chat header has a uniform status source. */
+  setStatusSink(sink: StatusSink | null): void {
+    this.statusSink = sink;
   }
 
   /** Start the SSE subscriber, idempotently. Safe to call repeatedly. Clears
@@ -216,6 +248,7 @@ class RealtimeStore {
         // (the card hides its line, the header shows "waiting…") until the
         // tagma reconnects and a fresh snapshot arrives.
         this.status.delete(ev.tagma_id);
+        this.statusSink?.(ev.tagma_id, undefined);
         this.presenceSink?.(ev.tagma_id, false);
         break;
       case "envelope":
@@ -231,6 +264,14 @@ class RealtimeStore {
           tokenBudget: ev.token_budget,
           tokenConsumed: ev.token_consumed,
         });
+        this.statusSink?.(ev.tagma_id, this.status.get(ev.tagma_id));
+        break;
+      case "tagma_signal":
+        // A per-event runtime signal (busy/idle presence, turn terminals,
+        // errors). Plaintext operator metadata, not conversation content;
+        // routed to the owning channel's transcript as a status transition
+        // and/or a transient system line.
+        this.signalSink?.(ev.tagma_id, ev.event);
         break;
     }
   }

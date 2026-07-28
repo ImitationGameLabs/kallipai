@@ -1,24 +1,19 @@
-// ChannelsStore: the online-mode, per-tagma chat state. The independent online
-// counterpart of SessionStore (session.svelte.ts) -- it does NOT reuse the
-// offline Session/applyEvent; it has its own transcript reducer
-// (../channel/transcript.ts). Each open channel owns a RelayChannel (the Phase-1
-// E2EE transport).
+// ChannelsStore: the unified per-conversation manager. Holds the offline
+// "local" conversation (a single LocalConversation bound to a DirectTransport)
+// and the online relay conversations (RelayConversation bound to a
+// RelayTransport via openRelay), keyed by conversation id in one SvelteMap. The
+// shell wires realtime's envelope + signal + presence sinks into the store; the
+// store routes each by conversation/tagma id to the owning conversation.
 //
-// Inbound envelopes arrive via realtime.svelte.ts (the single shared SSE
-// subscriber), which routes each by conversation id into `deliver` here. The
-// agora client supplies the pinned key (getTagma) and the lesche client runs the
-// key exchange + envelope relay (see openRelayChannel). Both are injected
-// singletons from agora.svelte.ts.
+// The two leaves (RelayConversation / LocalConversation) share the conversation
+// reducer (../transcript.ts); see conversation.svelte.ts for the per-conversation
+// state and the transport-drain contract.
 
 import { type TagmaView } from "@kallipai/kallip-agora-client";
 import {
   type Envelope,
+  type SignalEvent,
   openRelayChannel,
-  type RelayChannel,
-  type TagmaReply,
-  clearConvCache,
-  loadAll,
-  put as cachePut,
 } from "@kallipai/kallip-lesche-client";
 import { SvelteMap } from "svelte/reactivity";
 import {
@@ -26,58 +21,22 @@ import {
   agoraSession,
   lescheClientOrFail,
 } from "./agora.svelte.ts";
+import type { DirectTransport } from "./directTransport.ts";
+import { RelayTransport } from "./relayTransport.ts";
 import {
-  applyTagmaReply,
-  cacheLineOf,
-  type ChannelLine,
-  type ChannelTranscript,
-  EMPTY_TRANSCRIPT,
-  replaceLineId,
-  withUserLine,
-} from "../channel/transcript.ts";
+  ConversationBase,
+  LocalConversation,
+  RelayConversation,
+} from "./conversation.svelte.ts";
+import { clearConvCache, loadAll } from "@kallipai/kallip-lesche-client";
+import { configStore } from "../config/config.svelte.ts";
 import type { NavIndicator } from "../shell.ts";
+import type { ConversationLine } from "../transcript.ts";
 
-function messageOf(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
-/** Fire an OS notification for an inbound content event when the app is in the
- * background (`document.hidden`) — the "agent messaged while you were away"
- * surface. Foreground delivery is the transcript itself (no toast spam). The
- * Web Push extension (app fully closed) is Phase 4; this covers the background
- * tab. NOTE: notification permission is NOT auto-requested here — it must be
- * granted via a user-gesture surface (shell wiring is a follow-up); until then
- * `permission === "default"` and this is a silent no-op. */
-function maybeNotifyBackground(label: string | null, reply: TagmaReply): void {
-  if (typeof Notification === "undefined" || !document.hidden) return;
-  if (Notification.permission !== "granted") return;
-  if (reply.kind !== "event") return;
-  const event = reply.event;
-  let body: string | null = null;
-  if (event.type === "assistant_content") body = event.content;
-  else if (event.type === "status") body = event.message;
-  if (!body) return;
-  const title = label ? `Tagma ${label}` : "Tagma";
-  try {
-    new Notification(title, { body });
-  } catch {
-    // Some browsers reject construction without a service worker; ignore.
-  }
-}
-
-/** Build a synthetic `error` reply from a thrown exception, so a send failure
- * routes through the same reducer as a tagma-side error. `req_id` and
- * `status` are sentinels (the failure did not originate from a tagma reply). */
-function syntheticErrorReply(message: string): TagmaReply {
-  return { kind: "error", req_id: 0, status: 0, message };
-}
-
-/** Map a channel's transport status to a sidebar dot. This is OUR channel
- * transport (the KEX/drain lifecycle), distinct from the dashboard's
- * `TagmaPresence` / `realtimeStore` presence, which is the PEER presence (a
- * tagma tunnel is live). `error` (KEX/drain failure) is kept distinct from
- * `offline` (peer went away) so the sidebar can flag "click to retry" vs
- * "asleep". */
+/** Map a conversation's transport status to a sidebar dot. This is OUR channel
+ *  transport (the KEX/drain lifecycle), distinct from the dashboard's peer
+ *  presence. `error` (KEX/drain failure) is kept distinct from `offline` (peer
+ *  went away) so the sidebar can flag "click to retry" vs "asleep". */
 function channelIndicator(
   status: "opening" | "open" | "offline" | "error",
 ): NavIndicator {
@@ -93,101 +52,153 @@ function channelIndicator(
   }
 }
 
-/** One open channel's reactive state. A rune class so each field is reactive on
- * its own (class instances are not deep-proxied by $state). */
-export class ChannelState {
-  transcript: ChannelTranscript = $state(EMPTY_TRANSCRIPT);
-  /** Rendered optimistic user lines awaiting their POST. Each entry's line is
-   * already in `transcript` (status `"sending"`); the single-in-flight send
-   * pump drains this one ack at a time. */
-  pending: { localId: number; text: string }[] = $state([]);
-  status: "opening" | "open" | "offline" | "error" = $state("opening");
-  // The transport; plain (not reactive). Set once openRelayChannel resolves.
-  channel: RelayChannel | null = null;
-  /** The largest confirmed `history_id` rendered (the cursor). Any inbound
-   * frame with `history_id <= maxRendered` is dropped — this unifies dedup
-   * across the catch-up batch and live delivery. Persisted implicitly via the
-   * local cache (the max id it holds). */
-  maxRendered: number = $state(0);
-  /** True once the initial catch-up `History` batch has completed
-   * (`history_batch_end` received). Before that, inbound frames are catch-up
-   * (old) and must not fire notifications; after, they are live. */
-  live: boolean = $state(false);
-  /** The synthetic negative id of the ONE in-flight POST (its ack has not yet
-   * landed), or `null` when the pump is idle. Single-in-flight so the
-   * `MessageAccepted` ack unambiguously correlates to this line. */
-  pendingLocalId: number | null = $state(null);
-  /** Source of synthetic negative ids for lines without a real `history_id`
-   * (optimistic user lines, ack-class errors). Decremented per use; not
-   * reactive (the {#each} key is read at line construction, not observed). */
-  syntheticSeq: number = 0;
-  /** Deadline timer that force-flips `live=true` if no `history_batch_end`
-   * arrives within ~10s of `open()`. Guards the partial-delivery / lost-marker
-   * case: if the tagma drops a batch mid-way (it deliberately omits the marker
-   * on partial delivery so the app retries on reconnect), or the marker POST is
-   * lost, or the relay crashes, `live` would otherwise stay false for the whole
-   * session and silently disable background notifications. The normal path
-   * (`batch_end` arriving) cancels this; the timer is defense-in-depth. Plain
-   * (not reactive): only the `live` flip it triggers is observed. */
-  liveWatchdog: ReturnType<typeof setTimeout> | null = null;
-
-  constructor(
-    readonly conversationId: string,
-    readonly tagmaId: string,
-    readonly label: string | null,
-  ) {}
-}
-
 class ChannelsStore {
-  /** conversationId -> channel state. `SvelteMap` (not `$state(new Map())`):
-   * Svelte's `$state` proxy does not wrap Map/Set, so a raw Map's in-place
-   * `.set()` would be invisible to reactivity and the sidebar would never
-   * update. SvelteMap tracks membership + iteration natively; per-field
-   * reactivity of each entry still comes from ChannelState's own runes. */
-  private channels = new SvelteMap<string, ChannelState>();
+  /** conversationId -> conversation state. `SvelteMap` (not `$state(new
+   *  Map())`): Svelte's `$state` proxy does not wrap Map/Set, so a raw Map's
+   *  in-place `.set()` would be invisible to reactivity and the sidebar would
+   *  never update. SvelteMap tracks membership + iteration natively; per-field
+   *  reactivity of each entry still comes from the Conversation's own runes. */
+  private conversations = new SvelteMap<string, ConversationBase>();
 
-  /** tagmaIds with an in-flight `open()` started by `ensureOpen`. Guards
-   * auto-connect against duplicate/racing opens (a presence snapshot re-send
-   * plus a live transition, or a flap) for the same tagma. Plain (not
-   * reactive): it is only a concurrency guard, never rendered. Named
-   * `pendingOpens` (not `opening`) to avoid colliding with the
-   * `ChannelState.status === "opening"` transport state. */
+  /** tagmaIds with an in-flight openRelay() started by ensureOpen. Guards
+   *  auto-connect against duplicate/racing opens. Plain (a concurrency guard,
+   *  never rendered). */
   private pendingOpens = new Set<string>();
 
-  /** Snapshot for the sidebar: conversationId/label/indicator per open channel.
-   * Reading `c.status` here also subscribes the indicator to mid-life status
-   * changes (e.g. drain flipping open -> offline). */
+  /** Injected read-only backfill for the cached realtime status snapshot, used
+   *  to seed a freshly-opened relay conversation's `statusSnapshot` so the chat
+   *  header shows at once instead of waiting for the next status push. Bound by
+   *  the shell (which owns both stores) to keep this store decoupled from
+   *  realtime. `null` until the shell wires it (status just waits then). */
+  private statusBackfill:
+    | ((tagmaId: string) => import("../tagmata.svelte.ts").TagmaStatusSummary | undefined)
+    | null = null;
+
+  /** Bind the cached-status backfill. Called once by the shell at boot. */
+  setStatusBackfill(
+    fn: (
+      tagmaId: string,
+    ) => import("../tagmata.svelte.ts").TagmaStatusSummary | undefined,
+  ): void {
+    this.statusBackfill = fn;
+  }
+
+  /** Offline boot/switch failure surfaced on the layout banner. Set by the
+   *  shell when connectDirect throws (before a local conversation exists to
+   *  carry the error); cleared by attachLocal. */
+  localError: unknown = $state(null);
+
+  /** Snapshot for the sidebar: conversationId/label/indicator per open relay
+   *  conversation. The local conversation is never listed here (the offline
+   *  sidebar is a single Chat link). Reading `c.status` also subscribes the
+   *  indicator to mid-life status changes. */
   get list(): {
     conversationId: string;
     label: string | null;
     indicator: NavIndicator;
   }[] {
-    return Array.from(this.channels.values()).map((c) => ({
-      conversationId: c.conversationId,
-      label: c.label,
-      indicator: channelIndicator(c.status),
-    }));
+    const out: {
+      conversationId: string;
+      label: string | null;
+      indicator: NavIndicator;
+    }[] = [];
+    for (const c of this.conversations.values()) {
+      if (c.kind !== "relay") continue;
+      const r = c as RelayConversation;
+      out.push({
+        conversationId: c.conversationId,
+        label: r.label,
+        indicator: channelIndicator(c.status),
+      });
+    }
+    return out;
   }
 
-  get(conversationId: string): ChannelState | undefined {
-    return this.channels.get(conversationId);
+  get(id: string): ConversationBase | undefined {
+    return this.conversations.get(id);
   }
 
-  /**
-   * Open an E2EE channel to `tagma`. Runs the key exchange, hydrates the
-   * transcript from the local cache (instant), then asks the tagma for an
-   * incremental history batch (`after: maxRendered`) — or the most recent
-   * window if the cache is empty — and drains the reply stream. Resolves to the
-   * conversation id. Throws if the user is unsigned or KEX fails.
-   */
-  async open(tagma: TagmaView): Promise<string> {
+  /** The offline "local" conversation, if any. */
+  get local(): LocalConversation | undefined {
+    const c = this.conversations.get("local");
+    return c?.kind === "local" ? (c as LocalConversation) : undefined;
+  }
+
+  /** True iff the local conversation is connected (offline transport bound). */
+  get localConnected(): boolean {
+    return this.local?.connected ?? false;
+  }
+
+  // --- offline (local) ---
+
+  /** Bind the offline DirectTransport as the "local" conversation. Replaces
+   *  sessionStore.attach(): tears down any prior local conversation first,
+   *  hydrates from the shared IndexedDB cache, then starts the drain. The store
+   *  entry stays keyed `"local"` (so the gate/links/`localConnected` are
+   *  untouched), but its cache lives under the tagma's conversation id (shared
+   *  with the online path). `conversationId` is null for a never-enrolled tagma
+   *  (no durable history) -- the cache then keys `"local"` too.
+   *
+   *  Async because the cache hydrate must complete BEFORE the SSE drain starts
+   *  (a live frame racing ahead of the hydrate would double-render). Re-checks
+   *  `activeMode` after the hydrate so a mode flip during the await closes the
+   *  stray transport instead of attaching it. */
+  async attachLocal(
+    transport: DirectTransport,
+    conversationId: string | null,
+  ): Promise<void> {
+    this.detachLocal();
+    this.localError = null;
+    const cacheConversationId = conversationId ?? "local";
+    const conv = new LocalConversation(this, transport, cacheConversationId);
+    this.conversations.set("local", conv);
+    try {
+      const cached = await loadAll(cacheConversationId);
+      if (cached.length > 0) {
+        const lines: ConversationLine[] = cached.map(
+          ({ historyId, role, text, createdAt }) => ({
+            historyId,
+            role: role as ConversationLine["role"],
+            text,
+            createdAt,
+          }),
+        );
+        conv.transcript = { lines, status: "idle" };
+        conv.maxRendered = cached[cached.length - 1]!.historyId;
+      }
+    } catch {
+      // IndexedDB unavailable (e.g. private mode): proceed with an empty
+      // transcript; live delivery still works.
+    }
+    // Race guard: a flip back to online during the hydrate must not leave a
+    // held tagma transport attached as "local".
+    if (configStore.value?.activeMode !== "offline") {
+      transport.close();
+      this.conversations.delete("local");
+      return;
+    }
+    void conv.run();
+  }
+
+  /** Tear down the local conversation (called on detach / before a re-attach /
+   *  on leaving offline mode). */
+  detachLocal(): void {
+    const prior = this.local;
+    if (prior) {
+      prior.close();
+      this.conversations.delete("local");
+    }
+  }
+
+  // --- online (relay) ---
+
+  /** Open an E2EE channel to `tagma`. Runs the key exchange, hydrates the
+   *  transcript from the local cache (instant), then asks the tagma for an
+   *  incremental history batch and drains. Resolves to the conversation id. */
+  async openRelay(tagma: TagmaView): Promise<string> {
     const userId = agoraSession.user?.user_id;
     if (!userId) throw new Error("not signed in");
 
-    // KEX is synchronous HTTP; inbound replies flow only through realtime's SSE
-    // demux into `deliver`, which begins well before the user can send. The
-    // pinned device key is TOFU from the agora (control plane); the lesche
-    // client takes it as a base64 string so it has no agora dependency.
     const info = await agoraClientOrFail().getTagma(tagma.tagma_id);
     const channel = await openRelayChannel(
       lescheClientOrFail(),
@@ -195,64 +206,69 @@ class ChannelsStore {
       userId,
       info.pinned_public_key,
     );
-    const state = new ChannelState(
+    const transport = new RelayTransport(channel);
+    const conv = new RelayConversation(
       channel.conversationId,
+      this,
+      transport,
       tagma.tagma_id,
       tagma.label,
     );
-    state.channel = channel;
     // Hydrate from the per-device cache before marking open, so a refresh
     // restores the conversation instantly and we only pull a delta.
     const cached = await loadAll(channel.conversationId);
     if (cached.length > 0) {
-      const lines: ChannelLine[] = cached.map(
+      const lines: ConversationLine[] = cached.map(
         ({ historyId, role, text, createdAt }) => ({
           historyId,
-          // The cache stores role as an opaque string (it is a UI concept); cast
-          // back to the reducer's role union, which the values round-trip as.
-          role: role as ChannelLine["role"],
+          // The cache stores role as an opaque string (a UI concept); cast back
+          // to the reducer's role union, which the values round-trip as.
+          role: role as ConversationLine["role"],
           text,
           createdAt,
         }),
       );
-      state.transcript = { lines, status: "idle" };
-      state.maxRendered = cached[cached.length - 1]!.historyId;
+      conv.transcript = { lines, status: "idle" };
+      conv.maxRendered = cached[cached.length - 1]!.historyId;
     }
-    state.status = "open";
-    this.channels.set(channel.conversationId, state);
-    // Pull what we are missing: incremental if the cache had state, else the
-    // most recent window. Drained through the normal reply stream.
-    const after = state.maxRendered > 0 ? state.maxRendered : null;
+    conv.status = "open";
+    // Backfill the status snapshot from the realtime store's cache (the agora
+    // SSE has been receiving tagma_status since login), so the header shows at
+    // once instead of waiting up to the next status push (~2s). The realtime
+    // status sink keeps it fresh thereafter. The read goes through an injected
+    // callback so this store stays decoupled from realtime (the shell binds
+    // both directions, mirroring the envelope/signal sinks).
+    if (this.statusBackfill) {
+      conv.setStatusSnapshot(this.statusBackfill(tagma.tagma_id));
+    }
+    this.conversations.set(channel.conversationId, conv);
+    const after = conv.maxRendered > 0 ? conv.maxRendered : null;
     try {
       await channel.history({ after, limit: 50 });
     } catch {
-      // Non-fatal: live delivery still works; the next open retries the pull.
-      // Flip `live` on anyway -- with no catch-up batch in flight, subsequent
-      // frames are live and must be allowed to notify (otherwise a failed pull
-      // would silently disable background notifications for the whole session).
-      state.live = true;
+      // Non-fatal: live delivery still works. Flip live so background
+      // notifications are not silently disabled for the whole session.
+      conv.live = true;
     }
-    // Watchdog: if no `history_batch_end` lands within 10s (partial delivery,
-    // lost marker, relay crash), force `live` so background notifications still
-    // fire for this session. The `batch_end` handler in `applyReply` cancels
-    // this timer on the normal path. Object-identity guard so a stale closure
-    // (a second `open()` of the same conv replaced the map entry) no-ops. Arm
-    // BEFORE kicking drain so an early `batch_end` finds the handle to clear.
-    state.liveWatchdog = setTimeout(() => {
-      if (this.channels.get(channel.conversationId) === state && !state.live) {
-        state.live = true;
+    // Watchdog: if no history_batch_end lands within 10s (partial delivery,
+    // lost marker, relay crash), force live. The batch_end handler in
+    // RelayConversation.applyReply cancels this on the normal path.
+    conv.liveWatchdog = setTimeout(() => {
+      if (
+        this.conversations.get(channel.conversationId) === conv &&
+        !conv.live
+      ) {
+        conv.live = true;
       }
     }, 10_000);
-    void this.drain(channel.conversationId);
+    void conv.run();
     return channel.conversationId;
   }
 
   /** Idempotent, best-effort auto-open driven by the shell on presence
-   * transitions and at boot. Skips tagmas already open or with an open in
-   * flight. A dead channel (offline / error from a dropped tagma) is torn down
-   * first WITHOUT purging its cache, so the re-KEX rehydrates the prior
-   * transcript. Open failures are logged and swallowed: auto-connect is
-   * best-effort, and the next presence transition retries. */
+   *  transitions and at boot. Skips tagmas already open or with an open in
+   *  flight. A dead conversation is torn down first WITHOUT purging its cache,
+   *  so the re-KEX rehydrates the prior transcript. */
   async ensureOpen(tagma: TagmaView): Promise<void> {
     if (this.pendingOpens.has(tagma.tagma_id)) return;
     const existing = this.findByTagma(tagma.tagma_id);
@@ -262,14 +278,10 @@ class ChannelsStore {
     ) {
       return;
     }
-    // Tear down a dead transport before re-opening. tearDown (not close):
-    // preserve the IndexedDB cache so open() rehydrates the transcript. The
-    // old drain's finally/catch are object-identity-guarded (see the invariant
-    // on `drain`), so they no-op against the fresh ChannelState open() inserts.
     if (existing) this.tearDown(existing.conversationId);
     this.pendingOpens.add(tagma.tagma_id);
     try {
-      await this.open(tagma);
+      await this.openRelay(tagma);
     } catch (e) {
       console.warn(
         `[channels] auto-open failed for tagma ${tagma.tagma_id}:`,
@@ -280,247 +292,104 @@ class ChannelsStore {
     }
   }
 
-  /** Send a prompt. Renders the optimistic user line immediately (so it is
-   * visible before the turn even starts), enqueues it, and lets the
-   * single-in-flight pump POST it. Busy/idle is irrelevant -- the tagma accepts
-   * mid-turn messages and may coalesce them; each message is its own send with
-   * its own ack. */
-  send(conversationId: string, text: string): Promise<void> {
-    const ch = this.channels.get(conversationId);
-    const trimmed = text.trim();
-    if (!ch || !ch.channel || trimmed === "") return Promise.resolve();
-    const localId = (ch.syntheticSeq -= 1);
-    ch.transcript = withUserLine(ch.transcript, trimmed, localId);
-    ch.pending = [...ch.pending, { localId, text: trimmed }];
-    void this.pumpPending(ch);
-    return Promise.resolve();
+  /** Send a prompt to a conversation. Renders the optimistic line and hands off
+   *  to the conversation's send path (single-in-flight pump for relay; inline
+   *  POST for local). */
+  send(conversationId: string, text: string): void {
+    const conv = this.conversations.get(conversationId);
+    if (!conv || !conv.connected) return;
+    void conv.send(text);
   }
 
-  /** Close + drop a channel by tagma id. Finds the conversation via
-   * `findByTagma` and delegates to `close(conversationId)` (full close, cache
-   * purged). Used by revoke: a revoked tagma must not leave plaintext behind on
-   * a shared device. No-op if no channel is open for the tagma. */
+  /** Close + drop a conversation by tagma id (revoke path: no plaintext left
+   *  on a shared device). No-op if none is open for the tagma. */
   closeByTagma(tagmaId: string): void {
-    const ch = this.findByTagma(tagmaId);
-    if (ch) this.close(ch.conversationId);
+    const conv = this.findByTagma(tagmaId);
+    if (conv) this.close(conv.conversationId);
   }
 
-  /** Close + drop a channel. Drops its IndexedDB cache too, so a conv that is
-   * closed (and thus absent from the map at logout) does not leave plaintext
-   * behind on a shared device. */
+  /** Close + drop a conversation and purge its IndexedDB cache. */
   close(conversationId: string): void {
     this.tearDown(conversationId);
     void clearConvCache(conversationId);
   }
 
-  /** Detach a channel's transport + state without purging its IndexedDB cache.
-   * Used by `close` (then the cache is purged) and by `ensureOpen` on reconnect
-   * (the cache is preserved so the re-KEX rehydrates the prior transcript). */
+  /** Detach a conversation's transport + drop its entry WITHOUT purging its
+   *  cache (used by close, then the cache is purged; and by ensureOpen on
+   *  reconnect, so the re-KEX rehydrates). */
   private tearDown(conversationId: string): void {
-    const ch = this.channels.get(conversationId);
-    if (ch?.liveWatchdog) clearTimeout(ch.liveWatchdog);
-    ch?.channel?.close();
-    this.channels.delete(conversationId);
+    const conv = this.conversations.get(conversationId);
+    if (!conv) return;
+    if (conv instanceof RelayConversation && conv.liveWatchdog) {
+      clearTimeout(conv.liveWatchdog);
+    }
+    conv.close();
+    this.conversations.delete(conversationId);
   }
 
-  /** Find the open channel for a tagma, if any. The map is keyed by
-   * conversationId (server-derived), but auto-connect and revoke key off
-   * tagmaId; this is the reverse lookup. */
-  private findByTagma(tagmaId: string): ChannelState | undefined {
-    for (const ch of this.channels.values()) {
-      if (ch.tagmaId === tagmaId) return ch;
+  /** Tear down every conversation (relay + local): close transports + drop
+   *  entries, PRESERVING the IndexedDB cache. Used by mode switches, so the
+   *  other mode rehydrates instantly from the shared cache on re-attach. */
+  tearDownAll(): void {
+    for (const conv of this.conversations.values()) {
+      if (conv instanceof RelayConversation && conv.liveWatchdog) {
+        clearTimeout(conv.liveWatchdog);
+      }
+      conv.close();
+    }
+    this.conversations.clear();
+    this.pendingOpens.clear();
+  }
+
+  /** Tear down every conversation AND purge its IndexedDB cache. Used on logout
+   *  (so no plaintext remains on a shared device) and explicit close. Purges by
+   *  each conversation's `cacheConversationId` -- NOT its store key -- because
+   *  the local entry's store key is `"local"` but its cache lives under the
+   *  tagma's conversation id; iterating store keys would leak the local cache. */
+  reset(): void {
+    const entries = Array.from(this.conversations.values());
+    this.tearDownAll();
+    for (const conv of entries) {
+      void clearConvCache(conv.cacheConversationId);
+    }
+  }
+
+  /** Find the open relay conversation for a tagma, if any. The map is keyed by
+   *  conversationId (server-derived); auto-connect and revoke key off tagmaId. */
+  private findByTagma(tagmaId: string): RelayConversation | undefined {
+    for (const c of this.conversations.values()) {
+      if (c.kind === "relay" && (c as RelayConversation).tagmaId === tagmaId) {
+        return c as RelayConversation;
+      }
     }
     return undefined;
   }
 
-  /** Route an inbound envelope (handed off by realtime.svelte.ts's SSE demux)
-   * to the channel that owns its conversation. Unknown ids are dropped -- the
-   * envelope belongs to a channel the app has not opened. */
+  /** Route an inbound envelope (from realtime's SSE demux) to the conversation
+   *  that owns it, by pushing it onto the underlying RelayChannel's inbound
+   *  queue. Unknown ids are dropped. */
   deliver(envelope: Envelope): void {
-    this.channels.get(envelope.conversation_id)?.channel?.enqueue(envelope);
+    const conv = this.conversations.get(envelope.conversation_id);
+    if (conv?.kind !== "relay") return;
+    (conv as RelayConversation).relayTransport.relayChannel.enqueue(envelope);
   }
 
-  /** Tear down every open channel. Called by the shell on logout and on leaving
-   * online mode. The SSE subscriber is owned by realtime.svelte.ts and torn down
-   * separately; this closes the per-channel transports, clears the map, and
-   * purges the per-conversation IndexedDB cache so a shared device does not
-   * retain the previous user's plaintext transcript. */
-  reset(): void {
-    const conversationIds = Array.from(this.channels.keys());
-    for (const ch of this.channels.values()) {
-      if (ch.liveWatchdog) clearTimeout(ch.liveWatchdog);
-      ch.channel?.close();
-    }
-    this.channels.clear();
-    this.pendingOpens.clear();
-    for (const conversationId of conversationIds) {
-      void clearConvCache(conversationId);
-    }
+  /** Route an inbound runtime signal (from realtime's tagma_signal demux) to the
+   *  owning conversation's transport signal queue; its signal drain reduces it
+   *  via applySignal. Unknown tagma ids are dropped. */
+  deliverSignal(tagmaId: string, signal: SignalEvent): void {
+    this.findByTagma(tagmaId)?.relayTransport.enqueueSignal(signal);
   }
 
-  // --- internals -----------------------------------------------------------
-
-  /** Single-in-flight send pump. POSTs the next queued optimistic line (if any,
-   * and if no POST is already outstanding) and leaves its `localId` in
-   * `pendingLocalId` so the `MessageAccepted` ack can correlate. Self-driving:
-   * called from `send` (on enqueue) and the ack handler (on promotion). */
-  private async pumpPending(ch: ChannelState): Promise<void> {
-    if (ch.pendingLocalId !== null) return;
-    const next = ch.pending.shift();
-    if (next === undefined) return;
-    ch.pendingLocalId = next.localId;
-    // The optimistic line was rendered in `send`; here we only POST it.
-    try {
-      await ch.channel!.send(next.text);
-    } catch (e) {
-      // POST failed before the tagma could ack: drop the optimistic line and
-      // surface the failure through the same reducer path as a tagma-side
-      // error. Do not auto-pump -- a POST failure usually means the channel is
-      // broken; the next send/ack resumes the pump once it recovers.
-      ch.transcript = applyTagmaReply(
-        {
-          ...ch.transcript,
-          lines: ch.transcript.lines.filter(
-            (l) => l.historyId !== next.localId,
-          ),
-        },
-        syntheticErrorReply(messageOf(e)),
-        (ch.syntheticSeq -= 1),
-      );
-      ch.pendingLocalId = null;
-    }
-  }
-
-  /** Drain a channel's reply stream into its transcript. Ends when the channel
-   * is closed (replies generator ends); the channel then reads as offline.
-   *
-   * INVARIANT: every mutation of `ch` here is guarded by the object-identity
-   * check `this.channels.get(conversationId) === ch`. `ensureOpen` reconnects
-   * by replacing the map entry under the same (server-derived) conversationId,
-   * so a stale drain closure (from the dead channel) must NOT touch the fresh
-   * `ChannelState` that took its place -- neither its status nor its transcript
-   * / cache / pending-send state. The `for await` guard below stops a stale
-   * drain (whose `RelayChannel.replies()` may still yield envelopes queued
-   * before `close`) as soon as the replacement lands. Keep these guards on any
-   * future drain mutation. */
-  private async drain(conversationId: string): Promise<void> {
-    const ch = this.channels.get(conversationId);
-    if (!ch?.channel) return;
-    const channel = ch.channel;
-    try {
-      for await (const reply of channel.replies()) {
-        // Stale drain after `ensureOpen` replaced this entry: stop before
-        // mutating the detached `ch` (which would also re-POST via the closed
-        // transport's send pump).
-        if (this.channels.get(conversationId) !== ch) return;
-        this.applyReply(conversationId, ch, reply);
-      }
-    } catch {
-      if (this.channels.get(conversationId) === ch) {
-        ch.status = "error";
-        // Channel is dead: the in-flight POST and any queued optimistic lines
-        // can never send. Abandon them so the badge stops showing "queued",
-        // the pump does not wedge, and the UI does not leave them pulsing.
-        this.abandonPending(ch);
-      }
-    } finally {
-      if (this.channels.get(conversationId) === ch && ch.status === "open") {
-        ch.status = "offline";
-        this.abandonPending(ch);
-      }
-    }
-  }
-
-  /** Drop all unsent optimistic state: the in-flight slot, the queued pending
-   * entries, and their rendered `"sending"` lines. Used when the channel dies
-   * (error/offline) -- none of those messages can ever deliver, so leaving them
-   * would mislead (a stuck pulse, a stale "queued" badge). The channel-status
-   * banner is the surfaced signal. */
-  private abandonPending(ch: ChannelState): void {
-    ch.pending = [];
-    ch.pendingLocalId = null;
-    ch.transcript = {
-      ...ch.transcript,
-      lines: ch.transcript.lines.filter((l) => l.status !== "sending"),
-    };
-  }
-
-  /** Apply one reply to the transcript + cache + cursor. Dedup is by
-   * `maxRendered` and unifies catch-up batch frames and live frames; the
-   * optimistic user line is promoted to its real id on ack. Notifications fire
-   * only for live content (after the catch-up batch completes), when the app is
-   * backgrounded. */
-  private applyReply(
-    conversationId: string,
-    ch: ChannelState,
-    reply: TagmaReply,
+  /** Route an aggregate status snapshot (from realtime's tagma_status demux) to
+   *  the owning relay conversation's `statusSnapshot`, so the chat header has a
+   *  uniform status source (the direct path drains its own SSE status). `nil`
+   *  snapshot evicts (tagma went offline). Unknown tagma ids are dropped. */
+  deliverStatus(
+    tagmaId: string,
+    snapshot: import("../tagmata.svelte.ts").TagmaStatusSummary | undefined,
   ): void {
-    const realId =
-      reply.kind === "event" || reply.kind === "user_message"
-        ? (reply.history_id ?? 0)
-        : 0;
-    // Dedup: a content frame already rendered (catch-up + live share this) is
-    // dropped. Frames with no real id (synthetic) always pass through.
-    if (realId > 0 && realId <= ch.maxRendered) return;
-    const lineId = realId > 0 ? realId : (ch.syntheticSeq -= 1);
-    ch.transcript = applyTagmaReply(ch.transcript, reply, lineId);
-    // Cache + advance the cursor for content with a real id.
-    const cl = cacheLineOf(reply);
-    if (cl) {
-      void cachePut({
-        conversationId,
-        historyId: cl.historyId,
-        role: cl.role,
-        text: cl.text,
-        createdAt: cl.createdAt,
-      });
-      if (cl.historyId > ch.maxRendered) ch.maxRendered = cl.historyId;
-    }
-    // The `MessageAccepted` ack closes the in-flight send. When it carries a
-    // real `history_id` (> 0), promote the optimistic line to that id, mark it
-    // sent, refine its `createdAt` to the server's authoritative value, cache
-    // it, and advance the cursor. Either way (a 0-id ack means the row was not
-    // durable -- a tagma-side anomaly), clear the in-flight slot so the pump
-    // does not wedge, then pump the next queued message.
-    if (reply.kind === "message_accepted" && ch.pendingLocalId !== null) {
-      const ackId = reply.history_id ?? 0;
-      if (ackId > 0) {
-        ch.transcript = replaceLineId(
-          ch.transcript,
-          ch.pendingLocalId,
-          ackId,
-          reply.created_at,
-        );
-        const confirmed = ch.transcript.lines.find(
-          (l) => l.historyId === ackId,
-        );
-        // The ack isn't cacheable via `cacheLineOf` (acks are live-only and
-        // return null there), so the promoted user line is cached directly
-        // from the post-replaceLineId transcript here.
-        if (confirmed) {
-          void cachePut({
-            conversationId,
-            historyId: ackId,
-            role: "user",
-            text: confirmed.text,
-            createdAt: confirmed.createdAt,
-          });
-        }
-        if (ackId > ch.maxRendered) ch.maxRendered = ackId;
-      }
-      ch.pendingLocalId = null;
-      void this.pumpPending(ch);
-    }
-    if (reply.kind === "history_batch_end") {
-      // Normal catch-up completion: cancel the open() watchdog (no longer
-      // needed) and flip live so subsequent frames may notify.
-      if (ch.liveWatchdog) {
-        clearTimeout(ch.liveWatchdog);
-        ch.liveWatchdog = null;
-      }
-      ch.live = true;
-    }
-    if (ch.live) maybeNotifyBackground(ch.label, reply);
+    this.findByTagma(tagmaId)?.setStatusSnapshot(snapshot);
   }
 }
 

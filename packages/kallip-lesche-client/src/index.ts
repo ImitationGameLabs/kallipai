@@ -19,6 +19,11 @@ export { clear as clearConvCache, loadAll, put } from "./cache.ts";
 // Data-plane wire types the UI consumes. The remaining wire types
 // (Participant, TagmaRequest, TagmaControl, KeyExchange*, etc.) are
 // package-private (used inside the channel/crypto implementation).
-export type { Envelope, TagmaEvent, TagmaReply } from "./types.ts";
+export type {
+  AuthoredEvent,
+  Envelope,
+  SignalEvent,
+  TagmaReply,
+} from "./types.ts";
 export type { LescheEvent } from "./types.ts";
 export { LescheApiError } from "./types.ts";

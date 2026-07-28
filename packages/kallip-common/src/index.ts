@@ -1,18 +1,11 @@
 // @kallipai/kallip-common
 //
-// Transport-agnostic shared layer: identifiers, errors, the unified DomainEvent
-// union, the transcript model + reducer, SessionCapabilities, the Session
-// interface, approval domain types, and a shared SSE parser.
-// @kallipai/kallip-client implements Session; @kallipai/kallip-agora-client
-// ships the agora HTTP + WebAuthn control-plane client today, with the
-// Session-over-agora data plane a future phase. @kallipai/kallip-ui consumes
-// these types.
+// Transport-agnostic shared layer: identifiers, errors, and a shared SSE
+// parser. The frontend talks to the tagma through transport-specific clients
+// (@kallipai/kallip-client for the direct path, @kallipai/kallip-lesche-client
+// for the relayed path) rather than a shared session contract.
 
 export * from "./ids.ts";
 export * from "./errors.ts";
-export * from "./event.ts";
-export * from "./approvals.ts";
-export * from "./transcript.ts";
-export * from "./capabilities.ts";
-export * from "./session.ts";
 export * from "./sse.ts";
+export * from "./chat.ts";

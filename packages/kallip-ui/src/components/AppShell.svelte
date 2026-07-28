@@ -47,7 +47,7 @@
   }: {
     links: NavItem[];
     // Consumer-supplied route matcher ("/" exact, others by prefix). Kept out of
-    // the shell so deep links such as `/approvals/:id` still resolve.
+    // the shell so deep links such as `/chat/:id` still resolve.
     isActive: (href: string) => boolean;
     // Optional chrome snippets. `brand` defaults to a "KallipAI" wordmark and is
     // shown only in the sidebar header; `status` (e.g. a connection pill) is

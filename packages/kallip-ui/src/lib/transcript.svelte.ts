@@ -1,8 +1,8 @@
 // Headless auto-scroll controller for a scrolling transcript viewport. Encaps
 // the "stick to tail while new lines arrive, unless the user scrolled up"
-// behaviour that TranscriptView previously inlined. DOM-bound but
-// presentation-agnostic: the component binds the viewport element and calls
-// `stick()` from an effect that reacts to content changes.
+// behaviour the chat pages inline. DOM-bound but presentation-agnostic: the
+// component binds the viewport element and calls `stick()` from an effect that
+// reacts to content changes.
 
 export interface AutoScrollOptions {
   /** Distance from the bottom (px) within which the viewport is "following". */

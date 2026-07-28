@@ -1,35 +1,44 @@
-// Online-channel transcript model + reducer. This is the independent online
-// path: NOT @kallipai/kallip-common's TranscriptState (which is shaped by the
-// tagma's full event vocabulary + streaming). The agora path has no streaming
-// (the tagma relay does not surface streaming deltas — it maps
-// `AssistantContentDelta` to `None` at the app-facing event boundary), so each
-// `assistant_content` is a complete message appended as its own line, and
-// `idle` is a content-less status transition.
+// The conversation transcript model + reducer, shared by every transport
+// (direct offline, relayed online). The external event vocabulary is split by
+// destination channel (see the Rust projector): authored content (assistant
+// messages) crosses the E2EE envelope inside a `TagmaReply::Event` and is
+// persisted in chat_history; runtime signals (busy/idle presence, turn
+// terminals, errors) cross the plaintext signal channel and are ephemeral.
+// Accordingly the transcript is driven by TWO reducer entry points:
 //
-// `applyTagmaReply` is a pure reducer over the wire `TagmaReply` (from
-// @kallipai/kallip-lesche-client). It is the only place that interprets a
-// TagmaReply into view state, so it is unit-tested in transcript_test.ts.
+// - `applyTagmaReply` over the wire `TagmaReply` (acks, op errors, replayed
+//   user messages, and authored `assistant_content`).
+// - `applySignal` over the plaintext `SignalEvent` (status transitions and the
+//   transient system-message lines terminals/errors produce).
+//
+// Both are pure and unit-tested in transcript_test.ts.
 //
 // Lines are keyed by `historyId` (the tagma `chat_history.id`): a stable,
 // monotonic id that doubles as the Svelte `{#each}` key and the cache key.
 // Pending optimistic user lines (sent but not yet ack'd) carry a synthetic
 // negative id minted by the store; they are never cached and are replaced by
-// the real id when the `MessageAccepted` ack lands.
+// the real id when the `MessageAccepted` ack lands. Signal-produced system
+// lines are also synthetic (signals carry no history id) and are never cached.
 
-import type { TagmaEvent, TagmaReply } from "@kallipai/kallip-lesche-client";
+import type {
+  AuthoredEvent,
+  SignalEvent,
+  TagmaReply,
+} from "@kallipai/kallip-lesche-client";
 
-type ChannelRole = "user" | "assistant" | "system";
+type ConversationRole = "user" | "assistant" | "system";
 
-export interface ChannelLine {
+export interface ConversationLine {
   /** Stable id: the tagma `chat_history.id` for confirmed lines, or a synthetic
-   * negative id for pending optimistic user lines. Doubles as the `{#each}` key
-   * and (when positive) the cache key. Unique within a transcript. */
+   * negative id for pending optimistic user lines and signal-produced system
+   * lines. Doubles as the `{#each}` key and (when positive) the cache key.
+   * Unique within a transcript. */
   readonly historyId: number;
-  readonly role: ChannelRole;
+  readonly role: ConversationRole;
   readonly text: string;
   /** RFC 3339 send time. For confirmed lines, the tagma row's `created_at`;
    * for an optimistic user line, the client-side render time until the ack
-   * refines it. Absent on old cached rows and on system/status lines. */
+   * refines it. Absent on old cached rows and on signal-produced system lines. */
   readonly createdAt?: string;
   /** Per-line delivery status for an optimistic user line. Absent (≡ "sent")
    * for confirmed/replayed lines and for all non-user lines; `"sending"` from
@@ -37,17 +46,17 @@ export interface ChannelLine {
   readonly status?: "sending" | "sent";
 }
 
-type ChannelStatus = "idle" | "busy" | "error";
+type ConversationStatus = "idle" | "busy" | "error";
 
-export interface ChannelTranscript {
-  readonly lines: ChannelLine[];
-  readonly status: ChannelStatus;
+export interface ConversationTranscript {
+  readonly lines: ConversationLine[];
+  readonly status: ConversationStatus;
   /** Set when status === "error" (or a non-fatal notice); the chat view shows
    * it inline. */
   readonly error?: string;
 }
 
-export const EMPTY_TRANSCRIPT: ChannelTranscript = {
+export const EMPTY_TRANSCRIPT: ConversationTranscript = {
   lines: [],
   status: "idle",
 };
@@ -55,12 +64,12 @@ export const EMPTY_TRANSCRIPT: ChannelTranscript = {
 /** Append one line with an explicit `historyId`, preserving status + error.
  * No-op for empty/whitespace text. */
 function line(
-  state: ChannelTranscript,
+  state: ConversationTranscript,
   historyId: number,
-  role: ChannelRole,
+  role: ConversationRole,
   text: string,
   createdAt?: string,
-): ChannelTranscript {
+): ConversationTranscript {
   const trimmed = text.trim();
   if (trimmed === "") return state;
   return {
@@ -69,57 +78,22 @@ function line(
   };
 }
 
-/** The content line an event produces, or `null` if it is content-less (a pure
- * status transition like `busy`/`idle`). Extracted so the cache writer and the
- * reducer share one source of truth for what becomes a durable line. */
-function contentLineForEvent(
-  event: TagmaEvent,
-): { role: ChannelRole; text: string } | null {
-  switch (event.type) {
-    case "assistant_content":
-      return { role: "assistant", text: event.content };
-    case "status":
-      return { role: "system", text: event.message };
-    case "error":
-      return { role: "system", text: event.message };
-    case "interrupted":
-      return { role: "system", text: "Turn interrupted." };
-    case "cancelled":
-      return { role: "system", text: "Turn cancelled." };
-    case "token_budget_exceeded":
-      return {
-        role: "system",
-        text: `Token budget exceeded (consumed ${event.consumed} of ${event.budget}).`,
-      };
-    case "max_rounds_exceeded":
-      return { role: "system", text: "Max tool rounds exceeded." };
-    case "failover_chain_exhausted":
-      return {
-        role: "system",
-        text: `Model failover exhausted (${event.reason}): ${event.detail}`,
-      };
-    case "busy":
-    case "idle":
-      return null;
-  }
-}
-
 /** Apply one tagma reply to the transcript. `lineId` is the store-assigned id
  * for any content line this reply produces (the tagma `history_id` when > 0,
  * else a synthetic negative id the store mints). Pure; returns a new state. */
 export function applyTagmaReply(
-  state: ChannelTranscript,
+  state: ConversationTranscript,
   reply: TagmaReply,
   lineId: number,
-): ChannelTranscript {
+): ConversationTranscript {
   switch (reply.kind) {
     case "message_accepted":
       // Informational ack (queue depth / warning); the store stamps the
       // optimistic user line with the ack's history_id separately.
       return state;
     case "interrupted":
-      // Ack of an Interrupt op; the lifecycle Interrupted event below is what
-      // the user sees.
+      // Ack of an Interrupt op; the lifecycle Interrupted signal is what the
+      // user sees (delivered via the signal channel, not this reply).
       return state;
     case "history_batch_end":
       // A History-batch completion marker; the store uses it to flip back to
@@ -141,51 +115,75 @@ export function applyTagmaReply(
         reply.created_at,
       );
     case "event":
-      return applyTagmaEvent(state, reply.event, lineId, reply.created_at);
+      return applyAuthored(state, reply.event, lineId, reply.created_at);
   }
 }
 
-function applyTagmaEvent(
-  state: ChannelTranscript,
-  event: TagmaEvent,
+/** Apply an authored event (a complete assistant message). Appends one line. */
+function applyAuthored(
+  state: ConversationTranscript,
+  event: AuthoredEvent,
   lineId: number,
   createdAt?: string,
-): ChannelTranscript {
-  const content = contentLineForEvent(event);
+): ConversationTranscript {
+  return line(state, lineId, "assistant", event.content, createdAt);
+}
+
+/** The human-readable system line a signal produces, or `null` if it is
+ * content-less (a pure status transition like `busy`/`idle`). Signal-produced
+ * lines are transient (not cached, not replayed). */
+function signalSystemLine(signal: SignalEvent): { text: string } | null {
+  switch (signal.type) {
+    case "error":
+      return { text: signal.message };
+    case "interrupted":
+      return { text: "Turn interrupted." };
+    case "cancelled":
+      return { text: "Turn cancelled." };
+    case "token_budget_exceeded":
+      return {
+        text: `Token budget exceeded (consumed ${signal.consumed} of ${signal.budget}).`,
+      };
+    case "max_rounds_exceeded":
+      return { text: "Max tool rounds exceeded." };
+    case "failover_chain_exhausted":
+      return {
+        text: `Model failover exhausted (${signal.reason}): ${signal.detail}`,
+      };
+    case "busy":
+    case "idle":
+      return null;
+  }
+}
+
+/** Apply one runtime signal to the transcript. `lineId` is the store-assigned
+ * synthetic id for any system line this signal produces. Pure; returns a new
+ * state. Status transitions (busy/idle) and terminal/error system lines all
+ * arrive here — they no longer ride the encrypted envelope. */
+export function applySignal(
+  state: ConversationTranscript,
+  signal: SignalEvent,
+  lineId: number,
+): ConversationTranscript {
+  const content = signalSystemLine(signal);
   const withLine = content
-    ? line(state, lineId, content.role, content.text, createdAt)
+    ? line(state, lineId, "system", content.text)
     : state;
-  switch (event.type) {
+  switch (signal.type) {
     case "busy":
       // A new turn clears any stale error from the previous one.
       return { ...state, status: "busy", error: undefined };
-    case "assistant_content":
-      // A complete (non-streamed) assistant message — also the variant
-      // the `kallip lesche send` CLI's deliveries map to. Append as its own
-      // line; the agent stays busy until the `idle` event.
-      return withLine;
     case "idle":
-      // The agent yielded control (called `break`). Content-less: just
-      // transition to idle.
+      // The agent yielded control. Content-less: just transition to idle.
       return { ...state, status: "idle", error: undefined };
-    case "status":
-      return withLine;
     case "error":
-      return {
-        ...withLine,
-        status: "error",
-        error: event.message,
-      };
+      return { ...withLine, status: "error", error: signal.message };
     case "interrupted":
       return { ...withLine, status: "idle", error: undefined };
     case "cancelled":
       return { ...withLine, status: "idle", error: undefined };
     case "token_budget_exceeded":
-      return {
-        ...withLine,
-        status: "error",
-        error: "Token budget exceeded",
-      };
+      return { ...withLine, status: "error", error: "Token budget exceeded" };
     case "max_rounds_exceeded":
       return {
         ...withLine,
@@ -206,10 +204,10 @@ function applyTagmaEvent(
  * replaces `localId` with the real `history_id` and flips status to `"sent"`
  * when the `MessageAccepted` ack lands. */
 export function withUserLine(
-  state: ChannelTranscript,
+  state: ConversationTranscript,
   text: string,
   localId: number,
-): ChannelTranscript {
+): ConversationTranscript {
   const trimmed = text.trim();
   if (trimmed === "") return state;
   return {
@@ -239,11 +237,11 @@ export function withUserLine(
  * already exists (an ack id colliding with an already-rendered line would
  * otherwise duplicate the Svelte/cache key). */
 export function replaceLineId(
-  state: ChannelTranscript,
+  state: ConversationTranscript,
   localId: number,
   historyId: number,
   createdAt?: string,
-): ChannelTranscript {
+): ConversationTranscript {
   if (!state.lines.some((l) => l.historyId === localId)) return state;
   if (state.lines.some((l) => l.historyId === historyId)) return state;
   return {
@@ -261,13 +259,34 @@ export function replaceLineId(
   };
 }
 
+/** Flip the optimistic user line carrying `localId` from `"sending"` to
+ * `"sent"` without changing its id. Used on the direct transport, where the
+ * inbound POST resolves synchronously with no `history_id` ack to promote the
+ * line through {@link replaceLineId}. No-op if the line is gone or already
+ * resolved. */
+export function markLineSent(
+  state: ConversationTranscript,
+  localId: number,
+): ConversationTranscript {
+  if (!state.lines.some((l) => l.historyId === localId)) return state;
+  return {
+    ...state,
+    lines: state.lines.map((l) =>
+      l.historyId === localId && l.status === "sending"
+        ? { ...l, status: "sent" }
+        : l,
+    ),
+  };
+}
+
 /** The cacheable content line for a reply, or `null` if it carries no durable
- * content (acks, batch markers, status-only events) or has no real `history_id`
- * (synthetic / un-stored frames are not cached). The single source of truth for
- * what the cache persists, shared with the reducer via `contentLineForEvent`. */
+ * authored content (acks, batch markers, op errors) or has no real
+ * `history_id` (synthetic / un-stored frames are not cached). Only authored
+ * `assistant_content` and replayed `user_message` rows are cached — signals are
+ * ephemeral and never cached. */
 export function cacheLineOf(reply: TagmaReply): {
   historyId: number;
-  role: ChannelRole;
+  role: ConversationRole;
   text: string;
   createdAt?: string;
 } | null {
@@ -284,15 +303,13 @@ export function cacheLineOf(reply: TagmaReply): {
   if (reply.kind === "event") {
     const id = reply.history_id ?? 0;
     if (id <= 0) return null;
-    const content = contentLineForEvent(reply.event);
-    return content
-      ? {
-          historyId: id,
-          role: content.role,
-          text: content.text,
-          createdAt: reply.created_at,
-        }
-      : null;
+    // reply.event is AuthoredEvent (assistant_content only).
+    return {
+      historyId: id,
+      role: "assistant",
+      text: reply.event.content,
+      createdAt: reply.created_at,
+    };
   }
   return null;
 }

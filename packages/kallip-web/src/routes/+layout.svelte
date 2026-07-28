@@ -11,7 +11,7 @@
     localStorageConfigStorage,
     type NavIcons,
   } from "@kallipai/kallip-ui";
-  import { ClipboardCheck, Cpu, MessageSquare } from "@lucide/svelte";
+  import { Cpu, MessageSquare } from "@lucide/svelte";
 
   // Inject the app's navigation, agora/lesche URLs, and storage backend into
   // kallip-ui. The shared <RootLayout> consumes these ports (it cannot import
@@ -24,7 +24,6 @@
 
   const icons: NavIcons = {
     chat: MessageSquare,
-    approvals: ClipboardCheck,
     tagmata: Cpu,
   };
 

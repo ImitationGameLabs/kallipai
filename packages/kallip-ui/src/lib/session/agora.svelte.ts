@@ -2,10 +2,10 @@
 // the signed-in user and the owner's tagmata across their lifecycle (pending ->
 // enrolled -> revoked).
 //
-// Error discipline mirrors SessionStore (session.svelte.ts): auth-fatal errors
-// (whoami/register/login/logout) live in `authError` and clear `user`; the list
-// error lives in `tagmataError` so a fetch failure never blanks the signed-in
-// state or vice-versa. `user` is tri-state: `undefined` = unresolved (the root
+// Error discipline: auth-fatal errors (whoami/register/login/logout) live in
+// `authError` and clear `user`; the list error lives in `tagmataError` so a
+// fetch failure never blanks the signed-in state or vice-versa. `user` is
+// tri-state: `undefined` = unresolved (the root
 // layout is still calling whoami), `null` = resolved logged-out, `MeResponse` =
 // signed in. The auth gate treats only `null` as "redirect to /login", so a
 // transient network failure (user stays undefined) renders a skeleton rather

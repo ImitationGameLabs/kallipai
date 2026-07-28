@@ -7,7 +7,6 @@
   import { agoraSession } from "../session/agora.svelte";
   import { channelsStore } from "../session/channels.svelte";
   import { realtimeStore } from "../session/realtime.svelte";
-  import { sessionStore } from "../session/session.svelte";
   import { connectDirect } from "../session/connect.ts";
   import { configStore } from "../config/config.svelte";
   import { modeOf } from "../config/mode.ts";
@@ -44,6 +43,23 @@
     // store-to-store import, keeping realtime and channels decoupled. Idempotent
     // and safe to run once per mount.
     realtimeStore.setEnvelopeSink((env) => channelsStore.deliver(env));
+    // Wire runtime signals (busy/idle presence, turn terminals, errors) into
+    // the owning channel's transcript. Same shell-binding discipline.
+    realtimeStore.setSignalSink((tagmaId, signal) =>
+      channelsStore.deliverSignal(tagmaId, signal),
+    );
+    // Wire aggregate status snapshots (root state, subagent counts, budget) into
+    // the owning channel's `statusSnapshot`, so the chat header reads one
+    // uniform source (the direct path drains its own SSE status). Same
+    // shell-binding discipline.
+    realtimeStore.setStatusSink((tagmaId, snapshot) =>
+      channelsStore.deliverStatus(tagmaId, snapshot),
+    );
+    // Wire the cached-status backfill: a freshly-opened relay channel seeds its
+    // `statusSnapshot` from realtime's in-session cache so the header shows at
+    // once (otherwise it waits for the next status push). Same shell-binding
+    // discipline; keeps channels decoupled from realtime.
+    channelsStore.setStatusBackfill((tagmaId) => realtimeStore.statusFor(tagmaId));
     // Wire presence transitions to auto-connect: an offline -> online tagma is
     // opened on demand. Same shell-binding discipline as the envelope sink.
     realtimeStore.setPresenceSink((tagmaId, online) => {
@@ -59,12 +75,14 @@
       if (cfg?.activeMode === "offline" && cfg.offline) {
         // Surface a boot-reconnect failure on the banner (the same classifier
         // the layout uses for mid-session errors) instead of swallowing it --
-        // attach() is never reached on failure, so its error reset does not
-        // apply; setting `error` directly is correct here.
+        // attachLocal is never reached on failure, so its localError reset does
+        // not apply; setting localError directly is correct here.
         connectDirect(cfg.offline)
-          .then((s) => sessionStore.attach(s))
+          .then(({ transport, conversationId }) =>
+            channelsStore.attachLocal(transport, conversationId),
+          )
           .catch((e) => {
-            sessionStore.error = e;
+            channelsStore.localError = e;
           });
       } else {
         // Resolve the session; the gate reads the settled `user`. The tagma
@@ -123,7 +141,7 @@
       mode,
       user: agoraSession.user,
       authError: agoraSession.authError,
-      connected: sessionStore.connected,
+      connected: channelsStore.localConnected,
       pathname,
       search,
     }),
@@ -144,15 +162,16 @@
     return pathMatches(pathname, href);
   }
 
-  // The banner shows a classified, human-readable message; the full error (with
-  // cause chain) is mirrored to the console for diagnostics. Offline mode only
-  // contacts the tagma (boot reconnect + explicit actions), so this fires on a
-  // mid-session tagma failure -- never on an online landing.
-  const errorView = $derived(
-    sessionStore.error ? classifyError(sessionStore.error) : null,
+  // Offline error: the local conversation's transport-level error (mid-session
+  // tagma failure) or localError (a boot-reconnect / mode-switch failure that
+  // landed before a local conversation existed). The banner classifies it; the
+  // full error is mirrored to the console.
+  const offlineError = $derived(
+    channelsStore.local?.error ?? channelsStore.localError,
   );
+  const errorView = $derived(offlineError ? classifyError(offlineError) : null);
   $effect(() => {
-    if (sessionStore.error) console.error(sessionStore.error);
+    if (offlineError) console.error(offlineError);
   });
 </script>
 

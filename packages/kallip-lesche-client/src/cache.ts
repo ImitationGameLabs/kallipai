@@ -7,7 +7,7 @@
 // This is a DUMB key-value store of `{conversationId, historyId, role, text}`
 // tuples. It deliberately does NOT interpret `role` (a UI concept owned by
 // kallip-ui's transcript reducer) — the UI writes tuples it extracted via its
-// own `contentLineOf`, and reads them back as-is. Keeping the semantics out of
+// own `cacheLineOf`, and reads them back as-is. Keeping the semantics out of
 // this layer means this package never depends on the UI's role vocabulary.
 //
 // No key carries a secret; the cache is plaintext, consistent with the

@@ -4,7 +4,6 @@ import { navFor, type NavIcons, pathMatches } from "./links.ts";
 // navFor only stores the icon components; dummies suffice.
 const icons = {
   chat: () => {},
-  approvals: () => {},
   tagmata: () => {},
 } as unknown as NavIcons;
 
@@ -57,16 +56,13 @@ Deno.test("navFor online with an empty channels array -> Tagmata only", () => {
   );
 });
 
-Deno.test(
-  "navFor offline -> Chat + Approvals (Settings is in AccountMenu)",
-  () => {
-    const links = navFor({ mode: "offline", icons });
-    assertEquals(
-      links.map((l) => l.href),
-      ["/", "/approvals"],
-    );
-  },
-);
+Deno.test("navFor offline -> Chat only (Settings is in AccountMenu)", () => {
+  const links = navFor({ mode: "offline", icons });
+  assertEquals(
+    links.map((l) => l.href),
+    ["/chat/local"],
+  );
+});
 
 Deno.test("pathMatches uses segment boundaries (no prefix cross-match)", () => {
   // Exact + beneath.

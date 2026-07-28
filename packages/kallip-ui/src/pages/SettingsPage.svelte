@@ -1,6 +1,6 @@
 <script lang="ts">
   import { agoraSession } from "../lib/session/agora.svelte";
-  import { sessionStore } from "../lib/session/session.svelte";
+  import { channelsStore } from "../lib/session/channels.svelte";
   import { configStore } from "../lib/config/config.svelte";
   import { modeOf } from "../lib/config/mode.ts";
 
@@ -14,7 +14,7 @@
 
   // Offline: drop the tagma session without abandoning offline mode.
   function disconnect() {
-    sessionStore.detach();
+    channelsStore.detachLocal();
   }
 </script>
 
@@ -53,18 +53,20 @@
         <div class="card preset-tonal-surface p-4 space-y-3">
           <div class="flex items-center gap-2 text-sm">
             <span
-              class="size-2 rounded-full {sessionStore.connected
+              class="size-2 rounded-full {channelsStore.localConnected
                 ? 'bg-success-500'
                 : 'bg-error-500'}"
               aria-hidden="true"
             ></span>
             <span class="font-medium"
-              >{sessionStore.connected ? "Connected" : "Disconnected"}</span
+              >{channelsStore.localConnected
+                ? "Connected"
+                : "Disconnected"}</span
             >
           </div>
           <div class="text-xs opacity-60 font-mono break-all">{offlineUrl}</div>
           <div class="flex flex-wrap gap-2">
-            {#if sessionStore.connected}
+            {#if channelsStore.localConnected}
               <button
                 class="btn btn-sm preset-tonal-surface"
                 onclick={disconnect}>Disconnect</button

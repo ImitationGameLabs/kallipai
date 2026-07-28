@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { renderMarkdown } from "../lib/tools/markdown.ts";
-  import { enhanceCodeBlocks } from "../lib/tools/code-block.ts";
+  import { renderMarkdown } from "../lib/markdown/markdown.ts";
+  import { enhanceCodeBlocks } from "../lib/markdown/code-block.ts";
 
   let { source }: { source: string } = $props();
 

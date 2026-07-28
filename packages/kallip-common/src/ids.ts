@@ -7,5 +7,4 @@ export type TagmaId = string;
 export type ConversationId = string;
 export type UserId = string;
 export type TraceId = string;
-export type ApprovalId = string;
 export type SkillName = string;

@@ -21,9 +21,9 @@
 // are designed so the split is a move, not a rewrite.
 //
 // Interactive Skeleton primitives are permitted only for structural chrome (e.g.
-// AppShell's Navigation); feature components (Composer, TranscriptView,
-// ApprovalsView) continue to consume Skeleton via CSS tokens only, so they stay
-// portable to a non-Skeleton theme.
+// AppShell's Navigation); feature components (Composer, Markdown) continue to
+// consume Skeleton via CSS tokens only, so they stay portable to a non-Skeleton
+// theme.
 
 // App bootstrap ports (inject $app/navigation, the agora URL, and storage).
 export {
@@ -46,7 +46,6 @@ export {
 
 // Reactive stores (singletons).
 export { agoraSession } from "./lib/session/agora.svelte.ts";
-export { sessionStore } from "./lib/session/session.svelte.ts";
 export { channelsStore } from "./lib/session/channels.svelte.ts";
 export { realtimeStore } from "./lib/session/realtime.svelte.ts";
 export { configStore } from "./lib/config/config.svelte.ts";
@@ -62,9 +61,7 @@ export {
 } from "./lib/shell/gate.ts";
 
 // Route page bodies (consumed by each app's thin +page.svelte wrappers).
-export { default as ChatPage } from "./pages/ChatPage.svelte";
 export { default as ChannelChatPage } from "./pages/ChannelChatPage.svelte";
-export { default as ApprovalsPage } from "./pages/ApprovalsPage.svelte";
 export { default as TagmataPage } from "./pages/TagmataPage.svelte";
 export { default as SettingsPage } from "./pages/SettingsPage.svelte";
 export { default as LoginPage } from "./pages/LoginPage.svelte";
@@ -81,10 +78,8 @@ export type { NavItem } from "./lib/shell.ts";
 // Components
 export { default as Markdown } from "./components/Markdown.svelte";
 export { default as CopyButton } from "./components/CopyButton.svelte";
-export { default as TranscriptView } from "./components/TranscriptView.svelte";
 export { default as Composer } from "./components/Composer.svelte";
-export { default as ApprovalsView } from "./components/ApprovalsView.svelte";
-export { default as ApprovalRow } from "./components/ApprovalRow.svelte";
+export { default as ConversationView } from "./components/ConversationView.svelte";
 export { default as TagmaStatusHeader } from "./components/TagmaStatusHeader.svelte";
 
 // Tagmata dashboard
