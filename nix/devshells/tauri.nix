@@ -22,9 +22,14 @@
 #   Mirrors the proven talk-tree config (nix/dev/shell.nix), adapted for kallip:
 #   - appCraneLib carries the cross targets the backend toolchain omits: wasm32
 #     (shared agora crypto) and the android std targets (tauri android).
+#
+# Repo-wide tooling (rumdl, taplo, nil, ...) and the opt-in sccache scheme
+# (USE_SCCACHE=1) are shared with devShells.default via nix/devshells/shared.nix.
+# `deno` is also the entry point for @tauri-apps/cli via `deno task tauri`.
 {
   pkgs,
   inputs,
+  shared,
   ...
 }:
 
@@ -94,35 +99,32 @@ let
   #   pkg-config
   # ];
 in
-appCraneLib.devShell rec {
-  packages = with pkgs; [
-    rust-analyzer
+appCraneLib.devShell (
+  shared.withSccache rec {
+    packages = shared.tooling ++ [
+      # Android
+      androidComposition.androidsdk
+      pkgs.gradle
+      pkgs.jdk
+    ];
 
-    # JS build for the app (drives the @tauri-apps/cli via `deno task tauri`).
-    deno
+    # Mirrors the talk-tree env: aapt2 is pinned to the nix-provided build-tools
+    # copy so Gradle does not try to download its own (which would fail offline /
+    # diverge from the pinned SDK).
+    ANDROID_JAVA_HOME = "${pkgs.jdk.home}";
+    ANDROID_HOME = "${androidComposition.androidsdk}/libexec/android-sdk";
+    ANDROID_NDK_HOME = "${ANDROID_HOME}/ndk-bundle";
+    GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${ANDROID_HOME}/build-tools/${buildToolsVersion}/aapt2";
 
-    # Android
-    androidComposition.androidsdk
-    gradle
-    jdk
-  ];
-
-  # Mirrors the talk-tree env: aapt2 is pinned to the nix-provided build-tools
-  # copy so Gradle does not try to download its own (which would fail offline /
-  # diverge from the pinned SDK).
-  ANDROID_JAVA_HOME = "${pkgs.jdk.home}";
-  ANDROID_HOME = "${androidComposition.androidsdk}/libexec/android-sdk";
-  ANDROID_NDK_HOME = "${ANDROID_HOME}/ndk-bundle";
-  GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${ANDROID_HOME}/build-tools/${buildToolsVersion}/aapt2";
-
-  # Restrict the Android ABIs Tauri builds to arm64 + x86_64 (real devices +
-  # emulator), dropping legacy armeabi-v7a (32-bit ARM) and x86 (32-bit
-  # emulator). Gradle maps ORG_GRADLE_PROJECT_<name> env vars to project
-  # properties, which the generated RustPlugin reads via findProperty — so this
-  # applies to every gradle run including `tauri android init`'s verification,
-  # without editing the generated (re-init-clobberable) gradle.properties.
-  # The three lists are index-aligned: abi <-> arch <-> rust target.
-  ORG_GRADLE_PROJECT_abiList = "arm64-v8a,x86_64";
-  ORG_GRADLE_PROJECT_archList = "arm64,x86_64";
-  ORG_GRADLE_PROJECT_targetList = "aarch64,x86_64";
-}
+    # Restrict the Android ABIs Tauri builds to arm64 + x86_64 (real devices +
+    # emulator), dropping legacy armeabi-v7a (32-bit ARM) and x86 (32-bit
+    # emulator). Gradle maps ORG_GRADLE_PROJECT_<name> env vars to project
+    # properties, which the generated RustPlugin reads via findProperty — so this
+    # applies to every gradle run including `tauri android init`'s verification,
+    # without editing the generated (re-init-clobberable) gradle.properties.
+    # The three lists are index-aligned: abi <-> arch <-> rust target.
+    ORG_GRADLE_PROJECT_abiList = "arm64-v8a,x86_64";
+    ORG_GRADLE_PROJECT_archList = "arm64,x86_64";
+    ORG_GRADLE_PROJECT_targetList = "aarch64,x86_64";
+  }
+)

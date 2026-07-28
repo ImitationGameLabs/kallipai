@@ -72,6 +72,13 @@
             inherit (inputs) advisory-db;
           };
 
+          # Shared devShell concerns (repo-wide tooling + opt-in sccache)
+          # consumed by both devShells.default and devShells.tauri — see
+          # nix/devshells/shared.nix.
+          shared = import ./nix/devshells/shared.nix {
+            inherit pkgs lib;
+          };
+
           packages =
             let
               # Crane binary builds (full workspace + per-crate subsets for the
@@ -165,6 +172,7 @@
               pkgs
               lib
               inputs
+              shared
               ;
           };
 
@@ -174,6 +182,7 @@
               pkgs
               lib
               common
+              shared
               ;
           };
         in
