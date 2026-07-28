@@ -11,6 +11,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::direct::DirectFrame;
+
 /// A shutdown-aware SSE stream over one agent's broadcast channel, with
 /// subscribe/unsubscribe transition logging.
 ///
@@ -116,6 +118,57 @@ fn event_stream(
         },
         Err(_) => None, // skip lagged messages
     })
+}
+
+/// A shutdown-aware SSE stream over the direct serving channel. Each
+/// [`DirectFrame`] becomes one SSE `Event` whose `event:` name is the frame's
+/// channel discriminator (`authored` / `signal` / `status`) and whose `data:`
+/// is the inner value's JSON. The same shutdown contract as [`sse_stream`].
+///
+/// `initial` is an optional one-shot frame prepended to the stream — used to
+/// push an immediate status snapshot on connect so the chat header renders at
+/// once instead of after the next pump tick (~2 s). Serialized through the same
+/// [`serialize_direct_frame`] so the wire shape is identical to a pump-driven
+/// status frame; `None` skips it (no leading event).
+pub fn direct_sse_stream(
+    rx: broadcast::Receiver<DirectFrame>,
+    initial: Option<DirectFrame>,
+    shutdown: CancellationToken,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let initial_event = initial.and_then(|frame| match serialize_direct_frame(&frame) {
+        Ok(event) => Some(Ok(event)),
+        Err(e) => {
+            warn!(error = %e, "failed to serialize initial direct SSE frame, dropping");
+            None
+        }
+    });
+    let live = futures_util::stream::StreamExt::take_until(
+        BroadcastStream::new(rx),
+        shutdown.cancelled_owned(),
+    )
+    .filter_map(|result| match result {
+        Ok(frame) => match serialize_direct_frame(&frame) {
+            Ok(event) => Some(Ok(event)),
+            Err(e) => {
+                warn!(error = %e, "failed to serialize direct SSE frame, dropping");
+                None
+            }
+        },
+        Err(_) => None, // skip lagged frames
+    });
+    // `stream::iter(Option)` yields the single initial event or nothing, then
+    // chains into the live broadcast stream. One concrete stream type either way.
+    let with_initial = futures_util::stream::iter(initial_event).chain(live);
+    Sse::new(with_initial).keep_alive(KeepAlive::default())
+}
+
+fn serialize_direct_frame(frame: &DirectFrame) -> serde_json::Result<Event> {
+    let (name, data) = match frame {
+        DirectFrame::Authored(reply) => ("authored", serde_json::to_string(reply)?),
+        DirectFrame::Signal(event) => ("signal", serde_json::to_string(event)?),
+        DirectFrame::Status(payload) => ("status", serde_json::to_string(payload)?),
+    };
+    Ok(Event::default().event(name).data(data))
 }
 
 #[cfg(test)]

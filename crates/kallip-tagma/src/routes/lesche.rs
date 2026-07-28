@@ -58,17 +58,15 @@ pub async fn post_message(
             ));
         }
     }
-    let relay = {
-        let slot = state.relay.lock().unwrap_or_else(|e| e.into_inner());
-        slot.as_ref()
-            .map(|(handle, _)| handle.clone())
-            .ok_or_else(|| {
-                ApiError::unavailable(
-                    "relay not active (no KALLIP_TAGMA_RELAY_AGORA_URL configured)",
-                )
-            })?
-    };
-    match relay.emit_message(req.text).await {
+    // Persist once + publish via the single external projector. The projector
+    // is the sole writer of chat content; whichever serving paths are active
+    // (direct SSE and/or relay envelope) forward the published frame. Burst-
+    // limited at the projector.
+    let projector = state
+        .external
+        .get()
+        .ok_or_else(|| ApiError::unavailable("external projector not initialized"))?;
+    match projector.record_outbound(req.text).await {
         Ok(()) => Ok(Json(DeliveryResponse {
             ok: true,
             error: None,
@@ -76,6 +74,8 @@ pub async fn post_message(
         Err(RelayMessageError::BurstExceeded) => {
             Err(ApiError::too_many_requests("message burst cap exceeded"))
         }
+        // The projector does not POST (the pumps do, and their failures are
+        // logged there, not surfaced here); kept for exhaustiveness.
         Err(RelayMessageError::Delivery(e)) => {
             Err(ApiError::bad_gateway(format!("delivery failed: {e:#}")))
         }
@@ -92,9 +92,10 @@ mod tests {
     use axum::extract::{Path, State};
     use kallip_common::agentid::AgentId;
 
-    /// With no relay active (pure-local tagma, no `KALLIP_TAGMA_RELAY_AGORA_URL`) the
-    /// route returns 503 unavailable rather than touching the relay. Authed as
-    /// the agent itself (self-only) so the 403 check does not short-circuit.
+    /// With neither the relay nor the direct serving path initialized (a state
+    /// only constructed in tests — production always inits direct), the route
+    /// returns 503 rather than touching either serving path. Authed as the
+    /// agent itself (self-only) so the 403 check does not short-circuit.
     #[tokio::test]
     async fn message_unavailable_when_no_relay() {
         let state = make_state();

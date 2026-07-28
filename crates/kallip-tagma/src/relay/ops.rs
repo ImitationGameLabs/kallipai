@@ -1,80 +1,20 @@
-//! Pure helpers for the relay op path: the SSE→`TagmaEvent` mapping, the reply
-//! burst limiter, and the req_id/op-error helpers. Ported from the former
-//! standalone connector.
+//! Pure helpers for the relay op path: the reply burst limiter and the
+//! req_id/op-error helpers. Ported from the former standalone connector. The
+//! SSE→external-event projection lives in [`crate::projector`] (shared with
+//! the direct serving path).
 
 use std::time::Duration;
 
 use kallip_agora_common::ids::TraceId;
-use kallip_common::protocol::{
-    ApiError, FailoverChainExhaustion as WireFailoverExhaustion, SseEvent,
-};
-use kallip_lesche_common::event::{FailoverChainExhaustion, TagmaEvent};
+use kallip_common::protocol::ApiError;
 use kallip_lesche_common::message::TagmaReply;
-use tracing::debug;
 
 /// Trace id stamped on every event-pump envelope (the pump is one logical
 /// producer, not correlated to any single op `req_id`).
 pub(super) const PUMP_TRACE: &str = "tagma:pump";
 
-/// Trace id stamped on every message-delivery envelope.
-pub(super) const MESSAGE_TRACE: &str = "tagma:message";
-
 /// Backoff between lesche tunnel reconnect attempts.
 pub(super) const TUNNEL_RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
-
-/// Map a tagma `SseEvent` to the agent-free tagma-facing vocabulary, dropping
-/// variants outside the app's capability set (streaming deltas, tool events,
-/// retry/failover telemetry, approval updates) with a `debug!` so a new tagma
-/// event never vanishes silently.
-pub(super) fn map_sse_event(sse: &SseEvent) -> Option<TagmaEvent> {
-    Some(match sse {
-        SseEvent::AssistantContent { content } => TagmaEvent::AssistantContent {
-            content: content.clone(),
-        },
-        SseEvent::Idle => TagmaEvent::Idle,
-        SseEvent::Busy => TagmaEvent::Busy,
-        SseEvent::Status { message } => TagmaEvent::Status {
-            message: message.clone(),
-        },
-        SseEvent::Error { message } => TagmaEvent::Error {
-            message: message.clone(),
-        },
-        SseEvent::Interrupted => TagmaEvent::Interrupted,
-        SseEvent::Cancelled => TagmaEvent::Cancelled,
-        SseEvent::TokenBudgetExceeded { consumed, budget } => TagmaEvent::TokenBudgetExceeded {
-            consumed: *consumed,
-            budget: *budget,
-        },
-        SseEvent::MaxRoundsExceeded => TagmaEvent::MaxRoundsExceeded,
-        SseEvent::FailoverChainExhausted { reason, detail } => TagmaEvent::FailoverChainExhausted {
-            reason: map_failover_exhaustion(*reason),
-            detail: detail.clone(),
-        },
-        other => {
-            debug!(
-                target: "tagma.relay.sse_drop",
-                event = ?other,
-                "dropping out-of-capability tagma event"
-            );
-            return None;
-        }
-    })
-}
-
-fn map_failover_exhaustion(reason: WireFailoverExhaustion) -> FailoverChainExhaustion {
-    match reason {
-        WireFailoverExhaustion::NoFailoverConfigured => {
-            FailoverChainExhaustion::NoFailoverConfigured
-        }
-        WireFailoverExhaustion::AllBackupsExhausted => FailoverChainExhaustion::AllBackupsExhausted,
-        WireFailoverExhaustion::AllCandidatesUnbuildable => {
-            FailoverChainExhaustion::AllCandidatesUnbuildable
-        }
-        WireFailoverExhaustion::AllCandidatesInfeasible => {
-            FailoverChainExhaustion::AllCandidatesInfeasible
-        }
-    }
-}
 
 /// Map a tagma error to an op `Error` reply, preserving the tagma's HTTP status
 /// when the error carries one (otherwise 502 bad gateway). Only the `ApiError`'s
@@ -127,7 +67,7 @@ pub(crate) const DEFAULT_MESSAGE_BURST_WINDOW: Duration = Duration::from_secs(10
 /// A simple fixed-window burst limiter for message deliveries: at most
 /// `limits.max` deliveries per `limits.window`. Bounds a runaway agent loop
 /// without needing round-level semantics (the relay does not see rounds).
-pub(super) struct MessageLimiter {
+pub(crate) struct MessageLimiter {
     limits: MessageLimits,
     /// Start of the current window (seconds since UNIX epoch).
     window_start: u64,
@@ -136,7 +76,7 @@ pub(super) struct MessageLimiter {
 }
 
 impl MessageLimiter {
-    pub(super) fn new(limits: MessageLimits) -> Self {
+    pub(crate) fn new(limits: MessageLimits) -> Self {
         Self {
             limits,
             window_start: 0,
@@ -144,7 +84,7 @@ impl MessageLimiter {
         }
     }
 
-    pub(super) fn check(&mut self) -> bool {
+    pub(crate) fn check(&mut self) -> bool {
         let now = unix_secs();
         if now.saturating_sub(self.window_start) >= self.limits.window.as_secs() {
             self.window_start = now;

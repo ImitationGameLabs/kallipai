@@ -61,6 +61,14 @@ pub fn router() -> Router<SharedState> {
             "/agents/{id}/events",
             axum::routing::get(message::sse_events),
         )
+        .route(
+            "/agents/{id}/external/events",
+            axum::routing::get(message::external_events),
+        )
+        .route(
+            "/agents/{id}/external/history",
+            axum::routing::get(message::external_history),
+        )
         .route("/agents/{id}", axum::routing::delete(agent::remove_agent))
         .route(
             "/agents/{id}/interrupt",

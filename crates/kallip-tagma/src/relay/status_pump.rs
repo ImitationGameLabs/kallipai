@@ -37,7 +37,10 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 /// when the pump ticks -- the root is created at startup and non-removable
 /// while live, so this only fires under a logic bug. `Faulted` is the safe
 /// "no live peer" signal either way.
-fn snapshot_status(registry: &AgentRegistry, token_budget: &TokenBudget) -> TagmaStatusPayload {
+pub(crate) fn snapshot_status(
+    registry: &AgentRegistry,
+    token_budget: &TokenBudget,
+) -> TagmaStatusPayload {
     let mut root_state = AgentState::Faulted;
     let mut sub_total = 0u32;
     let mut sub_active = 0u32;
@@ -199,9 +202,7 @@ mod tests {
             kallip_agora_common::ids::TagmaId::from("tagma".to_string()),
             DeviceKey::generate(),
             root,
-            super::super::MessageLimits::default(),
             Arc::downgrade(&state),
-            None,
         );
         (handle, capture, state)
     }

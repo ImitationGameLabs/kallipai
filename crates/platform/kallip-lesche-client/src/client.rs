@@ -4,6 +4,7 @@
 //! - [`LescheClient::post_envelope`] — post an agent envelope, retrying on 503.
 //! - [`LescheClient::post_key_exchange_response`] — post a KEX response.
 //! - [`LescheClient::post_status`] — post a periodic aggregate status snapshot.
+//! - [`LescheClient::post_signal`] — post a per-event runtime signal.
 //! - [`LescheClient::open_tunnel`] — open the long-lived tunnel SSE and
 //!   yield parsed [`TunnelInbound`] events.
 //!
@@ -24,7 +25,7 @@ use futures_util::StreamExt;
 use kallip_agora_common::ids::{ConversationId, TagmaId};
 use kallip_e2ee::DeviceKey;
 use kallip_lesche_common::control::KeyExchangeResponse;
-use kallip_lesche_common::event::TagmaStatusPayload;
+use kallip_lesche_common::event::{SignalEvent, TagmaStatusPayload};
 use kallip_lesche_common::message::Envelope;
 use kallip_lesche_common::proof::tunnel_transcript;
 use kallip_lesche_common::tunnel::TunnelInbound;
@@ -148,6 +149,28 @@ impl LescheClient {
             .post(&url)
             .bearer_auth(&self.inner.tagma_token)
             .json(payload)
+            .send()
+            .await
+            .context("lesche POST failed")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("lesche POST returned {}", resp.status());
+        }
+        Ok(())
+    }
+
+    /// Post a tagma runtime signal (busy/idle presence, turn terminals,
+    /// errors) for plaintext rebroadcast as a `LescheEvent::TagmaSignal`. Like
+    /// [`post_status`](Self::post_status), not retried: a dropped signal just
+    /// means the UI misses a transient transition, and the tagma has already
+    /// logged it for observability. A failure here is logged by the caller.
+    pub async fn post_signal(&self, tagma_id: &TagmaId, event: &SignalEvent) -> Result<()> {
+        let url = self.url(&format!("/v1/tagmata/{tagma_id}/signal"));
+        let resp = self
+            .inner
+            .http_post
+            .post(&url)
+            .bearer_auth(&self.inner.tagma_token)
+            .json(event)
             .send()
             .await
             .context("lesche POST failed")?;

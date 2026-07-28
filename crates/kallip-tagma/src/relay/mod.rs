@@ -8,20 +8,20 @@
 //!   `crypto::CryptoState`);
 //! - decrypt inbound app ops and run them against the root agent in-process
 //!   (`handle_user_op` / `execute_op`);
-//! - pump the root agent's `SseEvent` stream onto the agent-free `TagmaEvent`
-//!   vocabulary and post encrypted envelopes (`pump`);
-//! - deliver the agent's `kallip lesche send` text as an `AssistantContent`
-//!   envelope (`emit_message`).
+//! - forward the external projector's authored/signal bus onto the relay:
+//!   encrypted envelope for authored content, plaintext for signals (`pump`).
 //!
-//! The E2E key never leaves this process. `Inner` holds a `Weak<AppState>` (not
-//! a strong ref) to avoid a reference cycle with `AppState.relay`.
+//! The projector (see [`crate::external`]) is the sole writer of chat content;
+//! this module only encrypts + posts. The E2E key never leaves this process.
+//! `Inner` holds a `Weak<AppState>` (not a strong ref) to avoid a reference
+//! cycle with `AppState.relay`.
 
 pub(crate) mod chat_history;
 mod crypto;
 mod kex;
-mod ops;
+pub(crate) mod ops;
 mod pump;
-mod status_pump;
+pub(crate) mod status_pump;
 
 use std::sync::{Arc, Weak};
 
@@ -31,7 +31,6 @@ use kallip_agora_common::bytes::Ciphertext;
 use kallip_agora_common::ids::{ConversationId, TagmaId};
 use kallip_e2ee::{self as e2e, DeviceKey};
 use kallip_lesche_client::LescheClient;
-use kallip_lesche_common::event::TagmaEvent;
 use kallip_lesche_common::message::{
     Envelope, Participant, TagmaControl, TagmaReply, TagmaRequest,
 };
@@ -48,7 +47,7 @@ use crate::auth::Identity;
 use crate::state::{AppState, SharedState};
 
 use crypto::CryptoState;
-use ops::{MessageLimiter, op_err_reply, op_trace};
+use ops::{op_err_reply, op_trace};
 
 // Re-exported so `activate_relay` (main.rs) can construct the configured limits.
 pub(crate) use ops::{DEFAULT_MESSAGE_BURST_MAX, DEFAULT_MESSAGE_BURST_WINDOW, MessageLimits};
@@ -98,12 +97,6 @@ struct Inner {
     /// `Weak` to break the `RelayHandle` ↔ `AppState` reference cycle. Upgraded
     /// at call time; `None` during shutdown → the op fails gracefully.
     state: Weak<AppState>,
-    /// Process-global message burst limiter.
-    message_limiter: Mutex<MessageLimiter>,
-    /// Durable chat-history store. `None` only in tests that skip replay; a
-    /// live relay always opens one in `activate_relay`. `Option` so `emit_event`
-    /// degrades to plain live emit (history_id stays 0) when absent.
-    history: Option<chat_history::Db>,
 }
 
 impl RelayHandle {
@@ -112,9 +105,7 @@ impl RelayHandle {
         tagma_id: TagmaId,
         device: DeviceKey,
         root_agent: AgentId,
-        message_limits: MessageLimits,
         state: Weak<AppState>,
-        history: Option<chat_history::Db>,
     ) -> Self {
         let conversation_id = ConversationId::for_tagma(&tagma_id);
         Self {
@@ -129,8 +120,6 @@ impl RelayHandle {
                 status_pump: Mutex::new(None),
                 dispatch: Mutex::new(tokio::task::JoinSet::new()),
                 state,
-                message_limiter: Mutex::new(MessageLimiter::new(message_limits)),
-                history,
             }),
         }
     }
@@ -267,12 +256,16 @@ impl RelayHandle {
         // Quiesce the pump before mutating crypto state: its in-flight emits
         // (if any) used the old key and must drain before we rotate + reset.
         self.stop_pump().await;
-        {
+        // `first` distinguishes the initial KEX from a re-KEX (the cadence the
+        // user sees in the logs); a re-KEX means a prior key was already installed.
+        let first = {
             let mut c = self.inner.crypto.lock().await;
+            let had_key = c.key.is_some();
             c.key = Some(key);
             c.outbound_seq = 0;
             c.seen_inbound = None;
-        }
+            !had_key
+        };
         self.start_pump().await;
         if let Err(e) = self
             .inner
@@ -282,6 +275,10 @@ impl RelayHandle {
         {
             warn!(conv = %conversation_id, "post key-exchange response: {e:#}");
         }
+        // `conv` is the relay-plane key (what agora/lesche index this KEX by),
+        // so it carries the cross-service correlation value; the tagma id is a
+        // constant 1:1 derivation of it and adds nothing per-line.
+        info!(conv = %conversation_id, first, "relay KEX completed");
         // History is pull-based: the app sends a `TagmaControl::History` request
         // once it has hydrated its local cache, so KEX no longer auto-replays.
     }
@@ -383,55 +380,24 @@ impl RelayHandle {
     }
 
     /// Run a `TagmaRequest` against the root agent and emit the reply, under a
-    /// req_id-aware panic boundary. A `SendMessage` is first appended to
-    /// `chat_history` as an inbound row (the durable source of truth for the
-    /// user side of the conversation); the row id and `created_at` are stamped
-    /// onto the `MessageAccepted` reply so the app can dedup its optimistic user
-    /// line and show the authoritative send time. `Interrupt` carries no content
-    /// and is not stored — its visible effect is the agent's outbound
-    /// `Interrupted` event, which the pump already stores.
+    /// req_id-aware panic boundary. The inbound `SendMessage` is persisted by
+    /// the external projector inside `deliver_message` (the shared seam
+    /// `execute_op` calls), which also publishes the stamped `UserMessage` frame
+    /// the pump forwards — so the app dedups its optimistic user line off that
+    /// frame, not this ack. The `MessageAccepted` reply therefore carries
+    /// `history_id = 0`. `Interrupt` carries no content and is not stored — its
+    /// visible effect is the agent's outbound `Interrupted` event, which the
+    /// pump already forwards.
     async fn handle_agent_op(
         &self,
         trace: &kallip_agora_common::ids::TraceId,
         req_id: u64,
         request: TagmaRequest,
     ) {
-        // Persist the inbound user message before running the op, so it is
-        // durable even if the reply POST fails (the app re-pulls it on
-        // reconnect via `UserMessage` echo). Carry both the row id and the
-        // `created_at` the append just wrote, so the live ack stamps the
-        // authoritative send time with zero skew.
-        let inbound: Option<(i64, i64)> = match (&request, self.inner.history.clone()) {
-            (TagmaRequest::SendMessage { .. }, Some(db)) => match serde_json::to_vec(&request) {
-                Ok(payload) => {
-                    match chat_history::append(
-                        &db,
-                        self.inner.conversation_id.as_ref(),
-                        "inbound",
-                        "send_message",
-                        &payload,
-                    )
-                    .await
-                    {
-                        Ok((id, created_at)) => Some((id, created_at)),
-                        Err(e) => {
-                            warn!(req_id, "inbound history append failed: {e:#}");
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(req_id, "inbound history encode failed: {e}");
-                    None
-                }
-            },
-            _ => None,
-        };
-
         let result = AssertUnwindSafe(self.execute_op(request))
             .catch_unwind()
             .await;
-        let mut reply = match result {
+        let reply = match result {
             Ok(Ok(reply)) => reply,
             Ok(Err(e)) => {
                 warn!(req_id, "op failed: {e:#}");
@@ -446,10 +412,6 @@ impl RelayHandle {
                 }
             }
         };
-        if let Some((id, created_at)) = inbound {
-            reply.set_history_id(id);
-            reply.set_created_at(created_at);
-        }
         // Op replies pass `cancel: None`: an in-flight reply POST is left to
         // complete across a re-KEX rather than aborted. This is safe by key
         // rotation (a re-KEX swaps the AEAD key, so an old-key envelope the app
@@ -524,97 +486,22 @@ impl RelayHandle {
         before: Option<i64>,
         limit: u32,
     ) {
-        let conv = self.inner.conversation_id.as_ref();
         let limit = limit.min(Self::HISTORY_BATCH_MAX);
-        let read = |db: chat_history::Db| async move {
-            match (after, before) {
-                (Some(a), None) => chat_history::read_after(&db, conv, a, limit).await,
-                (None, Some(b)) => chat_history::read_before(&db, conv, b, limit).await,
-                (None, None) => chat_history::read_last_n(&db, conv, limit as u64).await,
-                // Both set is not a defined mode; treat as an empty result so
-                // the app still gets a (count=0) completion marker.
-                (Some(_), Some(_)) => Ok(Vec::new()),
-            }
+        // Read + decode through the external projector, the single history read
+        // path shared with the direct `/external/history` endpoint. Returns
+        // decoded replies + the `more` flag.
+        let Some(projector) = self
+            .inner
+            .state
+            .upgrade()
+            .and_then(|s| s.external.get().cloned())
+        else {
+            // Tagma shutting down: nothing to emit.
+            return;
         };
-        let rows = match self.inner.history.clone() {
-            Some(db) => match read(db).await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(req_id, "history read failed: {e:#}");
-                    // No marker: the app will retry on the next reconnect.
-                    return;
-                }
-            },
-            // No history store: emit an empty completion marker so the app is
-            // not left waiting on a deadline.
-            None => {
-                let _ = self
-                    .emit(
-                        trace,
-                        TagmaReply::HistoryBatchEnd {
-                            req_id,
-                            count: 0,
-                            more: false,
-                        },
-                        None,
-                    )
-                    .await;
-                return;
-            }
-        };
-        // `more` signals "more rows may be pullable" and only applies to the
-        // paginated `after`/`before` modes. The `latest` mode (`read_last_n`)
-        // is the recent-N snapshot with no further page to pull, so it is
-        // always `more=false` even when it returned a full page (the app never
-        // paginates off a latest batch). `count` (incremented below) is the
-        // frames actually emitted -- rows whose payload fails to decode are
-        // skipped, so count <= rows.len().
-        let more = match (after, before) {
-            (None, None) => false,
-            _ => rows.len() as u32 == limit && limit > 0,
-        };
+        let (replies, more) = projector.read_history(after, before, limit).await;
         let mut count = 0u32;
-        for row in rows {
-            let reply = match row.direction.as_str() {
-                "outbound" => match serde_json::from_slice::<TagmaReply>(&row.payload) {
-                    Ok(mut r) => {
-                        r.set_history_id(row.id);
-                        r.set_created_at(row.created_at);
-                        r
-                    }
-                    Err(e) => {
-                        warn!(id = row.id, "history outbound decode failed: {e}; skipping");
-                        continue;
-                    }
-                },
-                "inbound" => match serde_json::from_slice::<TagmaRequest>(&row.payload) {
-                    Ok(TagmaRequest::SendMessage { text, .. }) => {
-                        let mut r = TagmaReply::UserMessage {
-                            history_id: row.id,
-                            text,
-                            created_at: None,
-                        };
-                        r.set_created_at(row.created_at);
-                        r
-                    }
-                    Ok(other) => {
-                        warn!(id = row.id, "unexpected inbound kind: {other:?}; skipping");
-                        continue;
-                    }
-                    Err(e) => {
-                        warn!(id = row.id, "history inbound decode failed: {e}; skipping");
-                        continue;
-                    }
-                },
-                other => {
-                    warn!(
-                        id = row.id,
-                        direction = other,
-                        "unknown direction; skipping"
-                    );
-                    continue;
-                }
-            };
+        for reply in replies {
             if let Err(e) = self.emit(trace, reply, None).await {
                 warn!(
                     req_id,
@@ -710,50 +597,30 @@ impl RelayHandle {
         Ok(())
     }
 
-    /// Like [`emit`](Self::emit) but first appends the reply to `chat_history`
-    /// and stamps the row id onto it as `history_id`, so a reconnecting device
-    /// can pull the frame again and dedup by that stable cursor. Used for the
-    /// pump's live events (append-before-emit): even if the live POST fails
-    /// (app offline), the frame is durable and reaches the device on replay.
-    /// A storage failure degrades gracefully (mirrors the inbound append in
-    /// [`Self::handle_agent_op`]): the row is not recorded, `history_id` stays 0, and
-    /// the frame is still delivered live (no dedup across reconnect for that
-    /// one frame) -- the alternative of dropping the live delivery too would
-    /// lose the frame from both paths at once. The ack replies (acks are
-    /// live-only, never replayed) bypass this and use `emit` directly. A `None`
-    /// history store degrades to plain `emit` (history_id stays 0; no dedup
-    /// across reconnect).
-    async fn emit_event(
+    /// Push a runtime signal (busy/idle presence, turn terminals, errors) to
+    /// the relay for plaintext rebroadcast as a `LescheEvent::TagmaSignal`.
+    /// Signals are operator metadata: they do NOT enter the encrypted envelope
+    /// channel and are NOT persisted in `chat_history` (a reconnect only
+    /// replays authored messages). Best-effort and not retried, mirroring
+    /// [`post_status`](kallip_lesche_client::LescheClient::post_status): a
+    /// signal is a transient transition that the next event supersedes, so a
+    /// dropped POST just means the UI misses one frame of presence, and the
+    /// projector has already logged it for observability. `cancel` aborts an
+    /// in-flight POST on re-KEX/shutdown.
+    async fn emit_signal(
         &self,
-        trace: &kallip_agora_common::ids::TraceId,
-        mut reply: TagmaReply,
+        event: kallip_common::protocol::SignalEvent,
         cancel: Option<&CancellationToken>,
     ) -> Result<()> {
-        if let Some(db) = self.inner.history.clone() {
-            // Serialize for storage with history_id unset (the row id is
-            // authoritative and stamped below); `set_history_id` only touches
-            // `Event`, so ack variants (which never take this path) are unaffected.
-            let payload = serde_json::to_vec(&reply).context("encode for history")?;
-            match chat_history::append(
-                &db,
-                self.inner.conversation_id.as_ref(),
-                "outbound",
-                reply_kind(&reply),
-                &payload,
-            )
-            .await
-            {
-                Ok((id, created_at)) => {
-                    reply.set_history_id(id);
-                    reply.set_created_at(created_at);
-                }
-                Err(e) => warn!(
-                    error = %e,
-                    "outbound chat_history append failed; live-only fallback",
-                ),
-            }
+        let post = self.inner.client.post_signal(&self.inner.tagma_id, &event);
+        match cancel {
+            Some(token) => tokio::select! {
+                biased;
+                _ = token.cancelled() => Ok(()),
+                r = post => r,
+            },
+            None => post.await,
         }
-        self.emit(trace, reply, cancel).await
     }
 
     /// Encrypt `reply` for the conversation and post the agent envelope. Returns
@@ -816,44 +683,6 @@ impl RelayHandle {
             None => post.await,
         }
     }
-
-    /// Deliver the agent's `kallip lesche send` text to the user: gate on the
-    /// process-global burst cap, then emit it as a `TagmaEvent::AssistantContent`
-    /// envelope. The E2E key never leaves the process.
-    pub async fn emit_message(&self, text: String) -> Result<(), RelayMessageError> {
-        let allowed = self.inner.message_limiter.lock().await.check();
-        if !allowed {
-            return Err(RelayMessageError::BurstExceeded);
-        }
-        let trace = kallip_agora_common::ids::TraceId::from(ops::MESSAGE_TRACE.to_owned());
-        self.emit_event(
-            &trace,
-            TagmaReply::Event {
-                event: TagmaEvent::AssistantContent { content: text },
-                history_id: 0,
-                created_at: None,
-            },
-            None,
-        )
-        .await?;
-        Ok(())
-    }
-}
-
-/// The `kind` discriminant of a [`TagmaReply`], stored alongside its payload in
-/// `chat_history` for debugging / future filtering. Only `Event` is ever stored
-/// (the ack variants and the replay-only `UserMessage`/`HistoryBatchEnd` are
-/// live-only or synthesized at replay time), but the match is kept exhaustive
-/// so adding a variant is a compile error here.
-fn reply_kind(reply: &TagmaReply) -> &'static str {
-    match reply {
-        TagmaReply::Event { .. } => "event",
-        TagmaReply::MessageAccepted { .. } => "message_accepted",
-        TagmaReply::Interrupted { .. } => "interrupted",
-        TagmaReply::Error { .. } => "error",
-        TagmaReply::UserMessage { .. } => "user_message",
-        TagmaReply::HistoryBatchEnd { .. } => "history_batch_end",
-    }
 }
 
 #[cfg(test)]
@@ -873,7 +702,7 @@ mod op_tests {
     use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, aead::Aead};
     use kallip_agora_common::bytes::Ciphertext;
     use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId, UserId};
-    use kallip_common::protocol::SseEvent;
+    use kallip_common::protocol::{AuthoredEvent, FailoverChainExhaustion, SignalEvent, SseEvent};
     use kallip_e2ee::{
         DIR_INITIATOR_TO_RESPONDER, DIR_RESPONDER_TO_INITIATOR, DeviceKey, SessionKey, nonce,
     };
@@ -889,6 +718,9 @@ mod op_tests {
 
     /// Captured outbound envelopes, in arrival order.
     type Capture = Arc<Mutex<Vec<Envelope>>>;
+
+    /// Captured system signals (busy/idle/terminals/errors), in arrival order.
+    type SignalCapture = Arc<Mutex<Vec<SignalEvent>>>;
 
     /// Initiator-side encrypt (direction 0 = initiator->responder). The e2e
     /// crate's `encrypt` is hardcoded to the responder's direction (1), so the
@@ -907,18 +739,31 @@ mod op_tests {
             .ok()
     }
 
-    async fn spawn_lesche(capture: Capture) -> String {
+    async fn spawn_lesche(capture: Capture, signals: SignalCapture) -> String {
         let app = Router::new()
             .route("/v1/conversations/{conv}/envelopes", post(capture_handler))
-            .with_state(capture);
+            .route("/v1/tagmata/{_tagma}/signal", post(signal_handler))
+            .route("/v1/tagmata/{_tagma}/status", post(|| async { "ok" }))
+            .with_state((capture, signals));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
         format!("http://{addr}")
     }
 
-    async fn capture_handler(State(c): State<Capture>, env: axum::Json<Envelope>) -> &'static str {
+    async fn capture_handler(
+        State((c, _)): State<(Capture, SignalCapture)>,
+        env: axum::Json<Envelope>,
+    ) -> &'static str {
         c.lock().await.push(env.0);
+        "ok"
+    }
+
+    async fn signal_handler(
+        State((_, s)): State<(Capture, SignalCapture)>,
+        axum::Json(event): axum::Json<SignalEvent>,
+    ) -> &'static str {
+        s.lock().await.push(event);
         "ok"
     }
 
@@ -937,14 +782,33 @@ mod op_tests {
         AgentId,
         SharedState,
     ) {
-        let (handle, key, capture, prompt_rx, root_id, state, _db_dir) =
+        let (handle, key, capture, _signals, prompt_rx, root_id, state, _db) =
             setup_inner(events_cap, None).await;
         (handle, key, capture, prompt_rx, root_id, state)
     }
 
-    /// Like [`setup`] but with a real tempfile-backed chat-history store, for
-    /// `TagmaControl::History` replay tests. The `TempDir` is returned so the caller can
-    /// keep the DB file alive for the test's duration.
+    /// Like [`setup`] but also exposes the captured system signals (for tests
+    /// that assert on the plaintext signal channel).
+    async fn setup_with_signals(
+        events_cap: usize,
+    ) -> (
+        RelayHandle,
+        SessionKey,
+        Capture,
+        SignalCapture,
+        mpsc::Receiver<String>,
+        AgentId,
+        SharedState,
+    ) {
+        let (handle, key, capture, signals, prompt_rx, root_id, state, _db) =
+            setup_inner(events_cap, None).await;
+        (handle, key, capture, signals, prompt_rx, root_id, state)
+    }
+
+    /// Like [`setup`] but with a real tempfile-backed chat-history store shared
+    /// with the projector, for `TagmaControl::History` replay tests. Returns the
+    /// `Db` (so tests can append rows the projector will read) and the `TempDir`
+    /// (to keep the file alive for the test's duration).
     async fn setup_with_history(
         events_cap: usize,
     ) -> (
@@ -954,15 +818,25 @@ mod op_tests {
         mpsc::Receiver<String>,
         AgentId,
         SharedState,
+        chat_history::Db,
         TempDir,
     ) {
         let dir = TempDir::new().unwrap();
         let db = chat_history::open(&dir.path().join("history.sqlite"))
             .await
             .unwrap();
-        let (handle, key, capture, prompt_rx, root_id, state, _) =
-            setup_inner(events_cap, Some(db)).await;
-        (handle, key, capture, prompt_rx, root_id, state, dir)
+        let (handle, key, capture, _signals, prompt_rx, root_id, state, db) =
+            setup_inner(events_cap, Some(db.clone())).await;
+        (
+            handle,
+            key,
+            capture,
+            prompt_rx,
+            root_id,
+            state,
+            db.unwrap(),
+            dir,
+        )
     }
 
     async fn setup_inner(
@@ -972,10 +846,11 @@ mod op_tests {
         RelayHandle,
         SessionKey,
         Capture,
+        SignalCapture,
         mpsc::Receiver<String>,
         AgentId,
         SharedState,
-        (),
+        Option<chat_history::Db>,
     ) {
         let state = make_state();
         let root_id = AgentId::from("root".to_string());
@@ -992,24 +867,39 @@ mod op_tests {
         }
 
         let capture: Capture = Arc::new(Mutex::new(Vec::new()));
-        let lesche_url = spawn_lesche(capture.clone()).await;
+        let signals: SignalCapture = Arc::new(Mutex::new(Vec::new()));
+        let lesche_url = spawn_lesche(capture.clone(), signals.clone()).await;
         let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
         let device = DeviceKey::generate();
         let tagma_id = TagmaId::from("tagma".to_string());
+        let conversation_id = ConversationId::for_tagma(&tagma_id);
+        // Install the external projector with the (optional) history store +
+        // conversation id, so the relay's history reads (handle_history) and
+        // inbound persistence (deliver_message → record_inbound) go through the
+        // same sole-writer the production boot installs.
+        let projector = crate::external::ExternalProjector::new(
+            Arc::downgrade(&state),
+            history.clone(),
+            Some(conversation_id),
+            MessageLimits::default(),
+        );
+        if state.external.set(projector).is_err() {
+            panic!("projector must be installed once per test state");
+        }
         let handle = RelayHandle::new(
             client,
             tagma_id,
             device,
             root_id.clone(),
-            MessageLimits::default(),
             Arc::downgrade(&state),
-            history,
         );
         let mut key = [0u8; 32];
         getrandom::fill(&mut key).expect("getrandom");
         let key = SessionKey::new(key);
         handle.inner.crypto.lock().await.key = Some(key.clone());
-        (handle, key, capture, prompt_rx, root_id, state, ())
+        (
+            handle, key, capture, signals, prompt_rx, root_id, state, history,
+        )
     }
 
     /// Encrypt an app->tagma payload (a serialized `TagmaRequest`) into a
@@ -1226,7 +1116,7 @@ mod op_tests {
     }
 
     #[tokio::test]
-    async fn pump_maps_sse_to_tagma_events() {
+    async fn pump_splits_authored_envelope_and_system_signal() {
         let events = vec![
             SseEvent::Busy,
             SseEvent::AssistantContent {
@@ -1238,7 +1128,8 @@ mod op_tests {
                 args: "{}".into(),
             }, // dropped (out of capability)
         ];
-        let (handle, key, capture, _prompt_rx, _root_id, state) = setup(16).await;
+        let (handle, key, capture, signals, _prompt_rx, _root_id, state) =
+            setup_with_signals(16).await;
         handle.start_pump().await;
 
         // Resolve the root's event sender and wait for the pump to subscribe
@@ -1261,11 +1152,22 @@ mod op_tests {
             tokio::task::yield_now().await;
         }
 
-        // Drain until the three in-capability events arrive (or time out).
+        // Authored content rides the encrypted envelope channel; busy/idle do
+        // NOT (they cross as plaintext signals), so the envelope capture holds
+        // exactly one authored reply.
         let mut got = Vec::new();
         for _ in 0..300 {
             got = drain_replies(&capture, &key).await;
-            if got.len() >= 3 {
+            if !got.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // System signals ride the plaintext channel; drain them too.
+        let mut sig = Vec::new();
+        for _ in 0..300 {
+            sig = signals.lock().await.clone();
+            if sig.len() >= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1273,75 +1175,113 @@ mod op_tests {
         handle.stop_pump().await;
         assert_eq!(
             got.len(),
-            3,
-            "exactly the in-capability events must be emitted"
+            1,
+            "only authored content (AssistantContent) rides the envelope channel"
         );
         assert!(matches!(
             got[0],
             TagmaReply::Event {
-                event: TagmaEvent::Busy,
+                event: AuthoredEvent::AssistantContent { .. },
                 ..
             }
         ));
-        assert!(matches!(
-            got[1],
-            TagmaReply::Event {
-                event: TagmaEvent::AssistantContent { .. },
-                ..
-            }
-        ));
-        assert!(matches!(
-            got[2],
-            TagmaReply::Event {
-                event: TagmaEvent::Idle,
-                ..
-            }
-        ));
+        assert_eq!(sig.len(), 2, "busy/idle cross as plaintext system signals");
+        assert!(matches!(sig[0], SignalEvent::Busy));
+        assert!(matches!(sig[1], SignalEvent::Idle));
     }
 
     #[test]
-    fn map_sse_event_keeps_and_drops_correctly() {
-        // Kept variants map one-to-one.
+    fn project_external_splits_authored_and_signal() {
+        use crate::projector::project_external;
+        // Authored content -> authored half only.
         assert!(matches!(
-            ops::map_sse_event(&SseEvent::Busy),
-            Some(TagmaEvent::Busy)
+            project_external(&SseEvent::AssistantContent {
+                content: "c".into()
+            }),
+            (Some(AuthoredEvent::AssistantContent { .. }), None)
+        ));
+        // System signals -> signal half only, no authored, never persisted.
+        assert!(matches!(
+            project_external(&SseEvent::Busy),
+            (None, Some(SignalEvent::Busy))
         ));
         assert!(matches!(
-            ops::map_sse_event(&SseEvent::Interrupted),
-            Some(TagmaEvent::Interrupted)
+            project_external(&SseEvent::Interrupted),
+            (None, Some(SignalEvent::Interrupted))
         ));
         assert!(matches!(
-            ops::map_sse_event(&SseEvent::MaxRoundsExceeded),
-            Some(TagmaEvent::MaxRoundsExceeded)
+            project_external(&SseEvent::Cancelled),
+            (None, Some(SignalEvent::Cancelled))
         ));
         assert!(matches!(
-            ops::map_sse_event(&SseEvent::TokenBudgetExceeded {
+            project_external(&SseEvent::MaxRoundsExceeded),
+            (None, Some(SignalEvent::MaxRoundsExceeded))
+        ));
+        assert!(matches!(
+            project_external(&SseEvent::TokenBudgetExceeded {
                 consumed: 1,
                 budget: 2
             }),
-            Some(TagmaEvent::TokenBudgetExceeded {
-                consumed: 1,
-                budget: 2
-            })
+            (
+                None,
+                Some(SignalEvent::TokenBudgetExceeded {
+                    consumed: 1,
+                    budget: 2
+                })
+            )
         ));
-        // Dropped (out-of-capability) variants.
-        assert!(
-            ops::map_sse_event(&SseEvent::ToolCall {
+        assert!(matches!(
+            project_external(&SseEvent::Error {
+                message: "m".into()
+            }),
+            (None, Some(SignalEvent::Error { .. }))
+        ));
+        {
+            let (a, s) = project_external(&SseEvent::Error {
+                message: "m".into(),
+            });
+            assert!(a.is_none());
+            match s {
+                Some(SignalEvent::Error { message }) => assert_eq!(message, "m"),
+                other => panic!("expected Error, got {other:?}"),
+            }
+        }
+        {
+            let (a, s) = project_external(&SseEvent::FailoverChainExhausted {
+                reason: FailoverChainExhaustion::NoFailoverConfigured,
+                detail: "d".into(),
+            });
+            assert!(a.is_none());
+            match s {
+                Some(SignalEvent::FailoverChainExhausted { reason, detail }) => {
+                    assert!(matches!(
+                        reason,
+                        FailoverChainExhaustion::NoFailoverConfigured
+                    ));
+                    assert_eq!(detail, "d");
+                }
+                other => panic!("expected FailoverChainExhausted, got {other:?}"),
+            }
+        }
+        // Dropped (out-of-capability) variants map to neither half.
+        assert!(matches!(
+            project_external(&SseEvent::ToolCall {
                 name: "x".into(),
                 args: "{}".into()
-            })
-            .is_none()
-        );
-        assert!(
-            ops::map_sse_event(&SseEvent::AssistantContentDelta { delta: "d".into() }).is_none()
-        );
-        assert!(
-            ops::map_sse_event(&SseEvent::ApprovalUpdated {
+            }),
+            (None, None)
+        ));
+        assert!(matches!(
+            project_external(&SseEvent::AssistantContentDelta { delta: "d".into() }),
+            (None, None)
+        ));
+        assert!(matches!(
+            project_external(&SseEvent::ApprovalUpdated {
                 id: "a".into(),
                 status: kallip_common::approval::ApprovalStatus::Pending
-            })
-            .is_none()
-        );
+            }),
+            (None, None)
+        ));
     }
 
     #[tokio::test]
@@ -1377,55 +1317,22 @@ mod op_tests {
         handle.stop_pump().await;
     }
 
-    #[tokio::test]
-    async fn emit_message_delivers_assistant_content() {
-        // The message-delivery path emits an AssistantContent envelope under the
-        // active epoch key; the burst limiter allows it.
-        let (handle, key, capture, _prompt_rx, _root_id, _state) = setup(1).await;
-        handle
-            .emit_message("hello user".to_string())
-            .await
-            .expect("emit_message");
-        let replies = drain_replies(&capture, &key).await;
-        assert!(matches!(
-            replies.as_slice(),
-            [TagmaReply::Event {
-                event: TagmaEvent::AssistantContent { content },
-                ..
-            }] if content == "hello user"
-        ));
-    }
-
-    #[tokio::test]
-    async fn emit_message_enforces_burst_cap() {
-        // Within one 10s window the limiter admits at most MESSAGE_BURST_MAX
-        // (20) deliveries; the next is rejected with BurstExceeded.
-        let (handle, _key, capture, _prompt_rx, _root_id, _state) = setup(1).await;
-        let mut denied = false;
-        for i in 0..25 {
-            if handle.emit_message(format!("message {i}")).await.is_err() {
-                denied = true;
-                break;
-            }
-        }
-        assert!(denied, "the burst cap must eventually deny a message");
-        // The cap is 20, so exactly 20 envelopes were posted before the denial.
-        assert_eq!(capture.lock().await.len(), 20);
-    }
-
     /// A zero key for the no-KEX drop test (the ciphertext never decrypts; the
     /// op is dropped at the key-absent check before decryption anyway).
     fn key_zero() -> SessionKey {
         SessionKey::new([0u8; 32])
     }
 
-    /// `handle_user_op` with `SendMessage` persists the inbound row (via
-    /// `handle_agent_op`) and stamps its id onto the `MessageAccepted` ack, so
-    /// the app can dedup its optimistic user line. Drives the real
-    /// `deliver_message` path against the root agent.
+    /// `handle_user_op` with `SendMessage` drives the real `deliver_message`,
+    /// which calls the projector's `record_inbound`: the inbound row is
+    /// persisted once under the conversation id. The `MessageAccepted` ack
+    /// therefore carries `history_id = 0` (the app dedups its optimistic line
+    /// off the `UserMessage` frame the projector publishes and the pump
+    /// forwards — exercised in `pump_splits_authored_envelope_and_system_signal`).
+    /// The row then replays as a `UserMessage` echo under its row id.
     #[tokio::test]
-    async fn send_message_persists_inbound_and_stamps_ack() {
-        let (handle, key, capture, mut prompt_rx, _root_id, _state, _db_dir) =
+    async fn send_message_persists_inbound_and_forwards_usermessage() {
+        let (handle, key, capture, mut prompt_rx, _root_id, _state, db, _dir) =
             setup_with_history(8).await;
         let conv = conv_of(&handle);
         handle
@@ -1442,19 +1349,34 @@ mod op_tests {
         // The root agent received the prompt.
         let _ = prompt_rx.recv().await.expect("message delivered");
         let replies = drain_replies(&capture, &key).await;
-        let ack_id = match replies.as_slice() {
-            [
-                TagmaReply::MessageAccepted {
-                    req_id: 10,
-                    history_id,
-                    ..
-                },
-            ] => *history_id,
-            other => panic!("expected MessageAccepted, got {other:?}"),
-        };
-        assert!(ack_id > 0, "ack must carry the inbound row id");
 
-        // The inbound row replays as a UserMessage echo under its row id.
+        // The ack is present and carries history_id = 0: the inbound row id no
+        // longer rides the ack (the projector-published UserMessage frame is the
+        // promotion path).
+        let ack = replies.iter().find_map(|r| match r {
+            TagmaReply::MessageAccepted {
+                req_id: 10,
+                history_id,
+                ..
+            } => Some(*history_id),
+            _ => None,
+        });
+        assert_eq!(
+            ack,
+            Some(0),
+            "MessageAccepted ack no longer stamps history_id"
+        );
+
+        // The inbound row is persisted under the conversation id.
+        let rows = chat_history::read_last_n(&db, conv.as_ref(), 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].direction, "inbound");
+        let um_id = rows[0].id;
+        assert!(um_id > 0, "inbound row assigned a positive id");
+
+        // It replays as a UserMessage echo under its row id.
         capture.lock().await.clear();
         let trace = kallip_agora_common::ids::TraceId::from("h".to_string());
         handle.handle_history(&trace, 1, None, None, 50).await;
@@ -1462,7 +1384,7 @@ mod op_tests {
         let um = replies.iter().find_map(|r| match r {
             TagmaReply::UserMessage {
                 history_id, text, ..
-            } if *history_id == ack_id => Some(text),
+            } if *history_id == um_id => Some(text),
             _ => None,
         });
         assert_eq!(
@@ -1477,26 +1399,21 @@ mod op_tests {
     /// echo, each stamped with its row id, then a `HistoryBatchEnd` marker.
     #[tokio::test]
     async fn handle_history_latest_replays_both_directions_in_order() {
-        let (handle, key, capture, _prompt_rx, _root_id, _state, _db_dir) =
+        let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
             setup_with_history(8).await;
         let conv = conv_of(&handle);
-        let db = handle.inner.history.clone().expect("history store present");
         let trace = kallip_agora_common::ids::TraceId::from("test".to_string());
         // Outbound, inbound, outbound — interleaved, ids assigned in append order.
-        handle
-            .emit_event(
-                &trace,
-                TagmaReply::Event {
-                    event: TagmaEvent::AssistantContent {
-                        content: "o0".into(),
-                    },
-                    history_id: 0,
-                    created_at: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
+        // Outbound rows are written directly (the projector is the production
+        // writer; here we seed the shared store the projector reads from).
+        let mut o0 = TagmaReply::Event {
+            event: AuthoredEvent::AssistantContent {
+                content: "o0".into(),
+            },
+            history_id: 0,
+            created_at: None,
+        };
+        chat_history::stamp_reply(&db, conv.as_ref(), &mut o0).await;
         chat_history::append(
             &db,
             conv.as_ref(),
@@ -1510,20 +1427,14 @@ mod op_tests {
         )
         .await
         .unwrap();
-        handle
-            .emit_event(
-                &trace,
-                TagmaReply::Event {
-                    event: TagmaEvent::AssistantContent {
-                        content: "o1".into(),
-                    },
-                    history_id: 0,
-                    created_at: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
+        let mut o1 = TagmaReply::Event {
+            event: AuthoredEvent::AssistantContent {
+                content: "o1".into(),
+            },
+            history_id: 0,
+            created_at: None,
+        };
+        chat_history::stamp_reply(&db, conv.as_ref(), &mut o1).await;
 
         capture.lock().await.clear();
         handle.handle_history(&trace, 7, None, None, 50).await;
@@ -1566,10 +1477,9 @@ mod op_tests {
     /// the latest branch.)
     #[tokio::test]
     async fn handle_history_latest_more_is_false_even_at_full_page() {
-        let (handle, key, capture, _prompt_rx, _root_id, _state, _db_dir) =
+        let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
             setup_with_history(8).await;
         let conv = conv_of(&handle);
-        let db = handle.inner.history.clone().expect("history store present");
         let trace = kallip_agora_common::ids::TraceId::from("test".to_string());
         // Insert exactly `limit` rows.
         for i in 0..3 {
@@ -1579,8 +1489,8 @@ mod op_tests {
                 "outbound",
                 "event",
                 &serde_json::to_vec(&TagmaReply::Event {
-                    event: TagmaEvent::Status {
-                        message: format!("e{i}"),
+                    event: AuthoredEvent::AssistantContent {
+                        content: format!("e{i}"),
                     },
                     history_id: 0,
                     created_at: None,
@@ -1613,10 +1523,9 @@ mod op_tests {
     /// `more` when truncated by `limit`.
     #[tokio::test]
     async fn handle_history_after_and_before_windows() {
-        let (handle, key, capture, _prompt_rx, _root_id, _state, _db_dir) =
+        let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
             setup_with_history(8).await;
         let conv = conv_of(&handle);
-        let db = handle.inner.history.clone().expect("history store present");
         let mut ids = Vec::new();
         for i in 0..4 {
             ids.push(
@@ -1626,8 +1535,8 @@ mod op_tests {
                     "outbound",
                     "event",
                     &serde_json::to_vec(&TagmaReply::Event {
-                        event: TagmaEvent::Status {
-                            message: format!("e{i}"),
+                        event: AuthoredEvent::AssistantContent {
+                            content: format!("e{i}"),
                         },
                         history_id: 0,
                         created_at: None,

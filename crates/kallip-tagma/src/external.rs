@@ -1,0 +1,606 @@
+//! The single external projector: the SOLE writer of chat content.
+//!
+//! It owns the unified `chat_history` store + the resolved conversation id and
+//! is the one place a durable row is written. Every ingress that produces chat
+//! content funnels through it, and each write publishes the stamped frame onto
+//! one broadcast (the "external bus") that the serving paths — the direct local
+//! SSE and the relay E2EE envelope — subscribe to and forward. The pumps never
+//! touch `chat_history`; they are pure forwarders. This makes "the write
+//! produces the event" the uniform rule for both directions and dissolves the
+//! double-write that coupling persistence to the pumps would otherwise cause
+//! once the two paths share one store.
+//!
+//! Ingress:
+//! - **Agent runtime replies** — the projector subscribes to the root agent's
+//!   raw `SseEvent` broadcast (the single subscription that the two pumps used
+//!   to duplicate), projects each event via [`crate::projector::project_external`],
+//!   persists the authored half once, and publishes it. The signal half is
+//!   published without persistence (ephemeral).
+//! - **Agent `send` CLI** — [`ExternalProjector::record_outbound`] (called by
+//!   the lesche message route), which burst-limits, persists, and publishes.
+//! - **Inbound user message** — [`ExternalProjector::record_inbound`] (called
+//!   by the shared `deliver_message` seam before the prompt enqueues), which
+//!   appends the row and publishes a stamped `UserMessage` frame so the
+//!   frontend can promote its optimistic line.
+//!
+//! Status snapshots are deliberately NOT routed here: they are ephemeral, on a
+//! fixed cadence, owned by the direct/relay status pumps.
+
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::Duration;
+
+use kallip_agora_common::ids::ConversationId;
+use kallip_common::protocol::SseEvent;
+use kallip_lesche_common::message::{TagmaReply, TagmaRequest};
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{Mutex, broadcast};
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+
+use crate::relay::MessageLimits;
+use crate::relay::RelayMessageError;
+use crate::relay::chat_history::{self, Db};
+use crate::relay::ops::MessageLimiter;
+use crate::state::{AppState, RegistryEntry};
+
+/// Broadcast capacity for the external bus. Mirrors the prior direct pump's
+/// capacity. A `Lagged` receiver now loses a frame for BOTH transports at once
+/// (whereas the old two independent pumps lagged independently); accepted,
+/// because either transport recovers on its next `history({after:
+/// maxRendered})` pull.
+const FRAMES_CAPACITY: usize = 256;
+
+/// One frame on the external bus the serving paths subscribe to.
+#[derive(Clone, Debug)]
+pub(crate) enum ExternalFrame {
+    /// Authored content, persisted once and stamped with its `history_id`.
+    Authored(TagmaReply),
+    /// A runtime signal (busy/idle/terminals/errors). Ephemeral, never persisted.
+    Signal(kallip_common::protocol::SignalEvent),
+}
+
+/// The single external projector handle. Cheap to clone (`Arc` inside); the
+/// pumps and routes hold clones to subscribe / record.
+#[derive(Clone)]
+pub(crate) struct ExternalProjector {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    frames_tx: broadcast::Sender<ExternalFrame>,
+    history: Option<Db>,
+    /// The conversation id for chat_history keying. Write-once: set at
+    /// construction when the tagma id is known at boot (creds existed), else
+    /// filled by [`ExternalProjector::set_conversation_id`] the moment
+    /// first-run enrollment resolves the id. `unset` ⇒ no durable history (the
+    /// persist gate): a never-enrolled tagma, or the brief window before enroll
+    /// lands on the enroll boot. `OnceLock` (not `Mutex`): write-once-read-many
+    /// on the hot path, no lock and no await hazard.
+    conversation_id: OnceLock<ConversationId>,
+    /// Burst cap on the agent's outbound `send` (mirrors the prior per-pump
+    /// limiter). Inbound user messages are not capped here.
+    message_limiter: Mutex<MessageLimiter>,
+    state: Weak<AppState>,
+}
+
+impl ExternalProjector {
+    /// Construct the handle and spawn the event pump that subscribes to the
+    /// root agent's broadcast. `history` is always `Some` in production (the Db
+    /// is opened unconditionally at boot). `conversation_id` is `Some` when the
+    /// tagma id is known at boot (creds existed); `None` on the first-run
+    /// enroll boot, filled later by `set_conversation_id`. The pump is
+    /// cancelled by a child of `state.shutdown`.
+    pub(crate) fn new(
+        state: Weak<AppState>,
+        history: Option<Db>,
+        conversation_id: Option<ConversationId>,
+        message_limits: MessageLimits,
+    ) -> Self {
+        let (frames_tx, _) = broadcast::channel(FRAMES_CAPACITY);
+        let cancel = state
+            .upgrade()
+            .map(|s| s.shutdown.child_token())
+            .unwrap_or_default();
+        let conversation_id_once = match conversation_id {
+            Some(c) => OnceLock::from(c),
+            None => OnceLock::new(),
+        };
+        let inner = Arc::new(Inner {
+            frames_tx,
+            history,
+            conversation_id: conversation_id_once,
+            message_limiter: Mutex::new(MessageLimiter::new(message_limits)),
+            state,
+        });
+        let projector = Self {
+            inner: inner.clone(),
+        };
+        tokio::spawn(projector.clone().run_event_pump(cancel));
+        projector
+    }
+
+    /// Set the conversation id once first-run enrollment resolves the tagma id.
+    /// Write-once: no-op if already set (the loaded-creds branch constructed
+    /// with the id; only the enroll branch calls this, once).
+    pub(crate) fn set_conversation_id(&self, conv: ConversationId) {
+        let _ = self.inner.conversation_id.set(conv);
+    }
+
+    /// Subscribe to the external bus. Each serving path (direct SSE, relay
+    /// envelope) subscribes once and forwards the frames it receives.
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<ExternalFrame> {
+        self.inner.frames_tx.subscribe()
+    }
+
+    /// The resolved conversation id for this tagma, if any (`None` until
+    /// enrollment resolves it). Surfaced on the root-agent summary so the
+    /// offline frontend can key its cache + history pulls under the same id the
+    /// relay uses.
+    pub(crate) fn conversation_id(&self) -> Option<String> {
+        self.inner
+            .conversation_id
+            .get()
+            .map(|c| c.as_ref().to_string())
+    }
+
+    /// Publish a frame; a `Send` error means there are currently no subscribers,
+    /// which is benign (the frame is live-only and needs no durable echo — the
+    /// persisted rows are re-pullable via history).
+    fn publish(&self, frame: ExternalFrame) {
+        let _ = self.inner.frames_tx.send(frame);
+    }
+
+    /// The agent speaking to the user (`kallip lesche send`). Burst-limited,
+    /// persisted once as outbound, and published as a stamped `AssistantContent`
+    /// frame. Returns [`RelayMessageError::BurstExceeded`] when the cap is hit;
+    /// no `Delivery` variant is produced (the projector does not POST).
+    pub(crate) async fn record_outbound(&self, text: String) -> Result<(), RelayMessageError> {
+        let allowed = self.inner.message_limiter.lock().await.check();
+        if !allowed {
+            return Err(RelayMessageError::BurstExceeded);
+        }
+        let mut reply = TagmaReply::Event {
+            event: kallip_common::protocol::AuthoredEvent::AssistantContent { content: text },
+            history_id: 0,
+            created_at: None,
+        };
+        self.stamp(&mut reply).await;
+        self.publish(ExternalFrame::Authored(reply));
+        Ok(())
+    }
+
+    /// A user message entering the conversation (from either transport).
+    /// Appended once as an inbound row, then published as a stamped
+    /// `UserMessage` frame so the frontend promotes its optimistic line. Called
+    /// by the shared `deliver_message` seam BEFORE the prompt enqueues, so the
+    /// row is durable even if the agent reply races.
+    ///
+    /// Persist gate: if the conversation id is unset (never-enrolled tagma, or
+    /// the window before first-run enrollment lands) NO row is written — the id
+    /// is the key, and writing under `""` would orphan the row. An unstamped
+    /// frame is still published so the live direct SSE echoes the user's line.
+    pub(crate) async fn record_inbound(&self, text: String) {
+        let Some(conv) = self.inner.conversation_id.get() else {
+            self.publish_unstamped_inbound(text);
+            return;
+        };
+        let Some(db) = self.inner.history.clone() else {
+            self.publish_unstamped_inbound(text);
+            return;
+        };
+        // req_id is not meaningful on the direct path and is unused on history
+        // replay (only `text` is), so 0 is fine.
+        let req = TagmaRequest::SendMessage {
+            req_id: 0,
+            text: text.clone(),
+        };
+        let appended = match serde_json::to_vec(&req) {
+            Ok(payload) => {
+                chat_history::append(&db, conv.as_ref(), "inbound", "send_message", &payload).await
+            }
+            Err(e) => {
+                warn!("inbound history encode failed: {e}");
+                self.publish_unstamped_inbound(text);
+                return;
+            }
+        };
+        match appended {
+            Ok((id, created_at)) => {
+                let mut reply = TagmaReply::UserMessage {
+                    history_id: id,
+                    text,
+                    created_at: None,
+                };
+                reply.set_history_id(id);
+                reply.set_created_at(created_at);
+                self.publish(ExternalFrame::Authored(reply));
+            }
+            Err(e) => {
+                warn!("inbound history append failed: {e:#}");
+                self.publish_unstamped_inbound(text);
+            }
+        }
+    }
+
+    /// Echo the inbound text unstamped when persistence is unavailable, so live
+    /// delivery is not lost (mirrors the outbound graceful-degrade rule).
+    fn publish_unstamped_inbound(&self, text: String) {
+        self.publish(ExternalFrame::Authored(TagmaReply::UserMessage {
+            history_id: 0,
+            text,
+            created_at: None,
+        }));
+    }
+
+    /// Read a history window as decoded replies + a `more` flag, for the direct
+    /// `/external/history` endpoint. `more` is true only for paginated
+    /// (`after`/`before`) queries that returned a full page; the recent-N
+    /// snapshot is always `more=false`.
+    pub(crate) async fn read_history(
+        &self,
+        after: Option<i64>,
+        before: Option<i64>,
+        limit: u32,
+    ) -> (Vec<TagmaReply>, bool) {
+        // Persist gate: no conversation id -> no durable history to read.
+        let (Some(db), Some(conv)) = (self.inner.history.clone(), self.inner.conversation_id.get())
+        else {
+            return (Vec::new(), false);
+        };
+        let conv = conv.as_ref();
+        let rows = match (after, before) {
+            (Some(a), None) => chat_history::read_after(&db, conv, a, limit).await,
+            (None, Some(b)) => chat_history::read_before(&db, conv, b, limit).await,
+            (None, None) => chat_history::read_last_n(&db, conv, limit as u64).await,
+            (Some(_), Some(_)) => Ok(Vec::new()),
+        };
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("direct history read failed: {e:#}");
+                return (Vec::new(), false);
+            }
+        };
+        let more = match (after, before) {
+            (None, None) => false,
+            _ => rows.len() as u32 == limit && limit > 0,
+        };
+        let replies = rows
+            .into_iter()
+            .filter_map(chat_history::decode_row)
+            .collect();
+        (replies, more)
+    }
+
+    /// Append `reply` as an outbound row once and stamp its row id +
+    /// `created_at` onto it. Persist gate: no-op without a conversation id (the
+    /// unstamped frame is still published by the caller). Graceful-degrade: a
+    /// failure leaves `history_id` at 0 and the caller still publishes the frame
+    /// live.
+    async fn stamp(&self, reply: &mut TagmaReply) {
+        let (Some(db), Some(conv)) = (self.inner.history.clone(), self.inner.conversation_id.get())
+        else {
+            return;
+        };
+        chat_history::stamp_reply(&db, conv.as_ref(), reply).await;
+    }
+
+    /// The event pump: subscribe to the root agent's raw broadcast, project each
+    /// event, persist the authored half once, and publish authored + signal
+    /// frames. Retries until the root is live (it may be transiently absent
+    /// during restore/reactivation). Mirrors the prior two pumps' retry loops.
+    async fn run_event_pump(self, cancel: CancellationToken) {
+        let mut rx = loop {
+            if let Some(rx) = self.subscribe_root().await {
+                break rx;
+            }
+            if cancel.is_cancelled() {
+                return;
+            }
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
+        };
+        // NOTE: this start/stop pair is one-per-tagma-lifetime (boot-bounded),
+        // unlike `relay/pump.rs` which cycles on every re-KEX — so INFO is
+        // defensible here. Do not "fix" it the same way the relay pump was
+        // demoted to DEBUG.
+        info!("external projector event pump started");
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    info!("external projector event pump stopped");
+                    return;
+                }
+                recv = rx.recv() => match recv {
+                    Ok(sse) => {
+                        let (authored, signal) = crate::projector::project_external(&sse);
+                        if let Some(event) = authored {
+                            let mut reply = TagmaReply::Event {
+                                event,
+                                history_id: 0,
+                                created_at: None,
+                            };
+                            self.stamp(&mut reply).await;
+                            self.publish(ExternalFrame::Authored(reply));
+                        }
+                        if let Some(signal) = signal {
+                            self.publish(ExternalFrame::Signal(signal));
+                        }
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        warn!(lagged = n, "external projector lagged events");
+                    }
+                    Err(RecvError::Closed) => {
+                        warn!("external projector: root stream closed; re-subscribing");
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return,
+                            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                        }
+                        rx = match self.subscribe_root().await {
+                            Some(r) => r,
+                            None => return,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve the root agent's `events_tx` under the registry read-lock and
+    /// subscribe. Returns `None` if the tagma is shutting down or the root is
+    /// not live.
+    async fn subscribe_root(&self) -> Option<broadcast::Receiver<SseEvent>> {
+        let state = self.inner.state.upgrade()?;
+        let registry = state.registry.read().await;
+        let (_id, entry) = registry.root_agent()?;
+        match entry {
+            RegistryEntry::Live(live) => Some(live.agent.events_tx.subscribe()),
+            RegistryEntry::Faulted(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::RegistryEntry;
+    use crate::test_helpers::{make_entry, make_state};
+    use kallip_common::agentid::AgentId;
+    use kallip_common::protocol::AuthoredEvent;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    /// `record_outbound` publishes a stamped `AssistantContent` frame and (when
+    /// a store is present) persists exactly one outbound row under the
+    /// conversation id.
+    #[tokio::test]
+    async fn record_outbound_persists_and_publishes() {
+        let state = make_state();
+        let root = AgentId::from("root".to_string());
+        {
+            let mut registry = state.registry.write().await;
+            registry
+                .register_root(
+                    root.clone(),
+                    RegistryEntry::Live(make_entry(None, "tok".into())),
+                )
+                .unwrap();
+        }
+        let dir = TempDir::new().unwrap();
+        let db = chat_history::open(&dir.path().join("h.sqlite"))
+            .await
+            .unwrap();
+        let conv =
+            ConversationId::for_tagma(&kallip_agora_common::ids::TagmaId::from("t".to_string()));
+        let projector = ExternalProjector::new(
+            Arc::downgrade(&state),
+            Some(db.clone()),
+            Some(conv.clone()),
+            MessageLimits::default(),
+        );
+        let mut rx = projector.subscribe();
+        projector.record_outbound("hello".into()).await.unwrap();
+
+        let frame = rx.recv().await.unwrap();
+        let reply = match frame {
+            ExternalFrame::Authored(r) => r,
+            other => panic!("expected Authored, got {other:?}"),
+        };
+        let id = match &reply {
+            TagmaReply::Event {
+                history_id, event, ..
+            } => {
+                assert!(history_id > &0, "row id stamped");
+                assert!(
+                    matches!(event, AuthoredEvent::AssistantContent { content } if content == "hello")
+                );
+                *history_id
+            }
+            other => panic!("expected Event, got {other:?}"),
+        };
+        // Exactly one row persisted, under the conversation id, outbound.
+        let rows = chat_history::read_last_n(&db, conv.as_ref(), 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].direction, "outbound");
+    }
+
+    /// `record_inbound` publishes a stamped `UserMessage` frame and persists one
+    /// inbound row, so a serving path (direct SSE) can promote the optimistic
+    /// line and a history pull can replay it.
+    #[tokio::test]
+    async fn record_inbound_persists_and_publishes() {
+        let state = make_state();
+        let root = AgentId::from("root".to_string());
+        {
+            let mut registry = state.registry.write().await;
+            registry
+                .register_root(
+                    root.clone(),
+                    RegistryEntry::Live(make_entry(None, "tok".into())),
+                )
+                .unwrap();
+        }
+        let dir = TempDir::new().unwrap();
+        let db = chat_history::open(&dir.path().join("h.sqlite"))
+            .await
+            .unwrap();
+        let conv =
+            ConversationId::for_tagma(&kallip_agora_common::ids::TagmaId::from("t".to_string()));
+        let projector = ExternalProjector::new(
+            Arc::downgrade(&state),
+            Some(db.clone()),
+            Some(conv.clone()),
+            MessageLimits::default(),
+        );
+        let mut rx = projector.subscribe();
+        projector.record_inbound("hi".into()).await;
+
+        let reply = match rx.recv().await.unwrap() {
+            ExternalFrame::Authored(r) => r,
+            other => panic!("expected Authored, got {other:?}"),
+        };
+        let id = match reply {
+            TagmaReply::UserMessage {
+                history_id, text, ..
+            } => {
+                assert!(history_id > 0, "row id stamped");
+                assert_eq!(text, "hi");
+                history_id
+            }
+            other => panic!("expected UserMessage, got {other:?}"),
+        };
+        let rows = chat_history::read_last_n(&db, conv.as_ref(), 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].direction, "inbound");
+
+        // The history read decodes the inbound row back into a UserMessage.
+        let (replies, more) = projector.read_history(None, None, 50).await;
+        assert!(!more);
+        assert_eq!(replies.len(), 1);
+        match &replies[0] {
+            TagmaReply::UserMessage {
+                history_id, text, ..
+            } => {
+                assert_eq!(*history_id, id);
+                assert_eq!(text, "hi");
+            }
+            other => panic!("expected UserMessage on replay, got {other:?}"),
+        }
+    }
+
+    /// Without a store (never-enrolled tagma) the projector still forwards live
+    /// frames (unstamped) so the direct SSE path keeps working local-only.
+    #[tokio::test]
+    async fn record_outbound_works_without_store() {
+        let state = make_state();
+        let root = AgentId::from("root".to_string());
+        {
+            let mut registry = state.registry.write().await;
+            registry
+                .register_root(
+                    root.clone(),
+                    RegistryEntry::Live(make_entry(None, "tok".into())),
+                )
+                .unwrap();
+        }
+        let projector =
+            ExternalProjector::new(Arc::downgrade(&state), None, None, MessageLimits::default());
+        let mut rx = projector.subscribe();
+        projector.record_outbound("hello".into()).await.unwrap();
+        match rx.recv().await.unwrap() {
+            ExternalFrame::Authored(TagmaReply::Event { history_id, .. }) => {
+                assert_eq!(history_id, 0, "no store -> unstamped");
+            }
+            other => panic!("expected unstamped Event, got {other:?}"),
+        }
+    }
+
+    /// Enroll-boot window: constructed with `history=Some` but
+    /// `conversation_id=None` (the store is open at boot, the id lands only when
+    /// enrollment resolves). Before `set_conversation_id`, `record_inbound`
+    /// publishes an UNSTAMPED frame and writes NO row (the persist gate — no
+    /// orphan `""` rows). After `set_conversation_id`, it persists under the id
+    /// and publishes a stamped frame.
+    #[tokio::test]
+    async fn enroll_window_persists_only_after_set_conversation_id() {
+        let state = make_state();
+        let root = AgentId::from("root".to_string());
+        {
+            let mut registry = state.registry.write().await;
+            registry
+                .register_root(
+                    root.clone(),
+                    RegistryEntry::Live(make_entry(None, "tok".into())),
+                )
+                .unwrap();
+        }
+        let dir = TempDir::new().unwrap();
+        let db = chat_history::open(&dir.path().join("h.sqlite"))
+            .await
+            .unwrap();
+        let conv =
+            ConversationId::for_tagma(&kallip_agora_common::ids::TagmaId::from("t".to_string()));
+        // Enroll boot: store present, conversation id unset.
+        let projector = ExternalProjector::new(
+            Arc::downgrade(&state),
+            Some(db.clone()),
+            None,
+            MessageLimits::default(),
+        );
+        let mut rx = projector.subscribe();
+
+        // Before enroll: unstamped echo, NO row written.
+        projector.record_inbound("pre".into()).await;
+        match rx.recv().await.unwrap() {
+            ExternalFrame::Authored(TagmaReply::UserMessage {
+                history_id, text, ..
+            }) => {
+                assert_eq!(history_id, 0, "unstamped before enroll");
+                assert_eq!(text, "pre");
+            }
+            other => panic!("expected unstamped UserMessage, got {other:?}"),
+        }
+        let pre_rows = chat_history::read_last_n(&db, conv.as_ref(), 10)
+            .await
+            .unwrap();
+        assert!(pre_rows.is_empty(), "no orphan row before enroll");
+
+        // history read returns empty before enroll too.
+        let (empty, more) = projector.read_history(None, None, 50).await;
+        assert!(empty.is_empty());
+        assert!(!more);
+
+        // Enrollment lands: the id is set once.
+        projector.set_conversation_id(conv.clone());
+
+        // After enroll: stamped echo, one row under the conversation id.
+        projector.record_inbound("post".into()).await;
+        let id = match rx.recv().await.unwrap() {
+            ExternalFrame::Authored(TagmaReply::UserMessage {
+                history_id, text, ..
+            }) => {
+                assert!(history_id > 0, "stamped after enroll");
+                assert_eq!(text, "post");
+                history_id
+            }
+            other => panic!("expected stamped UserMessage, got {other:?}"),
+        };
+        let post_rows = chat_history::read_last_n(&db, conv.as_ref(), 10)
+            .await
+            .unwrap();
+        assert_eq!(post_rows.len(), 1);
+        assert_eq!(post_rows[0].id, id);
+        assert_eq!(post_rows[0].direction, "inbound");
+    }
+}

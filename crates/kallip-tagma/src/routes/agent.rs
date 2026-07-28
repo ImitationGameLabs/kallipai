@@ -104,7 +104,7 @@ pub(crate) fn inject_identity_env(
 }
 
 /// Resolve the root agent id for a spawn. The root is the tagma's single
-/// registered root ([`Registry::root_agent`](crate::state::Registry::root_agent)),
+/// registered root ([`AgentRegistry::root_agent`](crate::state::AgentRegistry::root_agent)),
 /// always knowable at runtime and independent of the supervisor chain — so a
 /// broken chain never degrades the root identity to self.
 ///
@@ -946,11 +946,14 @@ pub async fn get_root_agent(
     State(state): State<SharedState>,
     _auth: crate::auth::AuthIdentity,
 ) -> Result<Json<AgentSummary>, ApiError> {
+    let conversation_id = state.external.get().and_then(|p| p.conversation_id());
     let registry = state.registry.read().await;
     let (id, entry) = registry
         .root_agent()
         .ok_or_else(|| ApiError::internal("root agent missing — startup invariant violated"))?;
-    Ok(Json(entry.summary(id)))
+    let mut summary = entry.summary(id);
+    summary.conversation_id = conversation_id;
+    Ok(Json(summary))
 }
 
 /// Any authenticated identity (operator or agent) may list agents.

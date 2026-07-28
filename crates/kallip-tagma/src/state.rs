@@ -58,6 +58,17 @@ pub struct AppState {
     /// bridge/agent tasks already hold `Arc<AppState>` clones by the time the
     /// relay is installed. Read under the mutex (e.g. by the lesche message route).
     pub relay: std::sync::Mutex<Option<(crate::relay::RelayHandle, tokio::task::JoinHandle<()>)>>,
+    /// The direct (local, non-relay) serving path, always present. Installed
+    /// once at startup via [`Self::set_direct`] after the `Arc<AppState>` exists
+    /// (its pumps hold a `Weak<AppState>` and a child of `shutdown`). Serves the
+    /// external event vocabulary over a plain SSE to any local frontend client.
+    pub direct: std::sync::OnceLock<crate::direct::DirectServing>,
+    /// The single external projector: the SOLE writer of chat content. Owns the
+    /// unified `chat_history` store + conversation id, subscribes to the root
+    /// broadcast, persists each authored/inbound row once, and publishes the
+    /// stamped frame onto a bus both serving paths (direct SSE + relay envelope)
+    /// forward. Installed once at startup after the `Arc<AppState>` exists.
+    pub external: std::sync::OnceLock<crate::external::ExternalProjector>,
 }
 
 /// Combined index: agent map + token-hash→id lookup + subagent reverse pointers.
@@ -292,6 +303,9 @@ impl RegistryEntry {
             description: identity.config.description.clone(),
             activity,
             faulted_reason,
+            // Populated only by `get_root_agent` (the sole external-conversation
+            // surface); absent on list/metadata summaries.
+            conversation_id: None,
         }
     }
 }
@@ -325,6 +339,8 @@ impl AppState {
             profiles,
             lock_manager: Arc::new(kallip_runtime::dirlock::DirLockManager::new()),
             relay: std::sync::Mutex::new(None),
+            direct: std::sync::OnceLock::new(),
+            external: std::sync::OnceLock::new(),
         }
     }
 
@@ -352,6 +368,8 @@ impl AppState {
             profiles,
             lock_manager: Arc::new(kallip_runtime::dirlock::DirLockManager::new()),
             relay: std::sync::Mutex::new(None),
+            direct: std::sync::OnceLock::new(),
+            external: std::sync::OnceLock::new(),
         }
     }
 }
@@ -371,6 +389,17 @@ impl AppState {
     pub fn take_relay(&self) -> Option<(crate::relay::RelayHandle, tokio::task::JoinHandle<()>)> {
         let mut slot = self.relay.lock().unwrap_or_else(|e| e.into_inner());
         slot.take()
+    }
+
+    /// Install the direct serving handle, once, at startup. Called from `main`
+    /// after the `Arc<AppState>` exists (the direct pumps hold a `Weak` to it).
+    /// No `take`: direct runs for the tagma's lifetime and is drained by its
+    /// pumps' `shutdown` child token, not by dropping the handle.
+    pub fn set_direct(&self, serving: crate::direct::DirectServing) {
+        // OnceLock: a second install is a logic bug — surface it loudly.
+        if self.direct.set(serving).is_err() {
+            panic!("direct serving must be installed once at startup");
+        }
     }
 }
 

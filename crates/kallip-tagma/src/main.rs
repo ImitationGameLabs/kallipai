@@ -3,7 +3,10 @@ mod auth;
 mod backend;
 mod bridge;
 mod credentials;
+mod direct;
+mod external;
 mod messaging;
+mod projector;
 mod relay;
 mod routes;
 mod shutdown;
@@ -141,11 +144,94 @@ async fn main() -> Result<()> {
     routes::restore_agents(&state).await?;
     routes::ensure_root_agent(&state).await?;
 
+    // Resolve the data root, credentials, and the tagma's conversation id ONCE
+    // before either serving path starts. The conversation id is
+    // `ConversationId::for_tagma(tagma_id)` (pure, no network) when stored
+    // credentials exist; `None` for a never-enrolled (pure-offline) tagma, in
+    // which case there is no durable history (the projector forwards live
+    // frames only). Hoisting this out of `init_direct`/`activate_relay` (which
+    // each used to do it independently) also collapses the duplicated
+    // data-root + credentials-dir setup.
+    let (tagma_id, conversation_id) = resolve_identity()?;
+
+    // The single chat_history store, shared by the projector (sole writer) and
+    // GC. Opened UNCONDITIONALLY at boot: the projector's persist gate is the
+    // conversation id (unset until first-run enrollment resolves it), not the
+    // store's presence, so the store is always ready the moment the id lands.
+    // On a never-enrolled tagma the file stays empty (writes are id-gated).
+    let history = relay::chat_history::open(&chat_history_path()?)
+        .await
+        .context("open chat_history store")?;
+
+    // The message burst limits (agent `send` rate cap), read from args once.
+    let message_limits = relay::MessageLimits {
+        max: args
+            .relay_message_burst_max
+            .unwrap_or(relay::DEFAULT_MESSAGE_BURST_MAX),
+        window: std::time::Duration::from_secs(
+            args.relay_message_burst_window_secs
+                .unwrap_or(relay::DEFAULT_MESSAGE_BURST_WINDOW.as_secs()),
+        ),
+    };
+
+    // Install the single external projector: the SOLE writer of chat content.
+    // Owns the store + conversation id, subscribes to the root broadcast, and
+    // publishes stamped frames onto a bus both serving paths forward. The store
+    // is always present; the conversation id is `Some` only when stored creds
+    // existed at boot (the first-run enroll boot sets it via
+    // `set_conversation_id` once enrollment lands — see `activate_relay`).
+    let projector = crate::external::ExternalProjector::new(
+        Arc::downgrade(&state),
+        Some(history.clone()),
+        conversation_id,
+        message_limits,
+    );
+    if state.external.set(projector).is_err() {
+        panic!("external projector must be installed once at startup");
+    }
+
+    // Best-effort GC sweep (TTL + cap), unconditional so a tagma that shares
+    // the unified store does not grow unbounded. Honors the tagma-wide shutdown
+    // token; failures are logged inside `gc`, never propagated.
+    {
+        let shutdown = state.shutdown.clone();
+        let history_ttl_days = args
+            .relay_history_ttl_days
+            .filter(|&v| v > 0)
+            .unwrap_or(relay::chat_history::DEFAULT_HISTORY_TTL_DAYS);
+        let history_cap = args
+            .relay_history_cap
+            .filter(|&v| v > 0)
+            .unwrap_or(relay::chat_history::DEFAULT_HISTORY_CAP);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let ttl_secs = history_ttl_days.saturating_mul(24 * 3600);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => return,
+                    _ = interval.tick() => {
+                        let reaped = relay::chat_history::gc(&history, ttl_secs, history_cap).await;
+                        if reaped > 0 {
+                            tracing::info!(reaped, "chat_history gc");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Always-on direct (local) serving path: serves the external event
+    // vocabulary to any local frontend client over a plain SSE. Forwards the
+    // projector's bus; owns no store of its own.
+    init_direct(&state).await?;
+
     // Optional online-mode relay: enroll + spawn the connector task. Degrades
     // to local-only on any enrollment failure (logs error, leaves the relay
-    // unset; the lesche message route then returns 503). Local agents keep running.
+    // unset; the lesche message route then routes through the projector).
     if let Some(agora_url) = args.relay_agora_url.clone() {
-        match activate_relay(&state, &args, agora_url).await {
+        match activate_relay(&state, &args, agora_url, tagma_id).await {
             Ok(()) => {}
             Err(e) => {
                 tracing::error!("relay activation failed, running local-only: {e:#}");
@@ -183,35 +269,85 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build and install the relay connector: resolve the relay state dir, load or
-/// enroll the tagma credential, build the lesche client, construct the
-/// `RelayHandle`, and spawn its long-running tunnel task. On any error the
-/// caller logs and continues local-only.
-async fn activate_relay(state: &Arc<AppState>, args: &args::Args, agora_url: String) -> Result<()> {
-    use kallip_runtime::persistence::data_dir_root;
-    // Resolve the data root once and lock it owner-only before creating any
-    // subtree under it. `data_dir_root()` is shared with the agent store
-    // (`agents/`/`archived/`/`skills/`, holding plaintext `history.ndjson` /
-    // `ContextStore`) and `credentials/`/`relay/`; create_dir_all makes those
-    // under the process umask (often 0o755), which would otherwise leak the
-    // directory names AND let other users traverse in. 0o700 on the root closes
-    // traversal for every subtree (set_permissions is non-recursive, but the
-    // root boundary is what matters).
-    let data_root = data_dir_root()?;
+/// Resolve the data root, create it + the credentials dir owner-only, load any
+/// stored tagma credential, and derive the conversation id. Returns
+/// `(Option<TagmaId>, Option<ConversationId>)` — both `None` for a
+/// never-enrolled (pure-offline) tagma. Centralized here so `init_direct` and
+/// `activate_relay` agree on the id, and the data-root/credentials setup runs
+/// once. Idempotent (`create_dir_all`).
+fn resolve_identity() -> Result<(
+    Option<kallip_agora_common::ids::TagmaId>,
+    Option<kallip_agora_common::ids::ConversationId>,
+)> {
+    let data_root = data_root()?;
     std::fs::create_dir_all(&data_root).context("create data root dir")?;
     credentials::set_owner_only(&data_root)?;
-
-    let credentials_dir = data_root.join("credentials");
+    let credentials_dir = credentials_dir()?;
     std::fs::create_dir_all(&credentials_dir).context("create credentials dir")?;
     credentials::set_owner_only(&credentials_dir)?;
+    Ok(match credentials::load_tagma(&credentials_dir) {
+        Some((id, _token)) => {
+            let tid = kallip_agora_common::ids::TagmaId::from(id);
+            let cid = kallip_agora_common::ids::ConversationId::for_tagma(&tid);
+            (Some(tid), Some(cid))
+        }
+        None => (None, None),
+    })
+}
 
+fn data_root() -> Result<std::path::PathBuf> {
+    use kallip_runtime::persistence::data_dir_root;
+    data_dir_root()
+}
+
+fn credentials_dir() -> Result<std::path::PathBuf> {
+    data_root().map(|d| d.join("credentials"))
+}
+
+/// The single chat_history store path: `<data_root>/chat_history.sqlite`.
+fn chat_history_path() -> Result<std::path::PathBuf> {
+    data_root().map(|d| d.join("chat_history.sqlite"))
+}
+
+/// Install the [`DirectServing`](crate::direct::DirectServing) handle. Always
+/// runs, independent of whether the relay is configured: the direct path
+/// serves any local frontend client over a plain SSE. It forwards the external
+/// projector's bus and owns no `chat_history` store of its own (the projector
+/// is the sole writer).
+async fn init_direct(state: &Arc<AppState>) -> Result<()> {
+    let projector = state
+        .external
+        .get()
+        .expect("external projector installed before init_direct");
+    state.set_direct(crate::direct::DirectServing::new(
+        Arc::downgrade(state),
+        projector.clone(),
+    ));
+    Ok(())
+}
+
+/// Build and install the relay connector. `stored_tagma_id` is the id resolved
+/// at boot when credentials already existed; `None` means first run, in which
+/// case the enrollment code is required. The tagma id is reused as-is (not
+/// re-loaded). The relay forwards the projector's bus (it does not own a
+/// history store); GC runs unconditionally from `main`.
+async fn activate_relay(
+    state: &Arc<AppState>,
+    args: &args::Args,
+    agora_url: String,
+    stored_tagma_id: Option<kallip_agora_common::ids::TagmaId>,
+) -> Result<()> {
+    let credentials_dir = credentials_dir()?;
     let device = credentials::load_or_create_device(&credentials_dir)?;
 
-    // Load stored credentials, or enroll (first run).
-    let (tagma_id, tagma_token) = match credentials::load_tagma(&credentials_dir) {
-        Some((id, token)) => {
+    // Use the id resolved at boot, or enroll on first run.
+    let (tagma_id, tagma_token) = match stored_tagma_id {
+        Some(id) => {
+            let token = credentials::load_tagma(&credentials_dir)
+                .map(|(_, t)| t)
+                .context("tagma id resolved at boot but credentials missing on relay activation")?;
             info!(tagma = %id, "relay: loaded stored tagma credentials");
-            (kallip_agora_common::ids::TagmaId::from(id), token)
+            (id, token)
         }
         None => {
             let code = args.relay_enrollment_code.as_deref().context(
@@ -223,6 +359,18 @@ async fn activate_relay(state: &Arc<AppState>, args: &args::Args, agora_url: Str
                 .await?;
             credentials::save_tagma(&credentials_dir, tagma_id.as_ref(), &token);
             info!(tagma = %tagma_id, "relay: enrolled with agora");
+            // First-run enroll boot: the projector was constructed at startup
+            // with `conversation_id = None` (creds did not exist yet). Now that
+            // enrollment has resolved the tagma id, hand it the derived
+            // conversation id so persistence + stamped echoes begin at once.
+            // (The loaded-creds boot constructed the projector with the id
+            // already set; this branch is the only caller, once.)
+            let conv = kallip_agora_common::ids::ConversationId::for_tagma(&tagma_id);
+            state
+                .external
+                .get()
+                .expect("external projector installed before relay activation")
+                .set_conversation_id(conv);
             (tagma_id, token)
         }
     };
@@ -247,87 +395,9 @@ async fn activate_relay(state: &Arc<AppState>, args: &args::Args, agora_url: Str
 
     let lesche = kallip_lesche_client::LescheClient::builder(&lesche_url, &tagma_token).build()?;
 
-    // Open the chat-history store alongside the credentials dir: a sibling
-    // `relay/` subdir, owner-only. The store is the source of truth a
-    // reconnecting or freshly-paired device pulls via `TagmaControl::History`.
-    let relay_dir = data_root.join("relay");
-    std::fs::create_dir_all(&relay_dir).context("create relay dir")?;
-    credentials::set_owner_only(&relay_dir)?;
-    let history_path = relay_dir.join("chat_history.sqlite");
-    let history = relay::chat_history::open(&history_path)
-        .await
-        .context("open chat_history store")?;
-    // `open()` primed the schema, creating the SQLite WAL siblings
-    // (`chat_history.sqlite-wal`/`-shm`) alongside the main file; they inherit
-    // the process umask (often 0o644). The 0o700 `relay_dir` is the real
-    // protection (other users cannot traverse in); chmod the siblings too as
-    // defense-in-depth, best-effort.
-    for entry in std::fs::read_dir(&relay_dir).context("read relay dir")? {
-        match entry {
-            Ok(e) => {
-                if let Err(e) = credentials::set_owner_only(&e.path()) {
-                    tracing::warn!(error = %e, "relay dir entry chmod failed");
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "relay dir entry read failed"),
-        }
-    }
-    // A config of 0 is a foot-gun: ttl=0 makes GC cut off at `now` (deletes
-    // everything), cap=0 trims to zero. Treat 0 (and unset) as "use the
-    // default" rather than silently wiping history.
-    let history_ttl_days = args
-        .relay_history_ttl_days
-        .filter(|&v| v > 0)
-        .unwrap_or(relay::chat_history::DEFAULT_HISTORY_TTL_DAYS);
-    let history_cap = args
-        .relay_history_cap
-        .filter(|&v| v > 0)
-        .unwrap_or(relay::chat_history::DEFAULT_HISTORY_CAP);
-
-    let message_limits = relay::MessageLimits {
-        max: args
-            .relay_message_burst_max
-            .unwrap_or(relay::DEFAULT_MESSAGE_BURST_MAX),
-        window: std::time::Duration::from_secs(
-            args.relay_message_burst_window_secs
-                .unwrap_or(relay::DEFAULT_MESSAGE_BURST_WINDOW.as_secs()),
-        ),
-    };
-    let handle = relay::RelayHandle::new(
-        lesche,
-        tagma_id,
-        device,
-        root_agent,
-        message_limits,
-        Arc::downgrade(state),
-        Some(history.clone()),
-    );
+    let handle =
+        relay::RelayHandle::new(lesche, tagma_id, device, root_agent, Arc::downgrade(state));
     info!(tagma = %handle.tagma_id(), "relay connector active");
-
-    // Best-effort GC sweep: trim by TTL + cap on an interval, honoring the
-    // tagma-wide shutdown token. Failures are logged inside `gc`, not
-    // propagated, so a GC fault never takes the relay down.
-    {
-        let shutdown = state.shutdown.clone();
-        let db = history.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let ttl_secs = history_ttl_days.saturating_mul(24 * 3600);
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => return,
-                    _ = interval.tick() => {
-                        let reaped = relay::chat_history::gc(&db, ttl_secs, history_cap).await;
-                        if reaped > 0 {
-                            tracing::info!(reaped, "chat_history gc");
-                        }
-                    }
-                }
-            }
-        });
-    }
 
     let join = tokio::spawn(handle.clone().run(state.shutdown.clone()));
     state.set_relay(handle, join);

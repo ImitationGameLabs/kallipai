@@ -4,6 +4,7 @@ pub mod agent;
 pub mod approval;
 pub mod budget;
 pub mod error;
+pub mod external;
 pub mod skill;
 pub mod sse;
 
@@ -19,5 +20,6 @@ pub use approval::{
 };
 pub use budget::{DEFAULT_TOKEN_BUDGET, TokenBudgetResponse, TokenBudgetUpdateRequest};
 pub use error::ApiError;
+pub use external::{AuthoredEvent, SignalEvent};
 pub use skill::{SkillMeta, parse_frontmatter, parse_frontmatter_description};
 pub use sse::{FailoverChainExhaustion, SseEvent};

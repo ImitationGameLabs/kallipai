@@ -89,7 +89,7 @@ pub fn skill_dir() -> Result<std::path::PathBuf> {
 ///   - the target is already non-empty — prior seed or agent-authored content
 ///     wins (never clobber), regardless of how the target path was chosen.
 ///
-/// An empty seed tree is refused loudly (see [`seed_into`]).
+/// An empty seed tree is refused loudly (see the private `seed_into` helper).
 ///
 /// Seeding is atomic and retryable: the seed is copied into a staging sibling
 /// and renamed entry-by-entry into the empty target, so a mid-copy failure

@@ -1,8 +1,10 @@
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use kallip_common::protocol::{ApiError, MessageResponse};
+use kallip_lesche_common::message::TagmaReply;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use crate::messaging::{MessageSender, SenderRelation, format_incoming};
@@ -71,6 +73,23 @@ pub async fn deliver_message(
     };
     info!(receiver = %id, sender = ?sender, relation = ?relation, "delivering message");
     let envelope = format_incoming(&sender, relation, text);
+
+    // The external chat-room conversation is root-only. For a user->root
+    // message, record it via the external projector BEFORE enqueuing the prompt
+    // so the inbound row is durable even if the agent reply races, and so the
+    // projector's published `UserMessage` frame lets the frontend promote its
+    // optimistic line. Inter-agent (non-root) messages are not part of the
+    // user-facing transcript and are skipped. The projector is the sole writer;
+    // both the direct and relay paths funnel through here.
+    let is_root = {
+        let registry = state.registry.read().await;
+        registry
+            .root_agent()
+            .is_some_and(|(root_id, _)| root_id == id)
+    };
+    if is_root && let Some(projector) = state.external.get() {
+        projector.record_inbound(text.to_string()).await;
+    }
 
     // Fast path: agent is alive, try non-blocking send.
     {
@@ -347,6 +366,102 @@ pub async fn sse_events(
         (rx, events_tx)
     };
     Ok(sse_stream(id, events_tx, rx, state.shutdown.clone()))
+}
+
+/// The direct (local) external SSE: serves the projected external vocabulary
+/// (authored messages, runtime signals, status snapshots) to a local frontend
+/// client. Root-only — the direct stream is the root agent's conversation, and
+/// the projector subscribes to the root regardless of the path id, so a non-root
+/// id is rejected to keep the route honest. Any authenticated identity may
+/// subscribe (the root owns the single conversation). The stream is one
+/// multiplexed channel discriminated by the SSE `event:` name.
+pub async fn external_events(
+    State(state): State<SharedState>,
+    _auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Hold the registry read-lock once for both the root check and the initial
+    // status snapshot. The snapshot is prepended to the SSE so the chat header
+    // renders at connect instead of after the next status-pump tick (~2 s).
+    let initial = {
+        let registry = state.registry.read().await;
+        let is_root = registry
+            .root_agent()
+            .is_some_and(|(root_id, _)| root_id == &id);
+        if !is_root {
+            return Err(ApiError::not_found(
+                "external event stream is root-only; the direct conversation is the root's",
+            ));
+        }
+        let payload = crate::relay::status_pump::snapshot_status(&registry, &state.token_budget);
+        crate::direct::DirectFrame::Status(payload)
+    };
+    let direct = state
+        .direct
+        .get()
+        .ok_or_else(|| ApiError::unavailable("direct serving not initialized"))?;
+    let rx = direct.subscribe();
+    Ok(crate::sse::direct_sse_stream(
+        rx,
+        Some(initial),
+        state.shutdown.clone(),
+    ))
+}
+
+/// Query params for [`external_history`]: `after` (incremental catch-up, rows
+/// with id > after), `before` (scroll-up, id < before), or neither (the most
+/// recent `limit`). Mirrors the relay `TagmaControl::History` modes.
+#[derive(Debug, Default, Deserialize)]
+pub struct ExternalHistoryQuery {
+    #[serde(default)]
+    pub after: Option<i64>,
+    #[serde(default)]
+    pub before: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// `GET /agents/{id}/external/history` -- the pull-based history window for the
+/// direct (offline) path, cursor-driven by the frontend's high-water mark.
+/// Root-only and projector-owned; returns decoded replies and a `more` flag.
+/// The direct SSE stays live-only; history is always a frontend-initiated pull,
+/// symmetric with the relay's `TagmaControl::History`.
+#[derive(Debug, Serialize)]
+pub struct ExternalHistoryResponse {
+    pub rows: Vec<TagmaReply>,
+    pub more: bool,
+}
+
+pub async fn external_history(
+    State(state): State<SharedState>,
+    _auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+    Query(query): Query<ExternalHistoryQuery>,
+) -> Result<Json<ExternalHistoryResponse>, ApiError> {
+    {
+        let registry = state.registry.read().await;
+        let is_root = registry
+            .root_agent()
+            .is_some_and(|(root_id, _)| root_id == &id);
+        if !is_root {
+            return Err(ApiError::not_found(
+                "external history is root-only; the direct conversation is the root's",
+            ));
+        }
+    }
+    let projector = state
+        .external
+        .get()
+        .ok_or_else(|| ApiError::unavailable("external projector not initialized"))?;
+    // Bound the page the same way the relay does (HISTORY_BATCH_MAX = 50); a
+    // missing `limit` defaults to the cap.
+    const DEFAULT_LIMIT: u32 = 50;
+    const MAX_LIMIT: u32 = 50;
+    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
+    let (rows, more) = projector
+        .read_history(query.after, query.before, limit)
+        .await;
+    Ok(Json(ExternalHistoryResponse { rows, more }))
 }
 
 // -- Helpers --

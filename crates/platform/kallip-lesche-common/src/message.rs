@@ -4,7 +4,7 @@
 //! The [`TagmaRequest`] / [`TagmaReply`] inside is the E2E payload shared
 //! between app and tagma; the agora never decrypts it.
 
-use crate::event::TagmaEvent;
+use crate::event::AuthoredEvent;
 use kallip_agora_common::bytes::Ciphertext;
 use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId, UserId};
 use serde::{Deserialize, Serialize};
@@ -107,15 +107,18 @@ pub enum TagmaReply {
         status: u16,
         message: String,
     },
-    /// An unsolicited tagma event. Has no `req_id`: it is produced by the
-    /// tagma's event pump, not in reply to any single op. `history_id` is the
-    /// `chat_history.id` of the outbound row the tagma appended for this event
-    /// before emitting it; the app uses it as a stable id to order/dedup frames
-    /// across batch replay and live delivery. `0` means the row was not
-    /// recorded (e.g. a relay running without chat history) and must not be
-    /// used for dedup.
+    /// An unsolicited authored tagma event (an assistant message). Has no
+    /// `req_id`: it is produced by the tagma's event pump, not in reply to any
+    /// single op. `history_id` is the `chat_history.id` of the outbound row the
+    /// tagma appended for this event before emitting it; the app uses it as a
+    /// stable id to order/dedup frames across batch replay and live delivery.
+    /// `0` means the row was not recorded (e.g. a relay running without chat
+    /// history) and must not be used for dedup. Runtime signals (busy/idle,
+    /// terminals, errors) do NOT ride this variant — they cross as plaintext
+    /// `LescheEvent::TagmaSystem`, since they are operator metadata, not
+    /// conversation content.
     Event {
-        event: TagmaEvent,
+        event: AuthoredEvent,
         #[serde(default)]
         history_id: i64,
         /// When the outbound row was appended (RFC 3339). Absent on frames with
@@ -271,13 +274,17 @@ mod tests {
             })
             .unwrap(),
             serde_json::to_string(&TagmaReply::Event {
-                event: TagmaEvent::Busy,
+                event: AuthoredEvent::AssistantContent {
+                    content: "hi".into(),
+                },
                 history_id: 0,
                 created_at: None,
             })
             .unwrap(),
             serde_json::to_string(&TagmaReply::Event {
-                event: TagmaEvent::Busy,
+                event: AuthoredEvent::AssistantContent {
+                    content: "hi".into(),
+                },
                 history_id: 42,
                 created_at: None,
             })
@@ -312,7 +319,7 @@ mod tests {
         // `history_id` / `created_at` default when absent, so an Event serialized
         // without them (a stored payload from before the stamp, or an older peer)
         // still parses.
-        let unstamped = r#"{"kind":"event","event":{"type":"busy"}}"#;
+        let unstamped = r#"{"kind":"event","event":{"type":"assistant_content","content":"hi"}}"#;
         let parsed: TagmaReply = serde_json::from_str(unstamped).unwrap();
         assert!(matches!(
             parsed,
@@ -324,7 +331,9 @@ mod tests {
         ));
         // `history_id` round-trips a non-zero value and the field name is pinned.
         let stamped = serde_json::to_string(&TagmaReply::Event {
-            event: TagmaEvent::Busy,
+            event: AuthoredEvent::AssistantContent {
+                content: "hi".into(),
+            },
             history_id: 42,
             created_at: None,
         })
@@ -354,7 +363,9 @@ mod tests {
         );
         // set_history_id stamps Event and MessageAccepted; leaves others alone.
         let mut ev = TagmaReply::Event {
-            event: TagmaEvent::Busy,
+            event: AuthoredEvent::AssistantContent {
+                content: "hi".into(),
+            },
             history_id: 0,
             created_at: None,
         };
@@ -383,7 +394,9 @@ mod tests {
         assert_eq!(format_created_at(1_785_069_296), "2026-07-26T12:34:56Z");
 
         let mut ev = TagmaReply::Event {
-            event: TagmaEvent::Busy,
+            event: AuthoredEvent::AssistantContent {
+                content: "hi".into(),
+            },
             history_id: 0,
             created_at: None,
         };

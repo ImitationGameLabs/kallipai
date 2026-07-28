@@ -120,6 +120,13 @@ pub struct AgentSummary {
     /// (e.g. "restore failed: workspace ... not found"). Absent for live agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faulted_reason: Option<String>,
+    /// The external conversation id for this agent's chat — present ONLY on the
+    /// root agent summary (`GET /agents/root`), absent for every other agent and
+    /// when the tagma is not enrolled (pure-offline, no durable history). The
+    /// offline frontend keys its IndexedDB cache + history pulls under it so the
+    /// direct and relay paths share one conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
 }
 
 /// Response body for listing agents.

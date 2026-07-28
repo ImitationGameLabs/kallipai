@@ -1,9 +1,9 @@
-//! Events on the app's multiplexed SSE stream (`GET /v1/me/events`), and the
-//! tagma-facing event vocabulary carried inside E2EE envelopes.
+//! Events on the app's multiplexed SSE stream (`GET /v1/me/events`), plus the
+//! signal vocabulary the tagma pushes to the relay for plaintext rebroadcast.
 //!
 //! A single per-user connection carries envelope deliveries for all of the
-//! user's conversations plus presence transitions, multiplexed by
-//! `conversation_id` / `tagma_id`.
+//! user's conversations plus presence transitions, system signals, and
+//! aggregate status snapshots, multiplexed by `conversation_id` / `tagma_id`.
 //!
 //! Key exchange is NOT delivered here: it is a synchronous request/reply on
 //! `POST /v1/conversations/{id}/key-exchange/init`, whose response body carries
@@ -15,22 +15,25 @@
 //! opens). `TagmaStatus` carries a tagma's live aggregate runtime state
 //! (agent counts + token budget); like presence it is plaintext and
 //! user-scoped, pushed by the tagma on a periodic snapshot and rebroadcast
-//! by the lesche.
+//! by the lesche. `TagmaSystem` carries a tagma's per-event runtime signal
+//! (busy/idle presence, turn terminals, errors) — plaintext like the others,
+//! because these are operator metadata, not conversation content (authored
+//! content rides the encrypted envelope as a `TagmaReply::Event`).
 //!
-//! [`TagmaEvent`] is the *public, agent-free* event vocabulary the tagma
-//! produces (by mapping the tagma's internal `SseEvent` stream) and the app
-//! consumes, inside the AEAD envelope. It is deliberately not a re-export of the
-//! tagma's event type: the agora/tagma public contract must not be coupled to
-//! tagma-internal event shapes.
+//! [`AuthoredEvent`] and [`SignalEvent`] are the *public, agent-free* event
+//! vocabulary the tagma produces (by projecting its internal `SseEvent` stream)
+//! and the app consumes. They are re-exported from `kallip_common::protocol`
+//! (the transport-neutral home); this crate re-exports them so downstream
+//! crates can name them without a second `use` path.
 
 use crate::message::Envelope;
 use kallip_agora_common::ids::TagmaId;
 use serde::{Deserialize, Serialize};
 
-// Re-exported so downstream crates (e.g. `kallip-lesche-client`) can construct
-// a [`TagmaStatusPayload`] without a direct `kallip_common` dependency. Also
-// brought into scope for this module's own use.
-pub use kallip_common::protocol::AgentState;
+// Re-exported so downstream crates (e.g. `kallip-lesche-client`) can name the
+// external vocabulary through this module without a direct `kallip_common`
+// path, and brought into scope for this module's own use.
+pub use kallip_common::protocol::{AgentState, AuthoredEvent, SignalEvent};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -60,6 +63,17 @@ pub enum LescheEvent {
         token_budget: u64,
         token_consumed: u64,
     },
+    /// A tagma's per-event runtime signal (busy/idle presence, turn terminals,
+    /// errors), pushed by the tagma and rebroadcast by the lesche on the
+    /// owner's app event stream. Plaintext like the status/presence variants:
+    /// operator metadata, not conversation content (authored content rides the
+    /// encrypted envelope). Not persisted in `chat_history` and not replayed —
+    /// a reconnect only replays authored messages; the tagma also writes each
+    /// to its application log for observability.
+    TagmaSignal {
+        tagma_id: TagmaId,
+        event: SignalEvent,
+    },
 }
 
 /// `POST /v1/tagmata/{tagma_id}/status` request body — the tagma's periodic
@@ -77,56 +91,4 @@ pub struct TagmaStatusPayload {
     pub subagents_active: u32,
     pub token_budget: u64,
     pub token_consumed: u64,
-}
-
-/// An event the tagma emits to the app, carried inside an E2EE envelope as a
-/// [`crate::message::TagmaReply::Event`].
-///
-/// This is the agent-free, tagma-facing subset of the tagma's event stream.
-/// The tagma maps its own `SseEvent` to this vocabulary, dropping
-/// streaming-delta, tool, retry, and approval variants (they are outside the
-/// app's capability set for the agora path). Approval-gated turns surface only
-/// as `Busy` followed by silence until the operator resolves the approval
-/// out-of-band.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum TagmaEvent {
-    /// A full assistant message (the non-streaming form; deltas are dropped).
-    /// This is also the variant the `kallip lesche send` CLI's deliveries are
-    /// mapped to — a message to the user is a deliberate act, surfaced as
-    /// assistant content.
-    AssistantContent { content: String },
-    /// The agent yielded control (called `break`, or was force-idled). Content-less:
-    /// a reply no longer rides the terminal event. The task parks, awaiting input.
-    Idle,
-    /// The tagma started working on a turn.
-    Busy,
-    /// A lifecycle/status notice.
-    Status { message: String },
-    /// The turn failed.
-    Error { message: String },
-    /// The in-flight turn was interrupted.
-    Interrupted,
-    /// The in-flight turn was cancelled.
-    Cancelled,
-    /// The tagma exhausted its token budget mid-turn.
-    TokenBudgetExceeded { consumed: u64, budget: u64 },
-    /// The tagma hit its max tool rounds mid-turn.
-    MaxRoundsExceeded,
-    /// The tagma's model failover chain is exhausted.
-    FailoverChainExhausted {
-        reason: FailoverChainExhaustion,
-        detail: String,
-    },
-}
-
-/// Why the failover chain ran out. Mirrors the tagma's
-/// `FailoverChainExhaustion` but lives in the agent-free public contract.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum FailoverChainExhaustion {
-    NoFailoverConfigured,
-    AllBackupsExhausted,
-    AllCandidatesUnbuildable,
-    AllCandidatesInfeasible,
 }

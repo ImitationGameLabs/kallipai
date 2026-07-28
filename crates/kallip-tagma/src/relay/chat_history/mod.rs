@@ -160,6 +160,42 @@ pub(crate) async fn append(
     Ok((res.last_insert_id, now))
 }
 
+/// Append `reply` as an outbound row and stamp its row id + `created_at` onto
+/// it in place. Shared by the relay emit path and the direct (local) serving
+/// path. A serialize failure degrades gracefully: the row is not recorded, the
+/// id stays 0, and the caller still delivers the frame live (no dedup across
+/// reconnect for that one frame). A storage failure is logged by the caller.
+pub(crate) async fn stamp_reply(
+    db: &Db,
+    conversation_id: &str,
+    reply: &mut kallip_lesche_common::message::TagmaReply,
+) {
+    let payload = match serde_json::to_vec(reply) {
+        Ok(v) => v,
+        Err(_e) => return,
+    };
+    if let Ok((id, created_at)) =
+        append(db, conversation_id, "outbound", reply_kind(reply), &payload).await
+    {
+        reply.set_history_id(id);
+        reply.set_created_at(created_at);
+    }
+}
+
+/// The `kind` discriminant stored alongside a reply payload, for debugging /
+/// future filtering. Only `Event` is normally stored on the outbound path.
+fn reply_kind(reply: &kallip_lesche_common::message::TagmaReply) -> &'static str {
+    use kallip_lesche_common::message::TagmaReply;
+    match reply {
+        TagmaReply::Event { .. } => "event",
+        TagmaReply::MessageAccepted { .. } => "message_accepted",
+        TagmaReply::Interrupted { .. } => "interrupted",
+        TagmaReply::Error { .. } => "error",
+        TagmaReply::UserMessage { .. } => "user_message",
+        TagmaReply::HistoryBatchEnd { .. } => "history_batch_end",
+    }
+}
+
 /// Read the most recent `n` rows for a conversation, oldest-first (i.e. in the
 /// order they should be replayed). Used by the `latest` history-pull mode (a
 /// first-time device with an empty local cache): the tagma re-encrypts these
@@ -299,6 +335,70 @@ pub(crate) async fn gc(db: &Db, ttl_secs: u64, cap: u64) -> usize {
         }
     }
     deleted
+}
+
+/// Decode one stored [`HistoryRow`] into the wire reply a serving path forwards
+/// (and a history pull returns). Outbound rows decode back to their original
+/// `TagmaReply` (re-stamped with the row id + `created_at`); inbound rows decode
+/// to a `TagmaReply::UserMessage` echo. Returns `None` for rows that cannot be
+/// interpreted — legacy non-authored outbound rows (predating the external
+/// event split, when the pump persisted transient system events), unknown
+/// inbound kinds, and corrupt payloads — so the caller skips them in replay.
+///
+/// Shared by the relay history replay and the direct `/external/history`
+/// endpoint so the two paths cannot drift on row interpretation.
+pub(crate) fn decode_row(row: HistoryRow) -> Option<kallip_lesche_common::message::TagmaReply> {
+    use kallip_lesche_common::message::{TagmaReply, TagmaRequest};
+    match row.direction.as_str() {
+        "outbound" => match serde_json::from_slice::<TagmaReply>(&row.payload) {
+            Ok(mut r) => {
+                r.set_history_id(row.id);
+                r.set_created_at(row.created_at);
+                Some(r)
+            }
+            Err(e) => {
+                // Read-time legacy filter: before the external event split, the
+                // pump persisted system events (busy/idle/status/terminals) as
+                // outbound `TagmaReply::Event` rows. `Event.event` is now
+                // `AuthoredEvent` (AssistantContent only), so those legacy rows
+                // no longer deserialize and are intentionally dropped from
+                // replay — system signals are transient by design.
+                tracing::debug!(
+                    id = row.id,
+                    error = %e,
+                    "filtering legacy non-authored outbound row from history replay"
+                );
+                None
+            }
+        },
+        "inbound" => match serde_json::from_slice::<TagmaRequest>(&row.payload) {
+            Ok(TagmaRequest::SendMessage { text, .. }) => {
+                let mut r = TagmaReply::UserMessage {
+                    history_id: row.id,
+                    text,
+                    created_at: None,
+                };
+                r.set_created_at(row.created_at);
+                Some(r)
+            }
+            Ok(other) => {
+                tracing::warn!(id = row.id, "unexpected inbound kind: {other:?}; skipping");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(id = row.id, "history inbound decode failed: {e}; skipping");
+                None
+            }
+        },
+        other => {
+            tracing::warn!(
+                id = row.id,
+                direction = other,
+                "unknown direction; skipping"
+            );
+            None
+        }
+    }
 }
 
 fn unix_secs() -> i64 {

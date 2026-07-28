@@ -2,6 +2,7 @@
 
 mod conversations;
 mod events;
+mod signal;
 mod status;
 mod tunnel;
 
@@ -13,11 +14,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::state::SharedConvState;
 
 /// Data-plane routes, state-injected (`Router<()>`): `/conversations*`,
-/// `/me/events`, `/tagmata/{id}/status`, and `/tunnel`.
+/// `/me/events`, `/tagmata/{id}/status`, `/tagmata/{id}/signal`, and `/tunnel`.
 pub fn router(state: SharedConvState) -> Router<()> {
     Router::new()
         .merge(conversations::router().with_state(state.clone()))
         .merge(events::router().with_state(state.clone()))
+        .merge(signal::router().with_state(state.clone()))
         .merge(status::router().with_state(state.clone()))
         .merge(tunnel::router().with_state(state))
 }
