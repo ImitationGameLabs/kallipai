@@ -133,14 +133,14 @@ impl AgoraClient {
         Ok(())
     }
 
-    /// Verify the admin credential: `GET /v1/admin/` with the bearer. Unlike
+    /// Verify the admin credential: `GET /v1/admin` with the bearer. Unlike
     /// [`Self::healthz`] (an unauthenticated reachability probe), this confirms
     /// the admin token is actually accepted, distinguishing "server down" from
     /// "wrong token".
     pub async fn admin_verify_token(&self) -> Result<()> {
         self.require_admin_token()?;
         let resp = self
-            .with_admin_auth(self.inner.http.get(self.url("/v1/admin/")))
+            .with_admin_auth(self.inner.http.get(self.url("/v1/admin")))
             .send()
             .await
             .context("admin ping failed")?;

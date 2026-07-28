@@ -45,7 +45,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Reachability + admin-token probe (GET /healthz, then GET /v1/admin/).
+    /// Reachability + admin-token probe (GET /healthz, then GET /v1/admin).
     Ping,
     /// User account management.
     #[command(subcommand)]

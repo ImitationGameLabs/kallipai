@@ -58,7 +58,7 @@ pub fn router() -> Router<SharedState> {
         .route("/", get(admin_root))
 }
 
-/// `GET /v1/admin/` -- admin-gated probe. Returns 200 only for a valid
+/// `GET /v1/admin` -- admin-gated probe. Returns 200 only for a valid
 /// `sk-admin-` bearer; any other credential is rejected by the extractor
 /// (`AuthPrincipal`) or by `require_admin`.
 async fn admin_root(AuthPrincipal(principal): AuthPrincipal) -> Result<&'static str, ApiError> {

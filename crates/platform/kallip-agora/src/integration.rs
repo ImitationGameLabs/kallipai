@@ -388,3 +388,42 @@ async fn internal_guard_passes_correct_bearer() {
         "correct bearer reaches the handler (404 for unknown session)"
     );
 }
+
+/// The admin-root probe is mounted at the no-trailing-slash path `/v1/admin`:
+/// axum 0.8 serves a `nest` + inner `"/"` route without the trailing slash, and
+/// there is no normalization middleware. Pin both sides of that contract so the
+/// client (`admin_verify_token`) and the route table cannot drift apart -- the
+/// bug this guards against once made `kallip-admin ping` always 404.
+#[tokio::test]
+async fn admin_probe_mounted_at_no_slash_path() {
+    let state = make_state_with(10, 10).await;
+    let app = routes::router(state, None);
+
+    // Valid admin bearer: `make_state` stores `TokenHash::of("test-admin")`.
+    let mut ok = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/admin")
+        .header(axum::http::header::AUTHORIZATION, "Bearer test-admin")
+        .body(Body::empty())
+        .expect("build request");
+    ok.extensions_mut().insert(MockConnectInfo(PEER));
+    assert_eq!(
+        run(app.clone(), ok).await,
+        StatusCode::OK,
+        "no-slash path with a valid admin bearer must reach the probe"
+    );
+
+    // The trailing-slash form is NOT registered under axum 0.8 nest.
+    let mut slash = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/admin/")
+        .header(axum::http::header::AUTHORIZATION, "Bearer test-admin")
+        .body(Body::empty())
+        .expect("build request");
+    slash.extensions_mut().insert(MockConnectInfo(PEER));
+    assert_eq!(
+        run(app, slash).await,
+        StatusCode::NOT_FOUND,
+        "trailing-slash form is unregistered under axum 0.8 nest"
+    );
+}
