@@ -8,6 +8,8 @@
   import Composer from "./Composer.svelte";
   import Markdown from "./Markdown.svelte";
   import CopyButton from "./CopyButton.svelte";
+  import RawToggleButton from "./RawToggleButton.svelte";
+  import { SvelteSet } from "svelte/reactivity";
   import { createAutoScroll } from "../lib/transcript.svelte.ts";
   import { timelineMarkers } from "../lib/channel/timeline.ts";
   import type {
@@ -51,6 +53,43 @@
     void lines.length;
     scroll.stick();
   });
+
+  // Per-message raw-source view: historyIds the user has toggled to raw text.
+  // Ephemeral component state (resets when this view unmounts). $state does
+  // not proxy a plain Set, so SvelteSet keeps add/delete reactive.
+  let rawLines = new SvelteSet<number>();
+  // Active scroll-pin observer for an in-flight toggle, so a rapid second
+  // toggle replaces it instead of stacking observers that fight each other.
+  let activeRO: ResizeObserver | undefined;
+  function toggleRaw(id: number): void {
+    const vp = scroll.viewport;
+    const el = vp?.querySelector<HTMLElement>(`[data-line="${id}"]`);
+    const actions = el?.querySelector<HTMLElement>("[data-actions]");
+    if (!vp || !el || !actions) {
+      if (rawLines.has(id)) rawLines.delete(id);
+      else rawLines.add(id);
+      return;
+    }
+    // Pin the action row (the control the user just clicked), not the message
+    // top: when the markdown bubble is taller than raw, pinning the top would
+    // push the toggle button off-screen. Letting the bubble grow/shrink around
+    // the button keeps it under the cursor. The markdown/Shiki mount settles
+    // across several frames, so re-pin on every resize for a short window.
+    const topBefore = actions.getBoundingClientRect().top;
+    const pin = (): void => {
+      vp.scrollTop += actions.getBoundingClientRect().top - topBefore;
+    };
+    if (rawLines.has(id)) rawLines.delete(id);
+    else rawLines.add(id);
+    activeRO?.disconnect();
+    requestAnimationFrame(pin);
+    const ro = new ResizeObserver(pin);
+    ro.observe(el);
+    activeRO = ro;
+    setTimeout(() => {
+      ro.disconnect();
+    }, 200);
+  }
 </script>
 
 <div
@@ -86,6 +125,7 @@
         </p>
       {:else}
         <div
+          data-line={line.historyId}
           class="group flex flex-col {line.role === 'user'
             ? 'items-end'
             : 'items-start'}"
@@ -99,7 +139,15 @@
               : ''}"
           >
             {#if line.role === "assistant"}
-              <Markdown source={line.text} />
+              {#if rawLines.has(line.historyId)}
+                <div
+                  class="min-w-0 whitespace-pre-wrap break-words font-mono text-xs"
+                >
+                  {line.text}
+                </div>
+              {:else}
+                <Markdown source={line.text} />
+              {/if}
             {:else}
               {line.text}
             {/if}
@@ -109,7 +157,15 @@
               >··</span
             >
           {:else}
-            <CopyButton getText={() => line.text} />
+            <div class="flex items-center gap-1" data-actions>
+              <CopyButton getText={() => line.text} />
+              {#if line.role === "assistant"}
+                <RawToggleButton
+                  pressed={rawLines.has(line.historyId)}
+                  onclick={() => toggleRaw(line.historyId)}
+                />
+              {/if}
+            </div>
           {/if}
         </div>
       {/if}
