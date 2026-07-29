@@ -139,8 +139,9 @@ resolved version from its output or `deno.lock`. Do not use `npm view` /
 2. From the repo root, run `deno install` to update `deno.lock` and
    `node_modules`.
 
-Do not use `npm install` / `npm i`, and do not use `deno add` (it writes JSR
-imports to `deno.json`, not npm deps to `package.json`).
+`deno add npm:<pkg>` does both steps at once -- the `npm:` prefix is
+mandatory (without it Deno resolves JSR and writes to `deno.json`); add
+`-D` for devDependencies. Do not use `npm install` / `npm i`.
 
 ## If a workflow isn't covered
 
