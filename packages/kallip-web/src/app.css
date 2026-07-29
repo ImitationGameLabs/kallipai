@@ -14,6 +14,7 @@
 /* kallip-level theme customizations (force light) live in the shared UI package
    so both apps import one source. */
 @import "../../kallip-ui/src/styles/theme.css";
+@import "../../kallip-ui/src/styles/markdown.css";
 
 html,
 body {

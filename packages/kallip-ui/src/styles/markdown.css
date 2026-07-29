@@ -1,0 +1,89 @@
+/*
+  Styling for rendered markdown (the <Markdown> component's `.markdown` root).
+
+  Lives here rather than in a scoped component <style> so it can compose
+  Skeleton's themed tokens via @apply: in Tailwind v4, @apply only resolves
+  utilities inside the main Tailwind-processed stylesheet, and a Svelte
+  component <style> is compiled as an isolated module (it would need a
+  cross-package @reference to see the utilities). SvelteMarkdown / ShikiCode
+  inject their elements as raw HTML with no Svelte scope hash anyway, so a
+  scoped block would need :global() wrappers regardless. Each app's app.css
+  imports this file; see theme.css for the same centralization pattern.
+
+  No `.prose` (tailwindcss/typography ships its own non-theme palette).
+  Preflight strips list markers, so they are re-added below.
+*/
+
+.markdown {
+  @apply text-sm leading-relaxed min-w-0 break-words;
+}
+
+.markdown p {
+  @apply my-2;
+}
+.markdown p:first-child {
+  @apply mt-0;
+}
+.markdown p:last-child {
+  @apply mb-0;
+}
+
+.markdown ul {
+  @apply list-disc pl-5;
+}
+.markdown ol {
+  @apply list-decimal pl-5;
+}
+.markdown li {
+  @apply my-0.5;
+}
+
+.markdown h1 {
+  @apply mt-3 mb-1 text-lg font-semibold;
+}
+.markdown h2 {
+  @apply mt-3 mb-1 font-semibold;
+}
+.markdown h3 {
+  @apply font-semibold;
+}
+
+.markdown a {
+  @apply text-primary-500 cursor-pointer;
+}
+.markdown a:hover,
+.markdown a:focus-visible {
+  @apply underline;
+}
+
+.markdown blockquote {
+  @apply border-l-2 border-surface-300 pl-3 opacity-80;
+}
+
+/*
+  The dark pre backdrop does double duty: Shiki's registered blocks carry
+  their own inline theme background (which wins), and an unregistered language
+  falls back to a class-only <pre> that picks this up -- so an unknown fence
+  (e.g. ```sql if sql were not registered) still renders as a visible framed
+  block instead of dissolving into the surrounding text.
+*/
+.markdown pre {
+  @apply rounded-md p-2 my-2 overflow-x-auto font-mono bg-surface-950 text-surface-50;
+}
+.markdown code {
+  @apply font-mono break-all;
+}
+/* Fenced blocks should scroll horizontally, not wrap like inline code. */
+.markdown pre code {
+  @apply break-normal;
+}
+
+.markdown table {
+  @apply my-2 w-full border-collapse;
+}
+.markdown th {
+  @apply border border-surface-300 bg-surface-100 px-2 py-1 text-left;
+}
+.markdown td {
+  @apply border border-surface-300 px-2 py-1 text-left;
+}

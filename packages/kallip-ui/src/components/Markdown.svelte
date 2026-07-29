@@ -1,29 +1,126 @@
 <script lang="ts">
-  import { renderMarkdown } from "../lib/markdown/markdown.ts";
-  import { enhanceCodeBlocks } from "../lib/markdown/code-block.ts";
-  import { enhanceLinks } from "../lib/markdown/links.ts";
+  import SvelteMarkdown, {
+    buildUnsupportedHTML,
+  } from "@humanspeak/svelte-markdown";
+  import {
+    createShikiHighlighter,
+    getShikiHighlighter,
+    setShikiHighlighter,
+    ShikiCode,
+  } from "@humanspeak/svelte-markdown/extensions/shiki";
+  // Only the languages/themes imported here are bundled (Shiki is opt-in and
+  // tree-shaken otherwise). The set covers what agent replies commonly emit in
+  // this repo; unregistered languages fall back to a plain (still dark, framed)
+  // code block rather than disappearing into the body text.
+  import bash from "shiki/langs/bash.mjs";
+  import css from "shiki/langs/css.mjs";
+  import diff from "shiki/langs/diff.mjs";
+  import html from "shiki/langs/html.mjs";
+  import javascript from "shiki/langs/javascript.mjs";
+  import json from "shiki/langs/json.mjs";
+  import nix from "shiki/langs/nix.mjs";
+  import python from "shiki/langs/python.mjs";
+  import rust from "shiki/langs/rust.mjs";
+  import sql from "shiki/langs/sql.mjs";
+  import toml from "shiki/langs/toml.mjs";
+  import typescript from "shiki/langs/typescript.mjs";
+  import yaml from "shiki/langs/yaml.mjs";
+  import githubDark from "shiki/themes/github-dark.mjs";
+  import CopyButton from "./CopyButton.svelte";
 
   let { source }: { source: string } = $props();
 
-  // Render sanitized markdown HTML. No `.prose` (tailwindcss/typography ships
-  // its own non-theme palette); instead style the elements via arbitrary
-  // variants so the text color inherits Skeleton's theme tokens. Preflight
-  // strips list markers, so those are re-added.
-  const html = $derived(renderMarkdown(source));
+  // Register the highlighter once (module singleton, idempotent across
+  // re-imports/HMR). Synchronous -- pure-JS regex engine, safe at render time.
+  if (!getShikiHighlighter()) {
+    setShikiHighlighter(
+      createShikiHighlighter({
+        langs: [
+          bash,
+          css,
+          diff,
+          html,
+          javascript,
+          json,
+          nix,
+          python,
+          rust,
+          sql,
+          toml,
+          typescript,
+          yaml,
+        ],
+        themes: [githubDark],
+      }),
+    );
+  }
+
+  // Disable raw HTML: agent markdown is parsed as markdown only. Stricter
+  // than the old DOMPurify DEFAULTS path (which allowed a sanitized subset)
+  // and removes that dependency. A suppressed tag renders as visible escaped
+  // text rather than being silently dropped.
+  const renderers = { html: buildUnsupportedHTML() };
+
+  // target=_blank makes modifier-clicks and middle-click open a new tab
+  // natively. A plain primary click would also follow target=_blank, so
+  // onclick swallows it (preventDefault cancels even that new-tab navigation)
+  // to keep links deliberate. Keyboard Enter synthesizes such a click, so it
+  // is handled in onkeydown instead -- preventDefault there cancels the
+  // synthesized click, and we open the new tab explicitly.
+  function isPlainPrimaryClick(event: MouseEvent): boolean {
+    return (
+      event.button === 0 &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey &&
+      !event.altKey
+    );
+  }
+
+  function openInNewTab(href: string): void {
+    globalThis.open(href, "_blank", "noopener,noreferrer");
+  }
 </script>
 
 <!--
-  Key on `html` so Svelte recreates the subtree (and re-runs
-  `enhanceCodeBlocks`) whenever `source` changes, not just patching `{@html}`.
-  Today no consumer mutates `source` on a mounted instance, but this keeps the
-  decoration correct locally instead of depending on that outer invariant.
+  SvelteMarkdown (and ShikiCode) inject their elements as raw HTML, so those
+  elements carry no Svelte scope hash and cannot be styled from a scoped
+  component <style>. The per-element styling lives in styles/markdown.css
+  (imported by each app's app.css), composed from Skeleton's themed tokens via
+  @apply. See that file.
 -->
-{#key html}
-  <div
-    use:enhanceCodeBlocks
-    use:enhanceLinks
-    class="text-sm leading-relaxed min-w-0 break-words [&_p]:my-2 first:[&_p]:mt-0 last:[&_p]:mb-0 [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5 [&_li]:my-0.5 [&_h1]:mt-3 [&_h1]:mb-1 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mt-3 [&_h2]:mb-1 [&_h2]:font-semibold [&_h3]:font-semibold [&_a]:text-primary-500 [&_a]:cursor-pointer [&_a]:hover:underline [&_a]:focus-visible:underline [&_blockquote]:border-l-2 [&_blockquote]:border-surface-300 [&_blockquote]:pl-3 [&_blockquote]:opacity-80 [&_pre]:rounded-md [&_pre]:bg-surface-100 [&_pre]:p-2 [&_pre]:overflow-x-auto [&_pre]:font-mono [&_pre]:my-2 [&_code]:font-mono [&_code]:break-all"
-  >
-    {@html html}
-  </div>
-{/key}
+<div class="markdown">
+  <SvelteMarkdown {source} {renderers}>
+    {#snippet link({ href, title, children })}
+      {#if href}
+        <a
+          {href}
+          title={title ?? "Ctrl/Cmd+click to open"}
+          target="_blank"
+          rel="noopener noreferrer"
+          onclick={(event) => {
+            if (isPlainPrimaryClick(event)) event.preventDefault();
+          }}
+          onkeydown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              openInNewTab(href);
+            }
+          }}
+        >
+          {@render children?.()}
+        </a>
+      {:else}
+        <!-- href sanitized out (e.g. a javascript: URL); render as plain text -->
+        {@render children?.()}
+      {/if}
+    {/snippet}
+
+    {#snippet code({ lang, text })}
+      <div class="group relative">
+        <ShikiCode {lang} {text} />
+        <CopyButton class="absolute top-1 right-1" getText={() => text} />
+      </div>
+    {/snippet}
+  </SvelteMarkdown>
+</div>
