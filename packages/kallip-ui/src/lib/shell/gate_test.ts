@@ -132,6 +132,31 @@ Deno.test("online + /chat/{id} renders for a signed-in user", () => {
   );
 });
 
+Deno.test(
+  "online + /chat/local -> redirect /tagmata (offline route marker)",
+  () => {
+    // /chat/local is an offline-only route; it is never a valid online
+    // destination. Mirrors the offline branch collapsing /tagmata -> /chat/local.
+    assertEquals(
+      decide({ mode: "online", pathname: "/chat/local", user: USER }),
+      { kind: "redirect", url: "/tagmata" },
+    );
+    // Fires during the whoami-in-flight window too, so the URL is corrected
+    // before the user resolves (no stuck "Connecting..." on ChannelChatPage).
+    assertEquals(
+      decide({ mode: "online", pathname: "/chat/local", user: undefined }),
+      { kind: "redirect", url: "/tagmata" },
+    );
+    // The rule sits above the user checks, so a logged-out user still collapses
+    // to /tagmata (whose next pass sends to /login) rather than /login?next=
+    // /chat/local -- locks the ordering the source comment relies on.
+    assertEquals(
+      decide({ mode: "online", pathname: "/chat/local", user: null }),
+      { kind: "redirect", url: "/tagmata" },
+    );
+  },
+);
+
 Deno.test("online + /chat/{id} + logged-out -> redirect /login", () => {
   assertEquals(
     decide({ mode: "online", pathname: "/chat/conv-1", user: null }),

@@ -9,8 +9,9 @@
 //     AgoraSessionStore: `undefined` = unresolved (whoami running / failed),
 //     `null` = resolved logged-out, object = signed in. `authError` is set when
 //     whoami failed with a non-auth error (e.g. agora unreachable). Online routes
-//     are /tagmata + /settings (chat is not available until the agora chat
-//     data-plane ships, so / redirects to /tagmata).
+//     are /tagmata + /settings + /chat/{server-id} (relay conversations). `/` and
+//     the offline-only `/chat/local` marker are not valid online destinations, so
+//     both redirect to /tagmata.
 //
 //   - "offline" -- no auth, no identity. `connected` reflects the local tagma
 //     transport. Offline routes are /chat/local (chat) + /settings. /tagmata
@@ -106,7 +107,12 @@ export function appGateDecision(args: {
   }
 
   // online protected
-  if (args.pathname === "/") {
+  // `/` is the old root and `/chat/local` is an offline-only route marker
+  // (relay conversations are keyed by server-derived ids, never "local");
+  // neither is a valid online destination, so go to the online home. Placed
+  // above the user checks so it also fires during the whoami-in-flight window;
+  // the next iteration on /tagmata then resolves auth (login / skeleton).
+  if (args.pathname === "/" || args.pathname === "/chat/local") {
     return { kind: "redirect", url: "/tagmata" };
   }
   if (args.user === null) {
