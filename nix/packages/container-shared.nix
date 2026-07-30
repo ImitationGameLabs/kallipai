@@ -5,6 +5,11 @@ let
   # toolset must live on PATH alongside the workspace binaries. pathsToLink
   # merges every package's /bin into a single ${toolEnv}/bin.
   #
+  # Carries the container's shell toolset: generic unix utils, dev-facing tools
+  # (git, ripgrep, direnv), and nix itself -- the package manager is container
+  # base infra for realizing project flakes and agent self-installed tooling via
+  # `nix shell`. sed is deliberately omitted (prefer the harness's edit tools).
+  #
   # Shared by the tagma docker image (nix/packages/docker-images/tagma.nix) and
   # the dev compose (arion-compose.nix) so the two cannot drift.
   toolEnv = pkgs.buildEnv {
@@ -15,9 +20,10 @@ let
       pkgs.findutils
       pkgs.diffutils
       pkgs.gnugrep
-      pkgs.gnused
       pkgs.ripgrep
       pkgs.git
+      pkgs.nix
+      pkgs.direnv
       pkgs.procps # pgrep
       pkgs.util-linux # kill
     ];

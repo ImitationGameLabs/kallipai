@@ -206,6 +206,7 @@ let
         service.capabilities.SYS_ADMIN = true;
         out.service.security_opt = [ "seccomp=unconfined" ];
         out.service.profiles = [ "tagma" ];
+        out.service.tmpfs = [ "/tmp:rw,size=256m" ];
         service.depends_on = [
           "agora"
           "lesche"
@@ -223,9 +224,20 @@ let
         image.enableRecommendedContents = true;
         image.contents = [ workspace ] ++ runtimeContents;
         service.useHostStore = true;
+        # Expose the host's nix daemon so the tagma (and the agent's sandboxed
+        # shells) can realize flakes / self-install tools via nix. Arion's option
+        # atomically sets NIX_REMOTE=daemon and bind-mounts the host
+        # /nix/var/nix/daemon-socket dir; the closure itself comes from the host
+        # store via useHostStore above. Dev-only (test mode stays hermetic).
+        service.useHostNixDaemon = true;
         service.command = [ "${workspace}/bin/kallip-tagma" ];
         service.environment = {
           PATH = "${workspace}/bin:${binPath}";
+          # The in-container nix client has no /etc/nix/nix.conf (only the
+          # store + daemon socket are shared), so it falls back to defaults
+          # where flakes/nix-command are off. Enable them client-side; the
+          # daemon still owns build/substitution policy.
+          NIX_CONFIG = "extra-experimental-features = nix-command flakes";
           HOME = "/var/lib/kallip";
           KALLIP_DATA_DIR = "/var/lib/kallip";
           # The tagma eagerly creates the singleton root agent at startup; its
