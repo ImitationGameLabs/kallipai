@@ -1,11 +1,13 @@
 <script lang="ts" module>
-  // Tone -> (bg tint, text) utility classes. Tints use the same shade base as
-  // the text so the banner reads as a single color at low saturation. Add tones
-  // here as the design calls for them; `error` is the only one wired today.
+  // Tone -> Skeleton `preset-filled-*` utility. Each bundles the solid tone
+  // fill with its paired contrast text, so the banner reads boldly, never lets
+  // the content beneath bleed through, and stays in lockstep with Skeleton's
+  // own component styling. Add tones here as the design calls for them; `error`
+  // is the only one wired today.
   export const bannerTones = {
-    error: "bg-error-500/10 text-error-500",
-    warning: "bg-warning-500/10 text-warning-500",
-    info: "bg-primary-500/10 text-primary-500",
+    error: "preset-filled-error-500",
+    warning: "preset-filled-warning-500",
+    info: "preset-filled-primary-500",
   } as const satisfies Record<string, string>;
 
   export type BannerTone = keyof typeof bannerTones;
