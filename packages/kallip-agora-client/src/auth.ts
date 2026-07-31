@@ -4,7 +4,7 @@
 // a soft hint, a 429 is a rate-limit message, etc.).
 
 import type { AgoraClient } from "./http.ts";
-import { AgoraApiError } from "./types.ts";
+import { AgoraApiError, type PasskeySummary } from "./types.ts";
 import {
   loginCredentialToJson,
   optionsForCreate,
@@ -123,6 +123,207 @@ export async function loginWithPasskey(
   }
 }
 
+/** The outcome of binding another passkey to the signed-in account. */
+export type AddPasskeyResult =
+  | { ok: true; passkey: PasskeySummary }
+  | {
+      ok: false;
+      reason:
+        | "cancelled"
+        | "reauth-required"
+        | "duplicate-credential"
+        | "rate-limited"
+        | "unknown";
+      message?: string;
+    };
+
+export interface AddPasskeyArgs {
+  /** The signed-in user's email (login id); used for the step-up re-login when
+   * the agora returns `reauth-required`. */
+  readonly email: string;
+  /** The device label for the new passkey. */
+  readonly label: string;
+}
+
+/**
+ * Bind ANOTHER passkey to the signed-in account (a second-device ceremony).
+ *
+ * One-shot step-up: if `addPasskeyBegin` returns 403 `reauth-required`, run the
+ * login ceremony (the user touches an existing passkey to prove presence), then
+ * retry begin exactly once. The typed label threads through the re-auth so the
+ * user does not re-type it.
+ */
+export async function addPasskey(
+  client: AgoraClient,
+  args: AddPasskeyArgs,
+): Promise<AddPasskeyResult> {
+  // begin (with one step-up retry on reauth-required).
+  let begun;
+  try {
+    begun = await client.addPasskeyBegin();
+  } catch (e) {
+    if (!(e instanceof AgoraApiError) || e.status !== 403) {
+      return mapAddBeginError(e);
+    }
+    // Step-up: run the login ceremony, then retry begin once.
+    const login = await loginWithPasskey(client, args.email);
+    if (!login.ok) {
+      // Forward the step-up login's own reason when it is one an add can surface
+      // (a cancel, or a rate-limit on the re-auth); anything else means the
+      // re-auth itself failed to establish the step-up.
+      if (login.reason === "cancelled" || login.reason === "rate-limited") {
+        return { ok: false, reason: login.reason, message: login.message };
+      }
+      return { ok: false, reason: "reauth-required", message: login.message };
+    }
+    try {
+      begun = await client.addPasskeyBegin();
+    } catch (e2) {
+      return mapAddBeginError(e2);
+    }
+  }
+
+  // create: the browser passkey prompt (cancel/abort -> "cancelled").
+  let credential: PublicKeyCredential | null;
+  try {
+    credential = (await navigator.credentials.create({
+      publicKey: optionsForCreate(begun.options),
+    })) as PublicKeyCredential | null;
+  } catch (e) {
+    return addCancelOrUnknown(e);
+  }
+
+  // finish: verify + bind. A 409 is a duplicate credential (live or previously
+  // revoked); the last-live-passkey guard never fires on an ADD (the user always
+  // has at least the one they are adding to).
+  try {
+    const passkey = await client.addPasskeyFinish({
+      ceremony_id: begun.ceremony_id,
+      credential: registerCredentialToJson(credential),
+      label: args.label,
+    });
+    return { ok: true, passkey };
+  } catch (e) {
+    if (e instanceof AgoraApiError && e.status === 409) {
+      return { ok: false, reason: "duplicate-credential", message: e.message };
+    }
+    if (e instanceof AgoraApiError && e.status === 429) {
+      return { ok: false, reason: "rate-limited", message: e.message };
+    }
+    return addUnknown(e);
+  }
+}
+
+/** `NotAllowedError`/`AbortError` during an add-passkey prompt = cancelled. */
+function addCancelOrUnknown(e: unknown): AddPasskeyResult {
+  if (isUserCancel(e)) return { ok: false, reason: "cancelled" };
+  return addUnknown(e);
+}
+
+function addUnknown(e: unknown): AddPasskeyResult {
+  const message = e instanceof Error ? e.message : String(e);
+  return { ok: false, reason: "unknown", message };
+}
+
+/** Map an add-passkey begin failure (other than the 403 handled by the caller). */
+function mapAddBeginError(e: unknown): AddPasskeyResult {
+  if (e instanceof AgoraApiError) {
+    if (e.status === 403)
+      return { ok: false, reason: "reauth-required", message: e.message };
+    if (e.status === 429)
+      return { ok: false, reason: "rate-limited", message: e.message };
+  }
+  const message = e instanceof Error ? e.message : String(e);
+  return { ok: false, reason: "unknown", message };
+}
+
+// ---------------------------------------------------------------------------
+// pair a new device (cross-device enrollment via a short-lived code)
+// ---------------------------------------------------------------------------
+
+/** The outcome of pairing a new device: bind a local passkey onto an existing
+ *  account and sign this device in. */
+export type PairResult =
+  | { ok: true; userId: string }
+  | {
+      ok: false;
+      reason:
+        | "cancelled"
+        | "invalid-code"
+        | "duplicate-credential"
+        | "rate-limited"
+        | "unknown";
+      message?: string;
+    };
+
+export interface PairArgs {
+  /** The short pairing code from the already-signed-in device. */
+  readonly code: string;
+  /** The device label for the new passkey. */
+  readonly label: string;
+}
+
+/**
+ * Pair THIS new device onto an existing account using a short code minted by an
+ * already-signed-in device. No step-up here (the code IS the proof of account
+ * ownership). On success this device is signed in with its own local passkey.
+ */
+export async function pairDevice(
+  client: AgoraClient,
+  args: PairArgs,
+): Promise<PairResult> {
+  // begin: validate the code (the server emits a uniform 401 for
+  // unknown/consumed/expired, so all map to one `invalid-code` reason).
+  let begun;
+  try {
+    begun = await client.pairBegin({ code: args.code });
+  } catch (e) {
+    if (e instanceof AgoraApiError) {
+      if (e.status === 401 || e.status === 403)
+        return { ok: false, reason: "invalid-code", message: e.message };
+      if (e.status === 429)
+        return { ok: false, reason: "rate-limited", message: e.message };
+    }
+    return pairUnknown(e);
+  }
+
+  // create: the browser passkey prompt (cancel/abort -> "cancelled").
+  let credential: PublicKeyCredential | null;
+  try {
+    credential = (await navigator.credentials.create({
+      publicKey: optionsForCreate(begun.options),
+    })) as PublicKeyCredential | null;
+  } catch (e) {
+    if (isUserCancel(e)) return { ok: false, reason: "cancelled" };
+    return pairUnknown(e);
+  }
+
+  // finish: verify + bind + mint session. A 409 is a duplicate credential.
+  try {
+    const finish = await client.pairFinish({
+      ceremony_id: begun.ceremony_id,
+      credential: registerCredentialToJson(credential),
+      label: args.label,
+    });
+    return { ok: true, userId: finish.user_id };
+  } catch (e) {
+    if (e instanceof AgoraApiError && e.status === 409)
+      return { ok: false, reason: "duplicate-credential", message: e.message };
+    if (e instanceof AgoraApiError && e.status === 429)
+      return { ok: false, reason: "rate-limited", message: e.message };
+    // 401 "ceremony expired" (the user sat on the prompt past its TTL) collapses
+    // to the same `invalid-code` UX as begin -- "code invalid/expired/used".
+    if (e instanceof AgoraApiError && e.status === 401)
+      return { ok: false, reason: "invalid-code", message: e.message };
+    return pairUnknown(e);
+  }
+}
+
+function pairUnknown(e: unknown): PairResult {
+  const message = e instanceof Error ? e.message : String(e);
+  return { ok: false, reason: "unknown", message };
+}
+
 // ---------------------------------------------------------------------------
 // error mapping
 // ---------------------------------------------------------------------------
@@ -152,16 +353,22 @@ function finishError(
 }
 
 /**
+ * Did the browser ceremony throw a user-cancel? `NotAllowedError`/`AbortError`
+ * = the user dismissed the platform prompt. Shared by both ceremony drivers.
+ */
+function isUserCancel(e: unknown): boolean {
+  return (
+    e instanceof DOMException &&
+    (e.name === "NotAllowedError" || e.name === "AbortError")
+  );
+}
+
+/**
  * The browser ceremony threw. `NotAllowedError`/`AbortError` = the user
  * cancelled the platform prompt; anything else is `unknown`.
  */
 function cancelOrUnknown(e: unknown): CeremonyResult {
-  if (
-    e instanceof DOMException &&
-    (e.name === "NotAllowedError" || e.name === "AbortError")
-  ) {
-    return { ok: false, reason: "cancelled" };
-  }
+  if (isUserCancel(e)) return { ok: false, reason: "cancelled" };
   return unknownError(e);
 }
 

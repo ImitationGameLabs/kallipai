@@ -44,7 +44,10 @@ export type GateDecision =
 
 export function isPublicRoute(pathname: string): boolean {
   return (
-    pathname === "/login" || pathname === "/register" || pathname === "/connect"
+    pathname === "/login" ||
+    pathname === "/register" ||
+    pathname === "/pair" ||
+    pathname === "/connect"
   );
 }
 
@@ -73,6 +76,17 @@ export function appGateDecision(args: {
       return { kind: "redirect", url: "/connect" };
     }
     // online
+    // A signed-in user hitting /pair (the anonymous-device code-entry page)
+    // goes to settings, where the mint UI lives — landing them on the code
+    // entry would be wrong (and would mint a second session for an already-
+    // authed user).
+    if (
+      args.pathname === "/pair" &&
+      args.user != null &&
+      args.user !== undefined
+    ) {
+      return { kind: "redirect", url: "/settings" };
+    }
     if (
       (args.pathname === "/login" || args.pathname === "/register") &&
       args.user != null &&

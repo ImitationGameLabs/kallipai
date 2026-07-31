@@ -120,6 +120,15 @@
     </p>
 
     <p class="text-center text-sm">
+      On a new device?
+      <a
+        href="/pair"
+        class="font-medium text-primary-500 hover:underline cursor-pointer"
+        >Add this device</a
+      >
+    </p>
+
+    <p class="text-center text-sm">
       <a
         href="/connect"
         class="font-medium text-primary-500 hover:underline cursor-pointer"

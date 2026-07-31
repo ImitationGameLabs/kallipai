@@ -35,6 +35,52 @@ export interface AuthFinishResponse {
   readonly user_id: string;
 }
 
+/** `GET /v1/me/passkeys` — one of the caller's live passkeys. The agora's
+ * `passkeys` table holds only live credentials (revoked history lives in a
+ * separate audit table), so there is no status field. `label` is the user-
+ * supplied device name ("" for the initial passkey until the user names it). */
+export interface PasskeySummary {
+  readonly id: string;
+  readonly label: string;
+  readonly created_at: string;
+  /** RFC3339; seeded to the enrollment instant, updated on every sign-in. */
+  readonly last_used_at: string;
+}
+
+/** Body the client sends to add-passkey `finish`. The label rides the finish
+ * body (the begin txn never sees it). */
+export interface AddPasskeyFinishRequest {
+  readonly ceremony_id: string;
+  readonly credential: RegisterPublicKeyCredentialJson;
+  readonly label: string;
+}
+
+/** `PATCH /v1/me/passkeys/{id}` body. */
+export interface RenamePasskeyRequest {
+  readonly label: string;
+}
+
+/** `POST /v1/me/device-pairing` — a freshly minted, short-lived pairing code
+ * (TTL is server-defined; see `expires_at`). `code` is the plaintext, returned
+ * ONCE; only its hash is retained. */
+export interface MintPairingCodeResponse {
+  readonly code: string;
+  readonly expires_at: string;
+}
+
+/** Body the new (unauthenticated) device sends to pair `begin`. */
+export interface PairBeginRequest {
+  readonly code: string;
+}
+
+/** Body the new device sends to pair `finish`. The label rides the finish body
+ *  (the begin txn never sees it). */
+export interface PairFinishRequest {
+  readonly ceremony_id: string;
+  readonly credential: RegisterPublicKeyCredentialJson;
+  readonly label: string;
+}
+
 /** `GET /v1/me`. `display_name` is nullable (null when unset) -- the agora
  * returns `users.display_name` verbatim with no synthesis (see commit
  * 53aa563); presentation fallback belongs to the frontend. */

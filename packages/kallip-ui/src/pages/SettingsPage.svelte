@@ -3,6 +3,16 @@
   import { channelsStore } from "../lib/session/channels.svelte";
   import { configStore } from "../lib/config/config.svelte";
   import { modeOf } from "../lib/config/mode.ts";
+  import type {
+    AddPasskeyResult,
+    PasskeySummary,
+  } from "@kallipai/kallip-agora-client";
+  import type {
+    PasskeyAddHint,
+    PasskeyCardProps,
+    PasskeyPhase,
+  } from "../lib/passkeys.svelte.ts";
+  import PasskeyManager from "../components/settings/PasskeyManager.svelte";
 
   // Settings is now info-only: account actions (logout, mode switch) live in
   // the sidebar AccountMenu. Online shows the account (identity lives in
@@ -15,6 +25,85 @@
   // Offline: drop the tagma session without abandoning offline mode.
   function disconnect() {
     channelsStore.detachLocal();
+  }
+
+  // -- passkeys (online only) ----------------------------------------------
+  // Loaded once when the signed-in user resolves. The store mirrors the tagmata
+  // error discipline: a fetch failure lands in `passkeysError` without blanking
+  // `user`; rename/revoke throw and are surfaced per-card.
+  $effect(() => {
+    if (
+      mode === "online" &&
+      agoraSession.user &&
+      !agoraSession.passkeysLoaded
+    ) {
+      agoraSession.refreshPasskeys();
+    }
+  });
+
+  // Wire the wire types into the prop-driven components. The store owns the
+  // ceremony + mutations; this page only projects state and forwards callbacks.
+  const passkeyCards = $derived(
+    agoraSession.passkeys.map(
+      (p: PasskeySummary): PasskeyCardProps => ({
+        id: p.id,
+        label: p.label,
+        createdAt: p.created_at,
+        lastUsedAt: p.last_used_at,
+      }),
+    ),
+  );
+
+  const passkeyPhase = $derived<PasskeyPhase>(
+    agoraSession.passkeysError
+      ? "error"
+      : agoraSession.passkeysLoaded
+        ? "loaded"
+        : "loading",
+  );
+
+  const passkeyAddHint = $derived(addHintFor(agoraSession.lastAddPasskey));
+
+  let adding = $state(false);
+
+  async function onAdd(label: string): Promise<boolean> {
+    adding = true;
+    try {
+      return (await agoraSession.addPasskey(label)).ok;
+    } finally {
+      adding = false;
+    }
+  }
+
+  // Cross-device pairing: mint a short-lived code shown on this device for a
+  // new device to redeem. `minting` gates the button; `onClear` drops an expired
+  // code from the store (the countdown fires it).
+  let minting = $state(false);
+
+  async function onMint() {
+    if (minting) return;
+    minting = true;
+    try {
+      await agoraSession.mintPairingCode();
+    } finally {
+      minting = false;
+    }
+  }
+
+  // Project the add-device ceremony result into a renderable hint. The result
+  // type is a client type; the hint is a pure view shape, so the mapping lives
+  // here (the components stay free of the client import).
+  function addHintFor(r: AddPasskeyResult | null): PasskeyAddHint | null {
+    if (!r) return null;
+    if (r.ok) return { tone: "ok", text: "Device added." };
+    const map: Record<string, string> = {
+      cancelled: "Cancelled.",
+      "reauth-required": "Re-authentication failed; try again.",
+      "duplicate-credential": "That device is already registered.",
+      "rate-limited": "Too many attempts. Try again later.",
+      unknown: r.message ?? "Something went wrong.",
+    };
+    return { tone: "err", text: map[r.reason] ?? "Something went wrong." };
   }
 </script>
 
@@ -44,6 +133,22 @@
             </div>
           </div>
         </section>
+
+        <PasskeyManager
+          passkeys={passkeyCards}
+          phase={passkeyPhase}
+          error={agoraSession.passkeysError}
+          addHint={passkeyAddHint}
+          {adding}
+          {onAdd}
+          onRename={(id, label) => agoraSession.renamePasskey(id, label)}
+          onRevoke={(id) => agoraSession.revokePasskey(id)}
+          pairingCode={agoraSession.pairingCode}
+          pairingError={agoraSession.pairingError}
+          {minting}
+          {onMint}
+          onClear={() => (agoraSession.pairingCode = null)}
+        />
       {/if}
     {:else}
       <section class="space-y-3">

@@ -16,14 +16,20 @@
 // app, not a library).
 
 import {
+  addPasskey,
   AgoraApiError,
   AgoraClient,
+  type AddPasskeyResult,
   type CeremonyResult,
   loginWithPasskey,
   type MeResponse,
+  type PairResult,
+  type PasskeySummary,
+  pairDevice,
   registerWithPasskey,
   type TagmaView,
 } from "@kallipai/kallip-agora-client";
+import type { PairingCodeView } from "../passkeys.svelte.ts";
 import { LescheClient } from "@kallipai/kallip-lesche-client";
 import type {
   EnrollmentCodeCardProps,
@@ -103,6 +109,24 @@ class AgoraSessionStore {
 
   minting = $state(false);
   copiedCodeId: string | null = $state(null);
+
+  // The signed-in user's live passkeys (revoked history is not listed). Mirrors
+  // the tagmata error discipline: a list fetch failure lands in `passkeysError`
+  // and never blanks `user`; rename/revoke THROW so a single failure does not
+  // blank the whole section.
+  passkeys: PasskeySummary[] = $state([]);
+  passkeysError: string | null = $state(null);
+  passkeysLoaded = $state(false);
+  // Result of the last add-device ceremony, for the settings page to render
+  // inline (success / reauth-required / duplicate / cancelled).
+  lastAddPasskey: AddPasskeyResult | null = $state(null);
+
+  // A freshly minted device-pairing code, shown once (typeable + QR) with a
+  // countdown, for a new device to redeem. Step-up-gated like addPasskey.
+  pairingCode: PairingCodeView | null = $state(null);
+  pairingError: string | null = $state(null);
+  // Result of the last pair-a-new-device ceremony run from an anonymous device.
+  lastPair: PairResult | null = $state(null);
 
   // The plaintext of just-minted pending tagmas, shown once on the new card
   // (transient -- dropped on the next refresh, when the agora's masked value
@@ -270,6 +294,114 @@ class AgoraSessionStore {
     this.mintedCode = next;
   }
 
+  // -- passkeys (self-service device management) ---------------------------
+
+  /** Fetch the signed-in user's live passkeys. */
+  async refreshPasskeys(): Promise<void> {
+    this.passkeysError = null;
+    try {
+      this.passkeys = await client().listPasskeys();
+      this.passkeysLoaded = true;
+    } catch (e) {
+      // Leave the stale list + loaded flag so a refresh failure does not blank it.
+      this.passkeysError = messageOf(e);
+    }
+  }
+
+  /**
+   * Bind another passkey to the signed-in account (a second-device ceremony).
+   * The driver handles the one-shot step-up (re-login) internally; the typed
+   * result is stashed in `lastAddPasskey` for the page. On success the new
+   * passkey is prepended to the local list.
+   */
+  async addPasskey(label: string): Promise<AddPasskeyResult> {
+    const email = this.user?.email;
+    if (!email) {
+      const result: AddPasskeyResult = {
+        ok: false,
+        reason: "unknown",
+        message: "no signed-in user",
+      };
+      this.lastAddPasskey = result;
+      return result;
+    }
+    const result = await addPasskey(client(), { email, label });
+    this.lastAddPasskey = result;
+    if (result.ok) {
+      this.passkeys = [result.passkey, ...this.passkeys];
+      this.passkeysError = null;
+    }
+    return result;
+  }
+
+  /** Rename a passkey; mirrors `renameTagma` (locally patches, THROWS on error). */
+  async renamePasskey(id: string, label: string): Promise<void> {
+    const updated = await client().renamePasskey(id, label);
+    this.passkeys = this.passkeys.map((p) => (p.id === id ? updated : p));
+  }
+
+  /** Revoke a passkey (hard-delete + audit); mirrors `revokeTagma` (locally
+   *  removes, THROWS on error). The agora refuses the last live passkey (409). */
+  async revokePasskey(id: string): Promise<void> {
+    await client().revokePasskey(id);
+    this.passkeys = this.passkeys.filter((p) => p.id !== id);
+  }
+
+  // -- device pairing (cross-device enrollment) ----------------------------
+
+  /**
+   * Mint a short-lived pairing code on THIS signed-in device, to be
+   * redeemed by a new device. Step-up-gated like addPasskey: a 403
+   * `reauth-required` triggers a re-login then a single retry. The plaintext
+   * code is stashed in `pairingCode` (shown once); only its hash is retained
+   * server-side. Returns true on success (the page clears its mint button).
+   */
+  async mintPairingCode(): Promise<boolean> {
+    const email = this.user?.email;
+    if (!email) {
+      this.pairingError = "no signed-in user";
+      return false;
+    }
+    this.pairingError = null;
+    // One step-up retry on reauth-required (mirrors addPasskey).
+    let resp;
+    try {
+      resp = await client().mintPairingCode();
+    } catch (e) {
+      if (!(e instanceof AgoraApiError) || e.status !== 403) {
+        this.pairingError = messageOf(e);
+        return false;
+      }
+      const login = await loginWithPasskey(client(), email);
+      if (!login.ok) {
+        this.pairingError =
+          login.reason === "cancelled" ? "Cancelled." : messageOf(e);
+        return false;
+      }
+      try {
+        resp = await client().mintPairingCode();
+      } catch (e2) {
+        this.pairingError = messageOf(e2);
+        return false;
+      }
+    }
+    this.pairingCode = { code: resp.code, expiresAt: resp.expires_at };
+    return true;
+  }
+
+  /**
+   * Pair THIS (anonymous) device onto an existing account using a code minted
+   * by an already-signed-in device. Runs the ceremony and resolves the profile
+   * on success (this device is then signed in). The result is stashed in
+   * `lastPair` for the page to render.
+   */
+  async pairDevice(code: string, label: string): Promise<PairResult> {
+    const result = await pairDevice(client(), { code, label });
+    this.lastPair = result;
+    if (result.ok) await this.whoami();
+    return result;
+  }
+
   /** Copy a just-minted secret to the clipboard and flash the card's "Copied". */
   async copySecret(id: string, secret: string): Promise<void> {
     try {
@@ -294,6 +426,13 @@ class AgoraSessionStore {
     this.lastCeremony = null;
     this.copiedCodeId = null;
     this.minting = false;
+    this.passkeys = [];
+    this.passkeysError = null;
+    this.passkeysLoaded = false;
+    this.lastAddPasskey = null;
+    this.pairingCode = null;
+    this.pairingError = null;
+    this.lastPair = null;
   }
 }
 

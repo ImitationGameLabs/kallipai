@@ -9,13 +9,19 @@
 
 import { AgoraApiError } from "./types.ts";
 import type {
+  AddPasskeyFinishRequest,
   AuthFinishResponse,
   LoginBeginResponse,
   LoginFinishRequest,
   MeResponse,
+  MintPairingCodeResponse,
   MintTagmaResponse,
+  PairBeginRequest,
+  PairFinishRequest,
+  PasskeySummary,
   RegisterBeginResponse,
   RegisterFinishRequest,
+  RenamePasskeyRequest,
   RenameTagmaRequest,
   TagmaInfo,
   TagmaView,
@@ -112,6 +118,69 @@ export class AgoraClient extends BaseClient {
 
   me(): Promise<MeResponse> {
     return this.json("/v1/me", "GET");
+  }
+
+  // -- passkeys (self-service management of the caller's own devices) -------
+
+  /** `GET /v1/me/passkeys` — the caller's live passkeys (oldest first). */
+  listPasskeys(): Promise<PasskeySummary[]> {
+    return this.json("/v1/me/passkeys", "GET");
+  }
+
+  /** `POST /v1/me/passkeys/register/begin` — start binding ANOTHER passkey to
+   * the signed-in account. Gated by a one-shot step-up; returns 403
+   * `reauth-required` if the session's freshness is stale/consumed (run
+   * `loginWithPasskey` then retry). */
+  addPasskeyBegin(): Promise<RegisterBeginResponse> {
+    return this.json("/v1/me/passkeys/register/begin", "POST", {});
+  }
+
+  /** `POST /v1/me/passkeys/register/finish` — verify + bind the new passkey. */
+  addPasskeyFinish(body: AddPasskeyFinishRequest): Promise<PasskeySummary> {
+    return this.json("/v1/me/passkeys/register/finish", "POST", body);
+  }
+
+  /** `PATCH /v1/me/passkeys/{id}` — rename (the device label). */
+  renamePasskey(id: string, label: string): Promise<PasskeySummary> {
+    const body: RenamePasskeyRequest = { label };
+    return this.json(
+      `/v1/me/passkeys/${encodeURIComponent(id)}`,
+      "PATCH",
+      body,
+    );
+  }
+
+  /** `DELETE /v1/me/passkeys/{id}` — revoke (hard-delete + audit row). The last
+   * live passkey cannot be revoked (409). Returns on 204. */
+  revokePasskey(id: string): Promise<void> {
+    return this.json(
+      `/v1/me/passkeys/${encodeURIComponent(id)}`,
+      "DELETE",
+      undefined,
+    );
+  }
+
+  // -- device pairing (cross-device enrollment via a short-lived code) --------
+
+  /** `POST /v1/me/device-pairing` (session-authed + step-up) — mint a
+   * short-lived pairing code shown on this device for a new device to redeem.
+   * Returns 403 `reauth-required` if the session's step-up is stale (run
+   * `loginWithPasskey` then retry). */
+  mintPairingCode(): Promise<MintPairingCodeResponse> {
+    return this.json("/v1/me/device-pairing", "POST", {});
+  }
+
+  /** `POST /v1/auth/device-pairing/begin` (unauthenticated, rate-limited) —
+   * start enrolling a LOCAL passkey on this new device onto an existing account
+   * referenced by the code. */
+  pairBegin(body: PairBeginRequest): Promise<RegisterBeginResponse> {
+    return this.json("/v1/auth/device-pairing/begin", "POST", body);
+  }
+
+  /** `POST /v1/auth/device-pairing/finish` (unauthenticated) — verify + bind
+   * the new passkey; mints a session for this device. */
+  pairFinish(body: PairFinishRequest): Promise<AuthFinishResponse> {
+    return this.json("/v1/auth/device-pairing/finish", "POST", body);
   }
 
   // -- tagmata (unified pending + enrolled lifecycle) -----------------------

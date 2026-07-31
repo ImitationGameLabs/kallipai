@@ -66,6 +66,7 @@ export { default as TagmataPage } from "./pages/TagmataPage.svelte";
 export { default as SettingsPage } from "./pages/SettingsPage.svelte";
 export { default as LoginPage } from "./pages/LoginPage.svelte";
 export { default as RegisterPage } from "./pages/RegisterPage.svelte";
+export { default as PairPage } from "./pages/PairPage.svelte";
 export { default as ConnectPage } from "./pages/ConnectPage.svelte";
 
 // App chrome
