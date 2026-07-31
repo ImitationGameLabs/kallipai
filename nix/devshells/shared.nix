@@ -39,6 +39,11 @@ in
     # prettier from node_modules via `deno task fmt`.
     rumdl
 
+    # Local CA + leaf cert generation for the Caddy-fronted dev topology (see
+    # the mkcert step in docs/development.md); used by arion-compose.nix +
+    # compose/dev/Caddyfile.dev.
+    mkcert
+
     # Temporary workaround for copilot-cli direnv integration bug
     # See: https://github.com/github/copilot-cli/issues/731
     # TODO: Remove once the upstream issue is resolved

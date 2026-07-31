@@ -18,8 +18,14 @@
   // $app/* or import.meta.env from inside the library package). Idempotent
   // setters; the root layout has a single instance so this runs once at boot.
   initShell(goto);
-  initAgora(import.meta.env.VITE_AGORA_URL ?? "http://localhost:7100");
-  initLesche(import.meta.env.VITE_LESCHE_URL ?? "http://localhost:7200");
+  // The dev stack is fronted by Caddy, so the browser reaches the agora/lesche
+  // at their *.<devDomain> subdomains. devDomain is injected by vite.config.ts
+  // from the same KALLIP_DEV_DOMAIN env var the backend stack uses; explicit
+  // VITE_AGORA_URL / VITE_LESCHE_URL still win (e.g. for a prod build or a
+  // non-default topology).
+  const devDomain = import.meta.env.KALLIP_DEV_DOMAIN ?? "kallipai.com";
+  initAgora(import.meta.env.VITE_AGORA_URL ?? `https://agora.${devDomain}`);
+  initLesche(import.meta.env.VITE_LESCHE_URL ?? `https://lesche.${devDomain}`);
   initConfigStorage(localStorageConfigStorage);
 
   const icons: NavIcons = {

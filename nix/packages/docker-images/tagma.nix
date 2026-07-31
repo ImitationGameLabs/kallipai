@@ -8,7 +8,7 @@ let
   shared = import ../container-shared.nix { inherit pkgs; };
   inherit (shared)
     toolEnv
-    certLinks
+    cacert
     aifed
     binPath
     skillsSeed
@@ -33,10 +33,9 @@ pkgs.dockerTools.buildImage {
   copyToRoot = [
     tagma
     toolEnv
-    pkgs.cacert
-    certLinks
     aifed
-  ];
+  ]
+  ++ cacert;
   config = {
     Env = [
       "PATH=${tagma}/bin:${binPath}"

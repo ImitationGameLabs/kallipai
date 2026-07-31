@@ -120,7 +120,7 @@
             # nix/packages/docker-images/.
             // (lib.optionalAttrs pkgs.stdenv.isLinux {
               # Purpose-built prod images for the split deploy
-              # (nix/prod-composes/agora.nix / tagma.nix): agora + lesche are the
+              # (compose/prod/agora.nix / tagma.nix): agora + lesche are the
               # two server-side services (co-located, independent images); tagma
               # carries no tagma-specific baked env.
               kallip-agora-image = import ./nix/packages/docker-images/agora.nix {
@@ -145,8 +145,8 @@
                 inherit (builds) tagma;
               };
               # Pre-built integration-test binaries + the agent binaries, for
-              # running the suite in a container (see arion-compose.nix test
-              # mode). Linux-only like the image.
+              # running the suite in a container (see compose/dev/test.nix).
+              # Linux-only like the image.
               kallip-integration-tests = import ./nix/packages/integration-tests.nix {
                 inherit
                   pkgs

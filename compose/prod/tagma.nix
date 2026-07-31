@@ -3,11 +3,10 @@
 # packages.kallip-tagma-image.
 #
 # Invoke from the repo root (so .env resolves):
-#   arion -f nix/prod-composes/tagma.nix up -d
+#   arion -f compose/prod/tagma.nix up -d
 #
-# This is a single-mode file, so unlike arion-compose.nix there is no
-# KALLIP_ARION_MODE switch and no mkIf/mkMerge: every service is declared
-# directly. The .env at the repo root supplies KALLIP_AUTH_TOKEN (the tagma
+# This is a single-purpose file: every service is declared directly, no mode
+# switch or mkIf/mkMerge. The .env at the repo root supplies KALLIP_AUTH_TOKEN (the tagma
 # operator token), KALLIP_TAGMA_RELAY_ENROLLMENT_CODE (first boot only),
 # KALLIP_TAGMA_RELAY_AGORA_URL (the prod-agora deploy's public HTTPS URL;
 # ENROLLMENT ONLY -- the stored tagma token is reused thereafter), and

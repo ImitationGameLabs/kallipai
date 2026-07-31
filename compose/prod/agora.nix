@@ -4,10 +4,10 @@
 # uses the official postgres:17 image for production parity and isolation.
 #
 # Invoke from the repo root (so .env resolves):
-#   arion -f nix/prod-composes/agora.nix up -d
+#   arion -f compose/prod/agora.nix up -d
 #
-# This is a single-mode file, so unlike arion-compose.nix there is no
-# KALLIP_ARION_MODE switch and no mkIf/mkMerge. ALL deploy env (DB url incl.
+# This is a single-purpose file: every service is declared directly, no mode
+# switch or mkIf/mkMerge. ALL deploy env (DB url incl.
 # password, WebAuthn RP, CORS, cookie domain, admin token, the agora/lesche
 # internal shared secret, POSTGRES_PASSWORD) comes from the repo-root .env.
 # Neither the agora nor the lesche is published -- both sit behind the

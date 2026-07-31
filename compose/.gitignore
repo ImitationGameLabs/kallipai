@@ -1,0 +1,3 @@
+# Local dev TLS certs (mkcert output) — machine-local, never commit.
+# The leaf key sits here; keep it out of git.
+dev/.certs/

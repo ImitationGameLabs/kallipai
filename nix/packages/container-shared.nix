@@ -51,6 +51,20 @@ let
   # The full container PATH, built once so prod and dev cannot drift.
   binPath = "${toolEnv}/bin:${aifed}/bin";
 
+  # The CA trust base: pkgs.cacert plus its standard-path symlinks (certLinks
+  # above), so rustls-platform-verifier -- which reads only the Debian/RHEL
+  # standard paths, ignoring SSL_CERT_FILE and cacert's own $out path -- finds
+  # the bundle. A thin wrapper around pkgs.cacert, named after it. Consumed by
+  # every service that builds a reqwest/rustls client at startup: lesche (->
+  # agora /internal) and the tagma (relay connector). agora is plain HTTP + DB
+  # and needs none. Consumers compose it directly into image.contents /
+  # copyToRoot rather than via an aggregator, e.g.
+  #   copyToRoot = [ tagma toolEnv aifed ] ++ cacert;
+  cacert = [
+    pkgs.cacert
+    certLinks
+  ];
+
   # Curated shared-skill tree (read-only bundled defaults). The tagma copies
   # this into the mutable <data_dir>/skills/ on first boot via the
   # KALLIP_SKILLS_SEED env var below. Same file the flake exposes as
@@ -64,7 +78,7 @@ in
 {
   inherit
     toolEnv
-    certLinks
+    cacert
     aifed
     binPath
     skillsSeed

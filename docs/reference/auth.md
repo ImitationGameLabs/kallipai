@@ -104,7 +104,7 @@ replay guard through a narrow `ControlPlane` trait, reached over the agora's
 non-public `/internal/*` HTTP API.
 
 The two services are addressed on their own subdomains (`agora.<d>` /
-`lesche.<d>` — e.g. `agora.localhost` / `lesche.localhost` in dev,
+`lesche.<d>` — e.g. `agora.kallipai.lan` / `lesche.kallipai.lan` in dev,
 `agora.kallipai.com` / `lesche.kallipai.com` in prod). The web app and the tagma
 talk to each by its own subdomain. The session cookie carries a configurable
 `Domain` attribute (`KALLIP_AGORA_SESSION_COOKIE_DOMAIN`, the parent domain) so

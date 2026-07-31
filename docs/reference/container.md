@@ -17,26 +17,26 @@ purpose-built images for the split production deploy:
   the compose `tagma` service sets its own command + env.
 
 The recommended way to run them is [Arion](https://docs.hercules-ci.com/arion/)
-(a Nix-native docker-compose). Local dev and the integration-test suite live in
-`arion-compose.nix` at the repo root; dev is the default (just `arion up`), and
-the integration suite is the single opt-in via `KALLIP_ARION_MODE=test`. Any
-other value — including a stale `prod-tagma` / `prod-agora` — is a **hard
-error** that points at the standalone prod files, not a silent fallback:
+(a Nix-native docker-compose). Each composition is a flat, single-purpose file
+under `compose/` (dev: `compose/dev/`, prod: `compose/prod/`); the repo-root
+`arion-compose.nix` is just a one-line shim that re-exports
+`compose/dev/agora.nix`, so arion's auto-discovery still makes a plain
+`arion up` bring up the dev agora side. The others are invoked with `arion -f`:
 
-| Mode             | Command                              | Services                  | Image source                                    |
-| ---------------- | ------------------------------------ | ------------------------- | ----------------------------------------------- |
-| **dev**          | `arion up -d` (default)              | agora + postgres          | `packages.default`, run via `useHostStore`      |
-| **dev** +`tagma` | `COMPOSE_PROFILES=tagma arion up -d` | agora + postgres + tagma  | `packages.default`, run via `useHostStore`      |
-| **test**         | `KALLIP_ARION_MODE=test arion up`    | tagma (integration suite) | `packages.kallip-integration-tests`, host store |
+| Composition   | Command                                      | Services                          | Image source                                    |
+| ------------- | -------------------------------------------- | --------------------------------- | ----------------------------------------------- |
+| **dev**       | `arion up -d` (default)                      | caddy + agora + lesche + postgres | `packages.default`, run via `useHostStore`      |
+| **dev** tagma | `arion -f compose/dev/tagma.nix up -d`       | tagma                             | `packages.default`, run via `useHostStore`      |
+| **test**      | `arion -f compose/dev/test.nix up`           | tagma (integration suite)         | `packages.kallip-integration-tests`, host store |
 
 Production is split into two **standalone compositions** under
-`nix/prod-composes/`, each a flat single-mode file invoked with `arion -f`
+`compose/prod/`, each a flat single-mode file invoked with `arion -f`
 (run from the repo root so `.env` resolves):
 
 | Composition | Command                                      | Services         | Image source                                    |
 | ----------- | -------------------------------------------- | ---------------- | ----------------------------------------------- |
-| **tagma**   | `arion -f nix/prod-composes/tagma.nix up -d` | tagma            | `packages.kallip-tagma-image` (pre-built)       |
-| **agora**   | `arion -f nix/prod-composes/agora.nix up -d` | agora + postgres | `packages.kallip-agora-image` + `postgres:17.5` |
+| **tagma**   | `arion -f compose/prod/tagma.nix up -d` | tagma            | `packages.kallip-tagma-image` (pre-built)       |
+| **agora**   | `arion -f compose/prod/agora.nix up -d` | agora + lesche + postgres | `packages.kallip-agora-image` + `packages.kallip-lesche-image` + `postgres:17.5` |
 
 The two prod halves run on **separate hosts** (the tagma host and the agora
 server) and carry distinct compose project names (`kallipai-tagma` /
@@ -71,32 +71,42 @@ host `/nix/store` read-only into the tagma/agora containers, so they run
 straight out of the crane workspace (`packages.default`) and a rebuild is picked
 up without an in-compose bake; postgres uses the official `postgres:17.5` image.
 
-The tagma is gated behind the `tagma` profile, so a plain `arion up` brings up
-only the agora + lesche side. The tagma's relay connector enrolls on first boot
-and needs a code that cannot exist until a user signs up — with
-`KALLIP_TAGMA_RELAY_AGORA_URL` set but no code it degrades to local-only (logs an
+The dev tagma lives in a separate composition (`compose/dev/tagma.nix`), so a
+plain `arion up` brings up only the agora side; bring the tagma up with
+`arion -f compose/dev/tagma.nix up -d`. It runs on the host network and reaches
+agora/lesche at `127.0.0.1:7100` / `:7200`. Its relay connector enrolls on first
+boot and needs a code that cannot exist until a user signs up — with
+`KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` unset it degrades to local-only (logs an
 error, keeps serving local agents; see [Relay bootstrap](#relay-bootstrap)).
 
-Dev uses a **per-service subdomain** topology with no edge proxy. Browsers
-resolve `*.localhost` to `127.0.0.1` natively, so the web app (`deno task dev`
-on the host at `:5173`) reaches the agora at `http://agora.localhost:7100` and
-the lesche at `http://lesche.localhost:7200` directly (each service publishes
-its own port). The session cookie carries `Domain=localhost`
+Dev is fronted by a **Caddy edge proxy** (`services.caddy`) that terminates TLS
+for `*.<devDomain>` with an mkcert certificate. This mirrors the prod
+edge-proxy model and makes the dev stack reachable cross-machine on the LAN —
+browsers only allow WebAuthn in a secure context, so the previous plain-HTTP
+`*.localhost` topology was host-only. The dev domain is `kallipai.lan`: the
+code default for `KALLIP_DEV_DOMAIN` is the prod domain (`kallipai.com`), which
+`.env.example` overrides to `kallipai.lan` for local dev (copied into `.env`,
+loaded into the shell by direnv's `dotenv`) so dev never clashes with
+production. Caddy runs on the host network and proxies the three subdomains to
+`127.0.0.1`: `web.kallipai.lan` -> the host vite dev server (`:5173`);
+`agora.kallipai.lan` / `lesche.kallipai.lan` -> the host-published `:7100` /
+`:7200`. The session cookie carries `Domain=kallipai.lan`
 (`KALLIP_AGORA_SESSION_COOKIE_DOMAIN`), so the cookie set at login on the agora
 is sent to the lesche too — both subdomains share the registrable domain
-`localhost` (same-site under `SameSite=Strict`), and CORS on each service
-allows the `http://localhost:5173` origin with credentials. Dev is validated on
-Chrome/Firefox (Safari has historical `*.localhost`/`Domain=localhost` quirks).
-The tagma container reaches the two services via compose DNS
-(`http://agora:7100`, `http://lesche:7200`), not `*.localhost`.
+`kallipai.lan` (same-site under `SameSite=Strict`) — and CORS on each service
+allows the `https://web.kallipai.lan` origin with credentials. One-time host
+setup (mkcert cert + LAN DNS) and client CA trust are covered in
+[development.md](../development.md). The tagma container reaches the two
+services via compose DNS (`http://agora:7100`, `http://lesche:7200`), not via
+Caddy.
 
 ## Production
 
-Production is split into two standalone compositions under `nix/prod-composes/`.
+Production is split into two standalone compositions under `compose/prod/`.
 Each is a flat, single-mode file; invoke it from the **repo root** (so `.env`
 resolves):
 
-### tagma — `arion -f nix/prod-composes/tagma.nix up -d`
+### tagma — `arion -f compose/prod/tagma.nix up -d`
 
 Brings up the tagma (agent host + in-process relay connector) from
 `packages.kallip-tagma-image`. The relay connector talks to the prod-deployed
@@ -118,14 +128,14 @@ topology).
 > never via the public edge.
 
 ```sh
-arion -f nix/prod-composes/tagma.nix up -d
-arion -f nix/prod-composes/tagma.nix logs -f
+arion -f compose/prod/tagma.nix up -d
+arion -f compose/prod/tagma.nix logs -f
 ```
 
 Secure the tagma's published `3000` port (the operator API) — do not expose it
 on a public host without a firewall / TLS reverse proxy in front.
 
-### agora — `arion -f nix/prod-composes/agora.nix up -d`
+### agora — `arion -f compose/prod/agora.nix up -d`
 
 Brings up the agora (from `packages.kallip-agora-image`) + lesche (from
 `packages.kallip-lesche-image`) + postgres (official `postgres:17.5` image) —
@@ -138,8 +148,8 @@ url, WebAuthn RP, CORS, cookie domain, admin token, the internal shared secret)
 and the postgres credentials come from `.env`.
 
 ```sh
-arion -f nix/prod-composes/agora.nix up -d
-arion -f nix/prod-composes/agora.nix logs -f
+arion -f compose/prod/agora.nix up -d
+arion -f compose/prod/agora.nix logs -f
 ```
 
 ## Relay bootstrap
@@ -157,7 +167,7 @@ lesche message route returns 503). The tagma service is
 back once the code is supplied / the agora is reachable (check
 `arion logs tagma`).
 
-## Integration tests: `KALLIP_ARION_MODE=test arion up`
+## Integration tests: `arion -f compose/dev/test.nix up`
 
 Test mode runs the workspace's integration tests (`[[test]]` targets) **inside
 the container** to confirm the sandbox and shell backends behave correctly in
@@ -177,7 +187,7 @@ external network are needed. The sandbox scenarios' scratch dirs live on a
 assertions stay honest).
 
 ```sh
-KALLIP_ARION_MODE=test arion up
+arion -f compose/dev/test.nix up
 arion ps -a          # exit code is the verdict (0 = all tests passed)
 arion logs tagma
 ```
@@ -201,9 +211,9 @@ shells. Its shell backend sets up an isolated mount namespace (user namespace +
 bind/tmpfs mounts) before applying Landlock and seccomp filters, **fail-closed**:
 if any step is blocked, the spawned shell aborts.
 
-`arion-compose.nix` (and `nix/prod-composes/tagma.nix`) already grant what this
-needs — on the `tagma` service only, in every composition that runs the tagma
-(dev / test / the prod-tagma composition):
+The three compositions that run the tagma — `compose/dev/tagma.nix`,
+`compose/dev/test.nix`, and `compose/prod/tagma.nix` — grant what this needs,
+on the `tagma` service only:
 
 - `service.capabilities.SYS_ADMIN = true` (→ `cap_add: [SYS_ADMIN]`)
 - `out.service.security_opt = [ "seccomp=unconfined" ]`
@@ -217,8 +227,8 @@ In dev and the prod-tagma composition, tagma data and the agent workspace are
 stays clean. Shared skills live inside the `data` volume's `skills/` subdir, and
 the tagma credentials (device key + tagma token) live under
 `/var/lib/kallip/credentials/` inside the `data` volume. The agora + postgres
-services add their own volumes in the compositions that run them. Test mode
-mounts none (its scratch tree is an ephemeral `/testdata` tmpfs).
+services add their own volumes in the compositions that run them. The test
+composition mounts none (its scratch tree is an ephemeral `/testdata` tmpfs).
 
 - `data` named volume → `/var/lib/kallip` — agent state, logs, skills, and the tagma credentials (persistent; survives `arion down`, removed by `arion down -v`).
 - `workspace` named volume → `/workspace` — the agent workspace root.
@@ -276,8 +286,9 @@ Relay connector (dev / the prod-tagma composition) — activate + enroll via `.e
 | `KALLIP_TAGMA_RELAY_LESCHE_URL`      | no                   | The prod-lesche deploy's public HTTPS URL (tunnel + envelopes + KEX). Defaults to the `KALLIP_TAGMA_RELAY_AGORA_URL` origin; set it for the subdomain split. |
 | `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` | first boot only      | A `sk-enroll-...` minted via the agora dashboard. Remove after the first successful enroll.                                                                  |
 
-Agora + postgres (the prod-agora composition) — `.env` only (dev hardcodes
-localhost values):
+Agora + postgres (the prod-agora composition) — `.env` only (dev derives these
+from `KALLIP_DEV_DOMAIN`, set to `kallipai.lan` in `.env` via `.env.example`;
+the code default is the prod `kallipai.com`):
 
 | Variable                          | Required                      | Notes                                                                                                                                  |
 | --------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -288,8 +299,8 @@ localhost values):
 | `KALLIP_AGORA_WEBAUTHN_RP_ID`     | **yes** (prod-agora)          | The registrable domain passkeys bind to; cannot change without invalidating every passkey.                                             |
 | `KALLIP_AGORA_WEBAUTHN_RP_ORIGIN` | **yes** (prod-agora)          | The exact origin the web app is served from (`https://app.example.com`).                                                               |
 | `KALLIP_AGORA_CORS_ORIGINS`       | **yes** (prod-agora)          | The app origin(s); never a wildcard on a public deploy.                                                                                |
-| `KALLIP_AGORA_COOKIE_SECURE`      | no (defaults true)            | Keep `true` behind TLS; `false` only for local HTTP dev (dev hardcodes `false`).                                                       |
-| `KALLIP_AGORA_TRUSTED_PROXIES`    | **yes** behind a remote proxy | Loopback-only by default and **cleared on a public bind**; set to the proxy's CIDR so X-Forwarded-For / per-client rate limiting work. |
+| `KALLIP_AGORA_COOKIE_SECURE`      | no (defaults true)            | Keep `true` behind TLS; `false` only for plain-HTTP dev. Dev is now behind Caddy's TLS and hardcodes `true`.                            |
+| `KALLIP_AGORA_TRUSTED_PROXIES`    | **yes** behind a remote proxy | Loopback-only by default and **cleared on a public bind**; set to the proxy's CIDR so X-Forwarded-For / per-client rate limiting work. Dev trusts loopback (`127.0.0.0/8, ::1/128`) because Caddy proxies over the host network. |
 | `KALLIP_AGORA_ADMIN_TOKEN`        | no                            | Stable admin token; else generated per boot and printed to `arion logs agora`.                                                         |
 
 Do not override `KALLIP_ADVERTISE_URL`; its default `http://127.0.0.1:3000` is
