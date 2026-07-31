@@ -1,5 +1,9 @@
 //! `passkeys` entity — a registered WebAuthn credential bound to a user.
 //!
+//! This table holds ONLY live (active) credentials. Revoked or clone-detected
+//! credentials are hard-deleted and recorded in `passkey_revocations` (an
+//! append-only audit table), so every query here is filter-free.
+//!
 //! The high-level wrapper `Passkey` is stored in the `credential` JSONB column
 //! (the `webauthn-rs` documented storage model), with `cred_id` mirrored as a
 //! `UNIQUE` column so the login ceremony can resolve
@@ -25,13 +29,18 @@ pub struct Model {
     /// The full `webauthn_rs::prelude::Passkey`, serialised to JSON. Carries the
     /// COSE public key, signature counter, backup flags, transports.
     pub credential: Json,
+    /// User-supplied device label ("iPhone", "MacBook") so a user can tell
+    /// their passkeys apart. May be empty for legacy rows; the UI renders a
+    /// fallback. NOT NULL with no DB default — every insert supplies a value.
+    #[sea_orm(column_type = "Text")]
+    pub label: String,
     #[sea_orm(column_type = "TimestampWithTimeZone")]
     pub created_at: OffsetDateTime,
-    /// Set when `webauthn-rs` reports a signature-counter regression (possible
-    /// clone). A compromised passkey is filtered out of `login_begin` and
-    /// cannot authenticate; the user must re-register. `None` = live.
-    #[sea_orm(column_type = "TimestampWithTimeZone", nullable)]
-    pub compromised_at: Option<OffsetDateTime>,
+    /// When this passkey was last used. Seeded to the enrollment instant (a
+    /// registration/pair ceremony is itself a user-verification event) and
+    /// stamped on every `login_finish`.
+    #[sea_orm(column_type = "TimestampWithTimeZone")]
+    pub last_used_at: OffsetDateTime,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -92,6 +92,22 @@ pub(crate) async fn gc_expired_challenges(db: &Db) {
     }
 }
 
+/// Delete expired pairing codes. Covers both unconsumed codes whose TTL elapsed
+/// and consumed rows that linger past their `expires_at` — `consumed_at` carries
+/// no audit value (it is purely the single-use consume mutex), so a consumed row
+/// is worthless once expired. Best-effort, like `gc_expired_challenges`; driven
+/// by the same 60s background sweep in `main.rs`.
+pub(crate) async fn gc_expired_pairing_codes(db: &Db) {
+    let now = time::OffsetDateTime::now_utc();
+    if let Err(e) = entity::device_pairing_codes::Entity::delete_many()
+        .filter(entity::device_pairing_codes::Column::ExpiresAt.lt(now))
+        .exec(db)
+        .await
+    {
+        warn!(error = %e, "expired-pairing-code GC failed (non-fatal)");
+    }
+}
+
 /// Connect to Postgres (retrying with a capped backoff, since the agora may boot
 /// before its DB in a composed deploy) and apply all pending migrations.
 pub async fn connect_and_migrate(url: &str) -> Result<Db> {

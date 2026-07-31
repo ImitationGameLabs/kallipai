@@ -143,6 +143,7 @@ async fn seed_session(state: &crate::state::SharedState) -> String {
         user_id: Set(user_id.to_string()),
         created_at: Set(now),
         expires_at: Set(now + time::Duration::hours(1)),
+        authed_at: Set(None),
     }
     .insert(&state.db)
     .await
@@ -299,7 +300,7 @@ async fn gc_sweep_deletes_expired_only() {
             id: Set(uuid::Uuid::new_v4()),
             kind: Set("login".to_string()),
             state: Set(serde_json::Value::Null),
-            invite_code_hash: Set(None),
+            held_code_hash: Set(None),
             user_id: Set(None),
             email: Set(None),
             username: Set(None),

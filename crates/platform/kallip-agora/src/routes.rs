@@ -8,7 +8,9 @@
 
 mod admin;
 mod auth;
+mod device_pairing;
 mod internal;
+mod passkeys;
 mod tagmata;
 
 use axum::Router;
@@ -36,7 +38,15 @@ pub fn router(state: SharedState, internal_token_hash: Option<TokenHash>) -> Rou
     // cannot lock each other out.
     let rate_limit =
         axum::middleware::from_fn_with_state(state.clone(), crate::middleware::auth_rate_limit);
+    // The device-pairing begin is the brute-force target on a short code, so it
+    // gets BOTH the per-IP limiter and a single shared global bucket (the real
+    // distributed bound — per-IP is bypassable by source-IP diversity).
+    let pair_rate_limit =
+        axum::middleware::from_fn_with_state(state.clone(), crate::middleware::pair_rate_limit);
     let ceremony_begin = auth::begin_router().layer(rate_limit.clone());
+    let pair_begin = device_pairing::begin_router()
+        .layer(rate_limit.clone())
+        .layer(pair_rate_limit);
     let enroll = tagmata::enroll_router().layer(rate_limit);
 
     // The control-plane v1 carries `SharedState`; resolve it to a stateless
@@ -45,8 +55,11 @@ pub fn router(state: SharedState, internal_token_hash: Option<TokenHash>) -> Rou
     // plane requests. The data plane (lesche) runs its own CSRF guard.
     let v1 = Router::new()
         .merge(ceremony_begin)
+        .merge(pair_begin)
         .merge(auth::finish_router())
+        .merge(device_pairing::finish_router())
         .merge(auth::session_router())
+        .merge(device_pairing::session_router())
         .nest("/admin", admin::router())
         .merge(enroll)
         .merge(tagmata::protected_router())

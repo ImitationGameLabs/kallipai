@@ -93,7 +93,7 @@ enum PasskeysCmd {
         /// User id (UUID) whose passkeys to list.
         user_id: String,
     },
-    /// Revoke (mark compromised) a passkey by id; the user must re-register.
+    /// Revoke a passkey by id (hard-delete + audit row).
     Revoke {
         /// Passkey id (NOT the user id), as shown by `passkeys list`.
         id: String,
@@ -372,14 +372,16 @@ fn print_invite_codes(items: &[InviteCodeSummary]) {
 fn print_passkeys(items: &[PasskeySummary]) {
     let mut table = Table::new();
     table.set_content_arrangement(ContentArrangement::Dynamic);
-    table.set_header(vec!["ID", "CREATED", "STATE"]);
+    table.set_header(vec!["ID", "LABEL", "CREATED"]);
     for p in items {
-        let state = if p.compromised_at.is_some() {
-            "compromised"
+        // The list endpoint returns only live passkeys; revoked history lives
+        // in a separate audit table, so there is no per-row state here.
+        let label = if p.label.is_empty() {
+            "(unnamed)"
         } else {
-            "live"
+            p.label.as_str()
         };
-        table.add_row(vec![&p.id, &fmt_ts(p.created_at), state]);
+        table.add_row(vec![&p.id, label, &fmt_ts(p.created_at)]);
     }
     println!("{table}");
 }

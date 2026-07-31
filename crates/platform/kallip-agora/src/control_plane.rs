@@ -204,6 +204,7 @@ mod tests {
             user_id: Set(user_id.to_string()),
             created_at: Set(now),
             expires_at: Set(now + Duration::hours(1)),
+            authed_at: Set(None),
         }
         .insert(&state.db)
         .await

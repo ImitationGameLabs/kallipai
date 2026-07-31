@@ -82,6 +82,63 @@ fn tokens_refilled(elapsed: Duration, refill_per_sec: u32) -> f64 {
     elapsed.as_secs_f64() * refill_per_sec as f64
 }
 
+/// A single shared token bucket (no per-key map). Used to cap the AGGREGATE
+/// throughput of a route regardless of source-IP diversity — the defense that
+/// matters against a distributed brute-force on a short, low-entropy secret
+/// (e.g. the device-pairing code begin endpoint), where a per-IP limiter is
+/// bypassable by spinning up many source IPs. Lives in `AppState`; constructed
+/// once at boot.
+pub struct GlobalRateLimiter {
+    inner: Mutex<Bucket>,
+    capacity: u32,
+    refill_per_sec: u32,
+}
+
+impl GlobalRateLimiter {
+    /// New shared limiter: `capacity` burst, refilling at `refill_per_sec`
+    /// tokens/sec, shared across ALL callers.
+    pub fn new(capacity: u32, refill_per_sec: u32) -> Self {
+        Self {
+            inner: Mutex::new(Bucket {
+                tokens: capacity as f64,
+                last: Instant::now(),
+            }),
+            capacity,
+            refill_per_sec,
+        }
+    }
+
+    /// Consume one shared token; `true` if allowed, `false` if the bucket is
+    /// empty. Fails closed on mutex poisoning (mirrors `IpRateLimiter::check`).
+    pub fn check(&self) -> bool {
+        let mut bucket = match self.inner.lock() {
+            Ok(b) => b,
+            Err(_) => {
+                static ONCE: Once = Once::new();
+                ONCE.call_once(|| {
+                    tracing::warn!(
+                        "global rate-limiter mutex poisoned; denying all pair requests until restart"
+                    )
+                });
+                return false;
+            }
+        };
+        let now = Instant::now();
+        let elapsed = now.duration_since(bucket.last);
+        bucket.last = now;
+        bucket.tokens += tokens_refilled(elapsed, self.refill_per_sec);
+        if bucket.tokens > self.capacity as f64 {
+            bucket.tokens = self.capacity as f64;
+        }
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

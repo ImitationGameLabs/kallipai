@@ -95,3 +95,18 @@ pub async fn auth_rate_limit(
     }
     next.run(request).await
 }
+
+/// Shared (global) rate limit layered on the device-pairing begin endpoint in
+/// ADDITION to the per-IP `auth_rate_limit`. A single bucket caps aggregate
+/// throughput regardless of source-IP diversity, which is the bound that
+/// matters against distributed brute-force on the short pairing code.
+pub async fn pair_rate_limit(
+    State(state): State<SharedState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if !state.pair_rate_limiter.check() {
+        return (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded").into_response();
+    }
+    next.run(request).await
+}

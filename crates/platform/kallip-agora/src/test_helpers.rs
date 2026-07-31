@@ -108,6 +108,7 @@ pub async fn make_state_with(
     };
     let auth_rate_limiter =
         crate::ratelimit::IpRateLimiter::new(auth_rate_capacity, auth_rate_refill_per_sec);
+    let pair_rate_limiter = crate::ratelimit::GlobalRateLimiter::new(100, 100);
     std::sync::Arc::new(AppState::new(
         admin_hash,
         limits,
@@ -115,6 +116,7 @@ pub async fn make_state_with(
         std::sync::Arc::new(webauthn),
         session_cfg,
         auth_rate_limiter,
+        pair_rate_limiter,
         Vec::new(),
     ))
 }

@@ -318,7 +318,8 @@ impl AgoraClient {
         .await
     }
 
-    /// Revoke (mark compromised) a passkey by id. Idempotent.
+    /// Revoke a passkey by id (hard-delete + audit row). A second revoke of the
+    /// now-absent id returns 404.
     pub async fn admin_revoke_passkey(&self, passkey_id: &str) -> Result<()> {
         self.require_admin_token()?;
         self.ensure_empty(

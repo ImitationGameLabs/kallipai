@@ -377,9 +377,10 @@ async fn update_user(
 }
 
 // ---------------------------------------------------------------------------
-// passkeys (list per user + revoke). A compromised passkey is already filtered
-// out of `login_begin`; revoke here marks `compromised_at` so the credential can
-// no longer authenticate, forcing the user to re-register.
+// passkeys (list per user + revoke). The live `passkeys` table holds only
+// active credentials; revoke hard-deletes the row and appends to
+// `passkey_revocations` via the shared `revoke_passkey_row` helper. Admin
+// force-revokes (`allow_last = true`); a now-absent id is a 404.
 // ---------------------------------------------------------------------------
 
 async fn list_user_passkeys(
@@ -395,19 +396,10 @@ async fn list_user_passkeys(
         .await
         .map_err(map_db_err)?
         .ok_or_else(|| ApiError::not_found("unknown user"))?;
-    let rows = passkeys::Entity::find()
-        .filter(passkeys::Column::UserId.eq(user_id))
-        .order_by_asc(passkeys::Column::CreatedAt)
-        .all(&state.db)
-        .await
-        .map_err(map_db_err)?;
+    let rows = super::passkeys::list_user_passkey_rows(&state.db, &UserId::from(user_id)).await?;
     let items = rows
         .into_iter()
-        .map(|r| PasskeySummary {
-            id: r.id.to_string(),
-            created_at: r.created_at,
-            compromised_at: r.compromised_at,
-        })
+        .map(super::passkeys::row_to_summary)
         .collect();
     Ok(Json(items))
 }
@@ -418,25 +410,23 @@ async fn revoke_passkey(
     Path(id): Path<Uuid>,
 ) -> Result<axum::http::StatusCode, ApiError> {
     require_admin(&principal)?;
+    // Resolve the owner so the shared helper can lock their live set. A truly
+    // unknown id (no live row) is a 404 for the operator; a concurrently-revoked
+    // row is an idempotent 204 inside the helper.
     let row = passkeys::Entity::find_by_id(id)
         .one(&state.db)
         .await
         .map_err(map_db_err)?
         .ok_or_else(|| ApiError::not_found("unknown passkey"))?;
-    // Idempotent + race-free, mirroring revoke_invite_code: only touch rows whose
-    // compromised_at is still NULL, so the first-revoked timestamp is preserved.
-    if row.compromised_at.is_none() {
-        passkeys::Entity::update_many()
-            .filter(passkeys::Column::Id.eq(row.id))
-            .filter(passkeys::Column::CompromisedAt.is_null())
-            .col_expr(
-                passkeys::Column::CompromisedAt,
-                sea_orm::sea_query::Expr::value(OffsetDateTime::now_utc()),
-            )
-            .exec(&state.db)
-            .await
-            .map_err(map_db_err)?;
-    }
+    super::passkeys::revoke_passkey_row(
+        &state,
+        &UserId::from(row.user_id),
+        id,
+        true,
+        crate::db::entity::passkey_revocations::REASON_REVOKED,
+        crate::db::entity::passkey_revocations::REVOKED_BY_ADMIN,
+    )
+    .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -711,8 +701,9 @@ mod tests {
             user_id: Set(user_id.to_string()),
             cred_id: Set(vec![1, 2, 3]),
             credential: Set(serde_json::json!({})),
+            label: Set("Device".to_string()),
             created_at: Set(OffsetDateTime::now_utc()),
-            compromised_at: Set(None),
+            last_used_at: Set(OffsetDateTime::now_utc()),
         }
         .insert(&state.db)
         .await
@@ -859,7 +850,7 @@ mod tests {
         .0;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, pk_id.to_string());
-        assert!(items[0].compromised_at.is_none());
+        assert_eq!(items[0].label, "Device");
 
         // Unknown user -> 404.
         match list_user_passkeys(State(state), admin, Path("no-such-user".to_string())).await {
@@ -868,10 +859,11 @@ mod tests {
         }
     }
 
-    /// Revoking a passkey marks it compromised; a second revoke is idempotent
-    /// (the timestamp is preserved). Revoking an unknown passkey is 404.
+    /// Admin revoking a passkey hard-deletes it (force-revoke; the last-passkey
+    /// guard is overridden). A second revoke of the now-absent id is a 404.
+    /// Revoking an unknown passkey is 404.
     #[tokio::test]
-    async fn revoke_passkey_is_idempotent() {
+    async fn revoke_passkey_hard_deletes_and_404s_when_gone() {
         let state = make_state().await;
         let admin = AuthPrincipal(Principal::Admin);
         let user_id = seed_user(&state, "owner", "owner@example.test").await;
@@ -881,28 +873,22 @@ mod tests {
             .await
             .expect("first revoke");
         assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
-        let first = list_user_passkeys(
+        // The live list no longer contains it.
+        let items = list_user_passkeys(
             State(state.clone()),
             admin.clone(),
             Path(user_id.to_string()),
         )
         .await
         .expect("list")
-        .0[0]
-            .compromised_at
-            .expect("compromised once");
+        .0;
+        assert!(items.is_empty());
 
-        let status = revoke_passkey(State(state.clone()), admin.clone(), Path(pk_id))
-            .await
-            .expect("second revoke");
-        assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
-        let second = list_user_passkeys(State(state.clone()), admin, Path(user_id.to_string()))
-            .await
-            .expect("list")
-            .0[0]
-            .compromised_at
-            .expect("still compromised");
-        assert_eq!(first, second, "compromised_at must not be clobbered");
+        // Second revoke: the id is gone -> 404.
+        match revoke_passkey(State(state.clone()), admin, Path(pk_id)).await {
+            Err(e) => assert_eq!(e.status, 404),
+            Ok(_) => panic!("already-revoked passkey must 404 for admin"),
+        }
 
         // Unknown passkey -> 404.
         match revoke_passkey(

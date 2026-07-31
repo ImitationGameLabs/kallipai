@@ -11,6 +11,7 @@
 mod args;
 mod auth;
 mod clientip;
+mod code;
 mod control_plane;
 mod db;
 mod email;
@@ -89,6 +90,8 @@ async fn main() -> Result<()> {
     };
     let auth_rate_limiter =
         ratelimit::IpRateLimiter::new(args.auth_rate_capacity, args.auth_rate_refill_per_sec);
+    let pair_rate_limiter =
+        ratelimit::GlobalRateLimiter::new(args.pair_rate_capacity, args.pair_rate_refill_per_sec);
 
     // Parse the trusted-proxy CIDRs. The default trusts loopback (correct for
     // the default same-box reverse-proxy deploy). When the agora binds a
@@ -122,6 +125,7 @@ async fn main() -> Result<()> {
         Arc::new(webauthn),
         session_cfg,
         auth_rate_limiter,
+        pair_rate_limiter,
         trusted_proxies,
     ));
 
@@ -160,7 +164,10 @@ async fn main() -> Result<()> {
             interval.tick().await;
             loop {
                 tokio::select! {
-                    _ = interval.tick() => crate::db::gc_expired_challenges(&sweep_db).await,
+                    _ = interval.tick() => {
+                        crate::db::gc_expired_challenges(&sweep_db).await;
+                        crate::db::gc_expired_pairing_codes(&sweep_db).await;
+                    }
                     _ = shutdown.cancelled() => break,
                 }
             }

@@ -108,14 +108,23 @@ pub struct UpdateUserRequest {
 // passkeys
 // ---------------------------------------------------------------------------
 
-/// A WebAuthn credential summary. Deliberately omits the `credential` JSONB and
-/// `cred_id` bytes (both sensitive) — surfaces only identity + compromise status.
+/// A WebAuthn credential summary. Omits the `credential` JSONB and `cred_id`
+/// bytes as least-exposure for the API surface — neither is a secret (the
+/// `credential` carries only the public key; `cred_id` is a per-RP opaque handle
+/// sent in plaintext on every ceremony), but a list view has no need for them.
+/// The `passkeys` table holds only live credentials, so there is no status
+/// field; revoked history lives in a separate `passkey_revocations` audit table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PasskeySummary {
     /// The passkey id (UUID), as a hyphenated string.
     pub id: String,
+    /// User-supplied device label (may be empty for legacy rows; the UI falls
+    /// back to a generic name).
+    pub label: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub compromised_at: Option<OffsetDateTime>,
+    /// When this passkey was last used. Seeded to the enrollment instant and
+    /// stamped on every subsequent sign-in.
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_used_at: OffsetDateTime,
 }

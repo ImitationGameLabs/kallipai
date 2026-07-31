@@ -20,10 +20,13 @@ pub struct Model {
     /// The serialised ceremony state (`PasskeyRegistration` for register,
     /// `PasskeyAuthentication` for login).
     pub state: Json,
-    /// For register: the hash of the invite being redeemed (held so the finish
-    /// txn can `FOR UPDATE` it). `None` for login. `Vec<u8>` -> Postgres BYTEA.
-    #[sea_orm(nullable)]
-    pub invite_code_hash: Option<Vec<u8>>,
+    /// The held redeem-code hash: for `register`, the invite-code hash; for
+    /// `pair`, the device-pairing-code hash; held so the finish txn can re-lock
+    /// / conditionally consume it. `None` for login. `Vec<u8>` -> Postgres BYTEA.
+    /// (The DB column keeps its historical name `invite_code_hash` via the
+    /// `column_name` alias below; the Rust field is self-documenting.)
+    #[sea_orm(column_name = "invite_code_hash", nullable)]
+    pub held_code_hash: Option<Vec<u8>>,
     /// For register: the pre-generated `UserId` that the finish txn will create.
     /// For login: the `UserId` resolved from the email at `begin`. Plain
     /// `TEXT`, NOT a FK (see the migration: at register the user row does not

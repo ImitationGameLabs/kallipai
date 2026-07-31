@@ -79,6 +79,24 @@ pub struct Args {
         default_value_t = 1
     )]
     pub auth_rate_refill_per_sec: u32,
+    /// Capacity (max burst) of the SHARED token bucket capping aggregate
+    /// throughput on the device-pairing begin endpoint. This is the real
+    /// distributed brute-force bound on the short pairing code (per-IP limiting
+    /// is bypassable by source-IP diversity). Pairing is rare (a legit user makes
+    /// ~3 requests to mint + redeem across two devices), so this is tuned tight;
+    /// raise it for larger deployments via this env var. Pair with
+    /// `pair_rate_refill_per_sec`. With a 2^40 code space, even 1 req/s makes
+    /// brute-forcing infeasible -- this is a CPU/storage-amplification cap, not
+    /// the entropy backstop.
+    #[arg(long, env = "KALLIP_AGORA_PAIR_RATE_CAPACITY", default_value_t = 10)]
+    pub pair_rate_capacity: u32,
+    /// Refill rate of the shared device-pairing bucket, in requests per second.
+    #[arg(
+        long,
+        env = "KALLIP_AGORA_PAIR_RATE_REFILL_PER_SEC",
+        default_value_t = 2
+    )]
+    pub pair_rate_refill_per_sec: u32,
     /// Comma-separated CIDRs whose direct connections are trusted to have set
     /// `X-Forwarded-For` (e.g. your reverse proxy). When the connecting peer is
     /// in one of these nets, the rate limiter buckets on the real client IP

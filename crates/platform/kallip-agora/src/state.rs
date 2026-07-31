@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::db::Db;
-use crate::ratelimit::IpRateLimiter;
+use crate::ratelimit::{GlobalRateLimiter, IpRateLimiter};
 use crate::session::SessionCfg;
 use kallip_common::authtoken::TokenHash;
 use tokio_util::sync::CancellationToken;
@@ -34,6 +34,10 @@ pub struct AppState {
     pub session_cfg: SessionCfg,
     /// Per-IP token bucket guarding `/v1/auth/*`.
     pub auth_rate_limiter: IpRateLimiter,
+    /// Single shared token bucket capping aggregate throughput on the
+    /// device-pairing begin endpoint (the real distributed brute-force bound on
+    /// the short pairing code; per-IP alone is bypassable by IP diversity).
+    pub pair_rate_limiter: GlobalRateLimiter,
     /// CIDRs whose direct connections are trusted to have set
     /// `X-Forwarded-For`. The rate limiter honors XFF only for a peer in one of
     /// these nets (see [`crate::clientip::real_client_ip`]). Empty means XFF is
@@ -51,6 +55,7 @@ pub struct Limits {
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         admin_token_hash: TokenHash,
         limits: Limits,
@@ -58,6 +63,7 @@ impl AppState {
         webauthn: Arc<Webauthn>,
         session_cfg: SessionCfg,
         auth_rate_limiter: IpRateLimiter,
+        pair_rate_limiter: GlobalRateLimiter,
         trusted_proxies: Vec<ipnet::IpNet>,
     ) -> Self {
         Self {
@@ -68,6 +74,7 @@ impl AppState {
             webauthn,
             session_cfg,
             auth_rate_limiter,
+            pair_rate_limiter,
             trusted_proxies,
         }
     }

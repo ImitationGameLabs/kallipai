@@ -1,6 +1,41 @@
 //! WebAuthn passkey registration + login, invite redemption, sessions, and the
 //! `/v1/me` profile.
 //!
+//! # Clone detection & signature counters — READ BEFORE CHANGING LOGIN
+//!
+//! WebAuthn's signature counter (`signCount`) was designed to detect cloned
+//! credentials on single-device HARDWARE authenticators. It is effectively dead
+//! for modern passkeys, and a regression MUST NOT auto-revoke a credential:
+//!
+//! - Synced passkeys (iCloud Keychain, Google, Microsoft, 1Password, ...)
+//!   intentionally share one private key across devices, so they report
+//!   `signCount = 0` forever and the regression check never runs. That is
+//!   correct — they are legitimately multi-device, not cloned.
+//! - Platform authenticators (TPM / Secure Enclave) often keep no reliable
+//!   monotonic counter; a regression is frequently a firmware quirk, not a clone.
+//! - Auto-revoking on a regression is an ATTACKER-TRIGGERABLE DoS: a holder of a
+//!   stale clone (counter behind the stored value) can force a regression that
+//!   destroys the legitimate user's credential, while the legit user — also
+//!   failing the regression — cannot self-recover.
+//!
+//! Accordingly, `login_finish` treats `CredentialPossibleCompromise` as DENY-
+//! THIS-LOGIN + LOG ONLY: it returns 401 and emits a structured warn
+//! (`user_id`, `cred_id`) for monitoring. It NEVER mutates the credential. A
+//! regression already fails the login regardless, so not revoking costs no real
+//! protection; a leading clone is undetectable anyway.
+//!
+//! Then how ARE clones prevented? Structurally, not at auth time:
+//! - Passkey private keys are non-exportable (locked in TPM / Secure Enclave /
+//!   Android Keystore) and the sync fabric is E2EE — there is no software blob
+//!   an attacker can copy short of compromising the secure enclave or sync vendor.
+//! - The RP stores only PUBLIC keys, so a DB breach leaks nothing usable.
+//! - Clone RECOVERY is the self-service surface in `routes/passkeys.rs`: suspect
+//!   a credential? revoke it (hard-delete + audit row) from another device, then
+//!   add a new one. The last-live-passkey guard blocks self-lockout on revoke.
+//!
+//! References: W3C webauthn-3 §7.2.4; Adam Langley, "Signature counters"
+//! (imperialviolet, 2023); MojoAuth, "signCount Is Dead".
+//!
 //! # Identity model
 //!
 //! The **login id is the email** (`users.email`, RFC 5321-faithful canonical
@@ -34,7 +69,9 @@
 //!   transient failure cannot advance the counter without issuing a session.
 //!   `update_credential` returning `None` (cred_id mismatch) is a hard 500, not
 //!   a silent skip: it means the row moved under us, and issuing a session
-//!   against a stale counter would lose clone detection.
+//!   while the stored `Passkey` is out of sync with what was verified would
+//!   weaken the next assertion's baseline. (This is integrity of the stored
+//!   credential, not clone detection — see the section above.)
 //!
 //! Session ids are rotated: every register/login finish mints a brand-new
 //! session token (never reuses a pre-login one), defeating session fixation.
@@ -72,13 +109,18 @@ use crate::auth::{AuthPrincipal, require_user};
 use crate::email;
 use crate::username;
 
-/// Ceremony-kind discriminator stored on `webauthn_challenges.kind`.
-const KIND_REGISTER: &str = "register";
+/// Ceremony-kind discriminator stored on `webauthn_challenges.kind`. Shared
+/// with `routes::passkeys` (the authenticated add-passkey ceremony) and
+/// `routes::device_pairing` (the cross-device pair ceremony). Each begin path
+/// writes its own kind so the per-kind in-flight caps do not collide.
+pub(crate) const KIND_REGISTER: &str = "register";
 const KIND_LOGIN: &str = "login";
+pub(crate) const KIND_PAIR: &str = "pair";
 
 /// How long an in-flight ceremony remains valid. Browsers prompt the user
 /// within this window; a stale challenge is rejected at finish and GC'd at begin.
-const CHALLENGE_TTL: Duration = Duration::from_secs(300);
+/// Shared with `routes::passkeys` (the add-passkey ceremony TTL).
+pub(crate) const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 
 /// Name of the `users.username` unique index (see migration). Matched against
 /// the Postgres unique-violation message to discriminate a username-collision
@@ -116,11 +158,13 @@ pub fn finish_router() -> Router<SharedState> {
         .route("/auth/login/finish", post(login_finish))
 }
 
-/// The cookie-authenticated session surface (no rate limiting).
+/// The cookie-authenticated session surface (no rate limiting). Includes the
+/// user self-service passkey management routes (`routes::passkeys`).
 pub fn session_router() -> Router<SharedState> {
     Router::new()
         .route("/auth/logout", post(logout))
         .route("/me", get(me))
+        .merge(super::passkeys::router())
 }
 
 // ---------------------------------------------------------------------------
@@ -135,10 +179,10 @@ struct RegisterBeginRequest {
     display_name: Option<String>,
 }
 
-#[derive(Serialize)]
-struct CeremonyBeginResponse<T: Serialize> {
-    ceremony_id: String,
-    options: T,
+#[derive(Serialize, Debug)]
+pub(crate) struct CeremonyBeginResponse<T: Serialize> {
+    pub ceremony_id: String,
+    pub options: T,
 }
 
 #[derive(Deserialize)]
@@ -239,7 +283,7 @@ async fn register_begin(
     // begin-flood cannot grow the table without limit. Only live (unexpired)
     // rows count: the background GC may not have swept expired ones yet.
     let in_flight = webauthn_challenges::Entity::find()
-        .filter(webauthn_challenges::Column::InviteCodeHash.eq(code_hash_bytes.clone()))
+        .filter(webauthn_challenges::Column::HeldCodeHash.eq(code_hash_bytes.clone()))
         .filter(webauthn_challenges::Column::ExpiresAt.gt(now))
         .count(&state.db)
         .await
@@ -272,7 +316,7 @@ async fn register_begin(
         id: Set(ceremony_id),
         kind: Set(KIND_REGISTER.to_string()),
         state: Set(state_value),
-        invite_code_hash: Set(Some(code_hash_bytes)),
+        held_code_hash: Set(Some(code_hash_bytes)),
         user_id: Set(Some(user_id.to_string())),
         email: Set(Some(email_norm)),
         username: Set(Some(username_norm)),
@@ -406,8 +450,11 @@ async fn register_finish(
                     user_id: Set(user_id.to_string()),
                     cred_id: Set(cred_id),
                     credential: Set(credential_json),
+                    // Initial passkey has no user-chosen label yet (the
+                    // management UI lets the user name it later).
+                    label: Set(String::new()),
                     created_at: Set(now),
-                    compromised_at: Set(None),
+                    last_used_at: Set(now),
                 }
                 .insert(txn)
                 .await?;
@@ -426,6 +473,10 @@ async fn register_finish(
                     user_id: Set(user_id.to_string()),
                     created_at: Set(now),
                     expires_at: Set(now + session_ttl),
+                    // A freshly registered account just proved UV; seed the
+                    // step-up marker so the user can add a first extra device
+                    // without an immediate re-login (consumed on use).
+                    authed_at: Set(Some(now)),
                 }
                 .insert(txn)
                 .await?;
@@ -463,6 +514,7 @@ async fn register_finish(
         AuthFinishResponse {
             user_id: user_id.to_string(),
         },
+        StatusCode::CREATED,
     ))
 }
 
@@ -486,7 +538,7 @@ async fn load_register_state(
         return Err(ApiError::unauthorized("ceremony expired"));
     }
     let invite_hash = row
-        .invite_code_hash
+        .held_code_hash
         .ok_or_else(|| ApiError::internal(format_args!("register ceremony missing invite hash")))?;
     let user_id = row
         .user_id
@@ -549,13 +601,13 @@ async fn login_begin(
         return Err(ApiError::too_many_requests("too many in-flight ceremonies"));
     }
 
-    // Load the user's live passkeys (a compromised passkey is excluded: once
-    // the library reports a counter regression it must not authenticate). The
-    // wrapper bakes them into the ceremony state so finish verifies the
-    // assertion against the right public keys.
+    // Load the user's passkeys. The `passkeys` table holds only live
+    // credentials (revoked / cloned ones are hard-deleted into
+    // `passkey_revocations`), so there is no status filter here. The wrapper
+    // bakes them into the ceremony state so finish verifies the assertion
+    // against the right public keys.
     let owned = passkeys::Entity::find()
         .filter(passkeys::Column::UserId.eq(user_id.to_string()))
-        .filter(passkeys::Column::CompromisedAt.is_null())
         .all(&state.db)
         .await
         .map_err(map_db_err)?;
@@ -580,7 +632,7 @@ async fn login_begin(
         id: Set(ceremony_id),
         kind: Set(KIND_LOGIN.to_string()),
         state: Set(state_value),
-        invite_code_hash: Set(None),
+        held_code_hash: Set(None),
         user_id: Set(Some(user_id.to_string())),
         email: Set(None),
         username: Set(None),
@@ -622,8 +674,8 @@ async fn login_finish(
             .ok_or_else(|| ApiError::internal(format_args!("login ceremony missing user id")))?,
     );
 
-    // The authenticated credential's id is the one in `req.credential.raw_id`.
-    // Extract it up front so the compromise path below can mark the right row.
+    // The authenticated credential's id, extracted up front so the counter-
+    // advance lookup below can resolve the matching passkey row by cred_id.
     let raw_id = req.credential.raw_id.as_slice().to_vec();
 
     // Verify the assertion (CPU-bound, outside the txn). The state already
@@ -638,30 +690,28 @@ async fn login_finish(
     {
         Ok(r) => r,
         Err(WebauthnError::CredentialPossibleCompromise) => {
-            // A counter regression means this credential may have been cloned.
-            // Mark it compromised (idempotent conditional UPDATE) so it can no
-            // longer authenticate, then reject. The user must re-register.
-            let now = OffsetDateTime::now_utc();
-            passkeys::Entity::update_many()
-                .filter(passkeys::Column::CredId.eq(raw_id.clone()))
-                .filter(passkeys::Column::CompromisedAt.is_null())
-                .col_expr(
-                    passkeys::Column::CompromisedAt,
-                    sea_orm::sea_query::Expr::value(now),
-                )
-                .exec(&state.db)
-                .await
-                .map_err(map_db_err)?;
-            warn!("passkey possibly cloned; marked compromised and disabled");
+            // Counter regression: DENY + LOG ONLY, never revoke. See the module
+            // doc "Clone detection & signature counters" for the full rationale
+            // (synced passkeys report 0; firmware quirks; auto-revoke is an
+            // attacker-triggerable DoS). Log user_id + cred_id -- cred_id is not
+            // a secret (per-RP opaque handle, plaintext on every ceremony; it is
+            // omitted from API responses only as least-exposure for clients),
+            // and it tells an operator WHICH of the user's passkeys regressed.
+            warn!(
+                user_id = %user_id,
+                cred_id = %hex::encode(&raw_id),
+                "passkey signature-counter regression (possible clone); denying login without revoking"
+            );
             return Err(ApiError::unauthorized("credential may be cloned"));
         }
         Err(e) => return Err(login_err(e)),
     };
 
-    // Resolve the matching passkey row by credential id. Needed to advance its
-    // stored counter inside the txn.
+    // Resolve the matching passkey row by credential id, owner-scoped (see the
+    // clone branch above). Needed to advance its stored counter inside the txn.
     let passkey_id = passkeys::Entity::find()
         .filter(passkeys::Column::CredId.eq(raw_id))
+        .filter(passkeys::Column::UserId.eq(user_id.to_string()))
         .one(&state.db)
         .await
         .map_err(map_db_err)?
@@ -715,9 +765,10 @@ async fn login_finish(
                 // Re-read the passkey under the lock and advance it via the
                 // library helper. `None` means the cred_id no longer matches the
                 // authenticated credential (the row moved under us) -- a HARD
-                // error, not a silent skip: issuing a session against a
-                // stale/wrong counter would lose clone detection. `Some(false)`
-                // = nothing changed (most passkeys); skip the write.
+                // error, not a silent skip: issuing a session while leaving the
+                // stored `Passkey` stale would corrupt its integrity (the stored
+                // counter + credential must reflect what was just verified).
+                // `Some(false)` = nothing changed (most passkeys); skip the write.
                 let current = passkeys::Entity::find_by_id(passkey_id)
                     .one(txn)
                     .await?
@@ -728,6 +779,7 @@ async fn login_finish(
                     .map_err(|e| {
                         TxnError::Db(DbErr::Custom(format!("deserialize passkey: {e}")))
                     })?;
+                let now = OffsetDateTime::now_utc();
                 match stored.update_credential(&auth_result) {
                     Some(true) => {
                         let updated_json = serde_json::to_value(&stored).map_err(|e| {
@@ -735,9 +787,17 @@ async fn login_finish(
                         })?;
                         let mut am: passkeys::ActiveModel = current.into();
                         am.credential = Set(updated_json);
+                        am.last_used_at = Set(now);
                         am.update(txn).await?;
                     }
-                    Some(false) => {}
+                    Some(false) => {
+                        // Counter unchanged (most software passkeys report a
+                        // constant 0); still stamp `last_used_at` so the
+                        // management UI can show "last used".
+                        let mut am: passkeys::ActiveModel = current.into();
+                        am.last_used_at = Set(now);
+                        am.update(txn).await?;
+                    }
                     None => {
                         return Err(TxnError::Api(ApiError::internal(
                             "credential id mismatch on login finish",
@@ -745,12 +805,15 @@ async fn login_finish(
                     }
                 }
 
-                let now = OffsetDateTime::now_utc();
                 sessions::ActiveModel {
                     token_hash: Set(session_hash),
                     user_id: Set(user_id.to_string()),
                     created_at: Set(now),
                     expires_at: Set(now + session_ttl),
+                    // A fresh login is the step-up that authorizes adding a
+                    // device; seed `authed_at` (consumed on use by add-passkey
+                    // begin).
+                    authed_at: Set(Some(now)),
                 }
                 .insert(txn)
                 .await?;
@@ -769,6 +832,7 @@ async fn login_finish(
         AuthFinishResponse {
             user_id: user_id.to_string(),
         },
+        StatusCode::OK,
     ))
 }
 
@@ -835,7 +899,7 @@ async fn me(
 /// A registration failure is a client error (bad/invalid credential). The
 /// `WebauthnError` detail is logged but NOT returned to the client — it can
 /// distinguish failure modes and so leak why verification failed.
-fn register_err(e: WebauthnError) -> ApiError {
+pub(crate) fn register_err(e: WebauthnError) -> ApiError {
     warn!(error = %e, "webauthn register failed");
     ApiError::bad_request("passkey registration failed")
 }
@@ -854,14 +918,21 @@ fn login_err(e: WebauthnError) -> ApiError {
     }
 }
 
-/// Build a `200 OK` JSON response carrying `body` and a `Set-Cookie` header
-/// built from `set_cookie`. Used by register/login finish to mint the session.
-fn set_cookie_response<T: Serialize>(set_cookie: &str, body: T) -> Response {
+/// Build a JSON response carrying `body` and a `Set-Cookie` header built from
+/// `set_cookie`, with the given status. Shared by the session-minting finishes:
+/// register/pair pass `CREATED` (a credential + session were created), login
+/// passes `OK` (an existing credential was authenticated).
+pub(crate) fn set_cookie_response<T: Serialize>(
+    set_cookie: &str,
+    body: T,
+    status: StatusCode,
+) -> Response {
     let mut resp = Json(body).into_response();
     if let Ok(value) = axum::http::HeaderValue::from_str(set_cookie) {
         resp.headers_mut()
             .append(axum::http::header::SET_COOKIE, value);
     }
+    *resp.status_mut() = status;
     resp
 }
 
@@ -957,7 +1028,7 @@ mod tests {
             .expect("read challenges");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "register");
-        assert_eq!(rows[0].invite_code_hash.as_deref(), Some(hash.as_slice()));
+        assert_eq!(rows[0].held_code_hash.as_deref(), Some(hash.as_slice()));
         // The canonical email (local preserved, domain lowercased) rides the
         // challenge row for finish; the username rides too.
         assert_eq!(rows[0].email.as_deref(), Some("NewUser@example.test"));
@@ -1050,7 +1121,7 @@ mod tests {
                 id: Set(uuid::Uuid::new_v4()),
                 kind: Set("register".to_string()),
                 state: Set(serde_json::Value::Null),
-                invite_code_hash: Set(Some(hash.clone())),
+                held_code_hash: Set(Some(hash.clone())),
                 user_id: Set(None),
                 email: Set(None),
                 username: Set(None),
