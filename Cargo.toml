@@ -16,6 +16,10 @@ members = [
   "crates/kallip-tagma",
   "crates/kallip-client",
   "crates/kallip-run",
+  "crates/time/kallip-cron-common",
+  "crates/time/kallip-cron-client",
+  "crates/time/kallip-cron",
+  "crates/time/kallip-cron-daemon",
 ]
 
 resolver = "3"
@@ -42,6 +46,9 @@ kallip-runtime = { path = "crates/kallip-runtime" }
 kallip-shell = { path = "crates/kallip-shell" }
 kallip-client = { path = "crates/kallip-client" }
 kallip-tagma = { path = "crates/kallip-tagma" }
+kallip-cron-common = { path = "crates/time/kallip-cron-common" }
+kallip-cron-client = { path = "crates/time/kallip-cron-client" }
+kallip-cron-daemon = { path = "crates/time/kallip-cron-daemon" }
 
 anyhow = "1.0.102"
 async-trait = "0.1.89"
@@ -131,7 +138,7 @@ dirs = "6"
 ipnet = "2.12"
 unicode-normalization = "0.1"
 rpassword = "7.5"
-time = { version = "0.3", features = ["serde-well-known"] }
+time = { version = "0.3", features = ["serde-well-known", "macros"] }
 toml = "1"
 tokenx-rs = "0.1"
 temp-env = "0.3"

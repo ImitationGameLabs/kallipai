@@ -1,0 +1,12 @@
+[package]
+name = "kallip-cron-common"
+description = "Wire types for the kallip-cron timer daemon and its clients"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallip-common = { workspace = true }
+serde = { workspace = true }
+time = { workspace = true }
+thiserror = { workspace = true }

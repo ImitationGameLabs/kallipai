@@ -956,6 +956,22 @@ pub async fn get_root_agent(
     Ok(Json(summary))
 }
 
+/// Verify the caller's bearer matches the named agent id: `204` on match,
+/// `401` otherwise. Lets a trusted peer service (e.g. `kallip-cron`) confirm an
+/// `(agent_id, token)` pair a client presented, without that service holding the
+/// agent-token index itself. The bearer resolves via the standard
+/// `crate::auth::AuthIdentity` path; an operator bearer does not match any agent
+/// id.
+pub async fn verify_agent(
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+) -> Result<StatusCode, ApiError> {
+    match auth.identity() {
+        crate::auth::Identity::Agent { id: aid } if *aid == id => Ok(StatusCode::NO_CONTENT),
+        _ => Err(ApiError::unauthorized("agent id does not match token")),
+    }
+}
+
 /// Any authenticated identity (operator or agent) may list agents.
 /// The response contains no secrets (only IDs, workspace paths, and state).
 /// `?created_by=<id>` optionally restricts the result to a superior's direct

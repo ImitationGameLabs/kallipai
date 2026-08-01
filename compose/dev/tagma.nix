@@ -1,6 +1,9 @@
-# Dev tagma composition (agent host + in-process relay connector), split from
-# arion-compose.nix so tagma operations don't drag the agora side along and
-# there is no COMPOSE_PROFILES dance.
+# Dev tagma composition: the agent host (tagma) + its in-process relay
+# connector, plus the kallip-cron timer daemon that fires schedules and injects
+# them into the tagma's conversations. Split from arion-compose.nix so tagma-side
+# operations don't drag the agora side along and there is no COMPOSE_PROFILES
+# dance. Cron lives here (not as its own project) because it is a tagma-side
+# component: it talks to the tagma over the host network at 127.0.0.1:3000.
 #
 # Invoke from the repo root (so .env resolves):
 #   arion -f compose/dev/tagma.nix up -d
@@ -52,9 +55,11 @@ let
   dataBind = bindOverride "KALLIP_ARION_DATA_PATH" "/var/lib/kallip";
   workspaceBind = bindOverride "KALLIP_ARION_WORKSPACE_PATH" "/workspace";
   skillsBind = bindOverride "KALLIP_ARION_SKILLS_PATH" "/var/lib/kallip/skills";
+  cronDataBind = bindOverride "KALLIP_ARION_CRON_DATA_PATH" "/var/lib/kallip-cron";
 
   dataVolume = if dataBind != null then dataBind else "tagma_data:/var/lib/kallip";
   workspaceVolume = if workspaceBind != null then workspaceBind else "tagma_workspace:/workspace";
+  cronDataVolume = if cronDataBind != null then cronDataBind else "cron_data:/var/lib/kallip-cron";
 in
 {
   config = {
@@ -63,7 +68,8 @@ in
     docker-compose.volumes =
       { }
       // lib.optionalAttrs (dataBind == null) { tagma_data = { }; }
-      // lib.optionalAttrs (workspaceBind == null) { tagma_workspace = { }; };
+      // lib.optionalAttrs (workspaceBind == null) { tagma_workspace = { }; }
+      // lib.optionalAttrs (cronDataBind == null) { cron_data = { }; };
 
     services.tagma = {
       service.capabilities.SYS_ADMIN = true;
@@ -123,6 +129,39 @@ in
         # kallip-tagma-image) -- mirrors how PATH is handled above. The store
         # path is reachable directly via the shared host /nix/store.
         KALLIP_SKILLS_SEED = skillsSeed;
+        RUST_LOG = "info";
+      };
+    };
+
+    # The timer/notification daemon: fires schedules and injects them into the
+    # tagma's conversations via the host-networked tagma at 127.0.0.1:3000. A
+    # tagma-side companion, not a separate project. KALLIP_CRON_TOKEN and
+    # KALLIP_AUTH_TOKEN (= the tagma's operator secret) come from .env.
+    services.cron = {
+      service.restart = "unless-stopped";
+      service.network_mode = "host";
+      service.volumes = [ cronDataVolume ];
+      service.env_file = [ ".env" ];
+      image.enableRecommendedContents = true;
+      image.contents = [
+        workspace
+        toolEnv
+      ]
+      ++ cacert;
+      service.useHostStore = true;
+      service.command = [ "${workspace}/bin/kallip-cron-daemon" ];
+      service.environment = {
+        PATH = "${workspace}/bin:${binPath}";
+        HOME = "/var/lib/kallip-cron";
+        KALLIP_CRON_DATA_DIR = "/var/lib/kallip-cron";
+        # Loopback only — cron is an internal tagma-side service, never
+        # network-exposed (no cron-specific token; the management API is gated
+        # by per-request agent-token verification via the tagma).
+        KALLIP_CRON_ADDR = "127.0.0.1:3010";
+        # Delivery target: the tagma service above (host network).
+        KALLIP_TAGMA_URL = "http://127.0.0.1:3000";
+        # KALLIP_AUTH_TOKEN (= tagma operator secret) comes from .env — used for
+        # delivery; management requests carry each caller's own agent token.
         RUST_LOG = "info";
       };
     };

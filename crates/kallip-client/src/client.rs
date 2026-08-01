@@ -403,6 +403,28 @@ impl TagmaClient {
         .await
     }
 
+    /// Verify the caller's bearer matches the named agent id: `Ok(())` on match
+    /// (tagma returns `204`), propagates `ApiError` (`401`) on mismatch. Lets a
+    /// trusted peer service (e.g. `kallip-cron`) confirm an `(agent_id, token)`
+    /// pair a client presented, without that service holding the agent-token
+    /// index itself. Carries its own short timeout — verification must not hang
+    /// the caller on a wedged tagma (unlike SSE, this is a one-shot request).
+    pub async fn verify_agent(&self, id: &AgentId) -> Result<()> {
+        self.ensure_success(
+            self.with_auth(
+                self.inner
+                    .http
+                    .get(self.url(&format!("/agents/{id}/verify")))
+                    .timeout(std::time::Duration::from_secs(5)),
+            )
+            .send()
+            .await
+            .context("failed to verify agent")?,
+        )
+        .await
+        .map(drop)
+    }
+
     /// Get agent permission profile and tool policy rules.
     pub async fn agent_permissions(&self, id: &AgentId) -> Result<AgentPermissionsResponse> {
         self.handle_response(
@@ -607,6 +629,18 @@ fn read_env_config() -> Result<(String, String)> {
     Ok((url, token))
 }
 
+/// The process-wide default `reqwest::Client`, constructed once and shared by
+/// every `TagmaClient` that doesn't override `.http_client()`. Cloning a
+/// `reqwest::Client` is cheap and shares the underlying pool.
+fn shared_http() -> &'static reqwest::Client {
+    static HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    HTTP.get_or_init(|| {
+        reqwest::ClientBuilder::new()
+            .build()
+            .expect("default reqwest client builds")
+    })
+}
+
 // -- Builder ------------------------------------------------------------------
 
 /// Fluent builder for [`TagmaClient`].
@@ -643,9 +677,16 @@ impl TagmaClientBuilder {
     /// system CA store is missing; callers that need to avoid this should
     /// supply their own client via `.http_client()`.
     pub fn build(self) -> Result<TagmaClient> {
+        // Callers that don't override `.http_client()` share one process-wide
+        // default `reqwest::Client` (constructed once, then cloned — the client
+        // is a cheap handle over a shared connection pool). This avoids churning
+        // a fresh pool/TLS-state per built client (e.g. a peer service building
+        // one per request). No blanket timeout is set here — it would clip the
+        // long-lived SSE event stream; per-request timeouts live on the calls
+        // that need them (e.g. `verify_agent`).
         let http = match self.http {
             Some(client) => client,
-            None => reqwest::ClientBuilder::new().build()?,
+            None => shared_http().clone(),
         };
         Ok(TagmaClient {
             inner: Arc::new(Inner {

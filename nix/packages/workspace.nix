@@ -51,4 +51,9 @@ in
   # beats many.
   # Excludes agora.
   tagma = buildCrate "cargo build --release -p kallip-tagma -p kallip";
+  # The timer/notification daemon: fires schedules and injects them into agent
+  # conversations via the tagma HTTP API. Separate attrs for the daemon and its
+  # management CLI so each can be built/deployed independently.
+  cron-daemon = buildCrate "cargo build --release -p kallip-cron-daemon";
+  cron = buildCrate "cargo build --release -p kallip-cron";
 }

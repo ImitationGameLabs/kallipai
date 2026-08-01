@@ -207,6 +207,23 @@ Source: [`crates/kallip-runtime/src/persistence.rs`](../../crates/kallip-runtime
 | ---------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------- |
 | `RUST_LOG` | no       | `info`  | Standard `tracing_subscriber::EnvFilter`. Controls log verbosity for tagma and TUI. Example: `kallip_client=debug`. |
 
+## Cron
+
+The timer/notification daemon (`kallip-cron-daemon`) and its management CLI (`kallip-cron`). The daemon fires schedules and injects them into agent conversations via the tagma HTTP API. The management API is self-scoped: the `kallip-cron` CLI runs inside an agent shell and reuses the shell's `KALLIP_ID` + `KALLIP_AUTH_TOKEN` (both auto-injected by the tagma); the daemon verifies the pair against the tagma and scopes every operation to that agent's own schedules.
+
+| Variable                | Required | Default                     | Description                                                                                                                                                                                                               |
+| ----------------------- | -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `KALLIP_CRON_ADDR`      | no       | `127.0.0.1:3010`            | Address the daemon's management API listens on. **Loopback only** — cron is an internal tagma-side service; the daemon refuses a non-loopback bind.                                                                       |
+| `KALLIP_CRON_DATA_DIR`  | no       | Platform data dir `kallip-cron/` | Directory holding `cron.sqlite`.                                                                                                                                                                                    |
+| `KALLIP_CRON_TICK_MS`   | no       | `1000`                      | Scheduler tick interval (ms). Must be `>= 1000` (second-precision scheduler).                                                                                                                                             |
+| `KALLIP_CRON_DELIVER_MS`| no       | `500`                       | Deliverer poll interval (ms): how often triggered schedules are pushed to tagma.                                                                                                                                          |
+| `KALLIP_CRON_URL`       | no       | `http://127.0.0.1:3010`     | Daemon URL used by the `kallip-cron` CLI client.                                                                                                                                                                          |
+| `KALLIP_ID`             | yes (CLI)| _(unset)_                   | The calling agent's id (auto-injected into agent shells by the tagma); the CLI passes it as the self-scope, and the daemon verifies it against the bearer via the tagma.                                                  |
+| `KALLIP_TAGMA_URL`      | yes      | `http://127.0.0.1:3000`     | Tagma URL for delivery + per-request verify (read by `TagmaClient::from_env`). Reused from the tagma client; not `KALLIP_CRON_*`-prefixed.                                                                                 |
+| `KALLIP_AUTH_TOKEN`     | yes      | _(unset)_                   | The daemon's operator secret for delivery (fired reminders render `[From: operator]`); the CLI's agent bearer for management requests. Reused from the tagma client.                                                      |
+
+Source: [`crates/time/kallip-cron-daemon/src/args.rs`](../../crates/time/kallip-cron-daemon/src/args.rs), [`crates/time/kallip-cron-client/src/client.rs`](../../crates/time/kallip-cron-client/src/client.rs).
+
 ## System environment variables
 
 The shell backend reads these from the process environment and passes them into every spawned `bash`:

@@ -1,0 +1,16 @@
+[package]
+name = "kallip-cron"
+description = "Management CLI for the kallip-cron timer daemon"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallip-cron-client = { workspace = true }
+kallip-cron-common = { workspace = true }
+kallip-common = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+time = { workspace = true }
+tracing-subscriber = { workspace = true }

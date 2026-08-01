@@ -50,6 +50,10 @@ pub fn router() -> Router<SharedState> {
         )
         .route("/agents/root", axum::routing::get(agent::get_root_agent))
         .route(
+            "/agents/{id}/verify",
+            axum::routing::get(agent::verify_agent),
+        )
+        .route(
             "/agents/{id}/message",
             axum::routing::post(message::send_message),
         )

@@ -100,6 +100,8 @@
               kallip-admin = builds.admin;
               kallip-lesche = builds.lesche;
               kallip-tagma = builds.tagma;
+              kallip-cron-daemon = builds.cron-daemon;
+              kallip-cron = builds.cron;
               kallip-tarball = import ./nix/packages/tarball.nix {
                 inherit
                   pkgs
