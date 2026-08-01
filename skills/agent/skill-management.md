@@ -20,9 +20,9 @@ category.
 
 Navigate top-down, never blind-scan:
 
-1. **`kallip skill index <skills-path>`** → see the top-level categories
-2. **`kallip skill index <skills-path>/<category>`** → see the skills in that category
-3. **Confirm with `kallip skill meta <skills-path>/<category>/<name>`** → check description matches
+1. **`kallip skill index <skills-path>`** → see the root-level skills and the top-level categories
+2. **`kallip skill index <skills-path>/<category>`** → see the skills in that category (skip this for a root-level skill)
+3. **Confirm with `kallip skill meta <skills-path>/<id>`** → check description matches (`<id>` is the path relative to skills root: `aifed` or `agent/kallip`)
 4. **Load**: read the skill file, then in the next turn pin it with `context_pin_last` (kind `tool-result`, label: `skill:<name>`)
 
 Each index answers one question: _"this directory covers what, and how do I pick?"_ Two index runs max to locate any skill.
@@ -51,6 +51,11 @@ Do **not** create a skill for:
 
 A skill should capture **judgment** — decisions, pitfalls, when-to-use guidance — not just syntax reference. The test: does this teach something that `--help` or official docs don't?
 
+For kallip itself, command syntax lives in `kallip --reference` (auto-generated
+from the binary, so it never drifts) — a kallip skill teaches _when_ and _why_,
+never the flag list. Pin the reference output (label `kallip:reference`) when
+the work spans many commands.
+
 Principles:
 
 - **Progressive disclosure** — point to authoritative references rather than duplicating them
@@ -59,25 +64,26 @@ Principles:
 - **Reasoned, not imperative** — write the _reason_ and the _conditions_, not bare commands. "X works because Z; reconsider when Z doesn't hold" invites weighing; "always X / never Y" reads as doctrine and gets followed blindly. Imperative tone is the root cause of blind skill-adherence.
 - **Integrate with agent capabilities** — explain how the skill connects to context management, pinning, other tools
 
-> Note: the skills shipped with the repo predate this rule and are not yet retrofitted to it; that pass is tracked separately. Treat them as structural examples, not tone examples.
-
 ### Where to place it
 
-Choose a category by asking: _what domain does this belong to?_
+First decide: **root or a category?**
+
+- **Root** for operational primitives you reach for across most work sessions — skills so fundamental that burying them in a category costs a drill-in every time (e.g. `aifed` for editing, `context-management` for context hygiene). Keep the root small: a handful of cross-cutting skills, not a dumping ground.
+- **A category** for skills that belong to a recognizable domain. Pick it by asking: _what domain does this belong to?_
 
 | Category | For                                                          |
 | -------- | ------------------------------------------------------------ |
 | `code/`  | Writing, editing, reviewing code; working with codebases     |
-| `agent/` | Agent self-management (context, skills, subagents, workflow) |
+| `agent/` | Agent self-management (the kallip CLI, skills, subagents, workflow) |
 
-Create a new subdirectory only when a category grows beyond ~6-8 skills. Depth limit: **two levels** (`category/skill.md`). Beyond that, navigation cost outweighs organization benefit.
+Create a new category only when a domain has ~6-8 skills. Depth limit: **two levels** (`category/skill.md`). Beyond that, navigation cost outweighs organization benefit.
 
 ### Naming
 
-- File paths are kebab-case. The path relative to skills root (e.g. `agent/skill-management`) is the canonical identifier used for all lookups and routing.
+- File paths are kebab-case. The path relative to skills root is the canonical identifier used for all lookups and routing — `aifed` for a root skill, `agent/skill-management` for a categorized one.
 - The `name` field in frontmatter is a display label — it can differ from the filename. The path is the identifier, not the name. If they were forced to match, `name` would be redundant.
 - Verb or noun phrase describing the domain, not the tool (e.g. `testing`, not `cargo-test`)
-- Nested paths use `/` separator: `code/testing`, `agent/skill-management`
+- Categorized paths use `/` separator: `code/testing`, `agent/skill-management`
 
 ## Skill Lifecycle
 
@@ -102,9 +108,9 @@ and `mv` it into place rather than redirecting `>` directly — a half-written
 
 ```bash
 # SHARED = the `skills path` from your identity facts.
-# <category> = the category dir (code/, agent/, ...); mkdir -p it first
-#              if it does not yet exist.
-mkdir -p "$SHARED/<category>"
+# Place a primitive at root (`$SHARED/my-skill.md`), or a domain skill in a
+# category (`$SHARED/<category>/my-skill.md`; mkdir -p the category first).
+mkdir -p "$SHARED/<category>"   # omit for a root-level skill
 cat > "$SHARED/<category>/my-skill.md.tmp" <<'EOF'
 ---
 name: My Skill

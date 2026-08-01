@@ -1,5 +1,5 @@
 ---
-description: Agent self-management — the kallip CLI, context window, skills, subagents, and coordination with the tagma. Look here for anything about managing your own runtime.
+description: Agent self-management — the kallip CLI, skills, subagents, and coordination with the tagma. Look here for anything about managing your own runtime.
 ---
 
 # Agent skills

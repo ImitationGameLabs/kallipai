@@ -1,153 +1,65 @@
 ---
 name: Kallip CLI
-description: kallip CLI usage — the agent's primary interface for self-management, subagent orchestration, skill discovery, approvals, policy, budget, and coordination
+description: When to reach for the kallip CLI and the behaviors clap won't tell you; run `kallip --reference` for full command syntax
 ---
 
-# kallip CLI Skill
+# kallip CLI
 
-`kallip` is the headless CLI that agents use to coordinate with the tagma and manage their own runtime. It is the **primary tool** for nearly all agent operations beyond raw shell commands.
+`kallip` is the headless CLI that agents use to coordinate with the tagma and
+manage their own runtime — the primary tool for nearly all agent operations
+beyond raw shell commands.
 
-## Invocation
+## Getting Started
 
-```bash
-kallip <command>
-```
-
-All commands require `KALLIP_AUTH_TOKEN` (env) and optionally `KALLIP_TAGMA_URL` (default `http://127.0.0.1:3000`). These are pre-set in the agent environment.
-
-## Command Reference
-
-### `status` — Agent context usage
+kallip ships its own complete, always up-to-date reference. For any command
+syntax (flags, value types, defaults), run:
 
 ```bash
-kallip status <ID>
+kallip --reference
 ```
 
-Shows context token usage and recent retry history. Use to check your own context pressure or a subagent's before sending more work.
+This is **progressive disclosure**: this skill tells you _when_ and _why_ to
+use kallip; `kallip --reference` gives you the _full syntax_. You don't need to
+memorize flags — just know to run it.
 
-### `activity` — Report current activity (self-only)
+For multi-command work, pin the reference so it stays available across turns:
 
 ```bash
-kallip activity "reading docs/x.md"
-kallip activity ""    # clear
+kallip --reference > /tmp/kallip-ref.md
 ```
 
-Update your activity label so your supervisor knows what you're doing. Keep it short.
+Read it, then in the next turn `context_pin_last` (kind `tool-result`, label
+`kallip:reference`). `context_unpin kallip:reference` when the work is done.
 
-### `message` — Send a message to an agent
+## Semantics to remember
 
-```bash
-kallip message <ID> <MESSAGE>
-```
+These are the behaviors clap can't express — keep them in mind even without the
+reference pinned:
 
-Fire-and-forget (202 Accepted). The tagma processes asynchronously. Poll `status` or `subagent list` to observe results.
+- **Messaging is fire-and-forget.** `kallip message` returns immediately (202);
+  the tagma processes asynchronously. Poll `kallip status <ID>` or
+  `kallip subagent list` to observe results.
+- **`activity` and `lesche send` are self-only.** The target is always the
+  calling agent (from `KALLIP_ID`); you cannot set another agent's activity.
+- **Approvals gate risky tool actions.** State machine: `pending` -> `committed`
+  -> `approved`/`denied` -> `redeemed`/`cancelled`. `kallip approval list`
+  defaults to **committed** (awaiting your decision); `--all` for every status.
+- **Budget is tagma-wide, not per-agent.** `kallip budget set 0` pauses **all**
+  agents.
+- **Dirlock is cross-agent mutual exclusion.** On `acquire` conflict the tagma
+  returns the holder's agent ID — message it to coordinate. `release` is
+  idempotent.
+- **Subagent scoping (server-enforced):** `spawn` / `metadata` are restricted
+  to the **direct supervisor**; `remove` / `interrupt` are open to any
+  **ancestor**. `spawn --role` is **required at runtime by the tagma** even
+  though clap lists it optional.
+- **Skill discovery:** run `kallip skill index <skills-path>` once on the skills
+  root and pin the output (label `skill:index`) so you always know what skills
+  exist.
+- **Shared skills are root-only.** Only the root agent authors shared skill
+  files; anyone else proposes them in conversation.
 
-### `subagent` — Manage direct subagents
+## Delegation
 
-```bash
-kallip subagent spawn --role <ROLE> [--prompt <PROMPT>] [--workspace-root <DIR>] [--permission-class <normal|guest>] [--skill <SKILL>] [--description <DESC>]
-kallip subagent list
-kallip subagent remove <ID>
-kallip subagent interrupt <ID>
-kallip subagent metadata <ID> [--role <ROLE>] [--description <DESC>]
-```
-
-`--role` is **required** for spawn. It is a short label like `researcher`, `reviewer`. Skills can be activated via repeated `--skill` flags.
-
-Scoping (server-enforced):
-
-- `spawn` / `metadata` — restricted to **direct supervisor** only.
-- `remove` / `interrupt` — open to **any ancestor** (superior).
-
-### `approval` — Manage approvals
-
-```bash
-kallip approval list [--status <STATUS>] [--all] [--limit <N>] [--offset <N>] [--requested-by <ID>] [--reverse]
-kallip approval get <ID>
-kallip approval approve <ID>
-kallip approval deny <ID> [REASON]
-```
-
-Approvals are tool actions that need supervisor sign-off before execution. Statuses: `pending` → `committed` → `approved`/`denied` → `redeemed`/`cancelled`.
-
-Default list shows **committed** (awaiting decision). Use `--all` for every status.
-
-### `policy` — Agent permissions and tool policy
-
-```bash
-kallip policy show <ID>          # full permissions + effective tool policy
-kallip policy get <ID>           # bare tool-policy map only
-kallip policy set <ID> <TOOL> <DECISION>          # allow | ask | deny | classify
-kallip policy exec-set <ID> <COMMAND> <DECISION>  # per-command bash_exec override (superior-only)
-kallip policy exec-get <ID>      # show bash_exec command overrides
-```
-
-`exec-set` controls per-command bash_exec overrides (e.g. `cargo`, `git`, `sudo`). Superior-only.
-
-### `budget` — Tagma-wide token budget
-
-```bash
-kallip budget get
-kallip budget set <AMOUNT>        # =0 pauses all agents
-kallip budget increase <AMOUNT>
-kallip budget decrease <AMOUNT>
-```
-
-Amounts support K/M/G suffixes (e.g. `100M`, `500K`, `1G`). Budget is tagma-wide, not per-agent.
-
-### `skill` — Skill discovery
-
-```bash
-kallip skill index <DIR>                    # generate the skill index for a directory
-kallip skill meta <PATH>                    # show metadata for a skill (reads the file directly)
-```
-
-`index` reads the directory at `DIR` (the `skills path` from your identity
-facts, or a subdirectory like `<skills>/agent`) and prints a markdown table of
-its entries — each `.md` skill and each subdirectory, with the description from
-the file's frontmatter. Run it once on the skills root and pin the output
-(`label skill:index`) so you always know what skills exist.
-
-Skills live as `<name>.md` files with YAML frontmatter (`name`, `description`).
-
-- **Shared** dir (writable only by the root agent): the root agent authors
-  shared skills directly via `bash_exec` (see the `skill-management` skill);
-  any other agent that wants a skill shared proposes it to root in
-  conversation.
-
-### `dirlock` — Directory write-locks (cross-agent mutual exclusion)
-
-```bash
-kallip dirlock acquire <PATH> [--timeout-secs <N>]
-kallip dirlock release <PATH> [--timeout-secs <N>]
-kallip dirlock status                        # dirs this agent currently holds
-kallip dirlock who <DIR>                     # who holds the lock, or "unlocked"
-```
-
-On `acquire` conflict the tagma returns the holder agent ID — message it to coordinate. `release` is idempotent.
-
-## Common Patterns
-
-For delegation patterns (async notification, parallel work, guest sandboxing,
-skill review), see the `agent/subagent-management` skill.
-
-Quick reference:
-
-```bash
-# Capture child ID immediately
-CHILD=$(kallip subagent spawn --role worker --prompt "do work")
-
-# Async: child messages you when done (preferred over sleep polling)
-kallip message "$CHILD" "When done, message agent $KALLIP_ID with results."
-
-# Dirlock for shared directory access
-kallip dirlock acquire /path/to/shared
-# ... do work ...
-kallip dirlock release /path/to/shared
-```
-
-## Important Notes
-
-- `subagent` commands use `KALLIP_ID` (current agent) as the supervisor — only meaningful inside an agent context.
-- `activity` is self-only; you cannot set another agent's activity.
-- `budget` is tagma-wide; `budget set 0` pauses **all** agents.
+For subagent delegation patterns (async notification, parallel work, guest
+sandboxing, skill review), see the `agent/subagent-management` skill.

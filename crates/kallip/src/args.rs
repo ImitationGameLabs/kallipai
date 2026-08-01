@@ -10,24 +10,31 @@ use kallip_common::agentid::AgentId;
     about = "Headless CLI for agents to coordinate with and manage other agents"
 )]
 pub struct Cli {
+    /// Print the full auto-generated command reference and exit (no tagma
+    /// connection needed). Pin its output (label `kallip:reference`) for
+    /// one-stop command syntax.
+    #[arg(long)]
+    pub reference: bool,
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
     #[command(flatten)]
     Agent(AgentCommand),
-    /// Manage approvals
+    /// Approvals gate tool actions that need supervisor sign-off (pending ->
+    /// committed -> approved/denied -> redeemed/cancelled).
     #[command(subcommand)]
     Approval(ApprovalCommand),
     /// Manage agent permissions and bash_exec exec-policy overrides
     #[command(subcommand)]
     Policy(PolicyCommand),
-    /// Skill discovery
+    /// Discover and inspect skills via the generated index.
     #[command(subcommand)]
     Skill(SkillCommand),
-    /// Manage agent token budget
+    /// Manage the tagma-wide token budget (shared by all agents; set 0 to
+    /// pause everyone).
     #[command(subcommand)]
     Budget(BudgetCommand),
     /// Manage this agent's direct subagents
@@ -36,7 +43,7 @@ pub enum Commands {
     /// Manage directory write-locks (mutual exclusion across agents)
     #[command(subcommand)]
     Dirlock(DirlockCommand),
-    /// Deliver messages to the user
+    /// Deliver messages to the user via the relay (the lesche data-plane).
     #[command(subcommand)]
     Lesche(LescheCommand),
 }
@@ -45,9 +52,10 @@ pub enum Commands {
 /// never appear as an "agent" group in `--help`.
 #[derive(Subcommand)]
 pub enum AgentCommand {
-    /// Send a message to an agent
+    /// Send a peer message to an agent (fire-and-forget; processed
+    /// asynchronously).
     Message(MessageArgs),
-    /// Show agent context usage
+    /// Show an agent's context token usage and recent retry history.
     Status(IdArgs),
     /// Report this agent's current activity (self-only)
     Activity(ActivityArgs),
@@ -135,7 +143,7 @@ pub struct IdArgs {
 
 #[derive(Subcommand)]
 pub enum ApprovalCommand {
-    /// List approvals
+    /// List approvals; default shows committed ones awaiting a decision.
     List(ApprovalListArgs),
     /// Show details of an approval
     Get(ApprovalGetArgs),
@@ -251,9 +259,9 @@ pub struct SkillMetaArgs {
 pub enum BudgetCommand {
     /// Show tagma-wide token budget status
     Get,
-    /// Increase tagma-wide token budget
+    /// Increase the tagma-wide token budget by an amount.
     Increase(BudgetAmountArgs),
-    /// Decrease tagma-wide token budget
+    /// Decrease the tagma-wide token budget by an amount.
     Decrease(BudgetAmountArgs),
     /// Set remaining tagma-wide token budget (=0 pauses all agents)
     Set(BudgetAmountArgs),

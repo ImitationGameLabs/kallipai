@@ -1,10 +1,11 @@
 //! kallip: tagma client CLI.
 
 mod args;
+mod reference;
 mod skill;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use kallip_client::TagmaClient;
 use kallip_common::agentid::AgentId;
 use kallip_common::policy::{ExecDecision, ExecOverride};
@@ -25,9 +26,18 @@ fn agent_id_from_env() -> anyhow::Result<AgentId> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.reference {
+        println!("{}", reference::render());
+        return Ok(());
+    }
+    let Some(command) = cli.command else {
+        // Bare `kallip` with no subcommand: print help and exit 0.
+        Cli::command().print_help()?;
+        return Ok(());
+    };
     let client = TagmaClient::from_env()?;
 
-    match cli.command {
+    match command {
         Commands::Agent(cmd) => match cmd {
             AgentCommand::Message(args) => {
                 client.post_message(&args.id, &args.message).await?;

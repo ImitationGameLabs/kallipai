@@ -7,7 +7,9 @@ description: How to spawn, coordinate, message, and clean up subagents — inclu
 
 Subagents are the primary way to parallelize work, delegate tasks, and test
 sandboxed environments. This skill covers the full lifecycle: spawn, message,
-monitor, and clean up.
+monitor, and clean up. For command flags and value types, run
+`kallip --reference` (the `subagent`, `message`, `status`, and `dirlock`
+sections).
 
 ## Permission Classes
 
@@ -32,31 +34,9 @@ Key rules:
 
 ## Spawning Subagents
 
-```bash
-# Basic spawn (inherits supervisor's permission class ceiling)
-kallip subagent spawn --role <ROLE> [--prompt <PROMPT>] [--workspace-root <DIR>]
-
-# Explicit permission class
-kallip subagent spawn --role <ROLE> --permission-class guest
-
-# With skills
-kallip subagent spawn --role <ROLE> --skill kallip --skill aifed
-
-# Full example
-kallip subagent spawn \
-  --workspace-root /path/to/workspace \
-  --role researcher \
-  --description "Explores the codebase" \
-  --permission-class normal \
-  --prompt "You are a code researcher." \
-  --skill kallip
-```
-
-The command prints the new agent ID on stdout. **Capture it immediately**:
-
-```bash
-CHILD=$(kallip subagent spawn --role worker --prompt "do work")
-```
+`kallip subagent spawn` prints the new agent ID on stdout — **capture it
+immediately** (e.g. `CHILD=$(kallip subagent spawn ...)`) so you can message
+and clean up the agent.
 
 ### Workspace constraints
 
@@ -67,25 +47,17 @@ CHILD=$(kallip subagent spawn --role worker --prompt "do work")
 
 ### Role is required
 
-`--role` is mandatory for all subagent spawns. Use short descriptive labels:
-`researcher`, `reviewer`, `tester`, `worker`.
+`--role` is mandatory for every subagent spawn (the tagma rejects a spawn
+without it). Use short descriptive labels: `researcher`, `reviewer`,
+`tester`, `worker`.
 
 ## Messaging & Monitoring
 
-```bash
-# Send a task (fire-and-forget, 202 Accepted)
-kallip message <ID> "Run the tests and report results"
-
-# Check progress
-kallip status <ID>          # context usage + state (idle/busy/faulted)
-
-# List direct subagents
-kallip subagent list
-```
-
-Messages are **asynchronous** — the tagma queues them and the subagent
-processes them in order. Poll `status` to check if the agent is `idle`
-(done), `busy` (still working), or `faulted` (restore failed — see below).
+`kallip message <ID>` sends a task; messages are **asynchronous** — the tagma
+queues them and the subagent processes them in order. Poll `kallip status
+<ID>` to check whether the agent is `idle` (done), `busy` (still working), or
+`faulted` (restore failed — see below). `kallip subagent list` shows your
+direct children.
 
 ## Dirlock & Workspace Isolation
 
@@ -107,28 +79,17 @@ Supervisor workspace: /project
     └── supervisor CANNOT write /project/other/* (sibling child holds the lock)
 ```
 
-If you need to write to a shared directory, use explicit dirlock:
-
-```bash
-kallip dirlock acquire /path/to/shared
-# ... do work ...
-kallip dirlock release /path/to/shared
-```
-
-On conflict, `acquire` returns the holder's agent ID — message it to coordinate.
+If you need to write to a shared directory, take an explicit dirlock
+(`kallip dirlock acquire` / `release`). On conflict, `acquire` returns the
+holder's agent ID — message it to coordinate.
 
 ## Cleanup
 
-```bash
-# Interrupt a busy subagent (cancels current round, keeps the agent alive)
-kallip subagent interrupt <ID>
-
-# Remove a subagent (must be idle or faulted, no active subagents of its own)
-kallip subagent remove <ID>
-```
-
-Always clean up test subagents after use. Removed agents are archived (not
-deleted), and their workspace dirlocks are released.
+`kallip subagent interrupt <ID>` cancels a busy subagent's current round but
+keeps it alive; `kallip subagent remove <ID>` removes it (the agent must be
+idle or faulted, with no active subagents of its own). Always clean up test
+subagents after use. Removed agents are archived (not deleted), and their
+workspace dirlocks are released.
 
 ### Faulted agents (restore failure)
 
@@ -143,40 +104,21 @@ messages or prompts. This is not an error — clean them up with `remove`.
 ### Delegate with async notification (preferred)
 
 Instead of polling with `sleep`, have the subagent message you when done.
-The message arrives as a new turn, waking you automatically — no wasted waits.
-
-```bash
-CHILD=$(kallip subagent spawn --role worker --prompt "help with testing")
-kallip message "$CHILD" "Run: echo hello > test.txt && cat test.txt.
-When done, send a message to agent $KALLIP_ID with your results."
-# ... do other work, or go idle and get woken by the notification ...
-# The subagent runs: kallip message $KALLIP_ID "DONE: ..."
-```
-
-The subagent learns your ID from `$KALLIP_ID` in your message, or you
-pass it explicitly. This is the natural coordination pattern — no sleep
-or status-polling needed.
+The message arrives as a new turn, waking you automatically — no wasted
+waits. The subagent learns your ID from `$KALLIP_ID` in your message, or you
+pass it explicitly. This is the natural coordination pattern — no sleep or
+status-polling needed.
 
 ### Guest subagent for untrusted work
 
-```bash
-kallip subagent spawn --role sandbox --permission-class guest \
-  --workspace-root $WS/sandbox --prompt "Run untrusted code safely"
-# Guest: read-only (workspace RO, no writes), secrets hidden
-```
+Spawn with `--permission-class guest` for untrusted code: the guest is
+read-only (workspace RO, no writes) with secrets hidden.
 
 ### Independent review (2+1 pattern)
 
-For important work, spawn two Guest reviewers with differentiated prompts,
-synthesize their feedback yourself:
-
-```bash
-A=$(kallip subagent spawn --role reviewer-clarity --permission-class guest \
-  --prompt "Review from a fresh reader's clarity perspective")
-B=$(kallip subagent spawn --role reviewer-robustness --permission-class guest \
-  --prompt "Review for robustness, staleness, and failure modes")
-# Each messages you when done; synthesize disagreements as decision points
-```
+For important work, spawn two Guest reviewers with differentiated prompts
+(e.g. clarity vs. robustness) and synthesize their feedback yourself; each
+messages you when done, and you resolve disagreements as decision points.
 
 ## Pitfalls
 
@@ -200,4 +142,7 @@ B=$(kallip subagent spawn --role reviewer-robustness --permission-class guest \
   `[From: agent <id> (role: <role>, <relation>)]` header automatically
   attached, so you always know which agent spoke and the hierarchy relation —
   no need to have subagents role-tag their messages.
-- **Long results should go to files.** `kallip message` is fine for short results. For long output (reviews, analysis, logs), have the subagent write to a file in its workspace and reference the path in the message — the supervisor reads it.
+- **Long results should go to files.** `kallip message` is fine for short
+  results. For long output (reviews, analysis, logs), have the subagent write
+  to a file in its workspace and reference the path in the message — the
+  supervisor reads it.
