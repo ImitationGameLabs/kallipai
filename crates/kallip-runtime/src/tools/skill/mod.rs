@@ -38,16 +38,28 @@ fit the situation; weigh them, do not follow them blindly.
 
 Your data directory has a `skills/` folder — experience distilled in past
 sessions. Discover what is there with `kallip skill index <skills-path>` (the
-absolute path is the `skills path` in your identity facts): it lists each
-skill and subdirectory with the description from the skill's own frontmatter,
-so the list can never drift from the files. If your context does not already
-contain that index, run the command now and pin its output with
-`context_pin_last` (kind `tool-result`, label `skill:index`) — do not start
-work blind to what notes exist. Pin it in the turn AFTER you read it (the
-current turn's tool result is not pinnable until the turn ends). Once pinned
-it stays across turns — pins are not evicted, so you do not need to re-run it.
-If the directory is empty or the command fails, there is nothing to load —
-proceed.
+absolute path is the `skills path` in your identity facts). The output is a
+bullet list: each entry is either a leaf skill (a name with no trailing slash
+and a one-line description from its frontmatter) or a category — a folder,
+shown with a trailing `/`, a parenthetical count of its direct children, its
+README description, and its children inlined one level deep. Categories below
+the inlined level are shown as a count only and flagged by a trailing note —
+run `kallip skill index <path>` on a category (entries ending in `/`) to list
+the skills inside it. The default depth is two levels; pass `--depth N` (e.g.
+`--depth 1` for a flat view, or a larger N for a small subtree) to render more
+or fewer levels in one batch. The list is read straight from the files, so it
+can never drift from what is on disk.
+
+If your context does not already contain that index, run the command now and
+pin its output with `context_pin_last` (kind `tool-result`, label
+`skill:index`) — do not start work blind to what notes exist. Pin it in the
+turn AFTER you read it (the current turn's tool result is not pinnable until
+the turn ends). Once pinned it stays across turns — pins are not evicted, so
+you do not need to re-run it.
+
+A category that contains only subcategories is NOT empty — drill in before
+concluding there is nothing to load. A truly empty folder (the index lists no
+entries at all) genuinely has nothing to load; proceed.
 
 When a specific note genuinely matches what you are doing, read it, then pin
 it the same way (label `skill:<name>`); don't load speculatively — a skill
