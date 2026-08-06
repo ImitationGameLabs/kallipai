@@ -1,73 +1,159 @@
 import { assertEquals } from "@std/assert";
-import { navFor, type NavIcons, pathMatches } from "./links.ts";
+import {
+  navFor,
+  pathMatches,
+  tagmaNavIndicator,
+  type NavIcons,
+} from "./links.ts";
 
 // navFor only stores the icon components; dummies suffice.
 const icons = {
   chat: () => {},
   tagmata: () => {},
+  rooms: () => {},
+  settings: () => {},
 } as unknown as NavIcons;
 
-Deno.test("navFor online -> Tagmata only (Settings is in AccountMenu)", () => {
-  const links = navFor({ mode: "online", icons });
-  assertEquals(
-    links.map((l) => l.href),
-    ["/tagmata"],
-  );
-});
+// The section shape stripped to its structural parts (title + manage href +
+// item hrefs) for the assertions below.
+function shape(
+  sections: ReturnType<typeof navFor>,
+): { title: string | null; manage: string | null; items: string[] }[] {
+  return sections.map((s) => ({
+    title: s.title ?? null,
+    manage: s.manage?.href ?? null,
+    items: s.items.map((l) => l.href),
+  }));
+}
 
-Deno.test("navFor online appends one entry per open channel", () => {
-  const links = navFor({
+Deno.test(
+  "navFor online -> Tagmata + Rooms sections with a manage gear each",
+  () => {
+    const sections = navFor({ mode: "online", icons });
+    assertEquals(shape(sections), [
+      { title: "Tagmata", manage: "/tagmata", items: [] },
+      { title: "Rooms", manage: "/rooms", items: [] },
+    ]);
+  },
+);
+
+Deno.test(
+  "navFor online lists each room as a chat entry (management lives in the gear)",
+  () => {
+    const sections = navFor({
+      mode: "online",
+      icons,
+      rooms: [
+        { roomId: "r1", label: "Design" },
+        { roomId: "r2", label: "Ops" },
+      ],
+    });
+    assertEquals(shape(sections), [
+      { title: "Tagmata", manage: "/tagmata", items: [] },
+      { title: "Rooms", manage: "/rooms", items: ["/rooms/r1", "/rooms/r2"] },
+    ]);
+  },
+);
+
+Deno.test("navFor online lists every enrolled tagma under Tagmata", () => {
+  const sections = navFor({
     mode: "online",
     icons,
-    channels: [
-      { conversationId: "c1", label: "Laptop", indicator: "live" },
-      { conversationId: "c2", label: null, indicator: "down" },
-      { conversationId: "c3", label: "Phone", indicator: "pending" },
+    tagmata: [
+      { tagmaId: "t1", label: "Laptop", indicator: "live" },
+      { tagmaId: "t2", label: null, indicator: "down" },
+      { tagmaId: "t3", label: "Phone", indicator: "pending" },
     ],
   });
-  // Channels use an indicator dot, not an icon, so they read as their own
-  // destinations distinct from the Tagmata management entry.
+  // Tagmas use an indicator dot, not an icon, and link to the tagma-keyed
+  // route (always navigable -- the channel opens on demand there). An entry
+  // appears regardless of whether its channel is open: live / down / pending
+  // are all present, proving visibility is not gated on an open channel.
   assertEquals(
-    links.map((l) => ({
-      href: l.href,
-      label: l.label,
-      icon: !!l.icon,
-      indicator: l.indicator ?? null,
+    sections.map((s) => ({
+      title: s.title,
+      manage: s.manage?.href ?? null,
+      items: s.items.map((l) => ({
+        href: l.href,
+        label: l.label,
+        icon: !!l.icon,
+        indicator: l.indicator ?? null,
+      })),
     })),
     [
-      { href: "/tagmata", label: "Tagmata", icon: true, indicator: null },
-      { href: "/chat/c1", label: "Laptop", icon: false, indicator: "live" },
       {
-        href: "/chat/c2",
-        label: "Unnamed tagma",
-        icon: false,
-        indicator: "down",
+        title: "Tagmata",
+        manage: "/tagmata",
+        items: [
+          {
+            href: "/chat/t/t1",
+            label: "Laptop",
+            icon: false,
+            indicator: "live",
+          },
+          {
+            href: "/chat/t/t2",
+            label: "Unnamed tagma",
+            icon: false,
+            indicator: "down",
+          },
+          {
+            href: "/chat/t/t3",
+            label: "Phone",
+            icon: false,
+            indicator: "pending",
+          },
+        ],
       },
-      { href: "/chat/c3", label: "Phone", icon: false, indicator: "pending" },
+      { title: "Rooms", manage: "/rooms", items: [] },
     ],
   );
 });
 
-Deno.test("navFor online with an empty channels array -> Tagmata only", () => {
-  const links = navFor({ mode: "online", icons, channels: [] });
+Deno.test(
+  "navFor online Tagmata section is empty when no tagmata passed",
+  () => {
+    const sections = navFor({ mode: "online", icons });
+    assertEquals(shape(sections), [
+      { title: "Tagmata", manage: "/tagmata", items: [] },
+      { title: "Rooms", manage: "/rooms", items: [] },
+    ]);
+  },
+);
+
+Deno.test("tagmaNavIndicator maps each channel state (transport-only)", () => {
+  // open -> live; pending/absent -> pending (spinner, click to connect);
+  // offline -> down; error -> error.
   assertEquals(
-    links.map((l) => l.href),
-    ["/tagmata"],
+    tagmaNavIndicator({ kind: "open", conversationId: "c" }),
+    "live",
+  );
+  assertEquals(
+    tagmaNavIndicator({ kind: "pending", conversationId: "c" }),
+    "pending",
+  );
+  assertEquals(tagmaNavIndicator({ kind: "absent" }), "pending");
+  assertEquals(
+    tagmaNavIndicator({ kind: "offline", conversationId: "c" }),
+    "down",
+  );
+  assertEquals(
+    tagmaNavIndicator({ kind: "error", conversationId: "c" }),
+    "error",
   );
 });
 
 Deno.test("navFor offline -> Chat only (Settings is in AccountMenu)", () => {
-  const links = navFor({ mode: "offline", icons });
-  assertEquals(
-    links.map((l) => l.href),
-    ["/chat/local"],
-  );
+  const sections = navFor({ mode: "offline", icons });
+  assertEquals(shape(sections), [
+    { title: null, manage: null, items: ["/chat/local"] },
+  ]);
 });
 
 Deno.test("pathMatches uses segment boundaries (no prefix cross-match)", () => {
   // Exact + beneath.
-  assertEquals(pathMatches("/tagmata", "/tagmata"), true);
-  assertEquals(pathMatches("/tagmata/x", "/tagmata"), true);
+  assertEquals(pathMatches("/rooms", "/rooms"), true);
+  assertEquals(pathMatches("/rooms/x", "/rooms"), true);
   // Root is exact-only.
   assertEquals(pathMatches("/", "/"), true);
   assertEquals(pathMatches("/chat", "/"), false);
@@ -76,6 +162,11 @@ Deno.test("pathMatches uses segment boundaries (no prefix cross-match)", () => {
   assertEquals(pathMatches("/chat/ab", "/chat/a"), false);
   assertEquals(pathMatches("/chat/a", "/chat/a"), true);
   assertEquals(pathMatches("/chat/a/sub", "/chat/a"), true);
+  // The tagma-keyed route /chat/t/{tagmaId} matches itself exactly, and does
+  // not cross-highlight with a sibling /chat/{conversationId} entry.
+  assertEquals(pathMatches("/chat/t/abc", "/chat/t/abc"), true);
+  assertEquals(pathMatches("/chat/t/abc", "/chat/abc"), false);
+  assertEquals(pathMatches("/chat/abc", "/chat/t/abc"), false);
   // A non-matching prefix entirely.
   assertEquals(pathMatches("/approvals", "/tagmata"), false);
 });

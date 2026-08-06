@@ -2,8 +2,7 @@
 // relay's role (KEX + AEAD) using the same crypto.ts. Validates the full
 // transport (openRelayChannel -> send -> encrypt -> lesche -> responder-decrypt
 // -> responder encrypt reply -> initiator decrypt -> TagmaReply) without the
-// live backend. The cross-endpoint check against the real Rust relay happens in
-// Phase 2.
+// live backend.
 
 import { assertEquals, assertExists } from "@std/assert";
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
@@ -19,7 +18,8 @@ import {
 } from "./crypto.ts";
 import { openRelayChannel, type RelayChannel } from "./channel.ts";
 import { LescheApiError } from "./types.ts";
-import { decodeB64, encodeB64 } from "./base64.ts";
+import type { Participant } from "./types.ts";
+import { decodeB64, encodeB64 } from "@kallipai/kallip-common";
 import type { LescheClient } from "./http.ts";
 import type {
   Envelope,
@@ -64,7 +64,7 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
     );
     channel.enqueue({
       conversation_id: convId,
-      sender: { kind: "agent", tagma_id: tagmaId },
+      sender: { id: tagmaId, kind: "agent", handle: "Tagma" },
       sequence_n: seq,
       trace_id: "trace",
       timestamp: new Date().toISOString(),
@@ -143,6 +143,7 @@ Deno.test(
       lesche as unknown as LescheClient,
       tagmaId,
       userId,
+      "Alice",
       pinnedKeyB64,
     );
     assertEquals(channel.conversationId, convId);
@@ -154,7 +155,8 @@ Deno.test(
     const iter = channel.replies();
     const first = await iter.next();
     assertEquals(first.done, false);
-    const reply = first.value as TagmaReply;
+    const reply = (first.value as { sender: Participant; reply: TagmaReply })
+      .reply;
     if (reply.kind !== "event") {
       throw new Error(`expected event, got ${reply.kind}`);
     }
@@ -179,6 +181,7 @@ Deno.test(
       lesche as unknown as LescheClient,
       "tagma-s",
       "u",
+      "Alice",
       pinnedKeyB64,
     );
     setChannel(channel);
@@ -201,6 +204,7 @@ Deno.test(
       lesche as unknown as LescheClient,
       "tagma-d",
       "u",
+      "Alice",
       pinnedKeyB64,
     );
     setChannel(channel);
@@ -208,7 +212,7 @@ Deno.test(
     // cannot decrypt under the session key.
     channel.enqueue({
       conversation_id: channel.conversationId,
-      sender: { kind: "agent", tagma_id: "tagma-d" },
+      sender: { id: "tagma-d", kind: "agent", handle: "Tagma" },
       sequence_n: 99,
       trace_id: "t",
       timestamp: new Date().toISOString(),
@@ -219,7 +223,8 @@ Deno.test(
     await channel.send("ok");
     const iter = channel.replies();
     const first = await iter.next();
-    const reply = first.value as TagmaReply;
+    const reply = (first.value as { sender: Participant; reply: TagmaReply })
+      .reply;
     if (reply.kind !== "event" || reply.event.type !== "assistant_content") {
       throw new Error(
         `tampered envelope was not dropped; got ${JSON.stringify(reply)}`,
@@ -241,6 +246,7 @@ Deno.test(
       lesche as unknown as LescheClient,
       "tagma-503",
       "u",
+      "Alice",
       pinnedKeyB64,
     );
     setChannel(channel);
@@ -280,6 +286,7 @@ Deno.test(
       lesche as unknown as LescheClient,
       "tagma-h",
       "u",
+      "Alice",
       pinnedKeyB64,
     );
     setChannel(channel);
@@ -294,9 +301,9 @@ Deno.test(
     respond(event(2));
 
     const iter = channel.replies();
-    const a = (await iter.next()).value as TagmaReply;
-    const b = (await iter.next()).value as TagmaReply;
-    const c = (await iter.next()).value as TagmaReply;
+    const a = ((await iter.next()).value as { reply: TagmaReply }).reply;
+    const b = ((await iter.next()).value as { reply: TagmaReply }).reply;
+    const c = ((await iter.next()).value as { reply: TagmaReply }).reply;
     assertEquals((a as { event: { content: string } }).event.content, "m1");
     assertEquals(
       (b as { event: { content: string } }).event.content,
@@ -318,6 +325,7 @@ Deno.test("history() sends a cursor-based history control op", async () => {
     lesche as unknown as LescheClient,
     "tagma-c",
     "u",
+    "Alice",
     pinnedKeyB64,
   );
   setChannel(channel);

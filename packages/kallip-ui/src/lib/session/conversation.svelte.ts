@@ -24,10 +24,14 @@ import {
   cacheLineOf,
   EMPTY_TRANSCRIPT,
   replaceLineId,
+  toSender,
   withUserLine,
 } from "../transcript.ts";
-import type { ConversationTranscript } from "../transcript.ts";
-import type { TagmaReply } from "@kallipai/kallip-lesche-client";
+import type {
+  ConversationSender,
+  ConversationTranscript,
+} from "../transcript.ts";
+import type { Participant, TagmaReply } from "@kallipai/kallip-lesche-client";
 import { put as cachePut } from "@kallipai/kallip-lesche-client";
 import type { Transport } from "./transport.ts";
 
@@ -99,6 +103,9 @@ export abstract class ConversationBase {
     protected readonly store: ConversationStoreLike,
     transport: Transport | null,
     cacheConversationId: string,
+    /** The UI sender for optimistic user lines (online: the agora session;
+     *  offline: the tagma-configured local identity). */
+    protected readonly localSender: ConversationSender,
   ) {
     this.transport = transport;
     this.cacheConversationId = cacheConversationId;
@@ -121,7 +128,12 @@ export abstract class ConversationBase {
     const trimmed = text.trim();
     if (!this.transport || trimmed === "") return;
     const localId = (this.syntheticSeq -= 1);
-    this.transcript = withUserLine(this.transcript, trimmed, localId);
+    this.transcript = withUserLine(
+      this.transcript,
+      trimmed,
+      localId,
+      this.localSender,
+    );
     this.pending = [...this.pending, { localId, text: trimmed }];
     void this.pumpPending();
   }
@@ -132,9 +144,13 @@ export abstract class ConversationBase {
 
   /** Apply one authored reply through the shared core: dedup by `history_id`,
    *  promote an optimistic line on a stamped `user_message`, reduce, cache, and
-   *  advance the cursor. Guarded by `isLive` so a stale drain cannot touch a
+   *  advance the cursor. `sender` is the wire participant who authored the
+   *  reply's content. Guarded by `isLive` so a stale drain cannot touch a
    *  fresher entry. */
-  protected applyReplyCore(reply: TagmaReply): void {
+  protected applyReplyCore(
+    reply: TagmaReply,
+    sender: Participant | undefined,
+  ): void {
     // A stamped user_message promotes the in-flight optimistic line (both
     // transports receive this frame from the projector). Skip the append path
     // for it -- the line already exists with a synthetic id.
@@ -145,21 +161,35 @@ export abstract class ConversationBase {
     ) {
       const localId = this.pendingLocalId;
       const ackId = reply.history_id;
+      // The wire sender is authoritative for the confirmed line: overwrite the
+      // optimistic line's (stale, client-side) sender so a handle that changed
+      // mid-session does not freeze on the old value, matching every other path
+      // where the wire sender drives the rendered/cached sender.
+      const wireSender = sender ? toSender(sender) : undefined;
       this.transcript = replaceLineId(
         this.transcript,
         localId,
         ackId,
         reply.created_at ?? undefined,
+        wireSender,
       );
       const confirmed = this.transcript.lines.find(
         (l) => l.historyId === ackId,
       );
       if (confirmed) {
+        // Cache the confirmed user line. Use the plain `wireSender` -- NOT
+        // `confirmed.sender`: the line lives in a `$state` transcript, so its
+        // nested `sender` is a Svelte Proxy, which IndexedDB's structured clone
+        // rejects (DataCloneError). `put` swallows that error, so reading the
+        // proxy sender here silently dropped EVERY user message from the cache
+        // (they vanished on refresh). `wireSender` is a fresh plain object.
+        // `text`/`createdAt` are primitives, safe to read off the proxy line.
         void cachePut({
           conversationId: this.cacheConversationId,
           historyId: ackId,
           role: "user",
           text: confirmed.text,
+          sender: wireSender,
           createdAt: confirmed.createdAt,
         });
       }
@@ -179,14 +209,15 @@ export abstract class ConversationBase {
       return;
     }
     const lineId = realId > 0 ? realId : (this.syntheticSeq -= 1);
-    this.transcript = applyTagmaReply(this.transcript, reply, lineId);
-    const cl = cacheLineOf(reply);
+    this.transcript = applyTagmaReply(this.transcript, reply, sender, lineId);
+    const cl = cacheLineOf(reply, sender);
     if (cl) {
       void cachePut({
         conversationId: this.cacheConversationId,
         historyId: cl.historyId,
         role: cl.role,
         text: cl.text,
+        sender: cl.sender,
         createdAt: cl.createdAt,
       });
       if (cl.historyId > this.maxRendered) this.maxRendered = cl.historyId;
@@ -214,6 +245,7 @@ export abstract class ConversationBase {
           ),
         },
         syntheticErrorReply(messageOf(e)),
+        undefined,
         (this.syntheticSeq -= 1),
       );
       this.pendingLocalId = null;
@@ -244,9 +276,9 @@ export abstract class ConversationBase {
     let failure: unknown = null;
     const drainReplies = async () => {
       try {
-        for await (const reply of t.replies()) {
+        for await (const { sender, reply } of t.replies()) {
           if (!this.isLive()) return;
-          this.applyReplyCore(reply);
+          this.applyReplyCore(reply, sender);
         }
       } catch (e) {
         if (this.isLive()) failure = e;
@@ -333,7 +365,13 @@ export class RelayConversation extends ConversationBase {
     label: string | null,
   ) {
     // Relay store key == the derived conversation id == the cache key.
-    super(conversationId, store, transport, conversationId);
+    super(
+      conversationId,
+      store,
+      transport,
+      conversationId,
+      transport.localSender,
+    );
     this.tagmaId = tagmaId;
     this.label = label;
   }
@@ -386,7 +424,13 @@ export class LocalConversation extends ConversationBase {
     // attachLocal resolves the transport before binding; there is no opening
     // window. The conversation is open for the moment the drain runs; it flips
     // to offline/error when the SSE ends or fails.
-    super("local", store, transport, cacheConversationId);
+    super(
+      "local",
+      store,
+      transport,
+      cacheConversationId,
+      transport.localSender,
+    );
     this.status = "open";
   }
 }

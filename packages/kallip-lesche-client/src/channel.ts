@@ -21,7 +21,7 @@ import {
   generateEphemeralKeyPair,
   verifyKeyExchange,
 } from "./crypto.ts";
-import { decodeB64, encodeB64 } from "./base64.ts";
+import { decodeB64, encodeB64, participantIdForUser } from "@kallipai/kallip-common";
 import type {
   Envelope,
   KeyExchangeInit,
@@ -50,6 +50,7 @@ export async function openRelayChannel(
   lesche: LescheClient,
   tagmaId: string,
   userId: string,
+  userHandle: string,
   pinnedKeyB64: string,
 ): Promise<RelayChannel> {
   const pinnedKey = decodeB64(pinnedKeyB64);
@@ -77,7 +78,18 @@ export async function openRelayChannel(
     );
   }
   const sessionKey = deriveSessionKey(initiatorPriv, responderEph);
-  return new RelayChannel(lesche, conversationId, tagmaId, userId, sessionKey);
+  // The wire sender id is the opaque room-layer participant id (a deterministic
+  // derivation from the user id), NOT the raw user id -- it must match the
+  // Rust `Participant::id` (`ParticipantId::for_user`) byte-for-byte.
+  const participantId = await participantIdForUser(userId);
+  return new RelayChannel(
+    lesche,
+    conversationId,
+    tagmaId,
+    participantId,
+    userHandle,
+    sessionKey,
+  );
 }
 
 /**
@@ -100,9 +112,20 @@ export class RelayChannel {
     private readonly lesche: LescheClient,
     readonly conversationId: string,
     readonly tagmaId: string,
-    private readonly userId: string,
+    private readonly participantId: string,
+    private readonly userHandle: string,
     private readonly sessionKey: Uint8Array,
   ) {}
+
+  /** The local user's wire sender (the participant the app stamps on outbound
+   * envelopes and on optimistic bubbles). `id` is the derived participant id. */
+  get localParticipant(): Participant {
+    return {
+      id: this.participantId,
+      kind: "human",
+      handle: this.userHandle,
+    };
+  }
 
   /** Decrypt an inbound envelope and append its `TagmaReply` to the queue.
    * Called by the SSE demux. A ciphertext that fails to decrypt (wrong key,
@@ -117,12 +140,12 @@ export class RelayChannel {
     this.resolveDrain?.();
   }
 
-  /** The decrypted `TagmaReply` stream. Ends when `close()` is called. The
-   * channel is a pure transport: it does NOT dedup — ordering/dedup by
-   * `history_id` is the UI store's job (it owns the rendered cursor and the
-   * local cache), since dedup needs to span both batch replay and live frames
-   * across a reconnect. */
-  async *replies(): AsyncGenerator<TagmaReply> {
+  /** The decrypted `{sender, reply}` stream. The sender is the relay-authenticated
+   * envelope sender (the tagma for outbound content, the user for the inbound
+   * echo); it is no longer discarded. Ends when `close()` is called. The channel
+   * is a pure transport: it does NOT dedup — ordering/dedup by `history_id` is
+   * the UI store's job. */
+  async *replies(): AsyncGenerator<{ sender: Participant; reply: TagmaReply }> {
     while (!this.closed) {
       while (this.inbound.length > 0) {
         const envelope = this.inbound.shift()!;
@@ -145,7 +168,10 @@ export class RelayChannel {
           }
           continue;
         }
-        yield JSON.parse(new TextDecoder().decode(plaintext)) as TagmaReply;
+        yield {
+          sender: envelope.sender,
+          reply: JSON.parse(new TextDecoder().decode(plaintext)) as TagmaReply,
+        };
       }
       if (this.closed) break;
       // Wait for the next inbound envelope (or close).
@@ -217,7 +243,7 @@ export class RelayChannel {
       sequence_n,
       plaintext,
     );
-    const sender: Participant = { kind: "user", user_id: this.userId };
+    const sender: Participant = this.localParticipant;
     const envelope: Envelope = {
       conversation_id: this.conversationId,
       sender,

@@ -54,8 +54,7 @@ async fn post_signal(
     let app_tx = {
         let reg = state.read()?;
         let owner = reg
-            .presence
-            .get(&path_tagma)
+            .presence_by_tagma(&path_tagma)
             .ok_or_else(|| ApiError::not_found("no live tunnel for tagma"))?
             .owner
             .clone();

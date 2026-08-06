@@ -22,6 +22,93 @@ use tokio_util::sync::CancellationToken;
 
 pub type SharedState = Arc<AppState>;
 
+/// Tagma-side cache of the rooms this tagma belongs to. Rooms are plaintext
+/// server-readable (the lesche enforces member access), so the cache is pure
+/// routing state: it tells the relay inbound fork and the agent's room
+/// send/read/list routes whether a given conversation id is a room envelope
+/// (vs the bilateral 1:1 conversation). Populated from the `list_my_rooms` poll
+/// (the room-membership pump in `relay::room_poll`, whose immediate first tick
+/// warms it on tunnel-up) and refreshed on each `Wake` nudge.
+///
+/// Best-effort: a cold or stale miss for a room routes the envelope to the
+/// bilateral path, where it is dropped (the lesche member-gated read still
+/// works) -- self-correcting on the next poll that warms the entry.
+#[derive(Default)]
+pub struct JoinedRooms {
+    rooms: Mutex<HashSet<kallip_agora_common::ids::RoomId>>,
+}
+
+impl JoinedRooms {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether `room` is a room this tagma belongs to.
+    pub async fn is_joined(&self, room: &kallip_agora_common::ids::RoomId) -> bool {
+        self.rooms.lock().await.contains(room)
+    }
+
+    /// Replace the room set from a fresh `list_my_rooms` snapshot.
+    pub async fn set_joined_rooms(
+        &self,
+        rooms: impl IntoIterator<Item = kallip_agora_common::ids::RoomId>,
+    ) {
+        let mut g = self.rooms.lock().await;
+        g.clear();
+        g.extend(rooms);
+    }
+
+    /// Snapshot of the room ids (for the agent's room-list route).
+    pub async fn joined_rooms(&self) -> HashSet<kallip_agora_common::ids::RoomId> {
+        self.rooms.lock().await.clone()
+    }
+}
+
+/// The offline (direct-HTTP) path's local user identity. There is no relay /
+/// WebAuthn offline, so the tagma synthesizes a stable `Participant` (Human) for
+/// inbound messages and surfaces the same values on `GET /agents/root` so the
+/// offline frontend renders the optimistic bubble. Loaded once at boot from
+/// `KALLIP_LOCAL_USER_ID` / `KALLIP_LOCAL_USER_HANDLE` (defaults below); the
+/// online path ignores these (its sender is the relay-authenticated envelope).
+#[derive(Clone, Debug)]
+pub struct LocalUserIdentity {
+    pub user_id: String,
+    pub handle: String,
+}
+
+impl Default for LocalUserIdentity {
+    fn default() -> Self {
+        Self {
+            user_id: "local-operator".to_string(),
+            handle: "Operator".to_string(),
+        }
+    }
+}
+
+impl LocalUserIdentity {
+    /// Read the local user identity from the environment, falling back to the
+    /// [`Default`]. Called once at boot.
+    pub fn from_env() -> Self {
+        Self {
+            user_id: std::env::var("KALLIP_LOCAL_USER_ID")
+                .unwrap_or_else(|_| "local-operator".to_string()),
+            handle: std::env::var("KALLIP_LOCAL_USER_HANDLE")
+                .unwrap_or_else(|_| "Operator".to_string()),
+        }
+    }
+
+    /// The wire sender for an inbound offline message.
+    pub fn participant(&self) -> kallip_lesche_common::message::Participant {
+        use kallip_agora_common::ids::{ParticipantId, ParticipantKind, UserId};
+        kallip_lesche_common::message::Participant {
+            id: ParticipantId::for_user(&UserId::from(self.user_id.clone())),
+            kind: ParticipantKind::Human,
+            handle: self.handle.clone(),
+            tagma_id: None,
+        }
+    }
+}
+
 pub struct AppState {
     /// Agent registry. **Lock order:** this RwLock must be acquired before
     /// any per-agent `exec_policy` std::sync::RwLock inside agent entries.
@@ -69,6 +156,13 @@ pub struct AppState {
     /// stamped frame onto a bus both serving paths (direct SSE + relay envelope)
     /// forward. Installed once at startup after the `Arc<AppState>` exists.
     pub external: std::sync::OnceLock<crate::external::ExternalProjector>,
+    /// Room-routing cache: which of this tagma's rooms exist (all plaintext).
+    /// Populated by the room-membership pump; independent of the relay, so it
+    /// stays usable even when the relay is not online. See [`JoinedRooms`].
+    pub joined_rooms: Arc<JoinedRooms>,
+    /// The offline path's local user identity (online path uses the envelope
+    /// sender). Loaded once at boot.
+    pub local_user: LocalUserIdentity,
 }
 
 /// Combined index: agent map + token-hash→id lookup + subagent reverse pointers.
@@ -306,6 +400,8 @@ impl RegistryEntry {
             // Populated only by `get_root_agent` (the sole external-conversation
             // surface); absent on list/metadata summaries.
             conversation_id: None,
+            local_user_id: None,
+            local_user_handle: None,
         }
     }
 }
@@ -341,6 +437,8 @@ impl AppState {
             relay: std::sync::Mutex::new(None),
             direct: std::sync::OnceLock::new(),
             external: std::sync::OnceLock::new(),
+            joined_rooms: Arc::new(JoinedRooms::new()),
+            local_user: LocalUserIdentity::default(),
         }
     }
 
@@ -370,6 +468,8 @@ impl AppState {
             relay: std::sync::Mutex::new(None),
             direct: std::sync::OnceLock::new(),
             external: std::sync::OnceLock::new(),
+            joined_rooms: Arc::new(JoinedRooms::new()),
+            local_user: LocalUserIdentity::from_env(),
         }
     }
 }

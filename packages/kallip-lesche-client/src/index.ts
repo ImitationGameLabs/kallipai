@@ -22,8 +22,25 @@ export { clear as clearConvCache, loadAll, put } from "./cache.ts";
 export type {
   AuthoredEvent,
   Envelope,
+  HistoryEntry,
+  Participant,
+  RoomMessageView,
   SignalEvent,
   TagmaReply,
 } from "./types.ts";
 export type { LescheEvent } from "./types.ts";
+// Room management (relocated from the agora client).
+export type {
+  AddTagmaRequest,
+  CreateInviteRequest,
+  CreateInviteResponse,
+  ParticipantKind,
+  RoomInviteView,
+  RoomMember,
+  RoomMemberProfile,
+  RoomRosterView,
+  RoomView,
+  TagmaRoomView,
+  Visibility,
+} from "./types.ts";
 export { LescheApiError } from "./types.ts";

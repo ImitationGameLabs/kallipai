@@ -9,6 +9,18 @@
 # lesche env and the web app use (code default kallipai.com; .env sets
 # kallipai.lan for dev). See docs/development.md for the one-time host setup
 # (mkcert cert into <repo>/dev-certs, host trust, LAN DNS).
+#
+# Global options: HTTP/3 is disabled in dev. Caddy advertises `alt-svc: h3`
+# otherwise, and Firefox upgrades the cross-subdomain SSE (`/v1/me/events`) to
+# h3, where the long-lived stream wedges (curl h3 works; Firefox's h3 stack
+# does not). Pinning h1/h2 keeps the app SSE flowing without changing the
+# prod topology decision. Re-enable here once the h3 streaming path is verified
+# end-to-end in Firefox.
+{
+	servers {
+		protocols h1 h2
+	}
+}
 
 *.{$KALLIP_DEV_DOMAIN} {
 	tls /certs/cert.pem /certs/key.pem

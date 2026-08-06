@@ -29,8 +29,8 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Kill an entire process group, then reap the leader.
 ///
-/// Phase 1: SIGTERM the group, wait up to [`KILL_GRACE`] for the child to exit.
-/// Phase 2: if it did not, SIGKILL the group and reap. Returns `true` when the
+/// Step 1: SIGTERM the group, wait up to [`KILL_GRACE`] for the child to exit.
+/// Step 2: if it did not, SIGKILL the group and reap. Returns `true` when the
 /// child exited during the graceful phase.
 pub(super) async fn kill_tree(child: &mut Child) -> Result<bool, ShellError> {
     let Some(pid) = child.id() else {

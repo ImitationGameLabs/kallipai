@@ -123,10 +123,10 @@ enrollment code -- starting it with `KALLIP_TAGMA_RELAY_AGORA_URL` set but no co
 degrades the tagma to local-only (it logs an error and keeps serving local
 agents; the lesche message route returns 503).
 
-### Phase 1 -- agora side
+### Agora side
 
 ```sh
-arion up -d                # caddy + agora + lesche + postgres (arion builds the workspace via the flake)
+arion up -d                # caddy + agora + lesche + agora-postgres + lesche-postgres (arion builds the workspace via the flake)
 ```
 
 Dev is fronted by Caddy (see the one-time setup above): the browser loads the
@@ -151,8 +151,8 @@ tooling — `kallip-admin` and curl keep using `http://localhost:7100` /
 #### Register a test user (first bring-up only)
 
 Signup is invite-gated, so a fresh database needs an invite code before anyone
-can register. The `pgdata` volume persists across `arion down` / `up`, so this
-sub-flow runs **once per volume** -- check before doing it:
+can register. The `agora_pgdata` volume persists across `arion down` / `up`, so
+this sub-flow runs **once per volume** -- check before doing it:
 
 ```sh
 KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test kallip-admin --agora-url http://localhost:7100 users list
@@ -200,7 +200,7 @@ KALLIP_AGORA_ADMIN_TOKEN="$TOK" kallip-admin --agora-url http://localhost:7100 .
 
 `sk-admin-test` is a dev-only fixture; prod must set a strong secret.
 
-### Phase 2 -- tagma side
+### Tagma side
 
 The tagma (agent host + in-process relay connector) is a separate composition
 (`compose/dev/tagma.nix`) so its lifecycle does not entangle with the agora
@@ -222,8 +222,9 @@ arion up -d                                # agora side
 arion -f compose/dev/tagma.nix up -d       # tagma side, if you want it up
 ```
 
-Tail logs with `arion logs -f <service>` (`agora`, `tagma`, `postgres`); for
-the tagma use `arion -f compose/dev/tagma.nix logs -f tagma`.
+Tail logs with `arion logs -f <service>` (`agora`, `agora-postgres`,
+`lesche-postgres`); for the tagma use `arion -f compose/dev/tagma.nix logs -f
+tagma`.
 
 ## Optional bind overrides
 
@@ -256,17 +257,17 @@ See [container.md](reference/container.md) for which suites run.
 
 When the backend changes in a way that invalidates existing data (a schema
 reset, an incompatible wire format, or you simply want to start over), tear down
-**including volumes** and re-run bring-up from Phase 1. `down -v` wipes
-`pgdata` plus the tagma `data` / `workspace` volumes, so the test user, the
-enrollment code, and all tagma state are gone -- the invite-code sub-flow is
-needed again:
+**including volumes** and re-run bring-up from the agora side. `down -v` wipes
+`agora_pgdata` and `lesche_pgdata` plus the tagma `data` / `workspace` volumes,
+so the test user, the enrollment code, and all tagma state are gone -- the
+invite-code sub-flow is needed again:
 
 ```sh
 arion down -v                                  # agora side: stop AND delete volumes
 arion -f compose/dev/tagma.nix down -v         # tagma side: stop AND delete volumes
-arion up -d                                    # agora side (Phase 1)
+arion up -d                                    # agora side
 # ...mint invite code, register, mint enrollment code, fill .env...
-arion -f compose/dev/tagma.nix up -d           # tagma side (Phase 2)
+arion -f compose/dev/tagma.nix up -d           # tagma side
 ```
 
 The agora side and the tagma are separate compose projects (`kallipai-dev` and

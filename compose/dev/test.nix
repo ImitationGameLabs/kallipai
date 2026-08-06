@@ -9,7 +9,7 @@
 #   arion logs tagma
 #
 # Split from arion-compose.nix: the test runner shares nothing with the agora
-# side (caddy/agora/lesche/postgres) -- its only inputs are the pre-built
+# side (caddy/agora/lesche/agora-postgres/lesche-postgres) -- its only inputs are the pre-built
 # integration-tests closure and the shared shell/CA layer from
 # container-shared.nix. A flat single-purpose file here mirrors
 # compose/dev/tagma.nix and lets arion-compose.nix drop the old

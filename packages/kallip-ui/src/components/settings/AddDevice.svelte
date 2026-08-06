@@ -51,7 +51,7 @@
   </Dialog.Trigger>
 
   <Portal>
-    <Dialog.Backdrop class="fixed inset-0 bg-surface-950-50/60 z-50" />
+    <Dialog.Backdrop class="fixed inset-0 bg-surface-950/60 z-50" />
     <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
       <Dialog.Content class="card preset-tonal-surface w-full max-w-md p-5 space-y-4">
         <Dialog.Title class="text-lg font-semibold">Add a device</Dialog.Title>

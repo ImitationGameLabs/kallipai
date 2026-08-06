@@ -14,6 +14,32 @@ export type FailoverChainExhausted =
   | "allCandidatesUnbuildable"
   | "allCandidatesInfeasible";
 
+/** The single sender identity. Mirrors `participant.rs::Participant` (a struct,
+ * NOT the old serde-tagged enum). The room-layer identity is an opaque
+ * `id` (a derived `ParticipantId` -- never a daemon-internal agent id), paired
+ * with a `kind` (`"human"` | `"agent"`) and an advisory display `handle`
+ * (sanitized at ingest on the tagma). */
+export type ParticipantKind = "human" | "agent";
+export type Participant = {
+  readonly id: string;
+  readonly kind: ParticipantKind;
+  readonly handle: string;
+  /** The agent's `tagma_id`, relay-stamped on room senders (history + live) so
+   * a message header can deep-link to that tagma's profile without reversing
+   * the one-way participant id. Absent for humans and for bilateral envelopes
+   * that never carry it. */
+  readonly tagma_id?: string;
+};
+
+/** One decoded history entry: the sender paired with the content-only reply.
+ * Mirrors `message.rs::HistoryEntry`. The history-pull response shape (online
+ * replay and offline `/external/history`), matching the live `{sender, body}`
+ * shape so the frontend has one render path. */
+export type HistoryEntry = {
+  readonly sender: Participant;
+  readonly reply: TagmaReply;
+};
+
 /** An authored message: conversation content that crosses the E2EE envelope
  * (online) or the plaintext direct SSE (offline) and is persisted in
  * chat_history (replayable on reconnect). serde tag = `type`, snake_case. There

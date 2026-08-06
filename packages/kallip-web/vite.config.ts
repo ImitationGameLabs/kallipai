@@ -54,6 +54,12 @@ export default defineConfig({
     host: true,
     port: 5173,
     strictPort: true,
+    // The kallip-ui live source (a sibling workspace package) lives outside this
+    // package's root; allow the repo root so it serves without per-path
+    // carve-outs.
+    fs: {
+      allow: [path.resolve(here, "../..")],
+    },
     // Caddy forwards the incoming Host header unchanged, and vite is plain HTTP
     // here (so the HTTPS host-check exemption does NOT apply). Without an
     // explicit allow entry for the proxied hostname, vite rejects the request.

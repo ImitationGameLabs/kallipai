@@ -88,6 +88,16 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "offline + /rooms -> redirect /chat/local (rooms are online-only)",
+  () => {
+    assertEquals(decide({ mode: "offline", pathname: "/rooms" }), {
+      kind: "redirect",
+      url: "/chat/local",
+    });
+  },
+);
+
 Deno.test("offline + / -> redirect /chat/local (old offline root)", () => {
   assertEquals(decide({ mode: "offline", pathname: "/" }), {
     kind: "redirect",
@@ -101,6 +111,16 @@ Deno.test("offline + /chat/{non-local} -> redirect /chat/local", () => {
     url: "/chat/local",
   });
 });
+
+Deno.test(
+  "offline + /rooms/{id} -> redirect /chat/local (rooms are online-only)",
+  () => {
+    assertEquals(decide({ mode: "offline", pathname: "/rooms/room-1" }), {
+      kind: "redirect",
+      url: "/chat/local",
+    });
+  },
+);
 
 Deno.test("offline protected routes render (the local chat + settings)", () => {
   for (const pathname of ["/chat/local", "/settings"]) {
@@ -130,6 +150,22 @@ Deno.test("online + /chat/{id} renders for a signed-in user", () => {
     decide({ mode: "online", pathname: "/chat/conv-1", user: USER }),
     { kind: "render" },
   );
+});
+
+Deno.test("online + /rooms + signed-in -> render", () => {
+  // /rooms is a new online-protected route: it falls through (no collapse rule
+  // for it) to the user checks then render. Pin the fall-through so a future
+  // gate refactor that adds an online allow-list does not silently break it.
+  assertEquals(decide({ mode: "online", pathname: "/rooms", user: USER }), {
+    kind: "render",
+  });
+});
+
+Deno.test("online + /rooms + logged-out -> redirect /login", () => {
+  assertEquals(decide({ mode: "online", pathname: "/rooms", user: null }), {
+    kind: "redirect",
+    url: "/login?next=" + encodeURIComponent("/rooms"),
+  });
 });
 
 Deno.test(

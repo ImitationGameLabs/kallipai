@@ -31,6 +31,7 @@ import {
 } from "@kallipai/kallip-agora-client";
 import type { PairingCodeView } from "../passkeys.svelte.ts";
 import { LescheClient } from "@kallipai/kallip-lesche-client";
+import { participantIdForUser } from "@kallipai/kallip-common";
 import type {
   EnrollmentCodeCardProps,
   TagmaCardProps,
@@ -93,6 +94,13 @@ class AgoraSessionStore {
   // mode-gated, so nothing in offline mode reads `user`. Do not change that
   // without adding a guard.
   user: MeResponse | null | undefined = $state(undefined);
+
+  // The signed-in user's opaque room-layer participant id (`ParticipantId::
+  // for_user`). The room envelope sender + the `mine` flag derive from it, so it
+  // is resolved once per session (in whoami) alongside `user`. Null while
+  // logged out / unresolved. NOT the raw user_id: the lesche's room routes
+  // authenticate the sender against this derived id, so a raw user_id would 403.
+  participantId: string | null = $state(null);
 
   // Split errors (see file comment).
   authError: string | null = $state(null);
@@ -177,6 +185,7 @@ class AgoraSessionStore {
   async whoami(): Promise<void> {
     try {
       this.user = await client().me();
+      this.participantId = await participantIdForUser(this.user.user_id);
       this.authError = null;
     } catch (e) {
       if (
@@ -184,6 +193,7 @@ class AgoraSessionStore {
         (e.status === 401 || e.status === 403)
       ) {
         this.user = null;
+        this.participantId = null;
         this.authError = null;
       } else {
         this.authError = messageOf(e);
@@ -418,6 +428,7 @@ class AgoraSessionStore {
   /** Drop all local state (logout). */
   private reset(): void {
     this.user = null;
+    this.participantId = null;
     this.tagmata = [];
     this.tagmataLoaded = false;
     this.mintedCode = {};

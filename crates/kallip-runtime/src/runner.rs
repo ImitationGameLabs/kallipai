@@ -334,12 +334,12 @@ async fn enforce_pre_call_budget(
     let effective_budget = ctx.config.effective_budget();
     let usage_pct = prompt_tokens * 100 / effective_budget;
 
-    // Phase 1: Progressive warnings.
+    // Step 1: Progressive warnings.
     if check_progressive_warnings(ctx, usage_pct, effective_budget).await {
         return BudgetAction::Recompose;
     }
 
-    // Phase 2: Auto-compact at the highest threshold.
+    // Step 2: Auto-compact at the highest threshold.
     let auto_threshold = ctx.config.auto_compact_threshold() as usize;
     if usage_pct >= auto_threshold {
         info!(

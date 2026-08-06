@@ -2,9 +2,14 @@
 
 mod conversations;
 mod events;
+mod room_management;
+mod rooms;
 mod signal;
 mod status;
 mod tunnel;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use axum::Router;
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -18,10 +23,12 @@ use crate::state::SharedConvState;
 pub fn router(state: SharedConvState) -> Router<()> {
     Router::new()
         .merge(conversations::router().with_state(state.clone()))
+        .merge(rooms::router().with_state(state.clone()))
+        .merge(room_management::router().with_state(state.clone()))
         .merge(events::router().with_state(state.clone()))
         .merge(signal::router().with_state(state.clone()))
         .merge(status::router().with_state(state.clone()))
-        .merge(tunnel::router().with_state(state))
+        .merge(tunnel::router().with_state(state.clone()))
 }
 
 /// Build a CORS layer from a comma-separated allowlist. Mirrors the agora's

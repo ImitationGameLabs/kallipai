@@ -48,6 +48,12 @@ export {
 export { agoraSession } from "./lib/session/agora.svelte.ts";
 export { channelsStore } from "./lib/session/channels.svelte.ts";
 export { realtimeStore } from "./lib/session/realtime.svelte.ts";
+export { roomsStore } from "./lib/session/rooms.svelte.ts";
+export { roomConversationsStore } from "./lib/session/roomConversations.svelte.ts";
+export type {
+  RoomConversation,
+  RoomLine,
+} from "./lib/session/roomConversations.svelte.ts";
 export { configStore } from "./lib/config/config.svelte.ts";
 export { connectDirect } from "./lib/session/connect.ts";
 
@@ -62,7 +68,13 @@ export {
 
 // Route page bodies (consumed by each app's thin +page.svelte wrappers).
 export { default as ChannelChatPage } from "./pages/ChannelChatPage.svelte";
+export { default as TagmaChatPage } from "./pages/TagmaChatPage.svelte";
 export { default as TagmataPage } from "./pages/TagmataPage.svelte";
+export { default as RoomsPage } from "./pages/RoomsPage.svelte";
+export { default as RoomConversationPage } from "./pages/RoomConversationPage.svelte";
+export { default as RoomSettingsPage } from "./pages/RoomSettingsPage.svelte";
+export { default as UserProfilePage } from "./pages/UserProfilePage.svelte";
+export { default as TagmaProfilePage } from "./pages/TagmaProfilePage.svelte";
 export { default as SettingsPage } from "./pages/SettingsPage.svelte";
 export { default as LoginPage } from "./pages/LoginPage.svelte";
 export { default as RegisterPage } from "./pages/RegisterPage.svelte";

@@ -2,9 +2,11 @@
 //! hall, beside the agora).
 //!
 //! The lesche owns every agent/human communication surface -- tagma tunnels,
-//! app event streams, envelope routing, key exchange, presence -- as in-memory
-//! soft-state rebuilt on restart. It never touches the durable store: it
-//! authenticates requests, resolves tagma metadata, and advances the
+//! app event streams, envelope routing, key exchange, presence -- plus the
+//! durable chat store (rooms, membership, message payloads). The in-memory
+//! surfaces are soft-state rebuilt on restart;
+//! the chat schema persists in the lesche's own Postgres. It authenticates
+//! requests, resolves tagma metadata, attests identity facts, and advances the
 //! tunnel-proof replay guard through a narrow `ControlPlane` trait implemented
 //! by an HTTP client (`HttpControlPlane`) that calls the agora's `/internal/*`
 //! API. All app<->tagma business evolution happens in this crate and the shared
@@ -13,7 +15,13 @@
 mod args;
 mod auth;
 mod control_plane_http;
+mod control_policy;
+mod db;
+mod fan;
+mod identity;
+mod member_identity;
 mod middleware;
+mod room_presence;
 mod routes;
 mod sse;
 mod state;
@@ -52,12 +60,20 @@ async fn main() -> Result<()> {
         args.agora_internal_token.clone(),
     ));
 
+    // The durable room-message store, connected + migrated at boot. The state
+    // carries it as `Option<Db>` so the mock routing tests can pass `None`
+    // (they do not exercise persistence); the relay fan-out branches on
+    // `state.db.as_ref()`.
+    let db = db::connect_and_migrate(&args.database_url).await?;
+
     let conv_state: SharedConvState = Arc::new(state::ConversationsState {
         control,
         registry: std::sync::RwLock::new(state::Registry::new()),
         pending_key_exchange: std::sync::Mutex::new(std::collections::HashMap::new()),
         proof_skew_secs: args.proof_skew_secs,
         key_exchange_timeout: Duration::from_secs(args.key_exchange_timeout_secs),
+        db: Some(db),
+        agent_profiles: state::AgentProfileCache::default(),
     });
 
     // The relay routes carry `SharedConvState` (already applied inside
@@ -65,7 +81,8 @@ async fn main() -> Result<()> {
     // `/v1` so the data-plane paths keep their `/v1/...` contract, and apply the
     // CSRF guard to the whole v1 surface (it gates the cookie-bearing
     // `POST /conversations` and is a no-op for bearer/machine requests).
-    let v1 = routes::router(conv_state).layer(axum::middleware::from_fn(middleware::csrf_guard));
+    let v1 =
+        routes::router(conv_state.clone()).layer(axum::middleware::from_fn(middleware::csrf_guard));
 
     // Outermost layers: body limit, then CORS (explicit allowlist, never Any),
     // then request tracing. Mirrors the agora's layer order.
@@ -96,8 +113,9 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Readiness: the process is up (the lesche is soft-state; readiness is "can
-/// accept connections", which is always true until shutdown begins).
+/// Readiness: the process is up. readyz deliberately checks process liveness
+/// only (not DB connectivity), so it stays "can accept connections" -- always
+/// true until shutdown begins.
 async fn readyz() -> &'static str {
     "ready"
 }

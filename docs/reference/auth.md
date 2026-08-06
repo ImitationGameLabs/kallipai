@@ -96,12 +96,14 @@ gate.
 ## Agora / lesche service-to-service boundary
 
 The cloud relay is split into two services: the **agora** (control plane:
-identity, WebAuthn, tagma lifecycle, the durable Postgres store) and the
-**lesche** (data plane: tagma relay tunnels, app event streams, envelope routing,
-presence — all soft-state). The lesche never touches the durable store; it
-authenticates requests, resolves tagma metadata, and advances the tunnel-proof
-replay guard through a narrow `ControlPlane` trait, reached over the agora's
-non-public `/internal/*` HTTP API.
+identity, WebAuthn, tagma lifecycle, the durable identity Postgres store) and
+the **lesche** (data plane: tagma relay tunnels, app event streams, envelope
+routing, presence, plus the durable chat store — rooms, membership, message
+payloads — in its own Postgres). The lesche's in-memory surfaces
+are soft-state; its chat schema persists. It authenticates requests, resolves
+tagma metadata, attests identity facts, and advances the tunnel-proof replay
+guard through a narrow `ControlPlane` trait, reached over the agora's non-public
+`/internal/*` HTTP API.
 
 The two services are addressed on their own subdomains (`agora.<d>` /
 `lesche.<d>` — e.g. `agora.kallipai.lan` / `lesche.kallipai.lan` in dev,

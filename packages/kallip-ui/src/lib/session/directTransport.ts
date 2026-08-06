@@ -13,9 +13,15 @@
 // the POST resolves.
 
 import type { TagmaClient } from "@kallipai/kallip-client";
-import type { SignalEvent, TagmaReply } from "@kallipai/kallip-lesche-client";
+import type {
+  HistoryEntry,
+  Participant,
+  SignalEvent,
+  TagmaReply,
+} from "@kallipai/kallip-lesche-client";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
-import { AsyncQueue, type Transport } from "./transport.ts";
+import type { ConversationSender } from "../transcript.ts";
+import { AsyncQueue, type IncomingFrame, type Transport } from "./transport.ts";
 
 /** The aggregate runtime snapshot on the direct stream (the snake_case wire
  * shape, mirroring the relay's `tagma_status` LescheEvent). Ephemeral operator
@@ -29,11 +35,19 @@ export interface DirectStatusPayload {
   readonly token_consumed: number;
 }
 
+/** The `authored` SSE data payload: the sender paired with the content reply
+ * (the offline path has no relay envelope, so the direct frame carries the
+ * sender itself). Mirrors the Rust `DirectAuthoredPayload`. */
+export interface DirectAuthoredPayload {
+  readonly sender: Participant;
+  readonly reply: TagmaReply;
+}
+
 /** One frame on the direct external SSE, discriminated by the SSE `event:`
  * field. Authored content is persisted/replayable on the tagma; signals and
  * status are ephemeral. */
 export type DirectFrame =
-  | { readonly kind: "authored"; readonly reply: TagmaReply }
+  | { readonly kind: "authored"; readonly payload: DirectAuthoredPayload }
   | { readonly kind: "signal"; readonly event: SignalEvent }
   | { readonly kind: "status"; readonly payload: DirectStatusPayload };
 
@@ -64,7 +78,7 @@ function toSummary(p: DirectStatusPayload): TagmaStatusSummary {
  */
 export class DirectTransport implements Transport {
   private readonly controller = new AbortController();
-  private readonly replyQueue = new AsyncQueue<TagmaReply>();
+  private readonly replyQueue = new AsyncQueue<IncomingFrame>();
   private readonly signalQueue = new AsyncQueue<SignalEvent>();
   private readonly statusQueue = new AsyncQueue<TagmaStatusSummary>();
   private muxStarted = false;
@@ -72,9 +86,10 @@ export class DirectTransport implements Transport {
   constructor(
     private readonly client: TagmaClient,
     readonly agentId: string,
+    readonly localSender: ConversationSender,
   ) {}
 
-  async *replies(): AsyncGenerator<TagmaReply> {
+  async *replies(): AsyncGenerator<IncomingFrame> {
     this.ensureMux();
     while (true) {
       const { value, done } = await this.replyQueue.next();
@@ -117,16 +132,23 @@ export class DirectTransport implements Transport {
     limit?: number;
   }): Promise<void> {
     const resp = await this.client.externalHistory(this.agentId, opts);
-    for (const row of resp.rows) this.replyQueue.push(row);
+    // History rows are `{sender, reply}` entries — the same IncomingFrame shape
+    // live `authored` frames use, so the reply drain consumes live + batch in
+    // one ordered stream.
+    for (const row of resp.rows as HistoryEntry[]) {
+      this.replyQueue.push({ sender: row.sender, reply: row.reply });
+    }
     // Synthesize the batch-end marker so the reducer's `history_batch_end` arm
     // (and any future `live` gate reuse) sees the same terminator the relay
     // path emits. The direct path does not use the `live` gate today; the
-    // marker is consumed for parity + forward-compat.
+    // marker carries no sender (the reducer ignores it for this kind).
     this.replyQueue.push({
-      kind: "history_batch_end",
-      req_id: 0,
-      count: resp.rows.length,
-      more: resp.more,
+      reply: {
+        kind: "history_batch_end",
+        req_id: 0,
+        count: resp.rows.length,
+        more: resp.more,
+      },
     });
   }
 
@@ -152,7 +174,10 @@ export class DirectTransport implements Transport {
       for await (const f of this.frames()) {
         switch (f.kind) {
           case "authored":
-            this.replyQueue.push(f.reply);
+            this.replyQueue.push({
+              sender: f.payload.sender,
+              reply: f.payload.reply,
+            });
             break;
           case "signal":
             this.signalQueue.push(f.event);
@@ -186,7 +211,10 @@ export class DirectTransport implements Transport {
       try {
         switch (f.event) {
           case "authored":
-            yield { kind: "authored", reply: JSON.parse(f.data) as TagmaReply };
+            yield {
+              kind: "authored",
+              payload: JSON.parse(f.data) as DirectAuthoredPayload,
+            };
             break;
           case "signal":
             yield { kind: "signal", event: JSON.parse(f.data) as SignalEvent };

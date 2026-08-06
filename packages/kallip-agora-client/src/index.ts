@@ -10,7 +10,12 @@ export const PACKAGE_NAME = "@kallipai/kallip-agora-client";
 
 export { AgoraClient } from "./http.ts";
 export type { LoginBeginRequest, RegisterBeginRequest } from "./http.ts";
-export { addPasskey, loginWithPasskey, pairDevice, registerWithPasskey } from "./auth.ts";
+export {
+  addPasskey,
+  loginWithPasskey,
+  pairDevice,
+  registerWithPasskey,
+} from "./auth.ts";
 export type {
   AddPasskeyArgs,
   AddPasskeyResult,
@@ -35,6 +40,8 @@ export type {
   PairBeginRequest,
   PairFinishRequest,
   PasskeySummary,
+  PublicTagmaProfile,
+  PublicUserProfile,
   RegisterBeginResponse,
   RegisterFinishRequest,
   RenamePasskeyRequest,

@@ -72,6 +72,7 @@ reqwest = { version = "0.13.2", default-features = false, features = [
   "rustls",
   "stream",
 ] }
+bincode = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 # Match sea-orm's sqlx (0.8); the tagma names SqliteConnectOptions for PRAGMAs.
@@ -91,7 +92,7 @@ axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 tokio-stream = "0.1"
-uuid = { version = "1", features = ["v4", "v5"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 sea-orm = { version = "1.1", default-features = false, features = [
   "sqlx-postgres",
   "runtime-tokio-rustls",

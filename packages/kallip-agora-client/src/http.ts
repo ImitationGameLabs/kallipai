@@ -19,6 +19,8 @@ import type {
   PairBeginRequest,
   PairFinishRequest,
   PasskeySummary,
+  PublicTagmaProfile,
+  PublicUserProfile,
   RegisterBeginResponse,
   RegisterFinishRequest,
   RenamePasskeyRequest,
@@ -219,6 +221,19 @@ export class AgoraClient extends BaseClient {
    * app verifies the lesche's key-exchange signature against it. */
   getTagma(id: string): Promise<TagmaInfo> {
     return this.json(`/v1/tagmata/${encodeURIComponent(id)}`, "GET");
+  }
+
+  /** `GET /v1/users/{username}` — a public user profile card. Public + per-IP
+   * rate-limited; an unknown/disabled/malformed username 404s. */
+  getUserProfile(username: string): Promise<PublicUserProfile> {
+    return this.json(`/v1/users/${encodeURIComponent(username)}`, "GET");
+  }
+
+  /** `GET /v1/tagmata/{id}/profile` — a public tagma profile card. Public +
+   * per-IP rate-limited; an unknown/pending/revoked tagma (or one whose owner
+   * is disabled) 404s. */
+  getTagmaProfile(id: string): Promise<PublicTagmaProfile> {
+    return this.json(`/v1/tagmata/${encodeURIComponent(id)}/profile`, "GET");
   }
 }
 

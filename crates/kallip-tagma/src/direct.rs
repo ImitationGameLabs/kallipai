@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use kallip_common::protocol::SignalEvent;
 use kallip_lesche_common::event::TagmaStatusPayload;
-use kallip_lesche_common::message::TagmaReply;
+use kallip_lesche_common::message::{Participant, TagmaReply};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -33,14 +33,27 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 /// (variant name + inner JSON) lives in `crate::sse::serialize_direct_frame`.
 #[derive(Clone, Debug)]
 pub(crate) enum DirectFrame {
-    /// An authored message (a stamped `TagmaReply` forwarded from the
-    /// projector): an `assistant_content` event, a `user_message` echo, etc.
-    /// Already persisted by the projector.
-    Authored(TagmaReply),
+    /// An authored message forwarded from the projector: an `assistant_content`
+    /// event, a `user_message` echo, etc. Carries the sender alongside the
+    /// content reply (mirrors the online envelope's `{sender, body}`); already
+    /// persisted by the projector.
+    Authored {
+        sender: Participant,
+        reply: TagmaReply,
+    },
     /// A runtime signal (busy/idle presence, turn terminals, errors). Ephemeral.
     Signal(SignalEvent),
     /// An aggregate runtime snapshot. Ephemeral.
     Status(TagmaStatusPayload),
+}
+
+/// The JSON payload serialized for an `authored` direct-SSE event: the sender
+/// paired with the content reply, so the offline frontend (which has no relay
+/// envelope) renders the author from one uniform shape.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DirectAuthoredPayload {
+    pub sender: Participant,
+    pub reply: TagmaReply,
 }
 
 /// The direct serving handle. Always present on the tagma (it serves any local
@@ -97,8 +110,11 @@ impl DirectServing {
                 }
                 recv = rx.recv() => match recv {
                     Ok(frame) => match frame {
-                        ExternalFrame::Authored(reply) => {
-                            let _ = self.inner.frames_tx.send(DirectFrame::Authored(reply));
+                        ExternalFrame::Authored { sender, reply } => {
+                            let _ = self
+                                .inner
+                                .frames_tx
+                                .send(DirectFrame::Authored { sender, reply });
                         }
                         ExternalFrame::Signal(event) => {
                             let _ = self.inner.frames_tx.send(DirectFrame::Signal(event));

@@ -26,6 +26,38 @@ const SESSION_COOKIE_NAME: &str = "kallip_session";
 #[derive(Debug, Clone)]
 pub struct AuthPrincipal(pub Principal);
 
+/// The authoritative display identity for a cookie-authenticated user, stashed
+/// on the request by [`AuthPrincipal`]'s extractor. `None` for bearer (tagma /
+/// admin) requests. Consumed by handlers that stamp room identity so a human
+/// sender's name/handle is relay-resolved, not client-supplied.
+#[derive(Debug, Clone)]
+pub struct UserDisplay {
+    pub username: String,
+    /// Read by the roster path (a follow-up); the message-stamp path builds the
+    /// stable handle from `username` only.
+    #[allow(dead_code)]
+    pub display_name: Option<String>,
+}
+
+/// Optional extractor for [`UserDisplay`] (present only for cookie/user
+/// requests). Handlers read it to render an authoritative human identity;
+/// `None` means the request is bearer-authenticated (no user display).
+#[derive(Debug, Clone, Default)]
+pub struct OptUserDisplay(pub Option<UserDisplay>);
+
+impl FromRequestParts<SharedConvState> for OptUserDisplay {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &SharedConvState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(OptUserDisplay(
+            parts.extensions.get::<UserDisplay>().cloned(),
+        ))
+    }
+}
+
 impl FromRequestParts<SharedConvState> for AuthPrincipal {
     type Rejection = ApiError;
 
@@ -51,7 +83,15 @@ impl FromRequestParts<SharedConvState> for AuthPrincipal {
                 .await
                 .map_err(control_to_internal)?
                 .ok_or_else(|| ApiError::unauthorized("invalid session"))?;
-            return Ok(AuthPrincipal(Principal::User(user)));
+            // Stash the authoritative display identity on the request so handlers
+            // that stamp room identity (the rooms send path) can use it without a
+            // second verify_session call -- the relay is the sole source of room
+            // identity, retiring the advisory app-supplied `Participant.handle`.
+            parts.extensions.insert(UserDisplay {
+                username: user.username.clone(),
+                display_name: user.display_name.clone(),
+            });
+            return Ok(AuthPrincipal(Principal::User(user.user_id)));
         }
         Err(ApiError::unauthorized("authentication required"))
     }

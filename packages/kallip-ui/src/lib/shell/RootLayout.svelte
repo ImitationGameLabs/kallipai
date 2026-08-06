@@ -6,11 +6,18 @@
   import { classifyError } from "../errors.ts";
   import { agoraSession } from "../session/agora.svelte";
   import { channelsStore } from "../session/channels.svelte";
+  import { roomsStore } from "../session/rooms.svelte";
   import { realtimeStore } from "../session/realtime.svelte";
+  import { roomConversationsStore } from "../session/roomConversations.svelte";
   import { connectDirect } from "../session/connect.ts";
   import { configStore } from "../config/config.svelte";
   import { modeOf } from "../config/mode.ts";
-  import { navFor, pathMatches, type NavIcons } from "./links.ts";
+  import {
+    navFor,
+    pathMatches,
+    tagmaNavIndicator,
+    type NavIcons,
+  } from "./links.ts";
   import { appGateDecision, isPublicRoute } from "./gate.ts";
   import { navigate } from "./port.ts";
 
@@ -38,11 +45,24 @@
   // onMount (not a reactive $effect) so this runs exactly once, with no
   // `booted` flag and no effect read-of-write hazard.
   onMount(() => {
-    // Wire the realtime SSE's inbound envelopes into channelsStore. Bound here
-    // (the shell, where both singletons are in scope) rather than via a
-    // store-to-store import, keeping realtime and channels decoupled. Idempotent
-    // and safe to run once per mount.
-    realtimeStore.setEnvelopeSink((env) => channelsStore.deliver(env));
+    // Wire inbound envelopes: demux by recipient -- an envelope for an OPENED
+    // room conversation goes to the room store (plaintext render); anything else
+    // is the bilateral 1:1 path -> channelsStore. The room store's `get` is the
+    // demux (rooms bypass the bilateral projector per the mellow-baking-taco
+    // decision). Bound here (the shell, where both singletons are in scope)
+    // rather than via a store-to-store import, keeping realtime decoupled from
+    // both. Idempotent + safe to run once per mount.
+    realtimeStore.setEnvelopeSink((env) => {
+      if (roomConversationsStore.get(env.conversation_id)) {
+        roomConversationsStore.deliverLive(
+          env.conversation_id,
+          env.ciphertext,
+          env.sender,
+        );
+      } else {
+        channelsStore.deliver(env);
+      }
+    });
     // Wire runtime signals (busy/idle presence, turn terminals, errors) into
     // the owning channel's transcript. Same shell-binding discipline.
     realtimeStore.setSignalSink((tagmaId, signal) =>
@@ -59,15 +79,32 @@
     // `statusSnapshot` from realtime's in-session cache so the header shows at
     // once (otherwise it waits for the next status push). Same shell-binding
     // discipline; keeps channels decoupled from realtime.
-    channelsStore.setStatusBackfill((tagmaId) => realtimeStore.statusFor(tagmaId));
+    channelsStore.setStatusBackfill((tagmaId) =>
+      realtimeStore.statusFor(tagmaId),
+    );
     // Wire presence transitions to auto-connect: an offline -> online tagma is
     // opened on demand. Same shell-binding discipline as the envelope sink.
+    // NOTE: this is a pre-warm convenience only -- it is no longer load-bearing
+    // for sidebar visibility, since enrolled tagmas always show (linked to
+    // /chat/t/{tagmaId}, which opens on demand). It just makes the spinner
+    // fleeting by opening channels the SSE already knows are online.
     realtimeStore.setPresenceSink((tagmaId, online) => {
       if (!online) return;
       const tagma = agoraSession.tagmata.find(
         (t) => t.tagma_id === tagmaId && t.state === "enrolled",
       );
       if (tagma) void channelsStore.ensureOpen(tagma);
+    });
+    // Wire room-membership-changed nudges into the room roster refresh: a
+    // membership change repaints the member count / creator badge without
+    // waiting for the room page's poll. Same shell-binding discipline.
+    realtimeStore.setRoomMembershipChangedSink((roomId) => {
+      void roomConversationsStore.refreshRoster(roomId);
+    });
+    // Wire room-member presence deltas into the room's live online-member set:
+    // a peer's connect/disconnect mutates the set between roster re-fetches.
+    realtimeStore.setRoomMemberPresenceSink((roomId, memberId, online) => {
+      roomConversationsStore.applyMemberPresence(roomId, memberId, online);
     });
 
     void configStore.ready.then(() => {
@@ -107,7 +144,9 @@
   // the registry was empty when they fired). Live transitions and snapshots
   // arriving after the sweep are handled by the presence sink. `ensureOpen` is
   // idempotent, so a transition the sink already handled and the sweep both
-  // touch is opened exactly once.
+  // touch is opened exactly once. NOTE: like the presence sink, this is now a
+  // pre-warm convenience, not load-bearing for sidebar visibility (enrolled
+  // tagmas always show; /chat/t/{tagmaId} opens on demand).
   $effect(() => {
     const uid = agoraSession.user?.user_id;
     if (mode !== "online" || !uid) return;
@@ -121,17 +160,39 @@
     });
   });
 
+  // Load the rooms registry + invite inbox for the signed-in online user. A
+  // sibling effect to the tagmata one (rooms are a separate concern; the tagma
+  // effect ends in a channel auto-open sweep that is unrelated). Same keying
+  // discipline: `user?.user_id` (a stable primitive), not the `user` object.
+  $effect(() => {
+    const uid = agoraSession.user?.user_id;
+    if (mode !== "online" || !uid) return;
+    void roomsStore.refresh();
+  });
+
+  // Load the signed-in user's passkeys (devices). Gated on `!passkeysLoaded` so
+  // it cooperates with SettingsPage's own passkey-load effect (whichever fires
+  // first loads; the other no-ops) -- two triggers with the SAME guard, not a
+  // maintenance trap. Keyed on user_id; reset() clears passkeysLoaded on logout.
+  $effect(() => {
+    const uid = agoraSession.user?.user_id;
+    if (mode !== "online" || !uid || agoraSession.passkeysLoaded) return;
+    void agoraSession.refreshPasskeys();
+  });
+
   // Run the realtime SSE feed (presence + envelope delivery) while signed-in in
-  // online mode, and tear it down otherwise. Keyed on `user?.user_id` (a stable
+  // online mode; tear it down otherwise. Keyed on `user?.user_id` (a stable
   // primitive), NOT the `user` object: whoami() reassigns `user` to a fresh
-  // object on every fetch, so keying on the object would cycle the SSE on each
+  // object on every fetch, so keying on the object would cycle the feed on each
   // re-fetch. user_id still changes on login-as-different-user / logout, so the
   // cleanup fires exactly when it should.
   $effect(() => {
     const uid = agoraSession.user?.user_id;
     if (mode === "online" && uid) {
       realtimeStore.start();
-      return () => realtimeStore.stop();
+      return () => {
+        realtimeStore.stop();
+      };
     }
   });
 
@@ -155,7 +216,33 @@
     }
   });
 
-  const links = $derived(navFor({ mode, icons, channels: channelsStore.list }));
+  // The online sidebar lists EVERY enrolled tagma (not just open channels):
+  // the indicator reflects the channel transport state, and the entry links to
+  // the tagma-keyed route /chat/t/{tagmaId} which opens the channel on demand.
+  // Channel-transport-only (no realtime/presence) so the dot stays honest when
+  // the realtime SSE is down; peer presence still lives on the /tagmata
+  // dashboard.
+  const tagmaNav = $derived(
+    agoraSession.enrolledCards.map((c) => ({
+      tagmaId: c.tagmaId,
+      label: c.label,
+      indicator: tagmaNavIndicator(
+        channelsStore.getTagmaChannelState(c.tagmaId),
+      ),
+    })),
+  );
+
+  const links = $derived(
+    navFor({
+      mode,
+      icons,
+      tagmata: tagmaNav,
+      rooms: roomsStore.rooms.map((r) => ({
+        roomId: r.room_id,
+        label: r.name || `room ${r.room_id.slice(0, 8)}`,
+      })),
+    }),
+  );
 
   // Segment-boundary match so sibling /chat/{id} entries do not cross-highlight.
   function isActive(href: string): boolean {

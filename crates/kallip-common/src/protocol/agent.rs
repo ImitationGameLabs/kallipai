@@ -127,6 +127,15 @@ pub struct AgentSummary {
     /// direct and relay paths share one conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// The offline path's local user id — present ONLY on the root agent
+    /// summary. The offline frontend stamps its optimistic bubble's sender with
+    /// this; the tagma uses the same value to synthesize the inbound
+    /// `Participant::User` (no relay/WebAuthn offline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_user_id: Option<String>,
+    /// The offline path's local user handle (display name). See `local_user_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_user_handle: Option<String>,
 }
 
 /// Response body for listing agents.

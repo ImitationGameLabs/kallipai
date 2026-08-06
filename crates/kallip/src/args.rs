@@ -70,6 +70,11 @@ pub enum AgentCommand {
 pub enum LescheCommand {
     /// Send a text message to the user (via the tagma's relay, when attached).
     Send(SendArgs),
+    /// List the rooms this tagma has joined (so you can address them with
+    /// `send --room <room>`).
+    Rooms,
+    /// Read a room's history (`--room` required).
+    Read(ReadRoomArgs),
 }
 
 /// Text payload for `kallip lesche send`. The text is a positional argument;
@@ -80,6 +85,26 @@ pub struct SendArgs {
     /// The message text. If omitted, reads the full text from stdin (multiline).
     #[arg(allow_hyphen_values = true)]
     pub text: Option<String>,
+    /// The room id to send into. Omit for the bilateral 1:1
+    /// conversation; pass the room id (copied verbatim from the inbound
+    /// `[From: ... | room <id>]` header) to reply in a multi-member room.
+    #[arg(long, allow_hyphen_values = true)]
+    pub room: Option<String>,
+}
+
+/// Args for `kallip lesche read` (pull a room's history).
+#[derive(Args)]
+pub struct ReadRoomArgs {
+    /// The room id to read from (one of the ids listed by `kallip lesche rooms`).
+    #[arg(long, allow_hyphen_values = true)]
+    pub room: String,
+    /// Return only messages with `seq > after_seq` (exclusive). Default: from
+    /// the start.
+    #[arg(long)]
+    pub after_seq: Option<i64>,
+    /// Max messages to return (server-clamped).
+    #[arg(long)]
+    pub limit: Option<u64>,
 }
 
 #[derive(Args)]

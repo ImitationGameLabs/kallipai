@@ -554,27 +554,8 @@ mod tests {
     //! The WebAuthn crypto ceremonies themselves are exercised by the browser.
 
     use super::*;
-    use crate::test_helpers::{make_state, seed_user};
+    use crate::test_helpers::{make_state, seed_passkey, seed_user};
     use sea_orm::EntityTrait;
-
-    /// Insert a live passkey row for `user_id` (test fixture; the credential
-    /// JSONB is a placeholder — neither the list nor revoke helpers read it).
-    async fn seed_passkey(state: &SharedState, user_id: &UserId, cred_id: Vec<u8>) -> Uuid {
-        let id = Uuid::new_v4();
-        passkeys::ActiveModel {
-            id: Set(id),
-            user_id: Set(user_id.to_string()),
-            cred_id: Set(cred_id),
-            credential: Set(serde_json::json!({})),
-            label: Set("Device".to_string()),
-            created_at: Set(OffsetDateTime::now_utc()),
-            last_used_at: Set(OffsetDateTime::now_utc()),
-        }
-        .insert(&state.db)
-        .await
-        .expect("insert passkey");
-        id
-    }
 
     /// Revoking a passkey hard-deletes it from `passkeys` and appends a
     /// `passkey_revocations` audit row.

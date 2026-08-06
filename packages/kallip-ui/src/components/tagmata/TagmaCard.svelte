@@ -13,6 +13,8 @@
     presenceDotClass,
     presenceLabel,
   } from "../../lib/tagmata.svelte.ts";
+  import { DoorOpen } from "@lucide/svelte";
+  import ManageTagmaRoomsDialog from "./ManageTagmaRoomsDialog.svelte";
   import RevokeTagmaDialog from "./RevokeTagmaDialog.svelte";
 
   let {
@@ -46,6 +48,9 @@
   let confirmingRevoke = $state(false);
   let revoking = $state(false);
   let revokeError = $state<string | null>(null);
+
+  // Manage-rooms dialog (lazy: only opened on demand).
+  let roomsOpen = $state(false);
 
   async function confirmRevoke() {
     if (revoking || !onRevoke) return;
@@ -192,7 +197,8 @@
       <Menu
         positioning={{ placement: "top-end" }}
         onSelect={(e) => {
-          if (e.value === "rename" && onRename) startRename();
+          if (e.value === "rooms") roomsOpen = true;
+          else if (e.value === "rename" && onRename) startRename();
           else if (e.value === "revoke" && onRevoke) confirmingRevoke = true;
         }}
       >
@@ -205,6 +211,13 @@
         <Portal>
           <Menu.Positioner>
             <Menu.Content class="card preset-tonal-surface p-1 min-w-[8rem]">
+              <Menu.Item
+                value="rooms"
+                class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+              >
+                <DoorOpen class="size-4" />
+                Manage rooms
+              </Menu.Item>
               {#if onRename}
                 <Menu.Item
                   value="rename"
@@ -239,5 +252,14 @@
   onCancel={() => {
     confirmingRevoke = false;
     revokeError = null;
+  }}
+/>
+
+<ManageTagmaRoomsDialog
+  open={roomsOpen}
+  tagmaId={tagma.tagmaId}
+  tagmaLabel={tagma.label}
+  onCancel={() => {
+    roomsOpen = false;
   }}
 />

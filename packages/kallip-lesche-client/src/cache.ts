@@ -17,22 +17,30 @@
 /** One cached content line. `historyId` is the tagma `chat_history.id`; the
  * (conversationId, historyId) pair is the IndexedDB primary key. `role` is an
  * opaque string the UI (which owns the role vocabulary) writes and reads back
- * -- this layer does not interpret it. `text` is the rendered line. `createdAt`
- * is the RFC 3339 send time; absent on rows cached before the field existed
- * (reads tolerate `undefined`). */
+ * -- this layer does not interpret it. `text` is the rendered line. `sender`
+ * (when present) is the UI-facing sender the UI wrote, stored verbatim so the
+ * cache-hydrate path renders the author without a server round-trip.
+ * `createdAt` is the RFC 3339 send time; absent on rows cached before the field
+ * existed (reads tolerate `undefined`). */
 export interface CachedLine {
   readonly conversationId: string;
   readonly historyId: number;
   readonly role: string;
   readonly text: string;
+  readonly sender?: {
+    readonly kind: "user" | "agent";
+    readonly id: string;
+    readonly handle: string;
+  };
   readonly createdAt?: string;
 }
 
 const DB_NAME = "kallip-relay";
-// v2: the keyPath field was renamed `convId` -> `conversationId`. The store is
-// a disposable derived cache (re-pulled from the tagma), so on upgrade from v1
-// we drop+recreate it rather than migrate rows.
-const DB_VERSION = 2;
+// v2: the keyPath field was renamed `convId` -> `conversationId`. v3: the row
+// gained an optional `sender`. The store is a disposable derived cache
+// (re-pulled from the tagma), so on upgrade we drop+recreate it rather than
+// migrate rows.
+const DB_VERSION = 3;
 const STORE = "messages";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -49,10 +57,9 @@ function db(): Promise<IDBDatabase> {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (event) => {
       const d = req.result;
-      // Drop any v1 store (keyPath used the old `convId` field name) and
-      // recreate with the renamed keyPath. Disposable cache; re-pull repopulates
-      // it on the next open.
-      if (event.oldVersion < 2 && d.objectStoreNames.contains(STORE)) {
+      // Drop any pre-v3 store (older keyPath or row shape) and recreate. The
+      // cache is disposable and re-pulled from the tagma on the next open.
+      if (event.oldVersion < 3 && d.objectStoreNames.contains(STORE)) {
         d.deleteObjectStore(STORE);
       }
       if (!d.objectStoreNames.contains(STORE)) {

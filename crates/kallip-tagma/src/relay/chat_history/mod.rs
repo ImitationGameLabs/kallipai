@@ -17,6 +17,16 @@
 //! to keep the per-event append off the fsync hot path. Schema is managed by
 //! sea-orm-migration (see [`migration`]); new schema changes are new `m_*`
 //! files appended to `Migrator`, never in-place edits to the init migration.
+//!
+//! ## Module layout
+//!
+//! The sea-orm model lives in [`entity`] and the row->wire decode in
+//! [`decode`]; this module holds the store operations (open/append/read/gc).
+//! `decode_row` and `HistoryRow` are re-exported here so callers keep using the
+//! stable `chat_history::decode_row` path.
+
+mod decode;
+mod entity;
 
 use std::path::Path;
 
@@ -44,68 +54,9 @@ pub(crate) const DEFAULT_HISTORY_CAP: u64 = 100_000;
 /// internally `Arc`'d, so cloning is cheap and shares the pool.
 pub(crate) type Db = DatabaseConnection;
 
-pub(crate) mod entities {
-    pub(crate) mod chat_history {
-        use sea_orm::entity::prelude::*;
-
-        /// One wire frame the pump has produced (outbound) or the user has sent
-        /// (inbound). `id` is a monotonic row id (AUTOINCREMENT: never reused,
-        /// even after GC), stamped onto the wire as `history_id` so the app can
-        /// dedup/order across batch replay and live delivery.
-        ///
-        /// Invariant: a single tagma daemon owns exactly ONE conversation
-        /// (`conversation_id` is derived from the tagma id in `RelayHandle`),
-        /// so the column is constant within a DB. The schema is multi-conversation
-        /// shaped (column + `(conversation_id, id)` index) for forward
-        /// compatibility; if a future phase hosts multiple conversations per
-        /// tagma, only the GC cap needs scoping (see `gc` in the parent module).
-        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-        #[sea_orm(table_name = "chat_history")]
-        pub struct Model {
-            #[sea_orm(primary_key, auto_increment = true)]
-            pub id: i64,
-            #[sea_orm(column_type = "Text")]
-            pub conversation_id: String,
-            /// `outbound` (agent -> user, payload = serialized `TagmaReply::Event`)
-            /// or `inbound` (user -> agent, payload = serialized
-            /// `TagmaRequest::SendMessage`). The replay loop reads `direction`
-            /// to decide how to re-emit each row.
-            #[sea_orm(column_type = "Text")]
-            pub direction: String,
-            /// The `TagmaReply` discriminant (`event`, etc.) for debugging /
-            /// future filtering. The full payload is `payload`.
-            #[sea_orm(column_type = "Text")]
-            pub kind: String,
-            /// Serialized `TagmaReply` (history_id left at 0; the row `id` is
-            /// authoritative and stamped onto the wire frame at emit time).
-            pub payload: Vec<u8>,
-            /// Unix seconds. Indexed indirectly via the id ordering; GC keys off
-            /// this. i64 (not OffsetDateTime) to avoid time-format drift in
-            /// SQLite and keep GC a plain integer compare.
-            pub created_at: i64,
-        }
-
-        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-        pub enum Relation {}
-
-        impl ActiveModelBehavior for ActiveModel {}
-    }
-}
-
-use entities::chat_history::{Column, Entity};
-
-/// One row returned for re-encryption + emit by the history pull paths.
-/// `direction` tells the replay loop how to interpret `payload`: `outbound` ->
-/// a serialized `TagmaReply::Event` (emit as-is); `inbound` -> a serialized
-/// `TagmaRequest::SendMessage` (emit as a `TagmaReply::UserMessage` echo).
-pub(crate) struct HistoryRow {
-    pub id: i64,
-    pub direction: String,
-    pub payload: Vec<u8>,
-    /// Unix seconds the row was appended. Surfaced to the wire as the frame's
-    /// `created_at` so replayed history shows its original send time.
-    pub created_at: i64,
-}
+pub(crate) use decode::{HistoryRow, decode_row};
+use entity::{ActiveModel, Column, Entity, Model};
+use kallip_lesche_common::message::Participant;
 
 /// Open (or create) the chat-history SQLite database at `path` and apply any
 /// pending migrations. The parent directory must already exist with owner-only
@@ -132,24 +83,30 @@ pub(crate) async fn open(path: &Path) -> Result<Db> {
     Ok(db)
 }
 
-/// Append one outbound frame and return `(row id, created_at)` — the id is the
+/// Append one typed frame and return `(row id, created_at)` — the id is the
 /// `history_id` stamped onto the wire reply, the `created_at` is the same Unix
 /// seconds just written so live stamping uses the DB's authoritative value with
-/// zero skew. `kind` is the reply discriminant; `payload` is the serialized
-/// `TagmaReply`.
+/// zero skew. `direction` is `outbound`/`inbound`; `kind` is the wire
+/// discriminant (`event`/`send_message`); `sender` + `text` are the typed
+/// payload (no opaque blob).
 pub(crate) async fn append(
     db: &Db,
     conversation_id: &str,
     direction: &str,
     kind: &str,
-    payload: &[u8],
+    sender: &Participant,
+    text: &str,
 ) -> Result<(i64, i64)> {
+    let (sender_kind, sender_id, sender_handle) = sender_fields(sender);
     let now = unix_secs();
-    let row = entities::chat_history::ActiveModel {
+    let row = ActiveModel {
         conversation_id: sea_orm::Set(conversation_id.to_string()),
         direction: sea_orm::Set(direction.to_string()),
         kind: sea_orm::Set(kind.to_string()),
-        payload: sea_orm::Set(payload.to_vec()),
+        sender_kind: sea_orm::Set(sender_kind.to_string()),
+        sender_id: sea_orm::Set(sender_id.to_string()),
+        sender_handle: sea_orm::Set(sender_handle.to_string()),
+        text: sea_orm::Set(text.to_string()),
         created_at: sea_orm::Set(now),
         ..Default::default()
     };
@@ -160,39 +117,30 @@ pub(crate) async fn append(
     Ok((res.last_insert_id, now))
 }
 
-/// Append `reply` as an outbound row and stamp its row id + `created_at` onto
-/// it in place. Shared by the relay emit path and the direct (local) serving
-/// path. A serialize failure degrades gracefully: the row is not recorded, the
-/// id stays 0, and the caller still delivers the frame live (no dedup across
-/// reconnect for that one frame). A storage failure is logged by the caller.
+/// Decompose a [`Participant`] into its typed column triple. The stored id is
+/// the room-layer `participant_id` (the opaque derived identity); the kind label
+/// goes through `ParticipantKind::as_str`.
+fn sender_fields(sender: &Participant) -> (&str, &str, &str) {
+    (sender.kind.as_str(), sender.id.as_ref(), &sender.handle)
+}
+
+/// Append an outbound `event` row and stamp its row id + `created_at` onto
+/// `reply` in place. Shared by the relay emit path and the direct serving path.
+/// The sender is the agent; `text` is the assistant content. A storage failure
+/// degrades gracefully: the row is not recorded, the id stays 0, and the caller
+/// still delivers the frame live (no dedup across reconnect for that one frame).
 pub(crate) async fn stamp_reply(
     db: &Db,
     conversation_id: &str,
+    sender: &Participant,
+    text: &str,
     reply: &mut kallip_lesche_common::message::TagmaReply,
 ) {
-    let payload = match serde_json::to_vec(reply) {
-        Ok(v) => v,
-        Err(_e) => return,
-    };
     if let Ok((id, created_at)) =
-        append(db, conversation_id, "outbound", reply_kind(reply), &payload).await
+        append(db, conversation_id, "outbound", "event", sender, text).await
     {
         reply.set_history_id(id);
         reply.set_created_at(created_at);
-    }
-}
-
-/// The `kind` discriminant stored alongside a reply payload, for debugging /
-/// future filtering. Only `Event` is normally stored on the outbound path.
-fn reply_kind(reply: &kallip_lesche_common::message::TagmaReply) -> &'static str {
-    use kallip_lesche_common::message::TagmaReply;
-    match reply {
-        TagmaReply::Event { .. } => "event",
-        TagmaReply::MessageAccepted { .. } => "message_accepted",
-        TagmaReply::Interrupted { .. } => "interrupted",
-        TagmaReply::Error { .. } => "error",
-        TagmaReply::UserMessage { .. } => "user_message",
-        TagmaReply::HistoryBatchEnd { .. } => "history_batch_end",
     }
 }
 
@@ -211,15 +159,7 @@ pub(crate) async fn read_last_n(db: &Db, conversation_id: &str, n: u64) -> Resul
         .await
         .context("read chat_history last_n")?;
     rows.reverse();
-    Ok(rows
-        .into_iter()
-        .map(|m| HistoryRow {
-            id: m.id,
-            direction: m.direction,
-            payload: m.payload,
-            created_at: m.created_at,
-        })
-        .collect())
+    Ok(rows.into_iter().map(history_row_from_model).collect())
 }
 
 /// Read up to `limit` rows with `id > after`, oldest-first, both directions
@@ -240,15 +180,7 @@ pub(crate) async fn read_after(
         .all(db)
         .await
         .context("read chat_history after")?;
-    Ok(rows
-        .into_iter()
-        .map(|m| HistoryRow {
-            id: m.id,
-            direction: m.direction,
-            payload: m.payload,
-            created_at: m.created_at,
-        })
-        .collect())
+    Ok(rows.into_iter().map(history_row_from_model).collect())
 }
 
 /// Read up to `limit` rows with `id < before`, oldest-first, both directions
@@ -272,15 +204,20 @@ pub(crate) async fn read_before(
         .await
         .context("read chat_history before")?;
     rows.reverse();
-    Ok(rows
-        .into_iter()
-        .map(|m| HistoryRow {
-            id: m.id,
-            direction: m.direction,
-            payload: m.payload,
-            created_at: m.created_at,
-        })
-        .collect())
+    Ok(rows.into_iter().map(history_row_from_model).collect())
+}
+
+/// Map a sea-orm `Model` into the decoded-read [`HistoryRow`] shape.
+fn history_row_from_model(m: Model) -> HistoryRow {
+    HistoryRow {
+        id: m.id,
+        direction: m.direction,
+        sender_kind: m.sender_kind,
+        sender_id: m.sender_id,
+        sender_handle: m.sender_handle,
+        text: m.text,
+        created_at: m.created_at,
+    }
 }
 
 /// Delete rows older than `ttl_secs` (by `created_at`), then if the row count
@@ -337,70 +274,6 @@ pub(crate) async fn gc(db: &Db, ttl_secs: u64, cap: u64) -> usize {
     deleted
 }
 
-/// Decode one stored [`HistoryRow`] into the wire reply a serving path forwards
-/// (and a history pull returns). Outbound rows decode back to their original
-/// `TagmaReply` (re-stamped with the row id + `created_at`); inbound rows decode
-/// to a `TagmaReply::UserMessage` echo. Returns `None` for rows that cannot be
-/// interpreted — legacy non-authored outbound rows (predating the external
-/// event split, when the pump persisted transient system events), unknown
-/// inbound kinds, and corrupt payloads — so the caller skips them in replay.
-///
-/// Shared by the relay history replay and the direct `/external/history`
-/// endpoint so the two paths cannot drift on row interpretation.
-pub(crate) fn decode_row(row: HistoryRow) -> Option<kallip_lesche_common::message::TagmaReply> {
-    use kallip_lesche_common::message::{TagmaReply, TagmaRequest};
-    match row.direction.as_str() {
-        "outbound" => match serde_json::from_slice::<TagmaReply>(&row.payload) {
-            Ok(mut r) => {
-                r.set_history_id(row.id);
-                r.set_created_at(row.created_at);
-                Some(r)
-            }
-            Err(e) => {
-                // Read-time legacy filter: before the external event split, the
-                // pump persisted system events (busy/idle/status/terminals) as
-                // outbound `TagmaReply::Event` rows. `Event.event` is now
-                // `AuthoredEvent` (AssistantContent only), so those legacy rows
-                // no longer deserialize and are intentionally dropped from
-                // replay — system signals are transient by design.
-                tracing::debug!(
-                    id = row.id,
-                    error = %e,
-                    "filtering legacy non-authored outbound row from history replay"
-                );
-                None
-            }
-        },
-        "inbound" => match serde_json::from_slice::<TagmaRequest>(&row.payload) {
-            Ok(TagmaRequest::SendMessage { text, .. }) => {
-                let mut r = TagmaReply::UserMessage {
-                    history_id: row.id,
-                    text,
-                    created_at: None,
-                };
-                r.set_created_at(row.created_at);
-                Some(r)
-            }
-            Ok(other) => {
-                tracing::warn!(id = row.id, "unexpected inbound kind: {other:?}; skipping");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(id = row.id, "history inbound decode failed: {e}; skipping");
-                None
-            }
-        },
-        other => {
-            tracing::warn!(
-                id = row.id,
-                direction = other,
-                "unknown direction; skipping"
-            );
-            None
-        }
-    }
-}
-
 fn unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -411,12 +284,47 @@ fn unix_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kallip_agora_common::ids::{ParticipantId, ParticipantKind, TagmaId, UserId};
+    use kallip_common::protocol::AuthoredEvent;
+    use kallip_lesche_common::message::{HistoryEntry, TagmaReply};
     use tempfile::TempDir;
 
     async fn open_tmp() -> (Db, TempDir) {
         let dir = TempDir::new().unwrap();
         let db = open(&dir.path().join("h.sqlite")).await.unwrap();
         (db, dir)
+    }
+
+    fn agent_sender() -> Participant {
+        Participant {
+            id: ParticipantId::for_tagma(&TagmaId::from("t1".to_string())),
+            kind: ParticipantKind::Agent,
+            handle: "Tagma".into(),
+            tagma_id: None,
+        }
+    }
+
+    fn user_sender() -> Participant {
+        Participant {
+            id: ParticipantId::for_user(&UserId::from("u1".to_string())),
+            kind: ParticipantKind::Human,
+            handle: "Alice".into(),
+            tagma_id: None,
+        }
+    }
+
+    /// Append with the test's default sender for the given direction and return
+    /// the row id.
+    async fn ap(db: &Db, conv: &str, direction: &str, text: &str) -> i64 {
+        let (kind, sender) = match direction {
+            "outbound" => ("event", agent_sender()),
+            "inbound" => ("send_message", user_sender()),
+            other => panic!("unknown test direction: {other}"),
+        };
+        append(db, conv, direction, kind, &sender, text)
+            .await
+            .unwrap()
+            .0
     }
 
     #[tokio::test]
@@ -430,10 +338,7 @@ mod tests {
             let _db = open(&path).await.unwrap();
         }
         let db = open(&path).await.unwrap();
-        let id = append(&db, "c1", "outbound", "event", b"x")
-            .await
-            .unwrap()
-            .0;
+        let id = ap(&db, "c1", "outbound", "x").await;
         assert!(id > 0);
         assert_eq!(read_last_n(&db, "c1", 10).await.unwrap().len(), 1);
     }
@@ -441,18 +346,9 @@ mod tests {
     #[tokio::test]
     async fn append_returns_monotonic_ids() {
         let (db, _d) = open_tmp().await;
-        let a = append(&db, "c1", "outbound", "event", b"{}")
-            .await
-            .unwrap()
-            .0;
-        let b = append(&db, "c1", "outbound", "event", b"{}")
-            .await
-            .unwrap()
-            .0;
-        let c = append(&db, "c1", "outbound", "event", b"{}")
-            .await
-            .unwrap()
-            .0;
+        let a = ap(&db, "c1", "outbound", "x").await;
+        let b = ap(&db, "c1", "outbound", "x").await;
+        let c = ap(&db, "c1", "outbound", "x").await;
         assert!(a < b && b < c, "ids must be monotonic: {a},{b},{c}");
     }
 
@@ -461,12 +357,7 @@ mod tests {
         let (db, _d) = open_tmp().await;
         let mut ids = Vec::new();
         for _ in 0..5 {
-            ids.push(
-                append(&db, "c1", "outbound", "event", b"x")
-                    .await
-                    .unwrap()
-                    .0,
-            );
+            ids.push(ap(&db, "c1", "outbound", "x").await);
         }
         // Asking for the last 3 returns ids[2..5], oldest-first for replay.
         let got = read_last_n(&db, "c1", 3).await.unwrap();
@@ -486,7 +377,7 @@ mod tests {
         let (db, _d) = open_tmp().await;
         // Insert with an artificially old created_at via raw SQL so TTL hits.
         for _ in 0..3 {
-            append(&db, "c1", "outbound", "event", b"x").await.unwrap();
+            ap(&db, "c1", "outbound", "x").await;
         }
         // Backdate all rows by 1000s.
         db.execute_unprepared("UPDATE chat_history SET created_at = created_at - 1000 WHERE 1;")
@@ -501,7 +392,7 @@ mod tests {
     async fn gc_cap_trims_oldest() {
         let (db, _d) = open_tmp().await;
         for _ in 0..5 {
-            append(&db, "c1", "outbound", "event", b"x").await.unwrap();
+            ap(&db, "c1", "outbound", "x").await;
         }
         // A TTL large enough that no row ages out (10 years), so only the cap
         // of 2 trims the 3 oldest.
@@ -516,26 +407,11 @@ mod tests {
     async fn read_after_returns_newer_both_directions_oldest_first() {
         let (db, _d) = open_tmp().await;
         // Interleave inbound/outbound; ids are assigned in append order.
-        let a = append(&db, "c1", "outbound", "event", b"o1")
-            .await
-            .unwrap()
-            .0;
-        let b = append(&db, "c1", "inbound", "send_message", b"u1")
-            .await
-            .unwrap()
-            .0;
-        let c = append(&db, "c1", "outbound", "event", b"o2")
-            .await
-            .unwrap()
-            .0;
-        let d = append(&db, "c1", "inbound", "send_message", b"u2")
-            .await
-            .unwrap()
-            .0;
-        let _e = append(&db, "c2", "outbound", "event", b"other")
-            .await
-            .unwrap()
-            .0;
+        let a = ap(&db, "c1", "outbound", "o1").await;
+        let b = ap(&db, "c1", "inbound", "u1").await;
+        let c = ap(&db, "c1", "outbound", "o2").await;
+        let d = ap(&db, "c1", "inbound", "u2").await;
+        let _e = ap(&db, "c2", "outbound", "other").await;
         // after=b -> rows c, d (both directions, oldest-first), c2 invisible.
         let got = read_after(&db, "c1", b, 50).await.unwrap();
         assert_eq!(got.len(), 2);
@@ -554,22 +430,10 @@ mod tests {
     #[tokio::test]
     async fn read_before_returns_older_both_directions_oldest_first() {
         let (db, _d) = open_tmp().await;
-        let a = append(&db, "c1", "outbound", "event", b"o1")
-            .await
-            .unwrap()
-            .0;
-        let b = append(&db, "c1", "inbound", "send_message", b"u1")
-            .await
-            .unwrap()
-            .0;
-        let c = append(&db, "c1", "outbound", "event", b"o2")
-            .await
-            .unwrap()
-            .0;
-        let d = append(&db, "c1", "inbound", "send_message", b"u2")
-            .await
-            .unwrap()
-            .0;
+        let a = ap(&db, "c1", "outbound", "o1").await;
+        let b = ap(&db, "c1", "inbound", "u1").await;
+        let c = ap(&db, "c1", "outbound", "o2").await;
+        let d = ap(&db, "c1", "inbound", "u2").await;
         // before=d -> rows a, b, c oldest-first (the chunk older than d).
         let got = read_before(&db, "c1", d, 50).await.unwrap();
         assert_eq!(got.len(), 3);
@@ -591,7 +455,7 @@ mod tests {
         // so a read must surface the row's append time (not drop it).
         let (db, _d) = open_tmp().await;
         let before = unix_secs();
-        append(&db, "c1", "outbound", "event", b"x").await.unwrap();
+        ap(&db, "c1", "outbound", "x").await;
         let after = unix_secs();
         let got = read_last_n(&db, "c1", 1).await.unwrap();
         let created_at = got[0].created_at;
@@ -599,5 +463,56 @@ mod tests {
             before <= created_at && created_at <= after,
             "created_at {created_at} should be within [{before},{after}]"
         );
+    }
+
+    #[tokio::test]
+    async fn typed_round_trip_decodes_sender_and_content() {
+        // The typed columns round-trip: an outbound agent row decodes back to an
+        // Event with the agent sender + the original content; an inbound user
+        // row decodes to a UserMessage with the user sender + text.
+        let (db, _d) = open_tmp().await;
+        append(&db, "c1", "outbound", "event", &agent_sender(), "hello")
+            .await
+            .unwrap();
+        append(&db, "c1", "inbound", "send_message", &user_sender(), "hi")
+            .await
+            .unwrap();
+
+        let rows = read_last_n(&db, "c1", 10).await.unwrap();
+        let entries: Vec<HistoryEntry> = rows.into_iter().filter_map(decode_row).collect();
+        assert_eq!(entries.len(), 2);
+
+        match &entries[0] {
+            HistoryEntry {
+                sender,
+                reply: TagmaReply::Event { event, .. },
+            } => {
+                assert_eq!(sender.kind, ParticipantKind::Agent);
+                assert_eq!(
+                    sender.id,
+                    ParticipantId::for_tagma(&TagmaId::from("t1".to_string()))
+                );
+                assert_eq!(sender.handle, "Tagma");
+                assert!(
+                    matches!(event, AuthoredEvent::AssistantContent { content } if content == "hello")
+                );
+            }
+            other => panic!("expected agent Event, got {other:?}"),
+        }
+        match &entries[1] {
+            HistoryEntry {
+                sender,
+                reply: TagmaReply::UserMessage { text, .. },
+            } => {
+                assert_eq!(sender.kind, ParticipantKind::Human);
+                assert_eq!(
+                    sender.id,
+                    ParticipantId::for_user(&UserId::from("u1".to_string()))
+                );
+                assert_eq!(sender.handle, "Alice");
+                assert_eq!(text, "hi");
+            }
+            other => panic!("expected user UserMessage, got {other:?}"),
+        }
     }
 }

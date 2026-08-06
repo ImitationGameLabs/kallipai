@@ -101,11 +101,14 @@ export function appGateDecision(args: {
 
   // Protected routes.
   if (args.mode === "offline") {
-    // /tagmata is unavailable offline; `/` is the old offline root. Both go to
-    // the local chat. A non-local /chat/{id} deep link is meaningless offline
-    // (no relay conversations exist) -- collapse it to /chat/local too.
+    // /tagmata + /rooms are online-only (the agora control plane is unreachable
+    // offline); `/` is the old offline root. All collapse to the local chat. A
+    // non-local /chat/{id} deep link is meaningless offline (no relay
+    // conversations exist) -- collapse it to /chat/local too. The /rooms/{id}
+    // deep link (a room conversation) is likewise meaningless offline.
     if (
       args.pathname === "/tagmata" ||
+      args.pathname === "/rooms" ||
       args.pathname === "/" ||
       args.pathname === "/chat/local"
     ) {
@@ -113,7 +116,10 @@ export function appGateDecision(args: {
         ? { kind: "render" }
         : { kind: "redirect", url: "/chat/local" };
     }
-    if (args.pathname.startsWith("/chat/")) {
+    if (
+      args.pathname.startsWith("/chat/") ||
+      args.pathname.startsWith("/rooms/")
+    ) {
       return { kind: "redirect", url: "/chat/local" };
     }
     // /settings: page owns its disconnected empty state.

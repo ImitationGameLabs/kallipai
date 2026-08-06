@@ -8,7 +8,7 @@ import { LescheClient } from "./http.ts";
 Deno.test("meEvents parses an SSE stream into LescheEvents", async () => {
   const envelope = {
     conversation_id: "c1",
-    sender: { kind: "agent", tagma_id: "t1" },
+    sender: { id: "p-tagma-1", kind: "agent", handle: "Tagma" },
     sequence_n: 0,
     trace_id: "tr",
     timestamp: "2024-01-01T00:00:00.000Z",

@@ -22,7 +22,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use futures_util::StreamExt;
-use kallip_agora_common::ids::{ConversationId, TagmaId};
+use kallip_agora_common::ids::{ConversationId, RoomId, TagmaId};
+use kallip_agora_common::rooms::TagmaRoomView;
 use kallip_e2ee::DeviceKey;
 use kallip_lesche_common::control::KeyExchangeResponse;
 use kallip_lesche_common::event::{SignalEvent, TagmaStatusPayload};
@@ -43,6 +44,33 @@ struct Inner {
 #[derive(Clone)]
 pub struct LescheClient {
     inner: Arc<Inner>,
+}
+
+/// One stored room message row, as returned by
+/// [`LescheClient::fetch_room_messages`]. Mirrors the lesche `GET
+/// /v1/rooms/{room}/messages` `StoredMessageView` shape; the row payload is the
+/// plaintext `RoomMessage` JSON (rooms are server-readable).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RoomMessageView {
+    pub seq: i64,
+    pub sender: kallip_lesche_common::message::Participant,
+    pub epoch: i64,
+    pub ciphertext: kallip_agora_common::bytes::Ciphertext,
+    #[serde(with = "time::serde::iso8601")]
+    pub created_at: time::OffsetDateTime,
+}
+
+/// A lesche HTTP failure with its status code, so a caller can distinguish a
+/// member-gated 404 (unknown room / not a member) from a transport failure.
+/// Only the room-surface methods return this; the rest of the client still uses
+/// plain `anyhow::Error`.
+#[derive(Debug, thiserror::Error)]
+#[error("lesche {op} returned {status}")]
+pub struct LescheHttpError {
+    /// The operation that failed (for the message).
+    op: &'static str,
+    /// The HTTP status the lesche returned.
+    pub status: reqwest::StatusCode,
 }
 
 impl LescheClient {
@@ -107,6 +135,121 @@ impl LescheClient {
             tokio::time::sleep(wait).await;
         }
         anyhow::bail!("lesche POST exhausted retries (app offline)")
+    }
+
+    /// Post an agent envelope to a multi-member room: `/v1/rooms/{room_id}/
+    /// envelopes`. The room route stores the payload and fans to live members,
+    /// returning 202 ACCEPTED regardless of who is online (offline members pull on
+    /// reconnect). A 202 means durably stored, so the only failure worth riding
+    /// out is the lesche itself being transiently unavailable (503). Retried on
+    /// 503 with the same bounded backoff as [`Self::post_envelope`]; any other
+    /// non-2xx (404 unknown-room / non-member, 400 mismatch, 500 store) is a hard
+    /// failure. A connect error also bails immediately (consistent with
+    /// [`Self::post_envelope`]).
+    pub async fn post_room_envelope(&self, room_id: &RoomId, envelope: &Envelope) -> Result<()> {
+        const BACKOFF: [Duration; 6] = [
+            Duration::from_millis(500),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            Duration::from_secs(8),
+            Duration::from_secs(16),
+        ];
+        // The room route rejects (400) any envelope whose `conversation_id` does
+        // not equal the path room. The field is dual-purpose -- a bilateral
+        // `ConversationId` (v5) on the 1:1 path, a `RoomId` (v4) on the room
+        // path -- and a caller building a room envelope off a bilateral-shaped
+        // helper can leave a stale bilateral id in it. Stamp it from `room_id`
+        // here so no caller can address a room with the wrong id; the type
+        // system will not catch it (both are UUID-string newtypes).
+        let mut envelope = envelope.clone();
+        envelope.conversation_id = ConversationId::from(room_id.as_ref().to_string());
+        let url = self.url(&format!("/v1/rooms/{room_id}/envelopes"));
+        for wait in BACKOFF {
+            let resp = self
+                .inner
+                .http_post
+                .post(&url)
+                .bearer_auth(&self.inner.tagma_token)
+                .json(&envelope)
+                .send()
+                .await
+                .context("lesche room POST failed")?;
+            let status = resp.status();
+            if status.is_success() {
+                return Ok(());
+            }
+            // Retry only on 503 (lesche transiently unavailable); a 202 always
+            // returns on success, so any other non-2xx is a hard failure.
+            if status.as_u16() != 503 {
+                return Err(LescheHttpError {
+                    op: "room POST",
+                    status,
+                }
+                .into());
+            }
+            tokio::time::sleep(wait).await;
+        }
+        anyhow::bail!("lesche room POST exhausted retries (lesche unavailable)")
+    }
+
+    /// Pull a room's message history: `GET /v1/rooms/{room_id}/messages?
+    /// after_seq=&limit=`. Member-only on the relay; returns the stored rows
+    /// (payload = plaintext `RoomMessage` JSON). A non-member / unknown room is
+    /// a [`LescheHttpError`] with status 404. Not retried: a history pull is
+    /// a fresh read, the next call supersedes a dropped one.
+    pub async fn fetch_room_messages(
+        &self,
+        room_id: &RoomId,
+        after_seq: Option<i64>,
+        limit: Option<u64>,
+    ) -> Result<Vec<RoomMessageView>> {
+        let mut query = Vec::new();
+        if let Some(a) = after_seq {
+            query.push(("after_seq", a.to_string()));
+        }
+        if let Some(l) = limit {
+            query.push(("limit", l.to_string()));
+        }
+        let resp = self
+            .inner
+            .http_post
+            .get(self.url(&format!("/v1/rooms/{room_id}/messages")))
+            .query(&query)
+            .bearer_auth(&self.inner.tagma_token)
+            .send()
+            .await
+            .context("lesche room history GET failed")?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LescheHttpError {
+                op: "room history GET",
+                status,
+            }
+            .into());
+        }
+        resp.json().await.context("decode room history")
+    }
+
+    /// List the calling tagma's rooms with each room's live membership + whether
+    /// THIS tagma is the creator (`GET /v1/tagmata/{tagma_id}/rooms`). The
+    /// tagma's room-membership pump polls this to refresh its joined-rooms
+    /// routing cache. `tagma_id` should be the caller's own id (the route is
+    /// self-only).
+    pub async fn list_my_rooms(&self, tagma_id: &TagmaId) -> Result<Vec<TagmaRoomView>> {
+        let resp = self
+            .inner
+            .http_post
+            .get(self.url(&format!("/v1/tagmata/{tagma_id}/rooms")))
+            .bearer_auth(&self.inner.tagma_token)
+            .send()
+            .await
+            .context("list-my-rooms fetch failed")?;
+        let status = resp.status();
+        if !status.is_success() {
+            anyhow::bail!("lesche list-my-rooms returned {status}");
+        }
+        resp.json().await.context("decode list-my-rooms response")
     }
 
     /// Post a key-exchange response for a conversation.
@@ -323,7 +466,9 @@ impl LescheClientBuilder {
 mod tests {
     use super::*;
     use kallip_agora_common::bytes::Ciphertext;
-    use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId};
+    use kallip_agora_common::ids::{
+        ConversationId, ParticipantId, ParticipantKind, TagmaId, TraceId,
+    };
     use kallip_lesche_common::event::AgentState;
     use kallip_lesche_common::message::{Envelope, Participant};
     use wiremock::matchers::{header, method, path};
@@ -339,7 +484,12 @@ mod tests {
         let tagma_id = TagmaId::from("tagma-1".to_string());
         Envelope {
             conversation_id: ConversationId::for_tagma(&tagma_id),
-            sender: Participant::Agent { tagma_id },
+            sender: Participant {
+                id: ParticipantId::for_tagma(&tagma_id),
+                kind: ParticipantKind::Agent,
+                handle: "Tagma".into(),
+                tagma_id: Some(tagma_id),
+            },
             sequence_n: seq,
             trace_id: TraceId::from("trace-1".to_string()),
             timestamp: time::OffsetDateTime::now_utc(),
@@ -387,6 +537,96 @@ mod tests {
             .await
             .expect_err("401");
         assert!(err.to_string().contains("401"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn post_room_envelope_posts_to_room_path() {
+        // The room route returns 202 ACCEPTED (stored + fanned) regardless of
+        // who is online; no 503 retry, just a single POST.
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/rooms/{room}/envelopes")))
+            .and(header("authorization", "Bearer sk-tagma-test"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        client(&server)
+            .post_room_envelope(&room, &sample_envelope(0))
+            .await
+            .expect("accepted");
+    }
+
+    #[tokio::test]
+    async fn post_room_envelope_bails_on_404() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/rooms/{room}/envelopes")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let err = client(&server)
+            .post_room_envelope(&room, &sample_envelope(0))
+            .await
+            .expect_err("404");
+        assert!(err.to_string().contains("404"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn post_room_envelope_stamps_conversation_id_from_room() {
+        // The room route rejects (400) an envelope whose conversation_id does
+        // not match the path room. The client must overwrite whatever the caller
+        // set (here a bilateral conversation id) with the room id, so a caller
+        // cannot address a room with a stale bilateral id.
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/rooms/{room}/envelopes")))
+            .and(body_partial_json(
+                serde_json::json!({ "conversation_id": "room-1" }),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        // The sample envelope carries a bilateral conversation_id derived from a
+        // tagma id -- NOT "room-1". The stamp must replace it.
+        client(&server)
+            .post_room_envelope(&room, &sample_envelope(0))
+            .await
+            .expect("accepted with stamped conversation_id");
+    }
+
+    #[tokio::test]
+    async fn fetch_room_messages_gets_history_path_and_decodes_rows() {
+        use wiremock::matchers::query_param;
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        // Participant is a struct wire type: `{ id, kind, handle }`.
+        let body = serde_json::json!([{
+            "seq": 3,
+            "sender": {"id": "p-tagma-1", "kind": "agent", "handle": "Tagma"},
+            "epoch": 1,
+            "ciphertext": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "created_at": "2026-08-02T00:00:00Z",
+        }]);
+        Mock::given(method("GET"))
+            .and(path("/v1/rooms/room-1/messages"))
+            .and(query_param("after_seq", "2"))
+            .and(query_param("limit", "10"))
+            .and(header("authorization", "Bearer sk-tagma-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let rows = client(&server)
+            .fetch_room_messages(&room, Some(2), Some(10))
+            .await
+            .expect("history fetched");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].seq, 3);
+        assert_eq!(rows[0].epoch, 1);
+        assert_eq!(rows[0].ciphertext.0.len(), 32);
     }
 
     #[tokio::test]
@@ -468,6 +708,7 @@ mod tests {
                 assert_eq!(conversation_id.as_ref(), "c1");
             }
             TunnelInbound::Envelope { .. } => panic!("expected KeyExchange"),
+            TunnelInbound::Wake => panic!("expected KeyExchange"),
         }
     }
 

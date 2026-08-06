@@ -184,6 +184,12 @@ async fn main() -> Result<()> {
         Arc::downgrade(&state),
         Some(history.clone()),
         conversation_id,
+        tagma_id.clone(),
+        // The enrolled label is not yet plumbed from the agora enroll response
+        // into local credentials; fall back to "Tagma" until that lands. The
+        // tagma_id (the load-bearing part for multi-tagma disambiguation) IS
+        // set, so the agent sender is correct.
+        None,
         message_limits,
     );
     if state.external.set(projector).is_err() {
@@ -366,11 +372,12 @@ async fn activate_relay(
             // (The loaded-creds boot constructed the projector with the id
             // already set; this branch is the only caller, once.)
             let conv = kallip_agora_common::ids::ConversationId::for_tagma(&tagma_id);
-            state
+            let projector = state
                 .external
                 .get()
-                .expect("external projector installed before relay activation")
-                .set_conversation_id(conv);
+                .expect("external projector installed before relay activation");
+            projector.set_conversation_id(conv);
+            projector.set_tagma_id(tagma_id.clone());
             (tagma_id, token)
         }
     };
@@ -393,10 +400,22 @@ async fn activate_relay(
         }
     };
 
+    // The data-plane client: tagma tunnel, envelope/KEX POSTs, room discovery
+    // (the chat domain lives in lesche now). Built once and shared by the room
+    // routes and the relay orchestrator (a cheap clone of the shared reqwest
+    // pool + bearer).
     let lesche = kallip_lesche_client::LescheClient::builder(&lesche_url, &tagma_token).build()?;
 
-    let handle =
-        relay::RelayHandle::new(lesche, tagma_id, device, root_agent, Arc::downgrade(state));
+    let handle = relay::RelayHandle::new(
+        lesche,
+        tagma_id,
+        // Label fallback (see projector construction): "Tagma" until the enrolled
+        // label is plumbed through.
+        "Tagma".to_string(),
+        device,
+        root_agent,
+        Arc::downgrade(state),
+    );
     info!(tagma = %handle.tagma_id(), "relay connector active");
 
     let join = tokio::spawn(handle.clone().run(state.shutdown.clone()));

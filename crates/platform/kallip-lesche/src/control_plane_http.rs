@@ -16,12 +16,15 @@
 
 use std::time::Duration;
 
-use kallip_agora_common::control_plane::{ControlPlane, ControlPlaneError, TagmaIdentity};
+use kallip_agora_common::control_plane::{
+    ControlPlane, ControlPlaneError, TagmaProfile, UserIdentity, VerifiedSession,
+};
 use kallip_agora_common::ids::{TagmaId, UserId};
 use kallip_agora_common::internal_api::{
-    TagmaIdentityRequest, TagmaIdentityResponse, TagmaResolvableRequest, TagmaResolvableResponse,
-    TunnelProofTsRequest, TunnelProofTsResponse, VerifyBearerRequest, VerifyBearerResponse,
-    VerifySessionRequest, VerifySessionResponse, WirePrincipal,
+    TagmaProfilesRequest, TagmaProfilesResponse, TunnelProofTsRequest, TunnelProofTsResponse,
+    UserIdentitiesRequest, UserIdentitiesResponse, UserIdentityByUsernameRequest,
+    UserIdentityResponse, VerifyBearerRequest, VerifyBearerResponse, VerifySessionRequest,
+    VerifySessionResponse, WirePrincipal,
 };
 use kallip_agora_common::principal::Principal;
 
@@ -98,7 +101,7 @@ impl ControlPlane for HttpControlPlane {
     async fn verify_session(
         &self,
         cookie_value: &str,
-    ) -> Result<Option<UserId>, ControlPlaneError> {
+    ) -> Result<Option<VerifiedSession>, ControlPlaneError> {
         let resp: Option<VerifySessionResponse> = self
             .post(
                 "/internal/verify-session",
@@ -107,7 +110,11 @@ impl ControlPlane for HttpControlPlane {
                 },
             )
             .await?;
-        Ok(resp.map(|r| r.user_id))
+        Ok(resp.map(|r| VerifiedSession {
+            user_id: r.user_id,
+            username: r.username,
+            display_name: r.display_name,
+        }))
     }
 
     async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError> {
@@ -125,40 +132,87 @@ impl ControlPlane for HttpControlPlane {
         }))
     }
 
-    async fn tagma_resolvable_by(
+    async fn tagma_profiles(
         &self,
-        tagma_id: &TagmaId,
-        user: &UserId,
-    ) -> Result<bool, ControlPlaneError> {
-        // The endpoint always returns 200 with a bool; a 404 (should not occur)
-        // is treated conservatively as "not resolvable".
-        let resp: Option<TagmaResolvableResponse> = self
+        tagma_ids: &[TagmaId],
+    ) -> Result<Vec<TagmaProfile>, ControlPlaneError> {
+        // Always-200 endpoint: a 404 (should not occur) degrades to an empty
+        // result so the relay renders prefix-only handles for every input id.
+        let resp: Option<TagmaProfilesResponse> = self
             .post(
-                "/internal/tagma-resolvable",
-                &TagmaResolvableRequest {
-                    tagma_id: tagma_id.clone(),
-                    user_id: user.clone(),
+                "/internal/tagma-profiles",
+                &TagmaProfilesRequest {
+                    tagma_ids: tagma_ids.to_vec(),
                 },
             )
             .await?;
-        Ok(resp.map(|r| r.resolvable).unwrap_or(false))
+        Ok(resp
+            .map(|r| {
+                r.profiles
+                    .into_iter()
+                    .map(|p| TagmaProfile {
+                        tagma_id: p.tagma_id,
+                        pinned_public_key: p.pinned_public_key,
+                        owner_user_id: p.owner_user_id,
+                        label: p.label,
+                        owner_username: p.owner_username,
+                        owner_display_name: p.owner_display_name,
+                        enrolled: p.enrolled,
+                        revoked: p.revoked,
+                        owner_disabled: p.owner_disabled,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
-    async fn tagma_identity(
+    async fn user_identities(
         &self,
-        tagma_id: &TagmaId,
-    ) -> Result<Option<TagmaIdentity>, ControlPlaneError> {
-        let resp: Option<TagmaIdentityResponse> = self
+        user_ids: &[UserId],
+    ) -> Result<Vec<UserIdentity>, ControlPlaneError> {
+        let resp: Option<UserIdentitiesResponse> = self
             .post(
-                "/internal/tagma-identity",
-                &TagmaIdentityRequest {
-                    tagma_id: tagma_id.clone(),
+                "/internal/user-identities",
+                &UserIdentitiesRequest {
+                    user_ids: user_ids.to_vec(),
                 },
             )
             .await?;
-        Ok(resp.map(|r| TagmaIdentity {
-            pinned_public_key: r.pinned_public_key,
-            owner_user_id: r.owner_user_id,
+        Ok(resp
+            .map(|r| {
+                r.users
+                    .into_iter()
+                    .map(|u| UserIdentity {
+                        user_id: u.user_id,
+                        username: u.username,
+                        display_name: u.display_name,
+                        disabled: u.disabled,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn user_identity_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<UserIdentity>, ControlPlaneError> {
+        // Singular handle resolve: 200 -> the identity (carrying the user_id the
+        // invite gate reads back out); 404 -> None (unknown / disabled /
+        // malformed all collapse on the registry side).
+        let resp: Option<UserIdentityResponse> = self
+            .post(
+                "/internal/user-identity-by-username",
+                &UserIdentityByUsernameRequest {
+                    username: username.to_string(),
+                },
+            )
+            .await?;
+        Ok(resp.map(|u| UserIdentity {
+            user_id: u.user_id,
+            username: u.username,
+            display_name: u.display_name,
+            disabled: u.disabled,
         }))
     }
 
@@ -200,19 +254,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_session_200_maps_to_some_user() {
+    async fn verify_session_200_maps_to_verified_session() {
         let (server, cp) = mocked().await;
         Mock::given(method("POST"))
             .and(path("/internal/verify-session"))
             .and(header("authorization", "Bearer internal-secret"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "user_id": "alice" })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "user_id": "alice", "username": "alice", "display_name": "Alice" }),
+            ))
             .mount(&server)
             .await;
 
-        let user = cp.verify_session("sk-sess-x").await.unwrap();
-        assert_eq!(user, Some(UserId::from("alice".to_string())));
+        let session = cp.verify_session("sk-sess-x").await.unwrap().unwrap();
+        assert_eq!(session.user_id, UserId::from("alice".to_string()));
+        assert_eq!(session.username, "alice");
+        assert_eq!(session.display_name.as_deref(), Some("Alice"));
     }
 
     #[tokio::test]
@@ -246,26 +302,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tagma_identity_200_round_trips_key_and_owner() {
+    async fn tagma_profiles_decodes_rich_facts() {
         let (server, cp) = mocked().await;
         // base64 of 32 bytes of 0x01.
         let key_b64 = base64::engine::general_purpose::STANDARD.encode([1u8; 32]);
         Mock::given(method("POST"))
-            .and(path("/internal/tagma-identity"))
+            .and(path("/internal/tagma-profiles"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "pinned_public_key": key_b64,
-                "owner_user_id": "owner"
+                "profiles": [{
+                    "tagma_id": "t1",
+                    "pinned_public_key": key_b64,
+                    "owner_user_id": "owner",
+                    "label": "Laptop",
+                    "owner_username": "alice",
+                    "owner_display_name": null,
+                    "enrolled": true,
+                    "revoked": false,
+                    "owner_disabled": false
+                }]
             })))
             .mount(&server)
             .await;
 
-        let identity = cp
-            .tagma_identity(&TagmaId::from("t1".to_string()))
+        let profiles = cp
+            .tagma_profiles(&[TagmaId::from("t1".to_string())])
+            .await
+            .unwrap();
+        assert_eq!(profiles.len(), 1);
+        let p = &profiles[0];
+        assert_eq!(p.tagma_id, TagmaId::from("t1".to_string()));
+        assert_eq!(p.pinned_public_key.as_ref().unwrap().0, vec![1u8; 32]);
+        assert_eq!(p.owner_user_id, UserId::from("owner".to_string()));
+        assert_eq!(p.label.as_deref(), Some("Laptop"));
+        assert_eq!(p.owner_username, "alice");
+        assert!(p.enrolled && !p.revoked && !p.owner_disabled);
+    }
+
+    #[tokio::test]
+    async fn user_identities_decodes_rich_facts() {
+        let (server, cp) = mocked().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/user-identities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "users": [{
+                    "user_id": "u1",
+                    "username": "alice",
+                    "display_name": "Alice",
+                    "disabled": false
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let users = cp
+            .user_identities(&[UserId::from("u1".to_string())])
+            .await
+            .unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].user_id, UserId::from("u1".to_string()));
+        assert_eq!(users[0].username, "alice");
+        assert_eq!(users[0].display_name.as_deref(), Some("Alice"));
+        assert!(!users[0].disabled);
+    }
+
+    #[tokio::test]
+    async fn user_identity_by_username_200_maps_to_identity() {
+        let (server, cp) = mocked().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/user-identity-by-username"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "user_id": "u1",
+                "username": "alice",
+                "display_name": null,
+                "disabled": false
+            })))
+            .mount(&server)
+            .await;
+
+        let resolved = cp
+            .user_identity_by_username("alice")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(identity.pinned_public_key.0, vec![1u8; 32]);
-        assert_eq!(identity.owner_user_id, UserId::from("owner".to_string()));
+        assert_eq!(resolved.user_id, UserId::from("u1".to_string()));
+        assert_eq!(resolved.username, "alice");
+        assert!(resolved.display_name.is_none());
+        assert!(!resolved.disabled);
+    }
+
+    #[tokio::test]
+    async fn user_identity_by_username_404_maps_to_none() {
+        let (server, cp) = mocked().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/user-identity-by-username"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        assert!(
+            cp.user_identity_by_username("nobody")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

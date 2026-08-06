@@ -1,7 +1,8 @@
 # Arion composition for the prod-agora deploy (the server side): agora +
-# lesche + postgres. agora (control plane) runs from packages.kallip-agora-image;
-# lesche (data-plane relay) runs from packages.kallip-lesche-image; postgres
-# uses the official postgres:17 image for production parity and isolation.
+# lesche + agora-postgres + lesche-postgres. agora (control plane) runs from
+# packages.kallip-agora-image; lesche (data-plane relay) runs from
+# packages.kallip-lesche-image; each postgres uses the official postgres:17
+# image for production parity and isolation.
 #
 # Invoke from the repo root (so .env resolves):
 #   arion -f compose/prod/agora.nix up -d
@@ -31,22 +32,28 @@ in
   config = {
     project.name = "kallipai-agora";
 
-    docker-compose.volumes.pgdata = { };
+    docker-compose.volumes = {
+      agora_pgdata = { };
+      lesche_pgdata = { };
+    };
 
-    # The official postgres image. POSTGRES_USER/PASSWORD/DB come from .env
-    # ONLY. Do NOT set them in service.environment here -- compose precedence
-    # would pin the value and silently ignore the operator's .env, shipping a
-    # weak default password on a public DB. Agora retries it with a capped
-    # backoff at boot, so `depends_on` (start-order only) is enough -- no
-    # healthcheck.
-    services.postgres = {
+    # POSTGRES_USER/PASSWORD/DB come from .env ONLY and are read by BOTH
+    # services -- do NOT set them in service.environment here (compose
+    # precedence would pin a weak default password on a public DB).
+    services.agora-postgres = {
       service.image = "postgres:17.5";
-      service.volumes = [ "pgdata:/var/lib/postgresql/data" ];
+      service.volumes = [ "agora_pgdata:/var/lib/postgresql/data" ];
+      service.env_file = [ ".env" ];
+    };
+
+    services.lesche-postgres = {
+      service.image = "postgres:17.5";
+      service.volumes = [ "lesche_pgdata:/var/lib/postgresql/data" ];
       service.env_file = [ ".env" ];
     };
 
     services.agora = {
-      service.depends_on = [ "postgres" ];
+      service.depends_on = [ "agora-postgres" ];
       # arion's image-builder option is `services.<name>.build.image` (a sibling
       # of `service`, not nested under it). mkForce replaces arion's own nix-image
       # builder (which would inject a nix-database layer).
@@ -73,12 +80,17 @@ in
     };
 
     # Lesche: the data-plane relay (tagma relay tunnels, app SSE, envelope routing,
-    # KEX, presence). DB-free; it authenticates requests and resolves tagma
-    # metadata through the agora's /internal ControlPlane API over the private
-    # compose network. Not published -- the operator's edge host-routes
+    # KEX, presence). Owns the chat domain in its own Postgres (rooms, membership,
+    # message payloads); it authenticates requests and
+    # attests identity through the agora's /internal ControlPlane API over the
+    # private compose network. Not published -- the operator's edge host-routes
     # lesche.<d> here.
     services.lesche = {
-      service.depends_on = [ "agora" ];
+      # No healthcheck; unlike the agora, lesche does not retry its DB connect.
+      service.depends_on = [
+        "agora"
+        "lesche-postgres"
+      ];
       build.image = lib.mkForce lescheImage;
       service.command = [ "${lesche}/bin/kallip-lesche" ];
       service.env_file = [ ".env" ];
@@ -88,9 +100,9 @@ in
         # routed through the public edge.
         KALLIP_LESCHE_AGORA_INTERNAL_URL = "http://agora:7100";
         RUST_LOG = "info";
-        # KALLIP_LESCHE_AGORA_TOKEN (must equal the agora's
-        # KALLIP_AGORA_INTERNAL_TOKEN) + KALLIP_LESCHE_CORS_ORIGINS come from
-        # .env.
+        # KALLIP_LESCHE_DATABASE_URL (the chat schema), KALLIP_LESCHE_AGORA_TOKEN
+        # (must equal the agora's KALLIP_AGORA_INTERNAL_TOKEN), and
+        # KALLIP_LESCHE_CORS_ORIGINS come from .env.
       };
       # No service.ports -- like the agora, the lesche sits behind the
       # TLS-terminating reverse proxy.

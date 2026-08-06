@@ -1,8 +1,8 @@
 // Tests for the conversation transcript reducer. Authored content (assistant
-// messages) arrives via applyTagmaReply; runtime signals (busy/idle, terminals,
-// errors) arrives via applySignal. Each variant maps to the expected lines +
-// status; assistant content is append-only (no streaming merge); busy/idle are
-// content-less status transitions.
+// messages) arrives via applyTagmaReply (now paired with its wire sender);
+// runtime signals (busy/idle, terminals, errors) arrive via applySignal. Each
+// variant maps to the expected lines + status; assistant content is append-only
+// (no streaming merge); busy/idle are content-less status transitions.
 
 import { assert, assertEquals } from "@std/assert";
 import {
@@ -15,10 +15,27 @@ import {
   replaceLineId,
   withUserLine,
 } from "./transcript.ts";
-import type { SignalEvent, TagmaReply } from "@kallipai/kallip-lesche-client";
+import type {
+  Participant,
+  SignalEvent,
+  TagmaReply,
+} from "@kallipai/kallip-lesche-client";
+
+const agentP: Participant = { id: "t1", kind: "agent", handle: "Tagma" };
+const userP: Participant = { id: "u1", kind: "human", handle: "Alice" };
+const agentS = { kind: "agent" as const, id: "t1", handle: "Tagma" };
+const userS = { kind: "user" as const, id: "u1", handle: "Alice" };
+
+/** Pick the wire sender matching a reply's content (agent for events, user for
+ * user_message; undefined for acks/errors/markers). */
+function senderFor(r: TagmaReply): Participant | undefined {
+  if (r.kind === "event") return agentP;
+  if (r.kind === "user_message") return userP;
+  return undefined;
+}
 
 function reply(r: TagmaReply, lineId = 1): ConversationTranscript {
-  return applyTagmaReply(EMPTY_TRANSCRIPT, r, lineId);
+  return applyTagmaReply(EMPTY_TRANSCRIPT, r, senderFor(r), lineId);
 }
 
 function signal(s: SignalEvent, lineId = 1): ConversationTranscript {
@@ -31,24 +48,26 @@ Deno.test(
     assertEquals(
       applyTagmaReply(
         EMPTY_TRANSCRIPT,
-        {
-          kind: "message_accepted",
-          req_id: 1,
-          queue_depth: 0,
-        },
+        { kind: "message_accepted", req_id: 1, queue_depth: 0 },
+        undefined,
         1,
       ).lines.length,
       0,
     );
     assertEquals(
-      applyTagmaReply(EMPTY_TRANSCRIPT, { kind: "interrupted", req_id: 1 }, 1)
-        .lines.length,
+      applyTagmaReply(
+        EMPTY_TRANSCRIPT,
+        { kind: "interrupted", req_id: 1 },
+        undefined,
+        1,
+      ).lines.length,
       0,
     );
     assertEquals(
       applyTagmaReply(
         EMPTY_TRANSCRIPT,
         { kind: "history_batch_end", req_id: 1, count: 0, more: false },
+        undefined,
         1,
       ).lines.length,
       0,
@@ -70,6 +89,7 @@ Deno.test("TagmaReply error sets status error + a system line", () => {
       historyId: 1,
       role: "system",
       text: "tagma blew up",
+      sender: undefined,
       createdAt: undefined,
     },
   ]);
@@ -81,7 +101,8 @@ Deno.test(
     // busy arrives via the signal channel, not the envelope.
     let t = applySignal(EMPTY_TRANSCRIPT, { type: "busy" }, 1);
     assertEquals(t.status, "busy");
-    // assistant_content arrives via the envelope (authored).
+    // assistant_content arrives via the envelope (authored), paired with the
+    // agent sender.
     t = applyTagmaReply(
       t,
       {
@@ -90,6 +111,7 @@ Deno.test(
         history_id: 2,
         created_at: "2026-07-26T12:00:00Z",
       },
+      agentP,
       2,
     );
     assertEquals(t.lines, [
@@ -97,6 +119,7 @@ Deno.test(
         historyId: 2,
         role: "assistant",
         text: "Hello.",
+        sender: agentS,
         createdAt: "2026-07-26T12:00:00Z",
       },
     ]);
@@ -108,6 +131,7 @@ Deno.test(
         historyId: 2,
         role: "assistant",
         text: "Hello.",
+        sender: agentS,
         createdAt: "2026-07-26T12:00:00Z",
       },
     ]);
@@ -124,6 +148,7 @@ Deno.test(
         event: { type: "assistant_content", content: "part one" },
         history_id: 1,
       },
+      agentP,
       1,
     );
     t = applyTagmaReply(
@@ -133,6 +158,7 @@ Deno.test(
         event: { type: "assistant_content", content: "part two" },
         history_id: 2,
       },
+      agentP,
       2,
     );
     t = applySignal(t, { type: "idle" }, 3);
@@ -189,6 +215,7 @@ Deno.test("user_message (replay echo) appends a user line + createdAt", () => {
       text: "hello",
       created_at: "2026-07-26T12:00:00Z",
     },
+    userP,
     7,
   );
   assertEquals(t.lines, [
@@ -196,46 +223,55 @@ Deno.test("user_message (replay echo) appends a user line + createdAt", () => {
       historyId: 7,
       role: "user",
       text: "hello",
+      sender: userS,
       createdAt: "2026-07-26T12:00:00Z",
     },
   ]);
 });
 
-Deno.test("withUserLine stamps a client-side createdAt", () => {
-  const t = withUserLine(EMPTY_TRANSCRIPT, "  hi there  ", -1);
-  assertEquals(t.status, "busy");
-  assertEquals(t.lines.length, 1);
-  assertEquals(t.lines[0]!.historyId, -1);
-  assertEquals(t.lines[0]!.role, "user");
-  assertEquals(t.lines[0]!.text, "hi there");
-  assertEquals(t.lines[0]!.status, "sending");
-  // A client-side ISO stamp is present so the optimistic line shows a time
-  // immediately; the ack refines it via replaceLineId.
-  assertEquals(typeof t.lines[0]!.createdAt, "string");
-  assert(t.lines[0]!.createdAt!.length > 0);
-  // Empty / whitespace-only is a no-op.
-  assertEquals(withUserLine(EMPTY_TRANSCRIPT, "   ", -2), EMPTY_TRANSCRIPT);
-});
+Deno.test(
+  "withUserLine stamps a client-side createdAt + the local sender",
+  () => {
+    const t = withUserLine(EMPTY_TRANSCRIPT, "  hi there  ", -1, userS);
+    assertEquals(t.status, "busy");
+    assertEquals(t.lines.length, 1);
+    assertEquals(t.lines[0]!.historyId, -1);
+    assertEquals(t.lines[0]!.role, "user");
+    assertEquals(t.lines[0]!.text, "hi there");
+    assertEquals(t.lines[0]!.sender, userS);
+    assertEquals(t.lines[0]!.status, "sending");
+    // A client-side ISO stamp is present so the optimistic line shows a time
+    // immediately; the ack refines it via replaceLineId.
+    assertEquals(typeof t.lines[0]!.createdAt, "string");
+    assert(t.lines[0]!.createdAt!.length > 0);
+    // Empty / whitespace-only is a no-op.
+    assertEquals(
+      withUserLine(EMPTY_TRANSCRIPT, "   ", -2, userS),
+      EMPTY_TRANSCRIPT,
+    );
+  },
+);
 
 Deno.test(
   "replaceLineId promotes a pending line and refines createdAt from the ack",
   () => {
-    let t = withUserLine(EMPTY_TRANSCRIPT, "hi", -1);
+    let t = withUserLine(EMPTY_TRANSCRIPT, "hi", -1, userS);
     const optimistic = t.lines[0]!.createdAt;
     // The ack carries the authoritative created_at; it overwrites the
-    // optimistic client-side stamp.
+    // optimistic client-side stamp. The sender survives the promotion.
     t = replaceLineId(t, -1, 42, "2026-07-26T12:00:00Z");
     assertEquals(t.lines, [
       {
         historyId: 42,
         role: "user",
         text: "hi",
+        sender: userS,
         status: "sent",
         createdAt: "2026-07-26T12:00:00Z",
       },
     ]);
     // No createdAt arg -> the optimistic stamp survives the promotion.
-    let t2 = withUserLine(EMPTY_TRANSCRIPT, "hi", -3);
+    let t2 = withUserLine(EMPTY_TRANSCRIPT, "hi", -3, userS);
     t2 = replaceLineId(t2, -3, 50);
     assertEquals(t2.lines[0]!.createdAt, optimistic);
     // No-op when the pending local id is absent.
@@ -248,7 +284,7 @@ Deno.test(
   () => {
     // The direct path has no history-id ack, so the optimistic line keeps its
     // synthetic id and only its status flips.
-    let t = withUserLine(EMPTY_TRANSCRIPT, "hi", -1);
+    let t = withUserLine(EMPTY_TRANSCRIPT, "hi", -1, userS);
     assertEquals(t.lines[0]!.status, "sending");
     t = markLineSent(t, -1);
     assertEquals(t.lines, [
@@ -256,6 +292,7 @@ Deno.test(
         historyId: -1,
         role: "user",
         text: "hi",
+        sender: userS,
         status: "sent",
         createdAt: t.lines[0]!.createdAt,
       },
@@ -269,63 +306,67 @@ Deno.test(
 );
 
 Deno.test(
-  "cacheLineOf caches authored frames with a real history id only",
+  "cacheLineOf caches authored frames with a real history id + the sender",
   () => {
-    // assistant_content with real id -> cached (createdAt carried through).
+    // assistant_content with real id -> cached (createdAt + sender carried).
     assertEquals(
-      cacheLineOf({
-        kind: "event",
-        event: { type: "assistant_content", content: "hi" },
-        history_id: 5,
-        created_at: "2026-07-26T12:00:00Z",
-      }),
+      cacheLineOf(
+        {
+          kind: "event",
+          event: { type: "assistant_content", content: "hi" },
+          history_id: 5,
+          created_at: "2026-07-26T12:00:00Z",
+        },
+        agentP,
+      ),
       {
         historyId: 5,
         role: "assistant",
         text: "hi",
+        sender: agentS,
         createdAt: "2026-07-26T12:00:00Z",
       },
     );
-    // user_message with real id -> cached (createdAt carried through).
+    // user_message with real id -> cached (createdAt + sender carried).
     assertEquals(
-      cacheLineOf({
-        kind: "user_message",
-        history_id: 6,
-        text: "q",
-        created_at: "2026-07-26T12:05:00Z",
-      }),
+      cacheLineOf(
+        {
+          kind: "user_message",
+          history_id: 6,
+          text: "q",
+          created_at: "2026-07-26T12:05:00Z",
+        },
+        userP,
+      ),
       {
         historyId: 6,
         role: "user",
         text: "q",
+        sender: userS,
         createdAt: "2026-07-26T12:05:00Z",
       },
     );
     // event with no history id -> not cached (synthetic / un-stored).
     assertEquals(
-      cacheLineOf({
-        kind: "event",
-        event: { type: "assistant_content", content: "x" },
-      }),
+      cacheLineOf(
+        { kind: "event", event: { type: "assistant_content", content: "x" } },
+        agentP,
+      ),
       null,
     );
     // acks / batch end -> not cached.
     assertEquals(
-      cacheLineOf({
-        kind: "message_accepted",
-        req_id: 1,
-        queue_depth: 0,
-        history_id: 8,
-      }),
+      cacheLineOf(
+        { kind: "message_accepted", req_id: 1, queue_depth: 0, history_id: 8 },
+        undefined,
+      ),
       null,
     );
     assertEquals(
-      cacheLineOf({
-        kind: "history_batch_end",
-        req_id: 1,
-        count: 0,
-        more: false,
-      }),
+      cacheLineOf(
+        { kind: "history_batch_end", req_id: 1, count: 0, more: false },
+        undefined,
+      ),
       null,
     );
   },

@@ -1,7 +1,14 @@
-// Derive the nav link list from the app mode. The two modes are mutually
+// Derive the nav link sections from the app mode. The two modes are mutually
 // exclusive front-door choices (see lib/config/mode.ts):
-//   - online  -> Tagmata, plus one entry per open tagma channel (online chat);
-//   - offline -> Chat (the single local conversation at /chat/local).
+//   - online  -> "Tagmata" and "Rooms" sections. Each section title carries a
+//     settings gear to its management page -- /tagmata for the tagma registry,
+//     /rooms for room management (create / invites / public rooms) -- so the
+//     management surfaces are reached through the section header, not a flat
+//     sibling link. "Tagmata" lists EVERY enrolled tagma (whether or not a
+//     relay channel is currently open -- the link is always navigable and the
+//     channel opens on demand at /chat/t/{tagmaId}); "Rooms" lists the caller's
+//     rooms as direct chat entries (`/rooms/{id}`).
+//   - offline -> Chat (the single local conversation at /chat/local), no header.
 // Settings is intentionally NOT a nav link: it lives in the AccountMenu
 // dropdown (footer) alongside the other account/system actions.
 // Icons are injected by the caller so this package does not depend on an icon
@@ -9,45 +16,113 @@
 import type { Component } from "svelte";
 import type { AppMode } from "../config/mode.ts";
 import type { NavIndicator, NavItem } from "../shell.ts";
+import type { TagmaChannelState } from "../session/channels.svelte.ts";
+
+// One sidebar section. `title` renders as a small header with a divider
+// beneath it; `manage` renders as a settings gear beside the title, linking to
+// the section's management page. An untitled section (offline mode's single
+// Chat entry) renders its items bare.
+export interface NavSection {
+  title?: string;
+  /** The section's management page, reached via a settings gear beside the
+   * title. `icon` is injected by the caller (mirrors NavItem). */
+  manage?: { href: string; label: string; icon: Component };
+  items: NavItem[];
+}
 
 export interface NavIcons {
   chat: Component;
   tagmata: Component;
+  rooms: Component;
+  /** Gear icon for the section-management entry beside each section title. */
+  settings: Component;
 }
 
-/** A summary of one open channel, for the sidebar nav. `indicator` is the
- * channel's transport status as a nav dot tri-state (the store maps its
- * ChannelState.status to this). */
-export interface NavChannel {
-  conversationId: string;
+/** One enrolled tagma as a sidebar chat entry. `indicator` is the channel
+ * transport status as a nav dot tri-state (the caller derives it from
+ * `channelsStore.getTagmaChannelState` via `tagmaNavIndicator`). The entry is
+ * always navigable -- the relay channel opens on demand at /chat/t/{tagmaId}. */
+export interface NavTagma {
+  tagmaId: string;
   label: string | null;
   indicator: NavIndicator;
+}
+
+/** One room as a sidebar chat entry (`/rooms/{id}`). Rooms have no live
+ * transport status to dot, so they carry the rooms icon as their leading mark. */
+export interface NavRoom {
+  roomId: string;
+  label: string;
+}
+
+/** Derive a sidebar NavIndicator from OUR channel transport state. Channel-
+ *  transport-only (not peer presence): when the realtime SSE is broken, peer
+ *  presence is unknown, so a presence-driven dot would mislabel every tagma
+ *  "offline". This mapping stays honest about what we know:
+ *    open      -> live (green)
+ *    pending   -> pending (spinner; in-flight open or KEX)
+ *    absent    -> pending (spinner; no channel yet -- click to connect)
+ *    offline   -> down (grey; we had a channel and the peer went away)
+ *    error     -> error (red; click to retry) */
+export function tagmaNavIndicator(channel: TagmaChannelState): NavIndicator {
+  switch (channel.kind) {
+    case "open":
+      return "live";
+    case "pending":
+    case "absent":
+      return "pending";
+    case "offline":
+      return "down";
+    case "error":
+      return "error";
+  }
 }
 
 export function navFor(args: {
   mode: AppMode;
   icons: NavIcons;
-  channels?: NavChannel[];
-}): NavItem[] {
-  const { mode, icons, channels } = args;
+  tagmata?: NavTagma[];
+  rooms?: NavRoom[];
+}): NavSection[] {
+  const { mode, icons, tagmata, rooms } = args;
   if (mode === "offline") {
-    return [{ href: "/chat/local", label: "Chat", icon: icons.chat }];
+    return [
+      { items: [{ href: "/chat/local", label: "Chat", icon: icons.chat }] },
+    ];
   }
-  const links: NavItem[] = [
-    { href: "/tagmata", label: "Tagmata", icon: icons.tagmata },
+  return [
+    {
+      title: "Tagmata",
+      manage: {
+        href: "/tagmata",
+        label: "Tagma management",
+        icon: icons.settings,
+      },
+      items: (tagmata ?? []).map((t) => {
+        // Each tagma uses a status dot (no icon) as the leading mark, so each
+        // reads as its own destination under the tagma surface. The link is
+        // always navigable; the channel opens on demand at the tagma route.
+        return {
+          href: `/chat/t/${t.tagmaId}`,
+          label: t.label ?? "Unnamed tagma",
+          indicator: t.indicator,
+        };
+      }),
+    },
+    {
+      title: "Rooms",
+      manage: {
+        href: "/rooms",
+        label: "Room management",
+        icon: icons.settings,
+      },
+      items: (rooms ?? []).map((r) => ({
+        href: `/rooms/${r.roomId}`,
+        label: r.label,
+        icon: icons.rooms,
+      })),
+    },
   ];
-  if (channels) {
-    for (const c of channels) {
-      // Open chats use a status dot (no icon) as the leading mark, so each
-      // channel reads as its own destination, distinct from the Tagmata entry.
-      links.push({
-        href: `/chat/${c.conversationId}`,
-        label: c.label ?? "Unnamed tagma",
-        indicator: c.indicator,
-      });
-    }
-  }
-  return links;
 }
 
 /** Segment-boundary route match: `href` is active when `pathname` is exactly it

@@ -17,14 +17,34 @@
 // (the store's drain surfaces it as a connection error) and simply END on a
 // clean close.
 
-import type { SignalEvent, TagmaReply } from "@kallipai/kallip-lesche-client";
+import type {
+  Participant,
+  SignalEvent,
+  TagmaReply,
+} from "@kallipai/kallip-lesche-client";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
+import type { ConversationSender } from "../transcript.ts";
+
+/** One unit the transcript reducer consumes: the wire sender paired with the
+ * content-only reply. Both transports yield this uniform shape so the reducer
+ * has one path for live-online, live-offline, and replay (the sender rides the
+ * relay envelope online, the direct frame offline, and the typed column on
+ * replay). `sender` is optional only because the direct path synthesizes a
+ * `history_batch_end` marker with no real sender; every genuine content frame
+ * carries one. */
+export interface IncomingFrame {
+  readonly sender?: Participant;
+  readonly reply: TagmaReply;
+}
 
 export interface Transport {
+  /** The UI sender for optimistic user lines this transport renders (online:
+   *  the agora session user; offline: the tagma-configured local identity). */
+  readonly localSender: ConversationSender;
   /** The authored-content reply stream (acks, op errors, replayed user
-   *  messages, authored `assistant_content`). Ends or throws when the transport
-   *  closes or fails. */
-  replies(): AsyncGenerator<TagmaReply>;
+   *  messages, authored `assistant_content`), each paired with its sender. Ends
+   *  or throws when the transport closes or fails. */
+  replies(): AsyncGenerator<IncomingFrame>;
   /** The runtime-signal feed (busy/idle presence, turn terminals, errors). Same
    *  end/throw contract as {@link replies}. */
   signals(): AsyncGenerator<SignalEvent>;

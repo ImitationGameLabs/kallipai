@@ -11,8 +11,8 @@ mod approval;
 mod context;
 mod message;
 /// The in-process message-delivery seam shared by the `send_message` route and
-/// the relay's `execute_op`.
-pub(crate) use message::deliver_message;
+/// the relay's `execute_op`, plus its room inbound counterpart.
+pub(crate) use message::{deliver_inbound_room_message, deliver_message};
 mod lesche;
 
 use axum::Router;
@@ -60,6 +60,14 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/agents/{id}/lesche/messages",
             axum::routing::post(lesche::post_message),
+        )
+        .route(
+            "/agents/{id}/lesche/rooms",
+            axum::routing::get(lesche::list_joined_rooms),
+        )
+        .route(
+            "/agents/{id}/lesche/rooms/{room}/messages",
+            axum::routing::get(lesche::read_room_messages),
         )
         .route(
             "/agents/{id}/events",

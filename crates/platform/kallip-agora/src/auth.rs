@@ -74,15 +74,18 @@ impl FromRequestParts<SharedState> for AuthPrincipal {
                 .await
                 .map_err(|e| ApiError::internal(format_args!("registry error: {e}")))?
                 .ok_or_else(|| ApiError::unauthorized("invalid session"))?;
-            return Ok(AuthPrincipal(Principal::User(user)));
+            // The agora's own routes need only the user id; the verified
+            // session's username/display_name are consumed by the lesche over
+            // the /internal/verify-session HTTP surface, not here.
+            return Ok(AuthPrincipal(Principal::User(user.user_id)));
         }
         Err(ApiError::unauthorized("authentication required"))
     }
 }
 
 // ---------------------------------------------------------------------------
-// Layer 2: Authorization helpers (`require_admin` / `require_user` /
-// `require_tagma`) live in `kallip-agora-common::principal` and are
-// re-exported above. The disabled-user / revoked-tagma auth semantics are
-// tested at the `DbControlPlane` impl (`crate::control_plane`).
+// Layer 2: Authorization helpers (`require_admin` / `require_user`) live in
+// `kallip-agora-common::principal` and are re-exported above. The disabled-user
+// / revoked-tagma auth semantics are tested at the `DbControlPlane` impl
+// (`crate::control_plane`).
 // ---------------------------------------------------------------------------

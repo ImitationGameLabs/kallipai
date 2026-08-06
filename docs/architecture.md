@@ -89,6 +89,44 @@ The app keeps a per-device IndexedDB cache of already-rendered authored lines
 asks the tagma for an incremental delta. It is a disposable derived mirror
 (re-pulled on demand), also plaintext, cleared on logout.
 
+### Multi-member rooms (plaintext server-readable)
+
+Multi-member rooms are a **plaintext server-readable** surface by design. The
+lesche is the room's store of record: it stores and relays the `RoomMessage`
+payload opaquely, enforces member access (a non-member gets a uniform 404 on
+envelopes, history, and roster), and fans each message to the room's other live
+members. `private` means invite-only membership; `public` means open-access
+join. This is a deliberate trust-model decision: the server (the operator's
+own deployment) is trusted with room content, so regulated/compliance
+deployments can audit it. It does **not** extend to the bilateral 1:1 path —
+user-device ↔ own-tagma traffic still crosses the relay as AEAD ciphertext
+(`kallip-e2ee`), with the relay seeing only routing metadata.
+
+#### Room identity: `MemberId` vs `ParticipantId`
+
+Two newtypes share one derived UUID, on purpose, at different layers:
+
+- **`ParticipantId`** — the cross-transport **conversation-sender** identity. It is the
+  `sender` on every live envelope on BOTH transports (the bilateral 1:1 path and rooms), what
+  the tagma persists in `chat_history`, and the key of the relay's shared presence registry.
+  Lives in `kallip-agora-common` (`ids.rs`, `participant.rs`); in TS, `@kallipai/kallip-common`
+  (`chat.ts`, `ids.ts`).
+- **`MemberId`** — the **room-domain** identity: how rooms address their members
+  (`RoomMember`, `room_members.member_id`, the roster, room-presence fan-out). It wraps a
+  `ParticipantId` (same `for_user`/`for_tagma` derivation, byte-for-byte), so the two convert
+  freely at the few seams where the room layer meets the shared transport identity (building
+  the wire `Envelope.sender`, presence-registry lookups). It exists so room code is
+  member-native — `RoomMember { id: MemberId }`, not the near-synonym clash
+  `member's ParticipantId`.
+
+A room member IS a participant who belongs to a room; `MemberId` is that participant identity
+viewed through the room layer. The wire JSON is unchanged (`MemberId` is
+`#[serde(transparent)]`).
+
+On the TS side the ids are unbranded `string`, so there is no `MemberId` alias -- the same
+derived string flows through both roles and `participantIdForUser`/`participantIdForTagma`
+results double as member ids by value equality.
+
 ## External chat-room API (authored vs signal)
 
 The tagma exposes two event surfaces (see [tagma-api.md](reference/tagma-api.md)).

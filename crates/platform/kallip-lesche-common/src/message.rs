@@ -6,9 +6,14 @@
 
 use crate::event::AuthoredEvent;
 use kallip_agora_common::bytes::Ciphertext;
-use kallip_agora_common::ids::{ConversationId, TagmaId, TraceId, UserId};
+use kallip_agora_common::ids::{ConversationId, TraceId};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+
+/// Re-exported from `kallip_agora_common::participant` so the envelope sender
+/// type stays reachable from its long-standing `kallip_lesche_common::message`
+/// path. See that module for the trust model.
+pub use kallip_agora_common::participant::Participant;
 
 /// The unit the agora forwards between endpoints. Carries routing metadata +
 /// AEAD ciphertext; the agora reads only the metadata.
@@ -25,13 +30,25 @@ pub struct Envelope {
     pub ciphertext: Ciphertext,
 }
 
-/// Who sent an envelope. The agora is agent-free: an agent sender is attributed
-/// only to its tagma, never to a tagma-internal agent id.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Participant {
-    User { user_id: UserId },
-    Agent { tagma_id: TagmaId },
+/// One decoded history entry: the sender paired with the content-only wire
+/// reply. The history-pull response shape (online replay and offline
+/// `/external/history`), so the frontend has one render path for replayed rows
+/// matching the live `{sender, body}` shape.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HistoryEntry {
+    pub sender: Participant,
+    pub reply: TagmaReply,
+}
+
+/// The room plaintext: the content a room participant broadcasts to the room's
+/// other members. This is the room-path payload; it is NOT the bilateral
+/// [`TagmaRequest`] (rooms and 1:1 conversations are disjoint address spaces).
+/// Kept deliberately minimal -- a room message is just text. The bilateral
+/// `req_id`/ack machinery does not apply: lesche's synchronous 202 is the room
+/// send ack, and the rooms route assigns the per-room seq.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomMessage {
+    pub text: String,
 }
 
 /// App -> tagma: one semantic operation against the tagma, encrypted inside an
@@ -194,29 +211,48 @@ fn format_created_at(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kallip_agora_common::ids::{ParticipantId, ParticipantKind, TagmaId, UserId};
     use time::OffsetDateTime;
 
     #[test]
-    fn participant_tag_is_snake_case() {
-        let p = Participant::User {
-            user_id: UserId::from("u1".to_string()),
+    fn participant_serializes_to_struct_shape() {
+        let p = Participant {
+            id: ParticipantId::for_user(&UserId::from("u1".to_string())),
+            kind: ParticipantKind::Human,
+            handle: "Alice".into(),
+            tagma_id: None,
         };
         let json = serde_json::to_string(&p).unwrap();
-        assert_eq!(json, "{\"kind\":\"user\",\"user_id\":\"u1\"}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Wire labels are the struct field names + snake_case kind.
+        assert_eq!(parsed["kind"], "human");
+        assert_eq!(parsed["handle"], "Alice");
+        assert_eq!(parsed["id"].as_str().unwrap(), p.id.as_ref());
+        // tagma_id is omitted when None (skip_serializing_if).
+        assert!(parsed.get("tagma_id").is_none());
 
-        let a = Participant::Agent {
-            tagma_id: TagmaId::from("t1".to_string()),
+        let a = Participant {
+            id: ParticipantId::for_tagma(&TagmaId::from("t1".to_string())),
+            kind: ParticipantKind::Agent,
+            handle: "Tagma".into(),
+            tagma_id: Some(TagmaId::from("t1".to_string())),
         };
         let json = serde_json::to_string(&a).unwrap();
-        assert_eq!(json, "{\"kind\":\"agent\",\"tagma_id\":\"t1\"}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["kind"], "agent");
+        // tagma_id is present (not omitted) when Some.
+        assert_eq!(parsed["tagma_id"].as_str().unwrap(), "t1");
     }
 
     #[test]
     fn envelope_round_trips() {
         let env = Envelope {
             conversation_id: ConversationId::from("c1".to_string()),
-            sender: Participant::User {
-                user_id: UserId::from("u1".to_string()),
+            sender: Participant {
+                id: ParticipantId::for_user(&UserId::from("u1".to_string())),
+                kind: ParticipantKind::Human,
+                handle: "Alice".into(),
+                tagma_id: None,
             },
             sequence_n: 3,
             trace_id: TraceId::from("t1".to_string()),
@@ -227,6 +263,17 @@ mod tests {
         let back: Envelope = serde_json::from_str(&json).unwrap();
         assert_eq!(back.sequence_n, 3);
         assert_eq!(back.ciphertext.0, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn room_message_round_trips() {
+        let msg = RoomMessage {
+            text: "hi from a room".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"text":"hi from a room"}"#);
+        let back: RoomMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.text, "hi from a room");
     }
 
     #[test]

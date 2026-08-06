@@ -56,6 +56,22 @@ type StatusSink = (
   snapshot: TagmaStatusSummary | undefined,
 ) => void;
 
+/** Sink for `room_membership_changed` nudges (a member was added/removed). Bound
+ * by the shell to `roomConversationsStore.refreshRoster` so a roster change
+ * repaints without waiting for the room page's poll. `null` (the default)
+ * drops. */
+type RoomMembershipChangedSink = (roomId: string) => void;
+
+/** Sink for `room_member_online` / `room_member_offline` deltas. Bound by the
+ * shell to `roomConversationsStore.applyMemberPresence` so a peer's room
+ * presence transition mutates that room's online-member set live, between
+ * roster re-fetches. `null` (the default) drops. */
+type RoomMemberPresenceSink = (
+  roomId: string,
+  memberId: string,
+  online: boolean,
+) => void;
+
 /** Maximum time the dashboard shows the "checking" placeholder before treating
  * presence as resolved (unknown tagmas then read offline). Bounded so a missing
  * or churning SSE connection can never strand the UI in "checking" forever --
@@ -72,7 +88,8 @@ class RealtimeStore {
   // Set())`): Svelte's `$state` proxy does not wrap Set, so a raw Set's in-place
   // `.add()/.delete()` would be invisible to reactivity. SvelteSet tracks
   // membership natively. Distinct from `ChannelState.status` (OUR channel
-  // transport), shown by the sidebar dot via channels.svelte.ts `channelIndicator`.
+  // transport), shown by the sidebar dot via links.ts `tagmaNavIndicator`
+  // (which reads `channelsStore.getTagmaChannelState`).
   private presence = new SvelteSet<string>();
   // Per-tagma aggregate status snapshots, fed by the `tagma_status` SSE event.
   // `SvelteMap` (not `$state(new Map())`): Svelte's `$state` proxy does not
@@ -94,6 +111,8 @@ class RealtimeStore {
   private presenceSink: PresenceSink | null = null;
   private signalSink: SignalSink | null = null;
   private statusSink: StatusSink | null = null;
+  private roomMembershipChangedSink: RoomMembershipChangedSink | null = null;
+  private roomMemberPresenceSink: RoomMemberPresenceSink | null = null;
   // One-shot per session; force-resolves presence after the deadline so the
   // "checking" placeholder is bounded regardless of SSE connection health.
   private resolveDeadline: ReturnType<typeof setTimeout> | null = null;
@@ -140,6 +159,21 @@ class RealtimeStore {
    * owning relay conversation's chat header has a uniform status source. */
   setStatusSink(sink: StatusSink | null): void {
     this.statusSink = sink;
+  }
+
+  /** Bind the room-membership-changed handler. Called once by the shell at boot;
+   * routes `room_membership_changed` nudges into `roomConversationsStore
+   * .refreshRoster` so a roster change repaints without waiting for the poll. */
+  setRoomMembershipChangedSink(sink: RoomMembershipChangedSink | null): void {
+    this.roomMembershipChangedSink = sink;
+  }
+
+  /** Bind the room-member-presence handler. Called once by the shell at boot;
+   * routes `room_member_online`/`room_member_offline` deltas into
+   * `roomConversationsStore.applyMemberPresence` so a peer's transition mutates
+   * that room's live online-member set. */
+  setRoomMemberPresenceSink(sink: RoomMemberPresenceSink | null): void {
+    this.roomMemberPresenceSink = sink;
   }
 
   /** Start the SSE subscriber, idempotently. Safe to call repeatedly. Clears
@@ -273,6 +307,31 @@ class RealtimeStore {
         // and/or a transient system line.
         this.signalSink?.(ev.tagma_id, ev.event);
         break;
+      case "room_membership_changed":
+        // A room's membership epoch bumped (a member was added/removed). The
+        // user-device analog of the tagma `Wake`: a transient nudge to refresh
+        // the room roster (membership is server-authoritative). NOT buffered --
+        // a dropped frame is backstopped by the room page's poll, not replay.
+        this.roomMembershipChangedSink?.(ev.room_id);
+        break;
+      case "room_member_online":
+        // A peer came online in this room (agent tunnel / human app stream).
+        // Idempotent set-add on the owning room's online set (see
+        // roomConversationsStore.applyMemberPresence); the roster re-fetch
+        // remains the resync ground truth.
+        this.roomMemberPresenceSink?.(ev.room_id, ev.member_id, true);
+        break;
+      case "room_member_offline":
+        // A peer went offline. Idempotent set-remove; transient (not buffered),
+        // so a missed frame self-heals on the next roster re-fetch.
+        this.roomMemberPresenceSink?.(ev.room_id, ev.member_id, false);
+        break;
+      default: {
+        // Exhaustiveness guard: a new LescheEvent variant without a dispatch
+        // case fails the build here rather than silently dropping.
+        const _exhaustive: never = ev;
+        break;
+      }
     }
   }
 }

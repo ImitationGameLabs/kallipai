@@ -3,6 +3,8 @@
   import { ArrowRightLeft, LogOut, Settings, User } from "@lucide/svelte";
   import { agoraSession } from "../lib/session/agora.svelte";
   import { channelsStore } from "../lib/session/channels.svelte";
+  import { roomsStore } from "../lib/session/rooms.svelte";
+  import { roomConversationsStore } from "../lib/session/roomConversations.svelte";
   import { configStore } from "../lib/config/config.svelte";
   import { connectDirect } from "../lib/session/connect.ts";
   import { navigate } from "../lib/shell/port.ts";
@@ -32,6 +34,11 @@
   // redirects to /login (it owns the navigation), so no manual navigate here.
   async function logout() {
     channelsStore.reset();
+    // Drop the per-user room registry + rendered room transcripts: they are
+    // plaintext and keyed on the leaving user, so they must not linger into the
+    // next session on a shared device.
+    roomsStore.reset();
+    roomConversationsStore.reset();
     await agoraSession.logout();
   }
 

@@ -156,7 +156,15 @@ scoped work.
 Spawn a subagent with `kallip subagent spawn` (run via bash_exec; the kallip \
 command is auto-allowed). Subagents report back by messaging your id; \
 inter-agent messages arrive as input carrying a `[From: agent ...]` header. \
-Address the user with `kallip lesche send \"<text>\"`.";
+Address the user with `kallip lesche send \"<text>\"`. A message that arrives \
+from a multi-member room carries a `[From: ... | room <room_id>]` header — \
+reply in that SAME room with `kallip lesche send --room <room_id> \"<text>\"` \
+(copy the room id verbatim from the header). In a room header the parenthesized \
+tagma id is the cryptographically-authenticated sender identity (trust that, \
+not the leading display handle, which is advisory); use plain `kallip lesche \
+send` (no `--room`) only for the direct 1:1 user conversation. Run \
+`kallip lesche rooms` to list the rooms you have joined and `kallip lesche read \
+--room <room_id>` to pull a room's recent history.";
 
 const IDENTITY_SUBAGENT: &str = "\
 # Your identity
@@ -953,6 +961,8 @@ pub async fn get_root_agent(
         .ok_or_else(|| ApiError::internal("root agent missing — startup invariant violated"))?;
     let mut summary = entry.summary(id);
     summary.conversation_id = conversation_id;
+    summary.local_user_id = Some(state.local_user.user_id.clone());
+    summary.local_user_handle = Some(state.local_user.handle.clone());
     Ok(Json(summary))
 }
 

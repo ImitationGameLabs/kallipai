@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::db::Db;
-use crate::db::entity::{tagma_tokens, tagmata, users};
+use crate::db::entity::{passkeys, tagma_tokens, tagmata, users};
 use crate::db::migration::Migrator;
 use kallip_agora_common::bytes::Ed25519PublicKey;
 use kallip_agora_common::ids::{TagmaId, UserId};
@@ -22,6 +22,7 @@ use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use time::OffsetDateTime;
 use tokio::sync::OnceCell;
+use uuid::Uuid;
 
 use crate::state::{AppState, Limits, SharedState};
 use crate::token::TAGMA;
@@ -151,7 +152,20 @@ pub async fn seed_tagma(
     owner: &UserId,
     pinned_key: Ed25519PublicKey,
 ) -> (TagmaId, String) {
-    let tagma_id = TagmaId::random();
+    let (tagma_id, plaintext) =
+        seed_tagma_with_id(state, owner, TagmaId::random(), pinned_key).await;
+    (tagma_id, plaintext)
+}
+
+/// Like [`seed_tagma`] but with a caller-supplied id -- for tests that need the
+/// tagma id to match some other fixture (e.g. a room member whose derived
+/// participant identity is the tagma id). Mints the tagma token the same way.
+pub async fn seed_tagma_with_id(
+    state: &SharedState,
+    owner: &UserId,
+    tagma_id: TagmaId,
+    pinned_key: Ed25519PublicKey,
+) -> (TagmaId, String) {
     let token = MintedToken::generate(TAGMA);
     let plaintext = token.secret().to_string();
     let now = OffsetDateTime::now_utc();
@@ -185,3 +199,23 @@ pub async fn seed_tagma(
 // Note: data-plane fixtures (seed_conversation, seed_presence) lived here when
 // the agora was a monolith. They moved to the `kallip-lesche` test harness
 // along with the relay's soft state.
+
+/// Insert a live passkey row for `user_id` (test fixture; the credential JSONB
+/// is a placeholder -- neither the list nor revoke helpers read it). Returns the
+/// server-assigned `passkeys.id` (the device id passkey-based APIs key on).
+pub async fn seed_passkey(state: &SharedState, user_id: &UserId, cred_id: Vec<u8>) -> Uuid {
+    let id = Uuid::new_v4();
+    passkeys::ActiveModel {
+        id: Set(id),
+        user_id: Set(user_id.to_string()),
+        cred_id: Set(cred_id),
+        credential: Set(serde_json::json!({})),
+        label: Set("Device".to_string()),
+        created_at: Set(OffsetDateTime::now_utc()),
+        last_used_at: Set(OffsetDateTime::now_utc()),
+    }
+    .insert(&state.db)
+    .await
+    .expect("insert passkey");
+    id
+}

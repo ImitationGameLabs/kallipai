@@ -18,7 +18,7 @@
 //! reaching `/v1/me` — are already impossible by construction: `require_tagma`
 //! never sees a `User` and `require_user` never sees a `Tagma`.
 
-use crate::ids::{TagmaId, UserId};
+use crate::ids::{ParticipantId, ParticipantKind, TagmaId, UserId};
 use kallip_common::protocol::ApiError;
 
 /// Resolved identity from either an `Authorization: Bearer` header (admin /
@@ -30,6 +30,28 @@ pub enum Principal {
     User(UserId),
     /// A tagma's long-lived tagma token. Always via bearer.
     Tagma(TagmaId),
+}
+
+impl Principal {
+    /// The room-participant id this principal maps to, or `None` for `Admin`
+    /// (which is not a room participant). Room-surface routes use this so the
+    /// room layer never sees the underlying `UserId`/`TagmaId`.
+    pub fn participant_id(&self) -> Option<ParticipantId> {
+        match self {
+            Principal::Admin => None,
+            Principal::User(id) => Some(ParticipantId::for_user(id)),
+            Principal::Tagma(id) => Some(ParticipantId::for_tagma(id)),
+        }
+    }
+
+    /// The room-participant kind, or `None` for `Admin`.
+    pub fn participant_kind(&self) -> Option<ParticipantKind> {
+        match self {
+            Principal::Admin => None,
+            Principal::User(_) => Some(ParticipantKind::Human),
+            Principal::Tagma(_) => Some(ParticipantKind::Agent),
+        }
+    }
 }
 
 /// Only the admin may proceed (provisioning endpoints).
@@ -56,5 +78,23 @@ pub fn require_tagma(principal: &Principal) -> Result<&TagmaId, ApiError> {
     match principal {
         Principal::Tagma(id) => Ok(id),
         _ => Err(ApiError::forbidden("tagma access required")),
+    }
+}
+
+/// The authenticated room participant (for the kind-agnostic room routes). A
+/// `User` resolves to its derived `ParticipantId` (Human); a `Tagma` to its
+/// derived `ParticipantId` (Agent); `Admin` is rejected (it is not a room
+/// participant). The underlying `UserId`/`TagmaId` is deliberately not returned
+/// -- the room surface deals only in `ParticipantId`. Routes that need a
+/// specific kind use [`require_user`] / [`require_tagma`] instead.
+pub fn require_participant(
+    principal: &Principal,
+) -> Result<(ParticipantId, ParticipantKind), ApiError> {
+    match (principal.participant_id(), principal.participant_kind()) {
+        // Both helpers agree (User -> Human, Tagma -> Agent); Admin maps to
+        // (None, None). Routed through the two helpers so the principal-to-
+        // participant mapping lives in exactly one place.
+        (Some(id), Some(kind)) => Ok((id, kind)),
+        _ => Err(ApiError::forbidden("a room participant is required")),
     }
 }

@@ -25,5 +25,7 @@ pub mod control;
 pub mod control_plane;
 pub mod ids;
 pub mod internal_api;
+pub mod participant;
 pub mod principal;
 pub mod proof;
+pub mod rooms;

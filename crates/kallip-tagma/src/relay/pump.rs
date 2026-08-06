@@ -66,11 +66,14 @@ impl RelayHandle {
                     return;
                 }
                 recv = rx.recv() => match recv {
-                    Ok(ExternalFrame::Authored(reply)) => {
+                    Ok(ExternalFrame::Authored { sender, reply }) => {
                         // Authored content is already persisted + stamped by the
-                        // projector; the pump just encrypts + posts under the
-                        // cancel token (so a slow emit cannot stall a re-KEX).
-                        if let Err(e) = self.emit(&trace, reply, Some(&cancel)).await {
+                        // projector, which also paired it with the sender (agent
+                        // for outbound, user for the inbound echo). The pump
+                        // encrypts + posts under the cancel token (so a slow emit
+                        // cannot stall a re-KEX), stamping the frame's sender
+                        // onto the envelope.
+                        if let Err(e) = self.emit(&trace, sender, reply, Some(&cancel)).await {
                             warn!("relay pump emit: {e:#}");
                         }
                     }

@@ -2,10 +2,11 @@ use clap::Parser;
 
 /// CLI arguments for `kallip-lesche`, the data-plane relay.
 ///
-/// The lesche is stateless soft-state (presence, conversations, app streams are
+/// The lesche's in-memory surfaces (presence, conversations, app streams) are
 /// rebuilt on restart from tagmas reconnecting + conversations created on
-/// demand); all durable identity / credential / tagma metadata stays in the
-/// agora, reached through the `/internal/*` ControlPlane API.
+/// demand; it owns the durable chat store (rooms, membership, message payloads)
+/// in its own Postgres. Durable identity / credential / tagma metadata stays in
+/// the agora, reached through the `/internal/*` ControlPlane API.
 #[derive(Parser)]
 #[command(
     name = "kallip-lesche",
@@ -43,4 +44,10 @@ pub struct Args {
     /// cross-origin allowed. Never use a wildcard on a public-facing deploy.
     #[arg(long, env = "KALLIP_LESCHE_CORS_ORIGINS", default_value = "")]
     pub cors_origins: String,
+    /// Postgres URL for the durable room-message store (e.g.
+    /// `postgres://user:pass@host/db`). Required: the relay's durable surface
+    /// is room history, so a missing URL fails fast at boot rather than
+    /// silently running with no store.
+    #[arg(long, env = "KALLIP_LESCHE_DATABASE_URL")]
+    pub database_url: String,
 }

@@ -50,3 +50,40 @@ export function createAutoScroll(options: AutoScrollOptions = {}): AutoScroll {
     stick,
   };
 }
+
+/** Scroll-pin function for a raw-toggle on a single message bubble. The markdown/Shiki
+ *  mount settles across several frames: when a taller-than-raw bubble collapses (or vice
+ *  versa) the control the user just clicked would drift away from the cursor. `pin` keeps
+ *  the clicked `anchor` (the actions row) at a fixed viewport-relative top while `target`
+ *  (the bubble box) reflows.
+ *
+ *  ONE controller per transcript owns a single active ResizeObserver, so a rapid second
+ *  toggle on a different bubble REPLACES the in-flight pin rather than stacking a second
+ *  observer -- two observers each adjusting the shared `scrollTop` would over-correct and
+ *  jitter. Pure (no DOM state of its own); the caller passes a `getViewport` that reads the
+ *  live scroll container. */
+export type TogglePin = (target: HTMLElement, anchor: HTMLElement) => void;
+
+export function createTogglePin(
+  getViewport: () => HTMLDivElement | undefined,
+): TogglePin {
+  let activeRO: ResizeObserver | undefined;
+  return (target, anchor) => {
+    const viewport = getViewport();
+    if (!viewport) return;
+    const topBefore = anchor.getBoundingClientRect().top;
+    // Re-pin on every resize for a short window: the markdown/Shiki mount settles across
+    // several frames, so a single rAF miss catches the rest.
+    const doPin = (): void => {
+      viewport.scrollTop += anchor.getBoundingClientRect().top - topBefore;
+    };
+    activeRO?.disconnect();
+    requestAnimationFrame(doPin);
+    const ro = new ResizeObserver(doPin);
+    ro.observe(target);
+    activeRO = ro;
+    setTimeout(() => {
+      ro.disconnect();
+    }, 200);
+  };
+}

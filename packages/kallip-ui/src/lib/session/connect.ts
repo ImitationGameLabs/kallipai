@@ -1,6 +1,7 @@
 import { TagmaClient } from "@kallipai/kallip-client";
 import type { AgentId } from "@kallipai/kallip-common";
 import type { OfflineModeConfig } from "../config/config.ts";
+import type { ConversationSender } from "../transcript.ts";
 import { DirectTransport } from "./directTransport.ts";
 
 /** The result of connecting to the tagma directly: the transport bound to the
@@ -18,7 +19,8 @@ export interface DirectConnection {
  * agent (eagerly created at tagma startup). The transport consumes the tagma's
  * external chat-room API (`/agents/{id}/external/events` + the inbound message
  * POST). Mirrors kallip-tui's `Session::connect`. Also surfaces the tagma's
- * conversation id so offline + online share one cache.
+ * conversation id so offline + online share one cache, and the offline local
+ * user identity (so the optimistic bubble renders the operator's handle).
  */
 export async function connectDirect(
   config: OfflineModeConfig,
@@ -30,9 +32,14 @@ export async function connectDirect(
 
   const root = await client.getRootAgent();
   const agentId: AgentId = root.id;
+  const localSender: ConversationSender = {
+    kind: "user",
+    id: root.local_user_id ?? "local-operator",
+    handle: root.local_user_handle ?? "Operator",
+  };
 
   return {
-    transport: new DirectTransport(client, agentId),
+    transport: new DirectTransport(client, agentId, localSender),
     conversationId: root.conversation_id ?? null,
   };
 }

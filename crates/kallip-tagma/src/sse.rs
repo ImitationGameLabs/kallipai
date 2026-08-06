@@ -164,7 +164,16 @@ pub fn direct_sse_stream(
 
 fn serialize_direct_frame(frame: &DirectFrame) -> serde_json::Result<Event> {
     let (name, data) = match frame {
-        DirectFrame::Authored(reply) => ("authored", serde_json::to_string(reply)?),
+        // The offline SSE carries the sender alongside the reply (the offline
+        // path has no relay envelope), so the frontend renders the author from
+        // one uniform `{sender, reply}` shape.
+        DirectFrame::Authored { sender, reply } => (
+            "authored",
+            serde_json::to_string(&crate::direct::DirectAuthoredPayload {
+                sender: sender.clone(),
+                reply: reply.clone(),
+            })?,
+        ),
         DirectFrame::Signal(event) => ("signal", serde_json::to_string(event)?),
         DirectFrame::Status(payload) => ("status", serde_json::to_string(payload)?),
     };

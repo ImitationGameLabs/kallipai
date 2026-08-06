@@ -3,4 +3,4 @@
 
 mod client;
 
-pub use client::{LescheClient, LescheClientBuilder};
+pub use client::{LescheClient, LescheClientBuilder, LescheHttpError};

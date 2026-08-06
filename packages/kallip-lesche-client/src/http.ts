@@ -11,11 +11,20 @@
 import { parseSseStream } from "@kallipai/kallip-common";
 import { LescheApiError } from "./types.ts";
 import type {
+  AddTagmaRequest,
   CreateConversationResponse,
+  CreateInviteRequest,
+  CreateInviteResponse,
   Envelope,
   KeyExchangeInit,
   KeyExchangeResponse,
   LescheEvent,
+  RoomInviteView,
+  RoomMessageView,
+  RoomRosterView,
+  RoomView,
+  TagmaRoomView,
+  Visibility,
 } from "./types.ts";
 
 /** CSRF marker the lesche's `csrf_guard` checks. */
@@ -102,6 +111,40 @@ export class LescheClient extends BaseClient {
     );
   }
 
+  // -- rooms (multi-member data plane) ---------------------------------------
+
+  /** `POST /v1/rooms/{id}/envelopes` — store + fan a room envelope to the
+   * room's other live members. Returns on 202; offline members pull the row via
+   * `fetchRoomMessages`. The payload is the plaintext `RoomMessage` JSON (the
+   * lesche stores it opaquely; member access is enforced server-side). 404 =
+   * the caller is not a room member. */
+  postRoomEnvelope(roomId: string, envelope: Envelope): Promise<void> {
+    return this.json(
+      `/v1/rooms/${encodeURIComponent(roomId)}/envelopes`,
+      "POST",
+      envelope,
+    );
+  }
+
+  /** `GET /v1/rooms/{id}/messages` — the room's message history. `afterSeq` is
+   * exclusive (rows with `seq > afterSeq`); `limit` caps the page. 404 = not a
+   * member. */
+  fetchRoomMessages(
+    roomId: string,
+    opts?: { afterSeq?: number; limit?: number },
+  ): Promise<RoomMessageView[]> {
+    const params = new URLSearchParams();
+    if (opts?.afterSeq !== undefined) {
+      params.set("after_seq", String(opts.afterSeq));
+    }
+    if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+    const query = params.toString();
+    return this.json(
+      `/v1/rooms/${encodeURIComponent(roomId)}/messages${query ? `?${query}` : ""}`,
+      "GET",
+    );
+  }
+
   /** `GET /v1/me/events` — the multiplexed SSE stream of the user's conversation
    * deliveries plus tagma presence (`tagma_online` / `tagma_offline`, with an
    * initial presence snapshot on connect). A long-lived fetch parsed with the
@@ -121,6 +164,105 @@ export class LescheClient extends BaseClient {
     for await (const ev of parseSseStream(resp, signal)) {
       yield JSON.parse(ev.data) as LescheEvent;
     }
+  }
+
+  // --- room management (relocated from agora) -------------------------------
+
+  /** `POST /v1/rooms` -- create a room; the caller is the founding member.
+   * `name` is required; `description` and `visibility` default to empty and
+   * `private` respectively. All three fields are always sent so the server's
+   * `Json<CreateRoomRequest>` extractor does not reject the body. */
+  createRoom(body: {
+    name: string;
+    description?: string;
+    visibility?: Visibility;
+  }): Promise<RoomView> {
+    return this.json("/v1/rooms", "POST", {
+      name: body.name,
+      description: body.description ?? "",
+      visibility: body.visibility ?? "private",
+    });
+  }
+
+  /** `GET /v1/rooms` — the caller's rooms (current membership), newest-joined. */
+  listRooms(): Promise<RoomView[]> {
+    return this.json("/v1/rooms", "GET");
+  }
+
+  /** `GET /v1/rooms/public` -- public (plaintext, open-access) rooms the caller
+   * may join without an invite, newest-created. */
+  listPublicRooms(): Promise<RoomView[]> {
+    return this.json("/v1/rooms/public", "GET");
+  }
+
+  /** `POST /v1/rooms/{id}/join` -- join a public room without an invite
+   * (open-access). 403 if the room is private (use the invite flow); 204 on a
+   * join or an idempotent re-join by an existing member. */
+  joinRoom(roomId: string): Promise<void> {
+    return this.json(`/v1/rooms/${encodeURIComponent(roomId)}/join`, "POST");
+  }
+
+  /** `GET /v1/rooms/{id}` — a room's live roster (member-only). */
+  fetchRoomRoster(roomId: string): Promise<RoomRosterView> {
+    return this.json(`/v1/rooms/${encodeURIComponent(roomId)}`, "GET");
+  }
+
+  /** `GET /v1/rooms/invites` — the caller's pending invites (the inbox). */
+  listMyRoomInvites(): Promise<RoomInviteView[]> {
+    return this.json("/v1/rooms/invites", "GET");
+  }
+
+  /** `POST /v1/rooms/{id}/invites` — invite a user by @username. 409 if one is
+   * already pending. The server strips a leading `@` and resolves the handle. */
+  createRoomInvite(
+    roomId: string,
+    inviteeUsername: string,
+  ): Promise<CreateInviteResponse> {
+    const body: CreateInviteRequest = { invitee_username: inviteeUsername };
+    return this.json(
+      `/v1/rooms/${encodeURIComponent(roomId)}/invites`,
+      "POST",
+      body,
+    );
+  }
+
+  /** `POST /v1/rooms/{id}/invites/{invite_id}/accept` — accept (invitee-only). */
+  acceptRoomInvite(roomId: string, inviteId: string): Promise<void> {
+    return this.json(
+      `/v1/rooms/${encodeURIComponent(roomId)}/invites/${encodeURIComponent(inviteId)}/accept`,
+      "POST",
+      undefined,
+    );
+  }
+
+  /** `DELETE /v1/rooms/{id}/members/{member_id}` — remove a member
+   * (self = leave). Keyed by the opaque derived member id (the identifier every
+   * room surface already carries). Authorization is server-side: self, the
+   * tagma's owner, or the room creator; anything else is a 404. */
+  removeRoomMember(roomId: string, memberId: string): Promise<void> {
+    return this.json(
+      `/v1/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(memberId)}`,
+      "DELETE",
+      undefined,
+    );
+  }
+
+  /** `POST /v1/rooms/{id}/tagmata` — add a tagma (idempotent). */
+  addRoomTagma(roomId: string, tagmaId: string): Promise<void> {
+    const body: AddTagmaRequest = { tagma_id: tagmaId };
+    return this.json(
+      `/v1/rooms/${encodeURIComponent(roomId)}/tagmata`,
+      "POST",
+      body,
+    );
+  }
+
+  /** `GET /v1/me/tagmata/{id}/rooms` — the rooms one of the caller's tagmata
+   * has joined (the "Manage rooms" dialog source). The caller must own the
+   * tagma (registry-attested server-side). Distinct from the tagma-self
+   * discovery route, which the tagma polls from Rust, not from this client. */
+  listMyTagmaRooms(tagmaId: string): Promise<TagmaRoomView[]> {
+    return this.json(`/v1/me/tagmata/${encodeURIComponent(tagmaId)}/rooms`, "GET");
   }
 }
 

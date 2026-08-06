@@ -27,7 +27,7 @@
 //! crates can name them without a second `use` path.
 
 use crate::message::Envelope;
-use kallip_agora_common::ids::TagmaId;
+use kallip_agora_common::ids::{MemberId, RoomId, TagmaId};
 use serde::{Deserialize, Serialize};
 
 // Re-exported so downstream crates (e.g. `kallip-lesche-client`) can name the
@@ -73,6 +73,36 @@ pub enum LescheEvent {
     TagmaSignal {
         tagma_id: TagmaId,
         event: SignalEvent,
+    },
+    /// A room's membership changed (a member was added/removed). The user-device
+    /// analog of the tagma-tunnel `Wake`: fanned to every live user member of
+    /// the room so the frontend refreshes the roster (membership is
+    /// server-authoritative). Transient -- not buffered, fanned to ALL live user
+    /// members (no actor exclusion).
+    RoomMembershipChanged { room_id: RoomId },
+    /// A room member came online in `room_id` (it established a live tunnel, for
+    /// an agent, or a live app stream, for a human). Fanned to every live HUMAN
+    /// member of every room the participant belongs to, by the relay
+    /// (`kallip-lesche`), on connect. Idempotent set-add -- clients MUST treat
+    /// per-room presence as a set, not assume exactly-once (a participant
+    /// connecting concurrently with the viewer's own snapshot may be delivered
+    /// twice). The roster's `online` field is the fetch-time ground truth that
+    /// resyncs this live layer.
+    RoomMemberOnline {
+        room_id: RoomId,
+        /// The transitioning member's id; joins with `RoomMemberProfile.id` on
+        /// the client.
+        member_id: MemberId,
+    },
+    /// A room member went offline in `room_id`. Fanned on disconnect to every
+    /// live HUMAN member of every room the participant belongs to (same audience
+    /// and scope as the online variant). Transient (not buffered for offline
+    /// viewers); the roster re-fetch resyncs. Idempotent like the online pair.
+    RoomMemberOffline {
+        room_id: RoomId,
+        /// The transitioning member's id; joins with `RoomMemberProfile.id` on
+        /// the client.
+        member_id: MemberId,
     },
 }
 

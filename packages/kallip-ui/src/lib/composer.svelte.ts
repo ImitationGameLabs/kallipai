@@ -45,7 +45,15 @@ export function createComposer(options: ComposerOptions): ComposerModel {
       const value = draft.trim();
       if (!value || !options.canSubmit()) return;
       draft = "";
-      await options.send(value);
+      try {
+        await options.send(value);
+      } catch (e) {
+        // Restore the draft so a failed send does not lose the user's input;
+        // swallow the rejection (the caller surfaces it -- e.g. a room store
+        // marks the optimistic line failed + the page renders a retry).
+        draft = value;
+        if (e instanceof Error) console.error("send failed:", e.message);
+      }
     },
   };
 }

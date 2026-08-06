@@ -11,6 +11,7 @@ mod auth;
 mod device_pairing;
 mod internal;
 mod passkeys;
+mod public_profiles;
 mod tagmata;
 
 use axum::Router;
@@ -47,7 +48,11 @@ pub fn router(state: SharedState, internal_token_hash: Option<TokenHash>) -> Rou
     let pair_begin = device_pairing::begin_router()
         .layer(rate_limit.clone())
         .layer(pair_rate_limit);
-    let enroll = tagmata::enroll_router().layer(rate_limit);
+    let enroll = tagmata::enroll_router().layer(rate_limit.clone());
+    // The public profile reads (user / tagma-by-id) are unauthenticated, so they
+    // share the per-IP limiter: `GET /v1/users/{username}` is otherwise a free
+    // username-enumeration sweep.
+    let public_profiles = public_profiles::public_router().layer(rate_limit);
 
     // The control-plane v1 carries `SharedState`; resolve it to a stateless
     // `Router<()>`. The CSRF custom-header guard scopes to v1 (a no-op for
@@ -63,6 +68,7 @@ pub fn router(state: SharedState, internal_token_hash: Option<TokenHash>) -> Rou
         .nest("/admin", admin::router())
         .merge(enroll)
         .merge(tagmata::protected_router())
+        .merge(public_profiles)
         .with_state(state.clone())
         .layer(axum::middleware::from_fn(crate::middleware::csrf_guard));
 

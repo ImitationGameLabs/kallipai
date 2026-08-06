@@ -6,10 +6,16 @@
     composer,
     disabled,
     pendingCount,
+    disabledNotice,
   }: {
     composer: ComposerModel;
     disabled: boolean;
     pendingCount: number;
+    // Optional copy shown under a disabled composer. When omitted, the default
+    // tagma-pairing notice ("Connect a tagma to send" + /connect link) is shown
+    // -- correct for the bilateral (offline-tagma) chat surface, wrong for a
+    // room error, so the room page passes a room-appropriate string here.
+    disabledNotice?: string;
   } = $props();
 
   let area: HTMLTextAreaElement | undefined = $state();
@@ -81,12 +87,16 @@
       </div>
     {:else if disabled}
       <div class="mt-1.5 text-xs opacity-60">
-        <a
-          href="/connect"
-          class="font-medium text-primary-500 hover:underline cursor-pointer"
-          >Connect a tagma</a
-        >
-        to send.
+        {#if disabledNotice}
+          {disabledNotice}
+        {:else}
+          <a
+            href="/connect"
+            class="font-medium text-primary-500 hover:underline cursor-pointer"
+            >Connect a tagma</a
+          >
+          to send.
+        {/if}
       </div>
     {/if}
   </div>

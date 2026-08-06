@@ -93,6 +93,15 @@ export interface MeResponse {
   readonly passkey_count: number;
 }
 
+/** `GET /v1/users/{username}` -- a public user profile card. Minimal disclosure:
+ * never `email`, `user_id`, or `passkey_count`. An unknown/disabled username and
+ * a malformed input both 404 (existence-oracle; no shape leak). */
+export interface PublicUserProfile {
+  readonly username: string;
+  readonly display_name: string | null;
+  readonly created_at: string;
+}
+
 /** Lifecycle phase of a tagma. `pending` carries an unredeemed enrollment code;
  * `enrolled` has a tagma connected with a pinned device key. Revoked tagmas are
  * never listed. */
@@ -141,6 +150,23 @@ export interface TagmaInfo {
   readonly tagma_id: string;
   readonly pinned_public_key: string;
 }
+
+/** `GET /v1/tagmata/{id}/profile` -- a public tagma profile card. Minimal
+ * disclosure: never `pinned_public_key`, `owner_user_id`, or the enrolled/
+ * revoked flags. Unknown/pending/revoked tagmas and a tagma whose owner is
+ * disabled all 404 (existence-oracle; no state leak). */
+export interface PublicTagmaProfile {
+  readonly tagma_id: string;
+  readonly label: string | null;
+  readonly owner_username: string;
+  readonly owner_display_name: string | null;
+  readonly created_at: string;
+}
+
+// -- rooms ---------------------------------------------------------------
+// Moved to @kallipai/kallip-lesche-client (the chat domain lives in lesche
+// now). Import RoomView / RoomRosterView / RoomInviteView / CreateInvite* /
+// AddTagmaRequest / RoomMemberProfile / ParticipantKind from there.
 
 /**
  * Agora API error. Mirrors `kallip_common::protocol::ApiError`. This is a

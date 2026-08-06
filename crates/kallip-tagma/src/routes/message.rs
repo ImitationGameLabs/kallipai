@@ -2,12 +2,13 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use kallip_agora_common::ids::ParticipantKind;
 use kallip_common::protocol::{ApiError, MessageResponse};
-use kallip_lesche_common::message::TagmaReply;
+use kallip_lesche_common::message::Participant;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
-use crate::messaging::{MessageSender, SenderRelation, format_incoming};
+use crate::messaging::{MessageSender, SenderRelation, format_incoming, sanitize_sender};
 
 use super::MessageRequest;
 use crate::routes::agent::{
@@ -31,30 +32,55 @@ pub async fn send_message(
     Path(id): Path<AgentId>,
     Json(req): Json<MessageRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
-    let response = deliver_message(&state, auth.identity().clone(), &id, &req.text).await?;
+    // Offline-direct path: there is no relay envelope, so the user-facing
+    // sender is the tagma-configured local operator. The relay path passes the
+    // envelope `Participant` explicitly; here we synthesize the local identity.
+    let sender = state.local_user.participant();
+    let response = deliver_message(
+        &state,
+        auth.identity().clone(),
+        Some(sender),
+        &id,
+        &req.text,
+    )
+    .await?;
     Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
 /// Deliver `text` to agent `id` as `identity`, attaching the `[From: ...]`
 /// header, enqueuing on the live prompt channel, and reactivating a dead agent.
-/// The HTTP [`send_message`] handler and the in-process relay (which calls this
-/// as [`crate::auth::Identity::Operator`], matching the old connector-over-HTTP
-/// path) share this single seam so reactivation + header formatting cannot drift.
+/// The HTTP [`send_message`] handler and the in-process relay share this single
+/// seam so reactivation + header formatting cannot drift.
+///
+/// `sender` is the user-facing wire sender (`Participant`): the relay passes
+/// the (relay-authenticated) envelope sender; the offline HTTP path synthesizes
+/// the local operator. `None` for inter-agent messages (no user-facing
+/// transcript entry). The handle is sanitized at this ingest point before it is
+/// persisted or rendered into the prompt.
 pub async fn deliver_message(
     state: &SharedState,
     identity: crate::auth::Identity,
+    sender: Option<Participant>,
     id: &AgentId,
     text: &str,
 ) -> Result<MessageResponse, ApiError> {
-    // Derive the sender from the caller's auth identity and render a
-    // `[From: ...]` header so the receiver knows who sent the message and how
-    // they relate. Computed once and reused across the fast path and the
-    // reactivation slow path. The sender's entry may have been unregistered
-    // between auth resolution and this lock; fall back to a placeholder role.
-    let (sender, relation) = {
+    // Sanitize the wire sender's handle once, at ingest, so the persisted row
+    // and the prompt header both see a clean value (format_incoming sanitizes
+    // again as defense in depth).
+    let sender = sender.map(sanitize_sender);
+    // Derive the prompt-header sender from the caller's auth identity, enriched
+    // with the user handle when the wire sender is a user. Computed once and
+    // reused across the fast path and the reactivation slow path.
+    let (header_sender, relation) = {
         let registry = state.registry.read().await;
         match identity {
-            crate::auth::Identity::Operator => (MessageSender::Operator, SenderRelation::Operator),
+            crate::auth::Identity::Operator => {
+                let handle = match &sender {
+                    Some(p) if p.kind == ParticipantKind::Human => Some(p.handle.clone()),
+                    _ => None,
+                };
+                (MessageSender::Operator { handle }, SenderRelation::Operator)
+            }
             crate::auth::Identity::Agent { id: sender_id } => {
                 let role = registry
                     .get(&sender_id)
@@ -71,26 +97,70 @@ pub async fn deliver_message(
             }
         }
     };
-    info!(receiver = %id, sender = ?sender, relation = ?relation, "delivering message");
-    let envelope = format_incoming(&sender, relation, text);
+    info!(receiver = %id, sender = ?header_sender, relation = ?relation, "delivering message");
+    let envelope = format_incoming(&header_sender, relation, text);
 
     // The external chat-room conversation is root-only. For a user->root
     // message, record it via the external projector BEFORE enqueuing the prompt
     // so the inbound row is durable even if the agent reply races, and so the
     // projector's published `UserMessage` frame lets the frontend promote its
-    // optimistic line. Inter-agent (non-root) messages are not part of the
-    // user-facing transcript and are skipped. The projector is the sole writer;
-    // both the direct and relay paths funnel through here.
+    // optimistic line. Inter-agent (non-root, or no user sender) messages are
+    // not part of the user-facing transcript and are skipped. The projector is
+    // the sole writer; both the direct and relay paths funnel through here.
     let is_root = {
         let registry = state.registry.read().await;
         registry
             .root_agent()
             .is_some_and(|(root_id, _)| root_id == id)
     };
-    if is_root && let Some(projector) = state.external.get() {
-        projector.record_inbound(text.to_string()).await;
+    if is_root
+        && let Some(participant) = sender.clone()
+        && let Some(projector) = state.external.get()
+    {
+        projector
+            .record_inbound(participant, text.to_string())
+            .await;
     }
 
+    enqueue_prompt(state, id, envelope).await
+}
+
+/// Deliver an inbound room message to the root agent's prompt channel (the
+/// inbound counterpart of the outbound `send_room_message` in `routes/lesche`).
+/// The room header carries the authenticated sender tagma id + the room id, so
+/// the agent can reply with `kallip lesche send --room <room>`. Unlike
+/// [`deliver_message`], this does NOT call `record_inbound`: rooms bypass the
+/// bilateral projector entirely (lesche is the room's store of record; the
+/// tagma is one member, not the transcript owner), so no local
+/// `chat_history` row is written and no bilateral `UserMessage` frame is
+/// published. The shared [`enqueue_prompt`] (fast path + reactivation) is reused
+/// so a room message wakes a dead root agent just like a bilateral one.
+pub async fn deliver_inbound_room_message(
+    state: &SharedState,
+    id: &AgentId,
+    room: &kallip_agora_common::ids::RoomId,
+    sender_kind: &str,
+    sender_id: &str,
+    sender_handle: String,
+    text: &str,
+) -> Result<MessageResponse, ApiError> {
+    info!(receiver = %id, room = %room, sender_kind, sender_id, "delivering room message");
+    let envelope =
+        crate::messaging::format_room_incoming(sender_kind, sender_id, sender_handle, room, text);
+    enqueue_prompt(state, id, envelope).await
+}
+
+/// Enqueue an already-formatted prompt string to an agent: the fast path
+/// (non-blocking send to a live agent's prompt channel) and the slow path
+/// (reactivating a dead agent on a fresh channel). Shared by the bilateral
+/// [`deliver_message`] and the room `deliver_room_message` so both paths
+/// wake a dead root agent identically; only the prompt formatting and the
+/// (bilateral-only) inbound persistence differ between the callers.
+async fn enqueue_prompt(
+    state: &SharedState,
+    id: &AgentId,
+    envelope: String,
+) -> Result<MessageResponse, ApiError> {
     // Fast path: agent is alive, try non-blocking send.
     {
         let registry = state.registry.read().await;
@@ -423,12 +493,12 @@ pub struct ExternalHistoryQuery {
 
 /// `GET /agents/{id}/external/history` -- the pull-based history window for the
 /// direct (offline) path, cursor-driven by the frontend's high-water mark.
-/// Root-only and projector-owned; returns decoded replies and a `more` flag.
-/// The direct SSE stays live-only; history is always a frontend-initiated pull,
-/// symmetric with the relay's `TagmaControl::History`.
+/// Root-only and projector-owned; returns decoded entries (sender + reply) and
+/// a `more` flag. The direct SSE stays live-only; history is always a
+/// frontend-initiated pull, symmetric with the relay's `TagmaControl::History`.
 #[derive(Debug, Serialize)]
 pub struct ExternalHistoryResponse {
-    pub rows: Vec<TagmaReply>,
+    pub rows: Vec<kallip_lesche_common::message::HistoryEntry>,
     pub more: bool,
 }
 
@@ -594,7 +664,9 @@ mod tests {
     // -- send_message: sender identity is attached to the delivered payload --
 
     /// Deliver a message as the operator and assert the receiver sees a
-    /// `[From: operator]` header.
+    /// `[From: user {handle}]` header. The offline HTTP path synthesizes the
+    /// local user sender (default handle "Operator"); the handle drives the
+    /// header.
     #[tokio::test]
     async fn operator_message_carries_operator_header() {
         let state = make_state();
@@ -608,7 +680,7 @@ mod tests {
             .register(receiver.clone(), RegistryEntry::Live(entry));
 
         let resp = send_message(
-            State(state),
+            State(state.clone()),
             AuthIdentity::test_new(Identity::Operator),
             Path(receiver),
             Json(MessageRequest {
@@ -620,7 +692,11 @@ mod tests {
         assert_eq!(resp.0, StatusCode::ACCEPTED);
 
         let delivered = rx.recv().await.expect("message delivered");
-        assert_eq!(delivered, "[From: operator]\ndo the thing");
+        let expected_handle = state.local_user.handle.clone();
+        assert_eq!(
+            delivered,
+            format!("[From: user {expected_handle}]\ndo the thing")
+        );
     }
 
     /// Deliver a message from a child agent to its parent and assert the

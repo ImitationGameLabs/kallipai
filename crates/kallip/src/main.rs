@@ -96,8 +96,32 @@ async fn main() -> Result<()> {
                         buf
                     }
                 };
-                client.post_message_delivery(&id, &text).await?;
+                client
+                    .post_message_delivery(&id, &text, args.room.as_deref())
+                    .await?;
                 println!("{}", kallip_common::message::marker_line(&text));
+            }
+            LescheCommand::Rooms => {
+                // Self-only: list the calling tagma's joined rooms.
+                let id = agent_id_from_env()?;
+                let rooms = client.list_joined_rooms(&id).await?;
+                if rooms.is_empty() {
+                    println!("(no rooms joined)");
+                } else {
+                    for room in rooms {
+                        println!("{room}");
+                    }
+                }
+            }
+            LescheCommand::Read(args) => {
+                // Self-only: read one room's decrypted history. The tagma route
+                // renders a text block (one bracketed block per message), so
+                // print it verbatim (no trailing newline added).
+                let id = agent_id_from_env()?;
+                let text = client
+                    .read_room_messages(&id, &args.room, args.after_seq, args.limit)
+                    .await?;
+                print!("{text}");
             }
         },
         Commands::Subagent(cmd) => {

@@ -1,4 +1,5 @@
-# Dev agora-side composition: caddy + agora + lesche + postgres. The default
+# Dev agora-side composition: caddy + agora + lesche + agora-postgres +
+# lesche-postgres. The default
 # dev stack -- a plain `arion up` brings it up via the `arion-compose.nix` shim
 # at the repo root (which just re-exports this module); invoke directly with
 # `arion -f compose/dev/agora.nix ...` for the same result.
@@ -81,17 +82,23 @@ in
     # meaningful suffix.
     docker-compose.volumes = {
       agora_pgdata = { };
+      lesche_pgdata = { };
     };
 
-    # Postgres: the official image, run as its own container for production
-    # parity and isolation. Agora retries it with a capped backoff at boot, so
-    # `depends_on` (start-order only) is enough -- no healthcheck. (prod-agora's
-    # postgres lives in compose/prod/agora.nix and reads creds from .env.)
-    services.postgres = {
+    # Dev-only hardcoded creds (prod reads them from .env).
+    services.agora-postgres = {
       service.image = "postgres:17.5";
       service.volumes = [ "agora_pgdata:/var/lib/postgresql/data" ];
-      # dev-only hardcoded credentials. (environment wins over env_file, so
-      # these MUST stay dev-only -- prod reads them from .env.)
+      service.environment = {
+        POSTGRES_USER = "kallip";
+        POSTGRES_PASSWORD = "kallip";
+        POSTGRES_DB = "kallip";
+      };
+    };
+
+    services.lesche-postgres = {
+      service.image = "postgres:17.5";
+      service.volumes = [ "lesche_pgdata:/var/lib/postgresql/data" ];
       service.environment = {
         POSTGRES_USER = "kallip";
         POSTGRES_PASSWORD = "kallip";
@@ -142,7 +149,7 @@ in
     # composition: compose/prod/agora.nix, behind the operator's TLS
     # reverse proxy, no published port.)
     services.agora = {
-      service.depends_on = [ "postgres" ];
+      service.depends_on = [ "agora-postgres" ];
       service.useHostStore = true;
       service.command = [ "${workspace}/bin/kallip-agora" ];
       service.ports = [ "7100:7100" ];
@@ -152,7 +159,7 @@ in
       service.environment = {
         PATH = "${workspace}/bin";
         KALLIP_AGORA_ADDR = "0.0.0.0:7100";
-        KALLIP_AGORA_DATABASE_URL = "postgres://kallip:kallip@postgres:5432/kallip";
+        KALLIP_AGORA_DATABASE_URL = "postgres://kallip:kallip@agora-postgres:5432/kallip";
         # The browser loads the SPA at https://web.<devDomain> (Caddy
         # terminates TLS), so the WebAuthn RP id is the registrable domain
         # <devDomain> and the RP origin is the web subdomain. Standard 443
@@ -183,13 +190,18 @@ in
       };
     };
 
-    # Lesche: the data-plane relay. DB-free; authenticates requests and
-    # resolves tagma metadata through the agora's /internal surface over the
-    # compose network. Reached by the browser via Caddy at
+    # Lesche: the data-plane relay. Owns the chat domain in its own Postgres
+    # (rooms, membership, message payloads) and
+    # authenticates + attests identity through the agora's /internal surface
+    # over the compose network. Reached by the browser via Caddy at
     # https://lesche.<devDomain> and by the tagma's relay connector via
     # compose DNS (lesche:7200).
     services.lesche = {
-      service.depends_on = [ "agora" ];
+      # No healthcheck; unlike the agora, lesche does not retry its DB connect.
+      service.depends_on = [
+        "agora"
+        "lesche-postgres"
+      ];
       service.useHostStore = true;
       service.command = [ "${workspace}/bin/kallip-lesche" ];
       service.ports = [ "7200:7200" ];
@@ -207,6 +219,7 @@ in
       ++ cacert;
       service.environment = {
         KALLIP_LESCHE_ADDR = "0.0.0.0:7200";
+        KALLIP_LESCHE_DATABASE_URL = "postgres://kallip:kallip@lesche-postgres:5432/kallip";
         KALLIP_LESCHE_AGORA_INTERNAL_URL = "http://agora:7100";
         # Must equal the agora's KALLIP_AGORA_INTERNAL_TOKEN above.
         KALLIP_LESCHE_AGORA_TOKEN = "dev-internal-secret";

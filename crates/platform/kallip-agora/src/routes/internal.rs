@@ -14,8 +14,9 @@ use axum::routing::post;
 
 use kallip_agora_common::control_plane::ControlPlane;
 use kallip_agora_common::internal_api::{
-    TagmaIdentityRequest, TagmaIdentityResponse, TagmaResolvableRequest, TagmaResolvableResponse,
-    TunnelProofTsRequest, TunnelProofTsResponse, VerifyBearerRequest, VerifyBearerResponse,
+    TagmaProfileResponse, TagmaProfilesRequest, TagmaProfilesResponse, TunnelProofTsRequest,
+    TunnelProofTsResponse, UserIdentitiesRequest, UserIdentitiesResponse,
+    UserIdentityByUsernameRequest, UserIdentityResponse, VerifyBearerRequest, VerifyBearerResponse,
     VerifySessionRequest, VerifySessionResponse, WirePrincipal,
 };
 use kallip_agora_common::principal::Principal;
@@ -27,19 +28,27 @@ pub fn router() -> Router<SharedState> {
     Router::new()
         .route("/verify-session", post(verify_session))
         .route("/verify-bearer", post(verify_bearer))
-        .route("/tagma-resolvable", post(tagma_resolvable))
-        .route("/tagma-identity", post(tagma_identity))
+        .route("/tagma-profiles", post(tagma_profiles))
+        .route("/user-identities", post(user_identities))
+        .route(
+            "/user-identity-by-username",
+            post(user_identity_by_username),
+        )
         .route("/tunnel-proof-ts", post(tunnel_proof_ts))
 }
 
-/// A handler error: a status + an optional diagnostic body. The lesche only
-/// inspects the status (`404` -> `None`, anything non-2xx other than 404 ->
-/// `Backend`); the body is for logs.
+/// A handler error: a status code plus a body the lesche never reads (it maps
+/// `404` -> `None`, any other non-2xx -> `Backend` from the status alone). All
+/// bodies here are empty; diagnostics go to `tracing` (see `backend`).
 type HandlerError = (StatusCode, String);
 
-/// Map a `ControlPlane` backend failure to a 500.
+/// Map a `ControlPlane` backend failure to a 500 with an EMPTY body. The body
+/// could otherwise echo a raw `DbErr` (query text, constraint names) to a
+/// trusted-but-remote caller; the lesche inspects only the status, so log the
+/// detail server-side and return the same empty body `NOT_FOUND` uses.
 fn backend<E: std::fmt::Display>(e: E) -> HandlerError {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    tracing::error!(error = %e, "internal route failure");
+    (StatusCode::INTERNAL_SERVER_ERROR, String::new())
 }
 
 /// The "not found" outcome: `404` with an empty body.
@@ -55,7 +64,11 @@ async fn verify_session(
     axum::Json(req): axum::Json<VerifySessionRequest>,
 ) -> Result<axum::Json<VerifySessionResponse>, HandlerError> {
     match control(&state).verify_session(&req.cookie).await {
-        Ok(Some(user_id)) => Ok(axum::Json(VerifySessionResponse { user_id })),
+        Ok(Some(session)) => Ok(axum::Json(VerifySessionResponse {
+            user_id: session.user_id,
+            username: session.username,
+            display_name: session.display_name,
+        })),
         Ok(None) => Err(NOT_FOUND),
         Err(e) => Err(backend(e)),
     }
@@ -79,34 +92,75 @@ async fn verify_bearer(
         Principal::Admin => WirePrincipal::Admin,
         Principal::Tagma(tagma_id) => WirePrincipal::Tagma { tagma_id },
         Principal::User(_) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "unexpected User principal from verify_bearer".to_string(),
-            ));
+            return Err(backend("unexpected User principal from verify_bearer"));
         }
     };
     Ok(axum::Json(VerifyBearerResponse { principal }))
 }
 
-async fn tagma_resolvable(
+async fn tagma_profiles(
     State(state): State<SharedState>,
-    axum::Json(req): axum::Json<TagmaResolvableRequest>,
-) -> Result<axum::Json<TagmaResolvableResponse>, HandlerError> {
-    let resolvable = control(&state)
-        .tagma_resolvable_by(&req.tagma_id, &req.user_id)
+    axum::Json(req): axum::Json<TagmaProfilesRequest>,
+) -> Result<axum::Json<TagmaProfilesResponse>, HandlerError> {
+    let profiles = control(&state)
+        .tagma_profiles(&req.tagma_ids)
         .await
         .map_err(backend)?;
-    Ok(axum::Json(TagmaResolvableResponse { resolvable }))
+    Ok(axum::Json(TagmaProfilesResponse {
+        profiles: profiles
+            .into_iter()
+            .map(|p| TagmaProfileResponse {
+                tagma_id: p.tagma_id,
+                pinned_public_key: p.pinned_public_key,
+                owner_user_id: p.owner_user_id,
+                label: p.label,
+                owner_username: p.owner_username,
+                owner_display_name: p.owner_display_name,
+                enrolled: p.enrolled,
+                revoked: p.revoked,
+                owner_disabled: p.owner_disabled,
+            })
+            .collect(),
+    }))
 }
 
-async fn tagma_identity(
+async fn user_identities(
     State(state): State<SharedState>,
-    axum::Json(req): axum::Json<TagmaIdentityRequest>,
-) -> Result<axum::Json<TagmaIdentityResponse>, HandlerError> {
-    match control(&state).tagma_identity(&req.tagma_id).await {
-        Ok(Some(id)) => Ok(axum::Json(TagmaIdentityResponse {
-            pinned_public_key: id.pinned_public_key,
-            owner_user_id: id.owner_user_id,
+    axum::Json(req): axum::Json<UserIdentitiesRequest>,
+) -> Result<axum::Json<UserIdentitiesResponse>, HandlerError> {
+    let users = control(&state)
+        .user_identities(&req.user_ids)
+        .await
+        .map_err(backend)?;
+    Ok(axum::Json(UserIdentitiesResponse {
+        users: users
+            .into_iter()
+            .map(|u| UserIdentityResponse {
+                user_id: u.user_id,
+                username: u.username,
+                display_name: u.display_name,
+                disabled: u.disabled,
+            })
+            .collect(),
+    }))
+}
+
+async fn user_identity_by_username(
+    State(state): State<SharedState>,
+    axum::Json(req): axum::Json<UserIdentityByUsernameRequest>,
+) -> Result<axum::Json<UserIdentityResponse>, HandlerError> {
+    // Singular handle resolve: `None` (unknown / disabled / malformed) maps to
+    // 404, matching verify-session / verify-bearer's None-as-404 convention --
+    // not the omission convention of the bulk reader, because this is one id.
+    match control(&state)
+        .user_identity_by_username(&req.username)
+        .await
+    {
+        Ok(Some(u)) => Ok(axum::Json(UserIdentityResponse {
+            user_id: u.user_id,
+            username: u.username,
+            display_name: u.display_name,
+            disabled: u.disabled,
         })),
         Ok(None) => Err(NOT_FOUND),
         Err(e) => Err(backend(e)),

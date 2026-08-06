@@ -3,15 +3,33 @@
 // pieces of new plumbing; both are testable in isolation with fake clients.
 
 import { assertEquals, assertRejects } from "@std/assert";
-import { AsyncQueue } from "./transport.ts";
-import { DirectTransport } from "./directTransport.ts";
+import { AsyncQueue, type IncomingFrame } from "./transport.ts";
+import {
+  DirectTransport,
+  type DirectAuthoredPayload,
+} from "./directTransport.ts";
 import { RelayTransport } from "./relayTransport.ts";
 import type { TagmaClient } from "@kallipai/kallip-client";
 import type {
+  Participant,
   RelayChannel,
   SignalEvent,
   TagmaReply,
 } from "@kallipai/kallip-lesche-client";
+import type { ConversationSender } from "../transcript.ts";
+
+// Shared fixtures: the agent that authors replies on the wire, and the local
+// operator sender the transports render for optimistic user lines.
+const participant: Participant = {
+  kind: "agent",
+  id: "root",
+  handle: "Agent",
+};
+const localSender: ConversationSender = {
+  kind: "user",
+  id: "local-operator",
+  handle: "Operator",
+};
 
 // --- AsyncQueue ---
 
@@ -101,11 +119,17 @@ const authored = (
   data: string;
 } => ({
   event: "authored",
+  // The direct `authored` SSE data is the sender paired with the content reply
+  // (DirectAuthoredPayload), not a bare TagmaReply -- the offline path has no
+  // relay envelope, so the direct frame carries the sender itself.
   data: JSON.stringify({
-    kind: "event",
-    event: { type: "assistant_content", content },
-    history_id,
-  } satisfies TagmaReply),
+    sender: participant,
+    reply: {
+      kind: "event",
+      event: { type: "assistant_content", content },
+      history_id,
+    },
+  } satisfies DirectAuthoredPayload),
 });
 
 const signal = (ev: SignalEvent): { event: string; data: string } => ({
@@ -138,6 +162,7 @@ Deno.test(
         authored("world", 2),
       ]),
       "root",
+      localSender,
     );
     const [replies, signals, statuses] = await Promise.all([
       drain(t.replies()),
@@ -145,11 +170,12 @@ Deno.test(
       drain(t.status()),
     ]);
     assertEquals(
-      replies.map((r) => r.kind),
+      replies.map((r) => r.reply.kind),
       ["event", "event"],
     );
     assertEquals(
-      (replies[0] as Extract<TagmaReply, { kind: "event" }>).event.content,
+      (replies[0]!.reply as Extract<TagmaReply, { kind: "event" }>).event
+        .content,
       "hello",
     );
     assertEquals(
@@ -174,6 +200,7 @@ Deno.test(
         },
       } as unknown as TagmaClient,
       "root",
+      localSender,
     );
     const replyP = drain(t.replies());
     const signalP = drain(t.signals());
@@ -198,6 +225,7 @@ Deno.test(
         },
       } as unknown as TagmaClient,
       "root",
+      localSender,
     );
     const [replies, signals] = await Promise.all([
       drain(t.replies()),
@@ -212,7 +240,11 @@ Deno.test(
 Deno.test(
   "DirectTransport ends both drains on a clean stream end",
   async () => {
-    const t = new DirectTransport(fakeClient([authored("hi", 1)]), "root");
+    const t = new DirectTransport(
+      fakeClient([authored("hi", 1)]),
+      "root",
+      localSender,
+    );
     const [replies, signals] = await Promise.all([
       drain(t.replies()),
       drain(t.signals()),
@@ -237,8 +269,9 @@ Deno.test("DirectTransport close ends both drains", async () => {
       },
     } as unknown as TagmaClient,
     "root",
+    localSender,
   );
-  const replies: TagmaReply[] = [];
+  const replies: IncomingFrame[] = [];
   const draining = (async () => {
     for await (const r of t.replies()) {
       replies.push(r);
@@ -253,9 +286,12 @@ Deno.test("DirectTransport close ends both drains", async () => {
 
 // --- RelayTransport ---
 
-/** A fake RelayChannel whose replies() yields the given replies, then ends. */
-function fakeChannel(replies: TagmaReply[]): RelayChannel {
+/** A fake RelayChannel whose replies() yields the given IncomingFrames, then
+ * ends. `localParticipant` is read by the RelayTransport constructor (it derives
+ * `localSender` from it), so the fake must supply one. */
+function fakeChannel(replies: IncomingFrame[]): RelayChannel {
   return {
+    localParticipant: participant,
     replies: async function* () {
       for (const r of replies) yield r;
     },
@@ -265,13 +301,16 @@ function fakeChannel(replies: TagmaReply[]): RelayChannel {
 }
 
 Deno.test("RelayTransport replies delegate to the RelayChannel", async () => {
-  const reply = {
-    kind: "event",
-    event: { type: "assistant_content", content: "hi" },
-    history_id: 1,
-  } as TagmaReply;
-  const t = new RelayTransport(fakeChannel([reply]));
-  assertEquals(await drain(t.replies()), [reply]);
+  const frame: IncomingFrame = {
+    sender: participant,
+    reply: {
+      kind: "event",
+      event: { type: "assistant_content", content: "hi" },
+      history_id: 1,
+    },
+  };
+  const t = new RelayTransport(fakeChannel([frame]));
+  assertEquals(await drain(t.replies()), [frame]);
 });
 
 Deno.test(
@@ -308,18 +347,22 @@ Deno.test(
     // the signal queue must still close so the signals drain ends -- otherwise
     // a Conversation.run() (Promise.allSettled) would hang forever.
     const t = new RelayTransport({
+      localParticipant: participant,
       replies: async function* () {
         yield {
-          kind: "event",
-          event: { type: "assistant_content", content: "x" },
-          history_id: 1,
-        } as TagmaReply;
+          sender: participant,
+          reply: {
+            kind: "event",
+            event: { type: "assistant_content", content: "x" },
+            history_id: 1,
+          },
+        };
         throw new Error("bad payload");
       },
       send: () => Promise.resolve(),
       close: () => {},
     } as unknown as RelayChannel);
-    const replies: TagmaReply[] = [];
+    const replies: IncomingFrame[] = [];
     await assertRejects(async () => {
       for await (const r of t.replies()) replies.push(r);
     }, "bad payload");

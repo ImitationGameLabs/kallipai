@@ -9,18 +9,19 @@
 // `signals()` drain consumes them here -- so the conversation drains replies +
 // signals from one uniform interface regardless of transport.
 
-import type {
-  RelayChannel,
-  SignalEvent,
-  TagmaReply,
-} from "@kallipai/kallip-lesche-client";
+import type { RelayChannel, SignalEvent } from "@kallipai/kallip-lesche-client";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
-import { AsyncQueue, type Transport } from "./transport.ts";
+import type { ConversationSender } from "../transcript.ts";
+import { toSender } from "../transcript.ts";
+import { AsyncQueue, type IncomingFrame, type Transport } from "./transport.ts";
 
 export class RelayTransport implements Transport {
   private readonly signalQueue = new AsyncQueue<SignalEvent>();
+  readonly localSender: ConversationSender;
 
-  constructor(private readonly channel: RelayChannel) {}
+  constructor(private readonly channel: RelayChannel) {
+    this.localSender = toSender(channel.localParticipant);
+  }
 
   async *status(): AsyncGenerator<TagmaStatusSummary> {
     // Empty by design: the relay's status rides the agora SSE (the
@@ -29,7 +30,7 @@ export class RelayTransport implements Transport {
     // drain in Conversation.run() therefore contributes nothing here.
   }
 
-  async *replies(): AsyncGenerator<TagmaReply> {
+  async *replies(): AsyncGenerator<IncomingFrame> {
     // The reply stream ending or throwing means the E2EE channel is dead. The
     // signal stream is a separate queue (fed by the realtime SSE); close it here
     // so the Conversation's signals drain ends too -- otherwise its run()

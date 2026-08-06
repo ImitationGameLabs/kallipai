@@ -3,7 +3,7 @@
 // names are snake_case here (matching serde), and every base64 string is
 // STANDARD base64 (padded, +//).
 
-import type { TagmaReply } from "@kallipai/kallip-common";
+import type { HistoryEntry } from "@kallipai/kallip-common";
 
 /** `GET /agents/root` -- the tagma's single root agent (always present after
  * startup). `id` binds the transport; `conversation_id` (present only on the
@@ -19,6 +19,10 @@ export interface WireAgentSummary {
   readonly activity?: string;
   readonly faulted_reason?: string | null;
   readonly conversation_id?: string;
+  /** The offline path's local user id/handle (present only on the root
+   * summary); the offline frontend renders its optimistic bubble with these. */
+  readonly local_user_id?: string;
+  readonly local_user_handle?: string;
 }
 
 /** `POST /agents/{id}/message` -- queue-depth feedback for an inbound user
@@ -30,11 +34,13 @@ export interface MessageResponse {
 }
 
 /** `GET /agents/{id}/external/history` -- a cursor-driven history window for
- * the direct (offline) path. `rows` are decoded `TagmaReply` frames (authored
- * `event` / `user_message` echoes); `more` is true only for paginated
- * (`after`/`before`) queries that returned a full page. Mirrors the relay
- * `TagmaControl::History` shape. */
+ * the direct (offline) path. `rows` are decoded `HistoryEntry` frames (the
+ * sender paired with an authored `event` / `user_message` echo); `more` is true
+ * only for paginated (`after`/`before`) queries that returned a full page.
+ * Mirrors the relay `TagmaControl::History` shape. */
 export interface ExternalHistoryResponse {
-  readonly rows: readonly TagmaReply[];
+  /** History entries: the sender paired with the content-only reply (mirrors
+   * the live `{sender, body}` shape). */
+  readonly rows: readonly HistoryEntry[];
   readonly more: boolean;
 }

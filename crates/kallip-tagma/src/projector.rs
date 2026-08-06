@@ -68,3 +68,102 @@ pub(crate) fn project_external(sse: &SseEvent) -> (Option<AuthoredEvent>, Option
     }
     (authored, system)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kallip_common::protocol::FailoverChainExhaustion;
+
+    #[test]
+    fn project_external_splits_authored_and_signal() {
+        // Authored content -> authored half only.
+        assert!(matches!(
+            project_external(&SseEvent::AssistantContent {
+                content: "c".into()
+            }),
+            (Some(AuthoredEvent::AssistantContent { .. }), None)
+        ));
+        // System signals -> signal half only, no authored, never persisted.
+        assert!(matches!(
+            project_external(&SseEvent::Busy),
+            (None, Some(SignalEvent::Busy))
+        ));
+        assert!(matches!(
+            project_external(&SseEvent::Interrupted),
+            (None, Some(SignalEvent::Interrupted))
+        ));
+        assert!(matches!(
+            project_external(&SseEvent::Cancelled),
+            (None, Some(SignalEvent::Cancelled))
+        ));
+        assert!(matches!(
+            project_external(&SseEvent::MaxRoundsExceeded),
+            (None, Some(SignalEvent::MaxRoundsExceeded))
+        ));
+        assert!(matches!(
+            project_external(&SseEvent::TokenBudgetExceeded {
+                consumed: 1,
+                budget: 2
+            }),
+            (
+                None,
+                Some(SignalEvent::TokenBudgetExceeded {
+                    consumed: 1,
+                    budget: 2
+                })
+            )
+        ));
+        assert!(matches!(
+            project_external(&SseEvent::Error {
+                message: "m".into()
+            }),
+            (None, Some(SignalEvent::Error { .. }))
+        ));
+        {
+            let (a, s) = project_external(&SseEvent::Error {
+                message: "m".into(),
+            });
+            assert!(a.is_none());
+            match s {
+                Some(SignalEvent::Error { message }) => assert_eq!(message, "m"),
+                other => panic!("expected Error, got {other:?}"),
+            }
+        }
+        {
+            let (a, s) = project_external(&SseEvent::FailoverChainExhausted {
+                reason: FailoverChainExhaustion::NoFailoverConfigured,
+                detail: "d".into(),
+            });
+            assert!(a.is_none());
+            match s {
+                Some(SignalEvent::FailoverChainExhausted { reason, detail }) => {
+                    assert!(matches!(
+                        reason,
+                        FailoverChainExhaustion::NoFailoverConfigured
+                    ));
+                    assert_eq!(detail, "d");
+                }
+                other => panic!("expected FailoverChainExhausted, got {other:?}"),
+            }
+        }
+        // Dropped (out-of-capability) variants map to neither half.
+        assert!(matches!(
+            project_external(&SseEvent::ToolCall {
+                name: "x".into(),
+                args: "{}".into()
+            }),
+            (None, None)
+        ));
+        assert!(matches!(
+            project_external(&SseEvent::AssistantContentDelta { delta: "d".into() }),
+            (None, None)
+        ));
+        assert!(matches!(
+            project_external(&SseEvent::ApprovalUpdated {
+                id: "a".into(),
+                status: kallip_common::approval::ApprovalStatus::Pending
+            }),
+            (None, None)
+        ));
+    }
+}

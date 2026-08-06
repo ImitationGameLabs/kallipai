@@ -20,8 +20,8 @@
 #   default devShell. This shell is opt-in: `nix develop .#tauri`.
 #
 #   Mirrors the proven talk-tree config (nix/dev/shell.nix), adapted for kallip:
-#   - appCraneLib carries the cross targets the backend toolchain omits: wasm32
-#     (shared agora crypto) and the android std targets (tauri android).
+#   - appCraneLib carries the cross targets the backend toolchain omits: the
+#     android std targets (tauri android).
 #
 # Repo-wide tooling (rumdl, taplo, nil, ...) and the opt-in sccache scheme
 # (USE_SCCACHE=1) are shared with devShells.default via nix/devshells/shared.nix.
@@ -47,8 +47,6 @@ let
       # build` needs an explicit `--target` (unlike `dev`); see
       # docs/frontend-development.md for the commands.
       targets = [
-        # Shared agora crypto, single-source build consumed by web + app.
-        "wasm32-unknown-unknown"
         # Android ABIs are restricted to arm64 + x86_64 via the
         # ORG_GRADLE_PROJECT_abiList/archList/targetList env vars below (read
         # by the generated RustPlugin), so gradle only invokes cargo for these

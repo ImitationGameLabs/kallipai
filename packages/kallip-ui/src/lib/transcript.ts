@@ -22,11 +22,32 @@
 
 import type {
   AuthoredEvent,
+  Participant,
   SignalEvent,
   TagmaReply,
 } from "@kallipai/kallip-lesche-client";
 
 type ConversationRole = "user" | "assistant" | "system";
+
+/** The UI-facing sender, derived from the wire `Participant`: the `kind`, a
+ * single `id` (the opaque participant id), and the display `handle`. The UI
+ * layer sees one flat `id`. The wire `kind` (`"human"`/`"agent"`) is mapped to
+ * the UI label (`"user"`/`"agent"`) so the offline-direct chat's rendering +
+ * tests keep their existing vocabulary. */
+export interface ConversationSender {
+  readonly kind: "user" | "agent";
+  readonly id: string;
+  readonly handle: string;
+}
+
+/** Derive the UI sender from the wire participant. */
+export function toSender(participant: Participant): ConversationSender {
+  return {
+    kind: participant.kind === "human" ? "user" : "agent",
+    id: participant.id,
+    handle: participant.handle,
+  };
+}
 
 export interface ConversationLine {
   /** Stable id: the tagma `chat_history.id` for confirmed lines, or a synthetic
@@ -36,6 +57,9 @@ export interface ConversationLine {
   readonly historyId: number;
   readonly role: ConversationRole;
   readonly text: string;
+  /** Who authored the line. Absent on signal-produced system lines (no sender)
+   * and on old cached rows written before the sender was tracked. */
+  readonly sender?: ConversationSender;
   /** RFC 3339 send time. For confirmed lines, the tagma row's `created_at`;
    * for an optimistic user line, the client-side render time until the ack
    * refines it. Absent on old cached rows and on signal-produced system lines. */
@@ -68,24 +92,32 @@ function line(
   historyId: number,
   role: ConversationRole,
   text: string,
+  sender: ConversationSender | undefined,
   createdAt?: string,
 ): ConversationTranscript {
   const trimmed = text.trim();
   if (trimmed === "") return state;
   return {
     ...state,
-    lines: [...state.lines, { historyId, role, text: trimmed, createdAt }],
+    lines: [
+      ...state.lines,
+      { historyId, role, text: trimmed, sender, createdAt },
+    ],
   };
 }
 
-/** Apply one tagma reply to the transcript. `lineId` is the store-assigned id
- * for any content line this reply produces (the tagma `history_id` when > 0,
- * else a synthetic negative id the store mints). Pure; returns a new state. */
+/** Apply one tagma reply to the transcript. `sender` is the wire participant
+ * who authored the reply's content (the user for `user_message`, the agent for
+ * `event`); `lineId` is the store-assigned id for any content line this reply
+ * produces (the tagma `history_id` when > 0, else a synthetic negative id the
+ * store mints). Pure; returns a new state. */
 export function applyTagmaReply(
   state: ConversationTranscript,
   reply: TagmaReply,
+  sender: Participant | undefined,
   lineId: number,
 ): ConversationTranscript {
+  const cs = sender ? toSender(sender) : undefined;
   switch (reply.kind) {
     case "message_accepted":
       // Informational ack (queue depth / warning); the store stamps the
@@ -101,7 +133,7 @@ export function applyTagmaReply(
       return state;
     case "error":
       return {
-        ...line(state, lineId, "system", reply.message),
+        ...line(state, lineId, "system", reply.message, undefined),
         status: "error",
         error: reply.message,
       };
@@ -112,10 +144,11 @@ export function applyTagmaReply(
         reply.history_id,
         "user",
         reply.text,
+        cs,
         reply.created_at,
       );
     case "event":
-      return applyAuthored(state, reply.event, lineId, reply.created_at);
+      return applyAuthored(state, reply.event, cs, lineId, reply.created_at);
   }
 }
 
@@ -123,10 +156,11 @@ export function applyTagmaReply(
 function applyAuthored(
   state: ConversationTranscript,
   event: AuthoredEvent,
+  sender: ConversationSender | undefined,
   lineId: number,
   createdAt?: string,
 ): ConversationTranscript {
-  return line(state, lineId, "assistant", event.content, createdAt);
+  return line(state, lineId, "assistant", event.content, sender, createdAt);
 }
 
 /** The human-readable system line a signal produces, or `null` if it is
@@ -167,7 +201,7 @@ export function applySignal(
 ): ConversationTranscript {
   const content = signalSystemLine(signal);
   const withLine = content
-    ? line(state, lineId, "system", content.text)
+    ? line(state, lineId, "system", content.text, undefined)
     : state;
   switch (signal.type) {
     case "busy":
@@ -202,11 +236,13 @@ export function applySignal(
 /** Append a pending user line (synthetic negative `localId`, status
  * `"sending"`) and mark the channel busy (a turn is starting). The store
  * replaces `localId` with the real `history_id` and flips status to `"sent"`
- * when the `MessageAccepted` ack lands. */
+ * when the `MessageAccepted` ack lands. `sender` is the local user (online: the
+ * agora session; offline: the tagma-configured local identity). */
 export function withUserLine(
   state: ConversationTranscript,
   text: string,
   localId: number,
+  sender: ConversationSender,
 ): ConversationTranscript {
   const trimmed = text.trim();
   if (trimmed === "") return state;
@@ -218,6 +254,7 @@ export function withUserLine(
         historyId: localId,
         role: "user",
         text: trimmed,
+        sender,
         // Client-side render time (millis precision); the ack refines this to
         // the server's whole-second `created_at` via `replaceLineId`. The
         // precision gap is invisible to the minute-granularity formatter.
@@ -232,15 +269,18 @@ export function withUserLine(
 /** Replace the pending line carrying `localId` with a confirmed `historyId`
  * (the inbound row id from the `MessageAccepted` ack) and flip its status to
  * `"sent"`. `createdAt`, when given, refines the optimistic client-side stamp
- * to the server's authoritative send time. No-op if the pending line is gone
- * (already replaced, or cleared on reconnect), or if a line with `historyId`
- * already exists (an ack id colliding with an already-rendered line would
- * otherwise duplicate the Svelte/cache key). */
+ * to the server's authoritative send time. `sender`, when given, overwrites the
+ * optimistic line's sender with the authoritative wire sender (so a handle that
+ * changed mid-session does not freeze on the stale optimistic value). No-op if
+ * the pending line is gone (already replaced, or cleared on reconnect), or if a
+ * line with `historyId` already exists (an ack id colliding with an
+ * already-rendered line would otherwise duplicate the Svelte/cache key). */
 export function replaceLineId(
   state: ConversationTranscript,
   localId: number,
   historyId: number,
   createdAt?: string,
+  sender?: ConversationSender,
 ): ConversationTranscript {
   if (!state.lines.some((l) => l.historyId === localId)) return state;
   if (state.lines.some((l) => l.historyId === historyId)) return state;
@@ -252,6 +292,7 @@ export function replaceLineId(
             ...l,
             historyId,
             status: "sent",
+            ...(sender !== undefined ? { sender } : {}),
             ...(createdAt !== undefined ? { createdAt } : {}),
           }
         : l,
@@ -283,19 +324,27 @@ export function markLineSent(
  * authored content (acks, batch markers, op errors) or has no real
  * `history_id` (synthetic / un-stored frames are not cached). Only authored
  * `assistant_content` and replayed `user_message` rows are cached — signals are
- * ephemeral and never cached. */
-export function cacheLineOf(reply: TagmaReply): {
+ * ephemeral and never cached. `sender` is the wire participant who authored the
+ * row; persisted alongside the content so the cache-hydrate path renders the
+ * author without a server round-trip. */
+export function cacheLineOf(
+  reply: TagmaReply,
+  sender: Participant | undefined,
+): {
   historyId: number;
   role: ConversationRole;
   text: string;
+  sender?: ConversationSender;
   createdAt?: string;
 } | null {
+  const cs = sender ? toSender(sender) : undefined;
   if (reply.kind === "user_message") {
     return reply.history_id > 0
       ? {
           historyId: reply.history_id,
           role: "user",
           text: reply.text,
+          sender: cs,
           createdAt: reply.created_at,
         }
       : null;
@@ -308,6 +357,7 @@ export function cacheLineOf(reply: TagmaReply): {
       historyId: id,
       role: "assistant",
       text: reply.event.content,
+      sender: cs,
       createdAt: reply.created_at,
     };
   }

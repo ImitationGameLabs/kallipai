@@ -25,7 +25,7 @@ under `compose/` (dev: `compose/dev/`, prod: `compose/prod/`); the repo-root
 
 | Composition   | Command                                      | Services                          | Image source                                    |
 | ------------- | -------------------------------------------- | --------------------------------- | ----------------------------------------------- |
-| **dev**       | `arion up -d` (default)                      | caddy + agora + lesche + postgres | `packages.default`, run via `useHostStore`      |
+| **dev**       | `arion up -d` (default)                      | caddy + agora + lesche + agora-postgres + lesche-postgres | `packages.default`, run via `useHostStore`      |
 | **dev** tagma | `arion -f compose/dev/tagma.nix up -d`       | tagma                             | `packages.default`, run via `useHostStore`      |
 | **test**      | `arion -f compose/dev/test.nix up`           | tagma (integration suite)         | `packages.kallip-integration-tests`, host store |
 
@@ -36,7 +36,7 @@ Production is split into two **standalone compositions** under
 | Composition | Command                                      | Services         | Image source                                    |
 | ----------- | -------------------------------------------- | ---------------- | ----------------------------------------------- |
 | **tagma**   | `arion -f compose/prod/tagma.nix up -d` | tagma            | `packages.kallip-tagma-image` (pre-built)       |
-| **agora**   | `arion -f compose/prod/agora.nix up -d` | agora + lesche + postgres | `packages.kallip-agora-image` + `packages.kallip-lesche-image` + `postgres:17.5` |
+| **agora**   | `arion -f compose/prod/agora.nix up -d` | agora + lesche + agora-postgres + lesche-postgres | `packages.kallip-agora-image` + `packages.kallip-lesche-image` + `postgres:17.5` |
 
 The two prod halves run on **separate hosts** (the tagma host and the agora
 server) and carry distinct compose project names (`kallipai-tagma` /
@@ -138,9 +138,9 @@ on a public host without a firewall / TLS reverse proxy in front.
 ### agora — `arion -f compose/prod/agora.nix up -d`
 
 Brings up the agora (from `packages.kallip-agora-image`) + lesche (from
-`packages.kallip-lesche-image`) + postgres (official `postgres:17.5` image) —
-the three server-side services co-located on one host. **Neither the agora nor
-the lesche is published** — both sit behind the operator's TLS-terminating edge
+`packages.kallip-lesche-image`) + `agora-postgres` / `lesche-postgres` (official
+`postgres:17.5` image) — co-located on one host. **Neither the agora nor the
+lesche is published** — both sit behind the operator's TLS-terminating edge
 proxy, which HOST-routes `agora.<d>` → `agora:7100` and `lesche.<d>` →
 `lesche:7200` (per-service subdomains) and sets `X-Forwarded-For`; configure
 `KALLIP_AGORA_TRUSTED_PROXIES` to the proxy's CIDR. All agora/lesche env (DB
@@ -218,7 +218,7 @@ on the `tagma` service only:
 - `service.capabilities.SYS_ADMIN = true` (→ `cap_add: [SYS_ADMIN]`)
 - `out.service.security_opt = [ "seccomp=unconfined" ]`
 
-The agora and postgres services need no special privileges.
+The agora and both postgres services need no special privileges.
 
 ## Volumes and workspaces
 
@@ -226,13 +226,15 @@ In dev and the prod-tagma composition, tagma data and the agent workspace are
 **docker named volumes** — no host directories are created and the project tree
 stays clean. Shared skills live inside the `data` volume's `skills/` subdir, and
 the tagma credentials (device key + tagma token) live under
-`/var/lib/kallip/credentials/` inside the `data` volume. The agora + postgres
-services add their own volumes in the compositions that run them. The test
-composition mounts none (its scratch tree is an ephemeral `/testdata` tmpfs).
+`/var/lib/kallip/credentials/` inside the `data` volume. The agora and each
+postgres service add their own volumes in the compositions that run them. The
+test composition mounts none (its scratch tree is an ephemeral `/testdata`
+tmpfs).
 
 - `data` named volume → `/var/lib/kallip` — agent state, logs, skills, and the tagma credentials (persistent; survives `arion down`, removed by `arion down -v`).
 - `workspace` named volume → `/workspace` — the agent workspace root.
-- `pgdata` named volume → `/var/lib/postgresql/data` — the agora's Postgres store (dev + the prod-agora composition).
+- `agora_pgdata` named volume → `/var/lib/postgresql/data` — the agora's Postgres store (dev + the prod-agora composition).
+- `lesche_pgdata` named volume → `/var/lib/postgresql/data` — the lesche's Postgres chat store (dev + the prod-agora composition).
 
 **In dev only**, data and workspace can be bind-mounted to a host path via
 their env vars, when you want the files on the host (e.g. inspect/persist tagma
@@ -286,22 +288,25 @@ Relay connector (dev / the prod-tagma composition) — activate + enroll via `.e
 | `KALLIP_TAGMA_RELAY_LESCHE_URL`      | no                   | The prod-lesche deploy's public HTTPS URL (tunnel + envelopes + KEX). Defaults to the `KALLIP_TAGMA_RELAY_AGORA_URL` origin; set it for the subdomain split. |
 | `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` | first boot only      | A `sk-enroll-...` minted via the agora dashboard. Remove after the first successful enroll.                                                                  |
 
-Agora + postgres (the prod-agora composition) — `.env` only (dev derives these
-from `KALLIP_DEV_DOMAIN`, set to `kallipai.lan` in `.env` via `.env.example`;
-the code default is the prod `kallipai.com`):
+Agora + lesche + their two postgres services (the prod-agora composition) —
+`.env` only (dev derives these from `KALLIP_DEV_DOMAIN`, set to `kallipai.lan`
+in `.env` via `.env.example`; the code default is the prod `kallipai.com`):
 
 | Variable                          | Required                      | Notes                                                                                                                                  |
 | --------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `KALLIP_AGORA_DATABASE_URL`       | **yes** (prod-agora)          | `postgres://<USER>:<POSTGRES_PASSWORD>@postgres:5432/<DB>` — user/db/password must match the `POSTGRES_*` vars.                        |
-| `POSTGRES_USER`                   | **yes** (prod-agora)          | The postgres superuser role; must match the user in `KALLIP_AGORA_DATABASE_URL` (the image defaults to `postgres`).                    |
-| `POSTGRES_PASSWORD`               | **yes** (prod-agora)          | The postgres superuser password (read by the postgres image).                                                                          |
-| `POSTGRES_DB`                     | **yes** (prod-agora)          | The initial db; must match the db in `KALLIP_AGORA_DATABASE_URL` (the image defaults to `postgres`).                                   |
+| `KALLIP_AGORA_DATABASE_URL`       | **yes** (prod-agora)          | `postgres://<USER>:<POSTGRES_PASSWORD>@agora-postgres:5432/<DB>` — user/db/password must match the `POSTGRES_*` vars. The agora's identity store. |
+| `KALLIP_LESCHE_DATABASE_URL`      | **yes** (prod-agora)          | `postgres://<USER>:<POSTGRES_PASSWORD>@lesche-postgres:5432/<DB>` — the lesche's durable chat store (rooms, membership, message payloads). |
+| `POSTGRES_USER`                   | **yes** (prod-agora)          | The postgres superuser role; read by BOTH postgres services and must match the user in both `*_DATABASE_URL`s (the image defaults to `postgres`).                    |
+| `POSTGRES_PASSWORD`               | **yes** (prod-agora)          | The postgres superuser password (read by both postgres images).                                                                          |
+| `POSTGRES_DB`                     | **yes** (prod-agora)          | The initial db; read by BOTH postgres services and must match the db in both `*_DATABASE_URL`s (the image defaults to `postgres`).                                   |
 | `KALLIP_AGORA_WEBAUTHN_RP_ID`     | **yes** (prod-agora)          | The registrable domain passkeys bind to; cannot change without invalidating every passkey.                                             |
 | `KALLIP_AGORA_WEBAUTHN_RP_ORIGIN` | **yes** (prod-agora)          | The exact origin the web app is served from (`https://app.example.com`).                                                               |
 | `KALLIP_AGORA_CORS_ORIGINS`       | **yes** (prod-agora)          | The app origin(s); never a wildcard on a public deploy.                                                                                |
 | `KALLIP_AGORA_COOKIE_SECURE`      | no (defaults true)            | Keep `true` behind TLS; `false` only for plain-HTTP dev. Dev is now behind Caddy's TLS and hardcodes `true`.                            |
 | `KALLIP_AGORA_TRUSTED_PROXIES`    | **yes** behind a remote proxy | Loopback-only by default and **cleared on a public bind**; set to the proxy's CIDR so X-Forwarded-For / per-client rate limiting work. Dev trusts loopback (`127.0.0.0/8, ::1/128`) because Caddy proxies over the host network. |
 | `KALLIP_AGORA_ADMIN_TOKEN`        | no                            | Stable admin token; else generated per boot and printed to `arion logs agora`.                                                         |
+| `KALLIP_LESCHE_AGORA_TOKEN`       | **yes** (prod-agora)          | Shared secret the lesche presents to the agora's `/internal/*` surface; must equal the agora's `KALLIP_AGORA_INTERNAL_TOKEN`.          |
+| `KALLIP_LESCHE_CORS_ORIGINS`      | **yes** (prod-agora)          | The app origin(s) for the lesche; never a wildcard on a public deploy.                                                                 |
 
 Do not override `KALLIP_ADVERTISE_URL`; its default `http://127.0.0.1:3000` is
 correct because the tagma and agent shells share the container's network

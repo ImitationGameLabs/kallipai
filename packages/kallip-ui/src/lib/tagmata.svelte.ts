@@ -65,8 +65,10 @@ export interface EnrollmentCodeCardProps {
   readonly copyable: boolean;
 }
 
-/** Per-section load state for the dashboard (drives auto-hide + skeleton/error). */
-export type SectionPhase = "loading" | "loaded" | "error";
+/** Per-section load state for the dashboard (drives auto-hide + skeleton/error).
+ * Re-exported from the shared `phase.ts` home so cross-feature dashboards (rooms,
+ * ...) import from there, not from this tagma module. */
+export type { SectionPhase } from "./phase.ts";
 
 /** Skeleton background token for the presence dot. `checking` is a muted,
  * gently pulsing dot to read as "checking", distinct from a definite offline. */

@@ -4,7 +4,9 @@
 //! impl). The lesche never touches these tables directly.
 
 use kallip_agora_common::bytes::Ed25519PublicKey;
-use kallip_agora_common::control_plane::{ControlPlane, ControlPlaneError, TagmaIdentity};
+use kallip_agora_common::control_plane::{
+    ControlPlane, ControlPlaneError, TagmaProfile, UserIdentity, VerifiedSession,
+};
 use kallip_agora_common::ids::{TagmaId, UserId};
 use kallip_agora_common::principal::Principal;
 use kallip_common::authtoken::TokenHash;
@@ -41,7 +43,7 @@ impl ControlPlane for DbControlPlane {
     async fn verify_session(
         &self,
         cookie_value: &str,
-    ) -> Result<Option<UserId>, ControlPlaneError> {
+    ) -> Result<Option<VerifiedSession>, ControlPlaneError> {
         let hash = TokenHash::of(cookie_value);
         let row = sessions::Entity::find()
             .filter(sessions::Column::TokenHash.eq(hash.as_bytes().to_vec()))
@@ -55,7 +57,9 @@ impl ControlPlane for DbControlPlane {
             return Ok(None);
         }
         // Owner-disabled re-check: disabling a user takes effect immediately on
-        // every authenticated request, not just at next login.
+        // every authenticated request, not just at next login. The display
+        // identity is resolved in the same pass (the row is already loaded) so
+        // the relay gets the authoritative handle once per connection-open.
         let user = users::Entity::find_by_id(row.user_id.clone())
             .one(&self.db)
             .await
@@ -66,7 +70,11 @@ impl ControlPlane for DbControlPlane {
         if user.disabled_at.is_some() {
             return Ok(None);
         }
-        Ok(Some(UserId::from(user.id)))
+        Ok(Some(VerifiedSession {
+            user_id: UserId::from(user.id),
+            username: user.username,
+            display_name: user.display_name,
+        }))
     }
 
     async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError> {
@@ -94,14 +102,17 @@ impl ControlPlane for DbControlPlane {
         if tagma.revoked_at.is_some() {
             return Ok(None);
         }
-        // A tagma owned by a disabled account never authenticates either.
+        // A tagma owned by a disabled account never authenticates either. A
+        // missing owner is unreachable (FK ON DELETE RESTRICT); treat it as
+        // disabled so this path fails closed, matching `tagma_profiles`'s owner
+        // arm.
         let owner_disabled = match users::Entity::find_by_id(tagma.owner_user_id.clone())
             .one(&self.db)
             .await
             .map_err(map_err)?
         {
             Some(owner) => owner.disabled_at.is_some(),
-            None => false,
+            None => true,
         };
         if owner_disabled {
             return Ok(None);
@@ -109,43 +120,111 @@ impl ControlPlane for DbControlPlane {
         Ok(Some(Principal::Tagma(TagmaId::from(row.tagma_id))))
     }
 
-    async fn tagma_resolvable_by(
+    async fn tagma_profiles(
         &self,
-        tagma_id: &TagmaId,
-        user: &UserId,
-    ) -> Result<bool, ControlPlaneError> {
-        let tagma = tagmata::Entity::find_by_id(tagma_id.to_string())
-            .one(&self.db)
+        tagma_ids: &[TagmaId],
+    ) -> Result<Vec<TagmaProfile>, ControlPlaneError> {
+        if tagma_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = tagma_ids.iter().map(|t| t.to_string()).collect();
+        // UNFILTERED: return every existing input row with its raw usability
+        // state. The relay -- not the registry -- combines these facts into an
+        // authorization decision. Unknown input ids are absent from the rows
+        // (IS IN), so they are omitted by construction.
+        let rows = tagmata::Entity::find()
+            .filter(tagmata::Column::Id.is_in(ids))
+            .all(&self.db)
             .await
             .map_err(map_err)?;
-        Ok(matches!(
-            tagma,
-            Some(t) if t.owner_user_id.as_str() == user.as_ref() && t.enrolled_at.is_some()
-        ))
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One batched read of the owner rows (FK ON DELETE RESTRICT guarantees
+        // each exists). Map owner_user_id -> (username, display_name, disabled).
+        let owner_ids: Vec<String> = rows.iter().map(|r| r.owner_user_id.clone()).collect();
+        let owners = users::Entity::find()
+            .filter(users::Column::Id.is_in(owner_ids))
+            .all(&self.db)
+            .await
+            .map_err(map_err)?;
+        let owner_facts: std::collections::HashMap<String, (String, Option<String>, bool)> = owners
+            .into_iter()
+            .map(|u| (u.id, (u.username, u.display_name, u.disabled_at.is_some())))
+            .collect();
+        let mut out = Vec::with_capacity(rows.len());
+        for t in rows {
+            // FK ON DELETE RESTRICT guarantees the owner row exists; the `None`
+            // arm is unreachable defense-in-depth. Treat a missing row as
+            // disabled (deny) so such a tagma can never join a room or open a
+            // chat -- never silently permissive.
+            let (owner_username, owner_display_name, owner_disabled) =
+                match owner_facts.get(&t.owner_user_id) {
+                    Some((u, d, dis)) => (u.clone(), d.clone(), *dis),
+                    None => (String::new(), None, true),
+                };
+            out.push(TagmaProfile {
+                tagma_id: TagmaId::from(t.id),
+                pinned_public_key: t.pinned_public_key.map(Ed25519PublicKey),
+                owner_user_id: UserId::from(t.owner_user_id),
+                label: t.label,
+                owner_username,
+                owner_display_name,
+                enrolled: t.enrolled_at.is_some(),
+                revoked: t.revoked_at.is_some(),
+                owner_disabled,
+            });
+        }
+        Ok(out)
     }
 
-    async fn tagma_identity(
+    async fn user_identities(
         &self,
-        tagma_id: &TagmaId,
-    ) -> Result<Option<TagmaIdentity>, ControlPlaneError> {
-        // Only an enrolled, non-revoked tagma has a usable identity. Revocation
-        // is also enforced by the bearer-auth gate (`resolve_bearer`); filtering
-        // here makes the method safe to call standalone too (defense-in-depth).
-        let tagma = tagmata::Entity::find_by_id(tagma_id.to_string())
-            .filter(tagmata::Column::RevokedAt.is_null())
-            .filter(tagmata::Column::EnrolledAt.is_not_null())
+        user_ids: &[UserId],
+    ) -> Result<Vec<UserIdentity>, ControlPlaneError> {
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = user_ids.iter().map(|u| u.to_string()).collect();
+        // UNFILTERED: return every existing input user with its raw `disabled`
+        // state; the relay derives the invite gate (`!disabled`) locally.
+        let rows = users::Entity::find()
+            .filter(users::Column::Id.is_in(ids))
+            .all(&self.db)
+            .await
+            .map_err(map_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|u| UserIdentity {
+                user_id: UserId::from(u.id),
+                username: u.username,
+                display_name: u.display_name,
+                disabled: u.disabled_at.is_some(),
+            })
+            .collect())
+    }
+
+    async fn user_identity_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<UserIdentity>, ControlPlaneError> {
+        // Single source of truth for handle shape: the same normalizer signup
+        // uses. A malformed / wrong-shape handle fails normalization and
+        // collapses to `None` -- the same outcome as an unknown handle, so the
+        // invite gate renders one fixed 404 with no shape leak.
+        let Ok(normalized) = crate::username::normalize(username) else {
+            return Ok(None);
+        };
+        let row = users::Entity::find()
+            .filter(users::Column::Username.eq(normalized))
             .one(&self.db)
             .await
             .map_err(map_err)?;
-        let Some(tagma) = tagma else {
-            return Ok(None);
-        };
-        let Some(pinned) = tagma.pinned_public_key else {
-            return Ok(None);
-        };
-        Ok(Some(TagmaIdentity {
-            pinned_public_key: Ed25519PublicKey(pinned),
-            owner_user_id: UserId::from(tagma.owner_user_id),
+        Ok(row.map(|u| UserIdentity {
+            user_id: UserId::from(u.id),
+            username: u.username,
+            display_name: u.display_name,
+            disabled: u.disabled_at.is_some(),
         }))
     }
 
@@ -230,6 +309,64 @@ mod tests {
         assert!(
             control
                 .verify_session(session.secret())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Resolving a user by handle returns the canonical identity (with the
+    /// `user_id` the invite gate reads back out), and folds case via the shared
+    /// normalizer.
+    #[tokio::test]
+    async fn user_identity_by_username_resolves() {
+        let state = make_state().await;
+        let user_id = seed_user(&state, "alice", "alice@example.test").await;
+
+        let control = cp(&state);
+        let resolved = control.user_identity_by_username("ALICE").await.unwrap();
+        let resolved = resolved.expect("seeded user resolves by handle");
+        assert_eq!(resolved.user_id, user_id);
+        assert_eq!(resolved.username, "alice");
+        assert!(!resolved.disabled);
+    }
+
+    /// An unknown handle and a malformed handle both collapse to `None` -- the
+    /// same outcome, so the invite gate renders one fixed 404 with no shape
+    /// leak (the existence-oracle invariant).
+    #[tokio::test]
+    async fn user_identity_by_username_unknown_and_malformed_are_none() {
+        let state = make_state().await;
+        let control = cp(&state);
+
+        // Unknown but well-formed handle.
+        assert!(
+            control
+                .user_identity_by_username("nobody")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Malformed: a bare `@` (the caller strips the sigil; if one slips
+        // through, normalize rejects it and it still collapses to None).
+        assert!(
+            control
+                .user_identity_by_username("@alice")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Malformed: invalid char (underscore) and interior space.
+        assert!(
+            control
+                .user_identity_by_username("no_good")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            control
+                .user_identity_by_username("not valid")
                 .await
                 .unwrap()
                 .is_none()

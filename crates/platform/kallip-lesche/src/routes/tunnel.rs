@@ -20,6 +20,7 @@ use axum::response::sse::{Event, Sse};
 use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use kallip_agora_common::ids::ParticipantId;
 use kallip_agora_common::proof::ProofError;
 use kallip_common::protocol::ApiError;
 use kallip_lesche_common::event::LescheEvent;
@@ -32,7 +33,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::auth::{AuthPrincipal, require_tagma};
 use crate::sse::{BoxEventStream, OnDrop};
-use crate::state::{BROADCAST_CAPACITY, SharedConvState};
+use crate::state::{AgentProfile, BROADCAST_CAPACITY, SharedConvState};
 
 pub fn router() -> Router<SharedConvState> {
     Router::new().route("/tunnel", get(tunnel))
@@ -52,6 +53,10 @@ async fn tunnel(
     headers: axum::http::HeaderMap,
 ) -> Result<Sse<OnDrop>, ApiError> {
     let tagma_id = require_tagma(&principal)?.clone();
+    // Capture the runtime handle so the synchronous `OnDrop` cleanup (which may
+    // run off-runtime, e.g. during body teardown) can spawn the presence
+    // fan-out without `tokio::spawn`'s implicit `Handle::current()` panic.
+    let handle = tokio::runtime::Handle::try_current().ok();
 
     // Proof of possession: timestamp within the skew window + signature over the
     // tunnel transcript.
@@ -71,22 +76,37 @@ async fn tunnel(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| STANDARD.decode(s).ok())
         .ok_or_else(|| ApiError::bad_request("missing or malformed X-Device-Proof"))?;
-    // The pinned device key + owner come from the registry. Fetched outside the
-    // relay lock. A missing tagma or a still-pending tagma (no pinned key) is
-    // "unknown tagma".
-    let identity = state
-        .control
-        .tagma_identity(&tagma_id)
+    // The pinned device key + owner come from the registry's raw tagma facts,
+    // fetched outside the relay lock. The usability gate (enrolled + non-revoked
+    // + pinned key) is derived locally; any failure -- unknown tagma, pending,
+    // revoked -- collapses to one "unknown tagma" 404 (the existence-oracle).
+    let profile = crate::control_policy::tagma_profile(&*state.control, &tagma_id)
         .await
-        .map_err(|e| ApiError::internal(format_args!("registry error: {e}")))?
+        .map_err(|e| ApiError::internal(format_args!("registry error: {e}")))?;
+    let identity = profile
+        .as_ref()
+        .filter(|p| crate::control_policy::tunnel_usable(p))
+        .and_then(|p| {
+            // A usable tagma has a pinned key by construction (tunnel_usable).
+            p.pinned_public_key.clone().map(|key| (p, key))
+        })
         .ok_or_else(|| ApiError::not_found("unknown tagma"))?;
-    verify_tunnel_proof(
-        &identity.pinned_public_key.0,
-        tagma_id.as_ref(),
-        ts,
-        &sig_bytes,
-    )
-    .map_err(proof_to_unauthorized)?;
+    let (profile, pinned_public_key) = identity;
+    verify_tunnel_proof(&pinned_public_key.0, tagma_id.as_ref(), ts, &sig_bytes)
+        .map_err(proof_to_unauthorized)?;
+
+    // Cache the authoritative agent profile (label + owner display) so the
+    // rooms send path stamps the sender handle without a per-message registry
+    // call. Refreshed on every (re)connect, so a rename lands at the next
+    // tunnel reconnect.
+    state.agent_profiles.set(
+        ParticipantId::for_tagma(&tagma_id),
+        AgentProfile {
+            label: profile.label.clone(),
+            owner_username: profile.owner_username.clone(),
+            owner_display_name: profile.owner_display_name.clone(),
+        },
+    );
 
     // Durable replay guard: accept this proof only if the tagma's stored
     // high-water-mark timestamp advanced. Cross-restart, atomic.
@@ -100,15 +120,15 @@ async fn tunnel(
     }
 
     // Reserve the tunnel slot and announce presence. One live tunnel per tagma.
-    let owner = identity.owner_user_id.clone();
+    let owner = profile.owner_user_id.clone();
     let (tx, rx) = broadcast::channel::<TunnelInbound>(BROADCAST_CAPACITY);
     let id = Arc::new(());
     {
         let mut reg = state.write()?;
-        if reg.presence.contains_key(&tagma_id) {
+        if reg.presence_by_tagma(&tagma_id).is_some() {
             return Err(ApiError::conflict("tagma already has a live tunnel"));
         }
-        reg.register_presence(&tagma_id, owner.clone(), tx, id.clone());
+        reg.register_presence(&tagma_id, owner.clone(), tx.clone(), id.clone());
         // Announce online to the owner's app stream, if one is open. The tunnel
         // never *creates* an app stream (only `me_events` may); if the owner is
         // not connected now, they get this tagma in their snapshot on connect.
@@ -117,6 +137,16 @@ async fn tunnel(
                 tagma_id: tagma_id.clone(),
             });
         }
+    }
+    // Announce room-member presence to peers (best-effort, off the request path).
+    // Presence is soft state; a dropped frame self-heals on the viewer's roster
+    // re-fetch (the roster's `online` field reads the live registry).
+    if let Some(h) = &handle {
+        let st = state.clone();
+        let who = ParticipantId::for_tagma(&tagma_id);
+        h.spawn(async move {
+            crate::room_presence::fan_member_presence(&st, &who, true).await;
+        });
     }
     tracing::info!(tagma = %tagma_id, "tunnel established; tagma online");
 
@@ -140,22 +170,39 @@ async fn tunnel(
     );
 
     // Synchronous cleanup in Drop::drop: remove presence only if this tunnel is
-    // still the live one, and announce offline to the owner.
+    // still the live one, and announce offline to the owner. The lock guard is
+    // dropped before the (async) room-presence fan-out is spawned off-thread.
     let cleanup_state = state.clone();
     let cleanup_tagma = tagma_id.clone();
     let cleanup_owner = owner.clone();
     let cleanup_id = id.clone();
+    let cleanup_handle = handle.clone();
     let cleaned = OnDrop::new(stream, move || {
-        let Ok(mut reg) = cleanup_state.write() else {
-            return;
-        };
-        if reg.take_presence_if_owned(&cleanup_tagma, &cleanup_id) {
-            if let Some(app_tx) = reg.app_stream(&cleanup_owner) {
-                let _ = app_tx.send(LescheEvent::TagmaOffline {
-                    tagma_id: cleanup_tagma.clone(),
-                });
+        let removed = {
+            let Ok(mut reg) = cleanup_state.write() else {
+                return;
+            };
+            let removed = reg.take_presence_if_owned(&cleanup_tagma, &cleanup_id);
+            if removed {
+                if let Some(app_tx) = reg.app_stream(&cleanup_owner) {
+                    let _ = app_tx.send(LescheEvent::TagmaOffline {
+                        tagma_id: cleanup_tagma.clone(),
+                    });
+                }
+                tracing::info!(tagma = %cleanup_tagma, "tunnel closed; presence removed");
             }
-            tracing::info!(tagma = %cleanup_tagma, "tunnel closed; presence removed");
+            removed
+        };
+        if removed {
+            if let Some(h) = cleanup_handle.as_ref() {
+                let st = cleanup_state.clone();
+                let who = ParticipantId::for_tagma(&cleanup_tagma);
+                h.spawn(async move {
+                    crate::room_presence::fan_member_presence(&st, &who, false).await;
+                });
+            } else {
+                tracing::warn!("offline-presence fan skipped: no runtime at drop");
+            }
         }
     });
     Ok(Sse::new(cleaned))
@@ -164,4 +211,76 @@ async fn tunnel(
 /// A rejected tunnel proof is an auth failure.
 fn proof_to_unauthorized(e: ProofError) -> ApiError {
     ApiError::unauthorized(format!("invalid device proof: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    //! The tunnel-establish gate (tagma facts + usability predicate) runs BEFORE
+    //! the Ed25519 proof check, so the existence-oracle 404s can be exercised
+    //! without a valid signature.
+
+    use super::*;
+    use crate::test_support::make_state;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use kallip_agora_common::bytes::Ed25519PublicKey;
+    use kallip_agora_common::ids::{TagmaId, UserId};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn now_ts() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Headers carrying a skew-ok timestamp + a parseable (unverified) base64
+    /// signature: enough to reach the gate, never the proof check.
+    fn gate_headers(ts: i64) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("X-Device-Timestamp", ts.to_string().parse().unwrap());
+        h.insert(
+            "X-Device-Proof",
+            STANDARD.encode([0u8; 64]).parse().unwrap(),
+        );
+        h
+    }
+
+    fn as_tagma(t: &TagmaId) -> AuthPrincipal {
+        AuthPrincipal(kallip_agora_common::principal::Principal::Tagma(t.clone()))
+    }
+
+    /// The gate collapses unknown / revoked / pending (no pinned key) tagmas to
+    /// one byte-identical "unknown tagma" 404, before the proof check.
+    #[tokio::test]
+    async fn tunnel_gate_oracle_is_uniform_across_failure_modes() {
+        let (state, control) = make_state(60, std::time::Duration::from_secs(2));
+        let owner = UserId::from("owner".to_string());
+        let revoked = TagmaId::from("rev".to_string());
+        control.enroll_tagma(
+            &revoked,
+            owner.clone(),
+            Ed25519PublicKey(vec![1u8; 32]),
+            "tok-rev",
+        );
+        control.revoke_tagma(&revoked);
+        let pending = TagmaId::from("pen".to_string());
+        control.enroll_tagma(&pending, owner, Ed25519PublicKey(vec![2u8; 32]), "tok-pen");
+        control.set_pinned_key(&pending, None);
+        let unknown = TagmaId::from("ghost".to_string());
+
+        let ts = now_ts();
+        let e_unknown = tunnel(State(state.clone()), as_tagma(&unknown), gate_headers(ts))
+            .await
+            .expect_err("unknown tagma");
+        let e_revoked = tunnel(State(state.clone()), as_tagma(&revoked), gate_headers(ts))
+            .await
+            .expect_err("revoked tagma");
+        let e_pending = tunnel(State(state), as_tagma(&pending), gate_headers(ts))
+            .await
+            .expect_err("pending tagma");
+        assert_eq!(e_unknown.status, 404);
+        assert_eq!(e_unknown.message, e_revoked.message);
+        assert_eq!(e_unknown.message, e_pending.message);
+    }
 }

@@ -200,6 +200,7 @@ mod tests {
         let handle = RelayHandle::new(
             client,
             kallip_agora_common::ids::TagmaId::from("tagma".to_string()),
+            "Tagma".into(),
             DeviceKey::generate(),
             root,
             Arc::downgrade(&state),
