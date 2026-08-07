@@ -155,7 +155,7 @@ can register. The `agora_pgdata` volume persists across `arion down` / `up`, so
 this sub-flow runs **once per volume** -- check before doing it:
 
 ```sh
-KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test kallip-admin --agora-url http://localhost:7100 users list
+KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test cargo run -q -p kallip-admin -- --agora-url http://localhost:7100 users list
 ```
 
 If `users list` already shows a row, a test account exists -- skip to minting
@@ -163,7 +163,7 @@ the enrollment code below. If the table is empty (fresh volume, or after a
 `down -v` reset), mint an invite code and register:
 
 ```sh
-KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test kallip-admin --agora-url http://localhost:7100 invite-codes new
+KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test cargo run -q -p kallip-admin -- --agora-url http://localhost:7100 invite-codes new
 # -> sk-invite-...   (plaintext returned once; the server stores only its hash)
 ```
 
@@ -195,7 +195,7 @@ out of **agora's** logs (not tagma's):
 
 ```sh
 TOK=$(arion logs agora 2>&1 | grep -oP 'sk-admin-[A-Za-z0-9_-]+' | tail -1)
-KALLIP_AGORA_ADMIN_TOKEN="$TOK" kallip-admin --agora-url http://localhost:7100 ...
+KALLIP_AGORA_ADMIN_TOKEN="$TOK" cargo run -q -p kallip-admin -- --agora-url http://localhost:7100 ...
 ```
 
 `sk-admin-test` is a dev-only fixture; prod must set a strong secret.
