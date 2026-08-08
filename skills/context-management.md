@@ -20,29 +20,36 @@ Run `context_status` periodically — especially before large operations or when
 
 ## Pinning Strategy
 
-Pin things you'll need **every turn** for the duration of a task:
+Examples of what to pin for the duration of a task (per the first rule):
 
 - Skill references (e.g. `skill:aifed-reference` while doing heavy editing)
 - Key decisions or constraints from the user
 - Critical file state you're working with
 
-**Unpin when the task shifts.** A pinned reference for a task you've finished is wasted context. Clean up after yourself.
+A pinned reference for a task you've finished is wasted context — unpin it (per the second rule) and clean up after yourself.
 
 Pinned content survives eviction — that's the point. If it's important enough to lose everything else, it belongs in a pin.
+
+## Decision rules
+
+- If you'll need it every turn for the duration of a task, then pin it, because pinned content survives eviction.
+- If the task has shifted and the pin is stale, then unpin, because every pin costs tokens every turn.
+- If you're switching topics or tasks, then evict with a hand-written summary, because auto-compaction uses a generic strategy and your summary preserves the thread.
+- If a threshold warning fires mid-coherent-task, then continue to the next natural boundary rather than evicting reflexively, because evicting mid-task loses the thread.
+
+These rules decide; the sections below elaborate them with examples.
 
 ## Eviction: Evict on Your Terms
 
 ### When to evict
 
-**The best time to evict is when switching topics or tasks** — this preserves
-coherence within the current task while freeing attention for the next one.
-Avoid evicting mid-task unless context is genuinely exhausted.
+Evict at topic or task switches (per the third rule) — it preserves coherence
+within the current task while freeing attention for the next one. Avoid evicting
+mid-task unless context is genuinely exhausted.
 
 ### Responding to threshold warnings
 
-When you receive a system threshold warning (e.g. 50% context), **do not evict
-reflexively**. The warning is advisory — it asks you to assess, not to act
-blindly. Consider:
+When a threshold warning fires, assess before acting (see the rule above). Consider:
 
 - Are you in the middle of a coherent task? If so, it's usually better to
   continue and evict at a natural boundary.

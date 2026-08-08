@@ -38,11 +38,11 @@ This pattern keeps the detailed syntax (operators, locators, escaping rules, ind
 
 These are the things that commonly trip up agents — keep them in mind even without the full reference pinned:
 
-1. **Always read before edit.** Hashlines (`LINE:HASH`) come from `aifed read`. You need current hashes to make any edit.
-2. **Prefer batch edits.** One heredoc with all operations avoids line-shift drift between sequential edits.
-3. **Never mix tools.** Don't alternate aifed with `cat`, `sed`, or other editors — it breaks hash verification on both sides.
-4. **Hash mismatch = retry.** If an edit fails because the hash doesn't match, re-read the file and retry with fresh hashes.
-5. **Outline first for large files.** `aifed outline <FILE>` gives you the structure before you dive into reading specific sections.
+- **Always read before edit.** Hashlines (`LINE:HASH`) come from `aifed read`. You need current hashes to make any edit.
+- **Prefer batch edits.** One heredoc with all operations avoids line-shift drift between sequential edits.
+- **Never mix tools.** Don't alternate aifed with `cat`, `sed`, or other editors — it breaks hash verification on both sides.
+- **Hash mismatch = retry.** If an edit fails because the hash doesn't match, re-read the file and retry with fresh hashes.
+- **Outline first for large files.** `aifed outline <FILE>` gives you the structure before you dive into reading specific sections.
 
 ## When NOT to Use aifed
 

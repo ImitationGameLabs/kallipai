@@ -1,6 +1,6 @@
 ---
 name: Skill System
-description: How to discover, navigate, author, and organize skills using the index-tree structure — the skill system's own organizational principles
+description: How to discover, navigate, and organize skills using the index-tree structure — the skill system's own organizational principles
 ---
 
 # Skill Management
@@ -20,10 +20,10 @@ category.
 
 Navigate top-down, never blind-scan:
 
-1. **`kallip skill index <skills-path>`** → see the root-level skills and the top-level categories
-2. **`kallip skill index <skills-path>/<category>`** → see the skills in that category (skip this for a root-level skill)
-3. **Confirm with `kallip skill meta <skills-path>/<id>`** → check description matches (`<id>` is the path relative to skills root: `aifed` or `agent/kallip`)
-4. **Load**: read the skill file, then in the next turn pin it with `context_pin_last` (kind `tool-result`, label: `skill:<name>`)
+- **Index the root.** `kallip skill index <skills-path>` → see the root-level skills and the top-level categories.
+- **Index the category.** `kallip skill index <skills-path>/<category>` → see the skills in that category (skip this for a root-level skill).
+- **Confirm.** `kallip skill meta <skills-path>/<id>` → check the description matches (`<id>` is the path relative to skills root: `aifed` or `agent/kallip`).
+- **Load.** Read the skill file, then in the next turn pin it with `context_pin_last` (kind `tool-result`, label: `skill:<name>`).
 
 Each index answers one question: _"this directory covers what, and how do I pick?"_ Two index runs max to locate any skill.
 
@@ -32,6 +32,8 @@ Each index answers one question: _"this directory covers what, and how do I pick
 The root index (`kallip skill index <skills-path>`) is your always-on map of the library — the bootstrap floor tells you to run it once and pin the output (label `skill:index`) so it persists across turns and you never start a task blind to what skills exist. A category index is different: run it transiently to locate a skill, then let the result go — it does not belong in pinned context. Beyond the root index, only pin the actual skill you'll use across turns.
 
 ## Creating a Skill
+
+For the step-by-step workflow to create one from scratch, see `skill/creating-a-skill`. This section covers the _whether_ and _where_.
 
 ### When to create
 
@@ -56,13 +58,9 @@ from the binary, so it never drifts) — a kallip skill teaches _when_ and _why_
 never the flag list. Pin the reference output (label `kallip:reference`) when
 the work spans many commands.
 
-Principles:
-
-- **Progressive disclosure** — point to authoritative references rather than duplicating them
-- **Concise** — the body is pinned into context; every line costs tokens every turn
-- **Action-oriented** — patterns, anti-patterns, decision rules
-- **Reasoned, not imperative** — write the _reason_ and the _conditions_, not bare commands. "X works because Z; reconsider when Z doesn't hold" invites weighing; "always X / never Y" reads as doctrine and gets followed blindly. Imperative tone is the root cause of blind skill-adherence.
-- **Integrate with agent capabilities** — explain how the skill connects to context management, pinning, other tools
+For how to write the content — the description that gets a skill loaded, the
+Process/Reference body structures, and the reasoned-not-imperative voice
+(imperative tone is the root cause of blind skill-adherence) — see `skill/what-makes-a-good-skill`.
 
 ### Where to place it
 
@@ -74,21 +72,22 @@ First decide: **root or a category?**
 | Category | For                                                          |
 | -------- | ------------------------------------------------------------ |
 | `code/`  | Writing, editing, reviewing code; working with codebases     |
-| `agent/` | Agent self-management (the kallip CLI, skills, subagents, workflow) |
+| `agent/` | Agent self-management (the kallip CLI, subagents, tagma coordination) |
+| `skill/` | The skill system — authoring, creating, reviewing, organizing skills |
 
-Create a new category only when a domain has ~6-8 skills. Depth limit: **two levels** (`category/skill.md`). Beyond that, navigation cost outweighs organization benefit.
+Create a new category only when a domain has ~6-8 skills (the `skill/` category is the self-referential exception — the skill system is a coherent domain that earns its own category regardless of count). Depth limit: **two levels** (`category/skill.md`). Beyond that, navigation cost outweighs organization benefit.
 
 ### Naming
 
-- File paths are kebab-case. The path relative to skills root is the canonical identifier used for all lookups and routing — `aifed` for a root skill, `agent/skill-management` for a categorized one.
+- File paths are kebab-case. The path relative to skills root is the canonical identifier used for all lookups and routing — `aifed` for a root skill, `skill/skill-management` for a categorized one.
 - The `name` field in frontmatter is a display label — it can differ from the filename. The path is the identifier, not the name. If they were forced to match, `name` would be redundant.
-- Verb or noun phrase describing the domain, not the tool (e.g. `testing`, not `cargo-test`)
-- Categorized paths use `/` separator: `code/testing`, `agent/skill-management`
+- Categorized paths use `/` separator: `code/testing`, `skill/skill-management`
+- For the wording craft — name the domain, not the tool (`testing`, not `cargo-test`); write `name` + `description` as one readable index entry — see `skill/what-makes-a-good-skill`.
 
 ## Skill Lifecycle
 
 ```text
-discover → kallip skill index → load & pin → use → unpin → (optionally) author or propose
+discover → kallip skill index → load & pin → use → unpin → (optionally) author, review, improve, or propose
 ```
 
 ### Authoring and sharing skills
@@ -130,7 +129,7 @@ category directory with a `README.md`) appears automatically.
 
 ## Skill Evolution
 
-Skills are living documents. Review and restructure as they grow.
+Skills are living documents. Review and restructure as they grow — the review workflow lives in `skill/reviewing-a-skill`, and changing an existing skill in `skill/improving-a-skill`.
 
 ### Distillation signals
 

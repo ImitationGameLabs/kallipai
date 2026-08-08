@@ -99,6 +99,14 @@ registry with its metadata and a `faulted_reason`. Faulted agents appear in
 `subagent list`, can be `remove`d (data is archived), but cannot receive
 messages or prompts. This is not an error — clean them up with `remove`.
 
+## Decision rules
+
+- If you are at depth 2-3, then the ceiling is Guest regardless (you cannot spawn Normal), because a child's class cannot exceed its tier ceiling.
+- If you are at depth 0-1 and the work is untrusted or must not see secrets, then spawn Guest (`--permission-class guest`), because Guests are workspace-read-only with secrets hidden under a tmpfs overlay; otherwise spawn Normal, because it can write within its workspace and hold a dirlock.
+- If the subagent is busy and you only want to cancel the current round, then `interrupt`, because it keeps the agent alive for reuse. If it is idle/faulted and you are done, then `remove`, because it archives the agent and releases its workspace dirlock.
+
+*Avoid:* pointing `--workspace-root` at a sibling of your workspace, because the tagma rejects siblings with 403 — it must be a subdirectory within your workspace.
+
 ## Common Patterns
 
 ### Delegate with async notification (preferred)
@@ -125,8 +133,6 @@ messages you when done, and you resolve disagreements as decision points.
 - **`kallip` must be in PATH** for subagents to coordinate. If a subagent
   reports `kallip: command not found`, it cannot spawn grandchild agents, use
   dirlock, or send messages.
-- **Workspace must be a subdirectory** of the supervisor's workspace — siblings
-  are rejected with 403.
 - **Workspace must exist** before spawn — `mkdir -p` first.
 - **Tagma restart releases all dirlocks** — workspaces may become writable
   again until agents are restored.
