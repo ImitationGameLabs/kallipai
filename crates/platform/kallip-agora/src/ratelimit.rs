@@ -1,10 +1,10 @@
 //! Minimal per-IP token bucket, used to guard the unauthenticated,
-//! crypto-expensive `/v1/auth/*` begin endpoints against invite enumeration
-//! and ceremony-spam.
+//! crypto-expensive `/v1/auth/*` begin endpoints against ceremony-spam and
+//! username enumeration.
 //!
 //! One bucket per client IP, lazily created on first sighting. Buckets are
 //! never actively evicted (the map is bounded in practice by the distinct-IP
-//! cardinality of the auth surface, which is tiny for an invite-only deploy);
+//! cardinality of the auth surface, which is tiny for an open-signup deploy);
 //! a future hardening pass can add an LRU sweep. All math is synchronous and
 //! cheap, so a `std::sync::Mutex` is appropriate.
 

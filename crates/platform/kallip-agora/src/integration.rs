@@ -129,7 +129,6 @@ async fn seed_session(state: &crate::state::SharedState) -> String {
     users::ActiveModel {
         id: Set(user_id.to_string()),
         username: Set("alice".to_string()),
-        email: Set("alice@example.test".to_string()),
         display_name: Set(None),
         created_at: Set(now),
         disabled_at: Set(None),
@@ -300,9 +299,8 @@ async fn gc_sweep_deletes_expired_only() {
             id: Set(uuid::Uuid::new_v4()),
             kind: Set("login".to_string()),
             state: Set(serde_json::Value::Null),
-            held_code_hash: Set(None),
+            pairing_code_hash: Set(None),
             user_id: Set(None),
-            email: Set(None),
             username: Set(None),
             expires_at: Set(expires),
             created_at: Set(now),

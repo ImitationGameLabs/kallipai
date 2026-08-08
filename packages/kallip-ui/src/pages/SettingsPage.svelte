@@ -13,6 +13,8 @@
     PasskeyPhase,
   } from "../lib/passkeys.svelte.ts";
   import PasskeyManager from "../components/settings/PasskeyManager.svelte";
+  import LinkedAccounts from "../components/settings/LinkedAccounts.svelte";
+  import EmailManager from "../components/settings/EmailManager.svelte";
 
   // Settings is now info-only: account actions (logout, mode switch) live in
   // the sidebar AccountMenu. Online shows the account (identity lives in
@@ -41,7 +43,22 @@
     }
   });
 
-  // Wire the wire types into the prop-driven components. The store owns the
+  // Linked OAuth identities + the configured-provider list (for the link
+  // affordance) load when the signed-in user resolves. Both guard on a loaded
+  // flag (NOT on length): a zero-provider deploy is a valid steady state, and
+  // the flag is set on both success and failure so the effect does not refetch.
+  $effect(() => {
+    if (mode === "online" && agoraSession.user) {
+      if (!agoraSession.externalIdentitiesLoaded) {
+        agoraSession.refreshExternalIdentities();
+      }
+      if (!agoraSession.oauthProvidersLoaded) {
+        agoraSession.refreshOAuthProviders();
+      }
+    }
+  });
+
+  // Project the wire types into the prop-driven components. The store owns the
   // ceremony + mutations; this page only projects state and forwards callbacks.
   const passkeyCards = $derived(
     agoraSession.passkeys.map(
@@ -50,6 +67,7 @@
         label: p.label,
         createdAt: p.created_at,
         lastUsedAt: p.last_used_at,
+        discoverable: p.discoverable,
       }),
     ),
   );
@@ -66,10 +84,13 @@
 
   let adding = $state(false);
 
-  async function onAdd(label: string): Promise<boolean> {
+  async function onAdd(
+    label: string,
+    opts: { discoverable?: boolean } = {},
+  ): Promise<boolean> {
     adding = true;
     try {
-      return (await agoraSession.addPasskey(label)).ok;
+      return (await agoraSession.addPasskey(label, opts)).ok;
     } finally {
       adding = false;
     }
@@ -128,11 +149,15 @@
                 {me.display_name ?? me.username}
               </div>
               <div class="text-xs opacity-60 font-mono break-all">
-                {me.email}
+                @{me.username}
               </div>
             </div>
           </div>
         </section>
+
+        <EmailManager />
+
+        <LinkedAccounts />
 
         <PasskeyManager
           passkeys={passkeyCards}

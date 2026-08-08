@@ -1,5 +1,4 @@
-//! WebAuthn passkey registration + login, invite redemption, sessions, and the
-//! `/v1/me` profile.
+//! WebAuthn passkey registration + login, and session minting.
 //!
 //! # Clone detection & signature counters — READ BEFORE CHANGING LOGIN
 //!
@@ -18,11 +17,13 @@
 //!   destroys the legitimate user's credential, while the legit user — also
 //!   failing the regression — cannot self-recover.
 //!
-//! Accordingly, `login_finish` treats `CredentialPossibleCompromise` as DENY-
-//! THIS-LOGIN + LOG ONLY: it returns 401 and emits a structured warn
-//! (`user_id`, `cred_id`) for monitoring. It NEVER mutates the credential. A
-//! regression already fails the login regardless, so not revoking costs no real
-//! protection; a leading clone is undetectable anyway.
+//! Accordingly, the login finish handlers (`login_finish` and
+//! `login_discoverable_finish`, sharing the `finalize_login_and_mint_session`
+//! tail) treat `CredentialPossibleCompromise` as DENY-THIS-LOGIN + LOG ONLY:
+//! they return 401 and emit a structured warn (`user_id`, `cred_id`) for
+//! monitoring. They NEVER mutate the credential. A regression already fails the
+//! login regardless, so not revoking costs no real protection; a leading clone
+//! is undetectable anyway.
 //!
 //! Then how ARE clones prevented? Structurally, not at auth time:
 //! - Passkey private keys are non-exportable (locked in TPM / Secure Enclave /
@@ -38,29 +39,28 @@
 //!
 //! # Identity model
 //!
-//! The **login id is the email** (`users.email`, RFC 5321-faithful canonical
-//! form: local part preserved verbatim, domain lowercased — see `crate::email`).
-//! `login_begin` resolves the user by email. The **username** is a required,
-//! unique in-site display handle chosen at redemption (normalized via
-//! `crate::username`); it is NOT the login id. WebAuthn `user.name` is the
-//! email; the username surfaces only as the fallback WebAuthn `displayName`
-//! (when the client omits `display_name`) and in `/v1/me`. `user.id` stays the
-//! opaque pre-generated `UserId`.
+//! The **login id is the username** (`users.username`, normalized via
+//! `crate::username`). `login_begin` resolves the user by username. Email is
+//! NOT a login id and NOT collected at registration: it is an optional
+//! contact/recovery channel a user links later in settings, stored in the
+//! `emails` table (1:N, with a primary + verification state). WebAuthn
+//! `user.name` is the username; `display_name` surfaces only as the fallback
+//! WebAuthn `displayName` (when the client omits one) and in `/v1/me`. `user.id`
+//! stays the opaque pre-generated `UserId` -- the only crypto binding.
 //!
 //! # Ceremonies
 //!
-//! - **register** `begin`/`finish`: `begin` validates (but does not consume) an
-//!   invite code, canonicalizes the email and normalizes the username,
-//!   synthesizes a prompt-only `display_name`, pre-generates the `UserId`, and
-//!   persists the `PasskeyRegistration` (+ email + username) on the challenge
-//!   row. `finish` verifies the credential (CPU, outside the txn), then in ONE
-//!   transaction locks the challenge row `FOR UPDATE`, re-checks the invite's
-//!   full live predicate `FOR UPDATE`, checks email AND username uniqueness
-//!   `FOR UPDATE` (`409` on conflict), inserts the user + passkey, consumes the
-//!   invite, deletes the challenge, and mints a fresh session. A parallel
-//!   double-finish on one invite loses on the row lock.
-//! - **login** `begin`/`finish`: email-first. `begin` resolves the user by
-//!   `email`, loads their passkeys, and bakes them into the ceremony state
+//! - **register** `begin`/`finish`: open signup (no invite). `begin` normalizes
+//!   the username, synthesizes a prompt-only `display_name`, pre-generates the
+//!   `UserId`, and persists a bare discoverable `RegistrationState` (+ username)
+//!   on the challenge row. `finish` verifies the credential (CPU, outside the
+//!   txn) through `WebauthnCore`, then in ONE transaction locks the challenge
+//!   row `FOR UPDATE`, checks username uniqueness `FOR UPDATE` (`409` on
+//!   conflict), inserts the user + passkey (marked `discoverable`), deletes the
+//!   challenge, and mints a fresh session. A parallel double-finish on one
+//!   ceremony loses on the row lock.
+//! - **login** `begin`/`finish`: username-first. `begin` resolves the user by
+//!   `username`, loads their passkeys, and bakes them into the ceremony state
 //!   via the wrapper's `start_passkey_authentication`. `finish` verifies the
 //!   assertion against that baked state (CPU, outside the txn) and advances the
 //!   stored passkey via `Passkey::update_credential` inside the SAME transaction
@@ -72,27 +72,35 @@
 //!   while the stored `Passkey` is out of sync with what was verified would
 //!   weaken the next assertion's baseline. (This is integrity of the stored
 //!   credential, not clone detection — see the section above.)
+//! - **login (discoverable)** `begin`/`finish`: passwordless, usernameless.
+//!   `begin` resolves NO user — it returns conditional-UI options with an empty
+//!   allowList. `finish` identifies the account from the assertion's signed
+//!   `userHandle`, then reuses the regular login tail (`finalize_login_and_mint_
+//!   session`) so the two login paths cannot drift. The assertion itself is
+//!   verified via `finish_discoverable_authentication` against the resolved
+//!   user's credentials (CPU, outside the txn).
 //!
 //! Session ids are rotated: every register/login finish mints a brand-new
 //! session token (never reuses a pre-login one), defeating session fixation.
 
-use crate::db::entity::{invite_codes, passkeys, sessions, users, webauthn_challenges};
+use crate::db::entity::{passkeys, sessions, users, webauthn_challenges};
 use crate::db::{TxnError, flatten_txn, map_db_err};
-use crate::session::{build_clear_cookie, build_set_cookie, read_session_cookie};
+use crate::session::{SessionCfg, build_set_cookie};
 use crate::state::SharedState;
 use crate::token::SESSION;
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::post;
 use kallip_agora_common::ids::UserId;
-use kallip_common::authtoken::{MintedToken, TokenHash};
+use kallip_common::authtoken::MintedToken;
 use kallip_common::protocol::ApiError;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DbErr, EntityTrait, PaginatorTrait,
-    QueryFilter, QuerySelect, SqlErr, TransactionError, TransactionTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, DatabaseTransaction,
+    DbErr, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect, SqlErr, TransactionError,
+    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -100,21 +108,39 @@ use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
-    AuthenticationResult, CreationChallengeResponse, Passkey, PasskeyAuthentication,
-    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
+    AuthenticationResult, CreationChallengeResponse, DiscoverableAuthentication, DiscoverableKey,
+    Passkey, PasskeyAuthentication, PublicKeyCredential, RegisterPublicKeyCredential,
     RequestChallengeResponse, WebauthnError,
 };
+use webauthn_rs_core::proto::{
+    AttestationConveyancePreference, CredProtect, CredentialProtectionPolicy, RegistrationState,
+    RequestRegistrationExtensions, UserVerificationPolicy,
+};
 
-use crate::auth::{AuthPrincipal, require_user};
-use crate::email;
 use crate::username;
 
-/// Ceremony-kind discriminator stored on `webauthn_challenges.kind`. Shared
-/// with `routes::passkeys` (the authenticated add-passkey ceremony) and
-/// `routes::device_pairing` (the cross-device pair ceremony). Each begin path
-/// writes its own kind so the per-kind in-flight caps do not collide.
+/// Ceremony-kind discriminators stored on `webauthn_challenges.kind`. Each
+/// begin path writes its own kind so the finish handler picks the right state
+/// type/resolver and the per-kind in-flight caps do not collide. Shared with
+/// `routes::passkeys` (the add-passkey ceremony) and `routes::device_pairing`
+/// (the cross-device pair ceremony).
+///
+/// Open-signup registration: enrolls a DISCOVERABLE (resident-key) credential,
+/// so its challenge row holds a bare core `RegistrationState` (distinct from
+/// `KIND_ADD_REGULAR`, whose non-discoverable add-passkey rehydrates a
+/// `PasskeyRegistration`). DISTINCT kinds also keep the per-kind in-flight caps
+/// independent and let each finish handler route a row unambiguously.
 pub(crate) const KIND_REGISTER: &str = "register";
+/// Authenticated non-discoverable add-passkey ceremony (rehydrates a
+/// `PasskeyRegistration`; resolved by the add-passkey finish handler, not
+/// register_finish). Discoverable add-passkey uses `KIND_ADD_DISCOVERABLE`.
+pub(crate) const KIND_ADD_REGULAR: &str = "add_regular";
 const KIND_LOGIN: &str = "login";
+/// Discoverable (usernameless) login: the user is resolved at finish from the
+/// assertion's `userHandle`, not supplied at begin. Distinct kind so the finish
+/// handler picks the right state type (`DiscoverableAuthentication`) and
+/// resolver.
+const KIND_LOGIN_DISCOVERABLE: &str = "login_discoverable";
 pub(crate) const KIND_PAIR: &str = "pair";
 
 /// How long an in-flight ceremony remains valid. Browsers prompt the user
@@ -127,19 +153,15 @@ pub(crate) const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 /// race (-> 409) from any other unique violation in the same transaction.
 const USERNAME_UNIQUE_CONSTRAINT: &str = "uniq_users_username";
 
-/// Name of the `users.email` unique index; same role as
-/// [`USERNAME_UNIQUE_CONSTRAINT`] for the login-id collision race (-> 409).
-const EMAIL_UNIQUE_CONSTRAINT: &str = "uniq_users_email";
-
-/// Max live (unexpired) ceremonies per invite (register) / user (login). Bounds
-/// `webauthn_challenges` storage growth against an attacker who spams begins;
-/// the per-client rate limiter is the primary gate, this is the storage bound.
-/// Count-then-insert, so the cap is soft under true concurrency.
+/// Max live (unexpired) ceremonies per username (register) / user (login).
+/// Bounds `webauthn_challenges` storage growth against an attacker who spams
+/// begins; the per-client rate limiter is the primary gate, this is the storage
+/// bound. Count-then-insert, so the cap is soft under true concurrency.
 const MAX_INFLIGHT_CEREMONIES: u64 = 16;
 
 /// The unauthenticated, crypto-expensive ceremony BEGIN endpoints. These are
-/// the invite-enumeration / ceremony-spam entry surface and the only ceremony
-/// routes the per-client rate limiter should cover (see `routes::router`). A
+/// the ceremony-spam entry surface and the only ceremony routes the per-client
+/// rate limiter should cover (see `routes::router`). A
 /// begin mints the unguessable `ceremony_id` that finish then consumes, so
 /// finish is transitively bounded by begin's rate limit and is NOT itself
 /// rate-limited (otherwise a login ceremony would cost two tokens).
@@ -147,6 +169,10 @@ pub fn begin_router() -> Router<SharedState> {
     Router::new()
         .route("/auth/register/begin", post(register_begin))
         .route("/auth/login/begin", post(login_begin))
+        .route(
+            "/auth/login/discoverable/begin",
+            post(login_discoverable_begin),
+        )
 }
 
 /// The ceremony FINISH endpoints. Not rate-limited: each requires a real,
@@ -156,15 +182,10 @@ pub fn finish_router() -> Router<SharedState> {
     Router::new()
         .route("/auth/register/finish", post(register_finish))
         .route("/auth/login/finish", post(login_finish))
-}
-
-/// The cookie-authenticated session surface (no rate limiting). Includes the
-/// user self-service passkey management routes (`routes::passkeys`).
-pub fn session_router() -> Router<SharedState> {
-    Router::new()
-        .route("/auth/logout", post(logout))
-        .route("/me", get(me))
-        .merge(super::passkeys::router())
+        .route(
+            "/auth/login/discoverable/finish",
+            post(login_discoverable_finish),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -173,8 +194,6 @@ pub fn session_router() -> Router<SharedState> {
 
 #[derive(Deserialize)]
 struct RegisterBeginRequest {
-    invite_code: String,
-    email: String,
     username: String,
     display_name: Option<String>,
 }
@@ -193,7 +212,7 @@ struct RegisterFinishRequest {
 
 #[derive(Deserialize)]
 struct LoginBeginRequest {
-    email: String,
+    username: String,
 }
 
 #[derive(Deserialize)]
@@ -205,17 +224,6 @@ struct LoginFinishRequest {
 #[derive(Serialize)]
 struct AuthFinishResponse {
     user_id: String,
-}
-
-#[derive(Serialize)]
-struct MeResponse {
-    user_id: String,
-    username: String,
-    email: String,
-    display_name: Option<String>,
-    #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
-    passkey_count: i64,
 }
 
 /// Max length of a client-supplied `display_name` (after trim). The WebAuthn
@@ -231,10 +239,18 @@ async fn register_begin(
     State(state): State<SharedState>,
     Json(req): Json<RegisterBeginRequest>,
 ) -> Result<Json<CeremonyBeginResponse<CreationChallengeResponse>>, ApiError> {
-    // Canonicalize the email (login id) and normalize the username (in-site
-    // handle) once; the same transforms run at login_begin so a user can log in
-    // with exactly the address they registered.
-    let email_norm = email::normalize(&req.email)?;
+    // Open signup is gated by the runtime kill switch (the invite gate is gone;
+    // this is its replacement). Login is unaffected. Register can surface an
+    // explicit 403 because the request IS signup intent; OAuth `finish_signin`
+    // cannot -- it must mask signup-disabled as a generic 401 so a disabled-
+    // signup probe does not reveal whether `(provider, subject)` is a known
+    // account (see `routes::oauth`).
+    if !state.signup_enabled {
+        return Err(ApiError::forbidden("signup is disabled"));
+    }
+    // Normalize the username (the login id + in-site handle) once; the same
+    // transform runs at login_begin so a user can log in with exactly the handle
+    // they registered.
     let username_norm = username::normalize(&req.username)?;
     // The WebAuthn `displayName` shown in the authenticator prompt MUST be
     // non-empty -- webauthn-rs rejects an empty one -- so when the client omits
@@ -259,31 +275,16 @@ async fn register_begin(
     // authenticator requires a non-empty label at ceremony time, while the API
     // represents stored data faithfully.
 
-    let code_hash = TokenHash::of(&req.invite_code);
-    let code_hash_bytes = code_hash.as_bytes().to_vec();
-
-    // Validate the invite is live WITHOUT consuming it. The finish txn is the
-    // authority; this only screens so a bogus code fails fast.
+    // Open signup (no invite). This per-username cap bounds repeat-begin
+    // floods against a single chosen handle; it is NOT a global storage bound
+    // (an attacker rotating the username field defeats it) -- the per-IP rate
+    // limiter on this endpoint is the real storage-growth bound (each begin
+    // adds one TTL-bounded row, GC'd every 60s). Only live (unexpired) rows
+    // count.
     let now = OffsetDateTime::now_utc();
-    let live = invite_codes::Entity::find()
-        .filter(invite_codes::Column::CodeHash.eq(code_hash_bytes.clone()))
-        .filter(invite_codes::Column::ConsumedAt.is_null())
-        .filter(invite_codes::Column::RevokedAt.is_null())
-        .filter(invite_codes::Column::ExpiresAt.gt(now))
-        .one(&state.db)
-        .await
-        .map_err(map_db_err)?;
-    if live.is_none() {
-        // Same message for unknown / consumed / revoked / expired so the
-        // response leaks nothing about which.
-        return Err(ApiError::unauthorized("invalid invite code"));
-    }
-
-    // Bound concurrent in-flight register ceremonies for this invite so a
-    // begin-flood cannot grow the table without limit. Only live (unexpired)
-    // rows count: the background GC may not have swept expired ones yet.
     let in_flight = webauthn_challenges::Entity::find()
-        .filter(webauthn_challenges::Column::HeldCodeHash.eq(code_hash_bytes.clone()))
+        .filter(webauthn_challenges::Column::Username.eq(username_norm.clone()))
+        .filter(webauthn_challenges::Column::Kind.eq(KIND_REGISTER))
         .filter(webauthn_challenges::Column::ExpiresAt.gt(now))
         .count(&state.db)
         .await
@@ -299,15 +300,18 @@ async fn register_begin(
     let user_id = UserId::random();
     let user_uuid = Uuid::parse_str(user_id.as_ref())
         .map_err(|e| ApiError::internal(format_args!("user id not a uuid: {e}")))?;
-    // The wrapper hardcodes require_resident_key=false + UV=Required (upstream
-    // passkey defaults); email-first login does not rely on discoverability.
-    // `user.name` is the email; the username is purely an in-site handle and
-    // reaches the authenticator only as the `displayName` fallback (see
-    // `display_name_for_prompt` above) when no `display_name` was supplied.
-    let (options, reg_state) = state
-        .webauthn
-        .start_passkey_registration(user_uuid, &email_norm, &display_name_for_prompt, None)
-        .map_err(register_err)?;
+    // Signup enrolls a DISCOVERABLE (resident-key) credential so the new account
+    // is immediately usable for passwordless / conditional-UI login (the
+    // authenticator stores the userHandle). `user.name` is the username (the
+    // stable handle); `display_name_for_prompt` is the `displayName`. A brand-new
+    // user has no existing credentials, so exclude is None.
+    let (options, reg_state) = discoverable_registration_challenge(
+        &state,
+        user_uuid,
+        &username_norm,
+        &display_name_for_prompt,
+        None,
+    )?;
     let state_value = serde_json::to_value(&reg_state)
         .map_err(|e| ApiError::internal(format_args!("serialize reg state: {e}")))?;
 
@@ -316,9 +320,9 @@ async fn register_begin(
         id: Set(ceremony_id),
         kind: Set(KIND_REGISTER.to_string()),
         state: Set(state_value),
-        held_code_hash: Set(Some(code_hash_bytes)),
+        // Open signup holds no code hash; the column stays for device pairing.
+        pairing_code_hash: Set(None),
         user_id: Set(Some(user_id.to_string())),
-        email: Set(Some(email_norm)),
         username: Set(Some(username_norm)),
         expires_at: Set(now + CHALLENGE_TTL),
         created_at: Set(now),
@@ -337,23 +341,31 @@ async fn register_finish(
     State(state): State<SharedState>,
     Json(req): Json<RegisterFinishRequest>,
 ) -> Result<Response, ApiError> {
+    // Re-check the signup kill switch at finish too (mirrors `register_begin`
+    // and OAuth `finish_signin`): without this, an in-flight registration stays
+    // completable for up to `CHALLENGE_TTL` after the operator flips the switch.
+    // Fires before any ceremony lookup, so the 403 leaks nothing about whether
+    // the ceremony exists.
+    if !state.signup_enabled {
+        return Err(ApiError::forbidden("signup is disabled"));
+    }
     // Rehydrate the ceremony state and run the (CPU-bound) registration
     // verification OUTSIDE the transaction so the row locks are not held across
     // crypto.
-    let (reg_state, invite_hash, user_id, email, username) =
-        load_register_state(&state.db, req.ceremony_id).await?;
-    let passkey = state
-        .webauthn
-        .finish_passkey_registration(&req.credential, &reg_state)
+    let (reg_state, user_id, username) = load_register_state(&state.db, req.ceremony_id).await?;
+    // Discoverable signup: the begin stored a bare core `RegistrationState`; finish
+    // through `WebauthnCore` and wrap the resulting `Credential` as a `Passkey`
+    // (mirrors the discoverable add-passkey finish in `routes::passkeys`).
+    let cred = state
+        .webauthn_core
+        .register_credential(&req.credential, &reg_state, None)
         .map_err(register_err)?;
+    let passkey = Passkey::from(cred);
 
-    let session = MintedToken::generate(SESSION);
-    let session_hash = session.hash().as_bytes().to_vec();
-    let set_cookie = build_set_cookie(&state.session_cfg, session.secret());
-    let session_ttl = state.session_cfg.ttl;
+    let session_cfg = state.session_cfg.clone();
 
-    // One transaction: lock challenge -> invite -> username, insert user +
-    // passkey, consume the invite, delete the challenge, mint the session.
+    // One transaction: lock challenge -> username, insert user + passkey,
+    // delete the challenge, mint the session.
     let ceremony_id = req.ceremony_id;
     let credential_json = serde_json::to_value(&passkey)
         .map_err(|e| ApiError::internal(format_args!("serialize passkey: {e}")))?;
@@ -361,14 +373,12 @@ async fn register_finish(
     let user_id_for_txn = user_id.clone();
     let result = state
         .db
-        .transaction::<_, _, TxnError>(|txn| {
-            let invite_hash = invite_hash.clone();
+        .transaction::<_, String, TxnError>(|txn| {
             let user_id = user_id_for_txn.clone();
-            let email = email.clone();
             let username = username.clone();
             let credential_json = credential_json.clone();
             let cred_id = cred_id.clone();
-            let session_hash = session_hash.clone();
+            let session_cfg = session_cfg.clone();
             Box::pin(async move {
                 // Lock the challenge row; a parallel finish on the same ceremony
                 // already deleted it -> the loser sees None -> 409.
@@ -385,46 +395,10 @@ async fn register_finish(
                     return Err(TxnError::Api(ApiError::unauthorized("ceremony expired")));
                 }
 
-                // Lock the invite and re-check the FULL live predicate under the
-                // row lock (defeats a parallel consume race).
-                let invite = invite_codes::Entity::find()
-                    .filter(invite_codes::Column::CodeHash.eq(invite_hash.clone()))
-                    .lock_exclusive()
-                    .one(txn)
-                    .await?;
-                let Some(invite) = invite else {
-                    return Err(TxnError::Api(ApiError::unauthorized("invalid invite code")));
-                };
-                let now = OffsetDateTime::now_utc();
-                if invite.consumed_at.is_some() {
-                    warn!("invite redeemed while already consumed");
-                    return Err(TxnError::Api(ApiError::conflict(
-                        "invite code already used",
-                    )));
-                }
-                if invite.revoked_at.is_some() {
-                    return Err(TxnError::Api(ApiError::conflict("invite code revoked")));
-                }
-                if invite.expires_at <= now {
-                    return Err(TxnError::Api(ApiError::conflict("invite code expired")));
-                }
-
-                // Email (login id) uniqueness: FOR UPDATE-then-check so a taken
-                // address maps to a clean 409. The `uniq_users_email` index is
-                // the backstop for the sub-ms simultaneous-insert race.
-                let existing_email = users::Entity::find()
-                    .filter(users::Column::Email.eq(email.clone()))
-                    .lock_exclusive()
-                    .one(txn)
-                    .await?;
-                if existing_email.is_some() {
-                    return Err(TxnError::Api(ApiError::conflict(
-                        "email already registered",
-                    )));
-                }
-
-                // Username (in-site handle) uniqueness: same FOR UPDATE-then-check
-                // shape; the `uniq_users_username` index is the race backstop.
+                // Username (login id + in-site handle) uniqueness: FOR
+                // UPDATE-then-check so a taken handle maps to a clean 409. The
+                // `uniq_users_username` index is the backstop for the sub-ms
+                // simultaneous-insert race.
                 let existing = users::Entity::find()
                     .filter(users::Column::Username.eq(username.clone()))
                     .lock_exclusive()
@@ -434,10 +408,10 @@ async fn register_finish(
                     return Err(TxnError::Api(ApiError::conflict("username already taken")));
                 }
 
+                let now = OffsetDateTime::now_utc();
                 users::ActiveModel {
                     id: Set(user_id.to_string()),
                     username: Set(username),
-                    email: Set(email),
                     display_name: Set(None),
                     created_at: Set(now),
                     disabled_at: Set(None),
@@ -455,59 +429,42 @@ async fn register_finish(
                     label: Set(String::new()),
                     created_at: Set(now),
                     last_used_at: Set(now),
+                    // Signup enrolls a discoverable (resident-key) credential so
+                    // the account is immediately usable for passwordless login.
+                    discoverable: Set(true),
                 }
                 .insert(txn)
                 .await?;
-
-                let mut invite_am: invite_codes::ActiveModel = invite.into();
-                invite_am.consumed_at = Set(Some(now));
-                invite_am.consumed_by = Set(Some(user_id.to_string()));
-                invite_am.update(txn).await?;
 
                 webauthn_challenges::Entity::delete_by_id(ceremony_id)
                     .exec(txn)
                     .await?;
 
-                sessions::ActiveModel {
-                    token_hash: Set(session_hash),
-                    user_id: Set(user_id.to_string()),
-                    created_at: Set(now),
-                    expires_at: Set(now + session_ttl),
-                    // A freshly registered account just proved UV; seed the
-                    // step-up marker so the user can add a first extra device
-                    // without an immediate re-login (consumed on use).
-                    authed_at: Set(Some(now)),
-                }
-                .insert(txn)
-                .await?;
-                Ok(())
+                let set_cookie = mint_session_row(txn, &user_id, &session_cfg, now).await?;
+                Ok(set_cookie)
             })
         })
         .await;
     // Flatten the transaction result. The `users` insert can still race a
-    // parallel register of the same email or username (the FOR UPDATE pre-checks
-    // above win the common case; the sub-ms simultaneous-insert case loses to
-    // the `uniq_users_email` / `uniq_users_username` index). Discriminate those
-    // unique-constraint violations by constraint name and surface each as a
-    // clean 409 with the right message instead of a 500; any other unique
-    // violation (e.g. a duplicate passkey cred_id, which is never legitimate)
-    // stays a generic 500 via map_db_err.
-    match result {
-        Ok(()) => {}
+    // parallel register of the same username (the FOR UPDATE pre-check above
+    // wins the common case; the sub-ms simultaneous-insert case loses to the
+    // `uniq_users_username` index). Discriminate that unique-constraint
+    // violation by constraint name and surface it as a clean 409; any other
+    // unique violation (e.g. a duplicate passkey cred_id, which is never
+    // legitimate) stays a generic 500 via map_db_err.
+    let set_cookie = match result {
+        Ok(set_cookie) => set_cookie,
         Err(TransactionError::Transaction(TxnError::Api(e))) => return Err(e),
         Err(TransactionError::Transaction(TxnError::Db(e)))
         | Err(TransactionError::Connection(e)) => {
-            if let Some(SqlErr::UniqueConstraintViolation(msg)) = e.sql_err() {
-                if msg.contains(EMAIL_UNIQUE_CONSTRAINT) {
-                    return Err(ApiError::conflict("email already registered"));
-                }
-                if msg.contains(USERNAME_UNIQUE_CONSTRAINT) {
-                    return Err(ApiError::conflict("username already taken"));
-                }
+            if let Some(SqlErr::UniqueConstraintViolation(msg)) = e.sql_err()
+                && msg.contains(USERNAME_UNIQUE_CONSTRAINT)
+            {
+                return Err(ApiError::conflict("username already taken"));
             }
             return Err(map_db_err(e));
         }
-    }
+    };
 
     Ok(set_cookie_response(
         &set_cookie,
@@ -518,14 +475,13 @@ async fn register_finish(
     ))
 }
 
-/// Read a register ceremony, rehydrate its `PasskeyRegistration`, and return
-/// the bound invite hash, the pre-generated `UserId`, the canonicalized email,
-/// and the chosen username. Errors if the ceremony is missing, expired, or not
-/// a register ceremony.
+/// Read a register ceremony, rehydrate its bare core `RegistrationState`, and
+/// return the pre-generated `UserId` and the chosen username. Errors if the
+/// ceremony is missing, expired, or not a register ceremony.
 async fn load_register_state(
     db: &crate::db::Db,
     ceremony_id: Uuid,
-) -> Result<(PasskeyRegistration, Vec<u8>, UserId, String, String), ApiError> {
+) -> Result<(RegistrationState, UserId, String), ApiError> {
     let row = webauthn_challenges::Entity::find_by_id(ceremony_id)
         .one(db)
         .await
@@ -537,47 +493,41 @@ async fn load_register_state(
     if row.expires_at <= OffsetDateTime::now_utc() {
         return Err(ApiError::unauthorized("ceremony expired"));
     }
-    let invite_hash = row
-        .held_code_hash
-        .ok_or_else(|| ApiError::internal(format_args!("register ceremony missing invite hash")))?;
     let user_id = row
         .user_id
         .clone()
         .ok_or_else(|| ApiError::internal(format_args!("register ceremony missing user id")))?;
-    let email = row
-        .email
-        .clone()
-        .ok_or_else(|| ApiError::internal(format_args!("register ceremony missing email")))?;
     let username = row
         .username
         .clone()
         .ok_or_else(|| ApiError::internal(format_args!("register ceremony missing username")))?;
-    let state: PasskeyRegistration = serde_json::from_value(row.state)
+    let state: RegistrationState = serde_json::from_value(row.state)
         .map_err(|e| ApiError::internal(format_args!("deserialize reg state: {e}")))?;
-    Ok((state, invite_hash, UserId::from(user_id), email, username))
+    Ok((state, UserId::from(user_id), username))
 }
 
 // ---------------------------------------------------------------------------
-// login (email-first)
+// login (username-first)
 // ---------------------------------------------------------------------------
 
 async fn login_begin(
     State(state): State<SharedState>,
     Json(req): Json<LoginBeginRequest>,
 ) -> Result<Json<CeremonyBeginResponse<RequestChallengeResponse>>, ApiError> {
-    let email_norm = email::normalize(&req.email)?;
+    let username_norm = username::normalize(&req.username)?;
 
-    // Resolve the user by email (the login id). NOTE: this is a timing-
-    // enumeration oracle -- an unknown email (or a user with no passkeys)
-    // returns immediately, while a known email with passkeys pays the cost of
+    // Resolve the user by username (the login id). NOTE: this is a timing-
+    // enumeration oracle -- an unknown username (or a user with no passkeys)
+    // returns immediately, while a known username with passkeys pays the cost of
     // loading them + `start_passkey_authentication` (real crypto-state
     // construction) + an INSERT, so existence is distinguishable by latency.
     // The same generic "invalid credentials" body is used for all 401 branches
-    // so the response BODY leaks nothing. Accepted for closed beta (emails are
-    // personally issued via invite). The pre-public-launch fix is constant-time
-    // / dummy-ceremony work, not message parity alone.
+    // so the response BODY leaks nothing. Now that signup is open (more accounts
+    // makes username enumeration more attractive) the per-IP rate limit on this
+    // handler is the bound; the pre-public-launch fix is constant-time /
+    // dummy-ceremony work, not message parity alone.
     let user = users::Entity::find()
-        .filter(users::Column::Email.eq(email_norm))
+        .filter(users::Column::Username.eq(username_norm))
         .one(&state.db)
         .await
         .map_err(map_db_err)?
@@ -632,9 +582,8 @@ async fn login_begin(
         id: Set(ceremony_id),
         kind: Set(KIND_LOGIN.to_string()),
         state: Set(state_value),
-        held_code_hash: Set(None),
+        pairing_code_hash: Set(None),
         user_id: Set(Some(user_id.to_string())),
-        email: Set(None),
         username: Set(None),
         expires_at: Set(now + CHALLENGE_TTL),
         created_at: Set(now),
@@ -684,58 +633,209 @@ async fn login_finish(
     // check (returns CredentialPossibleCompromise on a regression). Note: clone
     // detection only fires for authenticators that maintain a non-zero monotonic
     // counter; synced/software passkeys report counter == 0 and never trigger it.
-    let auth_result: AuthenticationResult = match state
-        .webauthn
-        .finish_passkey_authentication(&req.credential, &auth_state)
-    {
-        Ok(r) => r,
-        Err(WebauthnError::CredentialPossibleCompromise) => {
-            // Counter regression: DENY + LOG ONLY, never revoke. See the module
-            // doc "Clone detection & signature counters" for the full rationale
-            // (synced passkeys report 0; firmware quirks; auto-revoke is an
-            // attacker-triggerable DoS). Log user_id + cred_id -- cred_id is not
-            // a secret (per-RP opaque handle, plaintext on every ceremony; it is
-            // omitted from API responses only as least-exposure for clients),
-            // and it tells an operator WHICH of the user's passkeys regressed.
-            warn!(
-                user_id = %user_id,
-                cred_id = %hex::encode(&raw_id),
-                "passkey signature-counter regression (possible clone); denying login without revoking"
-            );
-            return Err(ApiError::unauthorized("credential may be cloned"));
-        }
-        Err(e) => return Err(login_err(e)),
-    };
+    let auth_result = check_login_assertion(
+        &user_id,
+        &raw_id,
+        state
+            .webauthn
+            .finish_passkey_authentication(&req.credential, &auth_state),
+    )?;
 
     // Resolve the matching passkey row by credential id, owner-scoped (see the
     // clone branch above). Needed to advance its stored counter inside the txn.
-    let passkey_id = passkeys::Entity::find()
-        .filter(passkeys::Column::CredId.eq(raw_id))
-        .filter(passkeys::Column::UserId.eq(user_id.to_string()))
+    let passkey_id = resolve_owner_passkey_id(&state.db, &user_id, &raw_id).await?;
+
+    finalize_login_and_mint_session(&state, req.ceremony_id, &user_id, passkey_id, auth_result)
+        .await
+}
+
+// ---------------------------------------------------------------------------
+// discoverable (usernameless) login
+// ---------------------------------------------------------------------------
+
+/// Begin a discoverable login. No identifier is supplied -- the authenticator
+/// resolves the user at finish via the assertion's `userHandle`. The wrapper
+/// forces conditional mediation + an empty allowList. No per-user in-flight cap
+/// is possible (no user handle at begin); the per-IP rate limiter is the gate.
+async fn login_discoverable_begin(
+    State(state): State<SharedState>,
+) -> Result<Json<CeremonyBeginResponse<RequestChallengeResponse>>, ApiError> {
+    let (options, auth_state) = state
+        .webauthn
+        .start_discoverable_authentication()
+        .map_err(login_err)?;
+    let state_value = serde_json::to_value(&auth_state)
+        .map_err(|e| ApiError::internal(format_args!("serialize auth state: {e}")))?;
+    let now = OffsetDateTime::now_utc();
+    let ceremony_id = Uuid::new_v4();
+    webauthn_challenges::ActiveModel {
+        id: Set(ceremony_id),
+        kind: Set(KIND_LOGIN_DISCOVERABLE.to_string()),
+        state: Set(state_value),
+        pairing_code_hash: Set(None),
+        user_id: Set(None),
+        username: Set(None),
+        expires_at: Set(now + CHALLENGE_TTL),
+        created_at: Set(now),
+    }
+    .insert(&state.db)
+    .await
+    .map_err(map_db_err)?;
+    Ok(Json(CeremonyBeginResponse {
+        ceremony_id: ceremony_id.to_string(),
+        options,
+    }))
+}
+
+/// Finish a discoverable login. The user is identified from the assertion's
+/// `userHandle` (the WebAuthn `user.id` set at registration = our opaque
+/// `UserId` UUID). A forged `userHandle` cannot impersonate: the assertion is
+/// verified against the resolved user's actual passkey public keys, so a handle
+/// with no matching key fails the signature check.
+async fn login_discoverable_finish(
+    State(state): State<SharedState>,
+    Json(req): Json<LoginFinishRequest>,
+) -> Result<Response, ApiError> {
+    // Rehydrate the discoverable ceremony (read without a lock; the shared tail
+    // locks the row for the consume).
+    let row = webauthn_challenges::Entity::find_by_id(req.ceremony_id)
+        .one(&state.db)
+        .await
+        .map_err(map_db_err)?;
+    let row = row.ok_or_else(|| ApiError::not_found("unknown ceremony"))?;
+    if row.kind != KIND_LOGIN_DISCOVERABLE {
+        return Err(ApiError::bad_request(
+            "ceremony is not a discoverable login",
+        ));
+    }
+    if row.expires_at <= OffsetDateTime::now_utc() {
+        return Err(ApiError::unauthorized("ceremony expired"));
+    }
+    let auth_state: DiscoverableAuthentication = serde_json::from_value(row.state)
+        .map_err(|e| ApiError::internal(format_args!("deserialize auth state: {e}")))?;
+
+    // Identify the user from the assertion's userHandle. Map a missing/malformed
+    // handle to the SAME generic 401 as an unknown/disabled user, so the
+    // response leaks nothing about which user handles exist.
+    let (user_uuid, cred_id_bytes) = state
+        .webauthn
+        .identify_discoverable_authentication(&req.credential)
+        .map_err(|_| ApiError::unauthorized("invalid credentials"))?;
+    let user_id = UserId::from(user_uuid.to_string());
+    let raw_id = cred_id_bytes.to_vec();
+
+    // Resolve the user; disabled/unknown -> same generic 401 as login_begin.
+    let user = users::Entity::find_by_id(user_id.to_string())
         .one(&state.db)
         .await
         .map_err(map_db_err)?
+        .ok_or_else(|| ApiError::unauthorized("invalid credentials"))?;
+    if user.disabled_at.is_some() {
+        return Err(ApiError::unauthorized("invalid credentials"));
+    }
+
+    // Load the user's passkeys and project ALL to DiscoverableKey. Legacy
+    // non-discoverable passkeys are harmless here -- they never surface via
+    // conditional-UI autofill (no resident entry), and the signature check is
+    // still owner-scoped.
+    let owned = passkeys::Entity::find()
+        .filter(passkeys::Column::UserId.eq(user_id.to_string()))
+        .all(&state.db)
+        .await
+        .map_err(map_db_err)?;
+    let creds: Vec<DiscoverableKey> = owned
+        .iter()
+        .map(|p| serde_json::from_value::<Passkey>(p.credential.clone()))
+        .map(|res| res.map(DiscoverableKey::from))
+        .collect::<Result<_, _>>()
+        .map_err(|e| ApiError::internal(format_args!("deserialize passkey: {e}")))?;
+
+    // Verify the assertion (CPU, outside the txn). Same clone-detection
+    // deny+log (never revoke) semantics as login_finish.
+    let auth_result = check_login_assertion(
+        &user_id,
+        &raw_id,
+        state
+            .webauthn
+            .finish_discoverable_authentication(&req.credential, auth_state, &creds),
+    )?;
+
+    // Resolve the matching passkey row by cred_id, owner-scoped, then run the
+    // shared login-finish tail (advance counter, mint session).
+    let passkey_id = resolve_owner_passkey_id(&state.db, &user_id, &raw_id).await?;
+
+    finalize_login_and_mint_session(&state, req.ceremony_id, &user_id, passkey_id, auth_result)
+        .await
+}
+
+/// Interpret a login assertion result shared by `login_finish` and
+/// `login_discoverable_finish`. A counter regression (`CredentialPossible-
+/// Compromise`) is DENY + LOG ONLY (never revoke -- see the module doc); any
+/// other WebAuthn error maps via `login_err`. Centralized so the two paths
+/// cannot drift on the clone-detection policy.
+fn check_login_assertion(
+    user_id: &UserId,
+    raw_id: &[u8],
+    result: Result<AuthenticationResult, WebauthnError>,
+) -> Result<AuthenticationResult, ApiError> {
+    match result {
+        Ok(r) => Ok(r),
+        Err(WebauthnError::CredentialPossibleCompromise) => {
+            warn!(
+                user_id = %user_id,
+                cred_id = %hex::encode(raw_id),
+                "passkey signature-counter regression (possible clone); denying login without revoking"
+            );
+            Err(ApiError::unauthorized("credential may be cloned"))
+        }
+        Err(e) => Err(login_err(e)),
+    }
+}
+
+/// Resolve the matching passkey row by credential id, owner-scoped. Shared by
+/// the two login finish paths (both need the row id to advance its counter in
+/// `finalize_login_and_mint_session`).
+async fn resolve_owner_passkey_id(
+    db: &DatabaseConnection,
+    user_id: &UserId,
+    raw_id: &[u8],
+) -> Result<Uuid, ApiError> {
+    Ok(passkeys::Entity::find()
+        .filter(passkeys::Column::CredId.eq(raw_id))
+        .filter(passkeys::Column::UserId.eq(user_id.to_string()))
+        .one(db)
+        .await
+        .map_err(map_db_err)?
         .ok_or_else(|| ApiError::unauthorized("unknown credential"))?
-        .id;
+        .id)
+}
 
-    // Mint the session token up front; its hash is inserted inside the txn.
-    let session = MintedToken::generate(SESSION);
-    let session_hash = session.hash().as_bytes().to_vec();
-    let set_cookie = build_set_cookie(&state.session_cfg, session.secret());
-    let ceremony_id = req.ceremony_id;
+/// Shared tail of `login_finish` and `login_discoverable_finish`: mint a fresh
+/// session token, then in ONE transaction lock the challenge row `FOR UPDATE`
+/// (defeats a parallel replay of the same ceremony_id: the loser sees the row
+/// gone -> 409), re-check the user is not disabled under the lock, advance the
+/// stored passkey via `Passkey::update_credential` (no lost-update), insert the
+/// session (seeding the step-up `authed_at`), and delete the challenge.
+/// All-or-nothing so a transient failure cannot advance the counter without
+/// issuing a session. Returns the `Set-Cookie` + `{ user_id }` 200 response.
+///
+/// Both login paths have already verified the assertion (CPU, outside the txn)
+/// and resolved the owner-scoped `passkey_id` before calling this.
+async fn finalize_login_and_mint_session(
+    state: &SharedState,
+    ceremony_id: Uuid,
+    user_id: &UserId,
+    passkey_id: Uuid,
+    auth_result: AuthenticationResult,
+) -> Result<Response, ApiError> {
     let user_id_for_txn = user_id.clone();
-    let session_ttl = state.session_cfg.ttl;
+    let session_cfg = state.session_cfg.clone();
 
-    // One transaction: lock the challenge row FOR UPDATE (defeats a parallel
-    // replay of the same ceremony_id: the loser sees the row gone -> 409),
-    // advance the stored passkey under the lock (no lost-update), insert the
-    // session, and delete the challenge. All-or-nothing so a transient failure
-    // cannot advance the counter without issuing a session.
     let outcome = state
         .db
-        .transaction::<_, _, TxnError>(|txn| {
+        .transaction::<_, String, TxnError>(|txn| {
             let user_id = user_id_for_txn.clone();
-            let session_hash = session_hash.clone();
+            let session_cfg = session_cfg.clone();
             Box::pin(async move {
                 let locked = webauthn_challenges::Entity::find_by_id(ceremony_id)
                     .lock_exclusive()
@@ -750,11 +850,15 @@ async fn login_finish(
                     return Err(TxnError::Api(ApiError::unauthorized("ceremony expired")));
                 }
 
-                // Re-check the owning user is not disabled under the lock: a
-                // user disabled between begin and finish must not mint a session
-                // even though they began legitimately. Same generic message as
-                // the begin-path check.
+                // Re-check the owning user is not disabled, taking a `users`
+                // row lock. This narrows the disabled-check race to a single
+                // ordering: whoever wins `FOR UPDATE` first proceeds. It does
+                // not fully close the race (if login wins it still mints a
+                // session before a concurrent disable commits), but a disable
+                // that has not yet acquired the row lock is visible here. Same
+                // generic message as the begin-path check.
                 let user = users::Entity::find_by_id(user_id.to_string())
+                    .lock_exclusive()
                     .one(txn)
                     .await?
                     .ok_or_else(|| TxnError::Api(ApiError::unauthorized("invalid credentials")))?;
@@ -805,27 +909,16 @@ async fn login_finish(
                     }
                 }
 
-                sessions::ActiveModel {
-                    token_hash: Set(session_hash),
-                    user_id: Set(user_id.to_string()),
-                    created_at: Set(now),
-                    expires_at: Set(now + session_ttl),
-                    // A fresh login is the step-up that authorizes adding a
-                    // device; seed `authed_at` (consumed on use by add-passkey
-                    // begin).
-                    authed_at: Set(Some(now)),
-                }
-                .insert(txn)
-                .await?;
+                let set_cookie = mint_session_row(txn, &user_id, &session_cfg, now).await?;
 
                 webauthn_challenges::Entity::delete_by_id(ceremony_id)
                     .exec(txn)
                     .await?;
-                Ok(())
+                Ok(set_cookie)
             })
         })
         .await;
-    flatten_txn(outcome)?;
+    let set_cookie = flatten_txn(outcome)?;
 
     Ok(set_cookie_response(
         &set_cookie,
@@ -836,60 +929,34 @@ async fn login_finish(
     ))
 }
 
-// ---------------------------------------------------------------------------
-// logout + /v1/me
-// ---------------------------------------------------------------------------
-
-async fn logout(
-    State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    // Require a signed-in user (cookie) so an anonymous token cannot force a
-    // cookie clear. The actual session row deletion is best-effort keyed by the
-    // presented cookie hash.
-    require_user(&principal)?;
-    let Some(cookie_value) = read_session_cookie(&headers) else {
-        return Err(ApiError::unauthorized("no session"));
-    };
-    let hash = TokenHash::of(&cookie_value);
-    sessions::Entity::delete_by_id(hash.as_bytes().to_vec())
-        .exec(&state.db)
-        .await
-        .map_err(map_db_err)?;
-    let clear = build_clear_cookie(&state.session_cfg);
-    let mut resp = StatusCode::OK.into_response();
-    resp.headers_mut().append(
-        axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&clear)
-            .map_err(|e| ApiError::internal(format_args!("bad set-cookie: {e}")))?,
-    );
-    Ok(resp)
-}
-
-async fn me(
-    State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
-) -> Result<Json<MeResponse>, ApiError> {
-    let user_id = require_user(&principal)?;
-    let user = users::Entity::find_by_id(user_id.to_string())
-        .one(&state.db)
-        .await
-        .map_err(map_db_err)?
-        .ok_or_else(|| ApiError::not_found("unknown user"))?;
-    let passkey_count = passkeys::Entity::find()
-        .filter(passkeys::Column::UserId.eq(user_id.to_string()))
-        .count(&state.db)
-        .await
-        .map_err(map_db_err)? as i64;
-    Ok(Json(MeResponse {
-        user_id: user_id.to_string(),
-        display_name: user.display_name,
-        username: user.username,
-        email: user.email,
-        created_at: user.created_at,
-        passkey_count,
-    }))
+/// Mint a session for `user_id` inside `txn`: generate a fresh `sk-sess-`
+/// token, insert the `sessions` row (seeding `authed_at = now` so a freshly
+/// signed-in user can immediately add a passkey), and return the `Set-Cookie`
+/// header value. Shared by [`register_finish`], [`finalize_login_and_mint_session`],
+/// and the OAuth login/create paths. The caller owns the surrounding txn
+/// (ceremony lock/delete, disabled recheck, optional passkey advance) and
+/// builds the response from the returned header.
+pub(crate) async fn mint_session_row(
+    txn: &DatabaseTransaction,
+    user_id: &UserId,
+    session_cfg: &SessionCfg,
+    now: OffsetDateTime,
+) -> Result<String, DbErr> {
+    let session = MintedToken::generate(SESSION);
+    let session_hash = session.hash().as_bytes().to_vec();
+    let set_cookie = build_set_cookie(session_cfg, session.secret());
+    sessions::ActiveModel {
+        token_hash: Set(session_hash),
+        user_id: Set(user_id.to_string()),
+        created_at: Set(now),
+        expires_at: Set(now + session_cfg.ttl),
+        // A fresh login/signup is the step-up that authorizes adding a device;
+        // seed `authed_at` (consumed on use by add-passkey begin).
+        authed_at: Set(Some(now)),
+    }
+    .insert(txn)
+    .await?;
+    Ok(set_cookie)
 }
 
 // ---------------------------------------------------------------------------
@@ -902,6 +969,54 @@ async fn me(
 pub(crate) fn register_err(e: WebauthnError) -> ApiError {
     warn!(error = %e, "webauthn register failed");
     ApiError::bad_request("passkey registration failed")
+}
+
+/// Build a discoverable (resident-key) registration challenge via the bare
+/// `WebauthnCore`. The high-level `Webauthn::start_passkey_registration` wrapper
+/// hardcodes `require_resident_key=false` and keeps its `core` field private, so
+/// a discoverable credential (the kind conditional-UI / usernameless login
+/// resolves) must be minted through the core directly. Mirrors that wrapper's
+/// builder verbatim EXCEPT `require_resident_key(true)`; the cred_protect block
+/// keeps `enforce=false` (upstream warns true breaks many authenticators).
+///
+/// Returns the bare core `RegistrationState` (a different shape from
+/// `PasskeyRegistration`); the caller finishes via
+/// `WebauthnCore::register_credential` + `Passkey::from`. Shared by signup
+/// (`register_begin`, `exclude = None`) and the discoverable add-passkey flow
+/// (`routes::passkeys`, `exclude = Some(existing cred ids)`).
+pub(crate) fn discoverable_registration_challenge(
+    state: &SharedState,
+    user_uuid: Uuid,
+    username: &str,
+    display: &str,
+    exclude: Option<Vec<Vec<u8>>>,
+) -> Result<(CreationChallengeResponse, RegistrationState), ApiError> {
+    let builder = state
+        .webauthn_core
+        .new_challenge_register_builder(user_uuid.as_bytes(), username, display)
+        .map_err(register_err)?
+        .attestation(AttestationConveyancePreference::None)
+        .require_resident_key(true)
+        .authenticator_attachment(None)
+        .user_verification_policy(UserVerificationPolicy::Required)
+        .reject_synchronised_authenticators(false)
+        .exclude_credentials(exclude)
+        .hints(None)
+        .extensions(Some(RequestRegistrationExtensions {
+            cred_protect: Some(CredProtect {
+                credential_protection_policy: CredentialProtectionPolicy::UserVerificationRequired,
+                enforce_credential_protection_policy: Some(false),
+            }),
+            uvm: Some(true),
+            cred_props: Some(true),
+            min_pin_length: None,
+            hmac_create_secret: None,
+        }));
+    let (ccr, rs) = state
+        .webauthn_core
+        .generate_challenge_register(builder)
+        .map_err(register_err)?;
+    Ok((ccr, rs))
 }
 
 /// An authentication failure is 401. `CredentialPossibleCompromise` keeps a
@@ -939,142 +1054,41 @@ pub(crate) fn set_cookie_response<T: Serialize>(
 #[cfg(test)]
 mod tests {
     //! Handler-level tests for the auth glue that does NOT require a virtual
-    //! authenticator: invite screening, ceremony begin, session-bearing
-    //! `/v1/me`, and ceremony GC. The WebAuthn crypto ceremonies themselves are
-    //! exercised end-to-end by the browser (a unit-level virtual authenticator
-    //! would have to re-implement CTAP signing, which `webauthn-rs` does not
-    //! ship).
+    //! authenticator: ceremony begin, the in-flight cap, and ceremony GC. The
+    //! WebAuthn crypto ceremonies themselves are exercised end-to-end by the
+    //! browser (a unit-level virtual authenticator would have to re-implement
+    //! CTAP signing, which `webauthn-rs` does not ship).
 
     use axum::Json;
     use axum::extract::State;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set};
     use time::OffsetDateTime;
+    use uuid::Uuid;
 
     use super::{
-        LoginBeginRequest, MeResponse, RegisterBeginRequest, login_begin, me, register_begin,
+        DiscoverableAuthentication, KIND_LOGIN, KIND_LOGIN_DISCOVERABLE, LoginBeginRequest,
+        LoginFinishRequest, PublicKeyCredential, RegisterBeginRequest, login_begin,
+        login_discoverable_begin, login_discoverable_finish, register_begin,
     };
-    use crate::auth::{AuthPrincipal, Principal};
-    use crate::db::entity::{invite_codes, users, webauthn_challenges};
+    use crate::db::entity::{users, webauthn_challenges};
     use crate::test_helpers::{make_state, seed_user};
-    use crate::token::INVITE;
-    use kallip_common::authtoken::MintedToken;
     use sea_orm::EntityTrait;
 
-    /// Insert a live invite code whose plaintext is `token`, returning its hash.
-    async fn seed_invite(state: &crate::state::SharedState, token: &MintedToken) -> Vec<u8> {
-        let now = OffsetDateTime::now_utc();
-        let hash = token.hash().as_bytes().to_vec();
-        invite_codes::ActiveModel {
-            code_hash: Set(hash.clone()),
-            created_at: Set(now),
-            expires_at: Set(now + time::Duration::days(7)),
-            consumed_at: Set(None),
-            consumed_by: Set(None),
-            note: Set(None),
-            revoked_at: Set(None),
-        }
-        .insert(&state.db)
-        .await
-        .expect("insert invite");
-        hash
-    }
-
-    /// An unknown invite is rejected at `register_begin` with 401 (and the
-    /// message reveals nothing about whether the code exists).
-    #[tokio::test]
-    async fn register_begin_rejects_unknown_invite() {
-        let state = make_state().await;
-        match register_begin(
-            State(state),
-            Json(RegisterBeginRequest {
-                invite_code: "sk-invite-bogus".to_string(),
-                email: "someone@example.test".to_string(),
-                username: "someone".to_string(),
-                display_name: None,
-            }),
-        )
-        .await
-        {
-            Err(e) => assert_eq!(e.status, 401),
-            Ok(_) => panic!("unknown invite must be rejected"),
-        }
-    }
-
-    /// A live invite produces a ceremony id + WebAuthn options, and persists the
-    /// challenge row bound to the invite hash.
-    #[tokio::test]
-    async fn register_begin_accepts_live_invite() {
-        let state = make_state().await;
-        let token = MintedToken::generate(INVITE);
-        let hash = seed_invite(&state, &token).await;
-
-        let resp = register_begin(
-            State(state.clone()),
-            Json(RegisterBeginRequest {
-                invite_code: token.secret().to_string(),
-                email: "NewUser@Example.TEST".to_string(),
-                username: "newuser".to_string(),
-                display_name: None,
-            }),
-        )
-        .await
-        .expect("begin ok");
-        assert!(!resp.ceremony_id.is_empty());
-
-        // The persisted challenge carries the invite hash + a register kind.
-        let rows = webauthn_challenges::Entity::find()
-            .all(&state.db)
-            .await
-            .expect("read challenges");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].kind, "register");
-        assert_eq!(rows[0].held_code_hash.as_deref(), Some(hash.as_slice()));
-        // The canonical email (local preserved, domain lowercased) rides the
-        // challenge row for finish; the username rides too.
-        assert_eq!(rows[0].email.as_deref(), Some("NewUser@example.test"));
-        assert_eq!(rows[0].username.as_deref(), Some("newuser"));
-    }
-
-    /// `/v1/me` returns the signed-in user's profile.
-    #[tokio::test]
-    async fn me_returns_signed_in_user() {
-        let state = make_state().await;
-        let user_id = seed_user(&state, "alice", "alice@example.test").await;
-        let Json(MeResponse {
-            user_id: got,
-            username,
-            email,
-            display_name,
-            passkey_count,
-            ..
-        }) = me(
-            State(state),
-            AuthPrincipal(Principal::User(user_id.clone())),
-        )
-        .await
-        .expect("me ok");
-        assert_eq!(got, user_id.to_string());
-        assert_eq!(username, "alice");
-        assert_eq!(email, "alice@example.test");
-        assert_eq!(display_name, None);
-        assert_eq!(passkey_count, 0);
-    }
-
-    /// `login_begin` rejects an unknown email with 401 (accepted enumeration
+    /// `login_begin` rejects an unknown username with 401 (accepted enumeration
     /// oracle for closed beta; see the handler doc comment).
     #[tokio::test]
-    async fn login_begin_rejects_unknown_email() {
+    async fn login_begin_rejects_unknown_username() {
         let state = make_state().await;
         match login_begin(
             State(state),
             Json(LoginBeginRequest {
-                email: "nobody@example.test".to_string(),
+                username: "nobody".to_string(),
             }),
         )
         .await
         {
             Err(e) => assert_eq!(e.status, 401),
-            Ok(_) => panic!("unknown email must be rejected"),
+            Ok(_) => panic!("unknown username must be rejected"),
         }
     }
 
@@ -1083,7 +1097,7 @@ mod tests {
     #[tokio::test]
     async fn login_begin_rejects_disabled_user() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "frozen", "frozen@example.test").await;
+        let user_id = seed_user(&state, "frozen").await;
         // Flip the account to disabled.
         let mut am: users::ActiveModel = users::Entity::find_by_id(user_id.to_string())
             .one(&state.db)
@@ -1097,7 +1111,7 @@ mod tests {
         match login_begin(
             State(state),
             Json(LoginBeginRequest {
-                email: "frozen@example.test".to_string(),
+                username: "frozen".to_string(),
             }),
         )
         .await
@@ -1107,24 +1121,21 @@ mod tests {
         }
     }
 
-    /// `register_begin` refuses once the per-invite in-flight ceremony cap is
+    /// `register_begin` refuses once the per-username in-flight ceremony cap is
     /// reached, bounding `webauthn_challenges` growth against a begin flood.
     #[tokio::test]
-    async fn register_begin_caps_inflight_ceremonies() {
+    async fn register_begin_caps_ceremonies_per_username() {
         let state = make_state().await;
-        let token = MintedToken::generate(INVITE);
-        let hash = seed_invite(&state, &token).await;
         let now = OffsetDateTime::now_utc();
-        // Seed exactly the cap of live register ceremonies for this invite.
+        // Seed exactly the cap of live register ceremonies for this username.
         for _ in 0..super::MAX_INFLIGHT_CEREMONIES {
             webauthn_challenges::ActiveModel {
                 id: Set(uuid::Uuid::new_v4()),
                 kind: Set("register".to_string()),
                 state: Set(serde_json::Value::Null),
-                held_code_hash: Set(Some(hash.clone())),
+                pairing_code_hash: Set(None),
                 user_id: Set(None),
-                email: Set(None),
-                username: Set(None),
+                username: Set(Some("newuser".to_string())),
                 expires_at: Set(now + time::Duration::seconds(60)),
                 created_at: Set(now),
             }
@@ -1132,12 +1143,10 @@ mod tests {
             .await
             .expect("seed challenge");
         }
-        // The next begin for the same invite is rejected with 429.
+        // The next begin for the same username is rejected with 429.
         match register_begin(
             State(state),
             Json(RegisterBeginRequest {
-                invite_code: token.secret().to_string(),
-                email: "newuser@example.test".to_string(),
                 username: "newuser".to_string(),
                 display_name: None,
             }),
@@ -1147,5 +1156,157 @@ mod tests {
             Err(e) => assert_eq!(e.status, 429),
             Ok(_) => panic!("cap reached must 429"),
         }
+    }
+
+    /// `register_begin` enrolls a DISCOVERABLE (resident-key) credential: the
+    /// persisted state rehydrates to the bare core `RegistrationState` (not the
+    /// wrapper `PasskeyRegistration`), so the discoverable login / conditional-UI
+    /// autofill path works for a signup-created account. The crypto itself is
+    /// browser-tested; this covers the begin state shape.
+    #[tokio::test]
+    async fn register_begin_writes_discoverable_reg_state() {
+        let state = make_state().await;
+        let resp = register_begin(
+            State(state.clone()),
+            Json(RegisterBeginRequest {
+                username: "newuser".to_string(),
+                display_name: None,
+            }),
+        )
+        .await
+        .expect("begin ok");
+        assert!(!resp.ceremony_id.is_empty());
+
+        let rows = webauthn_challenges::Entity::find()
+            .all(&state.db)
+            .await
+            .expect("read challenges");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "register");
+        assert_eq!(rows[0].username.as_deref(), Some("newuser"));
+        // The pre-generated user_id rides the ceremony and becomes the WebAuthn
+        // userHandle that discoverable login resolves the account by.
+        assert!(
+            rows[0].user_id.is_some(),
+            "register ceremony must carry user_id"
+        );
+        // Bare core RegistrationState -- the shape finish rehydrates.
+        let _: super::RegistrationState =
+            serde_json::from_value(rows[0].state.clone()).expect("deserialize bare reg state");
+    }
+
+    /// `login_discoverable_begin` opens a usernameless ceremony: no user is
+    /// resolved at begin (`user_id` stays None), and the persisted state
+    /// rehydrates to `DiscoverableAuthentication`. The crypto assertion itself
+    /// is browser-tested (no virtual authenticator); this covers the begin shape.
+    #[tokio::test]
+    async fn login_discoverable_begin_writes_discoverable_row() {
+        let state = make_state().await;
+        let resp = login_discoverable_begin(State(state.clone()))
+            .await
+            .expect("begin ok");
+        assert!(!resp.ceremony_id.is_empty());
+
+        let rows = webauthn_challenges::Entity::find()
+            .all(&state.db)
+            .await
+            .expect("read challenges");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "login_discoverable");
+        assert!(rows[0].user_id.is_none());
+        // The state deserializes to the discoverable auth state type (not the
+        // username-login PasskeyAuthentication shape).
+        let _: DiscoverableAuthentication =
+            serde_json::from_value(rows[0].state.clone()).expect("deserialize discoverable state");
+    }
+
+    /// A placeholder assertion credential -- its contents never matter because
+    /// these finish tests each hit a pre-crypto guard (unknown/kind/expiry),
+    /// before the assertion is touched.
+    fn phantom_assertion() -> PublicKeyCredential {
+        serde_json::from_str(
+            r#"{"id":"","rawId":"","type":"public-key","response":{"authenticatorData":"","clientDataJSON":"","signature":""}}"#,
+        )
+        .expect("phantom assertion deserializes")
+    }
+
+    /// `login_discoverable_finish` rejects an unknown ceremony id with 404.
+    #[tokio::test]
+    async fn login_discoverable_finish_rejects_unknown_ceremony() {
+        let state = make_state().await;
+        let err = login_discoverable_finish(
+            State(state),
+            Json(LoginFinishRequest {
+                ceremony_id: Uuid::new_v4(),
+                credential: phantom_assertion(),
+            }),
+        )
+        .await
+        .expect_err("unknown ceremony");
+        assert_eq!(err.status, 404);
+    }
+
+    /// `login_discoverable_finish` rejects a ceremony of the WRONG kind (e.g. a
+    /// username-login ceremony id) with 400 -- the kind discriminator routes a
+    /// row to the right finish handler.
+    #[tokio::test]
+    async fn login_discoverable_finish_rejects_wrong_kind() {
+        let state = make_state().await;
+        let now = OffsetDateTime::now_utc();
+        let id = Uuid::new_v4();
+        webauthn_challenges::ActiveModel {
+            id: Set(id),
+            kind: Set(KIND_LOGIN.to_string()),
+            state: Set(serde_json::Value::Null),
+            pairing_code_hash: Set(None),
+            user_id: Set(None),
+            username: Set(None),
+            expires_at: Set(now + time::Duration::seconds(60)),
+            created_at: Set(now),
+        }
+        .insert(&state.db)
+        .await
+        .expect("seed login ceremony");
+        let err = login_discoverable_finish(
+            State(state),
+            Json(LoginFinishRequest {
+                ceremony_id: id,
+                credential: phantom_assertion(),
+            }),
+        )
+        .await
+        .expect_err("wrong kind");
+        assert_eq!(err.status, 400);
+    }
+
+    /// `login_discoverable_finish` rejects an expired ceremony with 401.
+    #[tokio::test]
+    async fn login_discoverable_finish_rejects_expired() {
+        let state = make_state().await;
+        let now = OffsetDateTime::now_utc();
+        let id = Uuid::new_v4();
+        webauthn_challenges::ActiveModel {
+            id: Set(id),
+            kind: Set(KIND_LOGIN_DISCOVERABLE.to_string()),
+            state: Set(serde_json::Value::Null),
+            pairing_code_hash: Set(None),
+            user_id: Set(None),
+            username: Set(None),
+            expires_at: Set(now - time::Duration::seconds(60)),
+            created_at: Set(now - time::Duration::seconds(120)),
+        }
+        .insert(&state.db)
+        .await
+        .expect("seed expired discoverable ceremony");
+        let err = login_discoverable_finish(
+            State(state),
+            Json(LoginFinishRequest {
+                ceremony_id: id,
+                credential: phantom_assertion(),
+            }),
+        )
+        .await
+        .expect_err("expired");
+        assert_eq!(err.status, 401);
     }
 }

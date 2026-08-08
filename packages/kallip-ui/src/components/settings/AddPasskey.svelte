@@ -19,20 +19,29 @@
     // Commit the label; resolve `true` on success so the form clears, `false`
     // (or undefined) on failure so the user can retry without retyping -- the
     // store's driver preserves the label through the step-up re-auth server-side.
-    onAdd?: (label: string) => Promise<boolean> | boolean | void;
+    // Pass `{ discoverable: true }` to enroll a resident (passwordless) credential.
+    onAdd?: (
+      label: string,
+      opts?: { discoverable?: boolean },
+    ) => Promise<boolean> | boolean | void;
     // Fired on a successful add; the owner folds the chooser back (the new card
     // in the list is the success feedback).
     onAdded?: () => void;
   } = $props();
 
   let label = $state("");
+  // A discoverable credential lets the user sign in from the login page's
+  // passkey autofill without typing their username.
+  let discoverable = $state(false);
 
   async function submit() {
     const trimmed = label.trim();
     if (!trimmed || busy) return;
-    const ok = (await onAdd?.(trimmed)) ?? false;
+    const ok = (await onAdd?.(trimmed, discoverable ? { discoverable: true } : {})) ??
+      false;
     if (ok) {
       label = "";
+      discoverable = false;
       onAdded?.();
     }
   }
@@ -56,6 +65,10 @@
       {busy ? "Adding..." : "Add passkey"}
     </button>
   </div>
+  <label class="flex items-center gap-2 text-xs opacity-70 select-none">
+    <input type="checkbox" bind:checked={discoverable} disabled={busy} />
+    Enable passwordless sign-in (sign in from autofill, no username)
+  </label>
   {#if hint}
     <div
       class="text-xs {hint.tone === 'ok'

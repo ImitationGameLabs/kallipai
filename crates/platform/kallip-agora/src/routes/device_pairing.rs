@@ -23,11 +23,10 @@
 
 use crate::auth::{AuthPrincipal, require_user};
 use crate::code;
-use crate::db::entity::{device_pairing_codes, passkeys, sessions, users, webauthn_challenges};
+use crate::db::entity::{device_pairing_codes, passkeys, users, webauthn_challenges};
 use crate::db::{TxnError, flatten_txn, map_db_err};
-use crate::session::{build_set_cookie, read_session_cookie};
+use crate::session::read_session_cookie;
 use crate::state::SharedState;
-use crate::token::SESSION;
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
@@ -35,7 +34,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::post;
 use kallip_agora_common::ids::UserId;
-use kallip_common::authtoken::{MintedToken, TokenHash};
+use kallip_common::authtoken::TokenHash;
 use kallip_common::protocol::ApiError;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseTransaction, EntityTrait,
@@ -50,10 +49,12 @@ use webauthn_rs::prelude::{
 };
 
 use super::auth::{
-    CHALLENGE_TTL, CeremonyBeginResponse, KIND_PAIR, register_err, set_cookie_response,
+    CHALLENGE_TTL, CeremonyBeginResponse, KIND_PAIR, mint_session_row, register_err,
+    set_cookie_response,
 };
 use super::passkeys::{
-    CRED_ID_UNIQUE_CONSTRAINT, bind_passkey_to_user, consume_step_up, normalize_label,
+    CRED_ID_UNIQUE_CONSTRAINT, CredentialFlavor, bind_passkey_to_user, consume_step_up,
+    normalize_label,
 };
 
 /// How long a minted pairing code remains redeemable.
@@ -239,14 +240,14 @@ async fn pair_begin(
     };
     let (options, reg_state) = state
         .webauthn
-        .start_passkey_registration(user_uuid, &user.email, &display, Some(exclude))
+        .start_passkey_registration(user_uuid, &user.username, &display, Some(exclude))
         .map_err(register_err)?;
     let state_value = serde_json::to_value(&reg_state)
         .map_err(|e| ApiError::internal(format_args!("serialize reg state: {e}")))?;
 
     // Per-code in-flight cap (storage bound on a code-holder spamming begins).
     let in_flight = webauthn_challenges::Entity::find()
-        .filter(webauthn_challenges::Column::HeldCodeHash.eq(code_hash.clone()))
+        .filter(webauthn_challenges::Column::PairingCodeHash.eq(code_hash.clone()))
         .filter(webauthn_challenges::Column::Kind.eq(KIND_PAIR))
         .filter(webauthn_challenges::Column::ExpiresAt.gt(now))
         .count(&state.db)
@@ -263,9 +264,8 @@ async fn pair_begin(
         id: Set(ceremony_id),
         kind: Set(KIND_PAIR.to_string()),
         state: Set(state_value),
-        held_code_hash: Set(Some(code_hash)),
+        pairing_code_hash: Set(Some(code_hash)),
         user_id: Set(Some(user_id.to_string())),
-        email: Set(None),
         username: Set(None),
         expires_at: Set(now + CHALLENGE_TTL),
         created_at: Set(now),
@@ -329,7 +329,7 @@ async fn pair_finish(
             .ok_or_else(|| ApiError::internal(format_args!("pair ceremony missing user id")))?,
     );
     let code_hash = row
-        .held_code_hash
+        .pairing_code_hash
         .clone()
         .ok_or_else(|| ApiError::internal(format_args!("pair ceremony missing code hash")))?;
     let reg_state: PasskeyRegistration = serde_json::from_value(row.state)
@@ -345,14 +345,9 @@ async fn pair_finish(
         .map_err(|e| ApiError::internal(format_args!("serialize passkey: {e}")))?;
     let cred_id = passkey.cred_id().as_slice().to_vec();
 
-    // Mint the session token up front; its hash is inserted inside the txn.
-    let session = MintedToken::generate(SESSION);
-    let session_hash = session.hash().as_bytes().to_vec();
-    let set_cookie = build_set_cookie(&state.session_cfg, session.secret());
-    let session_ttl = state.session_cfg.ttl;
-
     let ceremony_id = req.ceremony_id;
     let user_id_for_txn = user_id.clone();
+    let session_cfg = state.session_cfg.clone();
     let outcome = state
         .db
         .transaction::<_, _, TxnError>(|txn| {
@@ -361,7 +356,7 @@ async fn pair_finish(
             let label = label.clone();
             let user_id = user_id_for_txn.clone();
             let code_hash = code_hash.clone();
-            let session_hash = session_hash.clone();
+            let session_cfg = session_cfg.clone();
             Box::pin(async move {
                 // Lock the challenge FOR UPDATE (anti-replay of one ceremony_id;
                 // a parallel finish of the SAME id loses). The
@@ -380,8 +375,12 @@ async fn pair_finish(
                     return Err(TxnError::Api(ApiError::unauthorized("ceremony expired")));
                 }
 
-                // Re-check the owner is not disabled under the lock.
+                // Re-check the owner is not disabled, taking a `users` row lock.
+                // This narrows the disabled-check race to a single ordering
+                // (whoever wins `FOR UPDATE` first proceeds); mirrors
+                // `finalize_login_and_mint_session`.
                 let user = users::Entity::find_by_id(user_id.to_string())
+                    .lock_exclusive()
                     .one(txn)
                     .await?
                     .ok_or_else(|| TxnError::Api(ApiError::unauthorized("invalid credentials")))?;
@@ -401,32 +400,31 @@ async fn pair_finish(
 
                 // Denylist + insert (shared with add-passkey finish). The
                 // unique-violation on cred_id is mapped to a 409 at the call site.
-                bind_passkey_to_user(txn, &user_id, cred_id, credential_json, label).await?;
+                bind_passkey_to_user(
+                    txn,
+                    &user_id,
+                    cred_id,
+                    credential_json,
+                    label,
+                    CredentialFlavor::Regular,
+                )
+                .await?;
 
                 webauthn_challenges::Entity::delete_by_id(ceremony_id)
                     .exec(txn)
                     .await?;
 
-                // Device B just proved UV via the create ceremony; seed
-                // `authed_at` so it can add another device without an immediate
-                // re-login (mirrors register_finish / login_finish).
-                let now = OffsetDateTime::now_utc();
-                sessions::ActiveModel {
-                    token_hash: Set(session_hash),
-                    user_id: Set(user_id.to_string()),
-                    created_at: Set(now),
-                    expires_at: Set(now + session_ttl),
-                    authed_at: Set(Some(now)),
-                }
-                .insert(txn)
-                .await?;
-                Ok(())
+                // Mint the session inside the txn (shared helper seeds
+                // `authed_at`, so device B can add another device without an
+                // immediate re-login -- mirrors register_finish / login_finish).
+                let set_cookie = mint_session_row(txn, &user_id, &session_cfg, now).await?;
+                Ok(set_cookie)
             })
         })
         .await;
     // A duplicate cred_id loses to `uniq_passkeys_cred_id`; surface as a 409.
-    match outcome {
-        Ok(()) => {}
+    let set_cookie = match outcome {
+        Ok(set_cookie) => set_cookie,
         Err(sea_orm::TransactionError::Transaction(TxnError::Api(e))) => return Err(e),
         Err(sea_orm::TransactionError::Transaction(TxnError::Db(e)))
         | Err(sea_orm::TransactionError::Connection(e)) => {
@@ -437,7 +435,7 @@ async fn pair_finish(
             }
             return Err(map_db_err(e));
         }
-    }
+    };
 
     Ok(set_cookie_response(
         &set_cookie,
@@ -457,7 +455,10 @@ mod tests {
     //! `finish_passkey_registration`, so they are testable here; the
     //! consume-race and denylist live in extracted helpers exercised directly.
     use super::*;
+    use crate::db::entity::sessions;
     use crate::test_helpers::{make_state, seed_user};
+    use crate::token::SESSION;
+    use kallip_common::authtoken::MintedToken;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, TransactionTrait};
 
     /// Seed a pairing code (`code`) for `user_id` and return its hash.
@@ -488,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn begin_validates_the_pairing_code_uniformly() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "alice", "alice@example.test").await;
+        let user_id = seed_user(&state, "alice").await;
         seed_code(&state, &user_id, "ABCD-EFGH", PAIR_CODE_TTL).await;
 
         // Unknown code -> 401 invalid pairing code.
@@ -528,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn begin_screens_disabled_account() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "frozen", "frozen@example.test").await;
+        let user_id = seed_user(&state, "frozen").await;
         let mut am: users::ActiveModel = users::Entity::find_by_id(user_id.to_string())
             .one(&state.db)
             .await
@@ -579,9 +580,8 @@ mod tests {
             id: Set(id),
             kind: Set(crate::routes::auth::KIND_REGISTER.to_string()),
             state: Set(serde_json::json!({})),
-            held_code_hash: Set(None),
+            pairing_code_hash: Set(None),
             user_id: Set(None),
-            email: Set(None),
             username: Set(None),
             expires_at: Set(now + CHALLENGE_TTL),
             created_at: Set(now),
@@ -608,16 +608,15 @@ mod tests {
     #[tokio::test]
     async fn finish_rejects_expired_ceremony() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "alice", "alice@example.test").await;
+        let user_id = seed_user(&state, "alice").await;
         let id = Uuid::new_v4();
         let past = OffsetDateTime::now_utc() - Duration::from_secs(60);
         webauthn_challenges::ActiveModel {
             id: Set(id),
             kind: Set(KIND_PAIR.to_string()),
             state: Set(serde_json::json!({})),
-            held_code_hash: Set(Some(vec![0u8; 32])),
+            pairing_code_hash: Set(Some(vec![0u8; 32])),
             user_id: Set(Some(user_id.to_string())),
-            email: Set(None),
             username: Set(None),
             expires_at: Set(past),
             created_at: Set(past),
@@ -645,7 +644,7 @@ mod tests {
     #[tokio::test]
     async fn consume_is_single_use_and_expiry_aware() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "alice", "alice@example.test").await;
+        let user_id = seed_user(&state, "alice").await;
 
         // Live code: first consume true, second false.
         let live = seed_code(&state, &user_id, "ABCD-EFGH", PAIR_CODE_TTL).await;
@@ -690,7 +689,7 @@ mod tests {
     async fn bind_respects_the_revocation_denylist() {
         use crate::db::entity::passkey_revocations;
         let state = make_state().await;
-        let user_id = seed_user(&state, "alice", "alice@example.test").await;
+        let user_id = seed_user(&state, "alice").await;
         let cred_id = vec![42u8];
 
         // Seed a revocation audit row for this cred_id (denylist).
@@ -720,6 +719,7 @@ mod tests {
                         cred_id,
                         serde_json::json!({}),
                         "Phone".to_string(),
+                        CredentialFlavor::Regular,
                     )
                     .await
                 })
@@ -745,6 +745,7 @@ mod tests {
                         vec![7u8],
                         serde_json::json!({}),
                         "Laptop".to_string(),
+                        CredentialFlavor::Regular,
                     )
                     .await
                 })
@@ -797,7 +798,7 @@ mod tests {
     async fn mint_caps_active_codes_per_user() {
         use crate::auth::Principal;
         let state = make_state().await;
-        let user_id = seed_user(&state, "alice", "alice@example.test").await;
+        let user_id = seed_user(&state, "alice").await;
         seed_code(&state, &user_id, "AAAA-AAAA", PAIR_CODE_TTL).await;
         seed_code(&state, &user_id, "BBBB-BBBB", PAIR_CODE_TTL).await;
         seed_code(&state, &user_id, "CCCC-CCCC", PAIR_CODE_TTL).await;
@@ -818,7 +819,7 @@ mod tests {
     #[tokio::test]
     async fn begin_caps_inflight_ceremonies_per_code() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "alice", "alice@example.test").await;
+        let user_id = seed_user(&state, "alice").await;
         let hash = seed_code(&state, &user_id, "ABCD-EFGH", PAIR_CODE_TTL).await;
         let now = OffsetDateTime::now_utc();
         for _ in 0..MAX_INFLIGHT_PAIR_CEREMONIES {
@@ -826,9 +827,8 @@ mod tests {
                 id: Set(Uuid::new_v4()),
                 kind: Set(KIND_PAIR.to_string()),
                 state: Set(serde_json::json!({})),
-                held_code_hash: Set(Some(hash.clone())),
+                pairing_code_hash: Set(Some(hash.clone())),
                 user_id: Set(Some(user_id.to_string())),
-                email: Set(None),
                 username: Set(None),
                 expires_at: Set(now + CHALLENGE_TTL),
                 created_at: Set(now),

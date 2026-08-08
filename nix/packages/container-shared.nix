@@ -55,10 +55,12 @@ let
   # above), so rustls-platform-verifier -- which reads only the Debian/RHEL
   # standard paths, ignoring SSL_CERT_FILE and cacert's own $out path -- finds
   # the bundle. A thin wrapper around pkgs.cacert, named after it. Consumed by
-  # every service that builds a reqwest/rustls client at startup: lesche (->
-  # agora /internal) and the tagma (relay connector). agora is plain HTTP + DB
-  # and needs none. Consumers compose it directly into image.contents /
-  # copyToRoot rather than via an aggregator, e.g.
+  # every service that builds a reqwest/rustls client at startup:
+  #   - agora (oauth client)
+  #   - lesche (-> agora /internal)
+  #   - tagma (relay connector)
+  # Consumers compose it directly into image.contents / copyToRoot rather than
+  # via an aggregator, e.g.
   #   copyToRoot = [ tagma toolEnv aifed ] ++ cacert;
   cacert = [
     pkgs.cacert

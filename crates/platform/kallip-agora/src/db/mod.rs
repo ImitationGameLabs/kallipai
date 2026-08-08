@@ -1,7 +1,7 @@
 //! Durable control-plane store (sea-orm / Postgres).
 //!
 //! Holds the identity / credentials / provisioning layer: users, passkeys,
-//! invite codes, enrollment tokens, tagmata, tagma tokens, sessions, and WebAuthn
+//! enrollment tokens, tagmata, tagma tokens, sessions, and WebAuthn
 //! challenges. The soft-state data plane (presence, routing, dedup, key-exchange
 //! correlation) stays in the bin's in-memory `Registry` — see
 //! `.draft/design/relay-service.md` for the durable/soft-state boundary.
@@ -108,6 +108,21 @@ pub(crate) async fn gc_expired_pairing_codes(db: &Db) {
     }
 }
 
+/// Delete expired OAuth ceremony states. Single-use rows whose begin never
+/// reached a finish (or whose finish lost the race) linger until this sweep.
+/// Best-effort, like the ceremony GCs above; driven by the same 60s background
+/// sweep in `main.rs`.
+pub(crate) async fn gc_expired_oauth_states(db: &Db) {
+    let now = time::OffsetDateTime::now_utc();
+    if let Err(e) = entity::oauth_states::Entity::delete_many()
+        .filter(entity::oauth_states::Column::ExpiresAt.lt(now))
+        .exec(db)
+        .await
+    {
+        warn!(error = %e, "expired-oauth-state GC failed (non-fatal)");
+    }
+}
+
 /// Connect to Postgres (retrying with a capped backoff, since the agora may boot
 /// before its DB in a composed deploy) and apply all pending migrations.
 pub async fn connect_and_migrate(url: &str) -> Result<Db> {
@@ -163,6 +178,7 @@ mod tests {
     use sea_orm::ActiveValue::Set;
     use sea_orm::{ActiveModelTrait, EntityTrait};
     use testcontainers_modules::postgres::Postgres;
+    use testcontainers_modules::testcontainers::ImageExt;
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
     use super::*;
@@ -183,7 +199,8 @@ mod tests {
         let image = Postgres::default()
             .with_db_name(PG_DB)
             .with_user(PG_USER)
-            .with_password(PG_PASSWORD);
+            .with_password(PG_PASSWORD)
+            .with_tag("16-alpine");
         let container = image.start().await.expect("start postgres");
         let port = container.get_host_port_ipv4(5432).await.expect("host port");
         let url = format!("postgres://{PG_USER}:{PG_PASSWORD}@127.0.0.1:{port}/{PG_DB}");
@@ -196,7 +213,6 @@ mod tests {
         entity::users::ActiveModel {
             id: Set("owner-1".to_string()),
             username: Set("owner-1".to_string()),
-            email: Set("owner-1@example.test".to_string()),
             display_name: Set(None),
             created_at: Set(created_at),
             disabled_at: Set(None),

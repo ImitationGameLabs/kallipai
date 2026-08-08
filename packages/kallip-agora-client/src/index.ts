@@ -12,14 +12,20 @@ export { AgoraClient } from "./http.ts";
 export type { LoginBeginRequest, RegisterBeginRequest } from "./http.ts";
 export {
   addPasskey,
+  completeOAuth,
+  completeOAuthSignup,
+  loginWithDiscoverablePasskey,
   loginWithPasskey,
   pairDevice,
   registerWithPasskey,
+  signInWithOAuth,
 } from "./auth.ts";
 export type {
   AddPasskeyArgs,
   AddPasskeyResult,
   CeremonyResult,
+  OAuthCompleteResult,
+  OAuthSignupResult,
   PairArgs,
   PairResult,
   RegisterArgs,
@@ -31,15 +37,24 @@ export {
   registerCredentialToJson,
 } from "./webauthn.ts";
 export type {
+  AddEmailRequest,
   AddPasskeyFinishRequest,
+  AuthFinishResponse,
+  EmailSummary,
+  ExternalIdentitySummary,
   LoginBeginResponse,
   LoginFinishRequest,
   MeResponse,
   MintPairingCodeResponse,
   MintTagmaResponse,
+  OAuthBeginResponse,
+  OAuthFinishRequest,
+  OAuthNeedsUsernameResponse,
+  OAuthSignupCompleteRequest,
   PairBeginRequest,
   PairFinishRequest,
   PasskeySummary,
+  ProviderInfo,
   PublicTagmaProfile,
   PublicUserProfile,
   RegisterBeginResponse,
@@ -48,5 +63,6 @@ export type {
   RenameTagmaRequest,
   TagmaState,
   TagmaView,
+  VerifyEmailRequest,
 } from "./types.ts";
 export { AgoraApiError } from "./types.ts";

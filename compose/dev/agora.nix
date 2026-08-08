@@ -156,6 +156,12 @@ in
       # Optional stable admin token (else generated per boot, printed to
       # `arion logs agora`).
       service.env_file = [ ".env" ];
+      # cacert: the reqwest oauth client (rustls) loads the system trust
+      # store at startup.
+      image.contents = [
+        workspace
+      ]
+      ++ cacert;
       service.environment = {
         PATH = "${workspace}/bin";
         KALLIP_AGORA_ADDR = "0.0.0.0:7100";

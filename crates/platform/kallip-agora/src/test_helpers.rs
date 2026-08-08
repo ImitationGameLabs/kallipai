@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::db::Db;
-use crate::db::entity::{passkeys, tagma_tokens, tagmata, users};
+use crate::db::entity::{emails, passkeys, tagma_tokens, tagmata, users};
 use crate::db::migration::Migrator;
 use kallip_agora_common::bytes::Ed25519PublicKey;
 use kallip_agora_common::ids::{TagmaId, UserId};
@@ -19,6 +19,7 @@ use sea_orm::Statement;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database, DatabaseBackend};
 use sea_orm_migration::MigratorTrait;
 use testcontainers_modules::postgres::Postgres;
+use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use time::OffsetDateTime;
 use tokio::sync::OnceCell;
@@ -26,7 +27,6 @@ use uuid::Uuid;
 
 use crate::state::{AppState, Limits, SharedState};
 use crate::token::TAGMA;
-use webauthn_rs::prelude::WebauthnBuilder;
 
 /// Process-global test Postgres: started once, the container is intentionally
 /// leaked so it outlives every test. Each [`make_state`] call carves out a
@@ -42,7 +42,8 @@ async fn shared_pg_port() -> &'static u16 {
             let image = Postgres::default()
                 .with_db_name("postgres")
                 .with_user("postgres")
-                .with_password("postgres");
+                .with_password("postgres")
+                .with_tag("16-alpine");
             let container = image.start().await.expect("start postgres");
             let port = container.get_host_port_ipv4(5432).await.expect("host port");
             // Leak the container so it stays up for the whole test process.
@@ -87,21 +88,61 @@ pub async fn make_state_with(
     auth_rate_capacity: u32,
     auth_rate_refill_per_sec: u32,
 ) -> SharedState {
+    build_state(
+        auth_rate_capacity,
+        auth_rate_refill_per_sec,
+        Default::default(),
+        true,
+    )
+    .await
+}
+
+/// Like [`make_state`] but with a custom OAuth provider registry, so handler
+/// tests inject a mock provider (the trait is the test seam) and exercise the
+/// full begin/finish/login/create/link logic without any real provider
+/// round-trip. `signup_enabled` defaults to true.
+pub async fn make_state_with_oauth(
+    providers: Vec<Box<dyn crate::oauth::OAuthProvider>>,
+) -> SharedState {
+    build_state(
+        100,
+        100,
+        crate::oauth::ProviderRegistry::new(providers),
+        true,
+    )
+    .await
+}
+
+/// Like [`make_state_with_oauth`] but with `signup_enabled = false`, to test the
+/// runtime kill switch (the create branch must surface a generic 401).
+pub async fn make_state_with_oauth_signup_disabled(
+    providers: Vec<Box<dyn crate::oauth::OAuthProvider>>,
+) -> SharedState {
+    build_state(
+        100,
+        100,
+        crate::oauth::ProviderRegistry::new(providers),
+        false,
+    )
+    .await
+}
+
+async fn build_state(
+    auth_rate_capacity: u32,
+    auth_rate_refill_per_sec: u32,
+    oauth_providers: crate::oauth::ProviderRegistry,
+    signup_enabled: bool,
+) -> SharedState {
     let db = setup_test_db().await;
     let admin_hash = TokenHash::of("test-admin");
     let limits = Limits {
         max_body_size_bytes: 1024 * 1024,
         enrollment_code_ttl: Duration::from_secs(600),
-        invite_default_ttl_secs: 604_800,
     };
     let rp_origin = url::Url::parse("http://localhost:7100").expect("valid url");
-    let webauthn = WebauthnBuilder::new("localhost", &rp_origin)
-        .expect("valid rp config")
-        .allow_any_port(true)
-        .rp_name("kallip")
-        .timeout(Duration::from_secs(60))
-        .build()
-        .expect("build test webauthn");
+    let (webauthn, webauthn_core) =
+        crate::state::build_webauthn_pair("kallip", "localhost", &rp_origin, true, false)
+            .expect("build test webauthn pair");
     let session_cfg = crate::session::SessionCfg {
         ttl: Duration::from_secs(3600),
         cookie_secure: false,
@@ -110,30 +151,38 @@ pub async fn make_state_with(
     let auth_rate_limiter =
         crate::ratelimit::IpRateLimiter::new(auth_rate_capacity, auth_rate_refill_per_sec);
     let pair_rate_limiter = crate::ratelimit::GlobalRateLimiter::new(100, 100);
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("build test reqwest client");
     std::sync::Arc::new(AppState::new(
         admin_hash,
         limits,
         db,
-        std::sync::Arc::new(webauthn),
+        webauthn,
+        webauthn_core,
         session_cfg,
         auth_rate_limiter,
         pair_rate_limiter,
         Vec::new(),
+        http,
+        oauth_providers,
+        signup_enabled,
     ))
 }
 
-/// Insert a user row with `username` and `email` and return its id. Users live
-/// in the durable store; sessions carry web auth, and the data-plane tests
-/// construct `Principal::User` directly. `display_name` is left `None`. The
-/// `email` is stored verbatim (no canonicalization) so each test controls the
-/// exact lookup key.
-pub async fn seed_user(state: &SharedState, username: &str, email: &str) -> UserId {
+/// Insert a user row with `username` and return its id. Users live in the
+/// durable store; sessions carry web auth, and the data-plane tests construct
+/// `Principal::User` directly. `display_name` is left `None`. Email is an
+/// optional contact channel -- use [`seed_email`] to link one. The username is
+/// stored verbatim (no normalization) so each test controls the exact lookup
+/// key (login resolves by `username`).
+pub async fn seed_user(state: &SharedState, username: &str) -> UserId {
     let user_id = UserId::random();
     let now = OffsetDateTime::now_utc();
     users::ActiveModel {
         id: Set(user_id.to_string()),
         username: Set(username.to_string()),
-        email: Set(email.to_string()),
         display_name: Set(None),
         created_at: Set(now),
         disabled_at: Set(None),
@@ -142,6 +191,38 @@ pub async fn seed_user(state: &SharedState, username: &str, email: &str) -> User
     .await
     .expect("insert user");
     user_id
+}
+
+/// Link an email address to `user_id`, optionally primary and optionally
+/// verified. The address is stored verbatim (no canonicalization) so each test
+/// controls the exact value. Returns the email row id.
+///
+/// NOTE: this bypasses the `/me/emails` flow invariants (it can seed an
+/// unverified primary, which the live `add_email`/`make_primary` paths forbid)
+/// -- it is a direct row insert for fixture setup, not a path through the
+/// handlers.
+pub async fn seed_email(
+    state: &SharedState,
+    user_id: &UserId,
+    address: &str,
+    is_primary: bool,
+    verified: bool,
+) -> uuid::Uuid {
+    let now = OffsetDateTime::now_utc();
+    emails::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        account_id: Set(user_id.to_string()),
+        address: Set(address.to_string()),
+        is_primary: Set(is_primary),
+        verified_at: Set(verified.then_some(now)),
+        verification_token_hash: Set(None),
+        verification_token_expires_at: Set(None),
+        added_at: Set(now),
+    }
+    .insert(&state.db)
+    .await
+    .expect("insert email")
+    .id
 }
 
 /// Register an enrolled tagma owned by `owner`, pinning `pinned_key`, and
@@ -213,6 +294,7 @@ pub async fn seed_passkey(state: &SharedState, user_id: &UserId, cred_id: Vec<u8
         label: Set("Device".to_string()),
         created_at: Set(OffsetDateTime::now_utc()),
         last_used_at: Set(OffsetDateTime::now_utc()),
+        discoverable: Set(false),
     }
     .insert(&state.db)
     .await

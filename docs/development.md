@@ -150,9 +150,9 @@ tooling — `kallip-admin` and curl keep using `http://localhost:7100` /
 
 #### Register a test user (first bring-up only)
 
-Signup is invite-gated, so a fresh database needs an invite code before anyone
-can register. The `agora_pgdata` volume persists across `arion down` / `up`, so
-this sub-flow runs **once per volume** -- check before doing it:
+Signup is open (no invite code): a fresh database just needs someone to sign
+up. The `agora_pgdata` volume persists across `arion down` / `up`, so this
+sub-flow runs **once per volume** -- check before doing it:
 
 ```sh
 KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test cargo run -q -p kallip-admin -- --agora-url http://localhost:7100 users list
@@ -160,19 +160,15 @@ KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test cargo run -q -p kallip-admin -- --agora-u
 
 If `users list` already shows a row, a test account exists -- skip to minting
 the enrollment code below. If the table is empty (fresh volume, or after a
-`down -v` reset), mint an invite code and register:
+`down -v` reset), sign up at the web app:
 
-```sh
-KALLIP_AGORA_ADMIN_TOKEN=sk-admin-test cargo run -q -p kallip-admin -- --agora-url http://localhost:7100 invite-codes new
-# -> sk-invite-...   (plaintext returned once; the server stores only its hash)
-```
-
-Open the web app at `https://web.kallipai.lan` and sign up using that
-`sk-invite-...` code. Once signed in, mint a `sk-enroll-...` enrollment code in
-the web UI and paste it into `.env` as `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE`, and
-set `KALLIP_AUTH_TOKEN` to the tagma's operator token. (The tagma's agora/lesche
-relay URLs are wired to compose DNS by arion — `http://agora:7100` /
-`http://lesche:7200` — so they need no `.env` override.)
+Open the web app at `https://web.kallipai.lan` and sign up with a username +
+passkey (or "Continue with GitHub/Google" once OAuth is configured). Once signed
+in, mint a `sk-enroll-...` enrollment code in the web UI and paste it into
+`.env` as `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE`, and set `KALLIP_AUTH_TOKEN` to
+the tagma's operator token. (The tagma's agora/lesche relay URLs are wired to
+compose DNS by arion -- `http://agora:7100` / `http://lesche:7200` -- so they
+need no `.env` override.)
 
 ##### The admin token
 
@@ -260,13 +256,13 @@ reset, an incompatible wire format, or you simply want to start over), tear down
 **including volumes** and re-run bring-up from the agora side. `down -v` wipes
 `agora_pgdata` and `lesche_pgdata` plus the tagma `data` / `workspace` volumes,
 so the test user, the enrollment code, and all tagma state are gone -- the
-invite-code sub-flow is needed again:
+sign-up sub-flow is needed again:
 
 ```sh
 arion down -v                                  # agora side: stop AND delete volumes
 arion -f compose/dev/tagma.nix down -v         # tagma side: stop AND delete volumes
 arion up -d                                    # agora side
-# ...mint invite code, register, mint enrollment code, fill .env...
+# ...sign up, mint enrollment code in the web UI, fill .env...
 arion -f compose/dev/tagma.nix up -d           # tagma side
 ```
 

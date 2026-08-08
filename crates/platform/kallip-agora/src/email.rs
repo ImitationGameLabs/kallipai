@@ -1,31 +1,34 @@
-//! Email normalization + validation, shared by `register_begin` and
-//! `login_begin` so a user can always log in with exactly the address they
-//! registered.
+//! Email normalization + validation for the optional contact channel
+//! (`routes::emails::add_email`). Email is NOT the login id (login resolves by
+//! `username`); this canonicalizes an address a user links for contact/recovery,
+//! so the same address always resolves to one canonical form regardless of how
+//! it was typed.
 //!
-//! Rules (applied at every write AND lookup): RFC 5321/5322 validation via the
+//! Rules (applied at write time): RFC 5321/5322 validation via the
 //! `email_address` crate, restricted to a bare `local@domain` addr-spec (no
 //! display-name wrapper, no domain literal), then assemble the canonical form
 //! as `{local-part}@{domain-in-lowercase}`. The local part is preserved
 //! verbatim (including case) per RFC 5321 sec 2.4 -- the local-part of a
 //! mailbox MUST be treated as case-sensitive -- while the domain is lowercased
 //! (DNS names are case-insensitive). Thus `John@Example.COM` canonicalizes to
-//! `John@example.com`, and `John@x.com` / `john@x.com` are *distinct* accounts.
+//! `John@example.com`, and `John@x.com` / `john@x.com` are *distinct* addresses.
 //!
-//! The bare-addr-spec restriction is deliberate for a login id: the crate's
-//! default also accepts `"Display Name <addr>"` (silently stripping the name)
-//! and quoted-string local parts (`"john..doe"@x.com`, stored WITH the quotes).
-//! Both would let a user register with a form they cannot reproduce at login,
-//! so they are rejected here. `email_address` provides no normalization helper
-//! and its parse stores the address verbatim (`Self(address.into())`), so the
-//! canonical form is reassembled from the `local_part()` / `domain()` accessors.
+//! The bare-addr-spec restriction is deliberate for a stored contact address:
+//! the crate's default also accepts `"Display Name <addr>"` (silently stripping
+//! the name) and quoted-string local parts (`"john..doe"@x.com`, stored WITH the
+//! quotes). Both would let a user link a form they cannot reproduce, so they are
+//! rejected here. `email_address` provides no normalization helper and its parse
+//! stores the address verbatim (`Self(address.into())`), so the canonical form
+//! is reassembled from the `local_part()` / `domain()` accessors.
 
 use email_address::{EmailAddress, Options};
 use kallip_common::protocol::ApiError;
 
 /// Reject any input containing a `"`. After display-text is disabled, a `"` can
 /// only come from a quoted-string local part -- RFC-valid but operationally
-/// pathological as a login id (the user will not type the quotes back at login,
-/// so they could not resolve). Bare addr-specs never contain a `"`.
+/// pathological as a stored contact address (the user will not type the quotes
+/// back, so they could not recognize or reproduce it). Bare addr-specs never
+/// contain a `"`.
 const QUOTE: char = '"';
 
 /// An email address that failed validation.
@@ -123,16 +126,17 @@ mod tests {
 
     #[test]
     fn rejects_display_name_wrapper() {
-        // A bare login id only; display-name wrappers would silently strip the
-        // name and let distinct inputs collide on the same login id.
+        // A bare address only; display-name wrappers would silently strip the
+        // name and let distinct inputs collide on the same stored address.
         assert!(normalize("Alice <a@example.com>").is_err());
         assert!(normalize("a@example.com").unwrap() == "a@example.com");
     }
 
     #[test]
     fn rejects_quoted_local_part() {
-        // RFC-valid but operationally pathological as a login id: the user
-        // would never type the quotes back at login, so they could not resolve.
+        // RFC-valid but operationally pathological as a stored contact address:
+        // the user would never type the quotes back, so they could not reproduce
+        // it.
         assert!(normalize("\"john..doe\"@example.com").is_err());
     }
 }

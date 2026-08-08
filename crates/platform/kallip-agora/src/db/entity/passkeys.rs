@@ -41,6 +41,13 @@ pub struct Model {
     /// stamped on every `login_finish`.
     #[sea_orm(column_type = "TimestampWithTimeZone")]
     pub last_used_at: OffsetDateTime,
+    /// Whether this credential was enrolled via the discoverable (resident-key)
+    /// registration flow. A server-side fact (the RP asked for
+    /// `require_resident_key(true)`), not an authenticator claim -- it gates the
+    /// "passwordless sign-in" UI affordance. Discoverable passkeys participate in
+    /// conditional-UI autofill; legacy ones do not (the wrapper registers with
+    /// `require_resident_key=false`). Both still work via username login.
+    pub discoverable: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

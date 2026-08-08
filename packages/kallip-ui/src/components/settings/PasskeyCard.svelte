@@ -79,8 +79,16 @@
   {:else}
     <div class="flex items-center justify-between gap-2">
       <div class="min-w-0">
-        <div class="text-sm font-medium truncate">
-          {passkey.label || "Unnamed device"}
+        <div class="flex items-center gap-2">
+          <span class="text-sm font-medium truncate">
+            {passkey.label || "Unnamed device"}
+          </span>
+          {#if passkey.discoverable}
+            <span
+              class="shrink-0 text-[0.65rem] px-1.5 py-0.5 rounded-full bg-primary-500/15 text-primary-600"
+              title="Enables passwordless sign-in via passkey autofill"
+            >passwordless</span>
+          {/if}
         </div>
         <div class="text-xs opacity-60">
           Added {formatPasskeyDate(passkey.createdAt)}

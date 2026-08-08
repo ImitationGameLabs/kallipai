@@ -16,43 +16,37 @@ import {
 export type CeremonyResult =
   | { ok: true; userId: string }
   | {
-      ok: false;
-      reason:
-        | "cancelled"
-        | "rate-limited"
-        | "duplicate-username"
-        | "duplicate-email"
-        | "invalid-invite"
-        | "unknown";
-      message?: string;
-    };
+    ok: false;
+    reason:
+      | "cancelled"
+      | "rate-limited"
+      | "duplicate-username"
+      | "unknown";
+    message?: string;
+  };
 
 export interface RegisterArgs {
-  readonly invite_code: string;
-  readonly email: string;
   readonly username: string;
   readonly display_name?: string;
 }
 
-/** Run the registration ceremony (invite + email + username -> passkey -> finish). */
+/** Run the registration ceremony (username -> passkey -> finish). */
 export async function registerWithPasskey(
   client: AgoraClient,
   args: RegisterArgs,
 ): Promise<CeremonyResult> {
-  // begin: validate the invite + reserve the ceremony (HTTP failure -> typed).
+  // begin: reserve the ceremony (HTTP failure -> typed).
   let ceremonyId: string;
   let options;
   try {
     const begun = await client.registerBegin({
-      invite_code: args.invite_code,
-      email: args.email,
       username: args.username,
       ...(args.display_name ? { display_name: args.display_name } : {}),
     });
     ceremonyId = begun.ceremony_id;
     options = begun.options;
   } catch (e) {
-    return beginError(e, { 401: "invalid-invite", 429: "rate-limited" });
+    return beginError(e, { 429: "rate-limited" });
   }
 
   // create: the browser passkey prompt (cancel/abort -> "cancelled").
@@ -65,11 +59,10 @@ export async function registerWithPasskey(
     return cancelOrUnknown(e);
   }
 
-  // finish: bind the passkey + consume the invite (HTTP failure -> typed).
-  // A 409 collides on either the email (login id) or the username (handle);
-  // the agora emits the same status for both, distinguished only by message
-  // text, so route 409 through classifyRegisterConflict before falling back
-  // to the status-based mapper for everything else.
+  // finish: bind the passkey (HTTP failure -> typed). A 409 is a username
+  // collision (the agora emits "username already taken"); route 409 through
+  // classifyRegisterConflict before falling back to the status-based mapper for
+  // everything else.
   try {
     const finish = await client.registerFinish({
       ceremony_id: ceremonyId,
@@ -88,15 +81,15 @@ export async function registerWithPasskey(
   }
 }
 
-/** Run the login ceremony (email -> passkey -> finish). */
+/** Run the login ceremony (username -> passkey -> finish). */
 export async function loginWithPasskey(
   client: AgoraClient,
-  email: string,
+  username: string,
 ): Promise<CeremonyResult> {
   let ceremonyId: string;
   let options;
   try {
-    const begun = await client.loginBegin({ email });
+    const begun = await client.loginBegin({ username });
     ceremonyId = begun.ceremony_id;
     options = begun.options;
   } catch (e) {
@@ -123,26 +116,238 @@ export async function loginWithPasskey(
   }
 }
 
+/**
+ * Run the discoverable (usernameless) login ceremony. No identifier is supplied:
+ * the authenticator surfaces matching resident credentials via conditional-UI
+ * autofill, and the server resolves the account from the assertion's
+ * `userHandle`. The browser must support conditional mediation; on unsupported
+ * browsers or when no discoverable credential exists, the call resolves with a
+ * non-ok result (typically `cancelled`) and the caller falls back to
+ * `loginWithPasskey`.
+ */
+export async function loginWithDiscoverablePasskey(
+  client: AgoraClient,
+  signal?: AbortSignal,
+): Promise<CeremonyResult> {
+  let ceremonyId: string;
+  let options;
+  try {
+    const begun = await client.loginDiscoverableBegin();
+    ceremonyId = begun.ceremony_id;
+    options = begun.options;
+  } catch (e) {
+    return beginError(e, { 429: "rate-limited" });
+  }
+
+  let credential: PublicKeyCredential | null;
+  try {
+    // `mediation: "conditional"` MUST be on the outer `credentials.get` call (it
+    // is dropped from the server `RequestChallengeResponse` by this client's
+    // `ServerRequestOptions` model, which only carries `publicKey`). `signal`
+    // lets the caller abort a pending conditional get BEFORE starting an
+    // explicit ceremony (e.g. the username form submit) -- two concurrent
+    // `credentials.get()` calls deadlock some browsers (notably Firefox).
+    credential = (await navigator.credentials.get({
+      publicKey: optionsForGet(options),
+      mediation: "conditional",
+      signal,
+    })) as PublicKeyCredential | null;
+  } catch (e) {
+    return cancelOrUnknown(e);
+  }
+  // A null resolve is a no-selection cancel variant: classify it as `cancelled`
+  // (silent fallback) rather than letting it throw inside the finish try below
+  // and surface as a confusing `unknown`.
+  if (!credential) return { ok: false, reason: "cancelled" };
+
+  try {
+    const finish = await client.loginDiscoverableFinish({
+      ceremony_id: ceremonyId,
+      credential: loginCredentialToJson(credential),
+    });
+    return { ok: true, userId: finish.user_id };
+  } catch (e) {
+    return finishError(e, { 429: "rate-limited" });
+  }
+}
+
+/**
+ * Start an OAuth sign-in (or link) ceremony: fetch the provider's authorize URL
+ * and navigate the browser there. The provider redirects back to the SPA
+ * callback with `code`+`state`, which [`completeOAuth`] exchanges.
+ *
+ * This NAVIGATES AWAY (full page navigation); it has no return value. The
+ * ceremony completes on the callback page after the redirect.
+ */
+export async function signInWithOAuth(
+  client: AgoraClient,
+  provider: string,
+  opts: { returnPath?: string } = {},
+): Promise<void> {
+  const { authorize_url } = await client.oauthSignInBegin(provider, {
+    return_path: opts.returnPath,
+  });
+  window.location.href = authorize_url;
+}
+
+/** The outcome of an OAuth finish on the SPA callback page. The same `/finish`
+ * endpoint serves both actions (the opaque `state` selects which): a signin
+ * mints a session (200/201, `kind: "signin"`); a link binds an identity to the
+ * already-signed-in account (204, `kind: "link"`); an UNLINKED identity holds
+ * the claim for a username step (202, `kind: "needs-username"`). The callback
+ * page navigates by `kind` -- signin resumes to `returnPath`/home + refreshes
+ * the session, link returns to settings + refreshes identities, needs-username
+ * routes to the OAuth signup page carrying the held token. */
+export type OAuthCompleteResult =
+  | { ok: true; kind: "signin"; userId: string; returnPath?: string }
+  | { ok: true; kind: "link" }
+  | {
+    ok: true;
+    kind: "needs-username";
+    signupToken: string;
+    provider: string;
+  }
+  | {
+    ok: false;
+    reason: "rate-limited" | "unknown";
+    message?: string;
+  };
+
+/**
+ * Complete an OAuth ceremony on the SPA callback page: post the provider's
+ * `code`+`state` to the agora. A 204 (no body) is a successful link; a 200/201
+ * body is a successful signin (cookie set via this same-site credentialed XHR),
+ * carrying the user id + the sanitized return path to resume to; a 202 body
+ * `kind:"needs-username"` holds the resolved claim -- the SPA collects a chosen
+ * username and submits it via {@link completeOAuthSignup}. Any failure (provider
+ * unavailable, invalid state) surfaces as a generic `unknown` -- the callback
+ * page shows a neutral message + a return-to-login link.
+ */
+export async function completeOAuth(
+  client: AgoraClient,
+  provider: string,
+  body: { state: string; code: string },
+): Promise<OAuthCompleteResult> {
+  try {
+    const finish = await client.oauthFinish(provider, body);
+    // 204 (link) resolves to `undefined`.
+    if (!finish) return { ok: true, kind: "link" };
+    // 202 (needs-username) carries signup_token; 200/201 (signin) carries user_id.
+    if ("signup_token" in finish) {
+      return {
+        ok: true,
+        kind: "needs-username",
+        signupToken: finish.signup_token,
+        provider: finish.provider,
+      };
+    }
+    return {
+      ok: true,
+      kind: "signin",
+      userId: finish.user_id,
+      ...(finish.return_path ? { returnPath: finish.return_path } : {}),
+    };
+  } catch (e) {
+    if (e instanceof AgoraApiError) {
+      if (e.status === 429) {
+        return { ok: false, reason: "rate-limited", message: e.message };
+      }
+      return { ok: false, reason: "unknown", message: e.message };
+    }
+    return {
+      ok: false,
+      reason: "unknown",
+      message: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+/** The outcome of completing a held OAuth signup with a chosen username. */
+export type OAuthSignupResult =
+  | { ok: true; userId: string; returnPath?: string }
+  | {
+    ok: false;
+    reason:
+      | "duplicate-username"
+      | "invalid-username"
+      | "signup-disabled"
+      | "rate-limited"
+      | "unknown";
+    message?: string;
+  };
+
+/**
+ * Submit the chosen username for a held OAuth signup (the token came from a
+ * `needs-username` finish). On success the session cookie is set by this
+ * credentialed XHR; the caller refreshes the session and navigates to
+ * `returnPath`/home. A taken username surfaces as `duplicate-username` so the
+ * form can prompt for another (the held row survives for retry). A 403 is the
+ * operator kill-switch (`signup_enabled` off) -> `signup-disabled`.
+ */
+export async function completeOAuthSignup(
+  client: AgoraClient,
+  body: { signupToken: string; username: string },
+): Promise<OAuthSignupResult> {
+  try {
+    const finish = await client.oauthSignupComplete({
+      signup_token: body.signupToken,
+      username: body.username,
+    });
+    return {
+      ok: true,
+      userId: finish.user_id,
+      ...(finish.return_path ? { returnPath: finish.return_path } : {}),
+    };
+  } catch (e) {
+    if (e instanceof AgoraApiError) {
+      if (e.status === 409 && e.message === "username already taken") {
+        return { ok: false, reason: "duplicate-username", message: e.message };
+      }
+      if (e.status === 400) {
+        return { ok: false, reason: "invalid-username", message: e.message };
+      }
+      if (e.status === 403) {
+        return { ok: false, reason: "signup-disabled", message: e.message };
+      }
+      if (e.status === 429) {
+        return { ok: false, reason: "rate-limited", message: e.message };
+      }
+      return { ok: false, reason: "unknown", message: e.message };
+    }
+    return {
+      ok: false,
+      reason: "unknown",
+      message: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
 /** The outcome of binding another passkey to the signed-in account. */
 export type AddPasskeyResult =
   | { ok: true; passkey: PasskeySummary }
   | {
-      ok: false;
-      reason:
-        | "cancelled"
-        | "reauth-required"
-        | "duplicate-credential"
-        | "rate-limited"
-        | "unknown";
-      message?: string;
-    };
+    ok: false;
+    reason:
+      | "cancelled"
+      | "reauth-required"
+      | "duplicate-credential"
+      | "rate-limited"
+      | "unknown";
+    message?: string;
+  };
 
 export interface AddPasskeyArgs {
-  /** The signed-in user's email (login id); used for the step-up re-login when
-   * the agora returns `reauth-required`. */
-  readonly email: string;
+  /** The signed-in user's username (login id); used for the passkey step-up
+   * re-login when the agora returns `reauth-required`. OMIT for an OAuth-only
+   * account (no passkey to re-auth with): the driver then returns
+   * `reauth-required` and the UI re-establishes the step-up via OAuth (which
+   * navigates away and back). */
+  readonly username?: string;
   /** The device label for the new passkey. */
   readonly label: string;
+  /** When true, enroll a discoverable (resident-key / passwordless) credential
+   * instead of a regular passkey. */
+  readonly discoverable?: boolean;
 }
 
 /**
@@ -150,23 +355,31 @@ export interface AddPasskeyArgs {
  *
  * One-shot step-up: if `addPasskeyBegin` returns 403 `reauth-required`, run the
  * login ceremony (the user touches an existing passkey to prove presence), then
- * retry begin exactly once. The typed label threads through the re-auth so the
- * user does not re-type it.
+ * retry begin exactly once. Requires `args.username` (a passkey account); an
+ * OAuth-only account omits it and gets `reauth-required` so the UI can
+ * re-establish the step-up via OAuth. The typed label threads through the
+ * re-auth so the user does not re-type it.
  */
 export async function addPasskey(
   client: AgoraClient,
   args: AddPasskeyArgs,
 ): Promise<AddPasskeyResult> {
   // begin (with one step-up retry on reauth-required).
+  const beginOpts = args.discoverable ? { discoverable: true } : {};
   let begun;
   try {
-    begun = await client.addPasskeyBegin();
+    begun = await client.addPasskeyBegin(beginOpts);
   } catch (e) {
     if (!(e instanceof AgoraApiError) || e.status !== 403) {
       return mapAddBeginError(e);
     }
+    // OAuth-only accounts (no username) cannot re-auth via a passkey: surface
+    // reauth-required so the UI re-establishes the step-up via OAuth.
+    if (!args.username) {
+      return { ok: false, reason: "reauth-required" };
+    }
     // Step-up: run the login ceremony, then retry begin once.
-    const login = await loginWithPasskey(client, args.email);
+    const login = await loginWithPasskey(client, args.username);
     if (!login.ok) {
       // Forward the step-up login's own reason when it is one an add can surface
       // (a cancel, or a rate-limit on the re-auth); anything else means the
@@ -177,7 +390,7 @@ export async function addPasskey(
       return { ok: false, reason: "reauth-required", message: login.message };
     }
     try {
-      begun = await client.addPasskeyBegin();
+      begun = await client.addPasskeyBegin(beginOpts);
     } catch (e2) {
       return mapAddBeginError(e2);
     }
@@ -228,10 +441,12 @@ function addUnknown(e: unknown): AddPasskeyResult {
 /** Map an add-passkey begin failure (other than the 403 handled by the caller). */
 function mapAddBeginError(e: unknown): AddPasskeyResult {
   if (e instanceof AgoraApiError) {
-    if (e.status === 403)
+    if (e.status === 403) {
       return { ok: false, reason: "reauth-required", message: e.message };
-    if (e.status === 429)
+    }
+    if (e.status === 429) {
       return { ok: false, reason: "rate-limited", message: e.message };
+    }
   }
   const message = e instanceof Error ? e.message : String(e);
   return { ok: false, reason: "unknown", message };
@@ -246,15 +461,15 @@ function mapAddBeginError(e: unknown): AddPasskeyResult {
 export type PairResult =
   | { ok: true; userId: string }
   | {
-      ok: false;
-      reason:
-        | "cancelled"
-        | "invalid-code"
-        | "duplicate-credential"
-        | "rate-limited"
-        | "unknown";
-      message?: string;
-    };
+    ok: false;
+    reason:
+      | "cancelled"
+      | "invalid-code"
+      | "duplicate-credential"
+      | "rate-limited"
+      | "unknown";
+    message?: string;
+  };
 
 export interface PairArgs {
   /** The short pairing code from the already-signed-in device. */
@@ -279,10 +494,12 @@ export async function pairDevice(
     begun = await client.pairBegin({ code: args.code });
   } catch (e) {
     if (e instanceof AgoraApiError) {
-      if (e.status === 401 || e.status === 403)
+      if (e.status === 401 || e.status === 403) {
         return { ok: false, reason: "invalid-code", message: e.message };
-      if (e.status === 429)
+      }
+      if (e.status === 429) {
         return { ok: false, reason: "rate-limited", message: e.message };
+      }
     }
     return pairUnknown(e);
   }
@@ -307,14 +524,17 @@ export async function pairDevice(
     });
     return { ok: true, userId: finish.user_id };
   } catch (e) {
-    if (e instanceof AgoraApiError && e.status === 409)
+    if (e instanceof AgoraApiError && e.status === 409) {
       return { ok: false, reason: "duplicate-credential", message: e.message };
-    if (e instanceof AgoraApiError && e.status === 429)
+    }
+    if (e instanceof AgoraApiError && e.status === 429) {
       return { ok: false, reason: "rate-limited", message: e.message };
+    }
     // 401 "ceremony expired" (the user sat on the prompt past its TTL) collapses
     // to the same `invalid-code` UX as begin -- "code invalid/expired/used".
-    if (e instanceof AgoraApiError && e.status === 401)
+    if (e instanceof AgoraApiError && e.status === 401) {
       return { ok: false, reason: "invalid-code", message: e.message };
+    }
     return pairUnknown(e);
   }
 }
@@ -381,27 +601,21 @@ type CeremonyReason =
   | "cancelled"
   | "rate-limited"
   | "duplicate-username"
-  | "duplicate-email"
-  | "invalid-invite"
   | "unknown";
 
 /**
- * Map a register-finish 409 message to a typed reason. The agora emits the
- * SAME 409 for both email and username collisions, distinguished only by
- * message text (`crates/platform/kallip-agora/src/routes/auth.rs` returns
- * "email already registered" / "username already taken"). Match the EXACT
- * server strings so a contract drift surfaces as a visible "unknown" rather
- * than a silent misclassification. The stable long-term fix belongs at the
- * agora layer (a stable `code` field on `ApiError`, not prose) -- flagged as
- * coupling debt to revisit there.
+ * Map a register-finish 409 message to a typed reason. Registration collects no
+ * email, so the only collision is the username (the agora emits
+ * "username already taken"). Match the EXACT server string so a contract drift
+ * surfaces as a visible "unknown" rather than a silent misclassification. The
+ * stable long-term fix belongs at the agora layer (a stable `code` field on
+ * `ApiError`, not prose) -- flagged as coupling debt to revisit there.
  *
- * Exported (but not re-exported from index.ts) so the contract strings are
+ * Exported (but not re-exported from index.ts) so the contract string is
  * pinned by `auth_test.ts`; an agora copy change must update this switch.
  */
 export function classifyRegisterConflict(message: string): CeremonyReason {
   switch (message) {
-    case "email already registered":
-      return "duplicate-email";
     case "username already taken":
       return "duplicate-username";
     default:

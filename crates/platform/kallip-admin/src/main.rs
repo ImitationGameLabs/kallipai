@@ -1,6 +1,6 @@
 //! `kallip-admin`: a headless operator CLI for the agora relay. It is an HTTP
 //! client authenticated with the `sk-admin-` bearer, driving the `/v1/admin/*`
-//! surface (invite codes, enrollment codes, users, passkeys).
+//! surface (enrollment codes, users, passkeys).
 //!
 //! The admin token is read from the `KALLIP_AGORA_ADMIN_TOKEN` environment
 //! variable only (no `--admin-token` flag): a flag would leak the secret into
@@ -15,8 +15,7 @@ use clap::{Parser, Subcommand};
 use comfy_table::{ContentArrangement, Table};
 use kallip_agora_client::{AgoraClient, ApiError};
 use kallip_agora_common::admin::{
-    CreateEnrollmentCodeRequest, CreateInviteCodeRequest, InviteCodeSummary, Page, PageQuery,
-    PasskeySummary, UpdateUserRequest, UserSummary,
+    CreateEnrollmentCodeRequest, Page, PageQuery, PasskeySummary, UpdateUserRequest, UserSummary,
 };
 
 #[derive(Parser)]
@@ -53,9 +52,6 @@ enum Cmd {
     /// Passkey management.
     #[command(subcommand)]
     Passkeys(PasskeysCmd),
-    /// Invite-code management.
-    #[command(subcommand)]
-    InviteCodes(InviteCodesCmd),
     /// Mint an enrollment code (sk-enroll) on a user's behalf.
     NewEnrollment {
         /// User id (UUID) to mint the enrollment code for.
@@ -97,32 +93,6 @@ enum PasskeysCmd {
     Revoke {
         /// Passkey id (NOT the user id), as shown by `passkeys list`.
         id: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum InviteCodesCmd {
-    /// List invite codes (paginated).
-    List {
-        #[arg(long, help = "fetch every page (ignores --limit/--cursor)")]
-        all: bool,
-        #[arg(long)]
-        limit: Option<u64>,
-        #[arg(long)]
-        cursor: Option<String>,
-    },
-    /// Mint an invite code.
-    New {
-        #[arg(long)]
-        ttl_secs: Option<u64>,
-        #[arg(long)]
-        note: Option<String>,
-    },
-    /// Revoke an invite code by its hex hash.
-    Revoke {
-        /// The invite code's hex HASH (from `invite-codes list`), not the
-        /// `sk-invite-` plaintext.
-        code_hash_hex: String,
     },
 }
 
@@ -232,56 +202,6 @@ async fn run(client: &AgoraClient, json: bool, cmd: Cmd) -> Result<()> {
                 println!("revoked");
             }
         },
-        Cmd::InviteCodes(sub) => match sub {
-            InviteCodesCmd::List { all, limit, cursor } => {
-                let page = if all {
-                    let items = fetch_all(limit, cursor, |q| {
-                        let client = client.clone();
-                        async move {
-                            client
-                                .admin_list_invite_codes(&q)
-                                .await
-                                .map(|p| (p.items, p.next_cursor))
-                        }
-                    })
-                    .await?;
-                    Page {
-                        items,
-                        next_cursor: None,
-                    }
-                } else {
-                    client
-                        .admin_list_invite_codes(&PageQuery { limit, cursor })
-                        .await?
-                };
-                if json {
-                    print_json(&page)?;
-                } else {
-                    print_invite_codes(&page.items);
-                }
-            }
-            InviteCodesCmd::New { ttl_secs, note } => {
-                let created = client
-                    .admin_create_invite_code(CreateInviteCodeRequest { ttl_secs, note })
-                    .await?;
-                if json {
-                    // `code` is in the JSON object; don't also print it bare (that
-                    // would emit two stdout documents).
-                    print_json(&created)?;
-                } else {
-                    // The plaintext is returned once; surface it prominently.
-                    println!("{}", created.code);
-                    println!("hash: {}", created.code_hash_hex);
-                    if let Some(n) = created.note {
-                        println!("note: {n}");
-                    }
-                }
-            }
-            InviteCodesCmd::Revoke { code_hash_hex } => {
-                client.admin_revoke_invite_code(&code_hash_hex).await?;
-                println!("revoked");
-            }
-        },
     }
     Ok(())
 }
@@ -341,30 +261,8 @@ fn print_users(items: &[UserSummary]) {
         } else {
             "active"
         };
-        table.add_row(vec![&u.id, &u.username, &u.email, state]);
-    }
-    println!("{table}");
-}
-
-fn print_invite_codes(items: &[InviteCodeSummary]) {
-    let mut table = Table::new();
-    table.set_content_arrangement(ContentArrangement::Dynamic);
-    table.set_header(vec!["CODE_HASH", "CREATED", "EXPIRES", "STATE", "NOTE"]);
-    for i in items {
-        let state = if i.revoked_at.is_some() {
-            "revoked"
-        } else if i.consumed_at.is_some() {
-            "consumed"
-        } else {
-            "live"
-        };
-        table.add_row(vec![
-            &i.code_hash_hex,
-            &fmt_ts(i.created_at),
-            &fmt_ts(i.expires_at),
-            state,
-            i.note.as_deref().unwrap_or(""),
-        ]);
+        let email = u.primary_email.as_deref().unwrap_or("-");
+        table.add_row(vec![&u.id, &u.username, email, state]);
     }
     println!("{table}");
 }

@@ -2661,10 +2661,12 @@ dependencies = [
  "ipnet",
  "kallip-agora-common",
  "kallip-common",
+ "reqwest",
  "sea-orm",
  "sea-orm-migration",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "testcontainers",
  "testcontainers-modules",
  "time",
@@ -2677,6 +2679,7 @@ dependencies = [
  "url",
  "uuid",
  "webauthn-rs",
+ "webauthn-rs-core",
 ]
 
 [[package]]

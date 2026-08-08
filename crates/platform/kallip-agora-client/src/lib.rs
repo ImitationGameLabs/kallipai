@@ -7,8 +7,8 @@ pub use client::{AgoraClient, AgoraClientBuilder};
 // agora HTTP surface. `DeviceKey` is the one e2e type surfaced (for `enroll`);
 // the rest of the private-key API stays in `kallip-e2ee`.
 pub use kallip_agora_common::admin::{
-    CreateEnrollmentCodeRequest, CreateEnrollmentCodeResponse, CreateInviteCodeRequest, InviteCode,
-    InviteCodeSummary, Page, PageQuery, PasskeySummary, UpdateUserRequest, UserSummary,
+    CreateEnrollmentCodeRequest, CreateEnrollmentCodeResponse, Page, PageQuery, PasskeySummary,
+    UpdateUserRequest, UserSummary,
 };
 pub use kallip_agora_common::ids::TagmaId;
 pub use kallip_common::protocol::ApiError;

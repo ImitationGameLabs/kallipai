@@ -16,8 +16,9 @@ export interface CeremonyBeginResponse<T> {
   readonly options: T;
 }
 
-export type RegisterBeginResponse =
-  CeremonyBeginResponse<ServerCreationOptions>;
+export type RegisterBeginResponse = CeremonyBeginResponse<
+  ServerCreationOptions
+>;
 export type LoginBeginResponse = CeremonyBeginResponse<ServerRequestOptions>;
 
 /** Bodies the client sends to register/login `finish`. */
@@ -33,6 +34,59 @@ export interface LoginFinishRequest {
 /** `{ user_id }` returned by register/login `finish`. */
 export interface AuthFinishResponse {
   readonly user_id: string;
+  /** OAuth signin only: the sanitized return path to resume to (omitted when
+   * the server has none). The passkey ceremonies do not set it. */
+  readonly return_path?: string;
+}
+
+/** `GET /v1/auth/oauth/providers` — one enabled OAuth provider, for rendering
+ * the login/settings buttons. */
+export interface ProviderInfo {
+  /** Stable provider id: `"github"` | `"google"`. */
+  readonly id: string;
+  /** Human label, e.g. `"GitHub"`. */
+  readonly label: string;
+}
+
+/** A linked OAuth identity, as surfaced by `/v1/me`. */
+export interface ExternalIdentitySummary {
+  readonly id: string;
+  /** `"github"` | `"google"`. */
+  readonly provider: string;
+  readonly display_name: string | null;
+  readonly created_at: string;
+  readonly last_used_at: string | null;
+}
+
+/** `POST .../oauth/{provider}/begin` — the provider authorize URL the SPA
+ * navigates to. */
+export interface OAuthBeginResponse {
+  readonly authorize_url: string;
+}
+
+/** `POST /v1/auth/oauth/{provider}/finish` body: the provider's `code` + the
+ * single-use `state` token it echoed back. */
+export interface OAuthFinishRequest {
+  readonly state: string;
+  readonly code: string;
+}
+
+/** `POST .../oauth/{provider}/finish` 202 response: the OAuth identity was not
+ * linked, so the resolved claim is held server-side and the SPA must collect a
+ * chosen username, then submit it (with this single-use token) at
+ * `oauthSignupComplete`. No session is established yet. */
+export interface OAuthNeedsUsernameResponse {
+  readonly kind: "needs-username";
+  readonly signup_token: string;
+  readonly provider: string;
+}
+
+/** `POST /v1/auth/oauth/signup/complete` body: the single-use token from a
+ * 202 needs-username finish, plus the user-chosen username. Account creation +
+ * session minting happen here. */
+export interface OAuthSignupCompleteRequest {
+  readonly signup_token: string;
+  readonly username: string;
 }
 
 /** `GET /v1/me/passkeys` — one of the caller's live passkeys. The agora's
@@ -45,6 +99,9 @@ export interface PasskeySummary {
   readonly created_at: string;
   /** RFC3339; seeded to the enrollment instant, updated on every sign-in. */
   readonly last_used_at: string;
+  /** Whether this credential was enrolled via the discoverable (resident-key)
+   * flow -- gates the "passwordless sign-in" affordance. */
+  readonly discoverable: boolean;
 }
 
 /** Body the client sends to add-passkey `finish`. The label rides the finish
@@ -81,16 +138,44 @@ export interface PairFinishRequest {
   readonly label: string;
 }
 
-/** `GET /v1/me`. `display_name` is nullable (null when unset) -- the agora
- * returns `users.display_name` verbatim with no synthesis (see commit
- * 53aa563); presentation fallback belongs to the frontend. */
+/** One linked email address, as returned by `/v1/me` and `/v1/me/emails`.
+ * `verified_at` is null until the user completes the verification flow. */
+export interface EmailSummary {
+  readonly id: string;
+  readonly address: string;
+  readonly is_primary: boolean;
+  readonly verified_at: string | null;
+}
+
+/** `GET /v1/me`. Email is an optional contact channel, decoupled from login
+ * (which resolves by username): `emails` is empty until the user links one in
+ * settings, and `primary_email` is null then. `display_name` is nullable (null
+ * when unset) -- the agora returns `users.display_name` verbatim with no
+ * synthesis; presentation fallback belongs to the frontend. */
 export interface MeResponse {
   readonly user_id: string;
   readonly username: string;
-  readonly email: string;
+  /** All linked addresses; empty until the user adds one. */
+  readonly emails: readonly EmailSummary[];
+  /** Primary contact address, or null when the user has no email. */
+  readonly primary_email: string | null;
+  /** Linked OAuth identities; empty for a passkey-only account. */
+  readonly external_identities: readonly ExternalIdentitySummary[];
   readonly display_name: string | null;
   readonly created_at: string;
   readonly passkey_count: number;
+}
+
+/** `POST /v1/me/emails` body. The address starts unverified; a verification
+ * link is delivered out-of-band. */
+export interface AddEmailRequest {
+  readonly address: string;
+}
+
+/** `POST /v1/me/emails/verify` body. `token` is the single-use secret from the
+ * verification link. */
+export interface VerifyEmailRequest {
+  readonly token: string;
 }
 
 /** `GET /v1/users/{username}` -- a public user profile card. Minimal disclosure:

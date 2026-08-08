@@ -32,10 +32,14 @@
     phase: PasskeyPhase;
     // Section-level fetch error (a list load failure does not blank `user`).
     error?: string | null;
-    // Local add-passkey path.
+    // Local add-passkey path. `onAdd` may be called with `{ discoverable: true }`
+    // to enroll a passwordless credential.
     adding?: boolean;
     addHint?: PasskeyAddHint | null;
-    onAdd?: (label: string) => Promise<boolean> | boolean | void;
+    onAdd?: (
+      label: string,
+      opts?: { discoverable?: boolean },
+    ) => Promise<boolean> | boolean | void;
     onRename?: (id: string, label: string) => Promise<void> | void;
     onRevoke?: (id: string) => Promise<void> | void;
     // Cross-device pairing-code path.

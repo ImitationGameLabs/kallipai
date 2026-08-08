@@ -47,7 +47,9 @@ export function isPublicRoute(pathname: string): boolean {
     pathname === "/login" ||
     pathname === "/register" ||
     pathname === "/pair" ||
-    pathname === "/connect"
+    pathname === "/connect" ||
+    pathname === "/auth/callback" ||
+    pathname === "/auth/signup"
   );
 }
 
@@ -88,7 +90,9 @@ export function appGateDecision(args: {
       return { kind: "redirect", url: "/settings" };
     }
     if (
-      (args.pathname === "/login" || args.pathname === "/register") &&
+      (args.pathname === "/login" ||
+        args.pathname === "/register" ||
+        args.pathname === "/auth/signup") &&
       args.user != null &&
       args.user !== undefined
     ) {

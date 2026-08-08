@@ -9,9 +9,12 @@
 mod admin;
 mod auth;
 mod device_pairing;
+mod emails;
 mod internal;
+mod oauth;
 mod passkeys;
 mod public_profiles;
+mod session;
 mod tagmata;
 
 use axum::Router;
@@ -30,7 +33,7 @@ use crate::state::SharedState;
 /// `None` runs the agora standalone with no internal surface.
 pub fn router(state: SharedState, internal_token_hash: Option<TokenHash>) -> Router<()> {
     // The unauthenticated, crypto-heavy entry surfaces are rate-limited per
-    // client IP: the ceremony begins (invite-enumeration / ceremony-spam) and
+    // client IP: the ceremony begins (ceremony-spam / username-enumeration) and
     // tagma enroll (CPU + DB + token mint). Ceremony finishes are NOT
     // rate-limited: each needs a real, single-use ceremony id issued by a
     // (rate-limited) begin, so they are transitively bounded. The
@@ -44,15 +47,27 @@ pub fn router(state: SharedState, internal_token_hash: Option<TokenHash>) -> Rou
     // distributed bound — per-IP is bypassable by source-IP diversity).
     let pair_rate_limit =
         axum::middleware::from_fn_with_state(state.clone(), crate::middleware::pair_rate_limit);
-    let ceremony_begin = auth::begin_router().layer(rate_limit.clone());
+    let ceremony_begin = auth::begin_router()
+        .merge(oauth::begin_router())
+        .layer(rate_limit.clone());
     let pair_begin = device_pairing::begin_router()
         .layer(rate_limit.clone())
         .layer(pair_rate_limit);
     let enroll = tagmata::enroll_router().layer(rate_limit.clone());
     // The public profile reads (user / tagma-by-id) are unauthenticated, so they
     // share the per-IP limiter: `GET /v1/users/{username}` is otherwise a free
-    // username-enumeration sweep.
-    let public_profiles = public_profiles::public_router().layer(rate_limit);
+    // username-enumeration sweep. The OAuth provider discovery endpoint
+    // (`GET /auth/oauth/providers`) is unauthenticated too and shares it.
+    let public_profiles = public_profiles::public_router()
+        .merge(oauth::public_router())
+        .layer(rate_limit.clone());
+    // The email surfaces that can drive unbounded work are per-IP rate-limited:
+    // `POST /me/emails` triggers an outbound verification mail (an amplifier
+    // once SMTP is wired), and `POST /me/emails/verify` is unauthenticated
+    // (click-from-inbox). The 256-bit single-use token is the real verify gate;
+    // the limiter is defense-in-depth + outbound bound.
+    let email_write = emails::write_router().layer(rate_limit.clone());
+    let email_verify = emails::verify_router().layer(rate_limit);
 
     // The control-plane v1 carries `SharedState`; resolve it to a stateless
     // `Router<()>`. The CSRF custom-header guard scopes to v1 (a no-op for
@@ -62,9 +77,13 @@ pub fn router(state: SharedState, internal_token_hash: Option<TokenHash>) -> Rou
         .merge(ceremony_begin)
         .merge(pair_begin)
         .merge(auth::finish_router())
+        .merge(oauth::finish_router())
         .merge(device_pairing::finish_router())
-        .merge(auth::session_router())
+        .merge(session::router())
+        .merge(oauth::session_router())
         .merge(device_pairing::session_router())
+        .merge(email_write)
+        .merge(email_verify)
         .nest("/admin", admin::router())
         .merge(enroll)
         .merge(tagmata::protected_router())

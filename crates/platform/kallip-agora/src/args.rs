@@ -61,14 +61,6 @@ pub struct Args {
     /// host-only (single-origin deploy).
     #[arg(long, env = "KALLIP_AGORA_SESSION_COOKIE_DOMAIN")]
     pub cookie_domain: Option<String>,
-    /// Default invite-code lifetime in seconds when the admin does not pass one
-    /// (minted via `POST /v1/admin/invite-codes`).
-    #[arg(
-        long,
-        env = "KALLIP_AGORA_INVITE_DEFAULT_TTL_SECS",
-        default_value = "604800"
-    )]
-    pub invite_default_ttl_secs: u64,
     /// Capacity of the per-IP token bucket guarding `/v1/auth/*` (max burst).
     #[arg(long, env = "KALLIP_AGORA_AUTH_RATE_CAPACITY", default_value_t = 10)]
     pub auth_rate_capacity: u32,
@@ -127,6 +119,30 @@ pub struct Args {
         default_value = "600"
     )]
     pub enrollment_code_ttl_secs: u64,
+    /// Whether open signup is allowed (both passkey-only signup and OAuth
+    /// signup that creates a new account). The invite gate is gone; this is its
+    /// replacement for closing signups during an incident. Existing-account
+    /// login (passkey or OAuth) and account linking are unaffected.
+    #[arg(long, env = "KALLIP_AGORA_SIGNUP_ENABLED", default_value_t = true)]
+    pub signup_enabled: bool,
+    /// Web app origin the OAuth flow redirects back into, e.g.
+    /// `https://web.kallipai.com`. The canonical redirect_uri is this plus
+    /// `/auth/callback`; the server is the single source of truth for it (the
+    /// SPA never constructs it). Required only when an OAuth provider is
+    /// configured.
+    #[arg(long, env = "KALLIP_AGORA_OAUTH_REDIRECT_BASE")]
+    pub oauth_redirect_base: Option<String>,
+    /// GitHub OAuth app credentials. The provider is enabled iff BOTH
+    /// client id and secret are non-empty.
+    #[arg(long, env = "KALLIP_AGORA_OAUTH_GITHUB_CLIENT_ID")]
+    pub oauth_github_client_id: Option<String>,
+    #[arg(long, env = "KALLIP_AGORA_OAUTH_GITHUB_CLIENT_SECRET")]
+    pub oauth_github_client_secret: Option<String>,
+    /// Google OAuth client credentials. Enabled iff BOTH are non-empty.
+    #[arg(long, env = "KALLIP_AGORA_OAUTH_GOOGLE_CLIENT_ID")]
+    pub oauth_google_client_id: Option<String>,
+    #[arg(long, env = "KALLIP_AGORA_OAUTH_GOOGLE_CLIENT_SECRET")]
+    pub oauth_google_client_secret: Option<String>,
     /// Shared secret that `kallip-lesche` presents as `Authorization: Bearer`
     /// to the `/internal/*` ControlPlane API. Unset = the `/internal` nest is
     /// not mounted (agora runs standalone, no relay connected). Must equal the

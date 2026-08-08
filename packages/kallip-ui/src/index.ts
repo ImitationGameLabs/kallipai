@@ -80,6 +80,8 @@ export { default as LoginPage } from "./pages/LoginPage.svelte";
 export { default as RegisterPage } from "./pages/RegisterPage.svelte";
 export { default as PairPage } from "./pages/PairPage.svelte";
 export { default as ConnectPage } from "./pages/ConnectPage.svelte";
+export { default as OAuthCallbackPage } from "./pages/OAuthCallbackPage.svelte";
+export { default as OAuthSignupPage } from "./pages/OAuthSignupPage.svelte";
 
 // App chrome
 export { default as AppShell } from "./components/AppShell.svelte";

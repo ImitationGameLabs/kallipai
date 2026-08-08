@@ -12,6 +12,8 @@ mod m_20260720_02_tagma_unified;
 mod m_20260730_01_passkey_label_stepup_revocations;
 mod m_20260730_02_device_pairing_codes;
 mod m_20260731_01_passkey_last_used_at;
+mod m_20260807_01_identity_rework;
+mod m_20260808_01_oauth_signup_username;
 
 /// The agora migrator. New migrations are appended to [`MigratorTrait::migrations`].
 pub struct Migrator;
@@ -25,6 +27,8 @@ impl MigratorTrait for Migrator {
             Box::new(m_20260730_01_passkey_label_stepup_revocations::Migration),
             Box::new(m_20260730_02_device_pairing_codes::Migration),
             Box::new(m_20260731_01_passkey_last_used_at::Migration),
+            Box::new(m_20260807_01_identity_rework::Migration),
+            Box::new(m_20260808_01_oauth_signup_username::Migration),
         ]
     }
 }

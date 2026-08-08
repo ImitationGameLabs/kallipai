@@ -14,6 +14,9 @@ export interface PasskeyCardProps {
   readonly label: string;
   readonly createdAt: string;
   readonly lastUsedAt: string;
+  /** Whether this credential was enrolled via the discoverable (resident-key)
+   *  flow -- shows a "passwordless" badge and gates the autofill affordance. */
+  readonly discoverable: boolean;
 }
 
 /** A human-facing summary of an add-device ceremony outcome, ready to render. */

@@ -9,16 +9,24 @@
 
 import { AgoraApiError } from "./types.ts";
 import type {
+  AddEmailRequest,
   AddPasskeyFinishRequest,
   AuthFinishResponse,
+  EmailSummary,
+  ExternalIdentitySummary,
   LoginBeginResponse,
   LoginFinishRequest,
   MeResponse,
   MintPairingCodeResponse,
   MintTagmaResponse,
+  OAuthBeginResponse,
+  OAuthFinishRequest,
+  OAuthNeedsUsernameResponse,
+  OAuthSignupCompleteRequest,
   PairBeginRequest,
   PairFinishRequest,
   PasskeySummary,
+  ProviderInfo,
   PublicTagmaProfile,
   PublicUserProfile,
   RegisterBeginResponse,
@@ -27,6 +35,7 @@ import type {
   RenameTagmaRequest,
   TagmaInfo,
   TagmaView,
+  VerifyEmailRequest,
 } from "./types.ts";
 
 /** CSRF marker the agora's `csrf_guard` checks (see `session.rs:21-24`). */
@@ -35,15 +44,15 @@ export const CSRF_HEADER_VALUE = "kallip";
 
 /** Request bodies for the ceremony begins. Mirrors the agora DTOs in
  * `crates/platform/kallip-agora/src/routes/auth.rs` (`RegisterBeginRequest`,
- * `LoginBeginRequest`): email is the login id; username is the in-site handle. */
+ * `LoginBeginRequest`): the username is the login id (login resolves by
+ * username); email is no longer collected at registration -- it is an optional
+ * contact channel the user links later in settings. */
 export interface RegisterBeginRequest {
-  readonly invite_code: string;
-  readonly email: string;
   readonly username: string;
   readonly display_name?: string;
 }
 export interface LoginBeginRequest {
-  readonly email: string;
+  readonly username: string;
 }
 
 /**
@@ -112,14 +121,144 @@ export class AgoraClient extends BaseClient {
     return this.json("/v1/auth/login/finish", "POST", body);
   }
 
+  /** `POST /v1/auth/login/discoverable/begin` — start a usernameless login. No
+   * identifier: the authenticator resolves the user at finish via the
+   * assertion's userHandle. The server returns conditional-mediation options
+   * with an empty allowList. */
+  loginDiscoverableBegin(): Promise<LoginBeginResponse> {
+    return this.json("/v1/auth/login/discoverable/begin", "POST", undefined);
+  }
+
+  /** `POST /v1/auth/login/discoverable/finish` — verify the discoverable
+   * assertion (the credential carries the userHandle the server identifies the
+   * account by). */
+  loginDiscoverableFinish(
+    body: LoginFinishRequest,
+  ): Promise<AuthFinishResponse> {
+    return this.json("/v1/auth/login/discoverable/finish", "POST", body);
+  }
+
   logout(): Promise<void> {
     return this.json("/v1/auth/logout", "POST", undefined);
+  }
+
+  // -- oauth ----------------------------------------------------------------
+
+  /** `GET /v1/auth/oauth/providers` — which OAuth providers this deploy has
+   * configured (unauthenticated; for rendering the login/settings buttons). */
+  listOAuthProviders(): Promise<ProviderInfo[]> {
+    return this.json("/v1/auth/oauth/providers", "GET");
+  }
+
+  /** `POST /v1/auth/oauth/{provider}/begin` — start a signin ceremony
+   * (anonymous). The SPA navigates to the returned `authorize_url`; the
+   * provider redirects back to the SPA callback with `code`+`state`. */
+  oauthSignInBegin(
+    provider: string,
+    body: { return_path?: string },
+  ): Promise<OAuthBeginResponse> {
+    return this.json(
+      `/v1/auth/oauth/${encodeURIComponent(provider)}/begin`,
+      "POST",
+      body,
+    );
+  }
+
+  /** `POST /v1/me/oauth/{provider}/begin` — start a link ceremony (cookie-
+   * authed, step-up gated). Binds the next provider identity to the signed-in
+   * account. */
+  oauthLinkBegin(
+    provider: string,
+    body: { return_path?: string },
+  ): Promise<OAuthBeginResponse> {
+    return this.json(
+      `/v1/me/oauth/${encodeURIComponent(provider)}/begin`,
+      "POST",
+      body,
+    );
+  }
+
+  /** `POST /v1/auth/oauth/{provider}/finish` — complete the OAuth ceremony. The
+   * same endpoint serves BOTH actions (the opaque `state` selects which): a
+   * signin returns 200/201 with `{user_id, return_path?}` (and sets the session
+   * cookie); a link returns 204 with no body (the caller is already signed in);
+   * an UNLINKED signin returns 202 `{kind:"needs-username",...}` holding the
+   * claim for a username step (no cookie). Resolves to `undefined` on the 204
+   * link path, else the signin or needs-username body. */
+  oauthFinish(
+    provider: string,
+    body: OAuthFinishRequest,
+  ): Promise<AuthFinishResponse | OAuthNeedsUsernameResponse | undefined> {
+    return this.json(
+      `/v1/auth/oauth/${encodeURIComponent(provider)}/finish`,
+      "POST",
+      body,
+    );
+  }
+
+  /** `POST /v1/auth/oauth/signup/complete` — finish a held OAuth signup by
+   * submitting the chosen username against the single-use token from a 202
+   * needs-username finish. Creates the account, binds the identity, and sets
+   * the session cookie; returns `{user_id, return_path?}`. */
+  oauthSignupComplete(
+    body: OAuthSignupCompleteRequest,
+  ): Promise<AuthFinishResponse> {
+    return this.json("/v1/auth/oauth/signup/complete", "POST", body);
+  }
+
+  /** The signed-in user's linked OAuth identities. Fetches `GET /v1/me` and
+   * projects `external_identities` (no dedicated list route). */
+  listExternalIdentities(): Promise<readonly ExternalIdentitySummary[]> {
+    return this.json<MeResponse>("/v1/me", "GET").then((me) =>
+      me.external_identities
+    );
+  }
+
+  /** `DELETE /v1/me/external-identities/{id}` — unlink an identity (hard-delete;
+   * 409 if it is the account's last sign-in method). */
+  unlinkExternalIdentity(id: string): Promise<void> {
+    return this.json(
+      `/v1/me/external-identities/${encodeURIComponent(id)}`,
+      "DELETE",
+      undefined,
+    );
   }
 
   // -- profile --------------------------------------------------------------
 
   me(): Promise<MeResponse> {
     return this.json("/v1/me", "GET");
+  }
+
+  // -- emails (self-service contact-channel management) ---------------------
+
+  /** `GET /v1/me/emails` — the caller's linked addresses (oldest first). */
+  listEmails(): Promise<EmailSummary[]> {
+    return this.json("/v1/me/emails", "GET");
+  }
+
+  /** `POST /v1/me/emails` — link a new address (starts unverified; a
+   * verification link is sent out-of-band). */
+  addEmail(body: AddEmailRequest): Promise<EmailSummary> {
+    return this.json("/v1/me/emails", "POST", body);
+  }
+
+  /** `POST /v1/me/emails/verify` — consume a verification token, marking the
+   * address verified. */
+  verifyEmail(body: VerifyEmailRequest): Promise<EmailSummary> {
+    return this.json("/v1/me/emails/verify", "POST", body);
+  }
+
+  /** `POST /v1/me/emails/{id}` — promote a verified address to primary. */
+  makeEmailPrimary(id: string): Promise<EmailSummary> {
+    return this.json(`/v1/me/emails/${encodeURIComponent(id)}`, "POST", {});
+  }
+
+  /** `DELETE /v1/me/emails/{id}` — unlink an address. Returns the remaining
+   * addresses (a different one is promoted to primary if the primary was
+   * removed). */
+  removeEmail(id: string): Promise<EmailSummary[]> {
+    return this.json(`/v1/me/emails/${encodeURIComponent(id)}`, "DELETE");
   }
 
   // -- passkeys (self-service management of the caller's own devices) -------
@@ -132,9 +271,13 @@ export class AgoraClient extends BaseClient {
   /** `POST /v1/me/passkeys/register/begin` — start binding ANOTHER passkey to
    * the signed-in account. Gated by a one-shot step-up; returns 403
    * `reauth-required` if the session's freshness is stale/consumed (run
-   * `loginWithPasskey` then retry). */
-  addPasskeyBegin(): Promise<RegisterBeginResponse> {
-    return this.json("/v1/me/passkeys/register/begin", "POST", {});
+   * `loginWithPasskey` then retry). With `discoverable: true` the ceremony
+   * enrolls a resident (passwordless) credential. */
+  addPasskeyBegin(
+    opts: { discoverable?: boolean } = {},
+  ): Promise<RegisterBeginResponse> {
+    const query = opts.discoverable ? "?discoverable=true" : "";
+    return this.json(`/v1/me/passkeys/register/begin${query}`, "POST", {});
   }
 
   /** `POST /v1/me/passkeys/register/finish` — verify + bind the new passkey. */

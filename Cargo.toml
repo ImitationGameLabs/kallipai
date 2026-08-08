@@ -113,7 +113,14 @@ url = "2.5"
 # Pinned to the first pure-Rust (crypto-glue) release; bump to stable release when out.
 webauthn-rs = { version = "=0.6.1-dev", features = [
   "danger-allow-state-serialisation",
+  "conditional-ui",
+  "danger-credential-internals",
 ] }
+# Used directly for discoverable-credential registration: the high-level wrapper
+# hardcodes require_resident_key=false and keeps its `core` field private, so we
+# construct our own WebauthnCore to set require_resident_key(true). Bump alongside
+# webauthn-rs.
+webauthn-rs-core = "=0.6.1-dev"
 cookie = "0.18"
 base64 = "0.22"
 hex = "0.4"

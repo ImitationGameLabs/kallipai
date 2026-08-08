@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use kallip_agora_common::admin::{
-    CreateEnrollmentCodeRequest, CreateEnrollmentCodeResponse, CreateInviteCodeRequest, InviteCode,
-    InviteCodeSummary, Page, PageQuery, PasskeySummary, UpdateUserRequest, UserSummary,
+    CreateEnrollmentCodeRequest, CreateEnrollmentCodeResponse, Page, PageQuery, PasskeySummary,
+    UpdateUserRequest, UserSummary,
 };
 use kallip_agora_common::bytes::{Ed25519PublicKey, Ed25519Signature};
 use kallip_agora_common::control::{EnrollRequest, EnrollResponse};
@@ -181,65 +181,6 @@ impl AgoraClient {
     }
 
     // -- admin surface (sk-admin- bearer) -------------------------------------
-
-    /// Mint an invite code. Returns the `sk-invite-...` plaintext (once) + the
-    /// hex hash that identifies it for revoke/list.
-    pub async fn admin_create_invite_code(
-        &self,
-        body: CreateInviteCodeRequest,
-    ) -> Result<InviteCode> {
-        self.require_admin_token()?;
-        self.handle_response(
-            self.with_admin_auth(
-                self.inner
-                    .http
-                    .post(self.url("/v1/admin/invite-codes"))
-                    .json(&body),
-            )
-            .send()
-            .await
-            .context("create invite code failed")?,
-            "decode invite code response",
-        )
-        .await
-    }
-
-    /// List invite codes (paginated).
-    pub async fn admin_list_invite_codes(
-        &self,
-        query: &PageQuery,
-    ) -> Result<Page<InviteCodeSummary>> {
-        self.require_admin_token()?;
-        self.handle_response(
-            self.with_admin_auth(
-                self.inner
-                    .http
-                    .get(self.url("/v1/admin/invite-codes"))
-                    .query(query),
-            )
-            .send()
-            .await
-            .context("list invite codes failed")?,
-            "decode invite code page",
-        )
-        .await
-    }
-
-    /// Revoke an invite code by its hex hash. Idempotent.
-    pub async fn admin_revoke_invite_code(&self, code_hash_hex: &str) -> Result<()> {
-        self.require_admin_token()?;
-        self.ensure_empty(
-            self.with_admin_auth(
-                self.inner
-                    .http
-                    .delete(self.url(&format!("/v1/admin/invite-codes/{code_hash_hex}"))),
-            )
-            .send()
-            .await
-            .context("revoke invite code failed")?,
-        )
-        .await
-    }
 
     /// Mint an enrollment code on a user's behalf. Returns the `sk-enroll-...`
     /// plaintext (once).
@@ -412,8 +353,8 @@ mod tests {
     //! so these tests lock the request shape, not the DTO definitions.
 
     use super::*;
-    use kallip_agora_common::admin::{CreateEnrollmentCodeRequest, CreateInviteCodeRequest};
-    use wiremock::matchers::{header, method, path};
+    use kallip_agora_common::admin::CreateEnrollmentCodeRequest;
+    use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client(server: &MockServer, admin: bool) -> AgoraClient {
@@ -422,31 +363,6 @@ mod tests {
             b = b.admin_token("sk-admin-test");
         }
         b.build().unwrap()
-    }
-
-    #[tokio::test]
-    async fn admin_create_invite_code_round_trips() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/admin/invite-codes"))
-            .and(header("authorization", "Bearer sk-admin-test"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "code": "sk-invite-x",
-                "code_hash_hex": "ab",
-                "note": "ops",
-                "expires_at": "2026-01-01T00:00:00Z",
-            })))
-            .mount(&server)
-            .await;
-        let created = client(&server, true)
-            .admin_create_invite_code(CreateInviteCodeRequest {
-                ttl_secs: Some(3600),
-                note: Some("ops".to_string()),
-            })
-            .await
-            .expect("ok");
-        assert_eq!(created.code, "sk-invite-x");
-        assert_eq!(created.code_hash_hex, "ab");
     }
 
     #[tokio::test]

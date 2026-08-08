@@ -1,5 +1,5 @@
-//! `users` entity — a human account, created at invite redemption. The id is a
-//! `UserId` (opaque UUID-string newtype) stored as `TEXT`.
+//! `users` entity — a human account, created at signup (passkey or OAuth). The
+//! id is a `UserId` (opaque UUID-string newtype) stored as `TEXT`.
 
 use sea_orm::entity::prelude::*;
 use time::OffsetDateTime;
@@ -10,15 +10,10 @@ pub struct Model {
     /// `UserId` (opaque UUID-string newtype), stored as `TEXT`.
     #[sea_orm(primary_key, column_type = "Text")]
     pub id: String,
-    /// In-site display handle, normalized at write time (trim + ASCII-lowercase,
-    /// `[a-z0-9_-]{3,32}`). Unique; NOT the login id.
+    /// Login handle AND in-site display handle, normalized at write time (trim +
+    /// ASCII-lowercase, `[a-z0-9_-]{3,32}`). Unique; resolved at `login_begin`.
     #[sea_orm(column_type = "Text")]
     pub username: String,
-    /// Login handle, canonicalized at write time per RFC 5321 sec 2.4 (local
-    /// part preserved verbatim, domain lowercased). Unique; resolved at
-    /// `login_begin`.
-    #[sea_orm(column_type = "Text")]
-    pub email: String,
     /// Optional human-readable name, NULL until set.
     #[sea_orm(column_type = "Text", nullable)]
     pub display_name: Option<String>,

@@ -2,7 +2,9 @@
 //! [`super::migration`] prime the full schema.
 
 pub mod device_pairing_codes;
-pub mod invite_codes;
+pub mod emails;
+pub mod external_identities;
+pub mod oauth_states;
 pub mod passkey_revocations;
 pub mod passkeys;
 pub mod sessions;

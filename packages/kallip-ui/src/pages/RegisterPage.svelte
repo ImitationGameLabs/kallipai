@@ -2,21 +2,17 @@
   import { onMount } from "svelte";
   import { agoraSession } from "../lib/session/agora.svelte";
   import { navigate } from "../lib/shell/port.ts";
-  import { isValidEmail } from "../lib/email.ts";
   import { isValidUsername } from "../lib/username.ts";
   import type { CeremonyResult } from "@kallipai/kallip-agora-client";
   import Brand from "../components/Brand.svelte";
   import Banner from "../components/Banner.svelte";
+  import OAuthProviderButtons from "../components/OAuthProviderButtons.svelte";
+  import UsernameField from "../components/UsernameField.svelte";
 
   // display_name length cap enforced on the trimmed value by the agora
   // (auth.rs:179). HTML maxlength counts untrimmed length, so this is a UX
   // hint only -- the server remains the authority.
   const DISPLAY_NAME_MAX = 64;
-  // An invite link can pre-fill the code via ?invite=... so the recipient just
-  // picks a username. Seeded once on mount (not reactively bound).
-  let { invite: initialInvite = "" }: { invite?: string } = $props();
-  let invite = $state("");
-  let email = $state("");
   let username = $state("");
   let displayName = $state("");
   let submitting = $state(false);
@@ -28,17 +24,10 @@
   // If whoami failed at boot (agora unreachable), surface it proactively.
   const notice = $derived(error ?? agoraSession.authError);
 
-  onMount(() => {
-    if (initialInvite) invite = initialInvite;
-  });
-
   // Client normalization so the user sees the canonical handle, not a 400 round-trip.
   const normalizedUsername = $derived(username.trim().toLowerCase());
   const usernameValid = $derived(isValidUsername(username));
-  const emailValid = $derived(isValidEmail(email));
-  const canSubmit = $derived(
-    invite.trim().length > 0 && emailValid && usernameValid && !submitting,
-  );
+  const canSubmit = $derived(usernameValid && !submitting);
 
   // Human copy for each ceremony failure reason.
   function reasonMessage(r: CeremonyResult): string | null {
@@ -46,10 +35,6 @@
     switch (r.reason) {
       case "cancelled":
         return "Passkey prompt cancelled.";
-      case "invalid-invite":
-        return "That invite code is invalid or already used.";
-      case "duplicate-email":
-        return "That email is already registered.";
       case "duplicate-username":
         return "That username is taken.";
       case "rate-limited":
@@ -68,11 +53,9 @@
     try {
       const trimmedDisplay = displayName.trim();
       const r = await agoraSession.register({
-        invite_code: invite.trim(),
-        email: email.trim(),
         username: normalizedUsername,
         // Omit when blank: the agora falls back to the username as the
-        // WebAuthn displayName (auth.rs:199-209).
+        // WebAuthn displayName.
         ...(trimmedDisplay ? { display_name: trimmedDisplay } : {}),
       });
       result = r;
@@ -84,6 +67,12 @@
       submitting = false;
     }
   }
+
+  // Fetch enabled OAuth providers for the "Continue with X" buttons. Registration
+  // has no return path -- a brand-new account always lands on /tagmata.
+  onMount(() => {
+    agoraSession.refreshOAuthProviders();
+  });
 </script>
 
 <svelte:head><title>KallipAI · register</title></svelte:head>
@@ -105,54 +94,9 @@
       <p class="text-sm opacity-60">Create your account</p>
     </div>
 
-    <label class="block space-y-1">
-      <span class="text-sm opacity-70">
-        Invite code <span class="text-error-500">*</span>
-      </span>
-      <input
-        class="input"
-        autocomplete="off"
-        placeholder="sk-invite-..."
-        bind:value={invite}
-        required
-      />
-    </label>
+    <OAuthProviderButtons />
 
-    <label class="block space-y-1">
-      <span class="text-sm opacity-70">
-        Email <span class="text-error-500">*</span>
-      </span>
-      <input
-        class="input"
-        type="email"
-        autocomplete="email"
-        placeholder="you@example.com"
-        bind:value={email}
-        required
-      />
-      {#if email.length > 0 && !emailValid}
-        <span class="text-xs text-error-500">Enter a valid email address.</span>
-      {/if}
-    </label>
-
-    <label class="block space-y-1">
-      <span class="text-sm opacity-70">
-        Username <span class="text-error-500">*</span>
-      </span>
-      <input
-        class="input"
-        autocomplete="username"
-        placeholder="a-z, 0-9, -, 3-32 chars"
-        bind:value={username}
-        required
-      />
-      {#if username.length > 0 && !usernameValid}
-        <span class="text-xs text-error-500"
-          >3-32 chars: a-z 0-9, single hyphens only (no
-          leading/trailing/consecutive)</span
-        >
-      {/if}
-    </label>
+    <UsernameField bind:value={username} />
 
     <label class="block space-y-1">
       <span class="text-sm opacity-70">Display name</span>

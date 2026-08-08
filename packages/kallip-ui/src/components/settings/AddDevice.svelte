@@ -21,10 +21,14 @@
     onMint,
     onClear,
   }: {
-    // Local path (another passkey on this browser).
+    // Local path (another passkey on this browser). May pass
+    // `{ discoverable: true }` to enroll a passwordless credential.
     adding?: boolean;
     addHint?: PasskeyAddHint | null;
-    onAdd?: (label: string) => Promise<boolean> | boolean | void;
+    onAdd?: (
+      label: string,
+      opts?: { discoverable?: boolean },
+    ) => Promise<boolean> | boolean | void;
     // Cross-device path (mint a pairing code).
     pairingCode?: PairingCodeView | null;
     pairingError?: string | null;

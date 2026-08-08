@@ -24,19 +24,22 @@ Deno.test("isPublicRoute flags /login, /register, /connect", () => {
   assertEquals(isPublicRoute("/login"), true);
   assertEquals(isPublicRoute("/register"), true);
   assertEquals(isPublicRoute("/connect"), true);
+  assertEquals(isPublicRoute("/auth/signup"), true);
   assertEquals(isPublicRoute("/tagmata"), false);
   assertEquals(isPublicRoute("/"), false);
 });
 
 Deno.test("config not loaded -> skeleton on every route (incl. /login)", () => {
-  for (const pathname of [
-    "/",
-    "/login",
-    "/register",
-    "/connect",
-    "/tagmata",
-    "/settings",
-  ]) {
+  for (
+    const pathname of [
+      "/",
+      "/login",
+      "/register",
+      "/connect",
+      "/tagmata",
+      "/settings",
+    ]
+  ) {
     assertEquals(decide({ loaded: false, mode: "online", pathname }), {
       kind: "skeleton",
     });
@@ -208,6 +211,21 @@ Deno.test("online + /login + signed-in -> redirect /tagmata", () => {
     kind: "redirect",
     url: "/tagmata",
   });
+});
+
+Deno.test("online + /auth/signup + signed-in -> redirect /tagmata", () => {
+  // A signed-in user has no business on the OAuth signup step; mirror /register.
+  assertEquals(
+    decide({ mode: "online", pathname: "/auth/signup", user: USER }),
+    { kind: "redirect", url: "/tagmata" },
+  );
+});
+
+Deno.test("online + /auth/signup + logged-out -> render", () => {
+  assertEquals(
+    decide({ mode: "online", pathname: "/auth/signup", user: null }),
+    { kind: "render" },
+  );
 });
 
 Deno.test("online + /login + unresolved -> render (no flash)", () => {

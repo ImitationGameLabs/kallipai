@@ -275,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn verify_session_rejects_disabled_user() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "frozen", "frozen@example.test").await;
+        let user_id = seed_user(&state, "frozen").await;
         let session = MintedToken::generate(SESSION);
         let now = OffsetDateTime::now_utc();
         sessions::ActiveModel {
@@ -321,7 +321,7 @@ mod tests {
     #[tokio::test]
     async fn user_identity_by_username_resolves() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "alice", "alice@example.test").await;
+        let user_id = seed_user(&state, "alice").await;
 
         let control = cp(&state);
         let resolved = control.user_identity_by_username("ALICE").await.unwrap();
@@ -377,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn verify_bearer_rejects_revoked_tagma() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "owner", "owner@example.test").await;
+        let user_id = seed_user(&state, "owner").await;
         let (tagma_id, token) = seed_tagma(&state, &user_id, Ed25519PublicKey(vec![0u8; 32])).await;
 
         let control = cp(&state);

@@ -27,44 +27,6 @@ pub struct Page<T> {
 }
 
 // ---------------------------------------------------------------------------
-// invite codes
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CreateInviteCodeRequest {
-    #[serde(default)]
-    pub ttl_secs: Option<u64>,
-    #[serde(default)]
-    pub note: Option<String>,
-}
-
-/// A freshly minted invite code. `code` is the `sk-invite-...` plaintext,
-/// returned once; the agora retains only its hash.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InviteCode {
-    pub code: String,
-    pub code_hash_hex: String,
-    pub note: Option<String>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub expires_at: OffsetDateTime,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InviteCodeSummary {
-    pub code_hash_hex: String,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    pub expires_at: OffsetDateTime,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub consumed_at: Option<OffsetDateTime>,
-    pub consumed_by: Option<String>,
-    pub note: Option<String>,
-    #[serde(default, with = "time::serde::rfc3339::option")]
-    pub revoked_at: Option<OffsetDateTime>,
-}
-
-// ---------------------------------------------------------------------------
 // enrollment codes (operator mint of a pending tagma on a user's behalf)
 // ---------------------------------------------------------------------------
 
@@ -89,7 +51,9 @@ pub struct UserSummary {
     /// `UserId` newtype) because the admin wire surface takes raw path params.
     pub id: String,
     pub username: String,
-    pub email: String,
+    /// Primary contact address, if the user linked one. `None` when the user
+    /// has no email (email is an optional, settings-linked channel).
+    pub primary_email: Option<String>,
     pub display_name: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -127,4 +91,7 @@ pub struct PasskeySummary {
     /// stamped on every subsequent sign-in.
     #[serde(with = "time::serde::rfc3339")]
     pub last_used_at: OffsetDateTime,
+    /// Whether this credential was enrolled via the discoverable (resident-key)
+    /// flow -- gates the "passwordless sign-in" UI affordance.
+    pub discoverable: bool,
 }

@@ -1,17 +1,16 @@
-//! Admin (operator) endpoints, authenticated by the admin token. The
-//! invite-only entry point: mint + list + revoke invite codes, mint a pending
-//! tagma (an enrollment code) on a user's behalf, and manage users + passkeys
-//! (list/disable/enable users, list/revoke passkeys). The user-facing self-
-//! service counterpart to the tagma mint is `POST /v1/tagmata`
+//! Admin (operator) endpoints, authenticated by the admin token. Mint a
+//! pending tagma (an enrollment code) on a user's behalf, and manage users +
+//! passkeys (list/disable/enable users, list/revoke passkeys). The user-facing
+//! self-service counterpart to the tagma mint is `POST /v1/tagmata`
 //! (`routes/tagmata.rs`); the admin mint here is retained for operator use.
 //!
-//! User accounts are born ONLY at invite redemption + passkey binding, so there
-//! is no admin user-creation endpoint.
+//! User accounts are created via open signup (passkey or OAuth), so there is no
+//! admin user-creation endpoint.
 //!
 //! All request/response DTOs live in `kallip_agora_common::admin` so the
 //! `kallip-agora-client` (admin CLI) shares one wire contract with the server.
 
-use crate::db::entity::{invite_codes, passkeys, users};
+use crate::db::entity::{emails, passkeys, users};
 use crate::db::map_db_err;
 use axum::Json;
 use axum::Router;
@@ -19,34 +18,21 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use base64::Engine as _;
 use kallip_agora_common::admin::{
-    CreateEnrollmentCodeRequest, CreateEnrollmentCodeResponse, CreateInviteCodeRequest, InviteCode,
-    InviteCodeSummary, Page, PageQuery, PasskeySummary, UpdateUserRequest, UserSummary,
+    CreateEnrollmentCodeRequest, CreateEnrollmentCodeResponse, Page, PageQuery, PasskeySummary,
+    UpdateUserRequest, UserSummary,
 };
 use kallip_agora_common::ids::UserId;
-use kallip_common::authtoken::MintedToken;
 use kallip_common::protocol::ApiError;
-use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect,
-};
-use std::time::Duration;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use std::collections::HashMap;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::auth::{AuthPrincipal, require_admin};
 use crate::state::SharedState;
-use crate::token::INVITE;
 
 pub fn router() -> Router<SharedState> {
     Router::new()
-        .route(
-            "/invite-codes",
-            post(create_invite_code).get(list_invite_codes),
-        )
-        .route(
-            "/invite-codes/{code_hash_hex}",
-            axum::routing::delete(revoke_invite_code),
-        )
         .route("/tagmata", post(create_enrollment_code))
         .route("/users", get(list_users))
         .route("/users/{id}", axum::routing::patch(update_user))
@@ -76,8 +62,8 @@ const MAX_PAGE: u64 = 500;
 
 /// Encode the `(created_at, anchor)` tuple for the last row of a page into an
 /// opaque cursor. `anchor` is a stable per-row string that, combined with the
-/// timestamp, breaks ties into a strict total order (the invite hash hex, or the
-/// user id). `split_once('|')` in [`decode_cursor`] means an anchor containing
+/// timestamp, breaks ties into a strict total order (the user id). `split_once('|')`
+/// in [`decode_cursor`] means an anchor containing
 /// `|` still round-trips byte-for-byte, but the separators are kept out of
 /// anchors by construction (hex / UUID), and the nanos prefix never contains it.
 fn encode_cursor(ts: OffsetDateTime, anchor: &str) -> String {
@@ -100,141 +86,6 @@ fn decode_cursor(s: &str) -> Result<(OffsetDateTime, String), ApiError> {
     let ts = OffsetDateTime::from_unix_timestamp_nanos(nanos)
         .map_err(|_| ApiError::bad_request("invalid cursor"))?;
     Ok((ts, anchor.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// invite codes
-// ---------------------------------------------------------------------------
-
-async fn create_invite_code(
-    State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
-    Json(req): Json<CreateInviteCodeRequest>,
-) -> Result<Json<InviteCode>, ApiError> {
-    require_admin(&principal)?;
-    let ttl = Duration::from_secs(req.ttl_secs.unwrap_or(state.limits.invite_default_ttl_secs));
-    let code = MintedToken::generate(INVITE);
-    let now = OffsetDateTime::now_utc();
-    let hash_bytes = code.hash().as_bytes().to_vec();
-    let am = invite_codes::ActiveModel {
-        code_hash: Set(hash_bytes.clone()),
-        created_at: Set(now),
-        expires_at: Set(now + ttl),
-        consumed_at: Set(None),
-        consumed_by: Set(None),
-        note: Set(req.note.clone()),
-        revoked_at: Set(None),
-    };
-    am.insert(&state.db).await.map_err(map_db_err)?;
-    Ok(Json(InviteCode {
-        code: code.secret().to_string(),
-        code_hash_hex: hex::encode(&hash_bytes),
-        note: req.note,
-        expires_at: now + ttl,
-    }))
-}
-
-async fn list_invite_codes(
-    State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
-    Query(query): Query<PageQuery>,
-) -> Result<Json<Page<InviteCodeSummary>>, ApiError> {
-    require_admin(&principal)?;
-    // Order by (created_at DESC, code_hash DESC); the PK code_hash makes the
-    // tuple a stable cursor even when rows share a timestamp.
-    let limit = query.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
-    let mut select = invite_codes::Entity::find()
-        .order_by_desc(invite_codes::Column::CreatedAt)
-        .order_by_desc(invite_codes::Column::CodeHash);
-    if let Some(cursor) = &query.cursor {
-        // Resume strictly after the anchor: rows that sort before it in DESC
-        // order (i.e. older, or same-ts with a smaller hash).
-        let (ts, anchor_hex) = decode_cursor(cursor)?;
-        let hash = hex::decode(&anchor_hex).map_err(|_| ApiError::bad_request("invalid cursor"))?;
-        select = select.filter(
-            sea_orm::Condition::any()
-                .add(invite_codes::Column::CreatedAt.lt(ts))
-                .add(
-                    sea_orm::Condition::all()
-                        .add(invite_codes::Column::CreatedAt.eq(ts))
-                        .add(invite_codes::Column::CodeHash.lt(hash)),
-                ),
-        );
-    }
-    // Fetch one extra to detect a following page without a second query.
-    let rows = select
-        .limit(limit + 1)
-        .all(&state.db)
-        .await
-        .map_err(map_db_err)?;
-    let has_more = rows.len() as u64 > limit;
-    let page_rows: Vec<_> = rows.into_iter().take(limit as usize).collect();
-    // The cursor anchors on the last row of THIS page; the resume filter is
-    // "strictly before", so the next page starts right after it.
-    let next_cursor = if has_more {
-        let last = page_rows
-            .last()
-            .expect("a page with a follower is non-empty");
-        Some(encode_cursor(
-            last.created_at,
-            &hex::encode(&last.code_hash),
-        ))
-    } else {
-        None
-    };
-    let items = page_rows.into_iter().map(invite_summary_from_row).collect();
-    Ok(Json(Page { items, next_cursor }))
-}
-
-fn invite_summary_from_row(r: invite_codes::Model) -> InviteCodeSummary {
-    InviteCodeSummary {
-        code_hash_hex: hex::encode(&r.code_hash),
-        created_at: r.created_at,
-        expires_at: r.expires_at,
-        consumed_at: r.consumed_at,
-        consumed_by: r.consumed_by,
-        note: r.note,
-        revoked_at: r.revoked_at,
-    }
-}
-
-async fn revoke_invite_code(
-    State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
-    Path(code_hash_hex): Path<String>,
-) -> Result<axum::http::StatusCode, ApiError> {
-    require_admin(&principal)?;
-    // A SHA-256 hash is exactly 64 hex chars; reject anything else before
-    // decoding (a path segment has no body-limit cap).
-    if code_hash_hex.len() != 64 {
-        return Err(ApiError::bad_request("code_hash_hex must be 64 hex chars"));
-    }
-    let hash = hex::decode(&code_hash_hex)
-        .map_err(|_| ApiError::bad_request("code_hash_hex must be hex"))?;
-    let row = invite_codes::Entity::find()
-        .filter(invite_codes::Column::CodeHash.eq(hash.clone()))
-        .one(&state.db)
-        .await
-        .map_err(map_db_err)?
-        .ok_or_else(|| ApiError::not_found("unknown invite code"))?;
-    // Idempotent AND race-free: a conditional UPDATE only touches rows whose
-    // `revoked_at` is still NULL, so two concurrent revokes cannot clobber the
-    // first-revoked timestamp. A row already revoked (by this call or a racing
-    // one) is left with its original timestamp. 204 either way.
-    if row.revoked_at.is_none() {
-        let now = OffsetDateTime::now_utc();
-        invite_codes::Entity::update_many()
-            .filter(invite_codes::Column::CodeHash.eq(hash))
-            .filter(invite_codes::Column::RevokedAt.is_null())
-            .col_expr(
-                invite_codes::Column::RevokedAt,
-                sea_orm::sea_query::Expr::value(now),
-            )
-            .exec(&state.db)
-            .await
-            .map_err(map_db_err)?;
-    }
-    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
@@ -312,19 +163,51 @@ async fn list_users(
     } else {
         None
     };
-    let items = page_rows.into_iter().map(user_summary_from_row).collect();
+    // Batch-fetch the primary email for each user on the page (avoids an N+1
+    // per-row lookup). Users without an email are absent from the map.
+    let page_ids: Vec<String> = page_rows.iter().map(|r| r.id.clone()).collect();
+    let primaries = primary_emails_by_account(&state.db, &page_ids).await?;
+    let items = page_rows
+        .into_iter()
+        .map(|r| {
+            let primary_email = primaries.get(&r.id).cloned();
+            user_summary_from_row(r, primary_email)
+        })
+        .collect();
     Ok(Json(Page { items, next_cursor }))
 }
 
-fn user_summary_from_row(r: users::Model) -> UserSummary {
+fn user_summary_from_row(r: users::Model, primary_email: Option<String>) -> UserSummary {
     UserSummary {
         id: r.id,
         username: r.username,
-        email: r.email,
+        primary_email,
         display_name: r.display_name,
         created_at: r.created_at,
         disabled_at: r.disabled_at,
     }
+}
+
+/// Fetch the primary (`is_primary = true`) address for each of `account_ids`,
+/// returning a map keyed by account id. Accounts with no primary email are
+/// simply absent. Used to populate `UserSummary.primary_email` without an N+1.
+async fn primary_emails_by_account(
+    db: &crate::db::Db,
+    account_ids: &[String],
+) -> Result<HashMap<String, String>, ApiError> {
+    if account_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = emails::Entity::find()
+        .filter(emails::Column::IsPrimary.eq(true))
+        .filter(emails::Column::AccountId.is_in(account_ids.to_vec()))
+        .all(db)
+        .await
+        .map_err(map_db_err)?;
+    Ok(rows
+        .into_iter()
+        .map(|e| (e.account_id, e.address))
+        .collect())
 }
 
 async fn update_user(
@@ -368,12 +251,16 @@ async fn update_user(
     }
     // update_many returns rows-affected, not the row; re-read to return the
     // refreshed (idempotent) state.
-    let refreshed = users::Entity::find_by_id(id)
+    let refreshed = users::Entity::find_by_id(id.clone())
         .one(&state.db)
         .await
         .map_err(map_db_err)?
         .ok_or_else(|| ApiError::not_found("unknown user"))?;
-    Ok(Json(user_summary_from_row(refreshed)))
+    let primary_email = primary_emails_by_account(&state.db, &[id])
+        .await?
+        .into_values()
+        .next();
+    Ok(Json(user_summary_from_row(refreshed, primary_email)))
 }
 
 // ---------------------------------------------------------------------------
@@ -432,26 +319,21 @@ async fn revoke_passkey(
 
 #[cfg(test)]
 mod tests {
-    //! Admin invite-code CRUD round-trip, the legacy enrollment-code mint (which
-    //! validates the user against the DB), and the user/passkey management
-    //! endpoints.
+    //! The legacy enrollment-code mint (which validates the user against the DB)
+    //! and the user/passkey management endpoints.
 
     use axum::Json;
     use axum::extract::{Path, Query, State};
 
     use super::{
-        admin_root, create_enrollment_code, create_invite_code, list_invite_codes,
-        list_user_passkeys, list_users, revoke_invite_code, revoke_passkey, update_user,
+        admin_root, create_enrollment_code, list_user_passkeys, list_users, revoke_passkey,
+        update_user,
     };
     use crate::auth::{AuthPrincipal, Principal};
     use crate::db::entity::passkeys;
     use crate::state::SharedState;
     use crate::test_helpers::{make_state, seed_user};
-    use kallip_agora_common::admin::{
-        CreateEnrollmentCodeRequest, CreateInviteCodeRequest, InviteCodeSummary, Page, PageQuery,
-        UpdateUserRequest,
-    };
-    use kallip_common::authtoken::TokenHash;
+    use kallip_agora_common::admin::{CreateEnrollmentCodeRequest, PageQuery, UpdateUserRequest};
     use sea_orm::{ActiveModelTrait, ActiveValue::Set};
     use time::OffsetDateTime;
     use uuid::Uuid;
@@ -460,7 +342,7 @@ mod tests {
     async fn admin_root_requires_admin() {
         let state = make_state().await;
         // A non-admin principal (a regular user) is rejected with 403.
-        let user_id = seed_user(&state, "u", "u@example.test").await;
+        let user_id = seed_user(&state, "u").await;
         let err = admin_root(AuthPrincipal(Principal::User(user_id)))
             .await
             .expect_err("non-admin must be rejected");
@@ -474,70 +356,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn invite_code_crud_round_trip() {
-        let state = make_state().await;
-        let admin = AuthPrincipal(Principal::Admin);
-
-        // Mint one invite.
-        let created = create_invite_code(
-            State(state.clone()),
-            admin.clone(),
-            Json(CreateInviteCodeRequest {
-                ttl_secs: Some(3600),
-                note: Some("ops".to_string()),
-            }),
-        )
-        .await
-        .expect("create")
-        .0;
-        // The plaintext hashes to the returned hex.
-        let expected_hex = hex::encode(TokenHash::of(&created.code).as_bytes());
-        assert_eq!(created.code_hash_hex, expected_hex);
-
-        // List shows it, unconsumed, with the note.
-        let Page {
-            items: listed,
-            next_cursor,
-        } = list_invite_codes(
-            State(state.clone()),
-            admin.clone(),
-            Query(PageQuery::default()),
-        )
-        .await
-        .expect("list")
-        .0;
-        assert_eq!(listed.len(), 1);
-        assert!(next_cursor.is_none());
-        let InviteCodeSummary {
-            consumed_at,
-            revoked_at,
-            note,
-            ..
-        } = &listed[0];
-        assert!(consumed_at.is_none());
-        assert!(revoked_at.is_none());
-        assert_eq!(note.as_deref(), Some("ops"));
-
-        // Revoke by hex hash -> 204, then the row is revoked.
-        let status = revoke_invite_code(
-            State(state.clone()),
-            admin.clone(),
-            Path(created.code_hash_hex.clone()),
-        )
-        .await
-        .expect("revoke");
-        assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
-        let Page { items: listed, .. } =
-            list_invite_codes(State(state.clone()), admin, Query(PageQuery::default()))
-                .await
-                .expect("list")
-                .0;
-        assert!(listed[0].revoked_at.is_some());
-    }
-
-    /// The legacy enrollment-code mint now rejects an unknown user (users live
-    /// in the DB; there is no longer an in-memory index).
     #[tokio::test]
     async fn enrollment_code_rejects_unknown_user() {
         let state = make_state().await;
@@ -560,7 +378,7 @@ mod tests {
     #[tokio::test]
     async fn enrollment_code_for_known_user() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "owner", "owner@example.test").await;
+        let user_id = seed_user(&state, "owner").await;
         let admin = AuthPrincipal(Principal::Admin);
         let resp = create_enrollment_code(
             State(state),
@@ -573,121 +391,6 @@ mod tests {
         .expect("create")
         .0;
         assert!(resp.code.starts_with("sk-enroll-"));
-    }
-
-    /// Revoke is idempotent: a second revoke returns 204 and does not clobber
-    /// the original `revoked_at` (audit-relevant).
-    #[tokio::test]
-    async fn revoke_is_idempotent_preserving_timestamp() {
-        let state = make_state().await;
-        let admin = AuthPrincipal(Principal::Admin);
-        let created = create_invite_code(
-            State(state.clone()),
-            admin.clone(),
-            Json(CreateInviteCodeRequest::default()),
-        )
-        .await
-        .expect("create")
-        .0;
-        let hex = created.code_hash_hex.clone();
-
-        revoke_invite_code(State(state.clone()), admin.clone(), Path(hex.clone()))
-            .await
-            .expect("first revoke");
-        let first = list_invite_codes(
-            State(state.clone()),
-            admin.clone(),
-            Query(PageQuery::default()),
-        )
-        .await
-        .expect("list")
-        .0
-        .items[0]
-            .revoked_at
-            .expect("revoked once");
-
-        revoke_invite_code(State(state.clone()), admin.clone(), Path(hex))
-            .await
-            .expect("second revoke");
-        let second = list_invite_codes(State(state.clone()), admin, Query(PageQuery::default()))
-            .await
-            .expect("list")
-            .0
-            .items[0]
-            .revoked_at
-            .expect("still revoked");
-        assert_eq!(first, second, "revoked_at must not be clobbered");
-    }
-
-    /// A non-64-hex path segment is rejected before any decode or DB work.
-    #[tokio::test]
-    async fn revoke_rejects_bad_hex_length() {
-        let state = make_state().await;
-        let admin = AuthPrincipal(Principal::Admin);
-        match revoke_invite_code(State(state), admin, Path("deadbeef".to_string())).await {
-            Err(e) => assert_eq!(e.status, 400),
-            Ok(_) => panic!("short hex must be rejected"),
-        }
-    }
-
-    /// `list_invite_codes` paginates: a full first page yields a cursor, the
-    /// second page returns the remainder with no cursor, and concatenation
-    /// reconstructs the whole set.
-    #[tokio::test]
-    async fn list_invite_codes_paginates() {
-        let state = make_state().await;
-        let admin = AuthPrincipal(Principal::Admin);
-        // Mint 3 codes with a 2-per-page limit.
-        let mut all = Vec::new();
-        for _ in 0..3 {
-            let created = create_invite_code(
-                State(state.clone()),
-                admin.clone(),
-                Json(CreateInviteCodeRequest::default()),
-            )
-            .await
-            .expect("create")
-            .0;
-            all.push(created.code_hash_hex);
-        }
-
-        let page1 = list_invite_codes(
-            State(state.clone()),
-            admin.clone(),
-            Query(PageQuery {
-                limit: Some(2),
-                cursor: None,
-            }),
-        )
-        .await
-        .expect("page1")
-        .0;
-        assert_eq!(page1.items.len(), 2);
-        let cursor = page1.next_cursor.expect("a following page exists");
-
-        let page2 = list_invite_codes(
-            State(state.clone()),
-            admin,
-            Query(PageQuery {
-                limit: Some(2),
-                cursor: Some(cursor),
-            }),
-        )
-        .await
-        .expect("page2")
-        .0;
-        assert_eq!(page2.items.len(), 1);
-        assert!(page2.next_cursor.is_none());
-
-        let mut seen: Vec<String> = page1
-            .items
-            .into_iter()
-            .chain(page2.items)
-            .map(|s| s.code_hash_hex)
-            .collect();
-        seen.sort();
-        all.sort();
-        assert_eq!(seen, all, "pages cover the full set with no dupes");
     }
 
     // --- users / passkeys --------------------------------------------------
@@ -704,6 +407,7 @@ mod tests {
             label: Set("Device".to_string()),
             created_at: Set(OffsetDateTime::now_utc()),
             last_used_at: Set(OffsetDateTime::now_utc()),
+            discoverable: Set(false),
         }
         .insert(&state.db)
         .await
@@ -718,11 +422,7 @@ mod tests {
         let admin = AuthPrincipal(Principal::Admin);
         let mut all = Vec::new();
         for i in 0..3 {
-            all.push(
-                seed_user(&state, &format!("u{i}"), &format!("u{i}@example.test"))
-                    .await
-                    .to_string(),
-            );
+            all.push(seed_user(&state, &format!("u{i}")).await.to_string());
         }
 
         let page1 = list_users(
@@ -770,7 +470,7 @@ mod tests {
     async fn disable_then_enable_user_round_trips() {
         let state = make_state().await;
         let admin = AuthPrincipal(Principal::Admin);
-        let user_id = seed_user(&state, "owner", "owner@example.test").await;
+        let user_id = seed_user(&state, "owner").await;
 
         // Disable -> disabled_at is set.
         let disabled = update_user(
@@ -837,7 +537,7 @@ mod tests {
     async fn list_passkeys_for_user() {
         let state = make_state().await;
         let admin = AuthPrincipal(Principal::Admin);
-        let user_id = seed_user(&state, "owner", "owner@example.test").await;
+        let user_id = seed_user(&state, "owner").await;
         let pk_id = seed_passkey(&state, user_id.as_ref()).await;
 
         let items = list_user_passkeys(
@@ -866,7 +566,7 @@ mod tests {
     async fn revoke_passkey_hard_deletes_and_404s_when_gone() {
         let state = make_state().await;
         let admin = AuthPrincipal(Principal::Admin);
-        let user_id = seed_user(&state, "owner", "owner@example.test").await;
+        let user_id = seed_user(&state, "owner").await;
         let pk_id = seed_passkey(&state, user_id.as_ref()).await;
 
         let status = revoke_passkey(State(state.clone()), admin.clone(), Path(pk_id))

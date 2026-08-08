@@ -529,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn empty_list() {
         let state = make_state().await;
-        let user = seed_user(&state, "alice", "alice@example.test").await;
+        let user = seed_user(&state, "alice").await;
         let Json(got) = list_tagmata(State(state), AuthPrincipal(Principal::User(user)))
             .await
             .expect("list");
@@ -542,7 +542,7 @@ mod tests {
     #[tokio::test]
     async fn enrolled_tagma_lists_as_enrolled() {
         let state = make_state().await;
-        let user = seed_user(&state, "alice", "alice@example.test").await;
+        let user = seed_user(&state, "alice").await;
         let (tagma, _) = seed_tagma(&state, &user, dummy_key()).await;
 
         let Json(got) = list_tagmata(State(state), AuthPrincipal(Principal::User(user)))
@@ -561,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn mint_then_list_round_trip() {
         let state = make_state().await;
-        let user = seed_user(&state, "alice", "alice@example.test").await;
+        let user = seed_user(&state, "alice").await;
         let principal = AuthPrincipal(Principal::User(user.clone()));
 
         let Json(MintResponse { code, id, .. }) = mint(State(state.clone()), principal.clone())
@@ -595,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn cap_counts_expired_pending_tagmas() {
         let state = make_state().await;
-        let user = seed_user(&state, "bob", "bob@example.test").await;
+        let user = seed_user(&state, "bob").await;
         let principal = AuthPrincipal(Principal::User(user.clone()));
         // Seed the cap (8) of already-expired, pending (unenrolled, unrevoked)
         // tagmas directly. Each needs a distinct code hash (partial unique
@@ -632,7 +632,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_is_idempotent() {
         let state = make_state().await;
-        let user = seed_user(&state, "carol", "carol@example.test").await;
+        let user = seed_user(&state, "carol").await;
         let Json(MintResponse { id, .. }) = mint(
             State(state.clone()),
             AuthPrincipal(Principal::User(user.clone())),
@@ -679,8 +679,8 @@ mod tests {
     #[tokio::test]
     async fn revoke_is_owner_scoped() {
         let state = make_state().await;
-        let alice = seed_user(&state, "alice", "alice@example.test").await;
-        let bob = seed_user(&state, "bob", "bob@example.test").await;
+        let alice = seed_user(&state, "alice").await;
+        let bob = seed_user(&state, "bob").await;
         let Json(MintResponse { id, .. }) =
             mint(State(state.clone()), AuthPrincipal(Principal::User(alice)))
                 .await
@@ -702,8 +702,8 @@ mod tests {
     #[tokio::test]
     async fn rename_tagma_sets_clears_and_is_owner_scoped() {
         let state = make_state().await;
-        let alice = seed_user(&state, "alice", "alice@example.test").await;
-        let bob = seed_user(&state, "bob", "bob@example.test").await;
+        let alice = seed_user(&state, "alice").await;
+        let bob = seed_user(&state, "bob").await;
         let (tagma_id, _) = seed_tagma(&state, &alice, dummy_key()).await;
         let id = tagma_id.to_string();
         let path = || axum::extract::Path(id.clone());

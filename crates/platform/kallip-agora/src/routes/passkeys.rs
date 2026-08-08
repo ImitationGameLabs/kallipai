@@ -17,13 +17,15 @@
 //! same helper with `allow_last = true`.
 
 use crate::auth::{AuthPrincipal, require_user};
-use crate::db::entity::{passkey_revocations, passkeys, sessions, users, webauthn_challenges};
+use crate::db::entity::{
+    external_identities, passkey_revocations, passkeys, sessions, users, webauthn_challenges,
+};
 use crate::db::{TxnError, flatten_txn, map_db_err};
 use crate::session::read_session_cookie;
 use crate::state::SharedState;
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, patch, post};
 use kallip_agora_common::admin::PasskeySummary;
@@ -31,17 +33,18 @@ use kallip_agora_common::ids::UserId;
 use kallip_common::authtoken::TokenHash;
 use kallip_common::protocol::ApiError;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseTransaction, EntityTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseTransaction, EntityTrait,
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use serde::Deserialize;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, PasskeyRegistration, RegisterPublicKeyCredential,
+    CreationChallengeResponse, Passkey, PasskeyRegistration, RegisterPublicKeyCredential,
 };
+use webauthn_rs_core::proto::RegistrationState;
 
-use super::auth::{CHALLENGE_TTL, CeremonyBeginResponse, KIND_REGISTER, register_err};
+use super::auth::{CHALLENGE_TTL, CeremonyBeginResponse, KIND_ADD_REGULAR, register_err};
 
 /// Max length of a passkey `label` (after trim). Mirrors `display_name`'s cap:
 /// the label is shown in management UI and stored, so an unbounded value is both
@@ -53,6 +56,12 @@ const MAX_LABEL_LEN: usize = 64;
 /// than [`CHALLENGE_TTL`] so a ceremony can never outlive the step-up that
 /// authorized it.
 pub(crate) const STEP_UP_WINDOW: time::Duration = time::Duration::seconds(240);
+
+/// Ceremony-kind for the discoverable (resident-key) add-passkey flow. Stored
+/// on `webauthn_challenges.kind` so `add_passkey_finish` picks the right state
+/// type (the bare core `RegistrationState`, not the wrapper `PasskeyRegistration`)
+/// and registers the credential through `WebauthnCore` + `Passkey::from`.
+pub(crate) const KIND_ADD_DISCOVERABLE: &str = "add_discoverable";
 
 /// Max live (unexpired) add-passkey ceremonies per user. The step-up is the
 /// primary gate (one-shot, so begin-spam needs a fresh re-auth each time, which
@@ -102,6 +111,7 @@ pub(crate) fn row_to_summary(r: passkeys::Model) -> PasskeySummary {
         label: r.label,
         created_at: r.created_at,
         last_used_at: r.last_used_at,
+        discoverable: r.discoverable,
     }
 }
 
@@ -132,6 +142,22 @@ pub(crate) async fn consume_step_up(
     Ok(())
 }
 
+/// Which enrollment flavor a bound credential is: a regular (server-stored,
+/// non-resident) passkey or a discoverable (resident-key) one. Carried into
+/// `bind_passkey_to_user` so call sites read as a named intent rather than a
+/// positional `bool` (which reads as a mystery flag at cross-module callers).
+#[derive(Clone, Copy)]
+pub(crate) enum CredentialFlavor {
+    Regular,
+    Discoverable,
+}
+
+impl CredentialFlavor {
+    fn is_discoverable(&self) -> bool {
+        matches!(self, Self::Discoverable)
+    }
+}
+
 /// Bind a verified credential to an existing user: denylist the cred_id against
 /// `passkey_revocations`, then insert a `passkeys` row. Shared by
 /// `add_passkey_finish` (session + step-up) and `device_pairing_finish` (pairing
@@ -151,6 +177,7 @@ pub(crate) async fn bind_passkey_to_user(
     cred_id: Vec<u8>,
     credential_json: serde_json::Value,
     label: String,
+    flavor: CredentialFlavor,
 ) -> Result<(), TxnError> {
     // Denylist: refuse to re-bind a previously-revoked cred_id.
     let revoked = passkey_revocations::Entity::find()
@@ -172,6 +199,7 @@ pub(crate) async fn bind_passkey_to_user(
         label: Set(label),
         created_at: Set(now),
         last_used_at: Set(now),
+        discoverable: Set(flavor.is_discoverable()),
     }
     .insert(txn)
     .await?;
@@ -218,9 +246,23 @@ pub(crate) async fn revoke_passkey_row(
                     return Ok(());
                 };
                 if !allow_last && live.len() <= 1 {
-                    return Err(TxnError::Api(ApiError::conflict(
-                        "cannot revoke last passkey",
-                    )));
+                    // Symmetric last-sign-in-method guard: removing the last
+                    // passkey is allowed only if the account still has an
+                    // external identity to sign in with. Lock
+                    // external_identities AFTER passkeys (the fixed order
+                    // `oauth::unlink_external_identity` also uses) so two
+                    // concurrent last-pair removals -- one of each kind --
+                    // cannot both pass and leave the account credentialless.
+                    let identities = external_identities::Entity::find()
+                        .filter(external_identities::Column::UserId.eq(user_id_str.clone()))
+                        .lock_exclusive()
+                        .all(txn)
+                        .await?;
+                    if identities.is_empty() {
+                        return Err(TxnError::Api(ApiError::conflict(
+                            "cannot remove the last sign-in method",
+                        )));
+                    }
                 }
                 let cred_id = target.cred_id.clone();
                 let now = OffsetDateTime::now_utc();
@@ -264,7 +306,9 @@ async fn add_passkey_begin(
     State(state): State<SharedState>,
     AuthPrincipal(principal): AuthPrincipal,
     headers: HeaderMap,
+    Query(params): Query<AddPasskeyBeginParams>,
 ) -> Result<Json<CeremonyBeginResponse<CreationChallengeResponse>>, ApiError> {
+    let discoverable = params.discoverable.unwrap_or(false);
     let user_id = require_user(&principal)?;
     let user = users::Entity::find_by_id(user_id.to_string())
         .one(&state.db)
@@ -305,16 +349,35 @@ async fn add_passkey_begin(
         Some(s) if !s.is_empty() => s.to_string(),
         _ => user.username.clone(),
     };
-    let (options, reg_state) = state
-        .webauthn
-        .start_passkey_registration(user_uuid, &user.email, &display, Some(exclude))
-        .map_err(register_err)?;
-    let state_value = serde_json::to_value(&reg_state)
-        .map_err(|e| ApiError::internal(format_args!("serialize reg state: {e}")))?;
+    let (options, state_value, kind) = if discoverable {
+        // Discoverable (resident-key) add-passkey: share the signup discoverable
+        // challenge builder. State is the BARE core RegistrationState (a different
+        // shape from PasskeyRegistration), tagged with its own kind so finish
+        // rehydrates the right type.
+        let (ccr, rs) = super::auth::discoverable_registration_challenge(
+            &state,
+            user_uuid,
+            &user.username,
+            &display,
+            Some(exclude),
+        )?;
+        let sv = serde_json::to_value(&rs)
+            .map_err(|e| ApiError::internal(format_args!("serialize reg state: {e}")))?;
+        (ccr, sv, KIND_ADD_DISCOVERABLE)
+    } else {
+        let (ccr, rs) = state
+            .webauthn
+            .start_passkey_registration(user_uuid, &user.username, &display, Some(exclude))
+            .map_err(register_err)?;
+        let sv = serde_json::to_value(&rs)
+            .map_err(|e| ApiError::internal(format_args!("serialize reg state: {e}")))?;
+        (ccr, sv, KIND_ADD_REGULAR)
+    };
 
     let ceremony_id = Uuid::new_v4();
     let now = OffsetDateTime::now_utc();
     let user_id_for_txn = user_id.clone();
+    let kind = kind.to_string();
     // NOTE: unlike `register_begin` (which inserts the challenge row outside any
     // txn), this begin wraps the challenge insert in a transaction because the
     // step-up MUST be consumed atomically with the insert -- otherwise a crash
@@ -327,15 +390,23 @@ async fn add_passkey_begin(
             let session_hash = session_hash.clone();
             let state_value = state_value.clone();
             let user_id = user_id_for_txn.clone();
+            let kind = kind.clone();
             Box::pin(async move {
                 // Step-up: check `authed_at` freshness and CONSUME it (NULL) so
                 // one fresh login authorizes exactly one credential-binding.
                 consume_step_up(txn, &session_hash, now).await?;
 
-                // Storage bound on in-flight add-passkey ceremonies for this user.
+                // Storage bound on in-flight add-passkey ceremonies for this
+                // user. Counts BOTH add kinds (discoverable + regular) against
+                // one shared budget so a user cannot bypass the cap by
+                // alternating kinds.
                 let in_flight = webauthn_challenges::Entity::find()
                     .filter(webauthn_challenges::Column::UserId.eq(user_id.to_string()))
-                    .filter(webauthn_challenges::Column::Kind.eq(KIND_REGISTER))
+                    .filter(
+                        Condition::any()
+                            .add(webauthn_challenges::Column::Kind.eq(KIND_ADD_REGULAR))
+                            .add(webauthn_challenges::Column::Kind.eq(KIND_ADD_DISCOVERABLE)),
+                    )
                     .filter(webauthn_challenges::Column::ExpiresAt.gt(now))
                     .count(txn)
                     .await?;
@@ -347,11 +418,10 @@ async fn add_passkey_begin(
 
                 webauthn_challenges::ActiveModel {
                     id: Set(ceremony_id),
-                    kind: Set(KIND_REGISTER.to_string()),
+                    kind: Set(kind),
                     state: Set(state_value),
-                    held_code_hash: Set(None),
+                    pairing_code_hash: Set(None),
                     user_id: Set(Some(user_id.to_string())),
-                    email: Set(None),
                     username: Set(None),
                     expires_at: Set(now + CHALLENGE_TTL),
                     created_at: Set(now),
@@ -368,6 +438,14 @@ async fn add_passkey_begin(
         ceremony_id: ceremony_id.to_string(),
         options,
     }))
+}
+
+/// `?discoverable=true` on `POST /v1/me/passkeys/register/begin` switches the
+/// add-passkey ceremony to resident-key (discoverable) registration. Absent =>
+/// the regular non-discoverable add-passkey flow (byte-identical to pre-Phase-B).
+#[derive(Deserialize)]
+struct AddPasskeyBeginParams {
+    discoverable: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -389,7 +467,7 @@ async fn add_passkey_finish(
         .await
         .map_err(map_db_err)?
         .ok_or_else(|| ApiError::not_found("unknown ceremony"))?;
-    if row.kind != KIND_REGISTER {
+    if row.kind != KIND_ADD_REGULAR && row.kind != KIND_ADD_DISCOVERABLE {
         return Err(ApiError::bad_request("ceremony is not a registration"));
     }
     if row.expires_at <= OffsetDateTime::now_utc() {
@@ -400,18 +478,37 @@ async fn add_passkey_finish(
             .clone()
             .ok_or_else(|| ApiError::internal(format_args!("add ceremony missing user id")))?,
     );
-    let reg_state: PasskeyRegistration = serde_json::from_value(row.state)
-        .map_err(|e| ApiError::internal(format_args!("deserialize reg state: {e}")))?;
 
-    // Verify the credential (CPU-bound, outside the txn).
-    let passkey = state
-        .webauthn
-        .finish_passkey_registration(&req.credential, &reg_state)
-        .map_err(register_err)?;
+    // Verify the credential (CPU-bound, outside the txn). The discoverable kind
+    // rehydrates the BARE core RegistrationState (a different shape from
+    // PasskeyRegistration) and finishes through WebauthnCore; the resulting
+    // Credential is wrapped into a Passkey via danger-credential-internals so it
+    // lands in the same `passkeys.credential` column and works in both flows.
+    let (credential_json, cred_id, flavor) = if row.kind == KIND_ADD_DISCOVERABLE {
+        let reg_state: RegistrationState = serde_json::from_value(row.state)
+            .map_err(|e| ApiError::internal(format_args!("deserialize reg state: {e}")))?;
+        let cred = state
+            .webauthn_core
+            .register_credential(&req.credential, &reg_state, None)
+            .map_err(register_err)?;
+        let passkey = Passkey::from(cred);
+        let cj = serde_json::to_value(&passkey)
+            .map_err(|e| ApiError::internal(format_args!("serialize passkey: {e}")))?;
+        let cid = passkey.cred_id().as_slice().to_vec();
+        (cj, cid, CredentialFlavor::Discoverable)
+    } else {
+        let reg_state: PasskeyRegistration = serde_json::from_value(row.state)
+            .map_err(|e| ApiError::internal(format_args!("deserialize reg state: {e}")))?;
+        let passkey = state
+            .webauthn
+            .finish_passkey_registration(&req.credential, &reg_state)
+            .map_err(register_err)?;
+        let cj = serde_json::to_value(&passkey)
+            .map_err(|e| ApiError::internal(format_args!("serialize passkey: {e}")))?;
+        let cid = passkey.cred_id().as_slice().to_vec();
+        (cj, cid, CredentialFlavor::Regular)
+    };
     let label = normalize_label(req.label)?;
-    let credential_json = serde_json::to_value(&passkey)
-        .map_err(|e| ApiError::internal(format_args!("serialize passkey: {e}")))?;
-    let cred_id = passkey.cred_id().as_slice().to_vec();
 
     let ceremony_id = req.ceremony_id;
     let user_id_for_txn = user_id.clone();
@@ -437,8 +534,12 @@ async fn add_passkey_finish(
                     return Err(TxnError::Api(ApiError::unauthorized("ceremony expired")));
                 }
 
-                // Re-check the owner is not disabled under the lock.
+                // Re-check the owner is not disabled, taking a `users` row lock.
+                // This narrows the disabled-check race to a single ordering
+                // (whoever wins `FOR UPDATE` first proceeds); mirrors
+                // `finalize_login_and_mint_session`.
                 let user = users::Entity::find_by_id(user_id.to_string())
+                    .lock_exclusive()
                     .one(txn)
                     .await?
                     .ok_or_else(|| TxnError::Api(ApiError::unauthorized("invalid credentials")))?;
@@ -454,6 +555,7 @@ async fn add_passkey_finish(
                     cred_id.clone(),
                     credential_json.clone(),
                     label.clone(),
+                    flavor,
                 )
                 .await?;
 
@@ -554,6 +656,7 @@ mod tests {
     //! The WebAuthn crypto ceremonies themselves are exercised by the browser.
 
     use super::*;
+    use crate::auth::Principal;
     use crate::test_helpers::{make_state, seed_passkey, seed_user};
     use sea_orm::EntityTrait;
 
@@ -562,7 +665,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_deletes_live_row_and_appends_audit() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "alice", "alice@example.test").await;
+        let user_id = seed_user(&state, "alice").await;
         let a = seed_passkey(&state, &user_id, vec![1]).await;
         let b = seed_passkey(&state, &user_id, vec![2]).await;
 
@@ -601,7 +704,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_rejects_last_live_passkey() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "bob", "bob@example.test").await;
+        let user_id = seed_user(&state, "bob").await;
         let only = seed_passkey(&state, &user_id, vec![9]).await;
         let err = revoke_passkey_row(
             &state,
@@ -624,11 +727,51 @@ mod tests {
         );
     }
 
+    /// The user path (`allow_last = false`) ALLOWS revoking the last passkey
+    /// when the account still has an external identity to sign in with (the
+    /// symmetric last-method guard: at least one credential of either kind).
+    #[tokio::test]
+    async fn revoke_last_passkey_allowed_with_external_identity() {
+        let state = make_state().await;
+        let user_id = seed_user(&state, "dory").await;
+        let only = seed_passkey(&state, &user_id, vec![3]).await;
+        // The account also has a linked GitHub identity.
+        external_identities::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            user_id: Set(user_id.to_string()),
+            provider: Set("github".to_string()),
+            subject: Set("gh-1".to_string()),
+            display_name: Set(None),
+            created_at: Set(OffsetDateTime::now_utc()),
+            last_used_at: Set(None),
+        }
+        .insert(&state.db)
+        .await
+        .expect("seed identity");
+
+        revoke_passkey_row(
+            &state,
+            &user_id,
+            only,
+            false,
+            passkey_revocations::REASON_REVOKED,
+            passkey_revocations::REVOKED_BY_USER,
+        )
+        .await
+        .expect("identity keeps the account reachable");
+        assert!(
+            list_user_passkey_rows(&state.db, &user_id)
+                .await
+                .expect("list")
+                .is_empty()
+        );
+    }
+
     /// The admin path (`allow_last = true`) overrides the guard.
     #[tokio::test]
     async fn revoke_allow_last_overrides_guard() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "carol", "carol@example.test").await;
+        let user_id = seed_user(&state, "carol").await;
         let only = seed_passkey(&state, &user_id, vec![7]).await;
         revoke_passkey_row(
             &state,
@@ -652,7 +795,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_is_idempotent() {
         let state = make_state().await;
-        let user_id = seed_user(&state, "dave", "dave@example.test").await;
+        let user_id = seed_user(&state, "dave").await;
         let pk = seed_passkey(&state, &user_id, vec![1]).await;
         seed_passkey(&state, &user_id, vec![2]).await;
         revoke_passkey_row(
@@ -682,5 +825,217 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(audits, 1);
+    }
+
+    // --- discoverable add-passkey begin: builder + step-up + cap ----------------
+
+    /// Seed a fresh step-up session for `user_id` and return the headers that
+    /// carry the matching `kallip_session` cookie. Mirrors the production
+    /// login-finish row: `token_hash = TokenHash::of(cookie value)` and
+    /// `authed_at` set to `now` (fresh within the step-up window).
+    async fn seed_step_up_session(state: &SharedState, user_id: &UserId) -> HeaderMap {
+        let now = OffsetDateTime::now_utc();
+        let secret = "sk-sess-test".to_string();
+        let hash = TokenHash::of(&secret).as_bytes().to_vec();
+        sessions::ActiveModel {
+            token_hash: Set(hash),
+            user_id: Set(user_id.to_string()),
+            created_at: Set(now),
+            expires_at: Set(now + time::Duration::seconds(3600)),
+            authed_at: Set(Some(now)),
+        }
+        .insert(&state.db)
+        .await
+        .expect("seed step-up session");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("{}={secret}", crate::session::SESSION_COOKIE_NAME)
+                .parse()
+                .expect("cookie header value"),
+        );
+        headers
+    }
+
+    /// `?discoverable=true` builds the resident-key ceremony via the bare core
+    /// and persists the BARE `RegistrationState` (not `PasskeyRegistration`),
+    /// tagged `add_discoverable`, owner-scoped to the caller. This is the
+    /// highest-risk untested code path (the hand-mirrored builder); the crypto
+    /// assertion itself is browser-tested.
+    #[tokio::test]
+    async fn add_passkey_begin_discoverable_writes_bare_registration_state() {
+        let state = make_state().await;
+        let user_id = seed_user(&state, "erin").await;
+        let headers = seed_step_up_session(&state, &user_id).await;
+
+        let resp = add_passkey_begin(
+            State(state.clone()),
+            AuthPrincipal(Principal::User(user_id.clone())),
+            headers,
+            Query(AddPasskeyBeginParams {
+                discoverable: Some(true),
+            }),
+        )
+        .await
+        .expect("discoverable begin ok");
+        assert!(!resp.ceremony_id.is_empty());
+
+        let rows = webauthn_challenges::Entity::find()
+            .all(&state.db)
+            .await
+            .expect("read challenges");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, KIND_ADD_DISCOVERABLE);
+        assert_eq!(rows[0].user_id, Some(user_id.to_string()));
+        // The state is the bare core RegistrationState (a different shape from
+        // the username-registration PasskeyRegistration): rehydration is what
+        // finish branches on.
+        let _: RegistrationState =
+            serde_json::from_value(rows[0].state.clone()).expect("deserialize bare reg state");
+
+        // The step-up was consumed (one fresh login authorizes exactly one bind).
+        let still_authed = sessions::Entity::find()
+            .filter(sessions::Column::UserId.eq(user_id.to_string()))
+            .one(&state.db)
+            .await
+            .expect("read session")
+            .expect("session exists");
+        assert!(still_authed.authed_at.is_none(), "step-up consumed");
+    }
+
+    /// The in-flight add-passkey cap is a SHARED budget across both add kinds:
+    /// `register` ceremonies already open for the user count against a
+    /// `?discoverable=true` begin, so alternating kinds cannot bypass the cap.
+    #[tokio::test]
+    async fn add_passkey_begin_cap_counts_both_add_kinds() {
+        let state = make_state().await;
+        let user_id = seed_user(&state, "frank").await;
+        let now = OffsetDateTime::now_utc();
+        // Saturate the cap with regular (non-discoverable) add ceremonies.
+        for _ in 0..MAX_INFLIGHT_ADD_CEREMONIES {
+            webauthn_challenges::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                kind: Set(KIND_ADD_REGULAR.to_string()),
+                state: Set(serde_json::Value::Null),
+                pairing_code_hash: Set(None),
+                user_id: Set(Some(user_id.to_string())),
+                username: Set(None),
+                expires_at: Set(now + time::Duration::seconds(60)),
+                created_at: Set(now),
+            }
+            .insert(&state.db)
+            .await
+            .expect("seed register challenge");
+        }
+        let headers = seed_step_up_session(&state, &user_id).await;
+
+        let err = add_passkey_begin(
+            State(state),
+            AuthPrincipal(Principal::User(user_id)),
+            headers,
+            Query(AddPasskeyBeginParams {
+                discoverable: Some(true),
+            }),
+        )
+        .await
+        .expect_err("shared cap must 429");
+        assert_eq!(err.status, 429);
+    }
+
+    /// A placeholder registration credential -- its contents never matter
+    /// because these finish tests each hit a pre-crypto guard (unknown/kind/
+    /// expiry), before `register_credential` is reached.
+    fn phantom_credential() -> RegisterPublicKeyCredential {
+        serde_json::from_str(
+            r#"{"id":"","rawId":"","type":"public-key","response":{"attestationObject":"","clientDataJSON":""}}"#,
+        )
+        .expect("phantom credential deserializes")
+    }
+
+    /// `add_passkey_finish` rejects an unknown ceremony id with 404.
+    #[tokio::test]
+    async fn add_passkey_finish_rejects_unknown_ceremony() {
+        let state = make_state().await;
+        let err = add_passkey_finish(
+            State(state),
+            Json(AddPasskeyFinishRequest {
+                ceremony_id: Uuid::new_v4(),
+                credential: phantom_credential(),
+                label: "Phone".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unknown ceremony");
+        assert_eq!(err.status, 404);
+    }
+
+    /// The finish kind-discriminator accepts only the add kinds
+    /// (`KIND_ADD_REGULAR` + `KIND_ADD_DISCOVERABLE`); a ceremony of any other
+    /// kind (e.g. a pairing ceremony) is rejected with 400. Locks the
+    /// `KIND_REGISTER`/`KIND_ADD_REGULAR` split so a non-add ceremony cannot
+    /// reach the rehydrate branch.
+    #[tokio::test]
+    async fn add_passkey_finish_rejects_wrong_kind() {
+        let state = make_state().await;
+        let user = seed_user(&state, "alice").await;
+        let now = OffsetDateTime::now_utc();
+        let id = Uuid::new_v4();
+        webauthn_challenges::ActiveModel {
+            id: Set(id),
+            kind: Set(crate::routes::auth::KIND_PAIR.to_string()),
+            state: Set(serde_json::Value::Null),
+            pairing_code_hash: Set(None),
+            user_id: Set(Some(user.to_string())),
+            username: Set(None),
+            expires_at: Set(now + time::Duration::seconds(60)),
+            created_at: Set(now),
+        }
+        .insert(&state.db)
+        .await
+        .expect("seed pair ceremony");
+        let err = add_passkey_finish(
+            State(state),
+            Json(AddPasskeyFinishRequest {
+                ceremony_id: id,
+                credential: phantom_credential(),
+                label: "Phone".to_string(),
+            }),
+        )
+        .await
+        .expect_err("wrong kind");
+        assert_eq!(err.status, 400);
+    }
+
+    /// `add_passkey_finish` rejects an expired add ceremony with 401.
+    #[tokio::test]
+    async fn add_passkey_finish_rejects_expired() {
+        let state = make_state().await;
+        let user = seed_user(&state, "alice").await;
+        let now = OffsetDateTime::now_utc();
+        let id = Uuid::new_v4();
+        webauthn_challenges::ActiveModel {
+            id: Set(id),
+            kind: Set(KIND_ADD_DISCOVERABLE.to_string()),
+            state: Set(serde_json::Value::Null),
+            pairing_code_hash: Set(None),
+            user_id: Set(Some(user.to_string())),
+            username: Set(None),
+            expires_at: Set(now - time::Duration::seconds(60)),
+            created_at: Set(now - time::Duration::seconds(120)),
+        }
+        .insert(&state.db)
+        .await
+        .expect("seed expired add ceremony");
+        let err = add_passkey_finish(
+            State(state),
+            Json(AddPasskeyFinishRequest {
+                ceremony_id: id,
+                credential: phantom_credential(),
+                label: "Phone".to_string(),
+            }),
+        )
+        .await
+        .expect_err("expired");
+        assert_eq!(err.status, 401);
     }
 }

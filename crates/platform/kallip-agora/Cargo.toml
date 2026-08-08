@@ -26,11 +26,14 @@ sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 async-trait = { workspace = true }
 webauthn-rs = { workspace = true }
+webauthn-rs-core = { workspace = true }
 cookie = { workspace = true }
 url = { workspace = true }
 ipnet = { workspace = true }
 getrandom = { workspace = true }
 email_address = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true, features = ["form"] }
 
 [dev-dependencies]
 testcontainers = { workspace = true }

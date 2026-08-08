@@ -1,5 +1,5 @@
 //! `kallip-agora`: the registry / control plane (identity, WebAuthn, tagma
-//! lifecycle, invites) for the kallip relay.
+//! lifecycle) for the kallip relay.
 //!
 //! The agora owns the durable Postgres store and exposes a narrow `ControlPlane`
 //! trait (in `kallip-agora-common`). The data-plane relay (`kallip-lesche`) is a
@@ -18,6 +18,8 @@ mod email;
 #[cfg(test)]
 mod integration;
 mod middleware;
+mod notify;
+mod oauth;
 mod ratelimit;
 mod routes;
 mod session;
@@ -34,7 +36,6 @@ use anyhow::Result;
 use clap::Parser;
 use kallip_common::authtoken::{MintedToken, TokenHash};
 use tracing::{info, warn};
-use webauthn_rs::prelude::WebauthnBuilder;
 
 use args::Args;
 use state::{AppState, Limits};
@@ -64,7 +65,6 @@ async fn main() -> Result<()> {
     let limits = Limits {
         max_body_size_bytes: body_size_bytes(args.max_body_size_kb),
         enrollment_code_ttl: Duration::from_secs(args.enrollment_code_ttl_secs),
-        invite_default_ttl_secs: args.invite_default_ttl_secs,
     };
 
     // Connect to Postgres (retrying with a capped backoff) and apply pending
@@ -72,26 +72,43 @@ async fn main() -> Result<()> {
     let db = crate::db::connect_and_migrate(&args.database_url).await?;
 
     // Build the WebAuthn relying party via the high-level wrapper's safe
-    // builder (validates rp_id is an effective domain of rp_origin), the
-    // session-cookie config, and the per-IP auth rate limiter from the boot args.
+    // builder (validates rp_id is an effective domain of rp_origin) AND a bare
+    // core from the same config (discoverable registration needs the core, since
+    // the wrapper hardcodes require_resident_key=false). The session-cookie
+    // config and per-IP auth rate limiter come from the boot args.
     let rp_origin = url::Url::parse(&args.webauthn_rp_origin)
         .map_err(|e| anyhow::anyhow!("invalid KALLIP_AGORA_WEBAUTHN_RP_ORIGIN: {e}"))?;
-    let webauthn = WebauthnBuilder::new(&args.webauthn_rp_id, &rp_origin)
-        .map_err(|e| anyhow::anyhow!("invalid WebAuthn RP config: {e}"))?
-        .allow_any_port(args.webauthn_allow_any_port)
-        .rp_name(&args.webauthn_rp_name)
-        .timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|e| anyhow::anyhow!("WebAuthn build failed: {e}"))?;
+    let (webauthn, webauthn_core) = crate::state::build_webauthn_pair(
+        &args.webauthn_rp_name,
+        &args.webauthn_rp_id,
+        &rp_origin,
+        args.webauthn_allow_any_port,
+        false,
+    )
+    .map_err(|e| anyhow::anyhow!("WebAuthn RP config invalid: {e}"))?;
     let session_cfg = session::SessionCfg {
         ttl: Duration::from_secs(args.session_ttl_secs),
         cookie_secure: args.cookie_secure,
-        cookie_domain: args.cookie_domain,
+        cookie_domain: args.cookie_domain.clone(),
     };
     let auth_rate_limiter =
         ratelimit::IpRateLimiter::new(args.auth_rate_capacity, args.auth_rate_refill_per_sec);
     let pair_rate_limiter =
         ratelimit::GlobalRateLimiter::new(args.pair_rate_capacity, args.pair_rate_refill_per_sec);
+
+    // Shared HTTP client for outbound OAuth round-trips. Request-bounded (each
+    // call is a token exchange + userinfo fetch with a natural end); rustls via
+    // the workspace reqwest features; no cookie jar.
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| anyhow::anyhow!("build reqwest client: {e}"))?;
+
+    // Build the OAuth provider registry from config. A provider is enabled iff
+    // BOTH its client id and secret are non-empty. redirect_base is required
+    // only when at least one provider is configured (the canonical redirect_uri
+    // is derived from it); an empty registry runs the agora with OAuth disabled.
+    let oauth_providers = build_oauth_registry(&args)?;
 
     // Parse the trusted-proxy CIDRs. The default trusts loopback (correct for
     // the default same-box reverse-proxy deploy). When the agora binds a
@@ -122,11 +139,15 @@ async fn main() -> Result<()> {
         admin.hash().clone(),
         limits,
         db,
-        Arc::new(webauthn),
+        webauthn,
+        webauthn_core,
         session_cfg,
         auth_rate_limiter,
         pair_rate_limiter,
         trusted_proxies,
+        http,
+        oauth_providers,
+        args.signup_enabled,
     ));
 
     // The data-plane relay (`kallip-lesche`) is a separate process that calls
@@ -167,6 +188,7 @@ async fn main() -> Result<()> {
                     _ = interval.tick() => {
                         crate::db::gc_expired_challenges(&sweep_db).await;
                         crate::db::gc_expired_pairing_codes(&sweep_db).await;
+                        crate::db::gc_expired_oauth_states(&sweep_db).await;
                     }
                     _ = shutdown.cancelled() => break,
                 }
@@ -204,6 +226,94 @@ fn body_size_bytes(max_body_size_kb: usize) -> usize {
     } else {
         2 * 1024 * 1024
     }
+}
+
+/// Build the OAuth [`crate::oauth::ProviderRegistry`] from boot config. A
+/// provider is enabled iff BOTH its client id and secret are non-empty.
+/// `redirect_base` is required only when at least one provider is configured
+/// (it derives the canonical redirect_uri); an empty registry runs the agora
+/// with OAuth disabled.
+fn build_oauth_registry(args: &Args) -> Result<crate::oauth::ProviderRegistry> {
+    use crate::oauth::{GitHubProvider, GoogleProvider, OAuthConfig, ProviderRegistry};
+
+    let github = configured(
+        &args.oauth_github_client_id,
+        &args.oauth_github_client_secret,
+    );
+    let google = configured(
+        &args.oauth_google_client_id,
+        &args.oauth_google_client_secret,
+    );
+    let any = github || google;
+    let redirect_base = match &args.oauth_redirect_base {
+        Some(s) if any => Some(
+            url::Url::parse(s)
+                .map_err(|e| anyhow::anyhow!("invalid KALLIP_AGORA_OAUTH_REDIRECT_BASE: {e}"))?,
+        ),
+        Some(_) => {
+            warn!(
+                "KALLIP_AGORA_OAUTH_REDIRECT_BASE is set but no OAuth provider is configured; ignoring"
+            );
+            None
+        }
+        None if any => {
+            anyhow::bail!(
+                "KALLIP_AGORA_OAUTH_REDIRECT_BASE is required when an OAuth provider is configured"
+            )
+        }
+        None => None,
+    };
+
+    let mut providers: Vec<Box<dyn crate::oauth::OAuthProvider>> = Vec::new();
+    // `redirect_base` is `Some` iff at least one provider is configured (above),
+    // so the `expect` is invariant-satisfied, not a real panic surface.
+    if github {
+        let (id, secret) = pair(
+            &args.oauth_github_client_id,
+            &args.oauth_github_client_secret,
+        );
+        let base = redirect_base
+            .as_ref()
+            .expect("github configured => redirect_base set")
+            .clone();
+        info!("OAuth provider enabled: github");
+        providers.push(Box::new(GitHubProvider::new(OAuthConfig {
+            client_id: id,
+            client_secret: secret,
+            redirect_base: base,
+        })));
+    }
+    if google {
+        let (id, secret) = pair(
+            &args.oauth_google_client_id,
+            &args.oauth_google_client_secret,
+        );
+        let base = redirect_base
+            .as_ref()
+            .expect("google configured => redirect_base set")
+            .clone();
+        info!("OAuth provider enabled: google");
+        providers.push(Box::new(GoogleProvider::new(OAuthConfig {
+            client_id: id,
+            client_secret: secret,
+            redirect_base: base,
+        })));
+    }
+    Ok(ProviderRegistry::new(providers))
+}
+
+/// Whether a provider's client id + secret are BOTH set (non-empty).
+fn configured(id: &Option<String>, secret: &Option<String>) -> bool {
+    matches!(id.as_deref(), Some(s) if !s.trim().is_empty())
+        && matches!(secret.as_deref(), Some(s) if !s.trim().is_empty())
+}
+
+/// Unwrap a configured id/secret pair (caller checked [`configured`]).
+fn pair(id: &Option<String>, secret: &Option<String>) -> (String, String) {
+    (
+        id.as_ref().expect("checked").trim().to_string(),
+        secret.as_ref().expect("checked").trim().to_string(),
+    )
 }
 
 /// Parse a comma-separated CIDR list into a sorted, de-duplicated vector of
