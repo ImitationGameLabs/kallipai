@@ -961,8 +961,6 @@ pub async fn get_root_agent(
         .ok_or_else(|| ApiError::internal("root agent missing — startup invariant violated"))?;
     let mut summary = entry.summary(id);
     summary.conversation_id = conversation_id;
-    summary.local_user_id = Some(state.local_user.user_id.clone());
-    summary.local_user_handle = Some(state.local_user.handle.clone());
     Ok(Json(summary))
 }
 

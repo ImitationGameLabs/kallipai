@@ -19,10 +19,6 @@ export interface WireAgentSummary {
   readonly activity?: string;
   readonly faulted_reason?: string | null;
   readonly conversation_id?: string;
-  /** The offline path's local user id/handle (present only on the root
-   * summary); the offline frontend renders its optimistic bubble with these. */
-  readonly local_user_id?: string;
-  readonly local_user_handle?: string;
 }
 
 /** `POST /agents/{id}/message` -- queue-depth feedback for an inbound user

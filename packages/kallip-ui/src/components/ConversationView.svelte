@@ -97,7 +97,7 @@
             ? 'items-end'
             : 'items-start'}"
         >
-          {#if line.sender && (i === 0 || lines[i - 1]?.sender?.id !== line.sender.id)}
+          {#if line.role !== "user" && line.sender && (i === 0 || lines[i - 1]?.sender?.id !== line.sender.id)}
             <span class="text-xs opacity-50 px-1 mb-0.5"
               >{line.sender.handle}</span
             >

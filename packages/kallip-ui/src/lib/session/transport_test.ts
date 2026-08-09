@@ -16,7 +16,7 @@ import type {
   SignalEvent,
   TagmaReply,
 } from "@kallipai/kallip-lesche-client";
-import type { ConversationSender } from "../transcript.ts";
+import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 
 // Shared fixtures: the agent that authors replies on the wire, and the local
 // operator sender the transports render for optimistic user lines.
@@ -25,11 +25,7 @@ const participant: Participant = {
   id: "root",
   handle: "Agent",
 };
-const localSender: ConversationSender = {
-  kind: "user",
-  id: "local-operator",
-  handle: "Operator",
-};
+const localSender = LOCAL_OPERATOR_SENDER;
 
 // --- AsyncQueue ---
 

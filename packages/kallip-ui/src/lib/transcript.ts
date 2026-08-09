@@ -40,6 +40,16 @@ export interface ConversationSender {
   readonly handle: string;
 }
 
+/** The fixed sender for the offline (direct) path's optimistic user bubble. The
+ *  operator is anonymous on the direct path -- there is no enrolled identity --
+ *  so this is a local placeholder that only the optimistic line reads. The wire
+ *  always resolves a real sender from the history rows. */
+export const LOCAL_OPERATOR_SENDER: ConversationSender = {
+  kind: "user",
+  id: "local-operator",
+  handle: "Operator",
+};
+
 /** Derive the UI sender from the wire participant. */
 export function toSender(participant: Participant): ConversationSender {
   return {
@@ -301,10 +311,10 @@ export function replaceLineId(
 }
 
 /** Flip the optimistic user line carrying `localId` from `"sending"` to
- * `"sent"` without changing its id. Used on the direct transport, where the
- * inbound POST resolves synchronously with no `history_id` ack to promote the
- * line through {@link replaceLineId}. No-op if the line is gone or already
- * resolved. */
+ * `"sent"` without changing its id. Used when a `user_message` echo arrives
+ * unstamped (`history_id === 0`) — e.g. a direct-path echo — so the line keeps
+ * its synthetic id and only its status flips. No-op if the line is gone or
+ * already resolved. */
 export function markLineSent(
   state: ConversationTranscript,
   localId: number,

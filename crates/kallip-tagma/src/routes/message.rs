@@ -32,18 +32,11 @@ pub async fn send_message(
     Path(id): Path<AgentId>,
     Json(req): Json<MessageRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
-    // Offline-direct path: there is no relay envelope, so the user-facing
-    // sender is the tagma-configured local operator. The relay path passes the
-    // envelope `Participant` explicitly; here we synthesize the local identity.
-    let sender = state.local_user.participant();
-    let response = deliver_message(
-        &state,
-        auth.identity().clone(),
-        Some(sender),
-        &id,
-        &req.text,
-    )
-    .await?;
+    // Offline-direct path: there is no relay envelope and no authenticated
+    // user, so the inbound is recorded under the operator partition (`NULL`) —
+    // `deliver_message` receives `sender = None` for that. The relay path
+    // passes the envelope `Participant` explicitly.
+    let response = deliver_message(&state, auth.identity().clone(), None, &id, &req.text).await?;
     Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
@@ -53,10 +46,11 @@ pub async fn send_message(
 /// seam so reactivation + header formatting cannot drift.
 ///
 /// `sender` is the user-facing wire sender (`Participant`): the relay passes
-/// the (relay-authenticated) envelope sender; the offline HTTP path synthesizes
-/// the local operator. `None` for inter-agent messages (no user-facing
-/// transcript entry). The handle is sanitized at this ingest point before it is
-/// persisted or rendered into the prompt.
+/// the (relay-authenticated) envelope peer; the offline HTTP path passes `None`
+/// (the operator is anonymous, recorded under the `NULL` partition). `None`
+/// also for inter-agent messages (no user-facing transcript entry). The handle
+/// is sanitized at this ingest point before it is persisted or rendered into
+/// the prompt.
 pub async fn deliver_message(
     state: &SharedState,
     identity: crate::auth::Identity,
@@ -104,9 +98,12 @@ pub async fn deliver_message(
     // message, record it via the external projector BEFORE enqueuing the prompt
     // so the inbound row is durable even if the agent reply races, and so the
     // projector's published `UserMessage` frame lets the frontend promote its
-    // optimistic line. Inter-agent (non-root, or no user sender) messages are
-    // not part of the user-facing transcript and are skipped. The projector is
-    // the sole writer; both the direct and relay paths funnel through here.
+    // optimistic line. A user-facing entry is one from the operator identity
+    // (the direct operator path with `sender = None`, or the relay path with
+    // `sender = Some(user)`); inter-agent messages carry a different relation
+    // and are skipped. The projector is the sole writer; both the direct and
+    // relay paths funnel through here. `sender` is the peer partition (`None` =
+    // operator, `Some` = relay user).
     let is_root = {
         let registry = state.registry.read().await;
         registry
@@ -114,11 +111,11 @@ pub async fn deliver_message(
             .is_some_and(|(root_id, _)| root_id == id)
     };
     if is_root
-        && let Some(participant) = sender.clone()
+        && matches!(relation, SenderRelation::Operator)
         && let Some(projector) = state.external.get()
     {
         projector
-            .record_inbound(participant, text.to_string())
+            .record_inbound(sender.clone(), text.to_string())
             .await;
     }
 
@@ -528,8 +525,9 @@ pub async fn external_history(
     const DEFAULT_LIMIT: u32 = 50;
     const MAX_LIMIT: u32 = 50;
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
+    // The direct endpoint serves the operator partition (`user_id IS NULL`).
     let (rows, more) = projector
-        .read_history(query.after, query.before, limit)
+        .read_history(None, query.after, query.before, limit)
         .await;
     Ok(Json(ExternalHistoryResponse { rows, more }))
 }
@@ -664,9 +662,9 @@ mod tests {
     // -- send_message: sender identity is attached to the delivered payload --
 
     /// Deliver a message as the operator and assert the receiver sees a
-    /// `[From: user {handle}]` header. The offline HTTP path synthesizes the
-    /// local user sender (default handle "Operator"); the handle drives the
-    /// header.
+    /// `[From: operator]` header. The offline HTTP path carries no operator
+    /// identity (the operator is recorded under the `NULL` partition), so the
+    /// header carries no handle.
     #[tokio::test]
     async fn operator_message_carries_operator_header() {
         let state = make_state();
@@ -692,11 +690,7 @@ mod tests {
         assert_eq!(resp.0, StatusCode::ACCEPTED);
 
         let delivered = rx.recv().await.expect("message delivered");
-        let expected_handle = state.local_user.handle.clone();
-        assert_eq!(
-            delivered,
-            format!("[From: user {expected_handle}]\ndo the thing")
-        );
+        assert_eq!(delivered, "[From: operator]\ndo the thing");
     }
 
     /// Deliver a message from a child agent to its parent and assert the

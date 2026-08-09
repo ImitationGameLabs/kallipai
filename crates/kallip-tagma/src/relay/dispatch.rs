@@ -135,6 +135,7 @@ impl RelayHandle {
         &self,
         trace: &kallip_agora_common::ids::TraceId,
         req_id: u64,
+        peer: &Participant,
         after: Option<i64>,
         before: Option<i64>,
         limit: u32,
@@ -142,7 +143,7 @@ impl RelayHandle {
         // req_id-aware panic boundary (mirrors `handle_agent_op`): a panic in
         // the batch is contained and surfaces as an empty `HistoryBatchEnd` so
         // the app is not left waiting on its deadline; it retries on reconnect.
-        if AssertUnwindSafe(self.handle_history_inner(trace, req_id, after, before, limit))
+        if AssertUnwindSafe(self.handle_history_inner(trace, req_id, peer, after, before, limit))
             .catch_unwind()
             .await
             .is_err()
@@ -170,6 +171,7 @@ impl RelayHandle {
         &self,
         trace: &kallip_agora_common::ids::TraceId,
         req_id: u64,
+        peer: &Participant,
         after: Option<i64>,
         before: Option<i64>,
         limit: u32,
@@ -177,7 +179,8 @@ impl RelayHandle {
         let limit = limit.min(Self::HISTORY_BATCH_MAX);
         // Read + decode through the external projector, the single history read
         // path shared with the direct `/external/history` endpoint. Returns
-        // decoded replies + the `more` flag.
+        // decoded replies + the `more` flag. Filter to THIS peer's partition so
+        // each device sees only its own conversation.
         let Some(projector) = self
             .inner
             .state
@@ -187,7 +190,9 @@ impl RelayHandle {
             // Tagma shutting down: nothing to emit.
             return;
         };
-        let (entries, more) = projector.read_history(after, before, limit).await;
+        let (entries, more) = projector
+            .read_history(Some(peer.id.as_ref()), after, before, limit)
+            .await;
         let mut count = 0u32;
         for entry in entries {
             // Stamp the row's stored sender (user for an inbound row, agent for

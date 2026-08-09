@@ -23,6 +23,7 @@ import {
   applyTagmaReply,
   cacheLineOf,
   EMPTY_TRANSCRIPT,
+  markLineSent,
   replaceLineId,
   toSender,
   withUserLine,
@@ -85,9 +86,11 @@ export abstract class ConversationBase {
    *  already in `transcript` (status "sending"); the single-in-flight send pump
    *  drains this one ack at a time. */
   pending = $state<{ localId: number; text: string }[]>([]);
-  /** The synthetic id of the ONE in-flight POST (its `user_message` frame has
-   *  not landed), or null when the pump is idle. */
-  pendingLocalId = $state<number | null>(null);
+  /** The ONE in-flight POST (its `user_message` frame has not landed): its
+   *  synthetic id + sent text, or null when the pump is idle. The text lets the
+   *  promotion branch correlate the echo to this exact send, so a history-replay
+   *  `user_message` arriving mid-flight is not mistaken for the ack. */
+  pendingInFlight = $state<{ localId: number; text: string } | null>(null);
   /** The latest aggregate status snapshot (root state, subagent counts, token
    *  budget) for THIS conversation's tagma, surfaced to the chat header. The
    *  single uniform source for the header regardless of transport: drained from
@@ -151,50 +154,66 @@ export abstract class ConversationBase {
     reply: TagmaReply,
     sender: Participant | undefined,
   ): void {
-    // A stamped user_message promotes the in-flight optimistic line (both
-    // transports receive this frame from the projector). Skip the append path
-    // for it -- the line already exists with a synthetic id.
+    // A `user_message` echo closes the in-flight optimistic line -- but only
+    // when it is THIS send's echo. Correlate by text: a history-replay
+    // `user_message` (e.g. a relay catch-up row) arriving while a fresh local
+    // send is in-flight must NOT be consumed as the ack (the echo carries no
+    // req_id to correlate on). A stamped echo (history_id > 0) promotes the
+    // line to the durable id; an unstamped echo (history_id === 0, a
+    // direct-path echo or a DB-write failure) keeps the synthetic id and just
+    // flips "sending" -> "sent". Either way the echo is consumed (never
+    // appended as a duplicate) and the send pump advances. A non-matching echo
+    // falls through to the normal dedup/append path below. Residual edge: a
+    // catch-up row whose text identically matches the in-flight send still
+    // collides -- far rarer than the prior uncorrelated misfire.
     if (
       reply.kind === "user_message" &&
-      this.pendingLocalId !== null &&
-      reply.history_id > 0
+      this.pendingInFlight !== null &&
+      reply.text.trim() === this.pendingInFlight.text.trim()
     ) {
-      const localId = this.pendingLocalId;
+      const localId = this.pendingInFlight.localId;
       const ackId = reply.history_id;
-      // The wire sender is authoritative for the confirmed line: overwrite the
-      // optimistic line's (stale, client-side) sender so a handle that changed
-      // mid-session does not freeze on the old value, matching every other path
-      // where the wire sender drives the rendered/cached sender.
-      const wireSender = sender ? toSender(sender) : undefined;
-      this.transcript = replaceLineId(
-        this.transcript,
-        localId,
-        ackId,
-        reply.created_at ?? undefined,
-        wireSender,
-      );
-      const confirmed = this.transcript.lines.find(
-        (l) => l.historyId === ackId,
-      );
-      if (confirmed) {
-        // Cache the confirmed user line. Use the plain `wireSender` -- NOT
-        // `confirmed.sender`: the line lives in a `$state` transcript, so its
-        // nested `sender` is a Svelte Proxy, which IndexedDB's structured clone
-        // rejects (DataCloneError). `put` swallows that error, so reading the
-        // proxy sender here silently dropped EVERY user message from the cache
-        // (they vanished on refresh). `wireSender` is a fresh plain object.
-        // `text`/`createdAt` are primitives, safe to read off the proxy line.
-        void cachePut({
-          conversationId: this.cacheConversationId,
-          historyId: ackId,
-          role: "user",
-          text: confirmed.text,
-          sender: wireSender,
-          createdAt: confirmed.createdAt,
-        });
+      if (ackId > 0) {
+        // The wire sender is authoritative for the confirmed line: overwrite the
+        // optimistic line's (stale, client-side) sender so a handle that changed
+        // mid-session does not freeze on the old value, matching every other path
+        // where the wire sender drives the rendered/cached sender.
+        const wireSender = sender ? toSender(sender) : undefined;
+        this.transcript = replaceLineId(
+          this.transcript,
+          localId,
+          ackId,
+          reply.created_at ?? undefined,
+          wireSender,
+        );
+        const confirmed = this.transcript.lines.find(
+          (l) => l.historyId === ackId,
+        );
+        if (confirmed) {
+          // Cache the confirmed user line. Use the plain `wireSender` -- NOT
+          // `confirmed.sender`: the line lives in a `$state` transcript, so its
+          // nested `sender` is a Svelte Proxy, which IndexedDB's structured clone
+          // rejects (DataCloneError). `put` swallows that error, so reading the
+          // proxy sender here silently dropped EVERY user message from the cache
+          // (they vanished on refresh). `wireSender` is a fresh plain object.
+          // `text`/`createdAt` are primitives, safe to read off the proxy line.
+          void cachePut({
+            conversationId: this.cacheConversationId,
+            historyId: ackId,
+            role: "user",
+            text: confirmed.text,
+            sender: wireSender,
+            createdAt: confirmed.createdAt,
+          });
+        }
+        if (ackId > this.maxRendered) this.maxRendered = ackId;
+      } else {
+        // Unstamped echo: keep the synthetic line, flip it to "sent". The echo
+        // carries no new content, so drop it (never append) -- otherwise it
+        // would render a second bubble and the send pump would never advance.
+        this.transcript = markLineSent(this.transcript, localId);
       }
-      if (ackId > this.maxRendered) this.maxRendered = ackId;
-      this.pendingLocalId = null;
+      this.pendingInFlight = null;
       void this.pumpPending();
       this.onReply(reply);
       return;
@@ -226,14 +245,14 @@ export abstract class ConversationBase {
   }
 
   /** Single-in-flight send pump. POSTs the next queued optimistic line (if any,
-   *  and if no POST is already outstanding), leaving its localId in
-   *  `pendingLocalId` so the stamped `user_message` frame can correlate. On a
+   *  and if no POST is already outstanding), leaving its localId + text in
+   *  `pendingInFlight` so the stamped `user_message` frame can correlate. On a
    *  POST failure, drops the optimistic line and surfaces a synthetic error. */
   protected async pumpPending(): Promise<void> {
-    if (this.pendingLocalId !== null) return;
+    if (this.pendingInFlight !== null) return;
     const next = this.pending.shift();
     if (next === undefined) return;
-    this.pendingLocalId = next.localId;
+    this.pendingInFlight = { localId: next.localId, text: next.text };
     try {
       await this.transport!.send(next.text);
     } catch (e) {
@@ -248,7 +267,7 @@ export abstract class ConversationBase {
         undefined,
         (this.syntheticSeq -= 1),
       );
-      this.pendingLocalId = null;
+      this.pendingInFlight = null;
       void this.pumpPending();
     }
   }
@@ -401,7 +420,7 @@ export class RelayConversation extends ConversationBase {
    *  and their rendered "sending" lines. Used when the channel dies. */
   abandonPending(): void {
     this.pending = [];
-    this.pendingLocalId = null;
+    this.pendingInFlight = null;
     this.transcript = {
       ...this.transcript,
       lines: this.transcript.lines.filter((l) => l.status !== "sending"),

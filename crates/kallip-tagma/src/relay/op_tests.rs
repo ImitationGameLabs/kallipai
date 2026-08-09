@@ -279,6 +279,17 @@ fn conv_of(handle: &RelayHandle) -> ConversationId {
     handle.inner.conversation_id.clone()
 }
 
+/// The test peer (matches `payload_envelope`'s sender): the relay user whose
+/// partition the history reads filter to.
+fn peer() -> Participant {
+    Participant {
+        id: ParticipantId::for_user(&UserId::from("u".to_string())),
+        kind: ParticipantKind::Human,
+        handle: "Alice".into(),
+        tagma_id: None,
+    }
+}
+
 #[tokio::test]
 async fn send_message_round_trips() {
     let (handle, key, capture, mut prompt_rx, _root_id, _state) = setup(1).await;
@@ -601,8 +612,9 @@ async fn send_message_persists_inbound_and_forwards_usermessage() {
         "MessageAccepted ack no longer stamps history_id"
     );
 
-    // The inbound row is persisted under the conversation id.
-    let rows = chat_history::read_last_n(&db, conv.as_ref(), 10)
+    // The inbound row is persisted under the peer's partition.
+    let user = peer();
+    let rows = chat_history::read_last_n(&db, Some(user.id.as_ref()), 10)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -610,10 +622,12 @@ async fn send_message_persists_inbound_and_forwards_usermessage() {
     let um_id = rows[0].id;
     assert!(um_id > 0, "inbound row assigned a positive id");
 
-    // It replays as a UserMessage echo under its row id.
+    // It replays as a UserMessage echo under its row id (filtered to the peer).
     capture.lock().await.clear();
     let trace = kallip_agora_common::ids::TraceId::from("h".to_string());
-    handle.handle_history(&trace, 1, None, None, 50).await;
+    handle
+        .handle_history(&trace, 1, &user, None, None, 50)
+        .await;
     let replies = drain_replies(&capture, &key).await;
     let um = replies.iter().find_map(|r| match r {
         TagmaReply::UserMessage {
@@ -635,45 +649,43 @@ async fn send_message_persists_inbound_and_forwards_usermessage() {
 async fn handle_history_latest_replays_both_directions_in_order() {
     let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
         setup_with_history(8).await;
-    let conv = conv_of(&handle);
     let trace = kallip_agora_common::ids::TraceId::from("test".to_string());
+    let user = peer();
     // Outbound, inbound, outbound — interleaved, ids assigned in append order.
-    // Outbound rows are written directly (the projector is the production
-    // writer; here we seed the shared store the projector reads from).
-    let agent = Participant {
-        id: ParticipantId::for_tagma(&TagmaId::from("tagma".to_string())),
-        kind: ParticipantKind::Agent,
-        handle: "Tagma".into(),
-        tagma_id: None,
-    };
-    let user = Participant {
-        id: ParticipantId::for_user(&UserId::from("u".to_string())),
-        kind: ParticipantKind::Human,
-        handle: "Alice".into(),
-        tagma_id: None,
-    };
-    let mut o0 = TagmaReply::Event {
-        event: AuthoredEvent::AssistantContent {
-            content: "o0".into(),
-        },
-        history_id: 0,
-        created_at: None,
-    };
-    chat_history::stamp_reply(&db, conv.as_ref(), &agent, "o0", &mut o0).await;
-    chat_history::append(&db, conv.as_ref(), "inbound", "send_message", &user, "u0")
-        .await
-        .unwrap();
-    let mut o1 = TagmaReply::Event {
-        event: AuthoredEvent::AssistantContent {
-            content: "o1".into(),
-        },
-        history_id: 0,
-        created_at: None,
-    };
-    chat_history::stamp_reply(&db, conv.as_ref(), &agent, "o1", &mut o1).await;
+    // All seeded under the peer partition (the relay replay filters to it); the
+    // agent's identity is not stored (reconstructed at read).
+    chat_history::append(
+        &db,
+        Some(user.id.as_ref()),
+        Some(user.handle.as_str()),
+        "outbound",
+        "o0",
+    )
+    .await
+    .unwrap();
+    chat_history::append(
+        &db,
+        Some(user.id.as_ref()),
+        Some(user.handle.as_str()),
+        "inbound",
+        "u0",
+    )
+    .await
+    .unwrap();
+    chat_history::append(
+        &db,
+        Some(user.id.as_ref()),
+        Some(user.handle.as_str()),
+        "outbound",
+        "o1",
+    )
+    .await
+    .unwrap();
 
     capture.lock().await.clear();
-    handle.handle_history(&trace, 7, None, None, 50).await;
+    handle
+        .handle_history(&trace, 7, &user, None, None, 50)
+        .await;
 
     let frames = drain_with_senders(&capture, &key).await;
     // o0, u0, o1, batch-end = 4 frames.
@@ -734,22 +746,15 @@ async fn handle_history_latest_replays_both_directions_in_order() {
 async fn handle_history_latest_more_is_false_even_at_full_page() {
     let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
         setup_with_history(8).await;
-    let conv = conv_of(&handle);
     let trace = kallip_agora_common::ids::TraceId::from("test".to_string());
-    // Insert exactly `limit` rows.
-    let agent = Participant {
-        id: ParticipantId::for_tagma(&TagmaId::from("tagma".to_string())),
-        kind: ParticipantKind::Agent,
-        handle: "Tagma".into(),
-        tagma_id: None,
-    };
+    let user = peer();
+    // Insert exactly `limit` rows under the peer partition.
     for i in 0..3 {
         chat_history::append(
             &db,
-            conv.as_ref(),
+            Some(user.id.as_ref()),
+            Some(user.handle.as_str()),
             "outbound",
-            "event",
-            &agent,
             &format!("e{i}"),
         )
         .await
@@ -758,7 +763,7 @@ async fn handle_history_latest_more_is_false_even_at_full_page() {
 
     capture.lock().await.clear();
     // Request exactly 3 (== stored count); latest mode.
-    handle.handle_history(&trace, 9, None, None, 3).await;
+    handle.handle_history(&trace, 9, &user, None, None, 3).await;
 
     let replies = drain_replies(&capture, &key).await;
     match replies.last().expect("batch end present") {
@@ -780,22 +785,15 @@ async fn handle_history_latest_more_is_false_even_at_full_page() {
 async fn handle_history_after_and_before_windows() {
     let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
         setup_with_history(8).await;
-    let conv = conv_of(&handle);
+    let user = peer();
     let mut ids = Vec::new();
-    let agent = Participant {
-        id: ParticipantId::for_tagma(&TagmaId::from("tagma".to_string())),
-        kind: ParticipantKind::Agent,
-        handle: "Tagma".into(),
-        tagma_id: None,
-    };
     for i in 0..4 {
         ids.push(
             chat_history::append(
                 &db,
-                conv.as_ref(),
+                Some(user.id.as_ref()),
+                Some(user.handle.as_str()),
                 "outbound",
-                "event",
-                &agent,
                 &format!("e{i}"),
             )
             .await
@@ -808,7 +806,7 @@ async fn handle_history_after_and_before_windows() {
     // after=ids[0] -> ids[1..3] + batch-end; more=false (3 < 50).
     capture.lock().await.clear();
     handle
-        .handle_history(&trace, 1, Some(ids[0]), None, 50)
+        .handle_history(&trace, 1, &user, Some(ids[0]), None, 50)
         .await;
     let replies = drain_replies(&capture, &key).await;
     assert_eq!(replies.len(), 4, "after-window: 3 rows + end");
@@ -820,7 +818,7 @@ async fn handle_history_after_and_before_windows() {
     // before=ids[3] limit 2 -> ids[1], ids[2] + batch-end; more=true (hit limit).
     capture.lock().await.clear();
     handle
-        .handle_history(&trace, 2, None, Some(ids[3]), 2)
+        .handle_history(&trace, 2, &user, None, Some(ids[3]), 2)
         .await;
     let replies = drain_replies(&capture, &key).await;
     assert_eq!(replies.len(), 3, "before-window: 2 rows + end");
@@ -839,7 +837,10 @@ async fn handle_history_after_and_before_windows() {
 async fn handle_history_without_store_emits_empty_batch_end() {
     let (handle, key, capture, _prompt_rx, _root_id, _state) = setup(8).await;
     let trace = kallip_agora_common::ids::TraceId::from("h".to_string());
-    handle.handle_history(&trace, 5, None, None, 50).await;
+    let user = peer();
+    handle
+        .handle_history(&trace, 5, &user, None, None, 50)
+        .await;
     let replies = drain_replies(&capture, &key).await;
     assert!(matches!(
         replies.as_slice(),

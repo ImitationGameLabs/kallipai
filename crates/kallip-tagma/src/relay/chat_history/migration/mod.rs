@@ -10,6 +10,7 @@ pub use sea_orm_migration::prelude::*;
 
 mod m_20260726_01_init;
 mod m_20260804_01_typed_history;
+mod m_20260809_01_peer_keyed;
 
 /// The chat-history migrator. New migrations are appended to
 /// [`MigratorTrait::migrations`].
@@ -20,6 +21,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m_20260726_01_init::Migration),
             Box::new(m_20260804_01_typed_history::Migration),
+            Box::new(m_20260809_01_peer_keyed::Migration),
         ]
     }
 }

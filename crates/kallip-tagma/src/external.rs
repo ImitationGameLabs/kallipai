@@ -85,23 +85,84 @@ struct Inner {
     /// (or the `"Tagma"` fallback for a never-enrolled offline-only tagma).
     tagma_id: OnceLock<TagmaId>,
     tagma_label: OnceLock<String>,
-    /// The conversation id for chat_history keying. Write-once: set at
-    /// construction when the tagma id is known at boot (creds existed), else
-    /// filled by [`ExternalProjector::set_conversation_id`] the moment
-    /// first-run enrollment resolves the id. `unset` ⇒ no durable history (the
-    /// persist gate): a never-enrolled tagma, or the brief window before enroll
-    /// lands on the enroll boot. `OnceLock` (not `Mutex`): write-once-read-many
-    /// on the hot path, no lock and no await hazard.
+    /// The conversation id surfaced on the root-agent summary as the frontend
+    /// cache key (so the direct and relay paths share one IndexedDB cache).
+    /// Write-once: set at construction when the tagma id is known at boot
+    /// (creds existed), else filled by
+    /// [`ExternalProjector::set_conversation_id`] the moment first-run
+    /// enrollment resolves the id. `unset` for a never-enrolled tagma (no
+    /// cache-key id), though rows are still written to the `NULL` operator
+    /// partition. `OnceLock` (not `Mutex`): write-once-read-many on the hot
+    /// path, no lock and no await hazard.
     conversation_id: OnceLock<ConversationId>,
     /// Burst cap on the agent's outbound `send` (mirrors the prior per-pump
     /// limiter). Inbound user messages are not capped here.
     message_limiter: Mutex<MessageLimiter>,
+    /// The current turn's peer partition for outbound rows: `None` = the
+    /// operator (direct path), `Some(peer)` = a relay user. Set on each
+    /// `record_inbound` and never cleared (clearing on `Idle` races the next
+    /// turn's outbound). Single-conversation runtime only; concurrent
+    /// multi-conversation turns will carry the partition per turn. Two latent
+    /// consequences of "last inbound wins" until then: interleaved direct +
+    /// relay turns can stamp an outbound under the wrong peer, and a proactive
+    /// outbound with no preceding inbound (e.g. a cron prompt right after
+    /// restart) lands in the `NULL` operator partition.
+    partition: Mutex<Option<Participant>>,
     state: Weak<AppState>,
 }
 
 /// The fallback agent handle when no enrolled label is known (a never-enrolled
 /// offline-only tagma). Matches the migration's backfill default.
 const FALLBACK_AGENT_HANDLE: &str = "Tagma";
+
+/// The reserved tagma id used to derive the agent `ParticipantId` when the
+/// enrolled id is unresolved (a never-enrolled tagma). Stable across restarts
+/// and distinct from any agora-assigned id; `agent_sender().tagma_id` stays
+/// `None` to signal "not enrolled" honestly.
+fn offline_tagma_id() -> TagmaId {
+    "local-tagma".parse().unwrap()
+}
+
+/// The operator's wire sender on the direct path. `NULL` in storage denotes
+/// the operator (no identity); the wire always carries a resolved
+/// `Participant`, so the operator is represented by this nil-id, empty-handle
+/// participant. The id is a non-rendered placeholder (the frontend suppresses
+/// the sender label on own messages), and the empty handle reflects the
+/// anonymous operator — no identity to carry.
+fn operator_sender() -> Participant {
+    Participant {
+        id: ParticipantId::from(uuid::Uuid::nil().to_string()),
+        kind: ParticipantKind::Human,
+        handle: String::new(),
+        tagma_id: None,
+    }
+}
+
+/// Decompose a peer partition into the stored `(user_id, username)` pair.
+/// `None` (the operator) maps to `(None, None)` (the `NULL` partition).
+fn peer_fields(partition: &Option<Participant>) -> (Option<String>, Option<String>) {
+    match partition {
+        Some(p) => (Some(p.id.as_ref().to_string()), Some(p.handle.clone())),
+        None => (None, None),
+    }
+}
+
+/// Resolve the wire sender for a stored row: outbound ⇒ the agent; inbound ⇒
+/// the peer (`user_id`/`username`), or the operator for the `NULL` partition.
+fn resolve_sender(row: &chat_history::HistoryRow, agent: &Participant) -> Participant {
+    if row.direction == "outbound" {
+        return agent.clone();
+    }
+    match &row.user_id {
+        Some(id) => Participant {
+            id: ParticipantId::from(id.clone()),
+            kind: ParticipantKind::Human,
+            handle: row.username.clone().unwrap_or_default(),
+            tagma_id: None,
+        },
+        None => operator_sender(),
+    }
+}
 
 impl ExternalProjector {
     /// Construct the handle and spawn the event pump that subscribes to the
@@ -142,6 +203,7 @@ impl ExternalProjector {
             tagma_label: tagma_label_once,
             conversation_id: conversation_id_once,
             message_limiter: Mutex::new(MessageLimiter::new(message_limits)),
+            partition: Mutex::new(None),
             state,
         });
         let projector = Self {
@@ -157,16 +219,14 @@ impl ExternalProjector {
         let _ = self.inner.tagma_id.set(id);
     }
 
-    /// The agent sender for outbound frames: the tagma id + its label (or the
-    /// fallback for an as-yet-unresolved id / label, e.g. the enroll window or a
-    /// never-enrolled offline-only tagma).
+    /// The agent sender for outbound frames: the tagma id + its label. The agent
+    /// exists (it is this tagma), so its id/handle are always real; only the
+    /// enrolled `tagma_id` is honestly `None` for a never-enrolled tagma (the
+    /// signal that the agora-assigned id is unresolved), using a reserved
+    /// offline id for the derivation in the meantime.
     fn agent_sender(&self) -> Participant {
-        let id = self
-            .inner
-            .tagma_id
-            .get()
-            .cloned()
-            .unwrap_or_else(|| TagmaId::from("local-tagma".to_string()));
+        let resolved = self.inner.tagma_id.get().cloned();
+        let id = resolved.clone().unwrap_or_else(offline_tagma_id);
         let handle = self
             .inner
             .tagma_label
@@ -177,7 +237,7 @@ impl ExternalProjector {
             id: ParticipantId::for_tagma(&id),
             kind: ParticipantKind::Agent,
             handle,
-            tagma_id: Some(id),
+            tagma_id: resolved,
         }
     }
 
@@ -240,40 +300,36 @@ impl ExternalProjector {
             history_id: 0,
             created_at: None,
         };
-        self.stamp(&sender, &text, &mut reply).await;
+        self.stamp(&text, &mut reply).await;
         self.publish(ExternalFrame::Authored { sender, reply });
         Ok(())
     }
 
-    /// A user message entering the conversation (from either transport).
-    /// Appended once as an inbound row, then published as a stamped
-    /// `UserMessage` frame (carrying the user sender) so the frontend promotes
-    /// its optimistic line. Called by the shared `deliver_message` seam BEFORE
-    /// the prompt enqueues, so the row is durable even if the agent reply races.
+    /// A user message entering the conversation. `partition` is the peer:
+    /// `None` = the operator (direct path, stored as `NULL`), `Some(peer)` = a
+    /// relay user (stored as `user_id`/`username`). Appended once as an inbound
+    /// row, then published as a stamped `UserMessage` frame so the frontend
+    /// promotes its optimistic line. Called by the shared `deliver_message`
+    /// seam BEFORE the prompt enqueues, so the row is durable even if the agent
+    /// reply races. Also records the turn's partition so the agent's outbound
+    /// reply lands in the same conversation.
     ///
-    /// The caller is responsible for sanitizing the sender's handle at ingest
-    /// (see `deliver_message`); the projector trusts what it is given and
-    /// persists it verbatim.
-    ///
-    /// Persist gate: if the conversation id is unset (never-enrolled tagma, or
-    /// the window before first-run enrollment lands) NO row is written — the id
-    /// is the key, and writing under `""` would orphan the row. An unstamped
-    /// frame is still published so the live direct SSE echoes the user's line.
-    pub(crate) async fn record_inbound(&self, sender: Participant, text: String) {
-        let Some(conv) = self.inner.conversation_id.get() else {
-            self.publish_unstamped_inbound(sender, text);
-            return;
-        };
+    /// No persist gate: a row is always written when the store is present (the
+    /// peer partition is the key, and it is always known at ingest — `None` for
+    /// the operator). The only unstamped path is a genuine append failure.
+    pub(crate) async fn record_inbound(&self, partition: Option<Participant>, text: String) {
+        *self.inner.partition.lock().await = partition.clone();
+        let sender = partition.clone().unwrap_or_else(operator_sender);
         let Some(db) = self.inner.history.clone() else {
             self.publish_unstamped_inbound(sender, text);
             return;
         };
+        let (user_id, username) = peer_fields(&partition);
         match chat_history::append(
             &db,
-            conv.as_ref(),
+            user_id.as_deref(),
+            username.as_deref(),
             "inbound",
-            "send_message",
-            &sender,
             &text,
         )
         .await
@@ -308,31 +364,29 @@ impl ExternalProjector {
         });
     }
 
-    /// Read a history window as decoded entries (sender + reply) + a `more`
-    /// flag, for the direct `/external/history` endpoint AND the relay history
-    /// replay (the single read path). `more` is true only for paginated
-    /// (`after`/`before`) queries that returned a full page; the recent-N
-    /// snapshot is always `more=false`.
-    ///
-    /// A backfilled outbound row from a never-enrolled tagma carries an empty
-    /// agent `sender_id` (the blob era never stored it); refine it to this
-    /// tagma's id now that enrollment has resolved it.
+    /// Read a history window for one peer partition as decoded entries (each a
+    /// sender and reply) with a `more` flag. Used by the direct
+    /// `/external/history` endpoint and the relay history replay (the single
+    /// read path). `user_id = None` reads the operator (direct) partition;
+    /// `Some(id)` reads that peer's relay partition. `more` is true only for
+    /// paginated (`after`/`before`) queries that returned a full page; the
+    /// recent-N snapshot is always `more=false`. The wire sender is
+    /// reconstructed per row: outbound becomes the agent, inbound becomes the
+    /// peer (or the operator for `NULL`).
     pub(crate) async fn read_history(
         &self,
+        user_id: Option<&str>,
         after: Option<i64>,
         before: Option<i64>,
         limit: u32,
     ) -> (Vec<HistoryEntry>, bool) {
-        // Persist gate: no conversation id -> no durable history to read.
-        let (Some(db), Some(conv)) = (self.inner.history.clone(), self.inner.conversation_id.get())
-        else {
+        let Some(db) = self.inner.history.clone() else {
             return (Vec::new(), false);
         };
-        let conv = conv.as_ref();
         let rows = match (after, before) {
-            (Some(a), None) => chat_history::read_after(&db, conv, a, limit).await,
-            (None, Some(b)) => chat_history::read_before(&db, conv, b, limit).await,
-            (None, None) => chat_history::read_last_n(&db, conv, limit as u64).await,
+            (Some(a), None) => chat_history::read_after(&db, user_id, a, limit).await,
+            (None, Some(b)) => chat_history::read_before(&db, user_id, b, limit).await,
+            (None, None) => chat_history::read_last_n(&db, user_id, limit as u64).await,
             (Some(_), Some(_)) => Ok(Vec::new()),
         };
         let rows = match rows {
@@ -346,31 +400,40 @@ impl ExternalProjector {
             (None, None) => false,
             _ => rows.len() as u32 == limit && limit > 0,
         };
-        let agent_refine = self.agent_sender();
+        let agent = self.agent_sender();
         let entries = rows
             .into_iter()
-            .filter_map(chat_history::decode_row)
-            .map(|mut e| {
-                if e.sender.kind == ParticipantKind::Agent && e.sender.id.as_ref().is_empty() {
-                    e.sender = agent_refine.clone();
-                }
-                e
+            .filter_map(|r| {
+                let sender = resolve_sender(&r, &agent);
+                chat_history::decode_row(r, sender)
             })
             .collect();
         (entries, more)
     }
 
-    /// Append `reply` as an outbound row once and stamp its row id +
-    /// `created_at` onto it. Persist gate: no-op without a conversation id (the
-    /// unstamped frame is still published by the caller). Graceful-degrade: a
-    /// failure leaves `history_id` at 0 and the caller still publishes the frame
-    /// live.
-    async fn stamp(&self, sender: &Participant, text: &str, reply: &mut TagmaReply) {
-        let (Some(db), Some(conv)) = (self.inner.history.clone(), self.inner.conversation_id.get())
-        else {
+    /// Append an outbound row once and stamp its row id + `created_at` onto
+    /// `reply`. The row keys on the current turn's partition (the agent speaks
+    /// *to* the peer); the agent's own identity is not stored (reconstructed at
+    /// read). Graceful-degrade: a failure leaves `history_id` at 0 and the
+    /// caller still publishes the frame live.
+    async fn stamp(&self, text: &str, reply: &mut TagmaReply) {
+        let Some(db) = self.inner.history.clone() else {
             return;
         };
-        chat_history::stamp_reply(&db, conv.as_ref(), sender, text, reply).await;
+        let partition = self.inner.partition.lock().await.clone();
+        let (user_id, username) = peer_fields(&partition);
+        if let Ok((id, created_at)) = chat_history::append(
+            &db,
+            user_id.as_deref(),
+            username.as_deref(),
+            "outbound",
+            text,
+        )
+        .await
+        {
+            reply.set_history_id(id);
+            reply.set_created_at(created_at);
+        }
     }
 
     /// The event pump: subscribe to the root agent's raw broadcast, project each
@@ -422,7 +485,7 @@ impl ExternalProjector {
                                 history_id: 0,
                                 created_at: None,
                             };
-                            self.stamp(&sender, &text, &mut reply).await;
+                            self.stamp(&text, &mut reply).await;
                             self.publish(ExternalFrame::Authored { sender, reply });
                         }
                         if let Some(signal) = signal {
@@ -541,20 +604,19 @@ mod tests {
             }
             other => panic!("expected Event, got {other:?}"),
         };
-        // Exactly one row persisted, under the conversation id, outbound, agent.
-        let rows = chat_history::read_last_n(&db, conv.as_ref(), 10)
-            .await
-            .unwrap();
+        // Exactly one outbound row persisted. With no prior inbound the turn's
+        // partition is the operator (NULL), so read the NULL partition.
+        let rows = chat_history::read_last_n(&db, None, 10).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id);
         assert_eq!(rows[0].direction, "outbound");
-        assert_eq!(rows[0].sender_kind, "agent");
         assert_eq!(rows[0].text, "hello");
     }
 
     /// `record_inbound` publishes a stamped `UserMessage` frame carrying the
-    /// user sender and persists one inbound row, so a serving path can promote
-    /// the optimistic line and a history pull can replay it.
+    /// peer sender and persists one inbound row under that peer's partition, so
+    /// a serving path can promote the optimistic line and a history pull can
+    /// replay it.
     #[tokio::test]
     async fn record_inbound_persists_and_publishes() {
         let state = make_state();
@@ -582,7 +644,10 @@ mod tests {
             MessageLimits::default(),
         );
         let mut rx = projector.subscribe();
-        projector.record_inbound(user_sender(), "hi".into()).await;
+        let user = user_sender();
+        projector
+            .record_inbound(Some(user.clone()), "hi".into())
+            .await;
 
         let (sender, reply) = match rx.recv().await.unwrap() {
             ExternalFrame::Authored { sender, reply } => (sender, reply),
@@ -599,16 +664,18 @@ mod tests {
             }
             other => panic!("expected UserMessage, got {other:?}"),
         };
-        let rows = chat_history::read_last_n(&db, conv.as_ref(), 10)
+        let rows = chat_history::read_last_n(&db, Some(user.id.as_ref()), 10)
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id);
         assert_eq!(rows[0].direction, "inbound");
 
-        // The history read decodes the inbound row back into a UserMessage
-        // paired with the user sender.
-        let (entries, more) = projector.read_history(None, None, 50).await;
+        // The history read (filtered to this peer) decodes the inbound row back
+        // into a UserMessage paired with the peer sender.
+        let (entries, more) = projector
+            .read_history(Some(user.id.as_ref()), None, None, 50)
+            .await;
         assert!(!more);
         assert_eq!(entries.len(), 1);
         match &entries[0] {
@@ -620,10 +687,7 @@ mod tests {
                     },
             } => {
                 assert_eq!(sender.kind, ParticipantKind::Human);
-                assert_eq!(
-                    sender.id,
-                    ParticipantId::for_user(&UserId::from("u".to_string()))
-                );
+                assert_eq!(sender.id, user.id);
                 assert_eq!(*history_id, id);
                 assert_eq!(text, "hi");
             }
@@ -667,14 +731,13 @@ mod tests {
         }
     }
 
-    /// Enroll-boot window: constructed with `history=Some` but
-    /// `conversation_id=None` (the store is open at boot, the id lands only when
-    /// enrollment resolves). Before `set_conversation_id`, `record_inbound`
-    /// publishes an UNSTAMPED frame and writes NO row (the persist gate — no
-    /// orphan `""` rows). After `set_conversation_id`, it persists under the id
-    /// and publishes a stamped frame.
+    /// Direct vs relay partitions: a direct inbound (`None`) lands in the
+    /// `NULL` (operator) partition and stamps a row; a relay inbound (`Some`)
+    /// lands in that peer's partition. Each `read_history` sees only its own
+    /// partition. There is no persist gate — rows are always written when the
+    /// store is present.
     #[tokio::test]
-    async fn enroll_window_persists_only_after_set_conversation_id() {
+    async fn direct_and_relay_partitions_persist_and_filter() {
         let state = make_state();
         let root = AgentId::from("root".to_string());
         {
@@ -690,8 +753,6 @@ mod tests {
         let db = chat_history::open(&dir.path().join("h.sqlite"))
             .await
             .unwrap();
-        let conv = ConversationId::for_tagma(&tagma_id());
-        // Enroll boot: store present, conversation id unset.
         let projector = ExternalProjector::new(
             Arc::downgrade(&state),
             Some(db.clone()),
@@ -700,57 +761,44 @@ mod tests {
             Some("Tagma".into()),
             MessageLimits::default(),
         );
-        let mut rx = projector.subscribe();
+        let user = user_sender();
 
-        // Before enroll: unstamped echo, NO row written.
-        projector.record_inbound(user_sender(), "pre".into()).await;
-        match rx.recv().await.unwrap() {
-            ExternalFrame::Authored {
-                reply:
-                    TagmaReply::UserMessage {
-                        history_id, text, ..
-                    },
-                ..
+        // Direct inbound -> operator (NULL) partition, stamped.
+        projector.record_inbound(None, "op-msg".into()).await;
+        // Relay inbound -> this peer's partition, stamped.
+        projector
+            .record_inbound(Some(user.clone()), "user-msg".into())
+            .await;
+
+        // read_history(None) sees only the operator partition; the relay row is
+        // in a different partition and is excluded.
+        let (op_entries, _) = projector.read_history(None, None, None, 50).await;
+        assert_eq!(op_entries.len(), 1);
+        match &op_entries[0] {
+            HistoryEntry {
+                sender,
+                reply: TagmaReply::UserMessage { text, .. },
             } => {
-                assert_eq!(history_id, 0, "unstamped before enroll");
-                assert_eq!(text, "pre");
+                // NULL rows resolve to the operator sender on the wire.
+                assert_eq!(sender.kind, ParticipantKind::Human);
+                assert_eq!(text, "op-msg");
             }
-            other => panic!("expected unstamped UserMessage, got {other:?}"),
+            other => panic!("expected operator UserMessage, got {other:?}"),
         }
-        let pre_rows = chat_history::read_last_n(&db, conv.as_ref(), 10)
-            .await
-            .unwrap();
-        assert!(pre_rows.is_empty(), "no orphan row before enroll");
-
-        // history read returns empty before enroll too.
-        let (empty, more) = projector.read_history(None, None, 50).await;
-        assert!(empty.is_empty());
-        assert!(!more);
-
-        // Enrollment lands: the id is set once.
-        projector.set_conversation_id(conv.clone());
-
-        // After enroll: stamped echo, one row under the conversation id.
-        projector.record_inbound(user_sender(), "post".into()).await;
-        let id = match rx.recv().await.unwrap() {
-            ExternalFrame::Authored {
-                reply:
-                    TagmaReply::UserMessage {
-                        history_id, text, ..
-                    },
-                ..
+        // read_history(Some(peer)) sees only that peer's partition.
+        let (user_entries, _) = projector
+            .read_history(Some(user.id.as_ref()), None, None, 50)
+            .await;
+        assert_eq!(user_entries.len(), 1);
+        match &user_entries[0] {
+            HistoryEntry {
+                sender,
+                reply: TagmaReply::UserMessage { text, .. },
             } => {
-                assert!(history_id > 0, "stamped after enroll");
-                assert_eq!(text, "post");
-                history_id
+                assert_eq!(sender.id, user.id);
+                assert_eq!(text, "user-msg");
             }
-            other => panic!("expected stamped UserMessage, got {other:?}"),
-        };
-        let post_rows = chat_history::read_last_n(&db, conv.as_ref(), 10)
-            .await
-            .unwrap();
-        assert_eq!(post_rows.len(), 1);
-        assert_eq!(post_rows[0].id, id);
-        assert_eq!(post_rows[0].direction, "inbound");
+            other => panic!("expected peer UserMessage, got {other:?}"),
+        }
     }
 }

@@ -184,7 +184,7 @@ impl RelayHandle {
                     limit,
                     ..
                 } = ctrl;
-                self.handle_history(&trace, req_id, after, before, limit)
+                self.handle_history(&trace, req_id, &sender, after, before, limit)
                     .await;
             }
             other => warn!(req_id, op = other, "unknown op; dropping"),

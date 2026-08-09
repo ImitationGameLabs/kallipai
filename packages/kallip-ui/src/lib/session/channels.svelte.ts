@@ -149,7 +149,8 @@ class ChannelsStore {
    *  entry stays keyed `"local"` (so the gate/links/`localConnected` are
    *  untouched), but its cache lives under the tagma's conversation id (shared
    *  with the online path). `conversationId` is null for a never-enrolled tagma
-   *  (no durable history) -- the cache then keys `"local"` too.
+   *  -- rows still persist to the operator (`NULL`) partition, but there is no
+   *  tagma conversation-id, so the cache then keys `"local"` too.
    *
    *  Async because the cache hydrate must complete BEFORE the SSE drain starts
    *  (a live frame racing ahead of the hydrate would double-render). Re-checks
