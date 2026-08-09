@@ -32,7 +32,7 @@ mod test_support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::Router;
 use axum::routing::get;
 use clap::Parser;
@@ -96,7 +96,9 @@ async fn main() -> Result<()> {
         .layer(routes::cors_layer(&args.cors_origins))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    let listener = tokio::net::TcpListener::bind(&args.listen_addr).await?;
+    let listener = tokio::net::TcpListener::bind(&args.listen_addr)
+        .await
+        .with_context(|| format!("binding listen addr {}", args.listen_addr))?;
     info!(addr = %args.listen_addr, "kallip-lesche listening");
     axum::serve(
         listener,

@@ -17,7 +17,7 @@ mod store;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use kallip_client::TagmaClient;
 use tokio_util::sync::CancellationToken;
@@ -104,7 +104,9 @@ async fn main() -> Result<()> {
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     info!(addr = %args.listen_addr, "kallip-cron-daemon listening (loopback only)");
-    let listener = tokio::net::TcpListener::bind(&args.listen_addr).await?;
+    let listener = tokio::net::TcpListener::bind(&args.listen_addr)
+        .await
+        .with_context(|| format!("binding listen addr {}", args.listen_addr))?;
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown.clone()))
