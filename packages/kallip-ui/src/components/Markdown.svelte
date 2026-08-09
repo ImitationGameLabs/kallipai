@@ -61,6 +61,15 @@
   // text rather than being silently dropped.
   const renderers = { html: buildUnsupportedHTML() };
 
+  // GFM with line breaks: agent replies lean on single newlines to lay out
+  // content (directory trees, multi-line list items, soft-wrapped prose).
+  // CommonMark treats a single newline as a soft break (collapsed to a
+  // space), which flattens such output into one line. `breaks: true` turns
+  // single newlines into <br>, preserving that layout while lists and other
+  // block elements keep parsing normally. This matches how chat UIs render
+  // LLM output.
+  const options = { gfm: true, breaks: true };
+
   // target=_blank makes modifier-clicks and middle-click open a new tab
   // natively. A plain primary click would also follow target=_blank, so
   // onclick swallows it (preventDefault cancels even that new-tab navigation)
@@ -90,7 +99,7 @@
   @apply. See that file.
 -->
 <div class="markdown">
-  <SvelteMarkdown {source} {renderers}>
+  <SvelteMarkdown {source} {renderers} {options}>
     {#snippet link({ href, title, children })}
       {#if href}
         <a
