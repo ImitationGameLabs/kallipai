@@ -34,6 +34,10 @@ mod builder;
 mod capture;
 mod cwd;
 mod error;
+/// Per-agent execution gate (`ExecGate`): synchronizes a workspace carve-out
+/// against the owning agent's in-flight shell forks. See the module docs for the
+/// load-bearing RwLock invariant.
+pub mod gate;
 /// Linux-only landlock + mount-ns readonly-hole enforcement for spawned
 /// processes. A thin composition layer: [`landlock::apply`] wires the owning
 /// agent's directory-lock decision into the spawn-independent `prepare_*`/
@@ -61,6 +65,7 @@ use tokio::sync::Mutex;
 pub use backend::{CaptureMode, ProcessBackend, ShellBackend, ShellOutput};
 pub use builder::ShellBuilder;
 pub use error::ShellError;
+pub use gate::{ExecGate, ExecGateFailure, ExecReadGuard, ExecWriteGuard};
 pub use tools::{BashExec, BashExecOutput, BgKill, BgRead};
 
 // The mock backend is public API behind the `testutils` feature so downstream

@@ -214,6 +214,7 @@ async fn restore_one(
     config.role = p.meta.role.clone();
     config.description = p.meta.description.clone();
     config.permissions_class = p.meta.permissions_class;
+    config.delegation_mode = p.meta.delegation_mode;
 
     // Same data-dir overlap guard as `create_agent` (bidirectional, fail-closed).
     // An agent persisted before this guard existed with an overlapping workspace
@@ -286,36 +287,19 @@ async fn restore_one(
 
     let exec_policy = Arc::new(std::sync::RwLock::new(exec_policy));
 
-    // Acquire the workspace write-lock (Normal only) -- the same invariant
-    // `create_agent` establishes. Restore used to skip this ("restart
-    // semantics"), which left the workspace outside the landlock writable set
-    // (every write failed with EACCES -- e.g. `cargo run` writing
-    // `target/debug/.cargo-lock`) and left same-workspace mutual exclusion
-    // unenforced after a tagma restart. On conflict, bail so the caller skips
-    // this agent and its subtree (the same fate as an
-    // `ensure_workspace_disjoint` failure). The guard's `Drop` releases the
-    // lock if `spawn_agent` below fails; disarmed on success so the lock
-    // persists for the agent's lifetime.
-    let workspace_lock = match super::agent::try_acquire_workspace_lock(
-        &shared_state,
-        &p.agent_id,
-        &config,
-        &chain_ids,
-    ) {
-        Ok(guard) => guard,
-        Err(super::agent::WorkspaceAcquireFailure::Busy { holder, conflict }) => {
-            anyhow::bail!(
-                "workspace {} overlaps a write-lock on {} held by agent {}; \
-                 skipping restore",
-                config.workspace_root.display(),
-                conflict.display(),
-                holder
-            );
-        }
-        Err(super::agent::WorkspaceAcquireFailure::Other(e)) => {
-            anyhow::bail!("failed to acquire workspace lock: {e}");
-        }
-    };
+    // Establish the workspace carve (forward handoff transfer + acquire +
+    // reverse-transfer rollback guards) via the same shared helper as the spawn
+    // path. Restore does NOT take the supervisor exec gate: at restore time the
+    // server is not yet serving and no agent task is processing prompts, so no
+    // shell fork can race the carve -- the dirlock's own mutex serializes the
+    // state update. Taking the gate here would be purely destructive: BFS
+    // restores siblings concurrently (`join_all`), they share one supervisor
+    // gate, and only one would win its `try_write` while the rest bail to
+    // Faulted. The helper has already restored the dirlock on any error; we
+    // just bail so the caller registers this agent Faulted.
+    let mut established =
+        super::agent::establish_workspace_lock(&shared_state, &p.agent_id, &config, &chain_ids)
+            .map_err(|e| anyhow::anyhow!("agent {}: {e}; skipping restore", p.agent_id))?;
 
     let (agent, identity) = spawn_agent(SpawnArgs {
         agent_id: p.agent_id.clone(),
@@ -338,10 +322,12 @@ async fn restore_one(
     })
     .await?;
     // Spawn succeeded: the agent owns the workspace lock for its lifetime.
-    // Disarm so the guard's (imminent) Drop does not release it.
-    if let Some(mut guard) = workspace_lock {
-        guard.disarm();
-    }
+    // Disarm both guards so their imminent Drops neither release the lock nor
+    // reverse a handoff transfer. If spawn had failed, `established` would have
+    // dropped on the `?` above in the right order (handoff reverse before
+    // workspace release).
+    established.disarm();
+    drop(established);
 
     Ok((
         restored.agent_id,
@@ -378,6 +364,7 @@ fn faulted_from_meta(
         description: meta.description.clone(),
         workspace_root: meta.workspace_root.clone(),
         permissions_class: meta.permissions_class,
+        delegation_mode: meta.delegation_mode,
         ..AgentConfig::default()
     };
     FaultedEntry {
@@ -678,6 +665,7 @@ mod tests {
                 role: String::new(),
                 description: String::new(),
                 permissions_class: class,
+                delegation_mode: kallip_runtime::config::DelegationMode::CarveOut,
             },
             exec_policy: ExecPolicy::default(),
         }
@@ -697,6 +685,7 @@ mod tests {
             role: "researcher".into(),
             description: "goners".into(),
             permissions_class: PermissionClass::Guest,
+            delegation_mode: kallip_runtime::config::DelegationMode::CarveOut,
         };
         let entry = faulted_from_meta(
             &id,

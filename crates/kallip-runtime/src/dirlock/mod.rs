@@ -92,6 +92,17 @@ pub enum AcquireOutcome {
     Busy { holder: AgentId, conflict: PathBuf },
 }
 
+/// Outcome of [`DirLockManager::transfer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferOutcome {
+    /// The lock on `path` was held by `from` and is now held by `to`.
+    Transferred,
+    /// `from` did not hold the lock on `path` -- someone else holds it, or nobody
+    /// does. Named from `from`'s perspective (not "the lock is free"): a transfer
+    /// back on removal, for instance, is `NotOwner` when the child already released.
+    NotOwner,
+}
+
 /// Internal per-directory state. v1 tracks only the writer; readonly isolation
 /// for peer-locked dirs is NOT a per-dir readers set here — it is derived as the
 /// complement of an agent's write-locks ([`DirLockManager::readonly_paths`]) and
@@ -233,6 +244,36 @@ impl DirLockManager {
         // Drop empty entries so `holder`/`status` don't report idle dirs.
         dirs.retain(|_, s| s.writer.is_some());
         Ok(())
+    }
+
+    /// Atomically reassign the write-lock on `path` from `from` to `to`, iff
+    /// `from` holds it. Used by full-workspace handoff: the supervisor transfers
+    /// its root lock to the handoff child at spawn, and the child transfers it
+    /// back at removal.
+    ///
+    /// Atomic under the manager mutex -- unlike a release+acquire pair there is
+    /// no window for a peer to grab the path between the two steps. `DirState`
+    /// tracks only the writer, so reassigning it is the whole state change;
+    /// derived views (`write_paths`/`readonly_paths`) recompute on the next read,
+    /// and delegation chains are caller-supplied at acquire time, so nothing else
+    /// needs repair. A subsequent `acquire(to, path)` sees `writer == to` and
+    /// returns [`AcquireOutcome::AlreadyHeld`].
+    pub fn transfer(
+        &self,
+        from: &AgentId,
+        to: &AgentId,
+        path: &Path,
+    ) -> io::Result<TransferOutcome> {
+        let canon = canonicalize(path)?;
+        let mut dirs = locked(&self.dirs);
+        if let Some(state) = dirs.get_mut(&canon)
+            && state.writer.as_ref() == Some(from)
+        {
+            state.writer = Some(to.clone());
+            Ok(TransferOutcome::Transferred)
+        } else {
+            Ok(TransferOutcome::NotOwner)
+        }
     }
 
     /// Release every lock held by `agent`. Called on task death (reactivation,

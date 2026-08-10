@@ -42,6 +42,10 @@ pub struct ToolDispatchInputs<'a> {
     pub lock_manager: Arc<DirLockManager>,
     /// The agent's identity (used to look up its locks in `lock_manager`).
     pub agent_id: AgentId,
+    /// Per-agent execution gate coordinating shell forks (READ) with workspace
+    /// carve-outs (WRITE on the tagma). The same `Arc` is stored on the agent so
+    /// the carve-out can reach it.
+    pub exec_gate: Arc<kallip_shell::ExecGate>,
 }
 
 /// Builds the tool registry exposed by `kallip`.
@@ -62,10 +66,12 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
         exec_policy,
         lock_manager,
         agent_id,
+        exec_gate,
     } = inputs;
     let builder = ShellBuilder::new()
         .initial_cwd(config.workspace_root.clone())
         .envs(env)
+        .exec_gate(exec_gate)
         // The exit code is intentionally omitted from the notice — the agent reads it
         // (and the output) via `bash_background_read`. Keeping the notice minimal avoids
         // duplicating state the agent will fetch anyway.

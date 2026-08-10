@@ -28,6 +28,10 @@
 //!  4. **Guest subagent spawn** -- a Normal parent explicitly downgrades a
 //!     subagent to `guest` via `--permission-class`; the granted class is
 //!     persisted, and a bad spelling is rejected by the CLI.
+//!  5. **Full-handoff delegation** -- a `--full-handoff` child takes the
+//!     supervisor's entire workspace write-lock: the supervisor is blocked from
+//!     its own workspace while the child lives, a second subagent is refused
+//!     (exclusivity), and the lock returns to the supervisor on child removal.
 //!
 //! Linux-only; gated behind the `sandbox-test` feature. Skip-guarded at runtime
 //! when landlock or unprivileged user namespaces are unavailable.
@@ -35,6 +39,7 @@
 #![cfg(all(target_os = "linux", feature = "sandbox-test"))]
 
 mod dirlock;
+mod full_handoff;
 mod guest;
 mod guest_spawn;
 mod harness;

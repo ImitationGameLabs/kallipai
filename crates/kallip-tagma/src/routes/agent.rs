@@ -17,7 +17,7 @@ use kallip_common::protocol::SseEvent;
 use kallip_runtime::agent_task::{self, AgentContext};
 use kallip_runtime::approval::ApprovalStore;
 use kallip_runtime::config::{
-    AgentConfig, PermissionClass, PermissionProfile, permission_class_from_env,
+    AgentConfig, DelegationMode, PermissionClass, PermissionProfile, permission_class_from_env,
 };
 use kallip_runtime::context::{AgenticContext, ContextStore, ContextSummarizer};
 use kallip_runtime::history::HistoryWriter;
@@ -28,7 +28,7 @@ use kallip_runtime::tools::{
 };
 use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use kallip_common::protocol::{
     CreateAgentRequest, CreateAgentResponse, ListAgentsQuery, UpdateActivityRequest,
@@ -316,6 +316,11 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     // the returned `Agent`.
     let activity = Arc::new(std::sync::Mutex::new(String::new()));
 
+    // Per-agent execution gate: READ across this agent's shell forks (threaded
+    // into the dispatch), WRITE across a workspace carve-out when a subagent is
+    // spawned under this agent (reached via the returned `Agent.exec_gate`).
+    let exec_gate = kallip_runtime::ExecGate::new();
+
     let dispatch = build_tool_dispatch(ToolDispatchInputs {
         ctx: args.store.clone(),
         config: &args.config,
@@ -324,6 +329,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         exec_policy: args.exec_policy.clone(),
         lock_manager: args.shared_state.lock_manager.clone(),
         agent_id: args.agent_id.clone(),
+        exec_gate: exec_gate.clone(),
     })
     .await?;
 
@@ -402,6 +408,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
             env: args.env,
             preset: args.preset,
             exec_policy: args.exec_policy,
+            exec_gate,
         },
         AgentIdentity {
             config: args.config,
@@ -538,40 +545,221 @@ pub(crate) fn try_acquire_workspace_lock<'a>(
     }
 }
 
-/// Create-path wrapper around [`try_acquire_workspace_lock`] that maps failure
-/// to [`ApiError`] and rolls back the pre-created agent dir (create-specific
-/// bookkeeping the other paths do not have). Extracted from `create_agent` so
-/// the acquire + rollback path is unit-testable without spawning the agent task.
-async fn acquire_workspace_lock<'a>(
+/// The result of [`establish_workspace_lock`]: the workspace write-lock guard
+/// and, for a `FullHandoff` spawn, the data to reverse the forward transfer.
+///
+/// # Drop ordering is structural
+///
+/// The custom [`Drop`] runs the reverse handoff transfer (if armed) BEFORE the
+/// `workspace` field auto-drops. This is load-bearing: the transfer back must
+/// run while the dirlock's `writer == child`, before
+/// [`WorkspaceLockGuard`]'s `Drop` runs `release_all(child)` and clears the
+/// entry. If `release_all` ran first, `writer` would become `None` and the
+/// back-transfer would be a `NotOwner` no-op, permanently stranding the lock.
+/// Encoding the reverse transfer in the manual `Drop` body (which always runs
+/// before field autodrop) makes this previously prose-only invariant
+/// structural — every caller that lets an `EstablishedLock` go out of scope on
+/// an error path gets the right order for free.
+///
+/// On the success path the caller calls [`EstablishedLock::disarm`] before the
+/// agent is considered registered, then drops the value (a no-op).
+pub(crate) struct EstablishedLock<'a> {
+    handoff: Option<HandoffRollback<'a>>,
+    workspace: Option<WorkspaceLockGuard<'a>>,
+}
+
+/// The reverse half of a full-handoff transfer, undone on unwind. A plain
+/// struct (no `Drop`): [`EstablishedLock`]'s manual `Drop` performs the
+/// transfer so the ordering relative to the workspace guard's release is
+/// explicit at one site. `armed` flips to false on the success path.
+struct HandoffRollback<'a> {
+    state: &'a SharedState,
+    child: AgentId,
+    supervisor: AgentId,
+    ws: std::path::PathBuf,
+    armed: bool,
+}
+
+impl<'a> EstablishedLock<'a> {
+    /// Disarm both the handoff rollback and the workspace guard. Call exactly
+    /// once, on the success path after the agent is registered, so the imminent
+    /// `Drop` neither reverses the handoff transfer nor releases the workspace
+    /// lock.
+    pub(crate) fn disarm(&mut self) {
+        if let Some(h) = self.handoff.as_mut() {
+            h.armed = false;
+        }
+        if let Some(g) = self.workspace.as_mut() {
+            g.disarm();
+        }
+    }
+}
+
+impl Drop for EstablishedLock<'_> {
+    fn drop(&mut self) {
+        // Reverse the forward handoff transfer WHILE the dirlock writer is still
+        // the child, i.e. before the `workspace` field auto-drops and runs
+        // `release_all(child)`. Rust runs this manual body before field autodrop.
+        if let Some(h) = self.handoff.as_ref()
+            && h.armed
+        {
+            let _ = h
+                .state
+                .lock_manager
+                .transfer(&h.child, &h.supervisor, &h.ws);
+        }
+    }
+}
+
+/// Failure to [`establish_workspace_lock`]. Each variant's doc states whether
+/// any dirlock mutation happened before the error, so callers know whether the
+/// lock state is intact (the helper itself guarantees the as-if-never-ran
+/// contract documented on [`establish_workspace_lock`]). The `Display` impl is
+/// the single source for the message prose; callers only pick a status code.
+#[derive(Debug)]
+pub(crate) enum EstablishLockFailure {
+    /// A `FullHandoff` config with no `created_by`. Rejected before any dirlock
+    /// mutation, so the state is untouched. (Spawn reaches this only on a
+    /// corrupted `meta.json` at restore time; `validate_subagent_request`
+    /// guarantees a live supervisor at spawn time.)
+    HandoffWithoutSupervisor,
+    /// The forward handoff transfer itself errored. Nothing followed it, so
+    /// there is nothing to reverse.
+    ForwardTransferFailed(std::io::Error),
+    /// Another agent holds an overlapping write-lock. The forward transfer (if
+    /// any) has already been reversed before this is returned.
+    Busy { holder: AgentId, conflict: PathBuf },
+    /// The acquire itself errored (e.g. an unresolvable workspace path). The
+    /// forward transfer (if any) has already been reversed before this is
+    /// returned.
+    AcquireFailed(std::io::Error),
+}
+
+impl std::fmt::Display for EstablishLockFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HandoffWithoutSupervisor => {
+                f.write_str("full-handoff agent has no supervisor (created_by); corrupt meta.json")
+            }
+            Self::ForwardTransferFailed(io) => {
+                write!(f, "full-handoff lock transfer failed: {io}")
+            }
+            Self::Busy { holder, conflict } => write!(
+                f,
+                "workspace overlaps a write-lock on {} held by agent {holder}; \
+                 remove it or choose a non-overlapping workspace",
+                conflict.display()
+            ),
+            Self::AcquireFailed(io) => write!(f, "failed to acquire workspace lock: {io}"),
+        }
+    }
+}
+
+/// Execute the workspace carve-out that every materialization path shares:
+/// the `FullHandoff` forward transfer, the workspace write-lock acquire, and the
+/// reverse-transfer rollback guard. This is the single place the carve logic
+/// lives, so spawn ([`Materialize::run`]) and restore (`restore_one`) cannot
+/// drift apart as they did when each inlined its own copy.
+///
+/// # Error contract
+///
+/// On `Ok`, the dirlock state reflects the child (writer == child for the
+/// workspace; a nested lock for a `CarveOut` subdir) and the returned
+/// [`EstablishedLock`] holds the rollback guards. On `Err`, the dirlock state is
+/// **as-if this call never ran**: a forward transfer that succeeded is reversed
+/// before a `Busy`/`AcquireFailed` is returned, and the two pre-mutation
+/// variants (`HandoffWithoutSupervisor`, `ForwardTransferFailed`) leave nothing
+/// to reverse. The caller is responsible only for *persistence* rollback (the
+/// agent dir), not the dirlock.
+pub(crate) fn establish_workspace_lock<'a>(
     state: &'a SharedState,
     id: &'a AgentId,
     config: &AgentConfig,
     chain: &[AgentId],
-    created_by: Option<&AgentId>,
-    agent_dir: &std::path::Path,
-    log_ws: &str,
-) -> Result<Option<WorkspaceLockGuard<'a>>, ApiError> {
-    match try_acquire_workspace_lock(state, id, config, chain) {
-        Ok(guard) => Ok(guard),
+) -> Result<EstablishedLock<'a>, EstablishLockFailure> {
+    let is_handoff = config.delegation_mode == DelegationMode::FullHandoff;
+    // Resolve the supervisor id once. `HandoffWithoutSupervisor` returns before
+    // any mutation; this replaces the prior `.expect` that crashed restore on a
+    // corrupted meta.
+    let supervisor_id: Option<AgentId> = match (is_handoff, config.created_by.as_ref()) {
+        (true, None) => return Err(EstablishLockFailure::HandoffWithoutSupervisor),
+        (true, Some(s)) => Some(s.clone()),
+        (false, _) => None,
+    };
+
+    // Forward handoff: transfer the supervisor's root lock to the child BEFORE
+    // the acquire, so the child's acquire sees writer==child (AlreadyHeld),
+    // not an exact-path Busy against the supervisor. Atomic under the dirlock
+    // mutex. A failure here leaves nothing to reverse.
+    if let Some(s) = &supervisor_id {
+        state
+            .lock_manager
+            .transfer(s, id, &config.workspace_root)
+            .map_err(EstablishLockFailure::ForwardTransferFailed)?;
+    }
+
+    // Acquire. On failure, reverse the forward transfer (if any) so the
+    // supervisor keeps its lock rather than the discarded child id.
+    let workspace = match try_acquire_workspace_lock(state, id, config, chain) {
+        Ok(guard) => guard,
         Err(WorkspaceAcquireFailure::Busy { holder, conflict }) => {
-            // `agent_dir` was created before the acquire; roll it back so
-            // `scan_agents` doesn't pick up an orphan `meta.json` on restart.
-            rollback_unspawned_create(state, created_by, id, agent_dir).await;
-            // `conflict` is the canonical path of the overlapping lock (the
-            // workspace itself, or an ancestor/descendant another agent holds
-            // that is not a delegation ancestor). A nested-vs-existing-workspace
-            // collision 409s here.
-            Err(ApiError::conflict(format!(
-                "workspace_root {log_ws} overlaps a write-lock on {} held by agent \
-                 {holder}; remove it or choose a non-overlapping workspace",
-                conflict.display()
-            )))
+            if let Some(s) = &supervisor_id {
+                let _ = state.lock_manager.transfer(id, s, &config.workspace_root);
+            }
+            return Err(EstablishLockFailure::Busy { holder, conflict });
         }
         Err(WorkspaceAcquireFailure::Other(e)) => {
-            rollback_unspawned_create(state, created_by, id, agent_dir).await;
-            Err(ApiError::bad_request(e.to_string()))
+            if let Some(s) = &supervisor_id {
+                let _ = state.lock_manager.transfer(id, s, &config.workspace_root);
+            }
+            return Err(EstablishLockFailure::AcquireFailed(e));
         }
+    };
+
+    // Rollback for failures AFTER this point (spawn/registration). Reversed by
+    // `EstablishedLock`'s manual `Drop` before the workspace guard releases.
+    let handoff = supervisor_id.map(|s| HandoffRollback {
+        state,
+        child: id.clone(),
+        supervisor: s,
+        ws: config.workspace_root.clone(),
+        armed: true,
+    });
+
+    Ok(EstablishedLock { handoff, workspace })
+}
+
+/// Map an [`EstablishLockFailure`] to a client-facing [`ApiError`]. The dirlock
+/// is already restored by [`establish_workspace_lock`] on every error variant,
+/// so the caller only needs to roll back persistence (the agent dir). Only the
+/// status code is chosen here; the message prose comes from the `Display` impl.
+///
+/// Note: the `ApiError::internal` arms log their message server-side and return
+/// a generic `"internal error"` to the client (see `ApiError::internal`) -- the
+/// prose there is for operators, not the HTTP body.
+fn establish_lock_api_error(e: EstablishLockFailure) -> ApiError {
+    use EstablishLockFailure::*;
+    match &e {
+        Busy { .. } => ApiError::conflict(e.to_string()),
+        AcquireFailed(_) => ApiError::bad_request(e.to_string()),
+        HandoffWithoutSupervisor | ForwardTransferFailed(_) => ApiError::internal(e.to_string()),
     }
+}
+
+/// Map an exec-gate WRITE failure (a carve-out refused because the supervisor
+/// has an in-flight shell) to a client-facing conflict. The carve is retried by
+/// the caller once the supervisor is quiescent.
+fn exec_gate_failure(failure: kallip_runtime::ExecGateFailure) -> ApiError {
+    use kallip_runtime::ExecGateFailure;
+    let msg = match failure {
+        ExecGateFailure::ForegroundExecInProgress => {
+            "supervisor has an in-flight shell; wait for it to finish and retry".to_string()
+        }
+        ExecGateFailure::BgTasksRunning(n) => format!(
+            "supervisor has {n} running background task(s); wait for them to finish and retry"
+        ),
+    };
+    ApiError::conflict(msg)
 }
 
 /// Materialize one agent end-to-end from a fully-resolved config: workspace
@@ -627,28 +815,43 @@ impl<'a> Materialize<'a> {
             &config.role,
             &config.description,
             config.permissions_class,
+            config.delegation_mode,
         )
         .map_err(ApiError::internal)?;
 
         for skill_name in &config.skills {
-            let content =
-                load_skill(skill_name).map_err(|e| ApiError::bad_request(e.to_string()))?;
-            store
-                .lock()
-                .await
-                .pin(
-                    &format!("skill:{skill_name}"),
-                    ChatMessage::user(format!("[skill: {skill_name}]\n{content}")),
-                )
-                .map_err(ApiError::internal)?;
+            let content = match load_skill(skill_name) {
+                Ok(c) => c,
+                Err(e) => {
+                    // The agent dir already exists; roll it back so `scan_agents`
+                    // does not pick up an orphan `meta.json` on restart.
+                    rollback_unspawned_create(state, rollback_supervisor.as_ref(), &id, &agent_dir)
+                        .await;
+                    return Err(ApiError::bad_request(e.to_string()));
+                }
+            };
+            if let Err(e) = store.lock().await.pin(
+                &format!("skill:{skill_name}"),
+                ChatMessage::user(format!("[skill: {skill_name}]\n{content}")),
+            ) {
+                rollback_unspawned_create(state, rollback_supervisor.as_ref(), &id, &agent_dir)
+                    .await;
+                return Err(ApiError::internal(e));
+            }
             info!(skill = skill_name, "loaded skill");
         }
 
-        persistence::persist_exec_policy(
+        // Bind the result so the `exec_policy.read()` guard (a `!Send`
+        // `std::sync::RwLockReadGuard`) drops at the `;`, before the `.await`
+        // in the error arm below.
+        let persist_result = persistence::persist_exec_policy(
             &agent_dir,
             &exec_policy.read().unwrap_or_else(|e| e.into_inner()),
-        )
-        .map_err(ApiError::internal)?;
+        );
+        if let Err(e) = persist_result {
+            rollback_unspawned_create(state, rollback_supervisor.as_ref(), &id, &agent_dir).await;
+            return Err(ApiError::internal(e));
+        }
 
         let prompt = config.prompt.take();
         let log_ws = config.workspace_root.display().to_string();
@@ -665,7 +868,19 @@ impl<'a> Materialize<'a> {
         let chain: Vec<AgentId> = match config.created_by.as_ref() {
             Some(supervisor_id) => {
                 let registry = state.registry.read().await;
-                registry.supervisor_chain_ids(supervisor_id)?
+                match registry.supervisor_chain_ids(supervisor_id) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        rollback_unspawned_create(
+                            state,
+                            rollback_supervisor.as_ref(),
+                            &id,
+                            &agent_dir,
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                }
             }
             None => Vec::new(),
         };
@@ -673,23 +888,58 @@ impl<'a> Materialize<'a> {
         // where the chain is empty). Reused for env injection and the identity
         // section; not re-derived inside spawn_agent.
         let root_agent_id = chain.last().cloned().unwrap_or_else(|| id.clone());
-        // Auto-acquire an exclusive write-lock on the workspace so no two agents
-        // edit the same workspace concurrently. **Normal only** -- a Guest is
-        // readonly, so it neither needs nor holds a workspace write-lock. A Normal
-        // agent holds this lock for the lifetime of its task (re-acquired on every
-        // materialization path), so the workspace stays writable across restarts.
-        // Done before spawn so enforcement is active for the first command; rolled
-        // back on every failure path below.
-        let mut workspace_lock = acquire_workspace_lock(
-            state,
-            &id,
-            &config,
-            &chain,
-            rollback_supervisor.as_ref(),
-            &agent_dir,
-            &log_ws,
-        )
-        .await?;
+        // Carve-out gate: a subagent's workspace acquire narrows the supervisor's
+        // writable set, so refuse if the supervisor has an in-flight shell (a
+        // foreground exec holding the gate READ, or a running background task)
+        // that could snapshot the pre-carve set and keep writing the carved-out
+        // region. The WRITE guard is held across the workspace acquire (the
+        // actual carve) and released right after: once the lock state is updated,
+        // any later fork snapshots the post-carve set correctly, so holding the
+        // guard through task spawn + registration would only freeze the
+        // supervisor's shells for no benefit. Root (no supervisor) skips the gate.
+        // Clone the supervisor's gate under a brief registry read-lock; the WRITE
+        // guard below borrows this owned Arc, so it lives in this scope (outside
+        // the read-lock critical section).
+        let supervisor_gate: Option<Arc<kallip_runtime::ExecGate>> =
+            match config.created_by.as_ref() {
+                Some(supervisor_id) => {
+                    let registry = state.registry.read().await;
+                    registry
+                        .get(supervisor_id)
+                        .and_then(RegistryEntry::as_live)
+                        .map(|s| s.agent.exec_gate.clone())
+                }
+                None => None,
+            };
+        let _supervisor_exec_guard = match &supervisor_gate {
+            // Supervisor not live (faulted) -> None: no in-flight shell to race.
+            Some(g) => Some(match g.try_write() {
+                Ok(guard) => guard,
+                Err(f) => {
+                    rollback_unspawned_create(state, rollback_supervisor.as_ref(), &id, &agent_dir)
+                        .await;
+                    return Err(exec_gate_failure(f));
+                }
+            }),
+            None => None,
+        };
+        // Establish the workspace carve (forward handoff transfer + acquire +
+        // reverse-transfer rollback guards) via the single shared helper, so
+        // spawn and restore cannot drift. The supervisor exec-gate WRITE is held
+        // across this call, covering the whole carve. On error the helper has
+        // already restored the dirlock; we roll back the agent dir here.
+        let mut established = match establish_workspace_lock(state, &id, &config, &chain) {
+            Ok(e) => e,
+            Err(e) => {
+                rollback_unspawned_create(state, rollback_supervisor.as_ref(), &id, &agent_dir)
+                    .await;
+                return Err(establish_lock_api_error(e));
+            }
+        };
+        // Carve complete (the workspace lock state now reflects the child); the
+        // supervisor's shells may fork freely again. Dropping here (not at end of
+        // run) keeps the supervisor from being frozen across task spawn/register.
+        drop(_supervisor_exec_guard);
         let (events_tx, _) = broadcast::channel(256);
         let agent_dir_clone = agent_dir.clone();
         let env = SpawnArgs::default_env(
@@ -721,8 +971,9 @@ impl<'a> Materialize<'a> {
         {
             Ok(pair) => pair,
             Err(e) => {
-                // The workspace lock is released by `workspace_lock`'s Drop on the
-                // `return Err` below; roll back the subagent slot + agent dir here.
+                // Roll back the subagent slot + agent dir here; the workspace
+                // carve (lock + any handoff transfer) is reversed by `established`'s
+                // Drop on the `return Err` below.
                 rollback_unspawned_create(
                     state,
                     rollback_supervisor.as_ref(),
@@ -744,7 +995,7 @@ impl<'a> Materialize<'a> {
                     supervisor.subagent_ids_mut().retain(|sid| sid != &id);
                 }
                 abort_agent(&agent, identity.agent_dir.as_deref());
-                // `workspace_lock` releases the workspace lock on `return Err`.
+                // `established` drops on `return Err`, reversing the carve.
                 return Err(ApiError::unavailable(format!(
                     "agent limit reached ({}/{max}), remove agents to create new ones",
                     registry.len(),
@@ -758,7 +1009,7 @@ impl<'a> Materialize<'a> {
                 // Supervisor gone — the pre-reserved slot is already cleaned up
                 // (unregistering the supervisor removes it from the map entirely).
                 abort_agent(&agent, identity.agent_dir.as_deref());
-                // `workspace_lock` releases the workspace lock on `return Err`.
+                // `established` drops on `return Err`, reversing the carve.
                 return Err(ApiError::internal(
                     "supervisor agent was removed during creation",
                 ));
@@ -777,14 +1028,12 @@ impl<'a> Materialize<'a> {
                 registry.register_no_subagent_push(id.clone(), entry);
             }
         }
-        // Registered: the Normal agent now owns the workspace lock for its
-        // lifetime — disarm the guard so its `Drop` does not release it. (Guest
-        // holds no lock.) Drop the guard explicitly so its borrow of `id` ends
-        // before `id` is moved into the return value.
-        if let Some(lock) = workspace_lock.as_mut() {
-            lock.disarm();
-        }
-        drop(workspace_lock);
+        // Registered: disarm both guards so their Drops neither release the
+        // workspace lock nor reverse a handoff transfer. Drop explicitly so the
+        // borrow of `id` (held by `WorkspaceLockGuard`) ends before `id` moves
+        // into the return value.
+        established.disarm();
+        drop(established);
         info!(id = %id, root = is_root, role = %log_role, ws = %log_ws, depth = log_depth, "created agent");
         Ok(id)
     }
@@ -815,8 +1064,8 @@ pub async fn create_agent(
     let token = MintedToken::generate(AGENT);
 
     let mut config = {
-        let ws = req.workspace_root.map(std::path::PathBuf::from);
-        AgentConfig::load(req.prompt, req.skills, ws)
+        let ws = std::path::PathBuf::from(&req.workspace_root);
+        AgentConfig::load(req.prompt, req.skills, Some(ws))
             .map_err(|e| ApiError::bad_request(e.to_string()))?
     };
     config.agent_id = Some(id.clone());
@@ -837,6 +1086,12 @@ pub async fn create_agent(
     }
     config.role = req.role.clone();
     config.description = req.description.clone();
+    config.delegation_mode = req
+        .delegation_mode
+        .as_deref()
+        .unwrap_or(kallip_common::protocol::DELEGATION_CARVE_OUT)
+        .parse::<kallip_runtime::config::DelegationMode>()
+        .map_err(ApiError::bad_request)?;
     // Fleet discipline: a subagent spawn must carry a non-empty role so a
     // superior can tell its subagents apart.
     if config.role.trim().is_empty() {
@@ -870,6 +1125,7 @@ pub async fn create_agent(
             &supervisor_id,
             &config.workspace_root,
             requested_class,
+            config.delegation_mode,
         )?;
         // Check per-agent subagent limit and pre-reserve the slot.
         let supervisor = registry
@@ -1154,6 +1410,33 @@ pub async fn remove_agent(
         }
     };
 
+    // FullHandoff: return the workspace lock to the supervisor before the
+    // child's locks are released. The transfer reassigns the ws entry from the
+    // child to the supervisor; `release_all(child)` below then clears any OTHER
+    // locks the child held (the ws entry is now the supervisor's, so it is
+    // untouched). `NotOwner` (supervisor gone / lock already released) is
+    // expected on racy removal -- logged, not fatal.
+    if entry.identity().config.delegation_mode == DelegationMode::FullHandoff
+        && let Some(supervisor_id) = entry.identity().config.created_by.as_ref()
+    {
+        match state.lock_manager.transfer(
+            &id,
+            supervisor_id,
+            &entry.identity().config.workspace_root,
+        ) {
+            Ok(kallip_runtime::dirlock::TransferOutcome::Transferred) => {}
+            Ok(kallip_runtime::dirlock::TransferOutcome::NotOwner) => {
+                debug!(
+                    child = %id,
+                    supervisor = %supervisor_id,
+                    "full-handoff transfer-back was NotOwner (lock already released or supervisor gone)"
+                );
+            }
+            Err(e) => {
+                warn!(child = %id, supervisor = %supervisor_id, "full-handoff transfer-back failed: {e}");
+            }
+        }
+    }
     // Release all of this agent's directory write-locks (coupled to task death,
     // not registry removal — see DirLockManager invariants). A no-op for
     // faulted entries, which never acquired locks.
@@ -1246,6 +1529,7 @@ fn validate_subagent_request(
     supervisor_id: &AgentId,
     workspace_root: &std::path::Path,
     requested_class: Option<PermissionClass>,
+    requested_mode: DelegationMode,
 ) -> Result<(PermissionProfile, ExecPolicy, PermissionClass), ApiError> {
     let supervisor_entry = registry.require_supervisor(identity, supervisor_id)?;
     // A faulted supervisor has no running task and no policy to inherit -- it
@@ -1253,6 +1537,28 @@ fn validate_subagent_request(
     let supervisor = supervisor_entry
         .as_live()
         .ok_or_else(|| ApiError::conflict("supervisor is faulted; cannot spawn subagents"))?;
+
+    // FullHandoff exclusivity: a full-handoff child takes the supervisor's
+    // entire workspace write-lock, so it cannot coexist with any other child
+    // (the carve topology and restore's concurrent sibling restore both require
+    // the supervisor to have a single child while a full-handoff one lives).
+    let existing = &supervisor.subagent_ids;
+    if requested_mode == DelegationMode::FullHandoff && !existing.is_empty() {
+        return Err(ApiError::conflict(
+            "a full-handoff subagent requires the supervisor to have no other \
+             subagents; remove them first",
+        ));
+    }
+    for cid in existing {
+        if let Some(child) = registry.get(cid)
+            && child.identity().config.delegation_mode == DelegationMode::FullHandoff
+        {
+            return Err(ApiError::conflict(
+                "supervisor already has a full-handoff subagent; remove it \
+                 before spawning others",
+            ));
+        }
+    }
 
     let supervisor_perms = &supervisor.identity.config.permissions;
     if supervisor_perms.max_depth == 0 {
@@ -1268,6 +1574,20 @@ fn validate_subagent_request(
             "workspace_root must be within supervisor's workspace",
         ));
     }
+    // FullHandoff transfers the supervisor's ENTIRE workspace write-lock to the
+    // child via an exact-path `transfer(supervisor, child, ws)`. A proper
+    // subdirectory would leave the supervisor holding its own root, so the
+    // transfer is a `NotOwner` no-op and the child silently carves out the
+    // subdirectory -- while the registry records FullHandoff and still enforces
+    // its exclusivity, invisibly losing the handoff contract. Require identity.
+    if requested_mode == DelegationMode::FullHandoff
+        && subagent_ws != supervisor_perms.workspace_root
+    {
+        return Err(ApiError::bad_request(
+            "full_handoff requires the subagent workspace to be the supervisor's \
+             entire workspace root",
+        ));
+    }
 
     let permissions = PermissionProfile::subagent(subagent_ws, supervisor_perms.max_depth);
 
@@ -1280,6 +1600,18 @@ fn validate_subagent_request(
     let ceiling = PermissionClass::ceiling_for_tier(permissions.depth());
     let supervisor_class = supervisor.identity.config.permissions_class;
     let granted = resolve_granted_class(ceiling, supervisor_class, requested_class)?;
+
+    // FullHandoff transfers the supervisor's workspace WRITE-lock to the child,
+    // so the child must be Normal (a Guest is readonly: it skips the workspace
+    // lock entirely, so a Guest FullHandoff would silently lose the lock on
+    // reactivation -- release_all(child) clears it and the Guest never
+    // re-acquires). Reject the combination up front.
+    if requested_mode == DelegationMode::FullHandoff && granted != PermissionClass::Normal {
+        return Err(ApiError::bad_request(
+            "full-handoff requires permission_class normal (a Guest is readonly and \
+             cannot hold the workspace write-lock)",
+        ));
+    }
 
     // The exec-policy is inherited from the supervisor (monotone: the tagma
     // validates the child stays at least as strict on the PUT path). The classify
@@ -1344,10 +1676,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AgentConfig, AgentId, MAX_ACTIVITY_CHARS, PermissionClass, PermissionProfile,
-        acquire_workspace_lock, compose_system_prompt, inject_identity_env, interrupt_agent,
-        list_agents, meta_skill_content, remove_agent, resolve_granted_class, resolve_root_agent,
-        truncate_chars,
+        AgentConfig, AgentId, DelegationMode, EstablishLockFailure, MAX_ACTIVITY_CHARS,
+        PermissionClass, PermissionProfile, compose_system_prompt, establish_workspace_lock,
+        inject_identity_env, interrupt_agent, list_agents, meta_skill_content, remove_agent,
+        resolve_granted_class, resolve_root_agent, truncate_chars,
     };
     use crate::auth::{AuthIdentity, Identity};
     use crate::test_helpers::{
@@ -1623,7 +1955,7 @@ mod tests {
         assert!(err.to_string().contains("supervisor"), "{}", err);
     }
 
-    // -- acquire_workspace_lock (the :445 auto-acquire path, extracted) --
+    // -- establish_workspace_lock (the shared carve: transfer + acquire + guards) --
 
     /// A Normal `AgentConfig` rooted at `ws`, reusing `make_entry`'s template so
     /// every field is populated.
@@ -1649,21 +1981,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acquire_workspace_lock_normal_root_acquires() {
+    async fn establish_workspace_lock_normal_root_acquires() {
         let state = make_state();
         let root = AgentId::from("root".to_owned());
         let ws = ws_dir("root");
         let cfg = normal_config(&ws);
-        let guard = acquire_workspace_lock(&state, &root, &cfg, &[], None, &ws, "ws").await;
-        let guard = guard.unwrap().expect("Normal root acquires its workspace");
-        // Lock is held and will release on drop.
+        let established = establish_workspace_lock(&state, &root, &cfg, &[])
+            .expect("Normal root acquires its workspace");
+        // Lock is held while the guard lives and releases on drop.
         assert_eq!(state.lock_manager.holder(&ws).unwrap(), Some(root.clone()));
-        drop(guard);
+        drop(established);
         assert!(state.lock_manager.holder(&ws).unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn acquire_workspace_lock_nested_child_no_longer_conflicts() {
+    async fn establish_workspace_lock_nested_child_no_longer_conflicts() {
         // The original bug: a Normal root holding /proj made any Normal nested
         // child's workspace acquire 409. With the chain, the child acquires.
         let state = make_state();
@@ -1673,93 +2005,250 @@ mod tests {
         std::fs::create_dir_all(&child_ws).unwrap();
 
         // Root holds /proj for the duration of the child acquire.
-        let root_guard = acquire_workspace_lock(
-            &state,
-            &root,
-            &normal_config(&root_ws),
-            &[],
-            None,
-            &root_ws,
-            "ws",
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let root_established =
+            establish_workspace_lock(&state, &root, &normal_config(&root_ws), &[])
+                .expect("root acquires");
 
         // Child's chain contains root → delegation, not conflict.
         let mut child_cfg = normal_config(&child_ws);
         child_cfg.created_by = Some(root.clone());
         let child = AgentId::from("child".to_owned());
-        let child_guard = acquire_workspace_lock(
-            &state,
-            &child,
-            &child_cfg,
-            std::slice::from_ref(&root),
-            Some(&root),
-            &child_ws,
-            "ws",
-        )
-        .await
-        .unwrap()
-        .expect("nested child acquires via delegation chain");
+        let child_established =
+            establish_workspace_lock(&state, &child, &child_cfg, std::slice::from_ref(&root))
+                .expect("nested child acquires via delegation chain");
         // Carve-out: the child's region appears read-only in the root's view.
         let ro = state.lock_manager.readonly_paths(&root).unwrap();
         assert_eq!(ro, vec![std::fs::canonicalize(&child_ws).unwrap()]);
-        drop(child_guard);
-        drop(root_guard);
+        drop(child_established);
+        drop(root_established);
     }
 
     #[tokio::test]
-    async fn acquire_workspace_lock_peer_without_chain_conflicts() {
+    async fn establish_workspace_lock_peer_without_chain_conflicts() {
         // Same topology, but the acquirer is NOT a delegation descendant
-        // (empty chain) → Busy → Err(conflict), the pre-fix behavior.
+        // (empty chain) → Busy, the pre-fix behavior.
         let state = make_state();
         let root = AgentId::from("root".to_owned());
         let root_ws = ws_dir("proj2");
         let nested = root_ws.join("sub");
         std::fs::create_dir_all(&nested).unwrap();
 
-        let _root_guard = acquire_workspace_lock(
-            &state,
-            &root,
-            &normal_config(&root_ws),
-            &[],
-            None,
-            &root_ws,
-            "ws",
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let _root_established =
+            establish_workspace_lock(&state, &root, &normal_config(&root_ws), &[])
+                .expect("root acquires");
 
         let peer = AgentId::from("peer".to_owned());
-        let err = acquire_workspace_lock(
-            &state,
-            &peer,
-            &normal_config(&nested),
-            &[],
-            None,
-            &nested,
-            "ws",
-        )
-        .await
-        .err()
-        .expect("peer without chain must conflict");
-        assert_eq!(err.status, 409);
+        let err = establish_workspace_lock(&state, &peer, &normal_config(&nested), &[])
+            .err()
+            .expect("peer without chain must conflict");
+        assert!(matches!(err, EstablishLockFailure::Busy { .. }));
     }
 
     #[tokio::test]
-    async fn acquire_workspace_lock_guest_acquires_nothing() {
+    async fn establish_workspace_lock_guest_acquires_nothing() {
         let state = make_state();
         let id = AgentId::from("guest".to_owned());
         let ws = ws_dir("guest");
         let mut cfg = normal_config(&ws);
         cfg.permissions_class = PermissionClass::Guest;
-        let guard = acquire_workspace_lock(&state, &id, &cfg, &[], None, &ws, "ws")
-            .await
-            .unwrap();
-        assert!(guard.is_none());
+        let established = establish_workspace_lock(&state, &id, &cfg, &[])
+            .expect("guest establishes (acquires nothing)");
+        assert!(established.workspace.is_none());
         assert!(state.lock_manager.holder(&ws).unwrap().is_none());
+        drop(established);
+    }
+
+    #[tokio::test]
+    async fn establish_workspace_lock_full_handoff_transfers_and_rolls_back() {
+        // The drop-order invariant: on an unwind (drop without disarm) the
+        // reverse transfer runs while writer==child, BEFORE the workspace guard's
+        // release_all(child). A FullHandoff child must end up returning the lock
+        // to the supervisor.
+        let state = make_state();
+        let supervisor = AgentId::from("sup".to_owned());
+        let child = AgentId::from("child".to_owned());
+        let ws = ws_dir("handoff");
+
+        // Supervisor holds its workspace (the precondition for a real spawn:
+        // validate guarantees a Live Normal supervisor owns its lock).
+        let _sup_lock = state
+            .lock_manager
+            .acquire(&supervisor, &ws, &[])
+            .expect("supervisor acquires");
+        assert_eq!(
+            state.lock_manager.holder(&ws).unwrap(),
+            Some(supervisor.clone())
+        );
+
+        let mut cfg = normal_config(&ws);
+        cfg.delegation_mode = DelegationMode::FullHandoff;
+        cfg.created_by = Some(supervisor.clone());
+
+        let established = establish_workspace_lock(&state, &child, &cfg, &[])
+            .expect("full-handoff child establishes");
+        // The forward transfer reassigned writer to the child.
+        assert_eq!(state.lock_manager.holder(&ws).unwrap(), Some(child.clone()));
+        // Simulate a spawn-failure unwind: drop WITHOUT disarm. EstablishedLock's
+        // manual Drop runs the reverse transfer before the workspace guard releases,
+        // so it runs while writer==child and the supervisor regains the lock.
+        drop(established);
+        assert_eq!(
+            state.lock_manager.holder(&ws).unwrap(),
+            Some(supervisor.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn establish_workspace_lock_rejects_handoff_without_supervisor() {
+        // A corrupt meta.json with delegation_mode=full_handoff and no created_by
+        // must fail gracefully (replaces the prior `.expect` that crashed restore).
+        let state = make_state();
+        let id = AgentId::from("orphan".to_owned());
+        let ws = ws_dir("orphan");
+        let mut cfg = normal_config(&ws);
+        cfg.delegation_mode = DelegationMode::FullHandoff;
+        cfg.created_by = None;
+        let err = establish_workspace_lock(&state, &id, &cfg, &[])
+            .err()
+            .expect("full-handoff without supervisor is rejected");
+        assert!(matches!(
+            err,
+            EstablishLockFailure::HandoffWithoutSupervisor
+        ));
+    }
+
+    #[test]
+    fn establish_lock_api_error_maps_status_codes() {
+        // The HTTP-status selection lives here (not in the helper), so pin it.
+        use kallip_common::protocol::ApiError;
+        let busy = EstablishLockFailure::Busy {
+            holder: AgentId::from("x".to_owned()),
+            conflict: PathBuf::from("/p"),
+        };
+        assert_eq!(super::establish_lock_api_error(busy).status, 409);
+        let other = EstablishLockFailure::AcquireFailed(std::io::Error::other("boom"));
+        assert_eq!(
+            super::establish_lock_api_error(other).status,
+            ApiError::bad_request("").status
+        );
+    }
+
+    // -- FullHandoff exclusivity (validate_subagent_request) --
+
+    #[tokio::test]
+    async fn validate_rejects_full_handoff_when_supervisor_has_a_child() {
+        // Direction 1: a full-handoff child requires the supervisor to have NO
+        // other children. Seed a supervisor with an existing child slot and the
+        // request must be refused before any workspace/depth check runs.
+        let state = make_state();
+        let sup = AgentId::from("sup".to_owned());
+        let sibling = AgentId::from("sibling".to_owned());
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &sup);
+            reg.get_mut(&sup)
+                .expect("supervisor registered")
+                .subagent_ids_mut()
+                .push(sibling.clone());
+        }
+        let reg = state.registry.read().await;
+        let ws = PathBuf::from("/tmp");
+        let err = super::validate_subagent_request(
+            &reg,
+            &Identity::Operator,
+            &sup,
+            &ws,
+            None,
+            DelegationMode::FullHandoff,
+        )
+        .expect_err("full-handoff with an existing child must be refused");
+        assert_eq!(err.status, 409);
+        // Direction-specific substring: this arm is the "supervisor has other
+        // children" rejection. Asserting merely `.contains("full-handoff")`
+        // would also pass against the other direction's message, hiding a swap.
+        assert!(
+            err.message.contains("no other subagents"),
+            "should cite the no-other-subagents rule, got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_new_child_when_full_handoff_child_exists() {
+        // Direction 2: once a full-handoff child lives, no other child (of any
+        // mode) may be spawned under the same supervisor.
+        let state = make_state();
+        let sup = AgentId::from("sup".to_owned());
+        let fh_child = AgentId::from("fh".to_owned());
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &sup);
+            let mut entry = make_entry(Some(sup.clone()), format!("agent-{fh_child}"));
+            entry.identity.config.delegation_mode = DelegationMode::FullHandoff;
+            reg.register(fh_child.clone(), crate::state::RegistryEntry::Live(entry));
+            reg.get_mut(&sup)
+                .expect("supervisor registered")
+                .subagent_ids_mut()
+                .push(fh_child.clone());
+        }
+        let reg = state.registry.read().await;
+        let ws = PathBuf::from("/tmp");
+        let err = super::validate_subagent_request(
+            &reg,
+            &Identity::Operator,
+            &sup,
+            &ws,
+            None,
+            DelegationMode::CarveOut,
+        )
+        .expect_err("a new child while a full-handoff child lives must be refused");
+        assert_eq!(err.status, 409);
+        // Direction-specific substring: this arm is the "supervisor already has
+        // a full-handoff child" rejection. Asserting merely
+        // `.contains("full-handoff")` would also pass against the other
+        // direction's message, hiding a swap.
+        assert!(
+            err.message.contains("already has"),
+            "should cite the existing full-handoff child, got: {}",
+            err.message
+        );
+    }
+
+    /// On removal, a FullHandoff child's workspace lock is transferred back to
+    /// the supervisor (the happy path; the drop-without-disarm unwind path is
+    /// covered by `establish_workspace_lock_full_handoff_transfers_and_rolls_back`).
+    #[tokio::test]
+    async fn remove_agent_returns_full_handoff_lock_to_supervisor() {
+        let state = make_state();
+        let sup = AgentId::from("sup".to_owned());
+        let child = AgentId::from("child".to_owned());
+        let ws = ws_dir("fh-remove");
+
+        // Register a Live FullHandoff child under `sup`. Set its workspace_root
+        // to `ws`: remove_agent's transfer-back targets config.workspace_root.
+        {
+            let mut reg = state.registry.write().await;
+            let mut entry = make_entry(Some(sup.clone()), format!("agent-{child}"));
+            entry.identity.config.delegation_mode = DelegationMode::FullHandoff;
+            entry.identity.config.permissions_class = PermissionClass::Normal;
+            entry.identity.config.workspace_root = ws.clone();
+            reg.register(child.clone(), crate::state::RegistryEntry::Live(entry));
+        }
+        // Simulate the spawn carve: sup held ws, then transferred it to the child.
+        state.lock_manager.acquire(&sup, &ws, &[]).unwrap();
+        state.lock_manager.transfer(&sup, &child, &ws).unwrap();
+        assert_eq!(state.lock_manager.holder(&ws).unwrap(), Some(child.clone()));
+
+        remove_agent(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(child.clone()),
+        )
+        .await
+        .expect("remove succeeds");
+
+        // The transfer-back branch reassigned the workspace lock to the supervisor.
+        assert_eq!(state.lock_manager.holder(&ws).unwrap(), Some(sup));
     }
 
     // -- Faulted agent manageability (the headline bug fix) --

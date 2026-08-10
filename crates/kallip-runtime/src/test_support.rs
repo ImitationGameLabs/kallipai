@@ -79,6 +79,7 @@ pub(crate) fn test_config() -> AgentConfig {
         permissions_class: Default::default(),
         role: String::new(),
         description: String::new(),
+        delegation_mode: crate::config::DelegationMode::CarveOut,
     }
 }
 

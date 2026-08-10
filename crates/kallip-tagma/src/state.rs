@@ -213,6 +213,11 @@ pub struct Agent {
     /// API (`PUT /exec-policy`); the runtime reads it in `evaluate()` for
     /// `bash_exec`. The only per-agent runtime-mutable policy knob.
     pub exec_policy: Arc<std::sync::RwLock<ExecPolicy>>,
+    /// Per-agent execution gate coordinating this agent's shell forks (READ on
+    /// the backend) with workspace carve-outs (WRITE here when a subagent is
+    /// spawned under this agent). Stored on the agent so the carve-out paths
+    /// (`Materialize::run`, `restore_one`) reach it via `AgentEntry`.
+    pub exec_gate: Arc<kallip_runtime::ExecGate>,
 }
 
 impl Agent {

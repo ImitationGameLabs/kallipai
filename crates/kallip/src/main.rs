@@ -138,6 +138,9 @@ async fn main() -> Result<()> {
                             description: args.description.unwrap_or_default(),
                             max_tool_rounds: None,
                             permission_class: args.permission_class,
+                            delegation_mode: args.full_handoff.then(|| {
+                                kallip_common::protocol::DELEGATION_FULL_HANDOFF.to_owned()
+                            }),
                         })
                         .await?;
                     println!("{id}");

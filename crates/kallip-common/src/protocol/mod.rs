@@ -12,8 +12,9 @@ pub mod sse;
 // Downstream `use kallip_common::protocol::*` continues to work unchanged.
 pub use agent::{
     AgentPermissionsResponse, AgentState, AgentStatusResponse, AgentSummary, CreateAgentRequest,
-    CreateAgentResponse, ListAgentsQuery, ListAgentsResponse, MaxToolRounds, MessageRequest,
-    MessageResponse, UpdateActivityRequest, UpdateAgentMetadataRequest,
+    CreateAgentResponse, DELEGATION_CARVE_OUT, DELEGATION_FULL_HANDOFF, ListAgentsQuery,
+    ListAgentsResponse, MaxToolRounds, MessageRequest, MessageResponse, UpdateActivityRequest,
+    UpdateAgentMetadataRequest,
 };
 pub use approval::{
     ApprovalDecisionBody, ApprovalEntry, ListApprovalsQuery, ListApprovalsResponse,

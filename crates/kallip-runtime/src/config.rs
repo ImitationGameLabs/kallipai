@@ -125,6 +125,66 @@ pub enum PermissionClass {
     Normal,
 }
 
+/// How a subagent relates to its supervisor's workspace write-lock.
+///
+/// Serialized `snake_case` for both the wire (`CreateAgentRequest`) and the
+/// persisted (`AgentMeta`) form. This intentionally diverges from
+/// [`PermissionClass`], which keeps a PascalCase persisted form distinct from its
+/// lowercase wire/env spelling: `DelegationMode` is newer and has no env-var
+/// spelling, so one shared lowercase form is simpler.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationMode {
+    /// The subagent scopes into a proper subdirectory of the supervisor's
+    /// workspace (the default). The supervisor keeps its root write-lock; the
+    /// subdirectory becomes a readonly hole to the supervisor via the delegation
+    /// carve-out.
+    #[default]
+    CarveOut,
+    /// The subagent takes the supervisor's *entire* workspace: the supervisor's
+    /// root write-lock is transferred to the child at spawn and transferred back
+    /// on removal, so the supervisor's next shell loses workspace write until the
+    /// child is gone.
+    ///
+    /// Exclusive: a supervisor with a `FullHandoff` child may have no other
+    /// child (CarveOut or FullHandoff). Enforced at spawn; a legacy/corrupt
+    /// on-disk tree that violates it may either fault on restore (one
+    /// interleaving) or silently overlap (the other) -- normal operation never
+    /// produces such a tree, so this is a defense note, not a live concern.
+    ///
+    /// Reactivation: while a `FullHandoff` child is Live the workspace write-lock
+    /// is reassigned to the child, so `release_all(supervisor)` is a no-op and
+    /// the supervisor's reactivation `try_acquire_workspace_lock` returns
+    /// `Busy { holder: child }`. The supervisor therefore cannot reactivate
+    /// (restart its task) until the child is removed -- the supervisor genuinely
+    /// cannot write its workspace while the child holds the lock.
+    FullHandoff,
+}
+
+impl std::str::FromStr for DelegationMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            kallip_common::protocol::DELEGATION_CARVE_OUT => Ok(Self::CarveOut),
+            kallip_common::protocol::DELEGATION_FULL_HANDOFF => Ok(Self::FullHandoff),
+            other => Err(format!(
+                "unknown delegation_mode '{other}' (expected '{}' or '{}')",
+                kallip_common::protocol::DELEGATION_CARVE_OUT,
+                kallip_common::protocol::DELEGATION_FULL_HANDOFF
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for DelegationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CarveOut => f.write_str(kallip_common::protocol::DELEGATION_CARVE_OUT),
+            Self::FullHandoff => f.write_str(kallip_common::protocol::DELEGATION_FULL_HANDOFF),
+        }
+    }
+}
+
 impl PermissionClass {
     /// Ceiling table: depth 0/1 -> Normal, depth 2/3 -> Guest (§2.3). Depths
     /// beyond the table clamp to the last entry (Guest), mirroring
@@ -239,6 +299,11 @@ pub struct AgentConfig {
     pub role: String,
     /// Longer prose ("gathers sources for the plan"). Supervisor-owned, optional.
     pub description: String,
+    /// How this subagent relates to its supervisor's workspace write-lock
+    /// (`CarveOut` subdir vs `FullHandoff` whole-workspace). Defaults to
+    /// `CarveOut`; set at spawn from the request, persisted in `AgentMeta`,
+    /// re-read on restore. Root is always `CarveOut`.
+    pub delegation_mode: DelegationMode,
 }
 
 impl Default for AgentConfig {
@@ -271,6 +336,7 @@ impl Default for AgentConfig {
             permissions_class: PermissionClass::Normal,
             role: String::new(),
             description: String::new(),
+            delegation_mode: DelegationMode::CarveOut,
         }
     }
 }
@@ -412,6 +478,7 @@ impl AgentConfig {
             // like `agent_id` / `created_by` above.
             role: String::new(),
             description: String::new(),
+            delegation_mode: DelegationMode::CarveOut,
         })
     }
 
@@ -598,6 +665,25 @@ mod tests {
     }
 
     #[test]
+    fn delegation_mode_from_str_display_round_trip() {
+        use std::str::FromStr;
+        for mode in [DelegationMode::CarveOut, DelegationMode::FullHandoff] {
+            let s = mode.to_string();
+            assert_eq!(DelegationMode::from_str(&s).unwrap(), mode);
+        }
+        assert_eq!(DelegationMode::CarveOut.to_string(), "carve_out");
+        assert_eq!(DelegationMode::FullHandoff.to_string(), "full_handoff");
+        // The wire producer defaults a missing field to "carve_out" itself, so
+        // FromStr must NOT treat an explicit empty string as the default -- it
+        // is a client bug and must be rejected (not silently become CarveOut).
+        assert!(DelegationMode::from_str("").is_err());
+        assert!(DelegationMode::from_str("CarveOut").is_err());
+        let err = DelegationMode::from_str("handoff").unwrap_err();
+        assert!(err.to_string().contains("handoff"));
+        assert!(err.to_string().contains("carve_out"));
+    }
+
+    #[test]
     fn default_system_prompt_stays_high_altitude() {
         // The base prompt must stay at agent altitude: posture and the
         // tool/round execution model. Agent identity is injected per-agent by
@@ -679,6 +765,7 @@ mod tests {
             permissions_class: PermissionClass::default(),
             role: String::new(),
             description: String::new(),
+            delegation_mode: DelegationMode::CarveOut,
         };
         // A 10k window → pinned = (10k − 8192) × 0.25 = 452 < summary 1200 → rejected.
         let err = cfg.set_context_window(10_000).unwrap_err();
@@ -719,6 +806,7 @@ mod tests {
             permissions_class: PermissionClass::default(),
             role: String::new(),
             description: String::new(),
+            delegation_mode: DelegationMode::CarveOut,
         };
         assert!(cfg.try_context_window(0).is_err(), "zero window rejected");
         assert!(
@@ -759,6 +847,7 @@ mod tests {
             permissions_class: PermissionClass::default(),
             role: String::new(),
             description: String::new(),
+            delegation_mode: DelegationMode::CarveOut,
         };
         assert_eq!(cfg.effective_budget(), 91_808);
         assert_eq!(cfg.pinned_budget(), 22_952);

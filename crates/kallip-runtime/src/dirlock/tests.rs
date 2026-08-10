@@ -487,3 +487,83 @@ fn delegation_does_not_inflate_ancestor_lock_count() {
         .unwrap();
     assert_eq!(mgr.write_paths(&parent).unwrap().len(), 1);
 }
+
+#[test]
+fn transfer_reassigns_holder_from_owner() {
+    let mgr = DirLockManager::new();
+    let supervisor = agent("supervisor");
+    let child = agent("child");
+    let dir = tmp_dir();
+
+    mgr.acquire(&supervisor, &dir, &[]).unwrap();
+    assert_eq!(
+        mgr.transfer(&supervisor, &child, &dir).unwrap(),
+        TransferOutcome::Transferred
+    );
+    // `child` now holds it; `supervisor` does not.
+    assert_eq!(mgr.holder(&dir).unwrap(), Some(child.clone()));
+    assert!(mgr.write_paths(&supervisor).unwrap().is_empty());
+    assert_eq!(
+        mgr.write_paths(&child).unwrap(),
+        vec![dir.canonicalize().unwrap()]
+    );
+    // A subsequent acquire by `child` is idempotent (AlreadyHeld), not Busy.
+    assert_eq!(
+        mgr.acquire(&child, &dir, &[]).unwrap(),
+        AcquireOutcome::AlreadyHeld
+    );
+}
+
+#[test]
+fn transfer_is_not_owner_when_someone_else_or_nobody_holds() {
+    let mgr = DirLockManager::new();
+    let supervisor = agent("supervisor");
+    let child = agent("child");
+    let other = agent("other");
+    let dir = tmp_dir();
+
+    // Nobody holds it.
+    assert_eq!(
+        mgr.transfer(&supervisor, &child, &dir).unwrap(),
+        TransferOutcome::NotOwner
+    );
+    // A different agent holds it -- still NotOwner, and that holder is untouched.
+    mgr.acquire(&other, &dir, &[]).unwrap();
+    assert_eq!(
+        mgr.transfer(&supervisor, &child, &dir).unwrap(),
+        TransferOutcome::NotOwner
+    );
+    assert_eq!(mgr.holder(&dir).unwrap(), Some(other));
+}
+
+#[test]
+fn transfer_then_transfer_back_round_trips() {
+    // The removal path transfers child -> supervisor; verify the reverse
+    // direction works too and a third agent cannot grab the path in between
+    // (the atomic handoff guarantee).
+    let mgr = DirLockManager::new();
+    let supervisor = agent("supervisor");
+    let child = agent("child");
+    let peer = agent("peer");
+    let dir = tmp_dir();
+
+    mgr.acquire(&supervisor, &dir, &[]).unwrap();
+    assert_eq!(
+        mgr.transfer(&supervisor, &child, &dir).unwrap(),
+        TransferOutcome::Transferred
+    );
+    // `peer` still sees the path held (by child) -- no window opened.
+    assert_eq!(
+        mgr.acquire(&peer, &dir, &[]).unwrap(),
+        AcquireOutcome::Busy {
+            holder: child.clone(),
+            conflict: dir.canonicalize().unwrap()
+        }
+    );
+    // Transfer it back to the supervisor on removal.
+    assert_eq!(
+        mgr.transfer(&child, &supervisor, &dir).unwrap(),
+        TransferOutcome::Transferred
+    );
+    assert_eq!(mgr.holder(&dir).unwrap(), Some(supervisor));
+}

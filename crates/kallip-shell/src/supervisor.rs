@@ -139,6 +139,10 @@ pub(super) struct BackgroundRegistry {
     /// landlock-restricted to the owning agent's current access decision.
     #[cfg(all(target_os = "linux", feature = "landlock"))]
     access_source: Option<super::builder::AccessSource>,
+    /// Per-agent execution gate shared with the tagma. READ is held across each
+    /// background spawn's snapshot+fork; each running task also bumps
+    /// `running_bg` for its lifetime so a carve-out refuses while it runs.
+    exec_gate: Option<Arc<super::gate::ExecGate>>,
 }
 
 impl BackgroundRegistry {
@@ -156,6 +160,7 @@ impl BackgroundRegistry {
             on_terminal,
             #[cfg(all(target_os = "linux", feature = "landlock"))]
             access_source: None,
+            exec_gate: None,
         }
     }
 
@@ -167,8 +172,15 @@ impl BackgroundRegistry {
         self
     }
 
+    /// Share the per-agent execution gate so background spawns coordinate with
+    /// workspace carve-outs (READ across snapshot+fork; `running_bg` for lifetime).
+    pub(super) fn with_exec_gate(mut self, gate: Arc<super::gate::ExecGate>) -> Self {
+        self.exec_gate = Some(gate);
+        self
+    }
+
     /// Spawn `command` as a background task; returns its id.
-    pub(super) fn spawn(&mut self, command: &str) -> Result<TaskId, ShellError> {
+    pub(super) async fn spawn(&mut self, command: &str) -> Result<TaskId, ShellError> {
         let id = uuid::Uuid::new_v4().to_string();
         // Each task owns an auto-cleaned tmpdir holding its merged `out.log`.
         // No cwd EXIT trap: background must not touch the shared sticky cwd.
@@ -197,6 +209,11 @@ impl BackgroundRegistry {
         for (key, value) in super::backend::COLOR_VARS {
             cmd.env(key, value);
         }
+        // Hold the exec-gate READ across the landlock snapshot + fork so a
+        // concurrent workspace carve-out (WRITE on the tagma) cannot interleave:
+        // the snapshot below cannot be preceded by a carve that narrows the
+        // writable set. No-op when no gate is configured.
+        let _bg_gate = super::gate::ExecGate::read(&self.exec_gate).await;
         // Landlock-restrict the background bash to the agent's access decision
         // (Linux + landlock). Compose the decision (lock-manager-backed snapshot
         // + this task's own tmpdir as scratch) via `AccessSource`; `apply` is
@@ -208,6 +225,24 @@ impl BackgroundRegistry {
         }
         let child = cmd.spawn()?;
         let pid = child.id();
+        // Bump the running-bg tally WHILE the READ permit is still held and
+        // BEFORE the watcher is spawned. Two races this closes:
+        //  - Dropping the permit before inc would leave a window where a
+        //    concurrent carve sees permit-free + counter-0 and narrows the
+        //    writable set while this just-forked child retains its baked
+        //    (broader) domain -- exactly the snapshot TOCTOU the gate prevents.
+        //  - inc must happen-before the watcher's terminal dec; `tokio::spawn`
+        //    (next) establishes that ordering for this write, so the watcher
+        //    always observes counter >= 1 before it can dec.
+        // `inc_guard` undoes the inc on an unwind before the watcher is spawned
+        // (the only window with no dec path); disarmed once the watcher owns it.
+        let mut inc_guard = if let Some(g) = &self.exec_gate {
+            g.inc_bg();
+            Some(BgIncGuard::new(g.clone()))
+        } else {
+            None
+        };
+        drop(_bg_gate);
 
         let state = Arc::new(AtomicU8::new(STATE_RUNNING));
         let exit_code = Arc::new(AtomicI32::new(EXIT_NONE));
@@ -228,7 +263,13 @@ impl BackgroundRegistry {
             self.max_bg_bytes,
             id.clone(),
             self.on_terminal.clone(),
+            self.exec_gate.clone(),
         ));
+        // The watcher now owns the dec via `mark_terminal`; disarm the unwind
+        // guard so a later `tasks.insert` unwind does not double-dec.
+        if let Some(g) = &mut inc_guard {
+            g.disarm();
+        }
 
         self.tasks.insert(
             id.clone(),
@@ -276,6 +317,13 @@ impl BackgroundRegistry {
         if let Some(handle) = task.handle.take() {
             let _ = tokio::time::timeout(KILL_JOIN, handle).await;
         }
+        // The watcher's cancel branch normally marks the task terminal (and
+        // decrements the running-bg tally). But on a KILL_JOIN timeout the
+        // JoinHandle is detached and the task is already removed from
+        // `self.tasks` (above), so the Drop drain cannot cover it. Settle the
+        // tally here as a fallback -- CAS-guarded, so it is a no-op if the
+        // watcher already reported terminal.
+        mark_terminal(&task.state, STATE_KILLED, self.exec_gate.as_ref());
         // `task` drops here: its `TempDir` removes the output dir. The watcher
         // has already finished (we awaited the handle above), so `out.log` is
         // not read after removal.
@@ -291,8 +339,14 @@ impl Drop for BackgroundRegistry {
         // orphaning its children. The orphaned watcher's `out.log` reads are
         // already fallible, so a dir removed mid-poll is tolerated (same as the
         // old manual cleanup).
+        //
+        // Also settle the running-bg tally for any task still STATE_RUNNING
+        // (a watcher that never reported — e.g. runtime shutting down before it
+        // was scheduled). `mark_terminal` CAS-guards the decrement, so a racing
+        // watcher that does report terminal first wins and this is a no-op.
         for (_, task) in self.tasks.drain() {
             task.cancel.cancel();
+            mark_terminal(&task.state, STATE_KILLED, self.exec_gate.as_ref());
             if let Some(pid) = task.pid {
                 pgroup::force_kill_group(pid as i32);
             }
@@ -300,8 +354,61 @@ impl Drop for BackgroundRegistry {
     }
 }
 
+/// Undoes an `inc_bg` if a background spawn unwinds BEFORE the watcher (which
+/// owns the `dec_bg`) is spawned -- the one window where no path would
+/// otherwise decrement the tally for this task, permanently refusing future
+/// carves. Disarmed ([`Self::disarm`]) as soon as `tokio::spawn(watch)`
+/// succeeds: from then on the watcher owns the decrement via `mark_terminal`,
+/// even if the later `tasks.insert` unwinds.
+struct BgIncGuard(Option<Arc<super::gate::ExecGate>>);
+
+impl BgIncGuard {
+    fn new(gate: Arc<super::gate::ExecGate>) -> Self {
+        Self(Some(gate))
+    }
+    /// Disarm so `Drop` no longer decrements -- call once the watcher owns the dec.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for BgIncGuard {
+    fn drop(&mut self) {
+        if let Some(g) = self.0.take() {
+            g.dec_bg();
+        }
+    }
+}
+
+/// Transition a task to `terminal`, decrementing the running-bg tally exactly
+/// once. The CAS from `STATE_RUNNING` succeeds for only the first caller across
+/// the four `watch()` terminal branches, a `kill()`-triggered cancel, and the
+/// registry `Drop` drain, so `dec_bg` fires at most once per task. A no-op when
+/// no gate is configured. `Relaxed` suffices: the inc→dec happens-before is
+/// established by `tokio::spawn` (inc precedes the spawn; the watcher runs only
+/// after), not by this atomic's ordering, and `running_bg` itself is `Relaxed`.
+fn mark_terminal(state: &AtomicU8, terminal: u8, gate: Option<&Arc<super::gate::ExecGate>>) {
+    if state
+        .compare_exchange(
+            STATE_RUNNING,
+            terminal,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+        && let Some(g) = gate
+    {
+        g.dec_bg();
+    }
+}
+
 /// Watcher loop: detect exit, run the size + stall watchdogs, and drive a
 /// two-phase kill on cancel.
+//
+// 8 args: the exec gate is coordinator state (not task state, so it does not
+// belong in `Watched`), and bundling the rest just for arg-count would obscure
+// the call. Accepting the lint here.
+#[allow(clippy::too_many_arguments)]
 async fn watch(
     mut child: Child,
     output_path: PathBuf,
@@ -310,6 +417,7 @@ async fn watch(
     max_bg_bytes: usize,
     id: String,
     on_terminal: Option<OnTaskTerminal>,
+    exec_gate: Option<Arc<super::gate::ExecGate>>,
 ) {
     let Watched {
         state,
@@ -324,7 +432,7 @@ async fn watch(
         tokio::select! {
             _ = cancel.cancelled() => {
                 let _ = pgroup::kill_tree(&mut child).await;
-                state.store(STATE_KILLED, Ordering::Relaxed);
+                mark_terminal(&state, STATE_KILLED, exec_gate.as_ref());
                 fire_terminal(&on_terminal, &id, TaskState::Killed, None);
                 return;
             }
@@ -339,7 +447,7 @@ async fn watch(
         // Size watchdog: unbounded output fills the disk (the 768GB lesson).
         if (size as usize) > max_bg_bytes {
             let _ = pgroup::kill_tree(&mut child).await;
-            state.store(STATE_KILLED, Ordering::Relaxed);
+            mark_terminal(&state, STATE_KILLED, exec_gate.as_ref());
             fire_terminal(&on_terminal, &id, TaskState::Killed, None);
             return;
         }
@@ -349,13 +457,13 @@ async fn watch(
             Ok(Some(status)) => {
                 let code = status.code();
                 exit_code.store(code.unwrap_or(EXIT_NONE), Ordering::Relaxed);
-                state.store(STATE_EXITED, Ordering::Relaxed);
+                mark_terminal(&state, STATE_EXITED, exec_gate.as_ref());
                 fire_terminal(&on_terminal, &id, TaskState::Exited, code);
                 return;
             }
             Ok(None) => {}
             Err(_) => {
-                state.store(STATE_EXITED, Ordering::Relaxed);
+                mark_terminal(&state, STATE_EXITED, exec_gate.as_ref());
                 fire_terminal(&on_terminal, &id, TaskState::Exited, None);
                 return;
             }
@@ -432,10 +540,52 @@ mod tests {
         )
     }
 
+    /// The headline carve-exclusion test, exercised through the real
+    /// `BackgroundRegistry` (no landlock needed): a running background task
+    /// bumps `running_bg` and makes the gate's WRITE side refuse a carve; once
+    /// the task is killed and the watcher decs, the gate is writable again.
+    /// This is the only test that drives the READ-across-fork + inc/dec wiring
+    /// end-to-end, covering both the carve-exclusion claim and the inc_bg
+    /// ordering (inc happens-before the watcher's dec).
+    #[tokio::test]
+    async fn running_bg_blocks_carve_while_task_runs() {
+        let gate = crate::gate::ExecGate::new();
+        let mut reg = registry().with_exec_gate(gate.clone());
+        let id = reg.spawn("sleep 30").await.unwrap();
+
+        // The spawn incs the tally before returning; wait for it to land.
+        for _ in 0..50 {
+            if gate.running_bg() == 1 {
+                break;
+            }
+            tokio::time::sleep(WATCH_POLL).await;
+        }
+        assert_eq!(gate.running_bg(), 1, "running task should bump the tally");
+        assert_eq!(
+            gate.try_write().unwrap_err(),
+            crate::gate::ExecGateFailure::BgTasksRunning(1),
+            "a carve must be refused while a background task runs"
+        );
+
+        reg.kill(&id).await.unwrap();
+        // The watcher's cancel branch decs the tally; wait for it to settle.
+        for _ in 0..50 {
+            if gate.running_bg() == 0 {
+                break;
+            }
+            tokio::time::sleep(WATCH_POLL).await;
+        }
+        assert_eq!(gate.running_bg(), 0, "tally returns to zero after kill");
+        assert!(
+            gate.try_write().is_ok(),
+            "a carve must succeed once no background task runs"
+        );
+    }
+
     #[tokio::test]
     async fn spawn_then_read_exited_task() {
         let mut reg = registry();
-        let id = reg.spawn("echo hello").unwrap();
+        let id = reg.spawn("echo hello").await.unwrap();
         // Wait for the task to exit and the watcher to notice.
         for _ in 0..50 {
             let out = reg.read(&id, 4096).unwrap();
@@ -457,6 +607,7 @@ mod tests {
         let mut reg = registry();
         let id = reg
             .spawn("echo \"$TERM/$NO_COLOR/$CLICOLOR\"; test -z \"$LS_COLORS\" && echo empty")
+            .await
             .unwrap();
         for _ in 0..50 {
             let out = reg.read(&id, 4096).unwrap();
@@ -473,7 +624,7 @@ mod tests {
     #[tokio::test]
     async fn kill_stops_a_long_task() {
         let mut reg = registry();
-        let id = reg.spawn("sleep 30").unwrap();
+        let id = reg.spawn("sleep 30").await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         reg.kill(&id).await.unwrap();
         let err = reg.read(&id, 4096).unwrap_err();
@@ -495,7 +646,7 @@ mod tests {
             HashMap::new(),
             None,
         );
-        let id = reg.spawn("yes hello").unwrap();
+        let id = reg.spawn("yes hello").await.unwrap();
         for _ in 0..100 {
             let out = reg.read(&id, 1024).unwrap();
             if out.state == TaskState::Killed {
@@ -528,7 +679,7 @@ mod tests {
     #[tokio::test]
     async fn on_terminal_fires_on_exit() {
         let (mut reg, received) = tracking_registry(10 * 1024 * 1024);
-        let id = reg.spawn("exit 7").unwrap();
+        let id = reg.spawn("exit 7").await.unwrap();
         for _ in 0..50 {
             if received.lock().unwrap().is_some() {
                 break;
@@ -549,7 +700,7 @@ mod tests {
     async fn on_terminal_fires_on_size_watchdog() {
         // tiny cap → the size watchdog kills quickly.
         let (mut reg, received) = tracking_registry(4096);
-        let id = reg.spawn("yes hello").unwrap();
+        let id = reg.spawn("yes hello").await.unwrap();
         for _ in 0..100 {
             if received.lock().unwrap().is_some() {
                 break;

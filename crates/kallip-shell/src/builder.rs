@@ -108,6 +108,11 @@ pub struct ShellBuilder {
     /// all writes.
     #[cfg(all(target_os = "linux", feature = "landlock"))]
     pub(super) access_source: Option<AccessSource>,
+    /// Per-agent execution gate shared with the tagma (READ here across each
+    /// shell fork, WRITE on the tagma across a workspace carve-out). `None` for
+    /// backends built without coordination (e.g. unit tests); the READ guard is
+    /// then a no-op. Not feature-gated: the gate is platform-independent.
+    pub(super) exec_gate: Option<Arc<crate::gate::ExecGate>>,
 }
 
 impl ShellBuilder {
@@ -124,6 +129,7 @@ impl ShellBuilder {
             on_terminal: None,
             #[cfg(all(target_os = "linux", feature = "landlock"))]
             access_source: None,
+            exec_gate: None,
         }
     }
 
@@ -211,6 +217,15 @@ impl ShellBuilder {
         self
     }
 
+    /// Sets the per-agent execution gate, shared with the tagma so a workspace
+    /// carve-out (WRITE on the tagma) excludes concurrent shell forks (READ here)
+    /// on this backend. The same `Arc` is also stored on the agent by the tagma
+    /// so the carve-out can reach it.
+    pub fn exec_gate(mut self, gate: Arc<crate::gate::ExecGate>) -> Self {
+        self.exec_gate = Some(gate);
+        self
+    }
+
     /// Validates the configuration.
     pub fn validate(&self) -> Result<(), ShellError> {
         if self.shell.is_empty() {
@@ -270,6 +285,13 @@ impl ShellBuilder {
         #[cfg(all(target_os = "linux", feature = "landlock"))]
         let background = match &self.access_source {
             Some(source) => background.with_access_source(source.clone()),
+            None => background,
+        };
+        // Share the exec gate with the background registry (cloned before `self`
+        // moves into `ProcessBackend.config`). The same Arc also stays on `self`
+        // -> `ProcessBackend.config` for the foreground path.
+        let background = match &self.exec_gate {
+            Some(gate) => background.with_exec_gate(gate.clone()),
             None => background,
         };
 

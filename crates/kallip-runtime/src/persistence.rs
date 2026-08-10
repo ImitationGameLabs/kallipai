@@ -136,6 +136,7 @@ pub fn create_agent_dir(
     role: &str,
     description: &str,
     permissions_class: crate::config::PermissionClass,
+    delegation_mode: crate::config::DelegationMode,
 ) -> Result<PathBuf> {
     let dir = agent_dir(agent_id)?;
     std::fs::create_dir_all(&dir)?;
@@ -148,6 +149,7 @@ pub fn create_agent_dir(
         role: role.to_owned(),
         description: description.to_owned(),
         permissions_class,
+        delegation_mode,
     };
     atomic_write(
         &dir.join("meta.json"),
@@ -353,6 +355,11 @@ pub struct AgentMeta {
     /// `meta.json` files written before this field existed.
     #[serde(default)]
     pub permissions_class: crate::config::PermissionClass,
+    /// Workspace delegation mode (`carve_out` subdir vs `full_handoff`
+    /// whole-workspace). Persisted so restore reproduces the supervisor lock
+    /// transfer for a FullHandoff child. Defaults to CarveOut for legacy metas.
+    #[serde(default)]
+    pub delegation_mode: crate::config::DelegationMode,
 }
 
 /// Read an agent's meta.json without side effects.
@@ -562,6 +569,7 @@ mod tests {
             role: "researcher".into(),
             description: "gathers sources".into(),
             permissions_class: crate::config::PermissionClass::Guest,
+            delegation_mode: crate::config::DelegationMode::CarveOut,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let back: AgentMeta = serde_json::from_str(&json).unwrap();
@@ -571,6 +579,48 @@ mod tests {
         assert_eq!(
             back.permissions_class,
             crate::config::PermissionClass::Guest
+        );
+        assert_eq!(
+            back.delegation_mode,
+            crate::config::DelegationMode::CarveOut
+        );
+        // The snake_case spelling round-trips for FullHandoff too.
+        let fh = AgentMeta {
+            delegation_mode: crate::config::DelegationMode::FullHandoff,
+            ..meta
+        };
+        let back2: AgentMeta = serde_json::from_str(&serde_json::to_string(&fh).unwrap()).unwrap();
+        assert_eq!(
+            back2.delegation_mode,
+            crate::config::DelegationMode::FullHandoff
+        );
+    }
+
+    #[test]
+    fn agent_meta_pins_on_disk_enum_spellings() {
+        // The two AgentMeta enums serialize in DIFFERENT cases by design:
+        // PermissionClass keeps a PascalCase persisted form ("Guest"), while
+        // DelegationMode uses snake_case ("full_handoff"). Pin both spellings
+        // so a future "normalize the cases" refactor knows exactly what it
+        // breaks (legacy meta.json files on disk carry these literals).
+        let meta = AgentMeta {
+            workspace_root: PathBuf::from("/app"),
+            last_restored_at: None,
+            consecutive_restart_count: 0,
+            created_by: None,
+            role: String::new(),
+            description: String::new(),
+            permissions_class: crate::config::PermissionClass::Guest,
+            delegation_mode: crate::config::DelegationMode::FullHandoff,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(
+            json.contains(r#""permissions_class":"Guest""#),
+            "PermissionClass persists PascalCase; got: {json}"
+        );
+        assert!(
+            json.contains(r#""delegation_mode":"full_handoff""#),
+            "DelegationMode persists snake_case; got: {json}"
         );
     }
 
@@ -585,9 +635,13 @@ mod tests {
         }"#;
         let meta: AgentMeta = serde_json::from_str(legacy).unwrap();
         assert_eq!(meta.workspace_root, PathBuf::from("/app"));
-        // New fields default to empty.
+        // String fields default to empty; enum fields default to their enum default.
         assert_eq!(meta.role, "");
         assert_eq!(meta.description, "");
+        assert_eq!(
+            meta.delegation_mode,
+            crate::config::DelegationMode::CarveOut
+        );
     }
 
     // ----- archive-on-remove tests -----
@@ -708,6 +762,7 @@ mod tests {
                 "",
                 "",
                 crate::config::PermissionClass::Normal,
+                crate::config::DelegationMode::CarveOut,
             )
             .unwrap();
 
@@ -761,6 +816,7 @@ mod tests {
                 "",
                 "",
                 crate::config::PermissionClass::Normal,
+                crate::config::DelegationMode::CarveOut,
             )
             .unwrap();
             archive_agent_dir(&id).unwrap();
@@ -785,6 +841,7 @@ mod tests {
                 "",
                 "",
                 crate::config::PermissionClass::Normal,
+                crate::config::DelegationMode::CarveOut,
             )
             .unwrap();
             // Rollback of a never-alive agent removes the live dir directly,
@@ -819,6 +876,7 @@ mod tests {
                 "",
                 "",
                 crate::config::PermissionClass::Normal,
+                crate::config::DelegationMode::CarveOut,
             )
             .unwrap();
             // Pre-create the archived destination (an anomaly: UUIDs should not collide).

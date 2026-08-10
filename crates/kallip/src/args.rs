@@ -109,9 +109,9 @@ pub struct ReadRoomArgs {
 
 #[derive(Args)]
 pub struct SpawnArgs {
-    /// Working directory for the agent.
+    /// Working directory for the agent (required).
     #[arg(long)]
-    pub workspace_root: Option<String>,
+    pub workspace_root: String,
     /// Activate a skill by name (repeatable).
     #[arg(long = "skill", value_delimiter = ',')]
     pub skills: Vec<String>,
@@ -131,6 +131,12 @@ pub struct SpawnArgs {
     /// tagma rejects a value above the tier ceiling or the supervisor's class.
     #[arg(long, value_name = "CLASS", value_parser = ["normal", "guest"])]
     pub permission_class: Option<String>,
+    /// Transfer the supervisor's entire workspace to this subagent for its
+    /// lifetime (the supervisor cannot write its workspace until the child is
+    /// removed). Exclusive: the supervisor may have no other subagent while a
+    /// full-handoff child exists.
+    #[arg(long)]
+    pub full_handoff: bool,
 }
 
 #[derive(Args)]

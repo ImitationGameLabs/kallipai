@@ -99,6 +99,7 @@ fn make_entry_inner(
         permissions_class: Default::default(),
         role: String::new(),
         description: String::new(),
+        delegation_mode: kallip_runtime::config::DelegationMode::CarveOut,
     };
     let entry = AgentEntry {
         identity: AgentIdentity {
@@ -121,6 +122,7 @@ fn make_entry_inner(
             env: std::collections::HashMap::new(),
             preset,
             exec_policy: Arc::new(std::sync::RwLock::new(exec_policy)),
+            exec_gate: kallip_runtime::ExecGate::new(),
         },
         subagent_ids: vec![],
     };

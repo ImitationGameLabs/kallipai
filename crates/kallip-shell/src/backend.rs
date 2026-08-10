@@ -218,6 +218,24 @@ impl ShellBackend for ProcessBackend {
         // stderr pipe, so its read-end is dropped below (immediate EOF, no hang).
         // The cwd marker is unaffected -- it rides the separate fd channel.
 
+        // Hold the exec-gate READ across the snapshot+fork -- the only window
+        // where a concurrent workspace carve-out could race: the snapshot below
+        // reads lock state, and the fork bakes it into a landlock domain. A carve
+        // (WRITE) cannot interleave with this READ. Released right after the fork:
+        // the running command never re-snapshots, so a carve landing later in this
+        // exec is safe (the documented one-command overlap; long-lived background
+        // tasks are refused separately via the gate's running-bg counter). This
+        // narrow bracket is load-bearing for agent-initiated spawns -- an agent
+        // spawns a subagent by running `kallip subagent spawn` IN a bash_exec, so
+        // the spawn request arrives while this exec is past its fork and the gate
+        // is free; a whole-exec bracket would deadlock every such spawn. No-op
+        // when no gate is configured.
+        // Accepted tradeoff: a command orphaned before the carve (`cmd &` /
+        // `disown`) retains its baked (pre-carve, broader) domain for its whole
+        // life -- the orphan non-goal documented at module top -- so a FullHandoff
+        // carve does not confine it. Foreground commands are bounded by the exec
+        // timeout; only the orphan escape is unbounded.
+        let _exec_gate = crate::gate::ExecGate::read(&self.config.exec_gate).await;
         // Landlock-restrict this bash to the agent's current access decision
         // (Linux + landlock). The foreground path needs no scratch beyond
         // `baseline_writable` (`/tmp`, `/dev/null`, ...) already folded in by
@@ -234,6 +252,7 @@ impl ShellBackend for ProcessBackend {
         }
 
         let mut child = cmd.spawn()?;
+        drop(_exec_gate);
         // The child has forked and inherited the marker fd; release the parent's
         // write-end copy NOW so the read end can reach EOF at child exit (this is
         // load-bearing -- holding it past `read_cwd` would deadlock the read).
@@ -367,7 +386,7 @@ impl ShellBackend for ProcessBackend {
     }
 
     async fn spawn_background(&mut self, command: &str) -> Result<String, ShellError> {
-        self.background.spawn(command)
+        self.background.spawn(command).await
     }
 
     async fn read_background(

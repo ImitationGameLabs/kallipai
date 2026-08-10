@@ -53,10 +53,19 @@ pub enum MaxToolRounds {
     Limited(usize),
 }
 
+/// Workspace delegation mode wire spellings, as carried by
+/// [`CreateAgentRequest::delegation_mode`] and parsed by the runtime's
+/// `DelegationMode::FromStr`. The single source for the on-wire spelling so the
+/// runtime, the tagma, and the CLI cannot drift (this crate is deliberately
+/// runtime-free, so the constants live here rather than on the enum).
+pub const DELEGATION_CARVE_OUT: &str = "carve_out";
+pub const DELEGATION_FULL_HANDOFF: &str = "full_handoff";
+
 /// Request body for creating a new agent instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateAgentRequest {
-    pub workspace_root: Option<String>,
+    /// Required working directory. Rejected if absent (never silently defaulted).
+    pub workspace_root: String,
     pub skills: Vec<String>,
     pub prompt: Option<String>,
     pub created_by: Option<AgentId>,
@@ -91,6 +100,15 @@ pub struct CreateAgentRequest {
     /// `kallip-common` free of any `kallip-runtime` dependency.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_class: Option<String>,
+    /// Optional workspace delegation mode for a subagent spawn, as the lowercase
+    /// wire spelling ([`DELEGATION_CARVE_OUT`] / [`DELEGATION_FULL_HANDOFF`]). Omit
+    /// (or [`DELEGATION_CARVE_OUT`]) for the default: the subagent scopes into a
+    /// subdirectory of the supervisor's workspace. [`DELEGATION_FULL_HANDOFF`]
+    /// transfers the supervisor's entire workspace write-lock to the child for its
+    /// lifetime (exclusive: the supervisor may have no other child while it lives).
+    /// String-typed to keep `kallip-common` free of a `kallip-runtime` dependency.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegation_mode: Option<String>,
 }
 
 /// Response body returned after creating an agent.
@@ -217,4 +235,18 @@ pub struct AgentPermissionsResponse {
     /// previously invisible to clients) so an explicit downgrade is observable
     /// and verifiable. String-typed to keep `kallip-common` runtime-free.
     pub permission_class: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CreateAgentRequest;
+
+    #[test]
+    fn rejects_request_without_workspace_root() {
+        let json = r#"{"skills":[],"created_by":null,"role":"reviewer"}"#;
+        assert!(
+            serde_json::from_str::<CreateAgentRequest>(json).is_err(),
+            "missing workspace_root must be rejected"
+        );
+    }
 }

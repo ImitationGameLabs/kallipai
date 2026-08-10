@@ -26,3 +26,7 @@ pub use failover::FailoverState;
 // Re-exported shell tool-name constants so downstream crates (e.g. the tagma's
 // approval gate) can refer to them without taking a direct `kallip-shell` dep.
 pub use kallip_shell::tools::names;
+
+// Re-exported so the tagma can mint the per-agent exec gate (storing it on
+// `Agent`) and read its WRITE-side failure, without a direct `kallip-shell` dep.
+pub use kallip_shell::{ExecGate, ExecGateFailure};
