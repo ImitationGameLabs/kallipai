@@ -452,9 +452,12 @@ Deno.test(
   async () => {
     const stub: typeof fetch = () =>
       Promise.resolve(
-        new Response(JSON.stringify({ message: "invite already pending" }), {
-          status: 409,
-        }),
+        new Response(
+          JSON.stringify({ error: { message: "invite already pending" } }),
+          {
+            status: 409,
+          },
+        ),
       );
     await withFetch(stub, async () => {
       const c = new LescheClient(BASE);

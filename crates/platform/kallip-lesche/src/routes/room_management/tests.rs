@@ -396,8 +396,9 @@ async fn add_tagma_rejects_owner_disabled_tagma() {
 
 /// Existence-oracle preservation: unknown / revoked / owner-disabled tagmas all
 /// produce the byte-identical 404 body at the room-add gate (the serialized
-/// `ApiError` body is `{"message": ...}`, status is on the response line), so a
-/// probe cannot distinguish the reason. The relay never branches on *why*.
+/// `ApiError` body is `{"error":{"message": ...}}`, status is on the response
+/// line), so a probe cannot distinguish the reason. The relay never branches on
+/// *why*.
 #[tokio::test]
 async fn add_tagma_oracle_body_is_uniform_across_failure_modes() {
     let (state, control, _container) = db_state().await;

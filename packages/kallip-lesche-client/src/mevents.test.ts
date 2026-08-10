@@ -50,7 +50,7 @@ Deno.test("meEvents surfaces a non-2xx response as an error", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (() =>
     Promise.resolve(
-      new Response(JSON.stringify({ message: "unauthorized" }), {
+      new Response(JSON.stringify({ error: { message: "unauthorized" } }), {
         status: 401,
       }),
     )) as typeof fetch;

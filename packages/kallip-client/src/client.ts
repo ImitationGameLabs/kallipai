@@ -2,6 +2,7 @@ import {
   KallipError,
   TransportError,
   parseSseStream,
+  readApiError,
 } from "@kallipai/kallip-common";
 import type { AgentId } from "@kallipai/kallip-common";
 import type {
@@ -53,10 +54,7 @@ export class TagmaClient {
       throw new TransportError(`tagma request failed: ${path}`, { cause });
     }
     if (!resp.ok) {
-      throw new KallipError({
-        status: resp.status,
-        message: await readErrorMessage(resp),
-      });
+      throw new KallipError(await readApiError(resp));
     }
     return resp;
   }
@@ -132,20 +130,4 @@ export class TagmaClient {
     const path = `/agents/${id}/external/history${qs ? `?${qs}` : ""}`;
     return this.json<ExternalHistoryResponse>(path);
   }
-}
-
-async function readErrorMessage(resp: Response): Promise<string> {
-  try {
-    const body = (await resp.json()) as { error?: { message?: string } };
-    const message = body?.error?.message;
-    if (message) return message;
-  } catch {
-    try {
-      const text = await resp.text();
-      if (text) return text;
-    } catch {
-      // fall through to statusText
-    }
-  }
-  return resp.statusText;
 }

@@ -7,6 +7,7 @@
 // responses become `AgoraApiError` (`{ status, message }`). The data-plane
 // client lives in `@kallipai/kallip-lesche-client`.
 
+import { readApiError } from "@kallipai/kallip-common";
 import { AgoraApiError } from "./types.ts";
 import type {
   AddEmailRequest,
@@ -209,8 +210,8 @@ export class AgoraClient extends BaseClient {
   /** The signed-in user's linked OAuth identities. Fetches `GET /v1/me` and
    * projects `external_identities` (no dedicated list route). */
   listExternalIdentities(): Promise<readonly ExternalIdentitySummary[]> {
-    return this.json<MeResponse>("/v1/me", "GET").then((me) =>
-      me.external_identities
+    return this.json<MeResponse>("/v1/me", "GET").then(
+      (me) => me.external_identities,
     );
   }
 
@@ -380,16 +381,10 @@ export class AgoraClient extends BaseClient {
   }
 }
 
-/** Build an `AgoraApiError` from a non-2xx response: the agora's `ApiError` body
- * is `{ status, message }`; fall back to `statusText` for a non-JSON body (e.g. a
- * 403 from the CSRF guard). */
+/** Build an `AgoraApiError` from a non-2xx response. Envelope parsing is
+ * shared (`readApiError`) so the agora client cannot drift from the
+ * `{"error":{"message":...}}` shape the server emits. */
 async function agoraError(resp: Response): Promise<AgoraApiError> {
-  let message = resp.statusText;
-  try {
-    const errorBody = (await resp.json()) as { message?: string };
-    if (errorBody.message) message = errorBody.message;
-  } catch {
-    // Non-JSON error body; keep statusText.
-  }
-  return new AgoraApiError(resp.status, message);
+  const { status, message } = await readApiError(resp);
+  return new AgoraApiError(status, message);
 }

@@ -8,7 +8,7 @@
 // cookie-bearing mutating requests. Non-2xx responses become `LescheApiError`
 // (`{ status, message }`).
 
-import { parseSseStream } from "@kallipai/kallip-common";
+import { parseSseStream, readApiError } from "@kallipai/kallip-common";
 import { LescheApiError } from "./types.ts";
 import type {
   AddTagmaRequest,
@@ -262,20 +262,17 @@ export class LescheClient extends BaseClient {
    * tagma (registry-attested server-side). Distinct from the tagma-self
    * discovery route, which the tagma polls from Rust, not from this client. */
   listMyTagmaRooms(tagmaId: string): Promise<TagmaRoomView[]> {
-    return this.json(`/v1/me/tagmata/${encodeURIComponent(tagmaId)}/rooms`, "GET");
+    return this.json(
+      `/v1/me/tagmata/${encodeURIComponent(tagmaId)}/rooms`,
+      "GET",
+    );
   }
 }
 
-/** Build a `LescheApiError` from a non-2xx response: the lesche's `ApiError`
- * body is `{ status, message }`; fall back to `statusText` for a non-JSON body
- * (e.g. a 403 from the CSRF guard). */
+/** Build a `LescheApiError` from a non-2xx response. Envelope parsing is
+ * shared (`readApiError`) so the lesche client cannot drift from the
+ * `{"error":{"message":...}}` shape the server emits. */
 async function lescheError(resp: Response): Promise<LescheApiError> {
-  let message = resp.statusText;
-  try {
-    const errorBody = (await resp.json()) as { message?: string };
-    if (errorBody.message) message = errorBody.message;
-  } catch {
-    // Non-JSON error body; keep statusText.
-  }
-  return new LescheApiError(resp.status, message);
+  const { status, message } = await readApiError(resp);
+  return new LescheApiError(status, message);
 }
