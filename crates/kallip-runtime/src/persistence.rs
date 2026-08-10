@@ -471,8 +471,8 @@ fn check_meta(dir: &Path) -> Result<AgentMeta> {
 
 /// Deserialize a single agent from its directory.
 ///
-/// Reads context.json and approvals.json, fixes incomplete turns, and
-/// injects the restart message.
+/// Reads context.json and approvals.json, runs the on-load migrations (legacy
+/// pinned/summary shapes, token re-estimation), and injects the restart message.
 pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> {
     let mut store: ContextStore = match fs::read_to_string(dir.join("context.json")) {
         Ok(json) => serde_json::from_str(&json).context("parsing context.json")?,
@@ -484,8 +484,10 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
         Err(_) => ApprovalStore::new(),
     };
 
-    fix_incomplete_turn(&mut store);
-
+    // Tool-call/result pairing is guaranteed at record time
+    // (`runner::synthesize_unanswered_results`); restore intentionally does not
+    // auto-repair legacy orphan tool calls -- a stuck agent is cleaned manually.
+    //
     // Fold the legacy `pinned` vec (pre-unification format) into pinned turns at the front of
     // `turns`. No-op for new-format stores.
     store.migrate_legacy_pinned();
@@ -529,30 +531,6 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
         store,
         approvals,
     })
-}
-
-/// If the last turn ends with a ToolCalls message (no corresponding
-/// ToolResult), the turn was interrupted by a crash. Remove it so
-/// the provider does not receive an incomplete conversation.
-fn fix_incomplete_turn(store: &mut ContextStore) {
-    let count = store.turn_count();
-    if count == 0 {
-        return;
-    }
-
-    // A complete turn's last message should be either a plain assistant
-    // response or a tool_result. If it ends with ToolCalls, the round
-    // was interrupted before tool execution finished.
-    let incomplete = store
-        .turns()
-        .back()
-        .and_then(|t| t.messages.last())
-        .is_some_and(|msg| msg.tool_calls().is_some());
-
-    if incomplete {
-        store.drain_turns(count - 1..count);
-        tracing::info!("removed incomplete last turn from restored agent");
-    }
 }
 
 const RESTART_MESSAGE: &str = concat!(

@@ -216,7 +216,7 @@ fn success_result(tool_name: &str, output: String) -> String {
     .unwrap_or_else(|e| error_result(tool_name, e.to_string()))
 }
 
-fn error_result(tool_name: &str, error: String) -> String {
+pub(crate) fn error_result(tool_name: &str, error: String) -> String {
     serde_json::to_string(&ToolErrorResponse {
         ok: false,
         tool_name: tool_name.to_owned(),

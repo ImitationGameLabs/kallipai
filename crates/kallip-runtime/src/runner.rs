@@ -21,7 +21,7 @@ use crate::context::{
 };
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::failover::FailoverOutcome;
-use crate::policy::{ToolCallOutcome, skipped_tool_result, timed_out_tool_result};
+use crate::policy::{ToolCallOutcome, error_result, skipped_tool_result, timed_out_tool_result};
 use crate::stream_accumulator::ToolCallAccumulator;
 use just_llm_client::types::chat::{
     ChatMessage, ChatToolCall, StreamOptions, ToolCallsMessage, ToolChoice, ToolChoiceMode,
@@ -162,8 +162,9 @@ enum ToolExecResult {
     /// The agent called `break`. Carries the turn messages accumulated from the
     /// calls *before* `break` (the assistant tool-call message + any prior results)
     /// so the caller records them — `break` must not drop real work done earlier in
-    /// the round. `break`'s own acknowledgement is emitted as an event only, never
-    /// a persisted tool result.
+    /// the round. `break`'s own result (and that of any call emitted after it, which
+    /// the round loop never reaches) is synthesized by `synthesize_unanswered_results`
+    /// so the recorded turn stays protocol-valid; the SSE ack still fires for UI.
     Break(Vec<ChatMessage>),
     /// Cancelled mid-execution; partial results are dropped (mirrors the original early-return).
     Cancelled,
@@ -707,8 +708,12 @@ async fn execute_tool_calls(
         // above the skip branch so it always terminates the round — even when an
         // earlier call armed `skip` (e.g. a deferred bash_exec). Calls issued
         // before `break` already ran and their results are in `turn_messages`;
-        // calls after `break` never reach here. `break` produces no persisted
-        // tool result, only an emitted ack for SSE symmetry.
+        // calls issued after `break` never reach the loop body. `break` itself —
+        // and any such trailing call — still needs a persisted tool result so the
+        // recorded turn is protocol-valid (an assistant `tool_calls` message must
+        // be followed by a tool result for every id). `synthesize_unanswered_results`
+        // fills those in (break -> its real success ack; trailing calls -> a
+        // not-executed error). The SSE ack below still fires for UI symmetry.
         if call.function.name == "break" {
             tx.send(AgentEvent::ToolCall {
                 name: "break".into(),
@@ -717,6 +722,7 @@ async fn execute_tool_calls(
             .await
             .ok();
             tx.send(AgentEvent::ToolResult(break_ack())).await.ok();
+            synthesize_unanswered_results(&mut turn_messages);
             return ToolExecResult::Break(turn_messages);
         }
 
@@ -801,11 +807,68 @@ async fn execute_tool_calls(
         turn_messages.push(ChatMessage::tool_result(result, call.id));
     }
 
+    // Defensive: the loop above answers every call it iterates, so this is a
+    // no-op on the Messages path. Kept as a safety net so no recorded turn can
+    // ever carry an un-answered `tool_calls` id regardless of future changes.
+    synthesize_unanswered_results(&mut turn_messages);
     ToolExecResult::Messages(turn_messages)
 }
 
-/// Synthetic acknowledgement emitted (as an event only) when the agent calls
-/// `break`. Never persisted as a tool result — the round is over.
+/// Fill in a tool result for every `tool_calls` id in the round's assistant
+/// message that has no matching `ToolResult` in the same turn.
+///
+/// The round's assistant tool-call message is `turn_messages[0]`; the remaining
+/// messages are the tool results produced so far. `break` (and any call the model
+/// emitted after `break`, which the round loop never reaches) would otherwise be
+/// left without a result, producing a protocol-invalid turn: providers reject an
+/// assistant `tool_calls` message not followed by a tool result for every id with
+/// `400 insufficient tool messages following tool_calls message`.
+///
+/// Synthesis is honest about what happened: `break` parked (its real success ack),
+/// and any other unanswered call never ran (a not-executed error). Idempotent — a
+/// turn whose ids are all answered is untouched.
+fn synthesize_unanswered_results(turn_messages: &mut Vec<ChatMessage>) {
+    // Snapshot the declared calls (id + tool name) off the assistant message
+    // before the mutable borrow below.
+    let Some(declared) = turn_messages
+        .first()
+        .and_then(|msg| msg.tool_calls())
+        .map(|calls| {
+            calls
+                .iter()
+                .map(|c| (c.id.clone(), c.function.name.clone()))
+                .collect::<Vec<_>>()
+        })
+    else {
+        return;
+    };
+
+    for (id, name) in declared {
+        let answered = turn_messages
+            .iter()
+            .skip(1)
+            .filter_map(|msg| msg.tool_call_id())
+            .any(|answered_id| answered_id == id.as_str());
+        if answered {
+            continue;
+        }
+        let content = if name == "break" {
+            break_ack()
+        } else {
+            error_result(
+                &name,
+                "not executed: a 'break' in this round terminated execution before this call ran"
+                    .to_owned(),
+            )
+        };
+        turn_messages.push(ChatMessage::tool_result(content, id));
+    }
+}
+
+/// Normal success result for the `break` control-flow tool: the agent parked.
+/// Emitted as an SSE event for UI symmetry and persisted as the tool result for
+/// the `break` call (via [`synthesize_unanswered_results`]) so the recorded turn
+/// stays protocol-valid.
 fn break_ack() -> String {
     r#"{"ok":true,"tool_name":"break","result":{"parked":true}}"#.to_owned()
 }
@@ -972,6 +1035,107 @@ mod tests {
 
     fn no_cancel() -> CancellationToken {
         CancellationToken::new()
+    }
+
+    // --- synthesize_unanswered_results unit tests ---
+
+    use just_llm_client::types::chat::{FunctionCall, ToolType};
+
+    /// Build an assistant `tool_calls` message declaring the given (id, tool name) calls.
+    fn assistant_tool_calls(calls: &[(&str, &str)]) -> ChatMessage {
+        ChatMessage::ToolCalls(ToolCallsMessage {
+            role: "assistant".into(),
+            content: None,
+            name: None,
+            tool_calls: calls
+                .iter()
+                .map(|(id, name)| ChatToolCall {
+                    id: (*id).into(),
+                    kind: ToolType::Function,
+                    function: FunctionCall {
+                        name: (*name).into(),
+                        arguments: "{}".into(),
+                    },
+                })
+                .collect(),
+            reasoning_content: None,
+        })
+    }
+
+    fn result_ids(msgs: &[ChatMessage]) -> Vec<&str> {
+        msgs.iter().filter_map(|m| m.tool_call_id()).collect()
+    }
+
+    #[test]
+    fn synthesize_answers_break_and_trailing_calls() {
+        // [break, bash_exec]: the loop returns at break, so neither ran — break gets
+        // its success ack, bash_exec gets an honest not-executed result.
+        let mut msgs = vec![assistant_tool_calls(&[
+            ("c1", "break"),
+            ("c2", "bash_exec"),
+        ])];
+        synthesize_unanswered_results(&mut msgs);
+        assert_eq!(result_ids(&msgs), vec!["c1", "c2"]);
+        assert!(
+            msgs[1].content().unwrap().contains("parked"),
+            "break result should be its success ack: {}",
+            msgs[1].content().unwrap()
+        );
+        assert!(
+            msgs[2].content().unwrap().contains("not executed"),
+            "trailing call should be not-executed: {}",
+            msgs[2].content().unwrap()
+        );
+    }
+
+    #[test]
+    fn synthesize_preserves_existing_results() {
+        // [bash_exec, break]: bash_exec already ran and has a result; only break is filled.
+        let mut msgs = vec![
+            assistant_tool_calls(&[("c1", "bash_exec"), ("c2", "break")]),
+            ChatMessage::tool_result("done", "c1"),
+        ];
+        synthesize_unanswered_results(&mut msgs);
+        assert_eq!(result_ids(&msgs), vec!["c1", "c2"]);
+        assert_eq!(msgs[1].content().unwrap(), "done");
+        assert!(msgs[2].content().unwrap().contains("parked"));
+    }
+
+    #[test]
+    fn synthesize_is_noop_on_complete_turn_and_idempotent() {
+        let mut msgs = vec![
+            assistant_tool_calls(&[("c1", "bash_exec")]),
+            ChatMessage::tool_result("done", "c1"),
+        ];
+        synthesize_unanswered_results(&mut msgs);
+        assert_eq!(msgs.len(), 2, "a fully-answered turn is untouched");
+        // Running again over the completed turn must not duplicate anything.
+        let before = msgs.clone();
+        synthesize_unanswered_results(&mut msgs);
+        assert_eq!(result_ids(&msgs), result_ids(&before));
+        assert_eq!(msgs.len(), before.len());
+    }
+
+    #[test]
+    fn synthesize_keeps_assistant_content_and_reasoning_intact() {
+        let mut msgs = vec![ChatMessage::ToolCalls(ToolCallsMessage {
+            role: "assistant".into(),
+            content: Some("parking now".into()),
+            name: None,
+            tool_calls: vec![ChatToolCall {
+                id: "c1".into(),
+                kind: ToolType::Function,
+                function: FunctionCall {
+                    name: "break".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            reasoning_content: Some("done thinking".into()),
+        })];
+        synthesize_unanswered_results(&mut msgs);
+        assert_eq!(msgs[0].content(), Some("parking now"));
+        assert_eq!(msgs[0].reasoning_content(), Some("done thinking"));
+        assert_eq!(msgs[1].tool_call_id(), Some("c1"));
     }
 
     // --- advance_failover unit tests (fast, no wiremock; summarize_and_evict no-ops on empty store) ---
