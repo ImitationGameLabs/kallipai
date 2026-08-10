@@ -1443,3 +1443,237 @@ async fn list_rooms_is_newest_joined_first() {
     assert_eq!(rooms_view[1].name, "room1");
     assert_eq!(rooms_view[2].name, "room0");
 }
+
+/// Insert `n` human members directly into an existing room (bypassing the
+/// handlers) to drive it toward the member cap without issuing dozens of
+/// invites. Each inserted id is `{prefix}{i}`.
+///
+/// The cap (`MAX_ROOM_MEMBERS`) is enforced inside the txn, after the
+/// idempotency check, so a re-add of an already-present member stays a no-op
+/// regardless of room size -- the tests below rely on both halves of that.
+async fn seed_extra_members(
+    db: &crate::db::Db,
+    room_id: &str,
+    added_by: &UserId,
+    n: usize,
+    prefix: &str,
+) {
+    let now = OffsetDateTime::now_utc();
+    for i in 0..n {
+        let u = UserId::from(format!("{prefix}{i}"));
+        room_members::ActiveModel {
+            room_id: Set(room_id.to_string()),
+            member_id: Set(ParticipantId::for_user(&u).as_ref().to_string()),
+            kind: Set(ParticipantKind::Human.as_str().to_string()),
+            source_id: Set(u.to_string()),
+            joined_at: Set(now),
+            added_by: Set(added_by.to_string()),
+        }
+        .insert(db)
+        .await
+        .expect("insert extra member");
+    }
+}
+
+#[tokio::test]
+async fn add_tagma_below_cap_succeeds() {
+    let (state, control, _container) = db_state().await;
+    let alice = UserId::from("alice".to_string());
+    control.seed_user(alice.clone());
+    let tagma = TagmaId::from("tagma-1".to_string());
+    control.enroll_tagma(&tagma, alice.clone(), dummy_key(), "tok");
+
+    // One short of the cap (creator + (cap - 2) extras), so adding the tagma
+    // lands at exactly the cap and succeeds.
+    let Json(room) = create_private_room(&state, &alice).await.expect("create");
+    let db = state.db.as_ref().expect("db present");
+    seed_extra_members(
+        db,
+        &room.room_id,
+        &alice,
+        (super::shared::MAX_ROOM_MEMBERS - 2) as usize,
+        "u",
+    )
+    .await;
+
+    add_tagma(
+        State(state),
+        as_user(&alice),
+        Path(room.room_id),
+        Json(AddTagmaRequest {
+            tagma_id: tagma.to_string(),
+        }),
+    )
+    .await
+    .expect("add tagma below cap");
+}
+
+#[tokio::test]
+async fn add_tagma_at_cap_is_409() {
+    let (state, control, _container) = db_state().await;
+    let alice = UserId::from("alice".to_string());
+    control.seed_user(alice.clone());
+    let tagma = TagmaId::from("tagma-1".to_string());
+    control.enroll_tagma(&tagma, alice.clone(), dummy_key(), "tok");
+
+    // At the cap (creator + (cap - 1) extras), so a fresh tagma is refused.
+    let Json(room) = create_private_room(&state, &alice).await.expect("create");
+    let db = state.db.as_ref().expect("db present");
+    seed_extra_members(
+        db,
+        &room.room_id,
+        &alice,
+        (super::shared::MAX_ROOM_MEMBERS - 1) as usize,
+        "u",
+    )
+    .await;
+
+    let err = add_tagma(
+        State(state),
+        as_user(&alice),
+        Path(room.room_id),
+        Json(AddTagmaRequest {
+            tagma_id: tagma.to_string(),
+        }),
+    )
+    .await
+    .expect_err("cap blocks add");
+    assert_eq!(err.status, 409);
+}
+
+#[tokio::test]
+async fn add_tagma_idempotent_at_cap_is_noop() {
+    // Re-adding a tagma already in the room is a no-op even at the cap: the cap
+    // check runs only for a genuinely new member.
+    let (state, control, _container) = db_state().await;
+    let alice = UserId::from("alice".to_string());
+    control.seed_user(alice.clone());
+    let tagma = TagmaId::from("tagma-1".to_string());
+    control.enroll_tagma(&tagma, alice.clone(), dummy_key(), "tok");
+
+    // Seed at the cap with the tagma already present (1 creator + (cap - 2)
+    // humans + 1 tagma).
+    let db = state.db.as_ref().expect("db present");
+    let extras: Vec<UserId> = (0..super::shared::MAX_ROOM_MEMBERS - 2)
+        .map(|i| UserId::from(format!("u{i}")))
+        .collect();
+    let extra_refs: Vec<&UserId> = extras.iter().collect();
+    seed_room(db, "room-1", &alice, &extra_refs, &[&tagma]).await;
+
+    add_tagma(
+        State(state),
+        as_user(&alice),
+        Path("room-1".to_string()),
+        Json(AddTagmaRequest {
+            tagma_id: tagma.to_string(),
+        }),
+    )
+    .await
+    .expect("idempotent re-add at cap");
+}
+
+#[tokio::test]
+async fn join_public_room_at_cap_is_409() {
+    let (state, control, _container) = db_state().await;
+    let alice = UserId::from("alice".to_string());
+    control.seed_user(alice.clone());
+    let late = UserId::from("late".to_string());
+    control.seed_user(late.clone());
+
+    // Public room at the cap (creator + (cap - 1) extras); a late self-join is
+    // refused.
+    let Json(room) = create_room_visible(&state, &alice, Visibility::Public)
+        .await
+        .expect("public");
+    let db = state.db.as_ref().expect("db present");
+    seed_extra_members(
+        db,
+        &room.room_id,
+        &alice,
+        (super::shared::MAX_ROOM_MEMBERS - 1) as usize,
+        "u",
+    )
+    .await;
+
+    let err = join_public_room(State(state), as_user(&late), Path(room.room_id))
+        .await
+        .expect_err("cap blocks join");
+    assert_eq!(err.status, 409);
+}
+
+#[tokio::test]
+async fn accept_invite_at_cap_blocks_new_member() {
+    let (state, control, _container) = db_state().await;
+    let alice = UserId::from("alice".to_string());
+    let carol = UserId::from("carol".to_string());
+    control.seed_user(alice.clone());
+    control.seed_user(carol.clone());
+
+    // Private room at the cap (creator + (cap - 1) extras); carol is not a member.
+    let db = state.db.as_ref().expect("db present");
+    let extras: Vec<UserId> = (0..super::shared::MAX_ROOM_MEMBERS - 1)
+        .map(|i| UserId::from(format!("u{i}")))
+        .collect();
+    let extra_refs: Vec<&UserId> = extras.iter().collect();
+    seed_room(db, "room-1", &alice, &extra_refs, &[]).await;
+
+    let (_, Json(invite)) = create_invite(
+        State(state.clone()),
+        as_user(&alice),
+        Path("room-1".to_string()),
+        Json(CreateInviteRequest {
+            invitee_username: carol.to_string(),
+        }),
+    )
+    .await
+    .expect("invite");
+
+    let err = accept_invite(
+        State(state),
+        as_user(&carol),
+        Path(("room-1".to_string(), invite.invite_id.to_string())),
+    )
+    .await
+    .expect_err("cap blocks accept");
+    assert_eq!(err.status, 409);
+}
+
+#[tokio::test]
+async fn accept_invite_at_cap_lets_existing_member_re_accept() {
+    // An already-member re-accepting their invite is a no-op member write (the
+    // invite is still stamped) and must not hit the cap even in a full room.
+    let (state, control, _container) = db_state().await;
+    let alice = UserId::from("alice".to_string());
+    let carol = UserId::from("carol".to_string());
+    control.seed_user(alice.clone());
+    control.seed_user(carol.clone());
+
+    // Private room at the cap with carol already present (creator + carol +
+    // (cap - 2) extras).
+    let db = state.db.as_ref().expect("db present");
+    let mut humans: Vec<UserId> = (0..super::shared::MAX_ROOM_MEMBERS - 2)
+        .map(|i| UserId::from(format!("u{i}")))
+        .collect();
+    humans.insert(0, carol.clone());
+    let human_refs: Vec<&UserId> = humans.iter().collect();
+    seed_room(db, "room-1", &alice, &human_refs, &[]).await;
+
+    let (_, Json(invite)) = create_invite(
+        State(state.clone()),
+        as_user(&alice),
+        Path("room-1".to_string()),
+        Json(CreateInviteRequest {
+            invitee_username: carol.to_string(),
+        }),
+    )
+    .await
+    .expect("invite");
+
+    accept_invite(
+        State(state),
+        as_user(&carol),
+        Path(("room-1".to_string(), invite.invite_id.to_string())),
+    )
+    .await
+    .expect("re-accept at cap stamps invite");
+}

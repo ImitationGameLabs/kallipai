@@ -11,7 +11,32 @@ use crate::state::SharedConvState;
 use kallip_agora_common::ids::{MemberId, ParticipantKind, RoomId, UserId};
 use kallip_agora_common::participant::RoomMember;
 use kallip_common::protocol::ApiError;
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+/// Hard cap on members per room. Deliberately small: a room is a
+/// human/agent collaboration group, not a mass chat, and coordination
+/// efficiency collapses past a certain size. Raise only when a real need
+/// appears.
+pub(super) const MAX_ROOM_MEMBERS: u64 = 30;
+
+/// Reject with 409 "room is full" when the room is already at the member cap.
+/// Race-free only because the caller holds the room row `lock_exclusive()` --
+/// every membership-add path takes that lock before its check-then-insert, so
+/// this count is atomic with the subsequent insert. Place the call AFTER the
+/// idempotency check so a re-add of an already-present member stays a no-op.
+pub(super) async fn enforce_member_cap_locked(
+    txn: &impl ConnectionTrait,
+    room: &str,
+) -> Result<(), TxnError> {
+    let count = room_members::Entity::find()
+        .filter(room_members::Column::RoomId.eq(room))
+        .count(txn)
+        .await?;
+    if count >= MAX_ROOM_MEMBERS {
+        return Err(TxnError::Api(ApiError::conflict("room is full")));
+    }
+    Ok(())
+}
 
 /// Parse a stored `kind` string into a [`ParticipantKind`]. Defensive: any
 /// unknown value is treated as `Agent` (the historical default for non-user

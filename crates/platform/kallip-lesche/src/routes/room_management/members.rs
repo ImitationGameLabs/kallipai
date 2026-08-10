@@ -4,7 +4,9 @@
 //! agora registry; `add_tagma` attests enrollment through the agora
 //! `/internal/*` surface rather than a local tagma-table read. Each actual
 //! membership change fires a local post-commit fan (`spawn_local_membership_fan`);
-//! an idempotent no-op add does not.
+//! an idempotent no-op add does not. A real new add past the member cap
+//! ([`super::shared::MAX_ROOM_MEMBERS`]) is refused with `409 "room is full"`,
+//! checked inside the txn after the idempotency gate.
 //!
 //! ## Removal authorization
 //!
@@ -25,7 +27,9 @@
 //! Every other case collapses to one `404 "unknown room"` (the existence
 //! oracle: a probe learns neither the room nor the target nor the reason).
 
-use super::shared::{bump_epoch_locked, require_member_locked, spawn_local_membership_fan};
+use super::shared::{
+    bump_epoch_locked, enforce_member_cap_locked, require_member_locked, spawn_local_membership_fan,
+};
 use crate::auth::{AuthPrincipal, require_user};
 use crate::db::entity::{room_member_revocations, room_members, rooms};
 use crate::db::{TxnError, flatten_txn, map_db_err};
@@ -103,6 +107,7 @@ pub(super) async fn add_tagma(
                     .one(txn)
                     .await?;
                 if already.is_none() {
+                    enforce_member_cap_locked(txn, &room).await?;
                     room_members::ActiveModel {
                         room_id: Set(room),
                         member_id: Set(participant_id),
@@ -172,6 +177,7 @@ pub(super) async fn join_public_room(
                 if already.is_some() {
                     return Ok(false);
                 }
+                enforce_member_cap_locked(txn, &room).await?;
                 let now = OffsetDateTime::now_utc();
                 room_members::ActiveModel {
                     room_id: Set(room),

@@ -8,7 +8,9 @@
 
 use std::collections::HashMap;
 
-use super::shared::{bump_epoch_locked, require_member_locked, spawn_local_membership_fan};
+use super::shared::{
+    bump_epoch_locked, enforce_member_cap_locked, require_member_locked, spawn_local_membership_fan,
+};
 use crate::auth::{AuthPrincipal, require_user};
 use crate::db::entity::{room_invites, room_members, rooms};
 use crate::db::{TxnError, flatten_txn, map_db_err};
@@ -282,6 +284,7 @@ pub(super) async fn accept_invite(
                     .await?
                     .is_some();
                 if !already_member {
+                    enforce_member_cap_locked(txn, &room).await?;
                     room_members::ActiveModel {
                         room_id: Set(room.clone()),
                         member_id: Set(participant_id),
