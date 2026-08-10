@@ -1,6 +1,6 @@
 //! Tagma-owned backend construction.
 //!
-//! The tagma owns the HTTP-client concern (reqwest TLS/timeout) and, via [`BackendFactory`],
+//! The tagma owns the HTTP-client concern (reqwest TLS + connect/read timeouts) and, via [`BackendFactory`],
 //! builds one shared [`LlmBackend`] per endpoint. At startup only the **active set** — each
 //! tier's `profiles[0]` — is built, so misconfiguration of the primary path fails fast. Failover
 //! profiles' endpoints are built lazily by [`TagmaBackendSource`] on first use (within-tier
@@ -18,10 +18,16 @@ use just_llm_client::client::BackendFactory;
 use just_llm_client::family;
 use kallip_runtime::profile::{BackendSource, Endpoint, ProfileConfig};
 
-/// Default total-request timeout for outbound LLM HTTP calls. LLM completions can be slow, but
-/// this also bounds streaming — to apply a custom timeout/proxy, build the `reqwest::Client`
-/// differently inside [`build_one`].
-const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default timeout for establishing the outbound LLM HTTP connection (DNS + TCP + TLS). Distinct
+/// from [`DEFAULT_READ_TIMEOUT`], which bounds per-read idle.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default per-read idle timeout for outbound LLM HTTP calls. Unlike a whole-request timeout,
+/// reqwest's `read_timeout` resets on each successful read, so a streaming completion that keeps
+/// producing tokens (or SSE keep-alive comments) never trips it — only genuine connection silence
+/// does. It also bounds time-to-response-headers. To apply a custom timeout/proxy, build the
+/// `reqwest::Client` differently inside [`build_one`].
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Default `User-Agent` for outbound LLM HTTP calls: `kallip/<tagma-version>`, with the version
 /// inlined at compile time from this crate's `Cargo.toml` (`env!("CARGO_PKG_VERSION")`). Override
@@ -71,8 +77,9 @@ fn validate_endpoints(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<(
     Ok(())
 }
 
-/// Build one backend for `endpoint` via the factory: a fresh `reqwest::Client` (rustls TLS, the default
-/// timeout, and the resolved `User-Agent`) with credentials passed into the constructor.
+/// Build one backend for `endpoint` via the factory: a fresh `reqwest::Client` (rustls TLS, the
+/// default connect + per-read idle timeouts, and the resolved `User-Agent`) with credentials
+/// passed into the constructor.
 ///
 /// The `User-Agent` survives upstream today because `BackendFactory::create` forwards our builder
 /// verbatim and `just-common::build_client` injects only `Authorization`/`Accept` — it sets no UA of
@@ -87,7 +94,8 @@ fn build_one(
     user_agent: &str,
 ) -> Result<Arc<dyn LlmBackend>> {
     let builder = reqwest::Client::builder()
-        .timeout(DEFAULT_HTTP_TIMEOUT)
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .read_timeout(DEFAULT_READ_TIMEOUT)
         .use_rustls_tls()
         .user_agent(user_agent);
     factory
