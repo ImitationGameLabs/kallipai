@@ -28,7 +28,7 @@ use kallip_runtime::tools::{
 };
 use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use kallip_common::protocol::{
     CreateAgentRequest, CreateAgentResponse, ListAgentsQuery, UpdateActivityRequest,
@@ -1453,7 +1453,7 @@ pub async fn remove_agent(
             // under a bound; force-abort only if a task is stuck.
             let bound = Duration::from_secs(crate::shutdown::REMOVE_AGENT_SHUTDOWN_TIMEOUT_SECS);
             if !live.agent.shutdown(bound).await {
-                warn!(id = %id, "agent did not shut down in time, force-aborted");
+                error!(id = %id, "agent did not shut down in time, force-aborted");
             }
         }
         crate::state::RegistryEntry::Faulted(_) => {
@@ -1464,7 +1464,7 @@ pub async fn remove_agent(
     }
 
     if let Err(e) = persistence::archive_agent_dir(&id) {
-        info!(id = %id, "agent dir archive failed: {e:#}");
+        warn!(id = %id, "agent dir archive failed: {e:#}");
     }
     info!(id = %id, "archived agent");
     Ok(StatusCode::NO_CONTENT)

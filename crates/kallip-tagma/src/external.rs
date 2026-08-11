@@ -35,7 +35,7 @@ use kallip_lesche_common::message::{HistoryEntry, Participant, TagmaReply};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::relay::MessageLimits;
 use crate::relay::RelayMessageError;
@@ -345,7 +345,7 @@ impl ExternalProjector {
                 self.publish(ExternalFrame::Authored { sender, reply });
             }
             Err(e) => {
-                warn!("inbound history append failed: {e:#}");
+                error!("inbound history append failed: {e:#}");
                 self.publish_unstamped_inbound(sender, text);
             }
         }
@@ -392,7 +392,7 @@ impl ExternalProjector {
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
-                warn!("history read failed: {e:#}");
+                error!("history read failed: {e:#}");
                 return (Vec::new(), false);
             }
         };

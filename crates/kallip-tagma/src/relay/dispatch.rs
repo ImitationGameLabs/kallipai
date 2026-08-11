@@ -91,7 +91,7 @@ impl RelayHandle {
                 op_err_reply(req_id, &e)
             }
             Err(_) => {
-                warn!(req_id, "op panicked; emitting 502");
+                error!(req_id, "op panicked; emitting 502");
                 TagmaReply::Error {
                     req_id,
                     status: 502,
@@ -148,7 +148,7 @@ impl RelayHandle {
             .await
             .is_err()
         {
-            warn!(req_id, "history batch panicked; emitting empty marker");
+            error!(req_id, "history batch panicked; emitting empty marker");
             if let Err(e) = self
                 .emit(
                     trace,

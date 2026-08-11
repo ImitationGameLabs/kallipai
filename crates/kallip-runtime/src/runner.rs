@@ -605,7 +605,7 @@ async fn step_failover(
             *messages = new_messages;
             // Under skip, `from`→`to` may jump over unbuildable intermediates; those are
             // warned inside advance_failover (not surfaced here).
-            info!(from = %from, to = %to, reason = %reason, "within-tier failover");
+            warn!(from = %from, to = %to, reason = %reason, "within-tier failover");
             tx.send(AgentEvent::Failover { from, to, reason })
                 .await
                 .ok();

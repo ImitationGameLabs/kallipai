@@ -110,7 +110,7 @@ impl RelayHandle {
                     .await
                     .is_err()
                 {
-                    warn!("relay op dispatch panicked past the inner boundary");
+                    error!("relay op dispatch panicked past the inner boundary");
                 }
             }
             TunnelInbound::Wake => {

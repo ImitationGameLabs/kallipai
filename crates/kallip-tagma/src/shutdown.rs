@@ -71,7 +71,7 @@ pub(crate) async fn graceful_agent_shutdown(state: &AppState) {
         match entry {
             RegistryEntry::Live(live) => {
                 if !live.agent.shutdown(bound).await {
-                    tracing::warn!(id = %id, "agent did not shut down in time, force-aborted");
+                    tracing::error!(id = %id, "agent did not shut down in time, force-aborted");
                 }
             }
             RegistryEntry::Faulted(_) => {

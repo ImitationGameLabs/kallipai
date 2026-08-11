@@ -7,7 +7,7 @@ use kallip_common::protocol::{AgentState, SseEvent};
 use kallip_runtime::event::AgentEvent;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::state::SharedState;
 
@@ -68,16 +68,15 @@ pub async fn bridge_task(
                         match &other {
                             AgentEvent::Busy => state.store(AgentState::BUSY, Ordering::Relaxed),
                             AgentEvent::Error(msg) => {
-                                // Fatal LLM/runtime error. `warn!` (not `error!`):
-                                // the task stays alive — only the round ended. This
-                                // log is also the sole observability channel for a
-                                // headless/subagent run, where the SSE event below
-                                // has no subscriber and is dropped silently.
-                                warn!(id = %agent_id, "agent round ended in error: {msg}");
+                                // Fatal LLM/runtime error. `error!`: the round terminally
+                                // failed (no retry). This is the sole observability channel
+                                // for a headless/subagent run, where the SSE event below has
+                                // no subscriber and is dropped silently.
+                                error!(id = %agent_id, "agent round ended in error: {msg}");
                                 mark_idle(&state, &activity);
                             }
                             AgentEvent::FailoverChainExhausted { detail, .. } => {
-                                warn!(id = %agent_id, "failover chain exhausted: {detail}");
+                                error!(id = %agent_id, "failover chain exhausted: {detail}");
                                 mark_idle(&state, &activity);
                             }
                             AgentEvent::Idle

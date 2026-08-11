@@ -43,7 +43,7 @@ use std::panic::AssertUnwindSafe;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use kallip_common::agentid::AgentId;
 

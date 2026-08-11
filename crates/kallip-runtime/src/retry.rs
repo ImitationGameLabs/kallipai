@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use just_llm_client::{BackendError, ChatCompletionStream};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::warn;
 
 use crate::event::AgentEvent;
 use kallip_common::retry::RetryRecord;
@@ -245,7 +245,7 @@ pub async fn stream_with_retry(
                 let error_msg = crate::llm_error::render_error(&error);
                 let global_attempt = prior_retries + attempt;
 
-                info!(
+                warn!(
                     attempt = global_attempt,
                     max_attempts = policy.max_retries,
                     delay_secs,
