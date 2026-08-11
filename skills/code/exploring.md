@@ -49,11 +49,15 @@ Done when:
 depth your goal demands: docs that explain design and architecture
 (usually under docs/), and code that illustrates how the parts work
 together — entry points, a top-level module, a representative
-subsystem. Understanding a project often requires reading past the
-README; the rule is to read what serves understanding, not what
-serves contribution. Contributor-only documents (AGENTS.md, CONTRIBUTING.md, and
-development guides such as docs/development.md) are for people
-changing the code and add no value to a reader.
+subsystem. For code files, use `aifed outline` to see the symbol
+structure first, then `aifed read <file> [start-end]` to read only the
+relevant section — this is cheaper than reading the whole file and
+respects the reader's goal of understanding, not exhaustively reading.
+Understanding a project often requires reading past the README; the rule
+is to read what serves understanding, not what serves contribution.
+Contributor-only documents (AGENTS.md, CONTRIBUTING.md, and development
+guides such as docs/development.md) are for people changing the code and
+add no value to a reader.
 Done when:
 - you can explain how the project works at the depth you set out to
   understand it

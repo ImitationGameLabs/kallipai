@@ -68,7 +68,9 @@ Done when:
 the conventions that govern it: the module layout, the types you will
 touch, the error-handling and naming patterns in that area. This is
 where the survey becomes targeted — deep-read the subtree you will
-change, not the whole codebase.
+change, not the whole codebase. For code files, use `aifed outline` to
+see the symbol structure first, then `aifed read <file> [start-end]` to
+read only the relevant section rather than the whole file.
 Done when:
 - you have the specific files, types, or symbols your change needs
 - you know the conventions (naming, error handling, module layout)
