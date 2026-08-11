@@ -215,7 +215,7 @@ fn compose_system_prompt(
     // output; a typo'd placeholder name (leaving a literal `{...}`) fails
     // loudly.
     let permission_class_hint = match config.permissions_class {
-        PermissionClass::Normal => "owns a read-write workspace",
+        PermissionClass::Normal => "owns a read-write workspace and home directory",
         PermissionClass::Guest => "readonly workspace, no home write",
     };
     // Absolute skills dir, resolved the same way `skill_dir()` does for the

@@ -76,10 +76,11 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
     // (Linux + `landlock`). The closure composes the decision fresh per spawn.
     // Both classes read broadly; the class distinction is on WRITE and secret
     // visibility:
-    // - **Normal**: writable = its write-locks (held dirlocks) plus `/dev/shm`
-    //   (Chromium and similar need writable POSIX shared memory); secrets readable
-    //   (mitigated by proxy tools, design doc §4.5). See `normal_extra_writable`
-    //   for the `/dev/shm` tradeoff.
+    // - **Normal**: writable = its write-locks (held dirlocks) plus `$HOME`
+    //   (home broad-write) and `/dev/shm` (Chromium and similar need writable
+    //   POSIX shared memory); secrets readable (a secret-proxy mitigation is
+    //   planned in docs/roadmap.md, not yet built). See `normal_extra_writable`
+    //   for the tradeoffs.
     // - **Guest**: read-only — no write-locks granted; secret dirs are hidden by
     //   mount-ns tmpfs overlays so a broad-read Guest can read source/caches
     //   (`~/.cargo`) without reaching keys/tokens.
@@ -152,10 +153,24 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
 }
 
 /// Extra writable paths granted to **Normal** agents on top of their held
-/// dirlocks — currently just `/dev/shm`, which tools like Chromium-backed
-/// renderers require (they write well-known prefixes such as
+/// dirlocks — `$HOME` (home broad-write, so `~/.cargo`, `~/.rustup`, ... stay
+/// populatable for build tools) and `/dev/shm`, which tools like
+/// Chromium-backed renderers require (they write well-known prefixes such as
 /// `/dev/shm/.org.chromium.*` directly, so per-agent namespacing would break
 /// them). Normal-only: Guest is contractually read-only.
+///
+/// The `$HOME` grant is broad on purpose: build tools and language runtimes
+/// scatter caches, installs, and config across an open-ended set of home
+/// subtrees (`~/.cargo`, `~/.rustup`, `~/.npm`, `~/.cache`, `~/.local`,
+/// `~/.config`, `~/.ssh/known_hosts`, ...) that no allowlist can enumerate. A
+/// Normal agent already shares the host UID, runs arbitrary bash as it, and
+/// has broad read of all secrets ([`ReadPolicy::Broad`], including `~/.ssh`
+/// private keys) — so home broad-write opens no new capability class beyond
+/// the trusted-UID boundary. The residual risk is cross-session persistence
+/// (e.g. planting `~/.bashrc`), to be addressed by the planned secret-proxy
+/// mitigation (docs/roadmap.md) rather than a cache-leaf allowlist. Note
+/// [`guest_hide_holes`] is Guest-only, so Normal gets no sandbox-side secret
+/// masking on either read or write.
 ///
 /// `/dev/shm` is world-shared tmpfs, so Normal agents can read/write each
 /// other's files there, and a Guest's Broad read sees them too. Accepted:
@@ -166,13 +181,22 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
 /// writable paths when building the ruleset.
 #[cfg(all(target_os = "linux", feature = "landlock"))]
 fn normal_extra_writable() -> Vec<PathBuf> {
-    vec![PathBuf::from("/dev/shm")]
+    let mut out = vec![PathBuf::from("/dev/shm")];
+    // Home broad-write: Normal agents must be able to populate ~/.cargo,
+    // ~/.rustup, ~/.npm, ... or build tools (cargo, npm, ...) fail on
+    // dependency fetch. libsandbox already filters non-existent writable
+    // paths when building the ruleset, so no existence guard is needed here.
+    if let Some(home) = dirs::home_dir() {
+        out.push(home);
+    }
+    out
 }
 
 /// Secret directories a Guest agent's `bash` must not see — overlaid by empty
 /// read-only tmpfs (hide-holes) so a broad-read Guest can read source/caches
 /// without reaching keys/tokens. Normal agents get no hide-holes (their secret
-/// use is via proxy tools, design doc §4.5). The returned paths populate
+/// use is via proxy tools, planned in docs/roadmap.md, not yet built). The
+/// returned paths populate
 /// [`kallip_shell::landlock::AccessDecision::hide_holes`], which
 /// `kallip-shell::landlock::apply` realizes via libsandbox's
 /// `prepare_tmpfs`/`install_tmpfs` (one tmpfs overlay per path).
