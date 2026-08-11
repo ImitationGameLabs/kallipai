@@ -78,7 +78,7 @@ will be simpler because it solves a real problem instead of an imagined one.
 - If a function is long but has a single purpose, prefer readability edits
   (extract well-named helpers, reorder for narrative) over architectural
   changes, because complexity from length and complexity from architecture
-  are different problems with different remedies.
+  are different problems with different remedies. Apply these readability edits via `code/refactoring` for the test-verified small-step workflow.
 - If you are tempted to add a parameter, flag, or branch for a scenario that
   does not yet exist, do not add it, because speculative parameters create a
   combinatorial test burden for a need that may never arrive.

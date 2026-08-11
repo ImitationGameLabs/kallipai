@@ -26,6 +26,7 @@ for how to present the recommended approach is the Design plan shape in
   thinking that fills in the design section of that plan
 - To judge plan quality — that is `what-makes-a-good-plan`; this skill is how
   you arrive at the content
+- For a pure refactoring with no design decisions — use `code/refactoring`, because small structural moves with no new abstractions need the safety-net workflow, not divergent design analysis
 
 ## The sequence
 

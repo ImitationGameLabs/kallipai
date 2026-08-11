@@ -28,6 +28,7 @@ is confirmed.
 - For a compiler error the message already pinpoints — read it and fix the syntax or type, because the investigation overhead costs more than the fix
 - For a one-line fix where the cause is obvious from the error — fix directly and add a regression test, because the full investigation sequence is ceremony
 - To explore a codebase without a specific failure — use `code/exploring`
+- To restructure working code without fixing a bug — use `code/refactoring`, because debugging is investigation of a failure, and behavior-preserving restructuring needs its own safety-net workflow
 
 ## The sequence
 

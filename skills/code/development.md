@@ -15,7 +15,7 @@ this skill is the single-agent per-task workflow those roles build on.
 
 ## When to use
 
-- You need to implement a change — a feature, a fix, a refactor — and want
+- You need to implement a change — a feature, a fix — and want
   the full workflow from understanding the codebase through shipping
 
 ## When NOT to use
@@ -28,6 +28,7 @@ this skill is the single-agent per-task workflow those roles build on.
   `code/debugging` for the investigation workflow, because development
   assumes you know what to change; return here once the cause is found
   and the fix is non-trivial
+- For pure structural cleanup that preserves behavior — use `code/refactoring`, because the safety-net discipline (tests verified before and after each small change) is specific to behavior-preserving work
 
 ## The sequence
 
