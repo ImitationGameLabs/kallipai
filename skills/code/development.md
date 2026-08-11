@@ -87,6 +87,8 @@ review scope includes both the diff (correctness, conventions, plan
 alignment) and the commit message (does it accurately convey the
 change's intent and meet `code/commit-messages` standard). Meta-review
 their findings.
+Reviewers should load `code/reviewing-code` for the criteria — what to
+check, priority order, and blocking rules.
 Done when:
 
 - deep-review has ended on the change (no blocking findings, or accepted-with-reason)

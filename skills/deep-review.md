@@ -44,6 +44,9 @@ so they review the exact commit (`git show <hash>`); include the commit
 message in the review scope, because the message states the change's intent
 and reviewing it catches mismatches between intent and implementation, as
 well as format violations against `code/commit-messages`.
+When the target is a code change, the review standard is
+`code/reviewing-code` — what to check, in what priority order, and what
+blocks.
 
 Done when:
 - the target is precisely named (file paths, diff, plan text, or commit hash)
