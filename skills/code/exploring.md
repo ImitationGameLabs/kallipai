@@ -27,6 +27,8 @@ serves changing the code, not understanding it. If you are preparing to change c
   and constraints — that is `code/onboarding`.
 - You already know a codebase and need a specific symbol — a targeted
   `grep`/`rg` beats a fresh survey.
+- To investigate a specific bug or failure — use `code/debugging`
+  for the systematic root-cause investigation workflow
 
 ## The sequence
 

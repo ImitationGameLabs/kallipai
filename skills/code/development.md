@@ -24,6 +24,10 @@ this skill is the single-agent per-task workflow those roles build on.
   workflow costs more than it saves
 - To explore a codebase without changing it — use `code/exploring`
 - To write a plan without implementing — use `planning`
+- For a bug fix where the root cause is unknown — start with
+  `code/debugging` for the investigation workflow, because development
+  assumes you know what to change; return here once the cause is found
+  and the fix is non-trivial
 
 ## The sequence
 
