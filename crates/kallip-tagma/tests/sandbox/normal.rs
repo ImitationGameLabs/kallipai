@@ -1,7 +1,8 @@
 //! Scenario 2 -- Normal root agent.
 //!
-//! Workspace and held dirlocks writable; `/tmp` baseline-writable; tagma data
-//! tree read-only (write denied, read ok); `.ssh` and `profiles.toml` readable
+//! Workspace and held dirlocks writable; `/tmp` baseline-writable and
+//! `/dev/shm` Normal-extra writable; tagma data tree read-only (write denied,
+//! read ok); `.ssh` and `profiles.toml` readable
 //! (Normal has no hide-holes -- secret protection is Guest-side; this asserts
 //! the real semantics).
 
@@ -15,10 +16,14 @@ async fn scenario2_normal() {
     if unsupported() {
         return;
     }
+    // `/dev/shm` is absent on some restricted containers; guard so the shm
+    // assertions no-op there rather than fail. `is_dir()` (not `exists()`) so a
+    // hostile regular file at that path is not written to.
+    let have_shm = Path::new("/dev/shm").is_dir();
     let world = World::setup();
     let ws = world.workspace.path().to_path_buf();
     let agent_data = "$KALLIP_DATA_DIR/agents/$KALLIP_ID";
-    let script = vec![
+    let mut script = vec![
         Reply::Tool(format!("echo hello > {}/test.txt", ws.display())), // 0: workspace writable
         Reply::Tool("kallip dirlock acquire $HOME/writable_subdir".into()), // 1: lock home subdir
         Reply::Tool("echo y > $HOME/writable_subdir/x".into()),         // 2: now writable
@@ -28,8 +33,11 @@ async fn scenario2_normal() {
         Reply::Tool("ls -A $HOME/.ssh".into()),                         // 6: Normal reads .ssh
         Reply::Tool("cat $HOME/.ssh/id_testkey".into()),                // 7: contents readable
         Reply::Tool("cat $HOME/.config/kallip/profiles.toml".into()),   // 8: Normal reads profiles
-        Reply::End("done"),
     ];
+    if have_shm {
+        script.push(Reply::Tool("echo s > /dev/shm/scenario2_shm".into())); // 9: /dev/shm writable
+    }
+    script.push(Reply::End("done"));
 
     let fx = start(world, &script, None).await;
     let run = run_agent(&fx.tagma).await;
@@ -67,6 +75,9 @@ async fn scenario2_normal() {
         results[7].text()
     );
     expect(&results, 8, "profiles read", true);
+    if have_shm {
+        expect(&results, 9, "/dev/shm write", true);
+    }
 
     // FS corroboration.
     assert!(
@@ -86,6 +97,14 @@ async fn scenario2_normal() {
 
     // /tmp cleanup so the assertion is repeatable.
     let _ = std::fs::remove_file("/tmp/scenario2_tmp");
+    // /dev/shm corroboration + cleanup.
+    if have_shm {
+        assert!(
+            Path::new("/dev/shm/scenario2_shm").exists(),
+            "/dev/shm file must exist"
+        );
+        let _ = std::fs::remove_file("/dev/shm/scenario2_shm");
+    }
 
     fx.tagma.kill().await;
 }

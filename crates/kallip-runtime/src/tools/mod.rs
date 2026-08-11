@@ -76,8 +76,10 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
     // (Linux + `landlock`). The closure composes the decision fresh per spawn.
     // Both classes read broadly; the class distinction is on WRITE and secret
     // visibility:
-    // - **Normal**: writable = its write-locks (held dirlocks); secrets readable
-    //   (mitigated by proxy tools, design doc §4.5).
+    // - **Normal**: writable = its write-locks (held dirlocks) plus `/dev/shm`
+    //   (Chromium and similar need writable POSIX shared memory); secrets readable
+    //   (mitigated by proxy tools, design doc §4.5). See `normal_extra_writable`
+    //   for the `/dev/shm` tradeoff.
     // - **Guest**: read-only — no write-locks granted; secret dirs are hidden by
     //   mount-ns tmpfs overlays so a broad-read Guest can read source/caches
     //   (`~/.cargo`) without reaching keys/tokens.
@@ -104,7 +106,9 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
             let writable = if is_guest {
                 Vec::new()
             } else {
-                lm.write_paths(&aid)?
+                let mut w = lm.write_paths(&aid)?;
+                w.extend(normal_extra_writable());
+                w
             };
             // Root-only: grant the shared skills dir on top of the class set.
             // `skill_dir()` is anyhow::Result; the closure's error type is
@@ -145,6 +149,24 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
     dispatch.add_tools(context::context_tool_set(ctx, exec_policy))?;
 
     Ok(dispatch)
+}
+
+/// Extra writable paths granted to **Normal** agents on top of their held
+/// dirlocks — currently just `/dev/shm`, which tools like Chromium-backed
+/// renderers require (they write well-known prefixes such as
+/// `/dev/shm/.org.chromium.*` directly, so per-agent namespacing would break
+/// them). Normal-only: Guest is contractually read-only.
+///
+/// `/dev/shm` is world-shared tmpfs, so Normal agents can read/write each
+/// other's files there, and a Guest's Broad read sees them too. Accepted:
+/// Normal agents already share the host UID and shared-writable scratch
+/// (`/tmp`, `/var/tmp`), so this opens no new privilege boundary, and secrets
+/// live in hide-holes (see [`guest_hide_holes`]) rather than scratch. An
+/// absent `/dev/shm` on the host is harmless — libsandbox skips non-existent
+/// writable paths when building the ruleset.
+#[cfg(all(target_os = "linux", feature = "landlock"))]
+fn normal_extra_writable() -> Vec<PathBuf> {
+    vec![PathBuf::from("/dev/shm")]
 }
 
 /// Secret directories a Guest agent's `bash` must not see — overlaid by empty
