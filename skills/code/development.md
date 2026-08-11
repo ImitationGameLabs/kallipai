@@ -55,8 +55,10 @@ Done when:
 - deep-review has ended on the plan (no blocking findings, or accepted-with-reason)
 
 **Implement.** Make the change following the approved plan. Use `aifed` for
-all edits. Work in small steps, checking each against the plan. If the
-implementation reveals the plan was wrong, stop and revise the plan.
+all edits. Follow `code/code-comments` for comment quality (why over
+what, doc vs internal, marker discipline). Work in small steps,
+checking each against the plan. If the implementation reveals the plan
+was wrong, stop and revise the plan.
 Done when:
 
 - every plan item is implemented
