@@ -18,7 +18,7 @@ use tracing::{error, info};
 use kallip_cron_common::{ScheduleStatus, TriggerSpec};
 
 use crate::state::Liveness;
-use crate::store::{ScheduleStore, calculate_next_fire};
+use crate::store::ScheduleStore;
 
 pub struct Scheduler {
     store: ScheduleStore,
@@ -68,8 +68,8 @@ impl Scheduler {
                 continue;
             };
             let new_next = match &schedule.trigger {
-                TriggerSpec::Every { period, at_time } => {
-                    Some(calculate_next_fire(period, at_time, now)?)
+                TriggerSpec::Every { duration_seconds } => {
+                    Some(now + time::Duration::seconds(*duration_seconds as i64))
                 }
                 // One-time triggers fire once and are done.
                 TriggerSpec::Once { .. } | TriggerSpec::In { .. } => None,
@@ -97,7 +97,7 @@ mod tests {
     use super::*;
     use crate::store::calculate_initial_next_fire;
     use kallip_common::agentid::AgentId;
-    use kallip_cron_common::{Period, Priority, Schedule};
+    use kallip_cron_common::{Priority, Schedule};
     use tempfile::TempDir;
     use time::macros::datetime;
 
@@ -116,8 +116,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             trigger: TriggerSpec::Every {
-                period: Period::Hourly,
-                at_time: None,
+                duration_seconds: 3600,
             },
             agent_id: AgentId::random(),
             message: "hi".into(),
@@ -211,30 +210,30 @@ mod tests {
     async fn full_recurring_lifecycle() {
         let (store, scheduler, _d) = open().await;
         let mut s = hourly("m", datetime!(2025-03-12 09:00 UTC));
+        // 3-minute interval (the recurrence floor).
         s.trigger = TriggerSpec::Every {
-            period: Period::Minutely,
-            at_time: None,
+            duration_seconds: 180,
         };
         store.create(&s).await.unwrap();
 
-        // Fire at :05 -> next_fire advanced to :01:05 (minutely from now).
+        // Fire at :05 -> next_fire advanced by 180 s (to :03:05).
         scheduler
             .tick_at(datetime!(2025-03-12 09:00:05 UTC))
             .await
             .unwrap();
         let after = store.get("m").await.unwrap().unwrap();
         assert_eq!(after.status, ScheduleStatus::Triggered);
-        assert_eq!(after.next_fire, Some(datetime!(2025-03-12 09:01:05 UTC)));
+        assert_eq!(after.next_fire, Some(datetime!(2025-03-12 09:03:05 UTC)));
 
         // Ack at :30 -> Active, next_fire unchanged.
         store.ack_triggered_at(&["m".into()]).await.unwrap();
         let after = store.get("m").await.unwrap().unwrap();
         assert_eq!(after.status, ScheduleStatus::Active);
-        assert_eq!(after.next_fire, Some(datetime!(2025-03-12 09:01:05 UTC)));
+        assert_eq!(after.next_fire, Some(datetime!(2025-03-12 09:03:05 UTC)));
 
-        // :01:00 must NOT trigger (next_fire = :01:05 > :01:00).
+        // :03:00 must NOT trigger (next_fire = :03:05 > :03:00).
         scheduler
-            .tick_at(datetime!(2025-03-12 09:01:00 UTC))
+            .tick_at(datetime!(2025-03-12 09:03:00 UTC))
             .await
             .unwrap();
         assert_eq!(
@@ -242,14 +241,14 @@ mod tests {
             ScheduleStatus::Active
         );
 
-        // :01:05 second fire.
+        // :03:05 second fire -> next advanced another 180 s.
         scheduler
-            .tick_at(datetime!(2025-03-12 09:01:05 UTC))
+            .tick_at(datetime!(2025-03-12 09:03:05 UTC))
             .await
             .unwrap();
         let after = store.get("m").await.unwrap().unwrap();
         assert_eq!(after.status, ScheduleStatus::Triggered);
-        assert_eq!(after.next_fire, Some(datetime!(2025-03-12 09:02:05 UTC)));
+        assert_eq!(after.next_fire, Some(datetime!(2025-03-12 09:06:05 UTC)));
     }
 
     #[tokio::test]
@@ -259,8 +258,10 @@ mod tests {
         s.trigger = TriggerSpec::Once {
             at: datetime!(2020-01-01 00:00 UTC),
         };
-        s.next_fire =
-            Some(calculate_initial_next_fire(&s.trigger, datetime!(2025-03-12 08:00 UTC)).unwrap());
+        s.next_fire = Some(calculate_initial_next_fire(
+            &s.trigger,
+            datetime!(2025-03-12 08:00 UTC),
+        ));
         // next_fire for Once{past} = the past time, so it is immediately due.
         store.create(&s).await.unwrap();
         scheduler

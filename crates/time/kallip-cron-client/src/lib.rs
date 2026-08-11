@@ -12,6 +12,6 @@ mod client;
 
 pub use client::{CronClient, CronClientBuilder, CronClientError};
 pub use kallip_cron_common::{
-    CreateScheduleRequest, Period, Priority, Schedule, ScheduleError, ScheduleId, ScheduleStatus,
+    CreateScheduleRequest, Priority, Schedule, ScheduleError, ScheduleId, ScheduleStatus,
     SchedulesListResponse, StatusResponse, TriggerSpec, UpdateScheduleRequest,
 };

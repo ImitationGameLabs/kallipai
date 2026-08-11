@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use kallip_common::agentid::AgentId;
 use kallip_cron_client::CronClient;
-use kallip_cron_common::{Period, Priority, ScheduleStatus, TriggerSpec};
+use kallip_cron_common::{Priority, ScheduleStatus, TriggerSpec};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -62,12 +62,10 @@ struct CreateArgs {
     /// segments `s`/`m`/`h`/`d`/`w` (`90m`, `1h30m`, `2d`).
     #[arg(long, value_name = "DURATION")]
     r#in: Option<String>,
-    /// Recurring period (minutely/hourly/daily/weekly/monthly/yearly).
-    #[arg(long, value_name = "PERIOD")]
-    every: Option<Period>,
-    /// Time-of-day "HH:MM" (UTC) for daily/monthly/yearly only.
-    #[arg(long, value_name = "HH:MM")]
-    at: Option<String>,
+    /// Recurring interval. Bare integer = seconds (`180`); or unit segments
+    /// `s`/`m`/`h`/`d`/`w` (`5m`, `1h30m`, `2d`). Must be >= 3 minutes.
+    #[arg(long, value_name = "DURATION")]
+    every: Option<String>,
     /// Tag (repeatable).
     #[arg(long = "tag", value_name = "TAG")]
     tags: Vec<String>,
@@ -101,10 +99,11 @@ impl CreateArgs {
                 duration_seconds: secs,
             });
         }
-        let period = self.every.expect("checked above");
+        let spec = self.every.as_ref().expect("checked above");
+        let secs = parse_duration_seconds(spec)
+            .with_context(|| format!("invalid --every duration: {spec}"))?;
         Ok(TriggerSpec::Every {
-            period,
-            at_time: self.at.clone(),
+            duration_seconds: secs,
         })
     }
 }
@@ -300,12 +299,42 @@ fn format_schedule(s: &kallip_cron_common::Schedule) -> String {
 fn trigger_label(t: &TriggerSpec) -> String {
     match t {
         TriggerSpec::Once { at } => format!("once@{at}"),
-        TriggerSpec::In { duration_seconds } => format!("in {duration_seconds}s"),
-        TriggerSpec::Every { period, at_time } => match at_time {
-            Some(at) => format!("every {period} @{at}"),
-            None => format!("every {period}"),
-        },
+        TriggerSpec::In { duration_seconds } => {
+            format!("in {}", format_duration_seconds(*duration_seconds))
+        }
+        TriggerSpec::Every { duration_seconds } => {
+            format!("every {}", format_duration_seconds(*duration_seconds))
+        }
     }
+}
+
+/// Format a whole-second duration as the compact segment form (`3h28m`,
+/// `5m`, `1d`, `1w`), largest unit first, omitting zero segments. The inverse
+/// of [`parse_duration_seconds`]: `parse_duration_seconds(&format_duration_seconds(n)) == Ok(n)`.
+fn format_duration_seconds(total: u64) -> String {
+    const UNITS: &[(u64, &str)] = &[
+        (604_800, "w"),
+        (86_400, "d"),
+        (3_600, "h"),
+        (60, "m"),
+        (1, "s"),
+    ];
+    let mut remaining = total;
+    let mut out = String::new();
+    for (mult, label) in UNITS {
+        let n = remaining / mult;
+        remaining %= mult;
+        if n > 0 {
+            out.push_str(&format!("{n}{label}"));
+        }
+    }
+    if out.is_empty() {
+        // A zero (or sub-second) duration renders as 0s rather than the empty
+        // string; this branch is unreachable for validated triggers but keeps
+        // the function total.
+        out.push_str("0s");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -348,5 +377,37 @@ mod tests {
     fn overflow_does_not_panic() {
         // Would overflow u64 seconds; must error, not panic.
         assert!(parse_duration_seconds("999999999999999w").is_err());
+    }
+
+    #[test]
+    fn format_covers_each_unit() {
+        assert_eq!(format_duration_seconds(45), "45s");
+        assert_eq!(format_duration_seconds(180), "3m");
+        assert_eq!(format_duration_seconds(3600), "1h");
+        assert_eq!(format_duration_seconds(5400), "1h30m");
+        assert_eq!(format_duration_seconds(12_480), "3h28m");
+        assert_eq!(format_duration_seconds(86_400), "1d");
+        assert_eq!(format_duration_seconds(604_800), "1w");
+        assert_eq!(format_duration_seconds(0), "0s");
+    }
+
+    #[test]
+    fn format_is_inverse_of_parse() {
+        // Every value formatted then parsed must round-trip exactly, across all
+        // unit boundaries and a compound value.
+        for n in [
+            1u64,
+            45,
+            60,
+            180,            // the recurrence floor
+            5400,           // 1h30m
+            12_480,         // 3h28m
+            86_400,         // 1d
+            604_800,        // 1w
+            604_800 + 3600, // 1w1h
+        ] {
+            let rendered = format_duration_seconds(n);
+            assert_eq!(parse_duration_seconds(&rendered).unwrap(), n, "{rendered}");
+        }
     }
 }

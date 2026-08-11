@@ -103,8 +103,7 @@ async fn create_schedule(
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     verify(&state, &bearer, &req.agent_id).await?;
     let now = time::OffsetDateTime::now_utc();
-    let next_fire = calculate_initial_next_fire(&req.trigger, now)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let next_fire = calculate_initial_next_fire(&req.trigger, now);
     let schedule = Schedule {
         id: Uuid::new_v4().to_string(),
         name: req.name,

@@ -1,11 +1,9 @@
 //! Schedule model + trigger specs for `kallip-cron`.
 //!
-//! Ported from Ephemera's `kairos-common::schedule`, adapted for kallipai:
-//! the free-form `payload: serde_json::Value` is replaced by a concrete
-//! `agent_id` + `message` delivery target (a fired timer is injected into a
-//! conversation via `POST /agents/{id}/message`), the dead `Cron` trigger
-//! variant is dropped (planned v2), and the model carries the precision/UTC
-//! contract used throughout the daemon.
+//! A fired timer is injected into a conversation via
+//! `POST /agents/{id}/message`; this module carries the concrete `agent_id` +
+//! `message` delivery target and the precision/UTC contract used throughout the
+//! daemon.
 
 use kallip_common::agentid::AgentId;
 use serde::{Deserialize, Serialize};
@@ -100,66 +98,36 @@ impl std::str::FromStr for ScheduleStatus {
     }
 }
 
-/// Recurrence period for `Every` triggers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Period {
-    Minutely,
-    Hourly,
-    Daily,
-    Weekly,
-    Monthly,
-    Yearly,
-}
+/// Minimum recurrence interval (3 minutes). Guards against event-flood timers
+/// that would overwhelm an agent's processing loop with no practical benefit
+/// for an LLM consumer.
+pub const MIN_RECURRENCE_SECONDS: u64 = 3 * 60;
 
-impl std::fmt::Display for Period {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let s = match self {
-            Period::Minutely => "minutely",
-            Period::Hourly => "hourly",
-            Period::Daily => "daily",
-            Period::Weekly => "weekly",
-            Period::Monthly => "monthly",
-            Period::Yearly => "yearly",
-        };
-        f.write_str(s)
-    }
-}
-
-impl std::str::FromStr for Period {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Strict lowercase, matching the serde canonical form.
-        match s {
-            "minutely" | "minute" => Ok(Period::Minutely),
-            "hourly" | "hour" => Ok(Period::Hourly),
-            "daily" | "day" => Ok(Period::Daily),
-            "weekly" | "week" => Ok(Period::Weekly),
-            "monthly" | "month" => Ok(Period::Monthly),
-            "yearly" | "year" => Ok(Period::Yearly),
-            _ => Err(format!("unknown period: {s}")),
-        }
-    }
-}
+/// Upper bound on any duration field (~10 years), shared by `In` and `Every`.
+/// Bounds the `u64 -> i64` cast in the fire-time math so an absurd value can't
+/// wrap negative and fire immediately.
+const MAX_DURATION_SECONDS: u64 = 10 * 365 * 24 * 3600;
 
 /// A validation or parse error in a schedule trigger.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ScheduleError {
-    #[error("invalid at_time: {0}")]
-    InvalidAtTime(String),
-    #[error("at_time is only valid for daily/monthly/yearly periods, not for {0}")]
-    AtTimeUnsupported(&'static str),
     #[error("duration_seconds must be >= 1 (second-precision scheduler)")]
     DurationTooSmall,
+    #[error("recurrence interval must be >= 3 minutes (event-flood guard)")]
+    RecurrenceTooSmall,
     #[error("duration_seconds exceeds the ~10-year v1 ceiling")]
     DurationTooLarge,
 }
 
 /// Trigger specification for a schedule.
 ///
-/// v1 ships the simple-trigger subset. Cron expressions (`Cron { expression }`)
-/// are a planned v2 addition — the daemon is named `kallip-cron` because full
-/// cron-expression support is the natural next step, not because v1 parses it.
+/// Recurring timers (`Every`) are pure rolling intervals — `next_fire` is
+/// advanced by `duration_seconds` from each fire time. Calendar-anchored
+/// recurrence ("daily at 09:00") is intentionally not modeled; a one-shot
+/// `Once` covers an absolute fire time, and a recurring cadence is expressed as
+/// a plain interval. Cron expressions are a planned v2 addition — the daemon is
+/// named `kallip-cron` because full cron-expression support is the natural next
+/// step, not because v1 parses it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum TriggerSpec {
@@ -171,14 +139,9 @@ pub enum TriggerSpec {
     },
     /// Relative delay from creation, in whole seconds.
     In { duration_seconds: u64 },
-    /// Recurring event. `at_time` ("HH:MM" UTC) is only meaningful — and only
-    /// accepted — for `Daily`/`Monthly`/`Yearly`; `Minutely`/`Hourly` fire on a
-    /// rolling cadence from each fire time, and `Weekly` repeats same
-    /// weekday/time-of-day.
-    Every {
-        period: Period,
-        at_time: Option<String>,
-    },
+    /// Recurring interval, in whole seconds. Must be >=
+    /// [`MIN_RECURRENCE_SECONDS`] (the event-flood guard).
+    Every { duration_seconds: u64 },
 }
 
 impl TriggerSpec {
@@ -187,83 +150,35 @@ impl TriggerSpec {
         matches!(self, TriggerSpec::Every { .. })
     }
 
-    /// Validate the trigger against the v1 precision/`at_time` contract.
-    /// Called at create time so a malformed trigger is rejected with a 400
-    /// rather than surfacing on the first scheduler tick.
+    /// Validate the trigger against the precision/duration contract. Called at
+    /// create time so a malformed trigger is rejected with a 400 rather than
+    /// surfacing on the first scheduler tick.
     pub fn validate(&self) -> Result<(), ScheduleError> {
         match self {
             TriggerSpec::Once { .. } => Ok(()),
             TriggerSpec::In { duration_seconds } => {
-                // >= 1 (second-precision) and <= ~10 years (bounds the u64 -> i64
-                // cast in `calculate_initial_next_fire` so an absurd value can't
-                // wrap negative and fire immediately).
-                const MAX_IN_SECONDS: u64 = 10 * 365 * 24 * 3600;
-                if *duration_seconds < 1 {
-                    Err(ScheduleError::DurationTooSmall)
-                } else if *duration_seconds > MAX_IN_SECONDS {
-                    Err(ScheduleError::DurationTooLarge)
-                } else {
-                    Ok(())
-                }
+                check_duration(*duration_seconds, 1, ScheduleError::DurationTooSmall)
             }
-            TriggerSpec::Every { period, at_time } => match period {
-                // `at_time` is meaningful only here; if present, validate format.
-                Period::Daily | Period::Monthly | Period::Yearly => {
-                    if let Some(t) = at_time {
-                        parse_at_time(t)?;
-                    }
-                    Ok(())
-                }
-                // Minutely/Hourly fire on a rolling cadence (next_fire is
-                // `now + period`) and Weekly repeats same weekday/time-of-day;
-                // none consume `at_time`. kairos's math silently drops it for
-                // Minutely/Hourly, so reject it here to avoid a surprising no-op.
-                Period::Minutely | Period::Hourly | Period::Weekly => {
-                    if at_time.is_some() {
-                        Err(ScheduleError::AtTimeUnsupported(period_label(*period)))
-                    } else {
-                        Ok(())
-                    }
-                }
-            },
+            TriggerSpec::Every { duration_seconds } => check_duration(
+                *duration_seconds,
+                MIN_RECURRENCE_SECONDS,
+                ScheduleError::RecurrenceTooSmall,
+            ),
         }
     }
 }
 
-/// Lowercase label for an unsupported-`at_time` period, for error messages.
-fn period_label(p: Period) -> &'static str {
-    match p {
-        Period::Minutely => "minutely",
-        Period::Hourly => "hourly",
-        Period::Weekly => "weekly",
-        Period::Daily => "daily",
-        Period::Monthly => "monthly",
-        Period::Yearly => "yearly",
+/// Range-check a duration field: `secs` must be in `[min, MAX_DURATION_SECONDS]`.
+/// `too_small` is the variant returned below the floor — `In` and `Every` have
+/// different floors (1 s vs 3 min) but share the ceiling.
+fn check_duration(secs: u64, min: u64, too_small: ScheduleError) -> Result<(), ScheduleError> {
+    if secs < min {
+        Err(too_small)
+    } else if secs > MAX_DURATION_SECONDS {
+        Err(ScheduleError::DurationTooLarge)
+    } else {
+        Ok(())
     }
-}
-
-/// Parse an `at_time` of the form `"HH:MM"` (UTC, no seconds) into `(hour,
-/// minute)`. Shared by `TriggerSpec::validate` (create-time) and the daemon's
-/// `calculate_next_fire` (fire-time) so the two cannot drift on the format.
-pub fn parse_at_time(s: &str) -> Result<(u8, u8), ScheduleError> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 2 {
-        return Err(ScheduleError::InvalidAtTime(format!(
-            "expected HH:MM, got {s:?}"
-        )));
-    }
-    let hour: u8 = parts[0]
-        .parse()
-        .map_err(|_| ScheduleError::InvalidAtTime(format!("invalid hour in {s:?}")))?;
-    let minute: u8 = parts[1]
-        .parse()
-        .map_err(|_| ScheduleError::InvalidAtTime(format!("invalid minute in {s:?}")))?;
-    if hour > 23 || minute > 59 {
-        return Err(ScheduleError::InvalidAtTime(format!(
-            "out of range in {s:?}"
-        )));
-    }
-    Ok((hour, minute))
 }
 
 /// A scheduled timer.
@@ -363,27 +278,6 @@ mod tests {
     }
 
     #[test]
-    fn period_round_trips() {
-        for p in [
-            Period::Minutely,
-            Period::Hourly,
-            Period::Daily,
-            Period::Weekly,
-            Period::Monthly,
-            Period::Yearly,
-        ] {
-            let s = p.to_string();
-            assert_eq!(s.parse::<Period>().unwrap(), p);
-        }
-        // Strict lowercase: wrong case and unknown values reject.
-        assert!("DAILY".parse::<Period>().is_err());
-        assert!("Daily".parse::<Period>().is_err());
-        assert!("garbage".parse::<Period>().is_err());
-        // Lowercase aliases accepted.
-        assert_eq!("day".parse::<Period>().unwrap(), Period::Daily);
-    }
-
-    #[test]
     fn status_round_trips() {
         for s in [
             ScheduleStatus::Active,
@@ -402,87 +296,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_at_time_valid() {
-        assert_eq!(parse_at_time("09:00").unwrap(), (9, 0));
-        assert_eq!(parse_at_time("23:59").unwrap(), (23, 59));
-        assert_eq!(parse_at_time("00:00").unwrap(), (0, 0));
-    }
-
-    #[test]
-    fn parse_at_time_rejects_bad() {
-        // Single-digit hour is accepted ("9:00" -> 9,0); only format/range fails.
-        assert!(parse_at_time("24:00").is_err());
-        assert!(parse_at_time("09:60").is_err());
-        assert!(parse_at_time("0900").is_err());
-        assert!(parse_at_time("09:00:00").is_err());
-        assert!(parse_at_time("").is_err());
-    }
-
-    #[test]
-    fn validate_rejects_at_time_for_minutely_hourly_weekly() {
-        assert!(
-            TriggerSpec::Every {
-                period: Period::Minutely,
-                at_time: Some("09:00".into()),
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            TriggerSpec::Every {
-                period: Period::Hourly,
-                at_time: Some("09:00".into()),
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            TriggerSpec::Every {
-                period: Period::Weekly,
-                at_time: Some("09:00".into()),
-            }
-            .validate()
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn validate_accepts_at_time_for_daily_monthly_yearly() {
-        for p in [Period::Daily, Period::Monthly, Period::Yearly] {
-            assert!(
-                TriggerSpec::Every {
-                    period: p,
-                    at_time: Some("09:00".into()),
-                }
-                .validate()
-                .is_ok()
-            );
-        }
-    }
-
-    #[test]
-    fn validate_accepts_no_at_time_for_any_period() {
-        for p in [
-            Period::Minutely,
-            Period::Hourly,
-            Period::Daily,
-            Period::Weekly,
-            Period::Monthly,
-            Period::Yearly,
-        ] {
-            assert!(
-                TriggerSpec::Every {
-                    period: p,
-                    at_time: None,
-                }
-                .validate()
-                .is_ok()
-            );
-        }
-    }
-
-    #[test]
     fn validate_rejects_subsecond_and_zero_duration() {
+        // `In` floor is 1 second.
         assert!(
             TriggerSpec::In {
                 duration_seconds: 0
@@ -497,6 +312,64 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    #[test]
+    fn validate_enforces_recurrence_floor() {
+        // Below the 3-minute floor is rejected; exactly at it is accepted.
+        assert!(matches!(
+            TriggerSpec::Every {
+                duration_seconds: MIN_RECURRENCE_SECONDS - 1
+            }
+            .validate(),
+            Err(ScheduleError::RecurrenceTooSmall)
+        ));
+        assert!(
+            TriggerSpec::Every {
+                duration_seconds: MIN_RECURRENCE_SECONDS
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_every_above_ceiling() {
+        assert!(matches!(
+            TriggerSpec::Every {
+                duration_seconds: u64::MAX
+            }
+            .validate(),
+            Err(ScheduleError::DurationTooLarge)
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_duration_at_ceiling() {
+        // The ceiling is inclusive (`secs > MAX` rejects): exactly MAX is the
+        // largest accepted value for both `In` and `Every`. Guards against a
+        // `>=` regression in `check_duration`.
+        assert!(
+            TriggerSpec::In {
+                duration_seconds: MAX_DURATION_SECONDS
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            TriggerSpec::Every {
+                duration_seconds: MAX_DURATION_SECONDS
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(matches!(
+            TriggerSpec::In {
+                duration_seconds: MAX_DURATION_SECONDS + 1
+            }
+            .validate(),
+            Err(ScheduleError::DurationTooLarge)
+        ));
     }
 
     #[test]

@@ -11,6 +11,6 @@
 pub mod schedule;
 
 pub use schedule::{
-    CreateScheduleRequest, Period, Priority, Schedule, ScheduleError, ScheduleId, ScheduleStatus,
-    SchedulesListResponse, StatusResponse, TriggerSpec, UpdateScheduleRequest, parse_at_time,
+    CreateScheduleRequest, MIN_RECURRENCE_SECONDS, Priority, Schedule, ScheduleError, ScheduleId,
+    ScheduleStatus, SchedulesListResponse, StatusResponse, TriggerSpec, UpdateScheduleRequest,
 };

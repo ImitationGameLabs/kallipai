@@ -21,15 +21,12 @@ use sea_orm::{
 };
 use sea_orm_migration::MigratorTrait;
 use time::OffsetDateTime;
-use time::util::is_leap_year;
-use time::{Month, UtcOffset};
+use time::UtcOffset;
 use tokio::fs;
 use tracing::warn;
 
 use kallip_common::agentid::AgentId;
-use kallip_cron_common::{
-    Period, Schedule, ScheduleError, ScheduleId, ScheduleStatus, TriggerSpec, parse_at_time,
-};
+use kallip_cron_common::{Schedule, ScheduleId, ScheduleStatus, TriggerSpec};
 
 pub(crate) mod entities {
     pub(crate) mod schedule {
@@ -405,114 +402,22 @@ fn backoff_seconds(attempt: i64) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// Time math (ported from kairos, adapted)
+// Time math
 // ---------------------------------------------------------------------------
 
-/// Calculate the next fire time for a recurring schedule, relative to `from`.
-/// `at_time` ("HH:MM" UTC) is consumed only by Daily/Monthly/Yearly;
-/// Minutely/Hourly/Weekly are rolling cadences (the create-time validator
-/// rejects `at_time` for those, so it is always `None` here).
-pub fn calculate_next_fire(
-    period: &Period,
-    at_time: &Option<String>,
-    from: OffsetDateTime,
-) -> Result<OffsetDateTime, ScheduleError> {
-    let from = from.to_offset(UtcOffset::UTC);
-    let (hour, minute, second) = if let Some(time_str) = at_time {
-        let (h, m) = parse_at_time(time_str)?;
-        (h, m, 0u8)
-    } else {
-        (from.hour(), from.minute(), from.second())
-    };
-
-    let next = match period {
-        // Rolling cadences — `at_time` is meaningless and never present.
-        Period::Minutely => from + time::Duration::minutes(1),
-        Period::Hourly => from + time::Duration::hours(1),
-        Period::Weekly => from + time::Duration::weeks(1),
-        // `at_time`-anchored — clamp to the next occurrence at HH:MM:SS.
-        Period::Daily => {
-            let candidate = at(from, hour, minute, second)?;
-            if candidate > from {
-                candidate
-            } else {
-                candidate + time::Duration::days(1)
-            }
-        }
-        Period::Monthly => {
-            let candidate = at(from, hour, minute, second)?;
-            if candidate > from {
-                candidate
-            } else {
-                add_one_month(candidate)
-            }
-        }
-        Period::Yearly => {
-            let candidate = at(from, hour, minute, second)?;
-            if candidate > from {
-                candidate
-            } else {
-                add_one_year(candidate)
-            }
-        }
-    };
-    Ok(next)
-}
-
-fn at(
-    from: OffsetDateTime,
-    hour: u8,
-    minute: u8,
-    second: u8,
-) -> Result<OffsetDateTime, ScheduleError> {
-    from.replace_hour(hour)
-        .and_then(|d| d.replace_minute(minute))
-        .and_then(|d| d.replace_second(second))
-        .map_err(|e| ScheduleError::InvalidAtTime(e.to_string()))
-}
-
-/// Initial `next_fire` for a brand-new schedule. Always returns `Some` for our
-/// trigger set, so an `Active` row always has a concrete `next_fire` (the
-/// no-rearm invariant relies on this).
-pub fn calculate_initial_next_fire(
-    trigger: &TriggerSpec,
-    now: OffsetDateTime,
-) -> Result<OffsetDateTime, ScheduleError> {
+/// Initial `next_fire` for a brand-new schedule. Always returns a concrete
+/// time, so an `Active` row always has a `next_fire` (the no-rearm invariant
+/// relies on this). Infallible: `validate()` has already range-checked the
+/// duration fields by the time this runs.
+pub fn calculate_initial_next_fire(trigger: &TriggerSpec, now: OffsetDateTime) -> OffsetDateTime {
     let now = now.to_offset(UtcOffset::UTC);
     match trigger {
-        TriggerSpec::Once { at } => Ok(at.to_offset(UtcOffset::UTC)),
-        TriggerSpec::In { duration_seconds } => {
-            Ok(now + time::Duration::seconds(*duration_seconds as i64))
+        TriggerSpec::Once { at } => at.to_offset(UtcOffset::UTC),
+        // `In` and `Every` both fire `duration_seconds` from now; `Every`
+        // recurs by re-adding the same interval at each trigger.
+        TriggerSpec::In { duration_seconds } | TriggerSpec::Every { duration_seconds } => {
+            now + time::Duration::seconds(*duration_seconds as i64)
         }
-        TriggerSpec::Every { period, at_time } => calculate_next_fire(period, at_time, now),
-    }
-}
-
-/// Add one month, clamping the day if the next month is shorter (Jan 31 -> Feb 28/29).
-fn add_one_month(dt: OffsetDateTime) -> OffsetDateTime {
-    let next_month = dt.month().next();
-    let next_year = if dt.month() == Month::December {
-        dt.year() + 1
-    } else {
-        dt.year()
-    };
-    let max_day = next_month.length(next_year);
-    let day = dt.day().min(max_day);
-    dt.replace_year(next_year)
-        .and_then(|d| d.replace_day(day))
-        .and_then(|d| d.replace_month(next_month))
-        .expect("valid date components")
-}
-
-/// Add one year, handling Feb 29 on non-leap years.
-fn add_one_year(dt: OffsetDateTime) -> OffsetDateTime {
-    let next_year = dt.year() + 1;
-    if dt.month() == Month::February && dt.day() == 29 && !is_leap_year(next_year) {
-        dt.replace_day(28)
-            .and_then(|d| d.replace_year(next_year))
-            .expect("valid date components")
-    } else {
-        dt.replace_year(next_year).expect("valid year")
     }
 }
 
@@ -593,76 +498,13 @@ mod tests {
         assert!(store.get_next(&b).await.unwrap().is_some());
     }
 
-    // --- time math (ported from kairos) ---
-
-    #[test]
-    fn daily_next_day_at_time() {
-        let now = OffsetDateTime::now_utc();
-        let next = calculate_next_fire(&Period::Daily, &Some("09:00".into()), now).unwrap();
-        assert!(next > now);
-        assert_eq!(next.hour(), 9);
-        assert_eq!(next.minute(), 0);
-    }
-
-    #[test]
-    fn hourly_rolls_forward_ignoring_at_time() {
-        let now = datetime!(2025-03-12 09:30 UTC);
-        let next = calculate_next_fire(&Period::Hourly, &None, now).unwrap();
-        assert_eq!(next, datetime!(2025-03-12 10:30 UTC));
-    }
-
-    #[test]
-    fn weekly_rolls_forward_one_week_same_weekday() {
-        // 2025-03-12 is a Wednesday; +7 days lands on the next Wednesday, same
-        // time-of-day — the rolling-cadence semantics the validator guarantees
-        // (Weekly with at_time is rejected at create).
-        let now = datetime!(2025-03-12 09:30 UTC);
-        let next = calculate_next_fire(&Period::Weekly, &None, now).unwrap();
-        assert_eq!(next, datetime!(2025-03-19 09:30 UTC));
-        assert_eq!(next.weekday(), time::Weekday::Wednesday);
-    }
-
-    #[test]
-    fn monthly_31_to_28() {
-        let next =
-            calculate_next_fire(&Period::Monthly, &None, datetime!(2025-01-31 10:00 UTC)).unwrap();
-        assert_eq!(next.month(), Month::February);
-        assert_eq!(next.day(), 28);
-    }
-
-    #[test]
-    fn monthly_31_to_29_leap() {
-        let next =
-            calculate_next_fire(&Period::Monthly, &None, datetime!(2024-01-31 10:00 UTC)).unwrap();
-        assert_eq!(next.month(), Month::February);
-        assert_eq!(next.day(), 29);
-    }
-
-    #[test]
-    fn yearly_leap_to_non_leap_downgrades_and_stays() {
-        let now = datetime!(2024-02-29 10:00 UTC);
-        let n1 = calculate_next_fire(&Period::Yearly, &None, now).unwrap();
-        assert_eq!(n1.year(), 2025);
-        assert_eq!(n1.day(), 28);
-        let n2 = calculate_next_fire(&Period::Yearly, &None, n1).unwrap();
-        assert_eq!(n2.day(), 28); // does not upgrade back to 29
-    }
-
-    #[test]
-    fn yearly_dec_31_wraps_year() {
-        let next = calculate_next_fire(&Period::Yearly, &None, datetime!(2025-12-31 23:59:59 UTC))
-            .unwrap();
-        assert_eq!(next.year(), 2026);
-    }
-
-    // --- calculate_initial_next_fire (ported from kairos) ---
+    // --- calculate_initial_next_fire ---
 
     #[test]
     fn initial_next_fire_once_is_at() {
         let at = datetime!(2025-03-12 09:00 UTC);
         let next =
-            calculate_initial_next_fire(&TriggerSpec::Once { at }, datetime!(2025-03-12 08:00 UTC))
-                .unwrap();
+            calculate_initial_next_fire(&TriggerSpec::Once { at }, datetime!(2025-03-12 08:00 UTC));
         assert_eq!(next, at);
     }
 
@@ -674,90 +516,20 @@ mod tests {
                 duration_seconds: 3600,
             },
             now,
-        )
-        .unwrap();
+        );
         assert_eq!(next, datetime!(2025-03-12 09:00 UTC));
     }
 
-    // --- monthly gaps (ported from kairos) ---
-
     #[test]
-    fn monthly_normal() {
-        let next =
-            calculate_next_fire(&Period::Monthly, &None, datetime!(2025-03-15 10:00 UTC)).unwrap();
-        assert_eq!(next.month(), Month::April);
-        assert_eq!(next.day(), 15);
-    }
-
-    #[test]
-    fn monthly_december_wrap() {
-        let next =
-            calculate_next_fire(&Period::Monthly, &None, datetime!(2025-12-15 10:00 UTC)).unwrap();
-        assert_eq!(next.month(), Month::January);
-        assert_eq!(next.day(), 15);
-        assert_eq!(next.year(), 2026);
-    }
-
-    #[test]
-    fn monthly_31_to_30_day_month() {
-        // Mar 31 -> Apr 30 (April has only 30 days).
-        let next =
-            calculate_next_fire(&Period::Monthly, &None, datetime!(2025-03-31 10:00 UTC)).unwrap();
-        assert_eq!(next.month(), Month::April);
-        assert_eq!(next.day(), 30);
-    }
-
-    #[test]
-    fn monthly_feb_28_to_march() {
-        let next =
-            calculate_next_fire(&Period::Monthly, &None, datetime!(2025-02-28 10:00 UTC)).unwrap();
-        assert_eq!(next.month(), Month::March);
-        assert_eq!(next.day(), 28);
-    }
-
-    #[test]
-    fn monthly_preserves_time() {
-        let next = calculate_next_fire(&Period::Monthly, &None, datetime!(2025-03-15 14:30:45 UTC))
-            .unwrap();
-        assert_eq!(next.hour(), 14);
-        assert_eq!(next.minute(), 30);
-        assert_eq!(next.second(), 45);
-    }
-
-    // --- yearly gaps (ported from kairos) ---
-
-    #[test]
-    fn yearly_normal() {
-        let next =
-            calculate_next_fire(&Period::Yearly, &None, datetime!(2025-03-15 10:00 UTC)).unwrap();
-        assert_eq!(next.year(), 2026);
-        assert_eq!(next.month(), Month::March);
-        assert_eq!(next.day(), 15);
-    }
-
-    #[test]
-    fn yearly_explicit_feb_28_never_upgrades() {
-        // Symmetric to the leap-downgrade test: an explicit Feb 28 schedule
-        // stays Feb 28 across leap years (we never auto-upgrade to Feb 29).
-        let now = datetime!(2025-02-28 10:00 UTC);
-        let n1 = calculate_next_fire(&Period::Yearly, &None, now).unwrap();
-        assert_eq!(n1.year(), 2026);
-        assert_eq!(n1.day(), 28);
-        let n2 = calculate_next_fire(&Period::Yearly, &None, n1).unwrap();
-        assert_eq!(n2.year(), 2027);
-        assert_eq!(n2.day(), 28);
-        let n3 = calculate_next_fire(&Period::Yearly, &None, n2).unwrap();
-        assert_eq!(n3.year(), 2028); // leap year
-        assert_eq!(n3.day(), 28); // still Feb 28, not upgraded to 29
-    }
-
-    #[test]
-    fn yearly_preserves_time() {
-        let next = calculate_next_fire(&Period::Yearly, &None, datetime!(2025-06-15 08:45:30 UTC))
-            .unwrap();
-        assert_eq!(next.hour(), 8);
-        assert_eq!(next.minute(), 45);
-        assert_eq!(next.second(), 30);
+    fn initial_next_fire_every_is_now_plus_duration() {
+        let now = datetime!(2025-03-12 08:00 UTC);
+        let next = calculate_initial_next_fire(
+            &TriggerSpec::Every {
+                duration_seconds: 180,
+            },
+            now,
+        );
+        assert_eq!(next, datetime!(2025-03-12 08:03 UTC));
     }
 
     #[test]
@@ -841,8 +613,7 @@ mod tests {
         // Recurring, triggered.
         let mut rec = once("rec", datetime!(2025-03-12 09:00 UTC));
         rec.trigger = TriggerSpec::Every {
-            period: Period::Hourly,
-            at_time: None,
+            duration_seconds: 3600,
         };
         rec.status = ScheduleStatus::Triggered;
         rec.next_fire = Some(datetime!(2025-03-12 10:00 UTC)); // already advanced
@@ -872,8 +643,7 @@ mod tests {
         let (store, _d) = open_tmp().await;
         let mut s = once("rec", datetime!(2025-03-12 09:00 UTC));
         s.trigger = TriggerSpec::Every {
-            period: Period::Hourly,
-            at_time: None,
+            duration_seconds: 3600,
         };
         s.status = ScheduleStatus::Triggered;
         store.create(&s).await.unwrap();

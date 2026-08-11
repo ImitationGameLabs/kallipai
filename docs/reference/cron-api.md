@@ -31,9 +31,12 @@ line.
 
 ## Precision contract
 
-Times are UTC, second-precision. `tick_ms` is `>= 1000`; sub-second `In`
-durations and `at_time` with a seconds component are rejected. `at_time`
-(`"HH:MM"` UTC) is accepted only for `daily`/`monthly`/`yearly` periods.
+Times are UTC, second-precision. `tick_ms` is `>= 1000`; a sub-second `In`
+duration is rejected. Recurring (`Every`) intervals must be `>= 180` seconds (3
+minutes) — the event-flood guard, since a too-fast recurrence can overwhelm an
+agent's processing loop with no practical value. Recurrence is a pure rolling
+interval (each `next_fire` is advanced by `duration_seconds` from the fire
+time); there is no calendar-anchored "daily at 09:00" mode.
 
 ## Endpoints
 
@@ -58,7 +61,7 @@ Create a schedule owned by (and targeting) `agent_id`. The server mints the id
 ```json
 {
   "name": "standup reminder",
-  "trigger": { "type": "every", "period": "daily", "at_time": "09:00" },
+  "trigger": { "type": "every", "duration_seconds": 86400 },
   "agent_id": "<your-agent-id>",
   "message": "Time for standup.",
   "tags": ["work"],
@@ -71,8 +74,8 @@ Trigger shapes:
 - `{ "type": "once", "at": "<RFC3339>" }` — one-shot at an absolute time (a past
   time fires on the next tick: fire-ASAP for a missed reminder).
 - `{ "type": "in", "duration_seconds": 300 }` — one-shot N seconds from create.
-- `{ "type": "every", "period": "minutely|hourly|daily|weekly|monthly|yearly", "at_time": "09:00" }`
-  — recurring. `at_time` only for daily/monthly/yearly.
+- `{ "type": "every", "duration_seconds": 10800 }` — recurring interval (whole
+  seconds, `>= 180`); each fire advances `next_fire` by this much.
 
 ### `GET /schedules?agent=&status=&tag=`
 
