@@ -54,19 +54,33 @@ Done when:
 
 - the approach is concrete with its key steps, and no approach-level fork is blocking
 
-**Write the plan.** All core items plus this shape's must-haves, per
-`what-makes-a-good-plan` — not a partial re-list, because a partial list silently
-drops criteria the plan must meet.
-Done when:
+**Write the plan.** Save the plan to `/tmp/plans/<short-name>.md`
+(kebab-case short name; `mkdir -p /tmp/plans` first), covering all
+core items plus this shape's must-haves, per `what-makes-a-good-plan`
+— not a partial re-list, because a partial list silently drops criteria
+the plan must meet. The fixed location gives reviewers and the
+review-change step a known path to reference. These are session
+artifacts — /tmp is ephemeral across reboots, so the plan persists
+for the session but not beyond.
+The plan file's first line is `Status: draft`, because the marker
 
+lets a reader or concurrent reviewer know the plan is not yet final.
+Done when:
 - the plan is executable — each step names what to do and how to verify it
+- the plan is at `/tmp/plans/<short-name>.md`
+- the plan file starts with `Status: draft`
 
 **Review the plan.** Check it against every core item and this shape's must-haves
 in `what-makes-a-good-plan`, because a plan that is wrong wastes the execution.
-Then run an independent review (see `agent/subagent-management`), because a fresh
-reader catches the author's blind spots — have it confirm the approach resolves
-the framed task, not just that the plan is well-formed. If it requests changes,
-fix and re-review per the review-fix loop in `skill/reviewing-a-skill`.
+Then run an independent review (see `agent/subagent-management`),
+because a fresh reader catches the author's blind spots — have it
+confirm the approach resolves the framed task, not just that the
+plan is well-formed. Include the plan's absolute path
+(`/tmp/plans/<short-name>.md`) in the reviewer's message, because a reviewer
+should not have to guess which plan to read — this is the producer
+side of `deep-review`'s pass-the-path instruction. If it requests
+changes, fix and re-review per the review-fix loop in
+`skill/reviewing-a-skill`.
 Done when:
 
 - the plan meets every core item and this shape's must-haves, and an independent reviewer confirms the approach resolves the framed task, with findings resolved or accepted-with-reason (a loop exit — see `skill/reviewing-a-skill`)
@@ -75,9 +89,14 @@ Done when:
 or outward-facing actions, then act; surface at natural boundaries or when the
 plan must change. When in doubt, or when an action touches shared state, other
 humans, or anything you cannot trivially undo yourself, treat it as irreversible.
+Update the plan's status to `in-progress` at the start of execution,
+because it signals active implementation so a re-reviewer knows the
+context.
 Done when:
-
+- the plan's status is `in-progress`
 - the task is complete, or the plan is revised with the user
+- the plan is archived: status updated to `done`, then `mv` to
+  `/tmp/plans/archived/` (`mkdir -p /tmp/plans/archived` first)
 
 ## Anti-patterns
 

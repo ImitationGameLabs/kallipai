@@ -35,8 +35,9 @@ Done when:
 skill's line alongside its siblings.
 Done when:
 
-- the description reads as a trigger (opens with `When`/`How to`, names the task shape)
+- the description reads as a trigger (opens with `When`/`How to`, or for a prerequisite skill, the imperative itself; names the task shape)
 - the description states when to reach for the skill, not a summary of its internal steps
+- if the skill has a required prerequisite, the description embeds that imperative into the trigger, because a trigger that omits it gets matched but the first step gets skipped
 - the description is one line
 - it is distinguishable from sibling skills
 

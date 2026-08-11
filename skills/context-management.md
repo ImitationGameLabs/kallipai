@@ -63,13 +63,13 @@ Don't let automatic compaction decide what to keep. When you feel context gettin
 
 The summary you provide to `context_evict` is pinned as `context_summary`. It becomes your working memory. Write it as if you'll have nothing else — because after eviction, you nearly don't.
 
-A good eviction summary preserves:
-
-- The current task and goal
-- Key decisions made and their rationale
-- Current state / progress
-- File paths, IDs, and other locators you'll need
-- Anything the user said that constrains future work
+For the dimensions and quality criteria that make an eviction summary reliable,
+see `what-to-preserve` — it defines what must survive (task, decisions and
+rationale, state, locators, user constraints, rejected approaches, blockers)
+and how to write each entry so the summary is usable after eviction.
+For sessions with critical decisions or locators at stake, see `preserving-context`
+for a multi-round summarization process that pins each round before
+evicting, so nothing is lost to a single pressured summary pass.
 
 **Bad eviction** = losing the thread. **Good eviction** = a fresh context window with just enough to continue seamlessly.
 

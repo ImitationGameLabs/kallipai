@@ -57,6 +57,10 @@ turn AFTER you read it (the current turn's tool result is not pinnable until
 the turn ends). Once pinned it stays across turns — pins are not evicted, so
 you do not need to re-run it.
 
+Before starting a new or unfamiliar task, scan the index for a
+matching skill, because re-inventing a process a skill captures wastes
+effort.
+
 A category that contains only subcategories is NOT empty — drill in before
 concluding there is nothing to load. A truly empty folder (the index lists no
 entries at all) genuinely has nothing to load; proceed.
@@ -579,6 +583,12 @@ mod tests {
         assert!(
             DEFAULT_META_SKILL.contains("weigh") || DEFAULT_META_SKILL.contains("judgment"),
             "floor must establish the judgment stance: {DEFAULT_META_SKILL}"
+        );
+
+        // --- Positive: scan the index before acting ---
+        assert!(
+            DEFAULT_META_SKILL.contains("Before starting"),
+            "floor must prompt agents to scan before new tasks: {DEFAULT_META_SKILL}"
         );
 
         // --- Positive: the one universal control primitive ---

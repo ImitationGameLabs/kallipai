@@ -1,15 +1,15 @@
 ---
 name: AI-First Editor (aifed)
-description: When to use aifed and how to integrate it with agent context management for text editing and coding tasks
+description: Reach for aifed before editing any text file — for modifying code, config, documentation, or any file content with hash-verified precision
 ---
 
 # aifed — Text Editing & Coding
 
-Use this skill whenever your task involves **reading, writing, or modifying files** — code, config, documentation, any text.
+Reach for aifed whenever your task involves **reading, writing, or modifying files** — code, config, documentation, any text.
 
-## Getting Started
+## Load the reference (required)
 
-aifed ships its own complete, always up-to-date reference. Before your first edit in a session, load it:
+aifed ships its own complete, always up-to-date reference. **Before your first edit in a session**, load it, because the syntax (operators, locators, escaping rules, indent directives) is not guessable and operating without it leads to broken edits:
 
 ```bash
 aifed --skill

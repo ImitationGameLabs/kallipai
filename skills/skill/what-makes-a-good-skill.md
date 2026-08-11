@@ -37,9 +37,10 @@ goes stale whenever the body changes.
 
 Done when:
 
-- it opens with a trigger verb — `When` or `How to` — naming the task shape;
+- it opens with a trigger — `When`, `How to`, or for a prerequisite skill, the prerequisite imperative itself (e.g., "Load X before Y") — naming the task shape;
 - it states when to reach for the skill (the triggering situation), not a summary of its internal steps;
 - it names the task the agent faces, not just the topic;
+- if the skill has a required prerequisite — a guide to load, a command to run, a state to check — the description embeds that imperative into the trigger, because a trigger that omits the prerequisite gets matched but the first step gets skipped;
 - it is one line.
 
 Weak: "Guidance about editing files." — no trigger; an agent facing "modify this
@@ -219,6 +220,8 @@ when to reach for it, and the semantics the flag list cannot express.
 `aifed` and `agent/kallip` are the in-repo examples (`aifed` titles the section "Key
 Behaviors to Remember"; `agent/kallip` titles it "Semantics to remember"). Both use
 the bullets-not-numbers style shown above. There are no gates — there is no sequence.
+
+Any skill with a required prerequisite should embed that imperative into the description trigger (e.g., "Load this skill before running any agent-browser command"), because a skill whose first step gets skipped is matched but useless. This applies whenever the skill's value depends on an action the agent must take before using it. See the Done-when criterion above.
 
 ## Reasoned voice: gates and constraints without doctrine
 

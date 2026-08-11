@@ -1,6 +1,6 @@
 ---
 name: Improving a Skill
-description: When you need to change an existing skill — a fix, an optimization, or catching up to a changed standard — without breaking the skills and routing that depend on it
+description: When you need to change an existing skill — a fix, an optimization, or catching up to a changed standard — without breaking dependents, ending in re-review
 ---
 
 # Improving a Skill — change a working skill without breaking what depends on it
@@ -66,10 +66,12 @@ Done when:
 
 - a grep for this skill's path-id returns no stale references, and every dependent from the blast-radius step is updated
 
-**Review it.** Hand the changed skill to `skill/reviewing-a-skill`, which
-re-checks it end to end against the standard, because an improvement that fails
-the standard is a regression. If it requests changes, fix and re-review; the
-loop's termination and convergence rules live in that skill.
+**Review it.** Hand the changed skill to `skill/reviewing-a-skill`
+immediately after making the change, before the skill ships or is used —
+it re-checks end to end against the standard, because an improvement
+that fails the standard is a regression. If it requests changes, fix and
+re-review; the loop's termination and convergence rules live in that
+skill.
 Done when:
 
 - the review-fix loop in `skill/reviewing-a-skill` has ended on this skill (Pass, or a finding accepted-with-reason), and the symptom diagnosed in step 1 no longer holds

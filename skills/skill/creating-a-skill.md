@@ -1,6 +1,6 @@
 ---
 name: Creating a Skill
-description: When you are about to create a new skill from scratch and want the end-to-end workflow
+description: When you are about to create a new skill from scratch — the workflow from naming through mandatory review
 ---
 
 # Creating a Skill — from deciding to reviewing
@@ -39,8 +39,9 @@ Done when:
 write the `name` + `description` pair per `skill/what-makes-a-good-skill`.
 Done when:
 
-- the description opens with a trigger verb (`When`/`How to`)
+- the description opens with a trigger (`When`/`How to`, or for a prerequisite skill, the imperative itself)
 - it names the task shape, not just the topic
+- if the skill has a required prerequisite, the description embeds that imperative
 - it is one line, and you believe the agent would match it at index time
 
 **Commit to an archetype.** Process, Reference, or Wrapper, via the decision
@@ -59,10 +60,11 @@ Done when:
 - the voice is reasoned throughout (because-clauses; bare `Never` only for
   genuine footguns)
 
-**Review it.** Hand the finished skill to the `skill/reviewing-a-skill` workflow
-— the checks live there, so they are not restated here. If it requests changes,
-fix and re-review; the loop's termination and convergence rules live in that
-skill.
+**Review it.** Hand the finished skill to `skill/reviewing-a-skill`
+immediately after writing it, before the skill ships or is used — the
+checks live there, so they are not restated here. If it requests changes,
+fix and re-review; the loop's termination and convergence rules live in
+that skill.
 Done when:
 
 - the review-fix loop in `skill/reviewing-a-skill` has ended on this skill (Pass, or a finding accepted-with-reason)
