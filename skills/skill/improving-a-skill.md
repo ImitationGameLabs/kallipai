@@ -43,9 +43,13 @@ Done when:
 skill is a node: other skills reference it by path-id, the index matches its
 description, and siblings route to it. Grep for references to this skill and note
 its index contract (name, description, filename) and its routing.
+If the change adds new content, also check whether it overlaps with an
+existing skill or introduces a concept another skill should reference —
+forward interconnections matter as much as the backward blast radius.
 Done when:
 
 - every dependent this change would touch is listed — cross-references, the index contract, and sibling routing
+- if the change adds content, forward interconnections are checked too (overlaps deduped, new reference points linked)
 
 **Decide the change, keeping the contract.** Scope the change keeping the
 archetype spine intact, because drifting it mid-skill breaks the structure the

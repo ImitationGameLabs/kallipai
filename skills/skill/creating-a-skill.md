@@ -60,6 +60,21 @@ Done when:
 - the voice is reasoned throughout (because-clauses; bare `Never` only for
   genuine footguns)
 
+**Cross-reference the network.** The new skill enters a network of related
+skills, and a skill with no links in or out is an island the index won't
+route to from its siblings. Check the body against existing skills for two
+things. First, dedup: content an existing skill already covers should be
+cross-referenced by path-id, not restated. Second, linking: identify the
+existing skills that relate to this one and add a reference to the new
+skill in each — because references should be bidirectional, and without
+the back-reference a sibling won't route here. Adding a cross-reference
+line to an existing skill is a small, low-risk change; bundle it into
+this creation commit rather than running separate improvement cycles.
+Done when:
+
+- every overlap with an existing skill is resolved by cross-reference, not restatement
+- every related existing skill has a reference to the new skill (or a noted reason why one isn't needed)
+
 **Review it.** Hand the finished skill to `skill/reviewing-a-skill`
 immediately after writing it, before the skill ships or is used — the
 checks live there, so they are not restated here. If it requests changes,
@@ -74,3 +89,6 @@ Done when:
 - **Skipping the independent review** — that step is the one most likely to catch
   a description that won't load or a ceremonial gate; without it the whole
   sequence collapses to a draft.
+- **Creating in isolation** — writing a skill without checking the network
+  for overlaps and reference points, because an unlinked skill duplicates
+  content and never gets discovered from its siblings.

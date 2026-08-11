@@ -68,6 +68,16 @@ Done when:
 - the location matches the placement guidance (root for cross-cutting primitives, else the matching category; no new category unless ~6-8 skills, or the self-referential `skill/` domain) and no deeper than `category/skill.md`
 - it passes the split/merge tests — not one skill covering multiple distinct scenarios exceeding ~80 lines, or carrying a section that is dead weight when pinned; and not tightly coupled to an obvious sibling, co-loaded whenever either is needed, and under ~30 lines
 
+**Check interconnections.** A skill is a node in a network, not a standalone
+file — a new skill that no sibling references is an island the index won't
+route to, and a skill that restates a sibling's content is dead weight.
+Verify that the body cross-references related skills rather than restating
+their content, and that related skills reference back to this one.
+Done when:
+
+- the body does not restate content an existing skill already covers (it cross-references instead)
+- related skills have a reference to this skill (for a new skill), or existing references are still valid (for a revision)
+
 **Check for sibling patterns to borrow.** Scan sibling skills for a structural
 pattern worth borrowing, because the library has already solved problems you are
 re-solving — e.g., whether this skill belongs in a workflow + standard pair.
