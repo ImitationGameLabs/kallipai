@@ -59,6 +59,8 @@ tested.
 An architectural decision, API shape, or schema. Must-haves: the decision to
 make, the forces and constraints, one recommended option with its tradeoffs, and
 what would reverse it.
+For the thinking process behind arriving at the recommended option, see
+`code/design-thinking`.
 
 ## Avoid
 

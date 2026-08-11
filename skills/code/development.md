@@ -38,6 +38,8 @@ Done when:
 
 **Plan.** Frame the change and sketch one recommended approach. Load
 `planning` for the workflow and `what-makes-a-good-plan` for the standard.
+For non-trivial designs, load `code/design-thinking` to explore and
+evaluate approaches before converging.
 The plan must name the touch-point files, the change shape, and a
 verification step.
 Done when:
@@ -57,8 +59,9 @@ Done when:
 **Implement.** Make the change following the approved plan. Use `aifed` for
 all edits. Follow `code/code-comments` for comment quality (why over
 what, doc vs internal, marker discipline). Work in small steps,
-checking each against the plan. If the implementation reveals the plan
-was wrong, stop and revise the plan.
+checking each against the plan. Load `code/testing` for test
+quality if the change includes tests. If the implementation reveals
+the plan was wrong, stop and revise the plan.
 Done when:
 
 - every plan item is implemented
