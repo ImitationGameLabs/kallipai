@@ -55,6 +55,10 @@ subsystem. For code files, use `aifed outline` to see the symbol
 structure first, then `aifed read <file> [start-end]` to read only the
 relevant section — this is cheaper than reading the whole file and
 respects the reader's goal of understanding, not exhaustively reading.
+To follow a symbol you meet — what a call actually does, where a name
+is defined or used — `aifed lsp def` / `aifed lsp refs` jump straight
+there instead of re-grepping; the hashline you land on copies back
+into `aifed read`.
 Understanding a project often requires reading past the README; the rule
 is to read what serves understanding, not what serves contribution.
 Contributor-only documents (AGENTS.md, CONTRIBUTING.md, and development
@@ -84,6 +88,10 @@ development documentation, and task-area drill-in.
   development guides (how-to-build, how-to-contribute) encode
   constraints for people changing the code, which is noise for a
   reader; they are the one category that never serves understanding.
+- **aifed is the reading tool, even read-only** — `outline` for
+  structure, `read` for line-numbered ranges, `lsp` for symbol jumps;
+  if the survey later turns into edits, the hashes are already in
+  hand. `rg` stays the tool for searching where something lives.
 
 ## Anti-patterns
 

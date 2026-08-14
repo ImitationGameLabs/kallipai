@@ -66,7 +66,7 @@ Process/Reference body structures, and the reasoned-not-imperative voice
 
 First decide: **root or a category?**
 
-- **Root** for operational primitives you reach for across most work sessions — skills so fundamental that burying them in a category costs a drill-in every time (e.g. `aifed` for editing, `context-management` for context hygiene). Keep the root small: a handful of cross-cutting skills, not a dumping ground.
+- **Root** for operational primitives you reach for across most work sessions — skills so fundamental that burying them in a category costs a drill-in every time (e.g. `aifed` for text and code work — exploring, reading, and editing, `context-management` for context hygiene). Keep the root small: a handful of cross-cutting skills, not a dumping ground.
 - **A category** for skills that belong to a recognizable domain. Pick it by asking: _what domain does this belong to?_
 
 | Category | For                                                          |

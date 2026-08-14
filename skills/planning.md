@@ -42,6 +42,9 @@ Done when:
 **Gather context.** Read the touch-point files or sources the task turns on,
 because the change shape's must-haves (touch-point paths, reuse) cannot be named
 without reading — touch points come from actual reading, not inference.
+Read text and code through aifed (`outline` for large files, then
+`read`) when the task turns on files — the hashlines stay valid if
+the plan proceeds to edits.
 Done when:
 
 - the relevant files or sources are read, and any touch points come from that reading
@@ -62,11 +65,16 @@ the plan must meet. The fixed location gives reviewers and the
 review-change step a known path to reference. These are session
 artifacts — /tmp is ephemeral across reboots, so the plan persists
 for the session but not beyond.
+When a step edits existing text files, name aifed as its tool: load
+the `aifed` skill and run its required `aifed --skill` before the
+first edit, then do the edits through aifed — writing this into the
+plan carries the guarantee to execution time.
 The plan file's first line is `Status: draft`, because the marker
 
 lets a reader or concurrent reviewer know the plan is not yet final.
 Done when:
 - the plan is executable — each step names what to do and how to verify it
+- every step that edits existing text files names aifed as the tool
 - the plan is at `/tmp/plans/<short-name>.md`
 - the plan file starts with `Status: draft`
 

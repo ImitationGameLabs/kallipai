@@ -1,11 +1,14 @@
 ---
 name: AI-First Editor (aifed)
-description: Reach for aifed before editing any text file — for modifying code, config, documentation, or any file content with hash-verified precision
+description: Prefer aifed first for any text or code work — exploring, reading, and editing files; run aifed --skill before your first edit
 ---
 
-# aifed — Text Editing & Coding
+# aifed — Text & Code Work
 
-Reach for aifed whenever your task involves **reading, writing, or modifying files** — code, config, documentation, any text.
+Prefer aifed as the first tool you reach for when **working with files** — code, config, documentation, any text. It covers exploring structure (`outline`), reading content (`read`), and editing (`edit`). "Preferred first choice", not "one option among many".
+For the survey workflow see `code/exploring` — aifed is the tool,
+that skill is the process (including `aifed lsp` for symbol jumps,
+which this file omits).
 
 ## Load the reference (required)
 
@@ -38,7 +41,7 @@ This pattern keeps the detailed syntax (operators, locators, escaping rules, ind
 
 These are the things that commonly trip up agents — keep them in mind even without the full reference pinned:
 
-- **Always read before edit.** Hashlines (`LINE:HASH`) come from `aifed read`. You need current hashes to make any edit.
+- **Always read before edit** — hashlines (`LINE:HASH`) come from `aifed read`; you need current hashes to make any edit.
 - **Prefer batch edits.** One heredoc with all operations avoids line-shift drift between sequential edits.
 - **Never mix tools.** Don't alternate aifed with `cat`, `sed`, or other editors — it breaks hash verification on both sides.
 - **Hash mismatch = retry.** If an edit fails because the hash doesn't match, re-read the file and retry with fresh hashes.
@@ -46,6 +49,6 @@ These are the things that commonly trip up agents — keep them in mind even wit
 
 ## When NOT to Use aifed
 
-- Quick file inspection where you won't edit (e.g., checking a config value) — `cat` is fine for read-only.
+- A one-off glance at a value you are certain you will never edit (e.g. `cat`ing a single config value mid-command) — but if the reading might lead to edits, use `aifed read` anyway so the hashlines are already in hand.
 - Binary files, images, non-text data.
 - Creating a new file from scratch — `aifed edit` works on existing files; use shell redirect for initial creation.
