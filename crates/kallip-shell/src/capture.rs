@@ -195,15 +195,10 @@ impl BoundedCapture {
         })
     }
 
-    /// Finalize into a [`CaptureResult`], rendering the head+tail view (with a
-    /// middle-omitted marker on overflow) and surfacing the spill path when the
-    /// spill is healthy. The spill `File` is dropped here, closing the fd;
-    /// writes already reached the page cache, so a same-host reader sees them.
-    pub(super) fn finish(mut self) -> CaptureResult {
-        let spill = match std::mem::replace(&mut self.spill, SpillState::Closed) {
-            SpillState::Open(handle) => Some(handle.path),
-            _ => None,
-        };
+    /// Render the current in-memory view, shared by `finish` and `peek`: the
+    /// full contiguous output under budget, else head + middle-omitted marker
+    /// + tail. Returns `(text, truncated)`.
+    fn render_view(&self) -> (String, bool) {
         let truncated = self.total > self.max_bytes;
         let text = if !truncated {
             // No overflow: head + tail is the full, contiguous output. Decode the
@@ -221,11 +216,68 @@ impl BoundedCapture {
             text.push_str(&String::from_utf8_lossy(&self.tail));
             text
         };
+        (text, truncated)
+    }
+
+    /// Finalize into a [`CaptureResult`], rendering the head+tail view (with a
+    /// middle-omitted marker on overflow) and surfacing the spill path when the
+    /// spill is healthy. The spill `File` is dropped here, closing the fd;
+    /// writes already reached the page cache, so a same-host reader sees them.
+    pub(super) fn finish(mut self) -> CaptureResult {
+        let (text, truncated) = self.render_view();
+        let spill = match std::mem::replace(&mut self.spill, SpillState::Closed) {
+            SpillState::Open(handle) => Some(handle.path),
+            _ => None,
+        };
         CaptureResult {
             text,
             truncated,
             spill,
         }
+    }
+
+    /// Snapshot the exact view [`Self::finish`] would render, WITHOUT
+    /// consuming the capture. Used while the stream is still being pumped
+    /// (a timed-out foreground exec converted to a background task): bytes
+    /// keep arriving after this peek, so later peeks see more. The spill
+    /// path is surfaced when healthy, so a caller-side recovery banner
+    /// keeps naming a file that is still being appended to.
+    pub(super) fn peek(&self) -> CaptureResult {
+        let (text, truncated) = self.render_view();
+        let spill = self.spill_path();
+        CaptureResult {
+            text,
+            truncated,
+            spill,
+        }
+    }
+
+    /// Path of the live spill file when this capture has overflowed and the
+    /// spill is healthy (`None` under budget or poisoned). For cleanup when
+    /// the owning task is discarded without a `finish` (a converted task
+    /// killed or dropped), so an unreferenced spill file does not leak on
+    /// disk: without this it would outlive its last banner.
+    pub(super) fn spill_path(&self) -> Option<PathBuf> {
+        match &self.spill {
+            SpillState::Open(handle) => Some(handle.path.clone()),
+            _ => None,
+        }
+    }
+
+    /// Total bytes seen so far — monotonic even after the rendered view
+    /// clips (the head freezes and the tail rolls). The size watchdog and
+    /// `bytes` counter of a converted background task read this so clipping
+    /// never freezes them.
+    pub(super) fn total_bytes(&self) -> usize {
+        self.total
+    }
+
+    /// The rolling tail's current bytes, lossily decoded (at most
+    /// `tail_budget`). Stall detection runs its prompt regex over just this
+    /// — the most recent output — mirroring the file task's STALL_TAIL
+    /// window instead of the whole head+marker+tail view.
+    pub(super) fn tail_text(&self) -> String {
+        String::from_utf8_lossy(&self.tail).into_owned()
     }
 }
 
@@ -337,5 +389,51 @@ mod tests {
         let r = c.finish();
         assert!(!r.truncated);
         assert_eq!(r.text, "héllo");
+    }
+
+    #[test]
+    fn peek_matches_later_finish_and_keeps_capture_alive() {
+        let dir = scratch();
+        let mut c = cap(8, &dir);
+        c.push(b"abcd");
+        let mid = c.peek();
+        assert_eq!(mid.text, "abcd");
+        assert!(!mid.truncated);
+        // peek does not consume: more bytes still land.
+        c.push(b"efgh");
+        let r = c.finish();
+        assert_eq!(r.text, "abcdefgh");
+    }
+
+    #[test]
+    fn peek_on_overflow_surfaces_spill_and_marker() {
+        let dir = scratch();
+        let mut c = cap(8, &dir); // head 4, tail 4
+        c.push(b"abcdefghijkl"); // overflow: spill holds the full stream
+        let p = c.peek();
+        assert!(p.truncated);
+        assert!(p.text.contains("bytes omitted"));
+        let path = p.spill.as_ref().expect("live spill surfaced");
+        assert_eq!(std::fs::read(path).unwrap(), b"abcdefghijkl");
+        // The live capture still exposes the same spill path for cleanup.
+        assert_eq!(c.spill_path().as_ref(), Some(path));
+        // And finishing later still works (peek duplicated nothing).
+        let r = c.finish();
+        assert_eq!(
+            std::fs::read(r.spill.as_ref().unwrap()).unwrap(),
+            b"abcdefghijkl"
+        );
+    }
+
+    #[test]
+    fn total_bytes_is_monotonic_and_tail_text_tracks_recent_output() {
+        let dir = scratch();
+        let mut c = cap(16, &dir); // head 8, tail 8
+        c.push(b"0123456789");
+        assert_eq!(c.total_bytes(), 10);
+        assert_eq!(c.tail_text(), "89");
+        c.push(b"abcdefghij");
+        assert_eq!(c.total_bytes(), 20);
+        assert_eq!(c.tail_text(), "cdefghij");
     }
 }

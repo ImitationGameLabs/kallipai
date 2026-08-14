@@ -336,6 +336,7 @@ struct ApprovalCancelResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kallip_shell::BashExecOutput;
 
     /// Build a bash_exec tool-output JSON string (the shape `call_tool` returns),
     /// mirroring the relevant `BashExecOutput` fields.
@@ -372,8 +373,42 @@ mod tests {
     }
 
     #[test]
-    fn classify_bash_timeout_124_is_failed() {
-        let env = success_result("bash_exec", bash_output(Some(124), None));
+    fn classify_bash_timeout_conversion_is_success() {
+        // The REAL serialized envelope of a timed-out exec converted to a
+        // still-running background task (timed_out:true + task_id +
+        // exit_code null): a success — the task_id carve-out must keep
+        // classifying it as non-failure despite the null exit code.
+        let out = BashExecOutput {
+            output: Some("partial".into()),
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            timed_out: true,
+            truncated: false,
+            cwd: "/tmp".into(),
+            task_id: Some("t9".into()),
+        };
+        let env = success_result("bash_exec", serde_json::to_string(&out).unwrap());
+        assert!(matches!(classify_outcome(env), ToolCallOutcome::Success(_)));
+    }
+
+    #[test]
+    fn classify_bash_refused_conversion_is_failed() {
+        // The refused-conversion envelope (a carve-out landed, so the child
+        // was killed under the old timeout semantics): timed_out:true but
+        // NO task_id and a null exit code — the successor of the old
+        // exit-124-is-failed pin.
+        let out = BashExecOutput {
+            output: Some("[timed out; killed ...]".into()),
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            timed_out: true,
+            truncated: false,
+            cwd: "/tmp".into(),
+            task_id: None,
+        };
+        let env = success_result("bash_exec", serde_json::to_string(&out).unwrap());
         assert!(matches!(classify_outcome(env), ToolCallOutcome::Failed(_)));
     }
 

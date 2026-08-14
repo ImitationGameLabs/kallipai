@@ -6,6 +6,7 @@
 //! [`crate::failover::FailoverState`] state machine and the low-level [`ToolCallAccumulator`] are
 //! kept pure in their own modules — this module only drives them.
 
+use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{Error, Result, bail};
@@ -666,6 +667,34 @@ async fn enforce_post_stream_budget(
     BudgetAction::Proceed
 }
 
+/// Tools that enforce their own bounded execution and are therefore exempt
+/// from the outer `tool_timeout` wrapper: `bash_exec` bounds itself with its
+/// internal per-call timeout (default 120s; the tool rejects requests over
+/// 24h) precisely so a legitimately long call converts to a background task at
+/// timeout instead of being killed here. The round cancel (below) still
+/// applies, so a shutdown is never blocked. Note the approval_redeem route
+/// is NOT exempt: the runner sees a redeemed call under the redeem tool's
+/// name, and exempting it would unbound every redeemed tool.
+const OWNS_TIMEOUT_TOOLS: &[&str] = &["bash_exec"];
+
+/// Run one tool call, applying the outer timeout only when the tool does
+/// not own its own bound (see [`OWNS_TIMEOUT_TOOLS`]).
+async fn run_tool_bounded<F>(tool_name: &str, tool_timeout: Duration, fut: F) -> ToolCallOutcome
+where
+    F: Future<Output = ToolCallOutcome>,
+{
+    if OWNS_TIMEOUT_TOOLS.contains(&tool_name) {
+        fut.await
+    } else {
+        match tokio::time::timeout(tool_timeout, fut).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                ToolCallOutcome::Failed(timed_out_tool_result(tool_name, tool_timeout.as_secs()))
+            }
+        }
+    }
+}
+
 /// Execute the assistant's tool calls, emitting events and assembling the turn messages. On a
 /// mid-call cancel returns `Cancelled` *before* the approval-state drain (mirrors the original),
 /// dropping any partial results — the caller does not record the turn.
@@ -737,19 +766,14 @@ async fn execute_tool_calls(
             .await
             .ok();
             let outcome = {
-                let tool_fut = tokio::time::timeout(
+                let tool_fut = run_tool_bounded(
+                    &call.function.name,
                     tool_timeout,
                     ctx.executor
                         .execute(&call.function.name, &call.function.arguments),
                 );
                 tokio::select! {
-                    result = tool_fut => match result {
-                        Ok(outcome) => outcome,
-                        Err(_) => ToolCallOutcome::Failed(timed_out_tool_result(
-                            &call.function.name,
-                            tool_timeout.as_secs(),
-                        )),
-                    },
+                    result = tool_fut => result,
                     _ = round_cancel.cancelled() => {
                         tracing::info!(tool = %call.function.name, "tool execution cancelled");
                         return ToolExecResult::Cancelled;
@@ -1699,5 +1723,34 @@ mod tests {
         // once more before failover — its `attempt` exceeds `max_attempts`, signalling the blown
         // budget — and the chain exhausts (single-profile tier).
         assert_eq!(stream_resets(&events), vec![(1, 2), (2, 2), (3, 2)]);
+    }
+
+    // --- run_tool_bounded outer-timeout exemption ---
+
+    /// bash_exec owns its own timeout (it converts a timed-out command to a background
+    /// task instead of failing), so the runner must NOT wrap it in an outer timeout.
+    #[tokio::test]
+    async fn bash_exec_is_exempt_from_outer_timeout() {
+        let slow = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+            ToolCallOutcome::Success("{\"ok\":true}".to_string())
+        };
+        let out = run_tool_bounded("bash_exec", Duration::from_millis(50), slow).await;
+        assert!(matches!(out, ToolCallOutcome::Success(_)), "got {out:?}");
+    }
+
+    /// Every other tool is still bounded: blowing past the runner timeout fails the
+    /// call with the standard timeout envelope instead of hanging the round.
+    #[tokio::test]
+    async fn other_tools_remain_bounded_by_outer_timeout() {
+        let slow = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+            ToolCallOutcome::Success("{\"ok\":true}".to_string())
+        };
+        let out = run_tool_bounded("bash_read", Duration::from_millis(50), slow).await;
+        match out {
+            ToolCallOutcome::Failed(s) => assert!(s.contains("timed out after"), "got {s}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 }

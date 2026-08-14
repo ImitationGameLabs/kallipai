@@ -237,6 +237,18 @@ impl ShellBuilder {
         if self.max_bg_bytes == 0 {
             return Err(ShellError::backend("max_bg_bytes must be > 0"));
         }
+        if self.max_output_bytes > self.max_bg_bytes {
+            return Err(ShellError::backend(format!(
+                "max_output_bytes ({}) must be <= max_bg_bytes ({}): a timed-out \
+                exec is converted to a background task whose size watchdog uses \
+                max_bg_bytes; with a larger capture budget the converted task \
+                would be killed on its first watchdog poll after crossing the cap. \
+                Note the watchdog totals both streams, so a Separate-mode \
+                conversion can still be killed at the cap if each stream sits \
+                near max_output_bytes; leave headroom (defaults: 1 MiB vs 100 MiB)",
+                self.max_output_bytes, self.max_bg_bytes
+            )));
+        }
         Ok(())
     }
 

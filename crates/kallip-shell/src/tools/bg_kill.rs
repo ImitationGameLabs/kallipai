@@ -42,7 +42,8 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BgKill<B> {
     }
 
     fn description(&self) -> &str {
-        "Cancel and reap a background task started by bash_exec (background:true)."
+        "Cancel and reap a background task started by bash_exec (background:true, or a \
+         timed-out command converted at timeout)."
     }
 
     fn parameters_schema(&self) -> Value {

@@ -132,6 +132,11 @@ mod tests {
             "bash_exec desc: {bash}"
         );
         assert!(bash.contains("authoritative"), "bash_exec desc: {bash}");
+        assert!(
+            bash.contains("converted to a background task"),
+            "bash_exec desc: {bash}"
+        );
+        assert!(bash.contains("still running"), "bash_exec desc: {bash}");
         let read = desc(names::BG_READ);
         assert!(read.contains("Background task"), "bg_read desc: {read}");
     }

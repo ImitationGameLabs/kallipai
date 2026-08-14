@@ -52,7 +52,14 @@ impl MockShellBackend {
         self
     }
 
-    /// Makes the next `exec` time out (exit 124).
+    /// Makes the next `exec` time out: per the new contract the command is
+    /// reported as converted to a background task (timed_out, task_id set,
+    /// exit_code null) and a fake task is registered so read/kill
+    /// exit_code null) and a fake task is registered so read/kill
+    /// round-trip against the returned id. The fake task never reaches
+    /// a terminal state (read stays Running; kill just removes it), so
+    /// runtime-layer tests cannot exercise the exited path against the
+    /// mock — pin that behavior against the real backend.
     pub fn set_should_timeout(&mut self) -> &mut Self {
         self.should_timeout = true;
         self
@@ -82,10 +89,13 @@ impl ShellBackend for MockShellBackend {
 
         if self.should_timeout {
             self.should_timeout = false;
+            let id = self.next_bg.fetch_add(1, Ordering::Relaxed).to_string();
+            self.background.insert(id.clone(), command.to_owned());
             return Ok(ShellOutput {
-                exit_code: Some(124),
+                exit_code: None,
                 timed_out: true,
                 cwd: self.cwd.clone(),
+                task_id: Some(id),
                 ..Default::default()
             });
         }
@@ -167,7 +177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_returns_124() {
+    async fn timeout_converts_to_background_task() {
         let mut backend = MockShellBackend::new();
         backend.set_should_timeout();
         let out = backend
@@ -175,7 +185,10 @@ mod tests {
             .await
             .unwrap();
         assert!(out.timed_out);
-        assert_eq!(out.exit_code, Some(124));
+        assert_eq!(out.exit_code, None);
+        let id = out.task_id.expect("converted to a background task");
+        let read = backend.read_background(&id, 4096).await.unwrap();
+        assert_eq!(read.state, TaskState::Running);
     }
 
     #[tokio::test]

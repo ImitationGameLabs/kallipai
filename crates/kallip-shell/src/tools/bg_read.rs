@@ -62,10 +62,11 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BgRead<B> {
 
     fn description(&self) -> &str {
         "Read the accumulated output and status of a background task started by bash_exec \
-         (background:true). Poll while it is running; when a `[Background task <id> <state>] \
-         notice arrives, call this to collect the final output and exit code. If `stalled` \
-         is true the task appears to be waiting on an interactive prompt that will never \
-         resolve on its own — kill it with bash_background_kill."
+         (background:true, or a timed-out command converted at timeout). Poll while it is \
+         running; when a `[Background task <id> <state>] notice arrives, call this to \
+         collect the final output and exit code. If `stalled` is true the task appears to \
+         be waiting on an interactive prompt that will never resolve on its own — kill it \
+         with bash_background_kill."
     }
 
     fn parameters_schema(&self) -> Value {

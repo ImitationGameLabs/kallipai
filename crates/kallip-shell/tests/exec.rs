@@ -37,13 +37,14 @@ async fn cd_is_reflected_in_reported_cwd() {
 }
 
 #[tokio::test]
-async fn timeout_kills_process_group_no_orphans() {
-    // After a timeout, the orphaned `sleep` must be gone — the whole process
-    // group is killed, not just the leader.
+async fn timeout_converts_then_kill_leaves_no_orphans() {
+    // On timeout the command is converted to a background task (still
+    // running); killing that task must reap the whole process group —
+    // including the orphaned `sleep`.
     let mut backend = ShellBuilder::new().build().await.unwrap();
     // A unique duration so `pgrep` doesn't match `sleep` spawned by other
     // concurrent tests (cross-test isolation).
-    let _ = backend
+    let out = backend
         .exec(
             "sleep 41 & wait",
             Duration::from_millis(500),
@@ -51,6 +52,9 @@ async fn timeout_kills_process_group_no_orphans() {
         )
         .await
         .unwrap();
+    assert!(out.timed_out);
+    let id = out.task_id.expect("timed out exec converts to a task");
+    backend.kill_background(&id).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let pgrep = std::process::Command::new("pgrep")
@@ -59,7 +63,7 @@ async fn timeout_kills_process_group_no_orphans() {
         .unwrap();
     assert!(
         pgrep.stdout.is_empty(),
-        "orphaned `sleep 41` survived the timeout: {}",
+        "orphaned `sleep 41` survived the timeout-then-kill: {}",
         String::from_utf8_lossy(&pgrep.stdout)
     );
 }

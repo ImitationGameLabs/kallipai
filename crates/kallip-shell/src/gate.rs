@@ -41,6 +41,16 @@ pub struct ExecGate {
     /// Number of currently-running background tasks, each retaining launch-time
     /// writability for its whole life. A carve refuses while this is > 0.
     running_bg: AtomicU64,
+    /// Monotonic count of carves that landed (acquired the WRITE side and
+    /// shaped a new writable set). A foreground exec records the epoch at
+    /// its fork; when a timeout converts its still-running child into a
+    /// background task (an unbounded life), the adoption re-checks the
+    /// epoch under a fresh READ — a mismatch means a carve landed in
+    /// between, the child's baked landlock domain is older than the
+    /// carve's access decision, and the child is killed instead. This
+    /// closes what would otherwise be the conversion's one unbounded
+    /// escape: a long-lived task running a pre-carve (broader) domain.
+    carve_epoch: AtomicU64,
 }
 
 /// Why a carve-out could not take the WRITE side of an [`ExecGate`]. Callers map
@@ -61,6 +71,7 @@ impl ExecGate {
         Arc::new(Self {
             permit: RwLock::new(()),
             running_bg: AtomicU64::new(0),
+            carve_epoch: AtomicU64::new(0),
         })
     }
 
@@ -97,6 +108,14 @@ impl ExecGate {
             drop(guard);
             return Err(ExecGateFailure::BgTasksRunning(bg));
         }
+
+        // A carve is landing (the guard will shape the new writable set):
+        // bump the epoch so a concurrent timeout->background conversion —
+        // which compares the epoch it recorded at fork, under a fresh
+        // READ — notices and refuses. `Relaxed` suffices: the RwLock's
+        // own acquire/release ordering makes the bump visible to anyone
+        // who takes the READ side after this WRITE drops.
+        self.carve_epoch.fetch_add(1, Ordering::Relaxed);
         Ok(ExecWriteGuard(guard))
     }
 
@@ -141,6 +160,13 @@ impl ExecGate {
     /// [`Self::try_write`]).
     pub fn running_bg(&self) -> u64 {
         self.running_bg.load(Ordering::Relaxed)
+    }
+
+    /// Current carve epoch (see the `carve_epoch` field). Exec records it
+    /// at fork under the READ permit; adoption compares it later under a
+    /// fresh READ.
+    pub fn carve_epoch(&self) -> u64 {
+        self.carve_epoch.load(Ordering::Relaxed)
     }
 }
 
@@ -199,6 +225,22 @@ mod tests {
     async fn read_is_noop_when_gate_absent() {
         let _read = ExecGate::read(&None).await;
         // No gate to contend with; nothing to assert beyond compilation + drop.
+    }
+
+    #[tokio::test]
+    async fn carve_epoch_bumps_on_every_successful_write() {
+        let gate = ExecGate::new();
+        assert_eq!(gate.carve_epoch(), 0);
+        drop(gate.try_write().unwrap());
+        assert_eq!(gate.carve_epoch(), 1);
+        // A carve refused on running-bg never landed: no epoch bump, so
+        // an adoption racing a merely-attempted carve is unaffected.
+        gate.inc_bg();
+        assert!(gate.try_write().is_err());
+        assert_eq!(gate.carve_epoch(), 1);
+        gate.dec_bg();
+        drop(gate.try_write().unwrap());
+        assert_eq!(gate.carve_epoch(), 2);
     }
 
     #[tokio::test]

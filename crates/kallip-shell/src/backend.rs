@@ -11,18 +11,28 @@
 //! spilled to a file under `spill_dir` so the dropped middle is recoverable,
 //! and a banner naming the file is prepended to the clipped text. Other than
 //! that overflow spill (and only then), `exec` writes nothing under the spawn
-//! cwd or workspace. On timeout the whole process group is killed (SIGTERM ->
-//! grace -> SIGKILL) and exit code 124 is synthesized. If the future is dropped
-//! before completion (the runtime cancels the tool call), a `GroupKillGuard`
-//! force-kills the whole group so grandchildren do not survive the leader. The
-//! trap fires on normal exit, `exit`, and SIGTERM, so the sticky cwd is read
-//! fresh after every command; a SIGKILL before the trap (or a timeout-kill of a
-//! command flooding the marker fd) loses the cwd and the caller falls back
-//! (never a stale path). A grandchild that the command intentionally
-//! backgrounded and detached on the *normal* exit path (e.g. `sleep 99 &
-//! disown; exit`) is not killed -- that is an intentional non-goal (use
-//! `spawn_background` for durable background work); only the cancel path
-//! force-kills the group.
+//! cwd or workspace. On timeout the still-running child is CONVERTED to a
+//! background task (the same registry `background:true` uses): exec returns
+//! `timed_out: true` plus the new `task_id` and a peek of the output so
+//! far, and the agent polls `bash_background_read` / kills via
+//! `bash_background_kill` as it judges. The conversion is gated on the
+//! exec-gate carve epoch (see `BackgroundRegistry::adopt`): a workspace
+//! carve that landed while the command ran refuses the conversion and the
+//! child is killed instead (SIGTERM -> grace -> SIGKILL), so no long-lived
+//! task ever runs a landlock domain older than the carve's access
+//! decision. If the future is dropped before completion (the runtime
+//! cancels the tool call), a `GroupKillGuard` force-kills the whole group
+//! so grandchildren do not survive the leader — including a cancellation
+//! racing the conversion itself. The trap fires on normal exit, `exit`, and
+//! SIGTERM, so the sticky cwd is read fresh after every completed command;
+//! a converted task does NOT advance it (the command has not finished),
+//! and a SIGKILL before the trap (or a kill of a command flooding the
+//! marker fd) loses the cwd and the caller falls back (never a stale
+//! path). A grandchild that the command intentionally backgrounded and
+//! detached on the *normal* exit path (e.g. `sleep 99 & disown; exit`) is
+//! not killed -- that is an intentional non-goal (use `spawn_background`
+//! for durable background work); only the cancel path force-kills the
+//! group.
 
 use std::fs::File;
 use std::io::Read;
@@ -42,8 +52,6 @@ use tokio::process::{Child, Command};
 use crate::error::ShellError;
 use crate::{builder, capture, cwd, pgroup, supervisor};
 
-/// Exit code synthesized on timeout (matches GNU `timeout(1)`).
-const TIMEOUT_EXIT: i32 = 124;
 /// Default per-call timeout when the caller omits one.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Ceiling on the inline `bash -c` script size, in bytes. The kernel would
@@ -109,9 +117,14 @@ pub struct ShellOutput {
     /// Captured stderr, possibly clipped + banner-prefixed on clip. `Some` under
     /// [`CaptureMode::Separate`] or [`CaptureMode::Stderr`].
     pub stderr: Option<String>,
-    /// Process exit code, or `None` on signal death; `Some(124)` on timeout.
+    /// Process exit code, or `None` on signal death. `None` while a
+    /// timed-out command keeps running as a background task (`task_id` is
+    /// set — poll the task for the eventual code).
     pub exit_code: Option<i32>,
-    /// Whether the command exceeded its timeout.
+    /// Whether the command exceeded its timeout. When `true`, the command
+    /// was converted to a background task (`task_id` set) — unless a
+    /// concurrent workspace carve refused the conversion, in which case it
+    /// was killed.
     pub timed_out: bool,
     /// Whether a returned stream was clipped (exceeded the byte budget). Only
     /// the stream(s) the mode returns are considered; clipping a discarded
@@ -120,6 +133,10 @@ pub struct ShellOutput {
     /// The working directory after the command (read fresh from the cwd fd
     /// channel).
     pub cwd: PathBuf,
+    /// Set when a timeout converted this exec into a background task;
+    /// poll `read_background` / `kill_background` with it. `None` for
+    /// every completed command (and for refused conversions).
+    pub task_id: Option<String>,
 }
 
 /// Abstraction for a one-shot command runner.
@@ -230,11 +247,18 @@ impl ShellBackend for ProcessBackend {
         // the spawn request arrives while this exec is past its fork and the gate
         // is free; a whole-exec bracket would deadlock every such spawn. No-op
         // when no gate is configured.
-        // Accepted tradeoff: a command orphaned before the carve (`cmd &` /
-        // `disown`) retains its baked (pre-carve, broader) domain for its whole
-        // life -- the orphan non-goal documented at module top -- so a FullHandoff
-        // carve does not confine it. Foreground commands are bounded by the exec
-        // timeout; only the orphan escape is unbounded.
+        // Converted-timeout close: a timed-out exec adopting its child as a
+        // background task re-checks the gate's carve epoch under a fresh
+        // READ (see `BackgroundRegistry::adopt`), so a carve landing AFTER
+        // this fork refuses the adoption and the child is killed — a
+        // background task never runs a domain older than the carve's access
+        // decision. The remaining accepted tradeoff is the pre-existing
+        // one-command overlap: a carve landing just before this fork is
+        // baked in for this command's life (bounded by its timeout, or by
+        // the passed epoch check after a conversion). The orphan non-goal
+        // stands: a command that detached a grandchild (`cmd &` /
+        // `disown`) leaves it on the pre-carve (broader) domain for its
+        // whole life — documented at module top.
         let _exec_gate = crate::gate::ExecGate::read(&self.config.exec_gate).await;
         // Landlock-restrict this bash to the agent's current access decision
         // (Linux + landlock). The foreground path needs no scratch beyond
@@ -252,6 +276,10 @@ impl ShellBackend for ProcessBackend {
         }
 
         let mut child = cmd.spawn()?;
+        // Epoch at fork (still under the READ permit): the conversion path
+        // compares this against the gate's current carve epoch under a
+        // fresh READ, to refuse adoption if a carve landed in between.
+        let epoch_at_fork = self.config.exec_gate.as_ref().map(|g| g.carve_epoch());
         drop(_exec_gate);
         // The child has forked and inherited the marker fd; release the parent's
         // write-end copy NOW so the read end can reach EOF at child exit (this is
@@ -307,82 +335,177 @@ impl ShellBackend for ProcessBackend {
             Some(tokio::spawn(pump(child.stderr.take(), err_cap.clone())))
         };
 
-        let (exit_status, timed_out) = run_until_exit_or_timeout(&mut child, timeout_dur).await;
+        let wait = run_until_exit_or_timeout(&mut child, timeout_dur).await;
 
-        // Abort any still-blocked pump (a grandchild may hold the write-end) and
-        // finalize whatever was buffered — partial output is preserved.
-        let out_cap = finish_capture(out_task, out_cap).await;
-        let err_cap = match err_task {
-            Some(task) => finish_capture(task, err_cap).await,
-            // No stderr pump (Merged): empty, untruncated capture placeholder.
-            None => capture::CaptureResult::default(),
-        };
+        match wait {
+            WaitOutcome::Exited(exit_status) => {
+                // Abort any still-blocked pump (a grandchild may hold the
+                // write-end) and finalize whatever was buffered — partial
+                // output is preserved.
+                let out_cap = finish_capture(out_task, out_cap).await;
+                let err_cap = match err_task {
+                    Some(task) => finish_capture(task, err_cap).await,
+                    // No stderr pump (Merged): empty, untruncated capture placeholder.
+                    None => capture::CaptureResult::default(),
+                };
 
-        // A drained-but-discarded stream (Stdout discards stderr, Stderr
-        // discards stdout) is never surfaced, so unlink its spill file if it
-        // overflowed -- otherwise it would leak under spill_dir with no banner
-        // pointing at it.
-        match capture {
-            CaptureMode::Stdout => drop_spill(&err_cap),
-            CaptureMode::Stderr => drop_spill(&out_cap),
-            _ => {}
+                // A drained-but-discarded stream (Stdout discards stderr,
+                // Stderr discards stdout) is never surfaced, so unlink its
+                // spill file if it overflowed -- otherwise it would leak
+                // under spill_dir with no banner pointing at it.
+                match capture {
+                    CaptureMode::Stdout => drop_spill(&err_cap),
+                    CaptureMode::Stderr => drop_spill(&out_cap),
+                    _ => {}
+                }
+
+                // Recover the post-command cwd from the private fd channel
+                // (the EXIT trap wrote `pwd -P` to it). An absent/empty
+                // result (SIGKILL before the trap, or a flooded marker fd,
+                // or the probe never came up) falls back -- always an
+                // existing dir, never a stale path.
+                let pwd = cwd_probe.and_then(CwdProbe::read_cwd);
+                let new_cwd = match pwd {
+                    Some(p) => cwd::resolve_str(&p, &self.config.fallback_cwd),
+                    None => self.config.fallback_cwd.clone(),
+                };
+                self.cwd = new_cwd.clone();
+
+                let exit_code = exit_status.and_then(|s| s.code());
+
+                // The child has settled and the pumps are drained -- disarm
+                // so the guard does not fire a redundant group kill when the
+                // future otherwise finishes dropping.
+                kill_guard.disarm();
+
+                // Surface only the field(s) the capture mode returns,
+                // banner-prefixed on clip (see `stream_fields`).
+                let (merged, stdout, stderr, truncated) =
+                    stream_fields(capture, &out_cap, &err_cap);
+                Ok(ShellOutput {
+                    merged,
+                    stdout,
+                    stderr,
+                    exit_code,
+                    timed_out: false,
+                    truncated,
+                    cwd: new_cwd,
+                    task_id: None,
+                })
+            }
+            WaitOutcome::TimedOut => {
+                // Convert the still-running child into a background task
+                // instead of killing it: the agent gets the task id and a
+                // peek of the output so far, then polls/kills as it judges.
+                // The child, its pumps, the captures, and the cwd-marker
+                // read end all move into the task — nothing may be dropped
+                // here first: closing the marker read end would SIGPIPE
+                // bash at its EXIT trap, losing the exit code. The sticky
+                // cwd does NOT advance (the command is unfinished); it
+                // stays at its pre-command value.
+                //
+                // A drained-but-discarded stream's spill is unlinked on the
+                // LIVE capture before ownership moves (same rationale as
+                // the exited path; the discarded stream's pump keeps
+                // writing an anonymous inode, so no disk space is held once
+                // it closes).
+                match capture {
+                    CaptureMode::Stdout => drop_spill_live(&err_cap),
+                    CaptureMode::Stderr => drop_spill_live(&out_cap),
+                    _ => {}
+                }
+                let output = supervisor::TaskOutput::Pipes {
+                    out: out_cap.clone(),
+                    // Merged has no stderr pump (nothing to read).
+                    err: (capture != CaptureMode::Merged).then(|| err_cap.clone()),
+                    mode: capture,
+                };
+                match self
+                    .background
+                    .adopt(
+                        child,
+                        cwd_probe.map(CwdProbe::into_read),
+                        supervisor::Pumps {
+                            out: out_task,
+                            err: err_task,
+                        },
+                        output,
+                        epoch_at_fork,
+                    )
+                    .await
+                {
+                    supervisor::AdoptOutcome::Adopted(task_id) => {
+                        // The task owns the lifecycle from here (cancel
+                        // token, watcher, registry Drop): disarm so
+                        // returning does not fire a redundant group kill.
+                        kill_guard.disarm();
+                        let out_peek = peek_cap(&out_cap);
+                        let err_peek = peek_cap(&err_cap);
+                        let (merged, stdout, stderr, truncated) =
+                            stream_fields(capture, &out_peek, &err_peek);
+                        Ok(ShellOutput {
+                            merged,
+                            stdout,
+                            stderr,
+                            // No exit yet: the command is still running
+                            // under the returned task id.
+                            exit_code: None,
+                            timed_out: true,
+                            truncated,
+                            cwd: self.cwd.clone(),
+                            task_id: Some(task_id),
+                        })
+                    }
+                    supervisor::AdoptOutcome::Refused {
+                        mut child,
+                        pumps,
+                        marker_read,
+                    } => {
+                        // A carve landed between fork and adoption: kill the
+                        // child (exactly today's timeout behavior) — its
+                        // baked landlock domain must not gain the unbounded
+                        // life of a background task.
+                        let cwd_probe = marker_read.map(|read| CwdProbe { read });
+                        let _ = pgroup::kill_tree(&mut child).await;
+                        let out_cap = finish_capture(pumps.out, out_cap).await;
+                        let err_cap = match pumps.err {
+                            Some(task) => finish_capture(task, err_cap).await,
+                            None => capture::CaptureResult::default(),
+                        };
+                        match capture {
+                            CaptureMode::Stdout => drop_spill(&err_cap),
+                            CaptureMode::Stderr => drop_spill(&out_cap),
+                            _ => {}
+                        }
+                        // The trap fired during kill_tree's graceful phase
+                        // (if bash honored SIGTERM), so the cwd may be
+                        // recoverable — same as the exited path.
+                        let pwd = cwd_probe.and_then(CwdProbe::read_cwd);
+                        let new_cwd = match pwd {
+                            Some(p) => cwd::resolve_str(&p, &self.config.fallback_cwd),
+                            None => self.config.fallback_cwd.clone(),
+                        };
+                        self.cwd = new_cwd.clone();
+                        kill_guard.disarm();
+                        let note = "[timed out; killed — the command could not be \
+                                    converted to a background task because a workspace \
+                                    carve-out landed while it ran]\n";
+                        let (merged, stdout, stderr, truncated) =
+                            stream_fields(capture, &out_cap, &err_cap);
+                        Ok(ShellOutput {
+                            merged: merged.map(|m| format!("{note}{m}")),
+                            stdout: stdout.map(|s| format!("{note}{s}")),
+                            stderr: stderr.map(|s| format!("{note}{s}")),
+                            exit_code: None,
+                            timed_out: true,
+                            truncated,
+                            cwd: new_cwd,
+                            task_id: None,
+                        })
+                    }
+                }
+            }
         }
-
-        // Recover the post-command cwd from the private fd channel (the EXIT
-        // trap wrote `pwd -P` to it). An absent/empty result (SIGKILL/timeout
-        // before the trap, or a flooded marker fd that the timeout killed, or
-        // the probe never came up) falls back -- always an existing dir, never a
-        // stale path.
-        let pwd = cwd_probe.and_then(CwdProbe::read_cwd);
-        let new_cwd = match pwd {
-            Some(p) => cwd::resolve_str(&p, &self.config.fallback_cwd),
-            None => self.config.fallback_cwd.clone(),
-        };
-        self.cwd = new_cwd.clone();
-
-        let exit_code = if timed_out {
-            Some(TIMEOUT_EXIT)
-        } else {
-            exit_status.and_then(|s| s.code())
-        };
-
-        // The child has settled (exited normally or kill_tree'd on timeout) and
-        // the pumps are drained -- disarm so the guard does not fire a redundant
-        // group kill when the future otherwise finishes dropping.
-        kill_guard.disarm();
-
-        // Surface only the field(s) the capture mode returns, prepending the
-        // recovery banner to any clipped stream. `truncated` considers just the
-        // returned streams — clipping a drained-but-discarded stream is not
-        // reported. The streams are pure command output (cwd recovery is
-        // off-band), so nothing is stripped.
-        let merged = match capture {
-            CaptureMode::Merged => Some(with_banner("output", &out_cap)),
-            _ => None,
-        };
-        let stdout = match capture {
-            CaptureMode::Separate | CaptureMode::Stdout => Some(with_banner("stdout", &out_cap)),
-            _ => None,
-        };
-        let stderr = match capture {
-            CaptureMode::Separate | CaptureMode::Stderr => Some(with_banner("stderr", &err_cap)),
-            _ => None,
-        };
-        let truncated = match capture {
-            CaptureMode::Merged | CaptureMode::Stdout => out_cap.truncated,
-            CaptureMode::Stderr => err_cap.truncated,
-            CaptureMode::Separate => out_cap.truncated || err_cap.truncated,
-        };
-
-        Ok(ShellOutput {
-            merged,
-            stdout,
-            stderr,
-            exit_code,
-            timed_out,
-            truncated,
-            cwd: new_cwd,
-        })
     }
 
     async fn spawn_background(&mut self, command: &str) -> Result<String, ShellError> {
@@ -429,20 +552,27 @@ impl Drop for GroupKillGuard {
     }
 }
 
-/// Wait for `child` to exit naturally, or kill the process group on timeout.
-///
-/// On timeout, [`pgroup::kill_tree`] kills the whole group and reaps the leader;
-/// the caller synthesizes exit code 124, so the real (cached) status is unused.
+/// Outcome of the foreground wait.
+enum WaitOutcome {
+    /// The child exited; the status is `None` if the wait itself failed
+    /// (treated as a signal death: no exit code).
+    Exited(Option<std::process::ExitStatus>),
+    /// The timeout elapsed with the child still running — child, pumps, and
+    /// captures are all alive and stay owned by the caller, which converts
+    /// them into a background task (see `BackgroundRegistry::adopt`).
+    TimedOut,
+}
+
+/// Wait for `child` to exit naturally, or report that the timeout elapsed
+/// with it still running. Nothing is killed here: the timeout branch hands
+/// the live child to the conversion path.
 async fn run_until_exit_or_timeout(
     child: &mut Child,
     timeout_dur: Duration,
-) -> (Option<std::process::ExitStatus>, bool) {
+) -> WaitOutcome {
     tokio::select! {
-        result = child.wait() => (result.ok(), false),
-        _ = tokio::time::sleep(timeout_dur) => {
-            let _ = pgroup::kill_tree(child).await;
-            (None, true)
-        }
+        result = child.wait() => WaitOutcome::Exited(result.ok()),
+        _ = tokio::time::sleep(timeout_dur) => WaitOutcome::TimedOut,
     }
 }
 
@@ -468,7 +598,7 @@ async fn pump(reader: Option<impl AsyncRead + Unpin>, cap: Arc<Mutex<capture::Bo
 /// pipe's write-end closes with the child, so the pump's next read returns EOF
 /// within microseconds; this bound only ever binds when a grandchild the command
 /// backgrounded still holds the write-end open.
-const PUMP_DRAIN_DEADLINE: Duration = Duration::from_secs(1);
+pub(super) const PUMP_DRAIN_DEADLINE: Duration = Duration::from_secs(1);
 
 /// Finalize a pump, preserving every buffered byte. Let it drain naturally
 /// first (after the child exits the pump completes on EOF), so an abort can never
@@ -586,6 +716,14 @@ impl CwdProbe {
             .find(|line| !line.trim().is_empty())
             .map(|line| line.trim().to_owned())
     }
+
+    /// Release the raw read end. Used when a timed-out exec is converted
+    /// into a background task: the read end must move into the task and
+    /// outlive the child (see `WatchArgs::marker_read`), instead of being
+    /// consumed by `read_cwd` here.
+    fn into_read(self) -> OwnedFd {
+        self.read
+    }
 }
 
 /// Render a finalized capture for the LLM: the head+tail view (which already
@@ -593,7 +731,7 @@ impl CwdProbe {
 /// banner prepended when this stream overflowed and spilled. The banner names
 /// the spill file once and the `cat` affordance so the model can read the full
 /// output back; `stream` matches the JSON field name the model sees.
-fn with_banner(stream: &str, cap: &capture::CaptureResult) -> String {
+pub(super) fn with_banner(stream: &str, cap: &capture::CaptureResult) -> String {
     match &cap.spill {
         Some(path) => {
             let banner = format!(
@@ -612,6 +750,56 @@ fn drop_spill(cap: &capture::CaptureResult) {
     if let Some(path) = &cap.spill {
         let _ = std::fs::remove_file(path);
     }
+}
+
+/// Best-effort unlink of a LIVE (still-pumping) capture's spill file — the
+/// discarded-stream twin of `drop_spill`, used on the conversion path
+/// where no finalized `CaptureResult` exists yet. The still-running pump
+/// keeps appending to the now-anonymous inode; its space is freed when the
+/// fd closes at terminal state.
+fn drop_spill_live(cap: &Arc<Mutex<capture::BoundedCapture>>) {
+    let cap = cap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(path) = cap.spill_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Poison-tolerant live peek of a shared capture — the conversion envelope
+/// renders the output captured so far while the pumps keep writing.
+fn peek_cap(cap: &Arc<Mutex<capture::BoundedCapture>>) -> capture::CaptureResult {
+    cap.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .peek()
+}
+
+/// Assemble exactly the capture mode's stream fields from (finalized or
+/// peeked) capture results, prepending the recovery banner to any clipped
+/// stream. `truncated` considers just the returned streams — clipping a
+/// drained-but-discarded stream is not reported. The streams are pure
+/// command output (cwd recovery is off-band), so nothing is stripped.
+fn stream_fields(
+    capture: CaptureMode,
+    out_cap: &capture::CaptureResult,
+    err_cap: &capture::CaptureResult,
+) -> (Option<String>, Option<String>, Option<String>, bool) {
+    let merged = match capture {
+        CaptureMode::Merged => Some(with_banner("output", out_cap)),
+        _ => None,
+    };
+    let stdout = match capture {
+        CaptureMode::Separate | CaptureMode::Stdout => Some(with_banner("stdout", out_cap)),
+        _ => None,
+    };
+    let stderr = match capture {
+        CaptureMode::Separate | CaptureMode::Stderr => Some(with_banner("stderr", err_cap)),
+        _ => None,
+    };
+    let truncated = match capture {
+        CaptureMode::Merged | CaptureMode::Stdout => out_cap.truncated,
+        CaptureMode::Stderr => err_cap.truncated,
+        CaptureMode::Separate => out_cap.truncated || err_cap.truncated,
+    };
+    (merged, stdout, stderr, truncated)
 }
 
 /// Build the foreground `-c` script: install the EXIT-trap cwd probe on the
@@ -700,51 +888,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_timeout_kills_and_synthesizes_124() {
+    async fn exec_timeout_converts_to_background_task() {
         let mut backend = ShellBuilder::new().build().await.unwrap();
         let out = backend
-            .exec("sleep 30", Duration::from_millis(500), CaptureMode::Merged)
-            .await
-            .unwrap();
-        assert!(out.timed_out);
-        assert_eq!(out.exit_code, Some(124));
-    }
-
-    /// On a SIGTERM-honoring timeout the EXIT trap still fires, so the cwd from
-    /// a preceding `cd` is reported (not the fallback). Only commands that
-    /// ignore SIGTERM and get SIGKILLed lose the cwd.
-    #[tokio::test]
-    async fn exec_timeout_with_sigterm_trap_reports_cwd() {
-        let mut backend = ShellBuilder::new().build().await.unwrap();
-        let target = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        // `trap '' TERM` would ignore; default bash honors SIGTERM by running
-        // the EXIT trap during shutdown. `cd` then `sleep` past the timeout.
-        let cmd = format!("cd '{}'; sleep 30", target.display());
-        let out = backend
-            .exec(&cmd, Duration::from_millis(500), CaptureMode::Merged)
+            .exec("sleep 43 & wait", Duration::from_millis(400), CaptureMode::Merged)
             .await
             .unwrap();
         assert!(out.timed_out);
         assert_eq!(
-            out.cwd, target,
-            "trap should fire on SIGTERM and report the cd target"
+            out.exit_code, None,
+            "no synthesized code: the command is still running"
         );
-    }
-
-    #[tokio::test]
-    async fn exec_timeout_reaps_process_group() {
-        let mut backend = ShellBuilder::new().build().await.unwrap();
-        // `sleep 43 &` orphans a child if only the leader is killed. A unique
-        // duration so `pgrep` doesn't match `sleep` spawned by sibling tests
-        // running in parallel.
-        let _ = backend
-            .exec(
-                "sleep 43 & wait",
-                Duration::from_millis(500),
-                CaptureMode::Merged,
-            )
-            .await
-            .unwrap();
+        let id = out.task_id.expect("converted to a background task");
+        // The converted task reads like any background task.
+        let read = backend.read_background(&id, 4096).await.unwrap();
+        assert_eq!(read.state, supervisor::TaskState::Running);
+        // Killing it reaps the whole process group.
+        backend.kill_background(&id).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         let pgrep = std::process::Command::new("pgrep")
             .arg("-f")
@@ -756,6 +916,115 @@ mod tests {
             "orphaned `sleep 43` survived: {:?}",
             String::from_utf8_lossy(&pgrep.stdout)
         );
+    }
+
+    /// Exit-code fidelity: the cwd-marker read end moves into the task and
+    /// outlives bash, so the task's eventual exit status is the command's
+    /// real one (a dropped read end would SIGPIPE bash at its EXIT trap
+    /// and the code would be lost).
+    #[tokio::test]
+    async fn converted_task_reports_real_exit_code() {
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let out = backend
+            .exec("sleep 0.3; exit 7", Duration::from_millis(100), CaptureMode::Merged)
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let read = backend.read_background(&id, 4096).await.unwrap();
+            if read.state == supervisor::TaskState::Exited {
+                assert_eq!(read.exit_code, Some(7));
+                return;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "task never exited");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn converted_task_output_keeps_growing() {
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let out = backend
+            .exec(
+                "echo one; sleep 0.5; echo two; sleep 30",
+                Duration::from_millis(200),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        assert!(out.merged.as_deref().unwrap().contains("one"));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let read = backend.read_background(&id, 4096).await.unwrap();
+            if read.output.contains("two") {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "second line never appeared: {:?}",
+                read.output
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// The sticky cwd does NOT advance on a conversion: the command has
+    /// not finished, so the pre-command value stays (unlike the old kill
+    /// path, where the trap fired during the graceful kill).
+    #[tokio::test]
+    async fn exec_timeout_conversion_does_not_advance_cwd() {
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let before = backend.cwd().to_path_buf();
+        let target = std::env::temp_dir();
+        let cmd = format!("cd '{}'; sleep 30", target.display());
+        let out = backend
+            .exec(&cmd, Duration::from_millis(400), CaptureMode::Merged)
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        assert_eq!(out.cwd, before, "conversion freezes the sticky cwd");
+        assert_eq!(backend.cwd(), before);
+        backend.kill_background(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn zero_timeout_converts_immediately() {
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let out = backend
+            .exec("sleep 30", Duration::ZERO, CaptureMode::Merged)
+            .await
+            .unwrap();
+        assert!(out.timed_out);
+        let id = out.task_id.expect("immediate conversion");
+        backend.kill_background(&id).await.unwrap();
+    }
+
+    /// A converted Separate-mode task joins its two captured streams
+    /// around a `[stderr]` divider on read (the pipes' true interleave
+    /// never existed).
+    #[tokio::test]
+    async fn converted_separate_task_joins_streams_with_divider() {
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let out = backend
+            .exec(
+                "echo out-line; echo err-line 1>&2; sleep 30",
+                Duration::from_millis(400),
+                CaptureMode::Separate,
+            )
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        assert!(out.stdout.as_deref().unwrap().contains("out-line"));
+        assert!(out.stderr.as_deref().unwrap().contains("err-line"));
+        let read = backend.read_background(&id, 4096).await.unwrap();
+        assert!(
+            read.output.contains("[stderr]"),
+            "divider joins the streams: {:?}",
+            read.output
+        );
+        backend.kill_background(&id).await.unwrap();
     }
 
     /// Dropping the `exec` future before its own timeout (the runtime's cancel
@@ -796,6 +1065,365 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+
+    /// Gate battery for the conversion path: a converted task bumps
+    /// running_bg for its lifetime (carve refused while it runs), the
+    /// tally drains on kill, and the kill reaps the whole group.
+    #[tokio::test]
+    async fn converted_task_blocks_carve_until_killed() {
+        let gate = crate::gate::ExecGate::new();
+        let mut backend = ShellBuilder::new()
+            .exec_gate(gate.clone())
+            .build()
+            .await
+            .unwrap();
+        let out = backend
+            .exec("sleep 45 & wait", Duration::from_millis(400), CaptureMode::Merged)
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        for _ in 0..50 {
+            if gate.running_bg() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(gate.running_bg(), 1, "converted task bumps the tally");
+        assert_eq!(
+            gate.try_write().unwrap_err(),
+            crate::gate::ExecGateFailure::BgTasksRunning(1),
+            "a carve must be refused while the converted task runs"
+        );
+        backend.kill_background(&id).await.unwrap();
+        for _ in 0..50 {
+            if gate.running_bg() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(gate.running_bg(), 0, "kill drains the tally");
+        assert!(gate.try_write().is_ok(), "carve allowed after the kill");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let pgrep = std::process::Command::new("pgrep")
+            .arg("-f")
+            .arg("sleep 45")
+            .output()
+            .unwrap();
+        assert!(
+            pgrep.stdout.is_empty(),
+            "orphaned `sleep 45` survived: {:?}",
+            String::from_utf8_lossy(&pgrep.stdout)
+        );
+    }
+
+    /// The tally also drains when the converted task exits on its own, and
+    /// the exited entry stays readable with its exit code.
+    #[tokio::test]
+    async fn converted_task_tally_drains_when_it_exits() {
+        let gate = crate::gate::ExecGate::new();
+        let mut backend = ShellBuilder::new()
+            .exec_gate(gate.clone())
+            .build()
+            .await
+            .unwrap();
+        let out = backend
+            .exec("sleep 0.3", Duration::from_millis(100), CaptureMode::Merged)
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let read = backend.read_background(&id, 4096).await.unwrap();
+            if read.state == supervisor::TaskState::Exited {
+                assert_eq!(read.exit_code, Some(0));
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "task never exited");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for _ in 0..50 {
+            if gate.running_bg() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            gate.running_bg(), 0,
+            "tally drains when the converted task exits"
+        );
+        assert!(gate.try_write().is_ok());
+    }
+
+    /// The registry Drop settles the tally for a still-running converted
+    /// task and force-kills its group.
+    #[tokio::test]
+    async fn converted_task_tally_drains_on_registry_drop() {
+        let gate = crate::gate::ExecGate::new();
+        let mut backend = ShellBuilder::new()
+            .exec_gate(gate.clone())
+            .build()
+            .await
+            .unwrap();
+        let out = backend
+            .exec("sleep 46", Duration::from_millis(400), CaptureMode::Merged)
+            .await
+            .unwrap();
+        assert!(out.task_id.is_some());
+        for _ in 0..50 {
+            if gate.running_bg() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(gate.running_bg(), 1);
+        drop(backend);
+        for _ in 0..50 {
+            if gate.running_bg() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(gate.running_bg(), 0, "registry Drop drains the tally");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let pgrep = std::process::Command::new("pgrep")
+            .arg("-f")
+            .arg("sleep 46")
+            .output()
+            .unwrap();
+        assert!(
+            pgrep.stdout.is_empty(),
+            "orphaned `sleep 46` survived the registry Drop: {:?}",
+            String::from_utf8_lossy(&pgrep.stdout)
+        );
+    }
+
+    /// Carve-epoch close: a carve landing between the exec's fork and the
+    /// timeout conversion refuses the adoption — the child is killed
+    /// (today's timeout behavior) and the envelope says so instead of
+    /// returning a task id.
+    #[tokio::test]
+    async fn carve_landing_after_fork_refuses_the_conversion() {
+        let gate = crate::gate::ExecGate::new();
+        let mut backend = ShellBuilder::new()
+            .exec_gate(gate.clone())
+            .build()
+            .await
+            .unwrap();
+        // Repeatedly attempt the WRITE side; it succeeds once the exec's
+        // fork releases the READ (long before its timeout).
+        let carver_gate = gate.clone();
+        let carver = tokio::spawn(async move {
+            loop {
+                if let Ok(guard) = carver_gate.try_write() {
+                    drop(guard);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let out = backend
+            .exec("cd /tmp && sleep 30", Duration::from_millis(500), CaptureMode::Merged)
+            .await
+            .unwrap();
+        carver.await.unwrap();
+        assert!(out.timed_out);
+        assert!(
+            out.task_id.is_none(),
+            "the conversion must be refused after a carve landed"
+        );
+        let text = out.merged.as_deref().unwrap_or("");
+        assert!(
+            text.contains("could not be converted"),
+            "envelope explains the refusal: {text}"
+        );
+        // The refusal runs the old kill semantics, which still probe the
+        // cwd via the SIGTERM trap: the post-command directory is reported.
+        assert_eq!(out.cwd, std::path::PathBuf::from("/tmp"));
+        // Nothing was registered, so the tally stays at zero.
+        assert_eq!(gate.running_bg(), 0);
+    }
+
+    /// Overflow before the conversion: the spill banner rides the
+    /// conversion envelope, the spill file lives while the task runs, and
+    /// killing the task unlinks it.
+    #[tokio::test]
+    async fn overflow_before_conversion_keeps_banner_and_cleans_spill() {
+        let spill = tempfile::TempDir::new().unwrap();
+        let mut backend = ShellBuilder::new()
+            .max_output_bytes(2048)
+            .spill_dir(spill.path())
+            .build()
+            .await
+            .unwrap();
+        // 8KiB of output overflows the 2KiB budget and spills; the command
+        // then outlives the timeout and is converted.
+        let out = backend
+            .exec(
+                "head -c 8192 /dev/zero | tr '\\0' 'a'; sleep 30",
+                Duration::from_millis(500),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        let text = out.merged.as_deref().unwrap();
+        assert!(
+            text.contains("was clipped"),
+            "banner present in the conversion envelope: {text}"
+        );
+        assert!(
+            text.contains("cat "),
+            "recovery affordance names the spill file: {text}"
+        );
+        assert_eq!(spill_files(spill.path()).len(), 1, "spill file exists");
+        backend.kill_background(&id).await.unwrap();
+        assert!(
+            spill_files(spill.path()).is_empty(),
+            "spill file unlinked when the task is killed"
+        );
+    }
+
+    /// The Pipes size watchdog: an adopted (converted) task whose captured
+    /// output total crosses max_bg_bytes is killed — the File-path twin is
+    /// size_watchdog_kills_overflow; this pins the adopted-task branch.
+    #[tokio::test]
+    async fn converted_pipes_size_watchdog_kills_overflow() {
+        let mut backend = ShellBuilder::new()
+            .max_output_bytes(2048)
+            .max_bg_bytes(8192)
+            .build()
+            .await
+            .unwrap();
+        let out = backend
+            .exec(
+                "head -c 65536 /dev/zero | tr '\\0' 'a'; sleep 30",
+                Duration::from_millis(400),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let read = backend.read_background(&id, 4096).await.unwrap();
+            if read.state == supervisor::TaskState::Killed {
+                return;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "watchdog never killed");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// drain_pumps recovery: a grandchild the command backgrounded keeps the
+    /// pipe write-end open after the child exits; the drain deadline aborts
+    /// the stuck pump, the watcher still reaches Exited with the real code,
+    /// and the surviving output is readable (drain never consumes captures).
+    #[tokio::test]
+    async fn converted_grandchild_pipe_drain_reaches_terminal() {
+        let mut backend = ShellBuilder::new().build().await.unwrap();
+        let out = backend
+            .exec(
+                "echo grandchild-pipe; sleep 5 & sleep 1; exit 0",
+                Duration::from_millis(400),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let read = backend.read_background(&id, 4096).await.unwrap();
+            if read.state == supervisor::TaskState::Exited {
+                assert_eq!(read.exit_code, Some(0));
+                assert!(
+                    read.output.contains("grandchild-pipe"),
+                    "output survived the drain: {}",
+                    read.output
+                );
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "drain never finished");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // The grandchild (sleep 5) outlives the task and dies naturally;
+        // killing stragglers after the leader exits is not this path's
+        // contract (the drain deadline, 1s < 5s, is what unblocks the
+        // watcher).
+    }
+
+    /// C-I4: after a converted task exits, the terminal drain must not
+    /// consume the captures — bg_read still returns the retained output
+    /// (clipped head+tail view) with the real exit code.
+    #[tokio::test]
+    async fn converted_task_read_after_exit_keeps_head_and_tail() {
+        let mut backend = ShellBuilder::new()
+            .max_output_bytes(2048)
+            .build()
+            .await
+            .unwrap();
+        let out = backend
+            .exec(
+                "head -c 8192 /dev/zero | tr '\\0' 'b'; sleep 0.8; exit 3",
+                Duration::from_millis(300),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let read = backend.read_background(&id, 4096).await.unwrap();
+            if read.state == supervisor::TaskState::Exited {
+                assert_eq!(read.exit_code, Some(3));
+                assert!(read.output.contains('b'), "head retained");
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "task never exited");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let read = backend.read_background(&id, 4096).await.unwrap();
+        assert_eq!(read.state, supervisor::TaskState::Exited);
+        assert!(read.output.contains('b'), "second read still has the output");
+    }
+
+    /// Registry Drop path: a spill file created after adoption is unlinked
+    /// when the backend (and its registry) is dropped, not only on kill.
+    #[tokio::test]
+    async fn dropping_backend_unlinks_post_adoption_spill() {
+        let spill = tempfile::TempDir::new().unwrap();
+        let mut backend = ShellBuilder::new()
+            .max_output_bytes(2048)
+            .spill_dir(spill.path())
+            .build()
+            .await
+            .unwrap();
+        // Output continues after the conversion so the capture spills a
+        // second time post-adoption.
+        let out = backend
+            .exec(
+                "(head -c 2048 /dev/zero | tr '\\0' 'c'; sleep 0.6; head -c 8192 /dev/zero | tr '\\0' 'c'); sleep 30",
+                Duration::from_millis(300),
+                CaptureMode::Merged,
+            )
+            .await
+            .unwrap();
+        let id = out.task_id.expect("converted");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while spill_files(spill.path()).is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "capture never spilled post-adoption"
+            );
+            let _ = backend.read_background(&id, 4096).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(backend);
+        assert!(
+            spill_files(spill.path()).is_empty(),
+            "registry Drop must unlink the post-adoption spill"
+        );
     }
 
     /// A non-zero exit still fires the EXIT trap, so the sticky cwd roundtrip
