@@ -3,7 +3,7 @@
 # them into the tagma's conversations. Split from arion-compose.nix so tagma-side
 # operations don't drag the agora side along and there is no COMPOSE_PROFILES
 # dance. Cron lives here (not as its own project) because it is a tagma-side
-# component: it talks to the tagma over the host network at 127.0.0.1:3000.
+# component: it talks to the tagma over the host network at 127.0.0.1:<tagmaPort>.
 #
 # Invoke from the repo root (so .env resolves):
 #   arion -f compose/dev/tagma.nix up -d
@@ -16,7 +16,7 @@
 # Runs on the host network (`network_mode: host`) and reaches the agora/lesche
 # at 127.0.0.1:7100 / :7200 -- the host-published ports of arion-compose.nix --
 # mirroring how the caddy service reaches them. KALLIP_TAGMA_ADDR binds host
-# :3000 directly (no `ports:` mapping; ignored under host net anyway). The
+# :<tagmaPort> directly (no `ports:` mapping; ignored under host net anyway). The
 # landlock/seccomp shell sandbox still needs SYS_ADMIN + seccomp=unconfined.
 #
 # Separate compose project (`kallipai-dev-tagma`) so its containers/volumes are
@@ -60,6 +60,13 @@ let
   dataVolume = if dataBind != null then dataBind else "tagma_data:/var/lib/kallip";
   workspaceVolume = if workspaceBind != null then workspaceBind else "tagma_workspace:/workspace";
   cronDataVolume = if cronDataBind != null then cronDataBind else "cron_data:/var/lib/kallip-cron";
+
+  # Tagma port override (mirrors the bindOverride pattern). Unset -> 3000
+  # (the existing default). Set via env or .env (direnv sources it into the
+  # arion process) to run the tagma on a different port:
+  #   KALLIP_TAGMA_PORT=3001 arion -f compose/dev/tagma.nix up -d
+  tagmaPortRaw = builtins.getEnv "KALLIP_TAGMA_PORT";
+  tagmaPort = if tagmaPortRaw == "" then "3000" else tagmaPortRaw;
 in
 {
   config = {
@@ -116,7 +123,7 @@ in
         # container, overlap the data tree, and fail startup
         # (ensure_workspace_disjoint rejects the overlap).
         KALLIP_WORKSPACE_ROOT = "/workspace";
-        KALLIP_TAGMA_ADDR = "0.0.0.0:3000";
+        KALLIP_TAGMA_ADDR = "0.0.0.0:${tagmaPort}";
         # In-process relay connector: enroll at the agora, tunnel to the lesche
         # -- both via the host-published ports (host network), not compose DNS.
         # KALLIP_TAGMA_RELAY_ENROLLMENT_CODE comes from .env (minted after
@@ -159,7 +166,7 @@ in
         # by per-request agent-token verification via the tagma).
         KALLIP_CRON_ADDR = "127.0.0.1:3010";
         # Delivery target: the tagma service above (host network).
-        KALLIP_TAGMA_URL = "http://127.0.0.1:3000";
+        KALLIP_TAGMA_URL = "http://127.0.0.1:${tagmaPort}";
         # KALLIP_AUTH_TOKEN (= tagma operator secret) comes from .env — used for
         # delivery; management requests carry each caller's own agent token.
         RUST_LOG = "info";
