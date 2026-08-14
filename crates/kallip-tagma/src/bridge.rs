@@ -80,8 +80,19 @@ pub async fn bridge_task(
                                 error!(id = %agent_id, "failover chain exhausted: {detail}");
                                 mark_idle(&state, &activity);
                             }
-                            AgentEvent::Idle
-                            | AgentEvent::MaxRoundsExceeded
+                            AgentEvent::Idle => {
+                                // Mark idle BEFORE notifying: the superior may
+                                // act on the notification immediately, and a
+                                // BUSY read in that window would contradict
+                                // the message.
+                                mark_idle(&state, &activity);
+                                // A subagent going idle is actionable
+                                // information for its superior. Root agents
+                                // have no superior, so the call no-ops.
+                                notify_superior_of_idle(&shared_state, &agent_id)
+                                    .await;
+                            }
+                            AgentEvent::MaxRoundsExceeded
                             | AgentEvent::Cancelled
                             | AgentEvent::Interrupted
                             | AgentEvent::TokenBudgetExceeded { .. } => {
@@ -192,6 +203,8 @@ fn convert_event(event: AgentEvent) -> Option<SseEvent> {
     }
 }
 
+/// Route an approval request to the agent's direct superior: inbox the
+/// full request and wake them if on-duty (see [`deliver_to_superior`]).
 async fn route_to_superior(
     shared_state: &SharedState,
     agent_id: &AgentId,
@@ -200,9 +213,6 @@ async fn route_to_superior(
     arguments: serde_json::Value,
     commit_reason: &str,
 ) {
-    // Collect the direct superior's id + prompt channel inside the lock so we
-    // don't hold it across the async send.
-    //
     // The notification always targets the direct superior. There is no longer an
     // escalation walk to find an "allow" superior: with a tagma-global classify
     // preset and monotone-inherited exec-policy, if any upper superior could
@@ -210,25 +220,8 @@ async fn route_to_superior(
     // superior is always the sufficient routing target. (The approval-time gate
     // in `routes::approval` re-runs classify against the approver's rule-set, so
     // routing cannot smuggle a command past policy.)
-    let (superior_id, notify) = {
-        let registry = shared_state.registry.read().await;
-        let Some(entry) = registry.get(agent_id) else {
-            warn!(id = %agent_id, "agent not found in registry during superior routing");
-            return;
-        };
-        let Some(ref superior_id) = entry.identity().config.created_by else {
-            return;
-        };
-        let Some(superior_entry) = registry.get(superior_id) else {
-            warn!(id = %superior_id, "superior not found in registry");
-            return;
-        };
-        // The direct superior must be live to receive the notification.
-        let Some(superior_live) = superior_entry.as_live() else {
-            warn!(id = %superior_id, "direct superior is faulted; cannot route approval");
-            return;
-        };
-        (superior_id.clone(), superior_live.agent.notify.clone())
+    let Some(target) = live_superior(shared_state, agent_id).await else {
+        return;
     };
 
     let notification = format!(
@@ -243,39 +236,113 @@ async fn route_to_superior(
          Use `kallip approval approve {approval_id}` to approve \
          or `kallip approval deny {approval_id} <reason>` to deny."
     );
-    // Push the full notification to the inbox (always — the inbox is the
-    // universal message record). The agent pulls undelivered messages on wake.
-    match shared_state.inboxes.get() {
-        Some(store) => {
-            store
-                .push(
-                    superior_id.clone(),
-                    crate::inbox::BufferedEvent {
-                        timestamp: OffsetDateTime::now_utc(),
-                        source: format!("agent:{agent_id}"),
-                        body: notification,
-                    },
-                )
-                .await;
-        }
-        None => {
-            tracing::warn!("inbox store not installed, dropping approval notification");
-            return;
-        }
-    }
 
-    // Duty gate: notify only if on-duty. An off-duty agent pulls buffered
-    // messages when it transitions back to on-duty (via update_duty).
-    if shared_state.duty.is_off_duty(&superior_id) {
-        info!(id = %superior_id, "superior off-duty, approval notification buffered to inbox");
+    // The approval is now in BOTH the inbox (as an informational text message
+    // the agent reads) and the ApprovalStore (checked via has_notifications in
+    // the notify arm). This is intentional: the inbox message provides context,
+    // while the ApprovalStore entry is the actionable record the agent acts on.
+    deliver_to_superior(shared_state, &target, agent_id, notification).await;
+}
+
+
+/// A resolved, live delivery target for a subagent's direct superior.
+struct SuperiorTarget {
+    superior_id: AgentId,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+}
+
+/// Resolve the direct superior of `agent_id` into a [`SuperiorTarget`]:
+/// follow `created_by`, then require the superior to be registered and
+/// live (a faulted superior has no runtime to receive anything). Returns
+/// `None` — with a warn where the state is anomalous — for root agents
+/// (no superior: expected, silent) and for unregistered/faulted parties.
+/// All lookups share one read-lock acquisition; nothing is held across
+/// the async delivery that follows.
+async fn live_superior(shared_state: &SharedState, agent_id: &AgentId) -> Option<SuperiorTarget> {
+    let registry = shared_state.registry.read().await;
+    let Some(entry) = registry.get(agent_id) else {
+        warn!(id = %agent_id, "agent not found in registry; no superior to resolve");
+        return None;
+    };
+    let Some(superior_id) = entry.identity().config.created_by.clone() else {
+        return None; // root agent — no superior (expected, not a warning)
+    };
+    let Some(superior_entry) = registry.get(&superior_id) else {
+        warn!(id = %agent_id, superior = %superior_id, "superior not found in registry");
+        return None;
+    };
+    let Some(superior_live) = superior_entry.as_live() else {
+        warn!(id = %agent_id, superior = %superior_id, "superior faulted; cannot deliver");
+        return None;
+    };
+    Some(SuperiorTarget {
+        notify: superior_live.agent.notify.clone(),
+        superior_id,
+    })
+}
+
+/// Push a notification body to the superior's inbox (as a message from
+/// `from`) and wake them when on-duty. The inbox push is unconditional —
+/// the inbox is the universal message record, pulled on wake — while the
+/// wake is duty-gated: an off-duty superior has the message buffered and
+/// pulls it when they transition back to on-duty.
+async fn deliver_to_superior(
+    shared_state: &SharedState,
+    target: &SuperiorTarget,
+    from: &AgentId,
+    body: String,
+) {
+    let Some(store) = shared_state.inboxes.get() else {
+        warn!("inbox store not installed, dropping notification for superior");
+        return;
+    };
+    store
+        .push(
+            target.superior_id.clone(),
+            crate::inbox::BufferedEvent {
+                timestamp: OffsetDateTime::now_utc(),
+                source: format!("agent:{from}"),
+                body,
+            },
+        )
+        .await;
+    if shared_state.duty.is_off_duty(&target.superior_id) {
+        info!(id = %target.superior_id, "superior off-duty, notification buffered to inbox");
         return;
     }
-    // The approval is now in BOTH the inbox (as an informational text message
-    // the agent reads) and the ApprovalStore (checked via has_notifications in the
-    // notify arm). This is intentional: the inbox message provides context, while
-    // the ApprovalStore entry is the actionable record the agent acts on.
-    notify.notify_one();
-    info!(id = %superior_id, "approval notification pushed to inbox + agent notified");
+    target.notify.notify_one();
+    info!(id = %target.superior_id, "notification pushed to inbox + agent notified");
+}
+
+/// Notify a subagent's superior that the subagent entered idle state (called
+/// `break` or was force-idled by the no-progress guardrail). Pushes a concise
+/// `[Subagent Idle]` notification through the shared superior-delivery path
+/// ([`live_superior`] + [`deliver_to_superior`]). No-ops for root agents (no
+/// superior) or when the superior is unavailable (faulted / unregistered).
+/// The notification is informational — the subagent's results (if any)
+/// travel via a separate `kallip message` call.
+async fn notify_superior_of_idle(shared_state: &SharedState, agent_id: &AgentId) {
+    let Some(target) = live_superior(shared_state, agent_id).await else {
+        return;
+    };
+    // The role only renders into the notification; read it separately so
+    // the shared resolution stays role-agnostic.
+    let role = {
+        let registry = shared_state.registry.read().await;
+        registry
+            .get(agent_id)
+            .map(|e| e.identity().config.role.clone())
+            .unwrap_or_default()
+    };
+    // An unset role renders nothing rather than an empty "(role: )".
+    let role_suffix = if role.is_empty() {
+        String::new()
+    } else {
+        format!(" (role: {role})")
+    };
+    let notification =
+        format!("[Subagent Idle] Subordinate agent {agent_id}{role_suffix} is now idle.");
+    deliver_to_superior(shared_state, &target, agent_id, notification).await;
 }
 
 #[cfg(test)]
@@ -629,6 +696,244 @@ mod tests {
         assert_eq!(state.inboxes.get().unwrap().len_for(&parent).await, 1);
         let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
         assert!(msg.contains("Approval Request"), "inbox should contain the approval: {msg}");
+    }
+
+    // -- Subagent idle notification --
+
+    /// When a subagent goes idle, the superior's inbox receives a concise
+    /// `[Subagent Idle]` notification naming the agent and its role.
+    #[tokio::test]
+    async fn subagent_idle_notifies_superior() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
+            None,
+            format!("agent-{parent}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        let (mut child_entry, _) = make_entry_with_policy_rx(
+            Some(parent.clone()),
+            format!("agent-{child}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        child_entry.identity.config.role = "reviewer".into();
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+            reg.register(child.clone(), RegistryEntry::Live(child_entry));
+        }
+
+        super::notify_superior_of_idle(&state, &child).await;
+
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains("[Subagent Idle]"), "prefix present: {msg}");
+        assert!(msg.contains(&child.to_string()), "names the subagent: {msg}");
+        assert!(msg.contains("(role: reviewer)"), "includes role: {msg}");
+        assert!(msg.contains("is now idle"), "states idle: {msg}");
+    }
+
+    /// A subagent with no configured role renders no "(role: ...)" suffix
+    /// rather than an empty "(role: )".
+    #[tokio::test]
+    async fn idle_notification_without_role_omits_suffix() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
+            None,
+            format!("agent-{parent}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+            add_sub(&mut reg, &child, &parent); // add_sub leaves role empty
+        }
+
+        super::notify_superior_of_idle(&state, &child).await;
+
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains("[Subagent Idle]"), "prefix present: {msg}");
+        assert!(!msg.contains("(role:"), "no empty-role suffix: {msg}");
+    }
+
+    /// A root agent (no `created_by`) going idle does not trigger a
+    /// notification — there is no superior to notify.
+    #[tokio::test]
+    async fn root_idle_does_not_notify() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let root = AgentId::random();
+
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &root);
+        }
+
+        super::notify_superior_of_idle(&state, &root).await;
+
+        assert_eq!(state.inboxes.get().unwrap().len_for(&root).await, 0);
+    }
+
+    /// When the superior is off-duty, the idle notification is buffered to
+    /// their inbox instead of triggering an immediate wake.
+    #[tokio::test]
+    async fn idle_notification_buffered_when_superior_off_duty() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
+            None,
+            format!("agent-{parent}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+            add_sub(&mut reg, &child, &parent);
+        }
+
+        state.duty.set(parent.clone(), crate::duty::DutyStatus::OffDuty);
+
+        super::notify_superior_of_idle(&state, &child).await;
+
+        assert_eq!(state.inboxes.get().unwrap().len_for(&parent).await, 1);
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains("[Subagent Idle]"), "buffered notification present: {msg}");
+    }
+
+    /// bridge_task-level dispatch of `AgentEvent::Idle`: the full
+    /// select!/match path must BOTH mark the agent idle (state + activity
+    /// cleared) AND notify the superior (inbox message + wake) — the
+    /// helper-level tests above cover each half in isolation.
+    #[tokio::test]
+    async fn bridge_dispatches_idle_to_superior() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
+            None,
+            format!("agent-{parent}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        let parent_notify = parent_entry.agent.notify.clone();
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+            add_sub(&mut reg, &child, &parent);
+        }
+
+        let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+        let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+        let cancel = CancellationToken::new();
+        let atomic_state = Arc::new(AtomicU8::new(AgentState::BUSY));
+        let activity = Arc::new(std::sync::Mutex::new("reading docs".to_string()));
+        tokio::spawn(super::bridge_task(
+            child.clone(),
+            agent_rx,
+            events_tx,
+            cancel,
+            atomic_state.clone(),
+            activity.clone(),
+            state.clone(),
+        ));
+
+        // Waiter registered before the event so the wake is observable even
+        // if it fires before this task first polls (tokio stores a permit).
+        let mut wake = std::pin::pin!(parent_notify.notified());
+        agent_tx.send(AgentEvent::Idle).await.unwrap();
+
+        let mut settled = false;
+        for _ in 0..40 {
+            if atomic_state.load(Ordering::Relaxed) == AgentState::IDLE
+                && activity.lock().unwrap().is_empty()
+                && state.inboxes.get().unwrap().len_for(&parent).await == 1
+            {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(settled, "idle dispatch must mark idle and inbox the notification");
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains("[Subagent Idle]"), "notification content: {msg}");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), wake.as_mut()).await.is_ok(),
+            "on-duty superior must be woken"
+        );
+        drop(agent_tx); // let the bridge observe the channel close and exit
+    }
+
+    /// When the superior is off-duty, the idle dispatch still buffers the
+    /// notification to their inbox but must NOT wake them.
+    #[tokio::test]
+    async fn bridge_idle_dispatch_off_duty_superior_not_woken() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
+            None,
+            format!("agent-{parent}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        let parent_notify = parent_entry.agent.notify.clone();
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+            add_sub(&mut reg, &child, &parent);
+        }
+        state.duty.set(parent.clone(), crate::duty::DutyStatus::OffDuty);
+
+        let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+        let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+        let cancel = CancellationToken::new();
+        tokio::spawn(super::bridge_task(
+            child.clone(),
+            agent_rx,
+            events_tx,
+            cancel,
+            Arc::new(AtomicU8::new(AgentState::BUSY)),
+            Arc::new(std::sync::Mutex::new(String::new())),
+            state.clone(),
+        ));
+
+        let mut wake = std::pin::pin!(parent_notify.notified());
+        agent_tx.send(AgentEvent::Idle).await.unwrap();
+
+        // Wait for the inbox push (delivery's observable half)...
+        let mut delivered = false;
+        for _ in 0..40 {
+            if state.inboxes.get().unwrap().len_for(&parent).await == 1 {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(delivered, "off-duty dispatch must still buffer the notification");
+        // ...then confirm no wake arrives after delivery: the waiter stays
+        // pending (no permit is stored by the duty-gated path).
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), wake.as_mut()).await.is_err(),
+            "off-duty superior must not be woken"
+        );
+        drop(agent_tx);
     }
 
 }
