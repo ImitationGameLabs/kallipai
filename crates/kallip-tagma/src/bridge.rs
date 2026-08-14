@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use time::OffsetDateTime;
 
-use crate::state::SharedState;
+use crate::state::{AgentRegistry, SharedState};
 
 /// Route one agent's runtime events to SSE subscribers (and approval requests
 /// to the agent's superior).
@@ -66,6 +66,14 @@ pub async fn bridge_task(
                         }).ok();
                     }
                     other => {
+                        // Terminal events share one idle path: mark idle
+                        // linearized with the all-subordinates snapshot
+                        // (`mark_idle_and_snapshot`), then decide per event
+                        // whether the superior gets a notification —
+                        // delivered AFTER the SSE broadcast below, so
+                        // subscribers never wait on the superior's inbox
+                        // write.
+                        let mut deferred: Option<(&'static str, String, IdleNotice)> = None;
                         match &other {
                             AgentEvent::Busy => state.store(AgentState::BUSY, Ordering::Relaxed),
                             AgentEvent::Error(msg) => {
@@ -74,29 +82,66 @@ pub async fn bridge_task(
                                 // for a headless/subagent run, where the SSE event below has
                                 // no subscriber and is dropped silently.
                                 error!(id = %agent_id, "agent round ended in error: {msg}");
-                                mark_idle(&state, &activity);
+                                let notice = mark_idle_and_snapshot(
+                                    &shared_state, &agent_id, &state, &activity,
+                                ).await;
+                                deferred = Some((
+                                    "Subagent Error",
+                                    format!("hit a fatal error and parked: {msg}"),
+                                    notice,
+                                ));
                             }
-                            AgentEvent::FailoverChainExhausted { detail, .. } => {
+                            AgentEvent::FailoverChainExhausted { reason, detail } => {
                                 error!(id = %agent_id, "failover chain exhausted: {detail}");
-                                mark_idle(&state, &activity);
+                                let notice = mark_idle_and_snapshot(
+                                    &shared_state, &agent_id, &state, &activity,
+                                ).await;
+                                deferred = Some((
+                                    "Subagent Error",
+                                    format!(
+                                        "exhausted its model failover chain and parked ({reason}: {detail})"
+                                    ),
+                                    notice,
+                                ));
                             }
                             AgentEvent::Idle => {
-                                // Mark idle BEFORE notifying: the superior may
-                                // act on the notification immediately, and a
-                                // BUSY read in that window would contradict
-                                // the message.
-                                mark_idle(&state, &activity);
-                                // A subagent going idle is actionable
-                                // information for its superior. Root agents
-                                // have no superior, so the call no-ops.
-                                notify_superior_of_idle(&shared_state, &agent_id)
-                                    .await;
+                                // The idle mark happens BEFORE the superior is
+                                // notified: the superior may act immediately,
+                                // and a BUSY read in that window would
+                                // contradict the message. A subagent going
+                                // idle is actionable information for its
+                                // superior; root agents have no superior, so
+                                // delivery no-ops.
+                                let notice = mark_idle_and_snapshot(
+                                    &shared_state, &agent_id, &state, &activity,
+                                ).await;
+                                deferred = Some((
+                                    "Subagent Idle",
+                                    "is now idle.".to_string(),
+                                    notice,
+                                ));
                             }
-                            AgentEvent::MaxRoundsExceeded
-                            | AgentEvent::Cancelled
+                            AgentEvent::MaxRoundsExceeded => {
+                                let notice = mark_idle_and_snapshot(
+                                    &shared_state, &agent_id, &state, &activity,
+                                ).await;
+                                deferred = Some((
+                                    "Subagent Error",
+                                    "hit the per-request tool-round limit and parked.".to_string(),
+                                    notice,
+                                ));
+                            }
+                            // Cancelled / Interrupted are operator-initiated and
+                            // TokenBudgetExceeded is a tagma-global event the
+                            // operator already observes: no superior
+                            // notification, but the idle mark is still
+                            // linearized with everyone else's snapshot.
+                            AgentEvent::Cancelled
                             | AgentEvent::Interrupted
                             | AgentEvent::TokenBudgetExceeded { .. } => {
-                                mark_idle(&state, &activity);
+                                mark_idle_and_snapshot(
+                                    &shared_state, &agent_id, &state, &activity,
+                                ).await;
                             }
                             _ => {}
                         }
@@ -107,6 +152,11 @@ pub async fn bridge_task(
                         // (logging per event would spam on every token delta).
                         if let Some(sse) = convert_event(other) {
                             let _ = events_tx.send(sse);
+                        }
+                        if let Some((tag, detail, notice)) = deferred {
+                            deliver_idle_notice(
+                                &shared_state, &agent_id, tag, &detail, notice,
+                            ).await;
                         }
                     }
                 },
@@ -314,35 +364,116 @@ async fn deliver_to_superior(
     info!(id = %target.superior_id, "notification pushed to inbox + agent notified");
 }
 
-/// Notify a subagent's superior that the subagent entered idle state (called
-/// `break` or was force-idled by the no-progress guardrail). Pushes a concise
-/// `[Subagent Idle]` notification through the shared superior-delivery path
-/// ([`live_superior`] + [`deliver_to_superior`]). No-ops for root agents (no
-/// superior) or when the superior is unavailable (faulted / unregistered).
-/// The notification is informational — the subagent's results (if any)
-/// travel via a separate `kallip message` call.
-async fn notify_superior_of_idle(shared_state: &SharedState, agent_id: &AgentId) {
-    let Some(target) = live_superior(shared_state, agent_id).await else {
-        return;
+/// A terminal-event snapshot taken atomically with the idle mark: the
+/// notification target (None for root agents and anomalous registry
+/// states), the agent's role, and whether every live direct subordinate of
+/// the superior is idle — i.e. this agent is the LAST to go idle.
+struct IdleNotice {
+    target: Option<SuperiorTarget>,
+    role: String,
+    is_last: bool,
+    live_subordinates: usize,
+}
+
+impl IdleNotice {
+    fn none() -> Self {
+        Self { target: None, role: String::new(), is_last: false, live_subordinates: 0 }
+    }
+}
+
+/// Mark the agent idle and snapshot the sibling states under one registry
+/// write lock. The lock is the linearization point: two subagents going
+/// idle concurrently cannot both (or neither) observe "all subordinates
+/// idle" — exactly one notification carries the last-idle annotation.
+async fn mark_idle_and_snapshot(
+    shared_state: &SharedState,
+    agent_id: &AgentId,
+    state: &std::sync::atomic::AtomicU8,
+    activity: &std::sync::Mutex<String>,
+) -> IdleNotice {
+    let registry = shared_state.registry.write().await;
+    mark_idle(state, activity);
+    snapshot_from(&registry, agent_id)
+}
+
+/// Snapshot without marking — the read-only surface used by tests.
+#[cfg(test)]
+async fn snapshot_idle_notice(shared_state: &SharedState, agent_id: &AgentId) -> IdleNotice {
+    let registry = shared_state.registry.read().await;
+    snapshot_from(&registry, agent_id)
+}
+
+/// Resolve the idle notice from a locked registry: the agent's role, its
+/// live superior (as a delivery target), and whether all of the superior's
+/// live direct subordinates are idle. Faulted or unregistered siblings are
+/// excluded from the wait set (a faulted agent never goes idle; waiting on
+/// it would starve the superior of the "all idle" signal forever).
+fn snapshot_from(registry: &AgentRegistry, agent_id: &AgentId) -> IdleNotice {
+    let Some(entry) = registry.get(agent_id) else {
+        warn!(id = %agent_id, "agent not found in registry; no idle notice");
+        return IdleNotice::none();
     };
-    // The role only renders into the notification; read it separately so
-    // the shared resolution stays role-agnostic.
-    let role = {
-        let registry = shared_state.registry.read().await;
-        registry
-            .get(agent_id)
-            .map(|e| e.identity().config.role.clone())
-            .unwrap_or_default()
+    let role = entry.identity().config.role.clone();
+    let Some(superior_id) = entry.identity().config.created_by.clone() else {
+        return IdleNotice { target: None, role, is_last: false, live_subordinates: 0 };
     };
+    let Some(superior_entry) = registry.get(&superior_id) else {
+        warn!(id = %agent_id, superior = %superior_id, "superior not found in registry");
+        return IdleNotice { role, ..IdleNotice::none() };
+    };
+    let Some(superior_live) = superior_entry.as_live() else {
+        warn!(id = %agent_id, superior = %superior_id, "superior faulted; cannot deliver");
+        return IdleNotice { role, ..IdleNotice::none() };
+    };
+    let target = SuperiorTarget {
+        notify: superior_live.agent.notify.clone(),
+        superior_id,
+    };
+    let mut live_subordinates = 0usize;
+    let mut all_idle = true;
+    for cid in &superior_live.subagent_ids {
+        let Some(child) = registry.get(cid) else { continue };
+        let Some(child_live) = child.as_live() else { continue };
+        live_subordinates += 1;
+        if child_live.agent.state.load(Ordering::Relaxed) != AgentState::IDLE {
+            all_idle = false;
+        }
+    }
+    IdleNotice {
+        target: Some(target),
+        role,
+        is_last: all_idle && live_subordinates > 0,
+        live_subordinates,
+    }
+}
+
+/// Compose and deliver a terminal-event notification to the superior:
+/// `[<tag>] Subordinate agent <id> (role: r) <detail>`, plus the last-idle
+/// annotation when this agent was the last live subordinate to go idle.
+/// No-ops for root agents (no target).
+async fn deliver_idle_notice(
+    shared_state: &SharedState,
+    agent_id: &AgentId,
+    tag: &str,
+    detail: &str,
+    notice: IdleNotice,
+) {
+    let Some(target) = notice.target else { return };
     // An unset role renders nothing rather than an empty "(role: )".
-    let role_suffix = if role.is_empty() {
+    let role_suffix = if notice.role.is_empty() {
         String::new()
     } else {
-        format!(" (role: {role})")
+        format!(" (role: {})", notice.role)
     };
-    let notification =
-        format!("[Subagent Idle] Subordinate agent {agent_id}{role_suffix} is now idle.");
-    deliver_to_superior(shared_state, &target, agent_id, notification).await;
+    let mut body =
+        format!("[{tag}] Subordinate agent {agent_id}{role_suffix} {detail}");
+    if notice.is_last {
+        body.push_str(&format!(
+            " It is the last to go idle — all {} live subordinates of the superior are now idle.",
+            notice.live_subordinates
+        ));
+    }
+    deliver_to_superior(shared_state, &target, agent_id, body).await;
 }
 
 #[cfg(test)]
@@ -728,10 +859,11 @@ mod tests {
             reg.register(child.clone(), RegistryEntry::Live(child_entry));
         }
 
-        super::notify_superior_of_idle(&state, &child).await;
+        let notice = super::snapshot_idle_notice(&state, &child).await;
+        super::deliver_idle_notice(&state, &child, "Subagent Idle", "is now idle.", notice).await;
 
         let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
-        assert!(msg.contains("[Subagent Idle]"), "prefix present: {msg}");
+        assert!(msg.contains("[Subagent Idle]") && !msg.contains("[[Subagent"), "single-bracket prefix: {msg}");
         assert!(msg.contains(&child.to_string()), "names the subagent: {msg}");
         assert!(msg.contains("(role: reviewer)"), "includes role: {msg}");
         assert!(msg.contains("is now idle"), "states idle: {msg}");
@@ -758,10 +890,11 @@ mod tests {
             add_sub(&mut reg, &child, &parent); // add_sub leaves role empty
         }
 
-        super::notify_superior_of_idle(&state, &child).await;
+        let notice = super::snapshot_idle_notice(&state, &child).await;
+        super::deliver_idle_notice(&state, &child, "Subagent Idle", "is now idle.", notice).await;
 
         let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
-        assert!(msg.contains("[Subagent Idle]"), "prefix present: {msg}");
+        assert!(msg.contains("[Subagent Idle]") && !msg.contains("[[Subagent"), "single-bracket prefix: {msg}");
         assert!(!msg.contains("(role:"), "no empty-role suffix: {msg}");
     }
 
@@ -778,7 +911,8 @@ mod tests {
             add_root(&mut reg, &root);
         }
 
-        super::notify_superior_of_idle(&state, &root).await;
+        let notice = super::snapshot_idle_notice(&state, &root).await;
+        super::deliver_idle_notice(&state, &root, "Subagent Idle", "is now idle.", notice).await;
 
         assert_eq!(state.inboxes.get().unwrap().len_for(&root).await, 0);
     }
@@ -806,11 +940,12 @@ mod tests {
 
         state.duty.set(parent.clone(), crate::duty::DutyStatus::OffDuty);
 
-        super::notify_superior_of_idle(&state, &child).await;
+        let notice = super::snapshot_idle_notice(&state, &child).await;
+        super::deliver_idle_notice(&state, &child, "Subagent Idle", "is now idle.", notice).await;
 
         assert_eq!(state.inboxes.get().unwrap().len_for(&parent).await, 1);
         let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
-        assert!(msg.contains("[Subagent Idle]"), "buffered notification present: {msg}");
+        assert!(msg.contains("[Subagent Idle]") && !msg.contains("[[Subagent"), "single-bracket prefix: {msg}");
     }
 
     /// bridge_task-level dispatch of `AgentEvent::Idle`: the full
@@ -870,7 +1005,7 @@ mod tests {
         }
         assert!(settled, "idle dispatch must mark idle and inbox the notification");
         let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
-        assert!(msg.contains("[Subagent Idle]"), "notification content: {msg}");
+        assert!(msg.contains("[Subagent Idle]") && !msg.contains("[[Subagent"), "single-bracket prefix: {msg}");
         assert!(
             tokio::time::timeout(Duration::from_millis(500), wake.as_mut()).await.is_ok(),
             "on-duty superior must be woken"
@@ -936,4 +1071,306 @@ mod tests {
         drop(agent_tx);
     }
 
+    // -- B①: park-event notifications (Error / FCE / MaxRounds) --
+
+    /// Full-bridge dispatch of `AgentEvent::Error`: the superior's inbox
+    /// receives a `[Subagent Error]` notification carrying the error detail.
+    #[tokio::test]
+    async fn bridge_dispatches_error_to_superior() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
+            None,
+            format!("agent-{parent}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+            add_sub(&mut reg, &child, &parent);
+        }
+
+        let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+        let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+        let cancel = CancellationToken::new();
+        tokio::spawn(super::bridge_task(
+            child.clone(),
+            agent_rx,
+            events_tx,
+            cancel,
+            Arc::new(AtomicU8::new(AgentState::BUSY)),
+            Arc::new(std::sync::Mutex::new(String::new())),
+            state.clone(),
+        ));
+
+        agent_tx
+            .send(AgentEvent::Error("model endpoint returned 500".into()))
+            .await
+            .unwrap();
+        let mut delivered = false;
+        for _ in 0..40 {
+            if state.inboxes.get().unwrap().len_for(&parent).await == 1 {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(delivered, "error dispatch must notify the superior");
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains("[Subagent Error]") && !msg.contains("[[Subagent"), "single-bracket prefix: {msg}");
+        assert!(msg.contains("hit a fatal error and parked: model endpoint returned 500"), "detail: {msg}");
+        assert!(msg.contains(&child.to_string()), "names the agent: {msg}");
+        drop(agent_tx);
+    }
+
+    /// Full-bridge dispatch of `AgentEvent::FailoverChainExhausted`.
+    #[tokio::test]
+    async fn bridge_dispatches_failover_exhausted_to_superior() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
+            None,
+            format!("agent-{parent}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+            add_sub(&mut reg, &child, &parent);
+        }
+
+        let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+        let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+        let cancel = CancellationToken::new();
+        tokio::spawn(super::bridge_task(
+            child.clone(),
+            agent_rx,
+            events_tx,
+            cancel,
+            Arc::new(AtomicU8::new(AgentState::BUSY)),
+            Arc::new(std::sync::Mutex::new(String::new())),
+            state.clone(),
+        ));
+
+        agent_tx
+            .send(AgentEvent::FailoverChainExhausted {
+                reason: kallip_common::protocol::FailoverChainExhaustion::NoFailoverConfigured,
+                detail: "all tiers unhealthy".into(),
+            })
+            .await
+            .unwrap();
+        let mut delivered = false;
+        for _ in 0..40 {
+            if state.inboxes.get().unwrap().len_for(&parent).await == 1 {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(delivered, "FCE dispatch must notify the superior");
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains("[Subagent Error]") && !msg.contains("[[Subagent"), "single-bracket prefix: {msg}");
+        assert!(msg.contains("exhausted its model failover chain and parked"), "body: {msg}");
+        assert!(msg.contains("all tiers unhealthy"), "detail: {msg}");
+        drop(agent_tx);
+    }
+    /// Full-bridge dispatch of `AgentEvent::MaxRoundsExceeded`.
+    #[tokio::test]
+    async fn bridge_dispatches_max_rounds_to_superior() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
+            None,
+            format!("agent-{parent}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+            add_sub(&mut reg, &child, &parent);
+        }
+
+        let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+        let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+        let cancel = CancellationToken::new();
+        tokio::spawn(super::bridge_task(
+            child.clone(),
+            agent_rx,
+            events_tx,
+            cancel,
+            Arc::new(AtomicU8::new(AgentState::BUSY)),
+            Arc::new(std::sync::Mutex::new(String::new())),
+            state.clone(),
+        ));
+
+        agent_tx.send(AgentEvent::MaxRoundsExceeded).await.unwrap();
+        let mut delivered = false;
+        for _ in 0..40 {
+            if state.inboxes.get().unwrap().len_for(&parent).await == 1 {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(delivered, "max-rounds dispatch must notify the superior");
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains("hit the per-request tool-round limit and parked"), "body: {msg}");
+        drop(agent_tx);
+    }
+
+    /// `Interrupted` parks the agent but must NOT notify the superior
+    /// (operator-initiated; the interrupter already knows).
+    #[tokio::test]
+    async fn bridge_interrupted_does_not_notify_superior() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
+            None,
+            format!("agent-{parent}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+            add_sub(&mut reg, &child, &parent);
+        }
+
+        let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+        let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+        let cancel = CancellationToken::new();
+        let atomic_state = Arc::new(AtomicU8::new(AgentState::BUSY));
+        tokio::spawn(super::bridge_task(
+            child.clone(),
+            agent_rx,
+            events_tx,
+            cancel,
+            atomic_state.clone(),
+            Arc::new(std::sync::Mutex::new(String::new())),
+            state.clone(),
+        ));
+
+        agent_tx.send(AgentEvent::Interrupted).await.unwrap();
+        let mut settled = false;
+        for _ in 0..40 {
+            if atomic_state.load(Ordering::Relaxed) == AgentState::IDLE {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(settled, "interrupted must still mark idle");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            state.inboxes.get().unwrap().len_for(&parent).await, 0,
+            "interrupted must not notify the superior"
+        );
+        drop(agent_tx);
+    }
+
+    // -- C: last-idle annotation --
+
+    /// When the second of two live siblings goes idle, its notification
+    /// carries the last-idle annotation; the first one's does not.
+    #[tokio::test]
+    async fn last_idle_annotation_on_final_sibling() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let c1 = AgentId::random();
+        let c2 = AgentId::random();
+
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &parent);
+            add_sub(&mut reg, &c1, &parent);
+            add_sub(&mut reg, &c2, &parent);
+            reg.get(&c1).unwrap().as_live().unwrap().agent.state.store(AgentState::IDLE, Ordering::Relaxed);
+            reg.get(&c2).unwrap().as_live().unwrap().agent.state.store(AgentState::BUSY, Ordering::Relaxed);
+        }
+
+        let n1 = super::snapshot_idle_notice(&state, &c1).await;
+        assert!(!n1.is_last, "c1 is not last while c2 is busy");
+        // The atomic must be the SAME Arc the registry holds (production
+        // shares it between the bridge and the entry) so the mark is visible
+        // to the snapshot.
+        let c2_atomic = {
+            let reg = state.registry.read().await;
+            reg.get(&c2).unwrap().as_live().unwrap().agent.state.clone()
+        };
+        let n2 = super::mark_idle_and_snapshot(
+            &state, &c2, &c2_atomic, &std::sync::Mutex::new(String::new()),
+        ).await;
+        assert!(n2.is_last, "c2 is the last to go idle");
+        assert_eq!(n2.live_subordinates, 2);
+
+        super::deliver_idle_notice(&state, &c2, "Subagent Idle", "is now idle.", n2).await;
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains("It is the last to go idle"), "annotation: {msg}");
+        assert!(msg.contains("all 2 live subordinates"), "live count: {msg}");
+    }
+
+    /// A faulted sibling is excluded from the wait set: one live sibling
+    /// going idle is already "the last".
+    #[tokio::test]
+    async fn faulted_sibling_excluded_from_wait_set() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let c1 = AgentId::random();
+        let c2 = AgentId::random();
+
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &parent);
+            add_sub(&mut reg, &c1, &parent);
+            add_faulted_sub(&mut reg, &c2, &parent, "workspace missing");
+        }
+
+        let c1_atomic = {
+            let reg = state.registry.read().await;
+            reg.get(&c1).unwrap().as_live().unwrap().agent.state.clone()
+        };
+        let n = super::mark_idle_and_snapshot(
+            &state, &c1, &c1_atomic, &std::sync::Mutex::new(String::new()),
+        ).await;
+        assert_eq!(n.live_subordinates, 1, "faulted sibling not counted");
+        assert!(n.is_last, "sole live sibling is the last by construction");
+    }
+
+    /// A child whose superior is not registered gets no delivery target —
+    /// anomalous registry state degrades to silence, not panic.
+    #[tokio::test]
+    async fn missing_superior_yields_no_target() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        {
+            let mut reg = state.registry.write().await;
+            add_sub(&mut reg, &child, &parent); // parent itself never registered
+        }
+
+        let n = super::snapshot_idle_notice(&state, &child).await;
+        assert!(n.target.is_none(), "no target without a registered superior");
+        assert!(!n.is_last);
+        super::deliver_idle_notice(&state, &child, "Subagent Idle", "is now idle.", n).await;
+        assert_eq!(state.inboxes.get().unwrap().len_for(&parent).await, 0);
+    }
 }
