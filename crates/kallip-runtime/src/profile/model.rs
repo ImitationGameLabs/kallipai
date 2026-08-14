@@ -1,7 +1,10 @@
 //! Runtime data model for the profile registry.
 
+use serde::{Deserialize, Serialize};
+
+
 /// A provider instance: credentials + endpoint. Maps ~1:1 to a just-llm-client backend.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Endpoint {
     pub id: String,
     /// Backend family — dispatched by the tagma's `BackendFactory` ("deepseek" /
@@ -12,7 +15,7 @@ pub struct Endpoint {
 }
 
 /// A model bound to an [`Endpoint`], carrying its declared capabilities.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
     /// The [`Endpoint::id`] this profile connects through.
@@ -33,7 +36,7 @@ pub struct Profile {
 /// append-only / truncate-tail, since reordering or removing a middle tier silently rebinds
 /// agents. The order here is the within-tier failover order (profile 0 first). Cross-tier
 /// failover is intentionally off.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tier {
     pub profiles: Vec<Profile>,
 }

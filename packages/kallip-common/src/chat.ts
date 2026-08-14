@@ -126,4 +126,13 @@ export type TagmaReply =
       readonly req_id: number;
       readonly count: number;
       readonly more: boolean;
+    }
+  | {
+      /** The result of a `TagmaControl::Manage` op. `status` mirrors the HTTP
+       * status the tagma handler returned; `body` is the JSON response body
+       * (null for empty/204 responses). Live-only: never stored or replayed. */
+      readonly kind: "manage_result";
+      readonly req_id: number;
+      readonly status: number;
+      readonly body: unknown;
     };

@@ -339,3 +339,70 @@ Deno.test("history() sends a cursor-based history control op", async () => {
   assertEquals(req.limit, 20);
   channel.close();
 });
+
+Deno.test("manage() round-trips: request and response correlation", async () => {
+  const { lesche, pinnedKeyB64, setChannel, respond, lastRequest } = makeMock(
+    ed25519.utils.randomSecretKey(),
+    "tagma-m",
+    "conv-m",
+  );
+  const channel = await openRelayChannel(
+    lesche as unknown as LescheClient,
+    "tagma-m",
+    "u",
+    "Alice",
+    pinnedKeyB64,
+  );
+  setChannel(channel);
+
+  const managePromise = channel.manage("GET", "/budget");
+  // The mock captured the manage control op (including req_id).
+  const req = lastRequest() as TagmaControl | null;
+  if (!req || req.op !== "manage") {
+    throw new Error(`expected manage control, got ${JSON.stringify(req)}`);
+  }
+  assertEquals(req.method, "GET");
+  assertEquals(req.path, "/budget");
+  // Respond with a manage_result matching the req_id.
+  respond({
+    kind: "manage_result",
+    req_id: req.req_id,
+    status: 200,
+    body: { total: 5000 },
+  });
+  const result = await managePromise;
+  assertEquals(result.status, 200);
+  assertEquals(result.body, { total: 5000 });
+  channel.close();
+});
+
+Deno.test("close() rejects pending manage() promises", async () => {
+  const { lesche, pinnedKeyB64, setChannel } = makeMock(
+    ed25519.utils.randomSecretKey(),
+    "tagma-c2",
+    "conv-c2",
+  );
+  const channel = await openRelayChannel(
+    lesche as unknown as LescheClient,
+    "tagma-c2",
+    "u",
+    "Alice",
+    pinnedKeyB64,
+  );
+  setChannel(channel);
+
+  const managePromise = channel.manage("GET", "/agents");
+  // Don't respond — close instead.
+  channel.close();
+  let caught: unknown;
+  try {
+    await managePromise;
+  } catch (e) {
+    caught = e;
+  }
+  if (!(caught instanceof Error) || caught.message !== "channel closed") {
+    throw new Error(
+      `expected "channel closed" rejection, got ${JSON.stringify(caught)}`,
+    );
+  }
+});

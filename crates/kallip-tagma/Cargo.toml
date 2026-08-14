@@ -16,6 +16,7 @@ kallip-e2ee = { workspace = true }
 sea-orm = { workspace = true, features = ["sqlx-sqlite"] }
 sea-orm-migration = { workspace = true, features = ["sqlx-sqlite"] }
 sqlx = { workspace = true }
+serde_urlencoded = "0.7"
 just-llm-client = { workspace = true }
 reqwest = { workspace = true }
 anyhow = { workspace = true }
@@ -36,6 +37,7 @@ futures-core = { workspace = true }
 futures-util = { workspace = true }
 url = { workspace = true }
 dirs = { workspace = true }
+arc-swap = { workspace = true }
 
 [features]
 default = []

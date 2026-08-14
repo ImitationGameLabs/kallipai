@@ -9,6 +9,7 @@ license.workspace = true
 kallip-common = { workspace = true }
 kallip-agora-common = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 time = { workspace = true }
 
 [dev-dependencies]

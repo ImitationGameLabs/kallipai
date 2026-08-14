@@ -166,6 +166,7 @@ async fn setup_inner(
     Option<chat_history::Db>,
 ) {
     let state = make_state();
+    crate::test_helpers::install_inbox_store(&state).await;
     let root_id = AgentId::from("root".to_string());
     let (mut entry, prompt_rx) = make_entry_with_rx(None, "root-tok".to_string());
     // Give the pump enough buffer that a burst of sends does not overflow
@@ -292,7 +293,7 @@ fn peer() -> Participant {
 
 #[tokio::test]
 async fn send_message_round_trips() {
-    let (handle, key, capture, mut prompt_rx, _root_id, _state) = setup(1).await;
+    let (handle, key, capture, _prompt_rx, root_id, state) = setup(1).await;
     let conv = conv_of(&handle);
     handle
         .handle_user_op(user_envelope(
@@ -307,8 +308,10 @@ async fn send_message_round_trips() {
         .await;
     // The root agent's prompt channel received the text, prefixed with the
     // `[From: user <handle>]` header (a Human sender carries its handle).
-    let delivered = prompt_rx.recv().await.expect("message delivered");
-    assert_eq!(delivered, "[From: user Alice]\nhello");
+    // Message is stored in the root agent's inbox.
+    let delivered = state.inboxes.get().unwrap().pull_undelivered(&root_id).await.unwrap();
+    assert!(delivered.contains("[From: user Alice]"));
+    assert!(delivered.contains("hello"));
     // The app got a MessageAccepted reply.
     let replies = drain_replies(&capture, &key).await;
     assert!(matches!(
@@ -577,7 +580,7 @@ fn key_zero() -> SessionKey {
 /// The row then replays as a `UserMessage` echo under its row id.
 #[tokio::test]
 async fn send_message_persists_inbound_and_forwards_usermessage() {
-    let (handle, key, capture, mut prompt_rx, _root_id, _state, db, _dir) =
+    let (handle, key, capture, _prompt_rx, root_id, state, db, _dir) =
         setup_with_history(8).await;
     let conv = conv_of(&handle);
     handle
@@ -592,7 +595,7 @@ async fn send_message_persists_inbound_and_forwards_usermessage() {
         ))
         .await;
     // The root agent received the prompt.
-    let _ = prompt_rx.recv().await.expect("message delivered");
+    let _ = state.inboxes.get().unwrap().pull_undelivered(&root_id).await;
     let replies = drain_replies(&capture, &key).await;
 
     // The ack is present and carries history_id = 0: the inbound row id no
@@ -860,7 +863,7 @@ async fn handle_history_without_store_emits_empty_batch_end() {
 /// (`handle_user_op`), which had no test driving it.
 #[tokio::test]
 async fn handle_user_op_routes_joined_room_to_the_room_path() {
-    let (handle, _key, capture, _signals, mut prompt_rx, _root_id, state, _history) =
+    let (handle, _key, capture, _signals, _prompt_rx, root_id, state, _history) =
         setup_inner(8, None).await;
     // Seed the joined-rooms cache so the fork recognizes the room.
     let room = RoomId::from("00000000-0000-0000-0000-000000000aa1".to_string());
@@ -871,10 +874,7 @@ async fn handle_user_op_routes_joined_room_to_the_room_path() {
 
     // Fail fast (timeout) if a regression skips the room path instead of
     // hanging the suite on a bare `recv()`.
-    let delivered = tokio::time::timeout(Duration::from_millis(100), prompt_rx.recv())
-        .await
-        .expect("room message delivered to prompt within 100ms")
-        .expect("prompt channel not closed");
+    let delivered = state.inboxes.get().unwrap().pull_undelivered(&root_id).await.unwrap();
     // The room header names the sender kind + handle + room id.
     assert!(
         delivered.contains(&format!("| room {room}")),
@@ -901,17 +901,16 @@ async fn handle_user_op_routes_joined_room_to_the_room_path() {
 /// bilateral drop itself has several silent short-circuits.)
 #[tokio::test]
 async fn handle_user_op_skips_room_path_for_non_joined_room() {
-    let (handle, _key, _capture, _signals, mut prompt_rx, _root_id, _state, _history) =
+    let (handle, _key, _capture, _signals, _prompt_rx, root_id, state, _history) =
         setup_inner(8, None).await;
     let not_joined = RoomId::from("00000000-0000-0000-0000-000000000bb2".to_string());
     let envelope = room_envelope(&not_joined, "hi room", "Alice");
     handle.handle_user_op(envelope).await;
-    // Bilateral decrypt of raw bytes fails before any deliver; the room path
-    // (which WOULD deliver) was skipped because the room is not joined.
-    let leaked = tokio::time::timeout(Duration::from_millis(100), prompt_rx.recv()).await;
+    // No message delivered to inbox on the bilateral fallthrough.
+    let leaked = state.inboxes.get().unwrap().pull_undelivered(&root_id).await;
     assert!(
-        leaked.is_err(),
-        "no prompt expected on the bilateral fallthrough, got {leaked:?}"
+        leaked.is_none(),
+        "no inbox message expected on the bilateral fallthrough"
     );
 }
 

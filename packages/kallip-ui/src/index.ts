@@ -82,6 +82,17 @@ export { default as PairPage } from "./pages/PairPage.svelte";
 export { default as ConnectPage } from "./pages/ConnectPage.svelte";
 export { default as OAuthCallbackPage } from "./pages/OAuthCallbackPage.svelte";
 export { default as OAuthSignupPage } from "./pages/OAuthSignupPage.svelte";
+export { default as OverviewPage } from "./pages/manage/OverviewPage.svelte";
+export { default as BudgetPage } from "./pages/manage/BudgetPage.svelte";
+export { default as AgentsPage } from "./pages/manage/AgentsPage.svelte";
+export { default as AgentDetailPage } from "./pages/manage/AgentDetailPage.svelte";
+export { default as ProfilesPage } from "./pages/manage/ProfilesPage.svelte";
+export { default as SchedulesPage } from "./pages/manage/SchedulesPage.svelte";
+export { default as OnlineManagePage } from "./pages/manage/OnlineManagePage.svelte";
+export { budgetStore } from "./lib/manage/budget.svelte.ts";
+export { agentsStore } from "./lib/manage/agents.svelte.ts";
+export { profilesStore } from "./lib/manage/profiles.svelte.ts";
+export { schedulesStore } from "./lib/manage/schedules.svelte.ts";
 
 // App chrome
 export { default as AppShell } from "./components/AppShell.svelte";

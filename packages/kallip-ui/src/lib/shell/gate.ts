@@ -9,13 +9,13 @@
 //     AgoraSessionStore: `undefined` = unresolved (whoami running / failed),
 //     `null` = resolved logged-out, object = signed in. `authError` is set when
 //     whoami failed with a non-auth error (e.g. agora unreachable). Online routes
-//     are /tagmata + /settings + /chat/{server-id} (relay conversations). `/` and
-//     the offline-only `/chat/local` marker are not valid online destinations, so
-//     both redirect to /tagmata.
+//     are /tagmata + /settings + /chat/{server-id} (relay conversations). `/`,
+//     /local/* (offline-only routes), and the retired `/chat/local` marker are
+//     not valid online destinations, so all redirect to /tagmata.
 //
 //   - "offline" -- no auth, no identity. `connected` reflects the local tagma
-//     transport. Offline routes are /chat/local (chat) + /settings. /tagmata
-//     is unavailable and redirects to /chat/local; `/` redirects to /chat/local.
+//     transport. Offline routes are /local/* (chat + management). /tagmata
+//     is unavailable and redirects to /local/chat; `/` redirects to /local/chat.
 //
 // Public (front-door) routes are /login, /register (online) and /connect
 // (offline). The gate owns all post-mode-flip / post-connect navigation: pages
@@ -71,7 +71,7 @@ export function appGateDecision(args: {
     if (args.mode === "offline") {
       // Already set up -> straight to the local chat (one redirect, not via
       // /connect).
-      if (args.connected) return { kind: "redirect", url: "/chat/local" };
+      if (args.connected) return { kind: "redirect", url: "/local/chat" };
       // Not connected: the form is the right place.
       if (args.pathname === "/connect") return { kind: "render" };
       // /login,/register are the wrong door for an offline user.
@@ -105,38 +105,44 @@ export function appGateDecision(args: {
 
   // Protected routes.
   if (args.mode === "offline") {
-    // /tagmata + /rooms are online-only (the agora control plane is unreachable
-    // offline); `/` is the old offline root. All collapse to the local chat. A
-    // non-local /chat/{id} deep link is meaningless offline (no relay
-    // conversations exist) -- collapse it to /chat/local too. The /rooms/{id}
-    // deep link (a room conversation) is likewise meaningless offline.
+    // All /local/* routes render in offline mode (the single local-only gate
+    // covering chat + management).
+    if (args.pathname === "/local" || args.pathname.startsWith("/local/")) {
+      return { kind: "render" };
+    }
+    // Back-compat: old /chat/local → /local/chat.
+    if (args.pathname === "/chat/local") {
+      return { kind: "redirect", url: "/local/chat" };
+    }
+    // /tagmata + /rooms are online-only (the agora control plane is
+    // unreachable offline); `/` is the old offline root. A non-local
+    // /chat/{id} deep link is meaningless offline (no relay conversations
+    // exist). All collapse to the local chat.
     if (
       args.pathname === "/tagmata" ||
       args.pathname === "/rooms" ||
       args.pathname === "/" ||
-      args.pathname === "/chat/local"
-    ) {
-      return args.pathname === "/chat/local"
-        ? { kind: "render" }
-        : { kind: "redirect", url: "/chat/local" };
-    }
-    if (
       args.pathname.startsWith("/chat/") ||
       args.pathname.startsWith("/rooms/")
     ) {
-      return { kind: "redirect", url: "/chat/local" };
+      return { kind: "redirect", url: "/local/chat" };
     }
     // /settings: page owns its disconnected empty state.
     return { kind: "render" };
   }
 
   // online protected
-  // `/` is the old root and `/chat/local` is an offline-only route marker
-  // (relay conversations are keyed by server-derived ids, never "local");
-  // neither is a valid online destination, so go to the online home. Placed
-  // above the user checks so it also fires during the whoami-in-flight window;
-  // the next iteration on /tagmata then resolves auth (login / skeleton).
-  if (args.pathname === "/" || args.pathname === "/chat/local") {
+  // `/` is the old root; `/chat/local` is a retired offline-only route
+  // marker; `/local/*` is the offline-only route tree (chat + management).
+  // None are valid online destinations, so go to the online home. Placed
+  // above the user checks so it also fires during the whoami-in-flight
+  // window; the next iteration on /tagmata then resolves auth.
+  if (
+    args.pathname === "/" ||
+    args.pathname === "/local" ||
+    args.pathname.startsWith("/local/") ||
+    args.pathname === "/chat/local"
+  ) {
     return { kind: "redirect", url: "/tagmata" };
   }
   if (args.user === null) {

@@ -12,7 +12,8 @@ use kallip_common::policy::{ExecDecision, ExecOverride};
 use kallip_common::tokens::parse_token_amount;
 
 use args::{
-    AgentCommand, ApprovalCommand, BudgetCommand, Cli, Commands, DirlockCommand, LescheCommand,
+    AgentCommand, ApprovalCommand, BudgetCommand, Cli, Commands, DirlockCommand, InboxCommand,
+    LescheCommand,
     PolicyCommand, SkillCommand, SubagentCommand,
 };
 
@@ -326,8 +327,67 @@ async fn main() -> Result<()> {
                 println!("Budget set. {}", resp.format_display());
             }
         },
+        Commands::Inbox(cmd) => match cmd {
+            InboxCommand::List(args) => {
+                let id = resolve_id(args.id)?;
+                let resp = client
+                    .inbox_list(
+                        &id,
+                        args.status.as_deref(),
+                        args.limit,
+                    )
+                    .await?;
+                if resp.is_empty() {
+                    println!("Inbox is empty.");
+                } else {
+                    for e in &resp {
+                        print_inbox_entry(e);
+                        println!("---");
+                    }
+                    println!("(showing {})", resp.len());
+                }
+            }
+            InboxCommand::Read(args) => {
+                let id = resolve_id(args.id)?;
+                let e = client.inbox_read(&id, args.msg_id).await?;
+                print_inbox_entry(&e);
+            }
+            InboxCommand::Summary(args) => {
+                let id = resolve_id(args.id)?;
+                let s = client.inbox_summary(&id).await?;
+                println!("total: {}", s.total);
+                println!("unread: {}", s.unread);
+            }
+            InboxCommand::Done(args) => {
+                let id = resolve_id(args.id)?;
+                client.inbox_mark_done(&id, args.msg_id).await?;
+                println!("Marked done.");
+            }
+            InboxCommand::Clear(args) => {
+                let id = resolve_id(args.id)?;
+                let cleared = client.inbox_clear(&id, args.all).await?;
+                println!("Cleared {cleared} message(s).");
+            }
+        },
     }
     Ok(())
+}
+
+fn resolve_id(id: Option<AgentId>) -> Result<AgentId, anyhow::Error> {
+    id.map(Ok).unwrap_or_else(|| {
+        std::env::var("KALLIP_ID")
+            .map(|s| s.parse::<AgentId>())
+            .map_err(|_| anyhow::anyhow!("KALLIP_ID not set and --id not given"))?
+            .map_err(|e| anyhow::anyhow!("invalid KALLIP_ID: {e}"))
+    })
+}
+
+fn print_inbox_entry(e: &kallip_client::InboxEntry) {
+    println!("id: {}", e.id);
+    println!("source: {}", e.source);
+    println!("status: {}", e.status);
+    println!("time: {}", e.timestamp);
+    println!("body: {}", e.body);
 }
 
 fn print_approval_entry(a: &kallip_common::protocol::ApprovalEntry) {

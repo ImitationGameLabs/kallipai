@@ -8,6 +8,7 @@ use crate::event::AuthoredEvent;
 use kallip_agora_common::bytes::Ciphertext;
 use kallip_agora_common::ids::{ConversationId, TraceId};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use time::OffsetDateTime;
 
 /// Re-exported from `kallip_agora_common::participant` so the envelope sender
@@ -89,6 +90,21 @@ pub enum TagmaControl {
         before: Option<i64>,
         limit: u32,
     },
+    /// A management operation (budget, agents, profiles, schedules). The relay
+    /// dispatches it in-process against the tagma route handlers with
+    /// `Identity::Operator`, the same trust model as `SendMessage`: the
+    /// bilateral E2E conversation is the authorization boundary, so any
+    /// principal that can open that conversation is already trusted as the
+    /// operator. `method` is the HTTP verb (GET/POST/PUT/DELETE), `path` is the
+    /// tagma route path (/budget, /agents/{id}/interrupt, etc.), and `body` is
+    /// the JSON request body (null for GET/DELETE). The relay replies with a
+    /// `TagmaReply::ManageResult` carrying the same `req_id`.
+    Manage {
+        req_id: u64,
+        method: String,
+        path: String,
+        body: serde_json::Value,
+    },
 }
 
 /// Tagma -> app: either the result of a correlated op, or an unsolicited
@@ -163,6 +179,15 @@ pub enum TagmaReply {
     /// rows remain pullable. If this marker never arrives, the app treats the
     /// sync as failed and retries on the next reconnect.
     HistoryBatchEnd { req_id: u64, count: u32, more: bool },
+    /// The result of a `TagmaControl::Manage` op. `status` mirrors the HTTP
+    /// status the tagma handler returned (200, 201, 204, 400, 404, 409, etc.);
+    /// `body` is the handler JSON response body (null for empty/204 responses).
+    /// Live-only: never stored or replayed.
+    ManageResult {
+        req_id: u64,
+        status: u16,
+        body: serde_json::Value,
+    },
 }
 
 impl TagmaReply {

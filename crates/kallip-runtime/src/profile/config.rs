@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use just_llm_client::family;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::model::{Endpoint, Profile, Tier};
 
@@ -21,7 +21,7 @@ pub(crate) const PROFILES_FILE_ENV: &str = "KALLIP_PROFILES_FILE";
 /// Parsed + validated profile configuration: the data the tagma assembles into a
 /// [`super::registry::ProfileRegistry`] after building backends. Pure data — no reqwest, no
 /// backends. The tagma owns construction (see `kallip_runtime::profile`).
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileConfig {
     /// Ordered capability tiers (selection reads `tiers[depth]`).
     pub tiers: Vec<Tier>,
@@ -135,6 +135,47 @@ fn resolve_config_path() -> Result<Option<PathBuf>> {
     };
     let path = dir.join("kallip").join("profiles.toml");
     Ok(if path.exists() { Some(path) } else { None })
+}
+
+
+/// Resolve the config file path for writing: explicit env override, else the
+/// default `<config_dir>/kallip/profiles.toml`. Unlike [`resolve_config_path`]
+/// (which returns `None` when the file does not exist), this always returns a
+/// path — `save()` needs a target even on first write. Returns `Err` only when
+/// neither `XDG_CONFIG_HOME` nor `HOME` is set.
+pub fn config_path() -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os(PROFILES_FILE_ENV) {
+        return Ok(PathBuf::from(p));
+    }
+    let dir = config_dir()
+        .context("neither XDG_CONFIG_HOME nor HOME is set; cannot resolve profiles config path")?;
+    Ok(dir.join("kallip").join("profiles.toml"))
+}
+
+/// Serialize a [`ProfileConfig`] to TOML and write it to `path` atomically
+/// (temp file + rename), chmod 600. The `id` field inside each endpoint is
+/// redundant with the map key but harmless: [`load_file`] uses an intermediate
+/// type that ignores it.
+pub fn save(config: &ProfileConfig, path: &Path) -> Result<()> {
+    let toml = toml::to_string_pretty(config)
+        .context("failed to serialize profiles config to TOML")?;
+    let parent = path.parent()
+        .context("profiles config path has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create config dir {}", parent.display()))?;
+    // Write to a temp file in the same directory, then rename for atomicity.
+    let tmp = path.with_extension(format!("toml.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, &toml)
+        .with_context(|| format!("failed to write profiles config to {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to chmod {}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename temp config to {}", path.display()))?;
+    Ok(())
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -363,5 +404,68 @@ api_key = "fake"
         temp_env::with_vars_unset(["DEFINITELY_UNSET_VAR_X9Q"], || {
             assert!(expand_vars("${DEFINITELY_UNSET_VAR_X9Q}").is_err());
         });
+    }
+
+    #[test]
+    fn save_load_roundtrip() {
+        use std::collections::HashMap;
+        use super::{Endpoint, Profile, Tier};
+
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "ds".into(),
+            Endpoint {
+                id: "ds".into(),
+                family: "deepseek".into(),
+                api_key: "secret-key".into(),
+                base_url: None,
+            },
+        );
+        endpoints.insert(
+            "oa".into(),
+            Endpoint {
+                id: "oa".into(),
+                family: "openai-compatible".into(),
+                api_key: "other-key".into(),
+                base_url: Some("https://api.example.com".into()),
+            },
+        );
+        let original = ProfileConfig {
+            tiers: vec![
+                Tier {
+                    profiles: vec![
+                        Profile {
+                            id: "pro".into(),
+                            endpoint: "ds".into(),
+                            model: "deepseek-pro".into(),
+                            max_context_window: 500_000,
+                        },
+                        Profile {
+                            id: "backup".into(),
+                            endpoint: "oa".into(),
+                            model: "gpt-4".into(),
+                            max_context_window: 128_000,
+                        },
+                    ],
+                },
+            ],
+            endpoints,
+        };
+
+        // Serialize to TOML
+        let toml_str = toml::to_string_pretty(&original).expect("serialize");
+        // Parse back via load_file's internal types (simulates disk round-trip)
+        let file: ConfigFile = toml::from_str(&toml_str).expect("parse back");
+        validate(&file).expect("validate");
+
+        // Verify the parsed data matches
+        assert_eq!(file.tiers.len(), 1);
+        assert_eq!(file.tiers[0].profiles.len(), 2);
+        assert_eq!(file.tiers[0].profiles[0].id, "pro");
+        assert_eq!(file.tiers[0].profiles[0].endpoint, "ds");
+        assert_eq!(file.endpoints.len(), 2);
+        assert_eq!(file.endpoints["ds"].family, "deepseek");
+        assert_eq!(file.endpoints["ds"].api_key, "secret-key");
+        assert_eq!(file.endpoints["oa"].base_url.as_deref(), Some("https://api.example.com"));
     }
 }

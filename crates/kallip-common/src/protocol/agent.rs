@@ -117,6 +117,15 @@ pub struct CreateAgentResponse {
     pub id: AgentId,
 }
 
+/// Whether an agent is on-duty (accepting messages) or off-duty (buffering to inbox).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DutyStatus {
+    #[default]
+    OnDuty,
+    OffDuty,
+}
+
 /// Summary of an agent instance returned in list responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSummary {
@@ -134,6 +143,9 @@ pub struct AgentSummary {
     /// Empty when idle (the bridge clears it on terminal events). Not persisted.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub activity: String,
+    /// Whether the agent is on-duty or off-duty (off-duty agents buffer messages).
+    #[serde(default)]
+    pub duty: DutyStatus,
     /// Present only when `state == Faulted`: why the agent could not be brought up
     /// (e.g. "restore failed: workspace ... not found"). Absent for live agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]

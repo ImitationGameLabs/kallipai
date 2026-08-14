@@ -8,6 +8,7 @@ use kallip_runtime::event::AgentEvent;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+use time::OffsetDateTime;
 
 use crate::state::SharedState;
 
@@ -209,7 +210,7 @@ async fn route_to_superior(
     // superior is always the sufficient routing target. (The approval-time gate
     // in `routes::approval` re-runs classify against the approver's rule-set, so
     // routing cannot smuggle a command past policy.)
-    let (superior_id, prompt_tx) = {
+    let (superior_id, notify) = {
         let registry = shared_state.registry.read().await;
         let Some(entry) = registry.get(agent_id) else {
             warn!(id = %agent_id, "agent not found in registry during superior routing");
@@ -222,13 +223,12 @@ async fn route_to_superior(
             warn!(id = %superior_id, "superior not found in registry");
             return;
         };
-        // The direct superior must be live to receive the notification. A faulted
-        // superior has no prompt channel.
+        // The direct superior must be live to receive the notification.
         let Some(superior_live) = superior_entry.as_live() else {
             warn!(id = %superior_id, "direct superior is faulted; cannot route approval");
             return;
         };
-        (superior_id.clone(), superior_live.agent.prompt_tx.clone())
+        (superior_id.clone(), superior_live.agent.notify.clone())
     };
 
     let notification = format!(
@@ -243,21 +243,39 @@ async fn route_to_superior(
          Use `kallip approval approve {approval_id}` to approve \
          or `kallip approval deny {approval_id} <reason>` to deny."
     );
-    // Non-blocking send: never stall the bridge task waiting for queue space.
-    // If the superior's message queue is full, drop the notification and log a
-    // warning — the superior can still query pending approvals via the API.
-    match prompt_tx.try_send(notification) {
-        Ok(()) => {}
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            warn!(
-                id = %superior_id,
-                "superior message queue full, approval notification dropped (query pending approvals via API)"
-            );
+    // Push the full notification to the inbox (always — the inbox is the
+    // universal message record). The agent pulls undelivered messages on wake.
+    match shared_state.inboxes.get() {
+        Some(store) => {
+            store
+                .push(
+                    superior_id.clone(),
+                    crate::inbox::BufferedEvent {
+                        timestamp: OffsetDateTime::now_utc(),
+                        source: format!("agent:{agent_id}"),
+                        body: notification,
+                    },
+                )
+                .await;
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            warn!(id = %superior_id, "superior message channel closed, approval notification dropped");
+        None => {
+            tracing::warn!("inbox store not installed, dropping approval notification");
+            return;
         }
     }
+
+    // Duty gate: notify only if on-duty. An off-duty agent pulls buffered
+    // messages when it transitions back to on-duty (via update_duty).
+    if shared_state.duty.is_off_duty(&superior_id) {
+        info!(id = %superior_id, "superior off-duty, approval notification buffered to inbox");
+        return;
+    }
+    // The approval is now in BOTH the inbox (as an informational text message
+    // the agent reads) and the ApprovalStore (checked via has_notifications in the
+    // notify arm). This is intentional: the inbox message provides context, while
+    // the ApprovalStore entry is the actionable record the agent acts on.
+    notify.notify_one();
+    info!(id = %superior_id, "approval notification pushed to inbox + agent notified");
 }
 
 #[cfg(test)]
@@ -475,14 +493,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notification_delivered_to_direct_superior() {
-        // The approval request is routed to the direct superior with a static
-        // review section (no escalation walk). Verify the full payload lands.
+    async fn notification_delivered_to_direct_superior_inbox() {
+        // The approval request is pushed to the superior's inbox with the
+        // full notification payload. Verify the content lands in the inbox.
         let state = make_state();
+        install_inbox_store(&state).await;
         let parent = AgentId::random();
         let child = AgentId::random();
 
-        let (parent_entry, mut prompt_rx) = make_entry_with_policy_rx(
+        let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
             None,
             format!("agent-{parent}"),
             PolicyPreset::Default,
@@ -504,28 +523,13 @@ mod tests {
         )
         .await;
 
-        let notification = recv_notification(&mut prompt_rx).await;
-        assert!(
-            notification.contains(&format!("{child}")),
-            "names the subordinate"
-        );
-        assert!(notification.contains("bash_exec"), "names the tool");
-        assert!(
-            notification.contains("rm -rf /tmp/x"),
-            "includes the arguments"
-        );
-        assert!(
-            notification.contains("test reason"),
-            "includes the commit reason"
-        );
-        assert!(
-            notification.contains("approval-1"),
-            "includes the action id"
-        );
-        assert!(
-            notification.contains("re-checked at approval time"),
-            "carries the static review guidance"
-        );
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains(&child.to_string()), "names the subordinate");
+        assert!(msg.contains("bash_exec"), "names the tool");
+        assert!(msg.contains("rm -rf /tmp/x"), "includes the arguments");
+        assert!(msg.contains("test reason"), "includes the commit reason");
+        assert!(msg.contains("approval-1"), "includes the action id");
+        assert!(msg.contains("re-checked at approval time"), "carries the static review guidance");
     }
 
     #[tokio::test]
@@ -579,4 +583,52 @@ mod tests {
 
         // Completes without panic; no channel to receive from either way.
     }
+
+    /// When the superior is off-duty, the approval notification is buffered to
+    /// their inbox instead of being delivered to the prompt channel.
+    #[tokio::test]
+    async fn approval_notification_buffered_when_superior_off_duty() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let parent = AgentId::random();
+        let child = AgentId::random();
+
+        let (parent_entry, mut prompt_rx) = make_entry_with_policy_rx(
+            None,
+            format!("agent-{parent}"),
+            PolicyPreset::Default,
+            ExecPolicy::default(),
+        );
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+            add_sub(&mut reg, &child, &parent);
+        }
+
+        // Set the superior off-duty.
+        state.duty.set(parent.clone(), crate::duty::DutyStatus::OffDuty);
+
+        super::route_to_superior(
+            &state,
+            &child,
+            "approval-off-duty".into(),
+            "bash_exec".into(),
+            serde_json::json!({"command": "echo hi"}),
+            "test reason",
+        )
+        .await;
+
+        // Nothing delivered to the prompt channel.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), prompt_rx.recv())
+                .await
+                .is_err(),
+            "no notification should reach an off-duty superior"
+        );
+        // The notification IS in the inbox.
+        assert_eq!(state.inboxes.get().unwrap().len_for(&parent).await, 1);
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains("Approval Request"), "inbox should contain the approval: {msg}");
+    }
+
 }

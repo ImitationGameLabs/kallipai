@@ -119,7 +119,7 @@ pub async fn deliver_message(
             .await;
     }
 
-    enqueue_prompt(state, id, envelope).await
+    enqueue_prompt(state, id, envelope, "operator").await
 }
 
 /// Deliver an inbound room message to the root agent's prompt channel (the
@@ -144,7 +144,7 @@ pub async fn deliver_inbound_room_message(
     info!(receiver = %id, room = %room, sender_kind, sender_id, "delivering room message");
     let envelope =
         crate::messaging::format_room_incoming(sender_kind, sender_id, sender_handle, room, text);
-    enqueue_prompt(state, id, envelope).await
+    enqueue_prompt(state, id, envelope, "room").await
 }
 
 /// Enqueue an already-formatted prompt string to an agent: the fast path
@@ -153,20 +153,47 @@ pub async fn deliver_inbound_room_message(
 /// [`deliver_message`] and the room `deliver_room_message` so both paths
 /// wake a dead root agent identically; only the prompt formatting and the
 /// (bilateral-only) inbound persistence differ between the callers.
-async fn enqueue_prompt(
+pub(crate) async fn enqueue_prompt(
     state: &SharedState,
     id: &AgentId,
     envelope: String,
+    source: &str,
 ) -> Result<MessageResponse, ApiError> {
-    // Fast path: agent is alive, try non-blocking send.
+    // Push the full message body to the inbox — always. The inbox is the
+    // universal message store; the agent pulls undelivered direct messages on
+    // wake via the MessagePuller trait.
+    let inbox_store = state
+        .inboxes
+        .get()
+        .ok_or_else(|| ApiError::internal("inbox store not installed"))?;
+    inbox_store
+        .push(
+            id.clone(),
+            crate::inbox::BufferedEvent {
+                timestamp: time::OffsetDateTime::now_utc(),
+                source: source.to_string(),
+                body: envelope,
+            },
+        )
+        .await;
+
+    // Duty gate: an off-duty agent must not wake. The message sits in the
+    // inbox (delivered=0) and is pulled when the agent transitions to on-duty.
+    if state.duty.is_off_duty(id) {
+        return Ok(MessageResponse {
+            queue_depth: 0,
+            warning: Some("agent is off-duty; message buffered to inbox".to_string()),
+        });
+    }
+
+    // On-duty: check agent liveness via prompt_tx.is_closed(). A closed channel
+    // means the task has died and needs reactivation. The message is already in
+    // the inbox, so the reactivated agent pulls it on its first notify wake.
     {
         let registry = state.registry.read().await;
         let entry = registry
             .get(id)
             .ok_or_else(|| ApiError::not_found("agent not found"))?;
-        // A faulted agent has no prompt channel and can never run; reject up
-        // front rather than falling through to reactivation (which would try to
-        // read runtime fields that don't exist on a faulted entry).
         let live = entry.as_live().ok_or_else(|| {
             let reason = match entry {
                 RegistryEntry::Faulted(f) => f.reason.clone(),
@@ -176,16 +203,11 @@ async fn enqueue_prompt(
                 "agent is faulted ({reason}); it cannot receive messages"
             ))
         })?;
-        match try_enqueue(&live.agent.prompt_tx, &envelope) {
-            EnqueueResult::Accepted(response) => return Ok(response),
-            EnqueueResult::Full => {
-                let cap = live.agent.prompt_tx.max_capacity();
-                return Err(ApiError::unavailable(format!(
-                    "agent message queue is full ({cap} messages), retry later"
-                )));
-            }
-            EnqueueResult::Closed => { /* fall through to reactivation */ }
+        if !live.agent.prompt_tx.is_closed() {
+            live.agent.notify.notify_one();
+            return Ok(MessageResponse { queue_depth: 0, warning: None });
         }
+        // Channel closed: fall through to reactivation.
     }
 
     // Slow path: agent is dead, reactivate.
@@ -211,16 +233,11 @@ async fn enqueue_prompt(
             .as_live_mut()
             .ok_or_else(|| ApiError::conflict("agent is faulted; cannot reactivate"))?;
 
-        // Double-check under write lock: another request may have reactivated.
-        match try_enqueue(&live.agent.prompt_tx, &envelope) {
-            EnqueueResult::Accepted(response) => return Ok(response),
-            EnqueueResult::Full => {
-                let cap = live.agent.prompt_tx.max_capacity();
-                return Err(ApiError::unavailable(format!(
-                    "agent message queue is full ({cap} messages), retry later"
-                )));
-            }
-            EnqueueResult::Closed => { /* proceed to reactivation */ }
+        // Double-check: another request may have reactivated since the read-lock
+        // probe. If the channel is now open, just notify.
+        if !live.agent.prompt_tx.is_closed() {
+            live.agent.notify.notify_one();
+            return Ok(MessageResponse { queue_depth: 0, warning: None });
         }
 
         info!(id = %id, "reactivating agent");
@@ -232,17 +249,9 @@ async fn enqueue_prompt(
         // the spawn step below (mirroring `create_agent`), so the reactivated
         // agent can write its own workspace once more.
         state.lock_manager.release_all(id);
-        // Create a fresh channel and install the sender immediately.
-        // This "reserves" the reactivation: concurrent requests see an open
-        // channel instead of a closed one, so they try_enqueue normally.
+        // Create a fresh channel (no pre-send: the message is already in the
+        // inbox; the reactivated agent pulls it on its first notify wake).
         let (prompt_tx, prompt_rx) = tokio::sync::mpsc::channel(state.prompt_queue_size);
-        // Pre-send the labeled message so it's already queued when the agent
-        // starts -- it becomes the reactivated agent's first user turn, carrying
-        // the same `[From: ...]` header as the live path.
-        prompt_tx.try_send(envelope.clone()).map_err(|e| {
-            error!(id = %id, "fresh channel rejected pre-send: {e}");
-            ApiError::internal("failed to pre-send message")
-        })?;
         live.agent.prompt_tx = prompt_tx;
 
         // Resolve the tier purely by depth (positional tiers) — reactivation re-derives the same
@@ -250,6 +259,8 @@ async fn enqueue_prompt(
         let config = live.identity.config.clone();
         let tier = state
             .profiles
+            .load()
+            .registry
             .select_profile(config.permissions.depth())
             .clone();
 
@@ -403,6 +414,16 @@ async fn enqueue_prompt(
         live.agent = agent;
     }
 
+    // Notify the reactivated agent to wake and pull from inbox.
+    {
+        let registry = state.registry.read().await;
+        if let Some(entry) = registry.get(id)
+            && let Some(live) = entry.as_live()
+        {
+            live.agent.notify.notify_one();
+        }
+    }
+
     Ok(MessageResponse {
         queue_depth: 0,
         warning: None,
@@ -548,231 +569,103 @@ async fn close_prompt_channel(state: &SharedState, id: &AgentId) {
     }
 }
 
-/// Outcome of a non-blocking message enqueue attempt.
-#[derive(Debug)]
-enum EnqueueResult {
-    /// Message accepted. Includes queue depth feedback.
-    Accepted(MessageResponse),
-    /// Queue is at capacity.
-    Full,
-    /// Channel closed (agent task exited).
-    Closed,
-}
-
-/// Try to enqueue a message into the agent's channel without blocking.
-/// Returns queue depth feedback on success.
-fn try_enqueue(tx: &tokio::sync::mpsc::Sender<String>, text: &str) -> EnqueueResult {
-    // Sender exposes capacity() (available slots) and max_capacity() (total).
-    // Queue depth = max_capacity - capacity.
-    let capacity = tx.capacity();
-    let max_capacity = tx.max_capacity();
-    let queue_depth = max_capacity - capacity;
-
-    if queue_depth >= max_capacity {
-        return EnqueueResult::Full;
-    }
-
-    match tx.try_send(text.to_owned()) {
-        Ok(()) => {
-            let warning = if queue_depth > 0 {
-                let plural = if queue_depth == 1 { "" } else { "s" };
-                Some(format!(
-                    "{queue_depth} message{plural} already queued, processing may be delayed"
-                ))
-            } else {
-                None
-            };
-            EnqueueResult::Accepted(MessageResponse {
-                queue_depth,
-                warning,
-            })
-        }
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => EnqueueResult::Full,
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => EnqueueResult::Closed,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::{AuthIdentity, Identity};
     use crate::state::AgentId;
-    use crate::test_helpers::{add_faulted_root, make_entry_with_rx, make_state};
+    use crate::test_helpers::{add_faulted_root, install_inbox_store, make_entry_with_rx, make_state};
     use axum::Json;
     use axum::extract::{Path, State};
     use kallip_common::protocol::MessageRequest;
 
-    /// A newly created channel accepts a message with queue_depth == 0 and no warning.
-    #[tokio::test]
-    async fn try_enqueue_empty_channel_accepted() {
-        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(5);
-        let result = try_enqueue(&tx, "hello");
-        match result {
-            EnqueueResult::Accepted(resp) => {
-                assert_eq!(resp.queue_depth, 0);
-                assert!(resp.warning.is_none());
-            }
-            other => panic!("expected Accepted, got {other:?}"),
-        }
-    }
-
-    /// Filling the channel produces Full result.
-    #[tokio::test]
-    async fn try_enqueue_full_channel_rejected() {
-        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(3);
-        // Fill the channel.
-        for i in 0..3 {
-            try_enqueue(&tx, &format!("msg-{i}"));
-        }
-        // Next send should be Full.
-        match try_enqueue(&tx, "overflow") {
-            EnqueueResult::Full => {}
-            other => panic!("expected Full, got {other:?}"),
-        }
-    }
-
-    /// Partially filled channel returns queue_depth > 0 with a warning.
-    #[tokio::test]
-    async fn try_enqueue_partial_channel_warns() {
-        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(5);
-        // Send one message to partially fill.
-        try_enqueue(&tx, "first");
-        // Second message should see queue_depth == 1.
-        match try_enqueue(&tx, "second") {
-            EnqueueResult::Accepted(resp) => {
-                assert_eq!(resp.queue_depth, 1);
-                assert!(resp.warning.is_some());
-                assert!(resp.warning.unwrap().contains("1 message"));
-            }
-            other => panic!("expected Accepted, got {other:?}"),
-        }
-    }
-
-    /// Closed channel returns Closed result.
-    #[tokio::test]
-    async fn try_enqueue_closed_channel() {
-        let (tx, rx) = tokio::sync::mpsc::channel::<String>(5);
-        drop(rx); // Close the receiving end.
-        match try_enqueue(&tx, "hello") {
-            EnqueueResult::Closed => {}
-            other => panic!("expected Closed, got {other:?}"),
-        }
-    }
-
     // -- send_message: sender identity is attached to the delivered payload --
 
-    /// Deliver a message as the operator and assert the receiver sees a
-    /// `[From: operator]` header. The offline HTTP path carries no operator
-    /// identity (the operator is recorded under the `NULL` partition), so the
-    /// header carries no handle.
+    /// Deliver a message as the operator. The full envelope (with header) is
+    /// stored in the inbox.
     #[tokio::test]
-    async fn operator_message_carries_operator_header() {
+    async fn operator_message_stores_envelope_in_inbox() {
         let state = make_state();
+        install_inbox_store(&state).await;
         let receiver = AgentId::random();
-        let (mut entry, mut rx) = make_entry_with_rx(None, "recv".into());
+        let (mut entry, _rx) = make_entry_with_rx(None, "recv".into());
         entry.identity.config.role = "root".into();
-        state
-            .registry
-            .write()
-            .await
+        state.registry.write().await
             .register(receiver.clone(), RegistryEntry::Live(entry));
 
         let resp = send_message(
             State(state.clone()),
             AuthIdentity::test_new(Identity::Operator),
-            Path(receiver),
-            Json(MessageRequest {
-                text: "do the thing".into(),
-            }),
-        )
-        .await
-        .expect("operator send accepted");
+            Path(receiver.clone()),
+            Json(MessageRequest { text: "do the thing".into() }),
+        ).await.expect("operator send accepted");
         assert_eq!(resp.0, StatusCode::ACCEPTED);
 
-        let delivered = rx.recv().await.expect("message delivered");
-        assert_eq!(delivered, "[From: operator]\ndo the thing");
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&receiver).await.unwrap();
+        assert!(msg.contains("[From: operator]"));
+        assert!(msg.contains("do the thing"));
     }
 
-    /// Deliver a message from a child agent to its parent and assert the
-    /// header identifies the sender (id + role) and the subordinate relation.
+    /// Deliver a message from a child agent to its parent. The inbox stores
+    /// the full envelope with sender id + role + relation.
     #[tokio::test]
-    async fn agent_message_carries_sender_and_relation_header() {
+    async fn agent_message_stores_sender_and_relation() {
         let state = make_state();
+        install_inbox_store(&state).await;
         let parent = AgentId::random();
         let child = AgentId::random();
 
-        let (mut parent_entry, mut parent_rx) = make_entry_with_rx(None, "parent".into());
+        let (mut parent_entry, _parent_rx) = make_entry_with_rx(None, "parent".into());
         parent_entry.identity.config.role = "lead".into();
-        state
-            .registry
-            .write()
-            .await
+        state.registry.write().await
             .register(parent.clone(), RegistryEntry::Live(parent_entry));
 
         let (mut child_entry, _child_rx) = make_entry_with_rx(Some(parent.clone()), "child".into());
         child_entry.identity.config.role = "researcher".into();
-        state
-            .registry
-            .write()
-            .await
+        state.registry.write().await
             .register(child.clone(), RegistryEntry::Live(child_entry));
 
         let resp = send_message(
-            State(state),
+            State(state.clone()),
             AuthIdentity::test_new(Identity::Agent { id: child.clone() }),
-            Path(parent),
-            Json(MessageRequest {
-                text: "results attached".into(),
-            }),
-        )
-        .await
-        .expect("agent send accepted");
+            Path(parent.clone()),
+            Json(MessageRequest { text: "results attached".into() }),
+        ).await.expect("agent send accepted");
         assert_eq!(resp.0, StatusCode::ACCEPTED);
 
-        let delivered = parent_rx.recv().await.expect("message delivered");
-        // Child is a subordinate of parent (parent is the receiver/ancestor).
-        let expected =
-            format!("[From: agent {child} (role: researcher, subordinate)]\nresults attached");
-        assert_eq!(delivered, expected);
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&parent).await.unwrap();
+        assert!(msg.contains(&child.to_string()));
+        assert!(msg.contains("researcher"));
+        assert!(msg.contains("results attached"));
     }
 
-    /// Self-message: an agent messaging itself is labeled `same`.
+    /// Self-message: an agent messaging itself is stored in the inbox.
     #[tokio::test]
-    async fn self_message_carries_same_relation() {
+    async fn self_message_stored_in_inbox() {
         let state = make_state();
+        install_inbox_store(&state).await;
         let me = AgentId::random();
-        let (mut entry, mut rx) = make_entry_with_rx(None, "me".into());
+        let (mut entry, _rx) = make_entry_with_rx(None, "me".into());
         entry.identity.config.role = "solo".into();
-        state
-            .registry
-            .write()
-            .await
+        state.registry.write().await
             .register(me.clone(), RegistryEntry::Live(entry));
 
         let _ = send_message(
-            State(state),
+            State(state.clone()),
             AuthIdentity::test_new(Identity::Agent { id: me.clone() }),
             Path(me.clone()),
-            Json(MessageRequest {
-                text: "note to self".into(),
-            }),
-        )
-        .await
-        .expect("self send accepted");
+            Json(MessageRequest { text: "note to self".into() }),
+        ).await.expect("self send accepted");
 
-        let delivered = rx.recv().await.expect("message delivered");
-        assert_eq!(
-            delivered,
-            format!("[From: agent {me} (role: solo, same)]\nnote to self")
-        );
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&me).await.unwrap();
+        assert!(msg.contains("note to self"));
     }
 
-    /// Messaging a faulted agent returns 409 with the reason -- it cannot
-    /// receive messages and must not fall through to reactivation (no runtime
-    /// fields to read).
+    /// Messaging a faulted agent returns 409 with the reason.
     #[tokio::test]
     async fn send_message_to_faulted_returns_conflict() {
         let state = make_state();
+        install_inbox_store(&state).await;
         let faulted = AgentId::random();
         {
             let mut reg = state.registry.write().await;
@@ -783,19 +676,133 @@ mod tests {
             AuthIdentity::test_new(Identity::Operator),
             Path(faulted),
             Json(MessageRequest { text: "hi".into() }),
+        ).await.expect_err("faulted agent rejects messages");
+        assert_eq!(err.status, 409);
+        assert!(err.message.contains("faulted"), "message should mention faulted: {}", err.message);
+        assert!(err.message.contains("missing workspace"), "{}", err.message);
+    }
+
+
+    // -- Duty gate: off-duty messages buffer to inbox --
+
+    /// An off-duty agent buffers messages to its inbox instead of delivering
+    /// to the prompt channel. The message never reaches `prompt_rx`.
+    #[tokio::test]
+    async fn off_duty_message_buffers_to_inbox() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let receiver = AgentId::random();
+        let (mut entry, mut rx) = make_entry_with_rx(None, "recv".into());
+        entry.identity.config.role = "root".into();
+        state
+            .registry
+            .write()
+            .await
+            .register(receiver.clone(), RegistryEntry::Live(entry));
+        // Set the agent off-duty.
+        state.duty.set(receiver.clone(), crate::duty::DutyStatus::OffDuty);
+
+        let resp = send_message(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(receiver.clone()),
+            Json(MessageRequest {
+                text: "urgent task".into(),
+            }),
         )
         .await
-        .expect_err("faulted agent rejects messages");
-        assert_eq!(err.status, 409);
+        .expect("off-duty send should still return accepted");
+        assert_eq!(resp.0, StatusCode::ACCEPTED);
+        // Warning mentions off-duty buffering.
         assert!(
-            err.message.contains("faulted"),
-            "message should mention faulted: {}",
-            err.message
+            resp.1.warning.is_some(),
+            "off-duty response should carry a warning"
         );
         assert!(
-            err.message.contains("missing workspace"),
-            "message should include the reason: {}",
-            err.message
+            resp.1
+                .warning
+                .as_ref()
+                .unwrap()
+                .contains("off-duty"),
+            "warning should mention off-duty: {:?}",
+            resp.1.warning
         );
+        // Message was NOT delivered to the prompt channel.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err(),
+            "no message should be delivered to an off-duty agent"
+        );
+        // Message IS in the inbox.
+        assert_eq!(state.inboxes.get().unwrap().len_for(&receiver).await, 1);
+    }
+
+    /// An on-duty agent receives messages normally (no buffering).
+    #[tokio::test]
+    async fn on_duty_message_stored_in_inbox() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let receiver = AgentId::random();
+        let (mut entry, _rx) = make_entry_with_rx(None, "recv".into());
+        entry.identity.config.role = "root".into();
+        state
+            .registry
+            .write()
+            .await
+            .register(receiver.clone(), RegistryEntry::Live(entry));
+
+        let resp = send_message(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(receiver.clone()),
+            Json(MessageRequest { text: "hello".into() }),
+        )
+        .await
+        .expect("on-duty send accepted");
+        assert_eq!(resp.0, StatusCode::ACCEPTED);
+        assert!(resp.1.warning.is_none(), "on-duty should have no warning");
+
+        // On-duty message is stored in the inbox.
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&receiver).await.unwrap();
+        assert!(msg.contains("hello"));
+    }
+
+    /// Off-duty messages buffer to inbox; on-duty messages also go to inbox.
+    /// The agent task loop pulls on notify wake.
+    #[tokio::test]
+    async fn duty_toggle_off_then_on() {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let receiver = AgentId::random();
+        let (mut entry, _rx) = make_entry_with_rx(None, "recv".into());
+        entry.identity.config.role = "root".into();
+        state.registry.write().await
+            .register(receiver.clone(), RegistryEntry::Live(entry));
+
+        // Off-duty: message buffered to inbox.
+        state.duty.set(receiver.clone(), crate::duty::DutyStatus::OffDuty);
+        let _ = send_message(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(receiver.clone()),
+            Json(MessageRequest { text: "first".into() }),
+        ).await.unwrap();
+        assert_eq!(state.inboxes.get().unwrap().len_for(&receiver).await, 1);
+
+        // Back on-duty: message also goes to inbox.
+        state.duty.set(receiver.clone(), crate::duty::DutyStatus::OnDuty);
+        let _ = send_message(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(receiver.clone()),
+            Json(MessageRequest { text: "second".into() }),
+        ).await.unwrap();
+        assert_eq!(state.inboxes.get().unwrap().len_for(&receiver).await, 2);
+
+        // Pull both messages.
+        let msg = state.inboxes.get().unwrap().pull_undelivered(&receiver).await.unwrap();
+        assert!(msg.contains("first"));
+        assert!(msg.contains("second"));
     }
 }

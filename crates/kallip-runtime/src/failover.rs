@@ -39,6 +39,17 @@ pub struct FailoverState {
     profile_idx: usize,
 }
 
+/// Pending profile-reset payload: the tagma's apply handler writes this into a
+/// shared cell on each live agent; the agent task drains it at the top of
+/// [`crate::agent_task::run_and_report`] and rebuilds its [`FailoverState`]
+/// against the new registry. Carries the re-derived [`Tier`] (selected by the
+/// agent's depth from the new registry) and the new [`ProfileRegistry`] Arc.
+#[derive(Clone)]
+pub struct ProfileReset {
+    pub tier: Tier,
+    pub registry: Arc<ProfileRegistry>,
+}
+
 impl FailoverState {
     /// Construct at the head of the chain (`profile_idx = 0`).
     pub fn new(tier: Tier, registry: Arc<ProfileRegistry>, system_prompt: Option<String>) -> Self {
@@ -102,6 +113,28 @@ impl FailoverState {
             self.profile_idx
         );
         self.profile_idx = idx;
+    }
+    /// Rebuild this failover state against a new registry and tier (used by the
+    /// online profile-apply path). Builds the client for the new tier's active
+    /// profile first (fail-fast on a misconfigured endpoint), then commits the
+    /// tier, registry, and resets `profile_idx` to 0. Returns the new
+    /// [`ChatClient`] so the caller can swap `ctx.client`. On error, nothing is
+    /// mutated — the agent continues on its prior config.
+    ///
+    /// `system_prompt` is carried over (it is agent-level config, not
+    /// profile-level), and the caller must update `ctx.config`'s context window
+    /// from the new active profile's `max_context_window`.
+    pub(crate) fn reset_and_rebuild(
+        &mut self,
+        tier: Tier,
+        registry: Arc<ProfileRegistry>,
+    ) -> Result<ChatClient> {
+        let profile = tier.active_profile();
+        let client = registry.build_client(profile, self.system_prompt.clone())?;
+        self.tier = tier;
+        self.registry = registry;
+        self.profile_idx = 0;
+        Ok(client)
     }
 }
 

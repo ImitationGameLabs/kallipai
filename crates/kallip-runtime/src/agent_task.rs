@@ -76,6 +76,18 @@ impl CancelKind {
 }
 
 /// Shared agent resources passed between modes.
+
+/// Trait for pulling undelivered inbox messages. Implemented by the tagma
+/// (where InboxStore lives) and injected into AgentContext at spawn time.
+/// `None` for test contexts (no inbox).
+#[async_trait::async_trait]
+pub trait MessagePuller: Send + Sync + 'static {
+    /// Atomically mark all undelivered direct messages as delivered and return
+    /// them as a formatted string. Returns `None` when no undelivered direct
+    /// messages exist.
+    async fn pull_undelivered(&self) -> Option<String>;
+}
+
 pub struct AgentContext {
     pub client: crate::profile::ChatClient,
     /// Within-tier failover state: the resolved capability tier, the profile registry (for
@@ -118,6 +130,17 @@ pub struct AgentContext {
     /// Tagma-wide token budget shared by all agents.
     /// Cloned from `AppState` — same underlying Arc counters across all agents.
     pub token_budget: crate::token_budget::TokenBudget,
+    /// Pending profile-reset cell: the tagma's apply handler writes a
+    /// [`ProfileReset`] here; the agent task drains it at the top of
+    /// [`run_and_report`] and rebuilds its failover state + client. Shared
+    /// (same `Arc`) with the tagma `Agent` struct so the apply route can write
+    /// to it without reaching into runtime internals. `None` when no reset is
+    /// pending.
+    pub pending_profile_reset: Arc<std::sync::Mutex<Option<crate::failover::ProfileReset>>>,
+    /// Inbox message puller. Injected by the tagma so the runtime can pull
+    /// undelivered direct messages on a notify wake without depending on the
+    /// tagma crate. `None` for test contexts and agents without an inbox.
+    pub message_puller: Option<Arc<dyn MessagePuller>>,
 }
 
 impl AgentContext {
@@ -222,13 +245,38 @@ pub async fn agent_task(
                 break;
             }
             _ = ctx.notify.notified() => {
-                // Guard: drain may have already consumed the notification during
-                // the previous round.  Skip the LLM call if nothing is pending.
-                // NOTE: This guard assumes all notify_one() producers push data
-                // to ApprovalStore::notifications.  The transient-retry path uses
-                // a separate Notify (`retry_notify`) so this stays the single
-                // authority for approval wakes.
+                // Three producers share this Notify: inbox message delivery,
+                // approval notifications, and the profile-apply handler (which
+                // writes a pending-reset cell then calls notify_one). Because
+                // Notify coalesces permits (at most 1 stored), a single wake may
+                // carry work from multiple producers — evaluate ALL sequentially.
+                let has_reset = ctx
+                    .pending_profile_reset
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
+                if has_reset {
+                    apply_pending_profile_reset(&mut ctx);
+                }
+
+                let mut should_run = false;
+
+                // Pull undelivered inbox messages (after reset so the round
+                // uses the fresh client). Drains ALL undelivered in one atomic
+                // call to survive notify coalescing.
+                if let Some(ref puller) = ctx.message_puller {
+                    if let Some(msg) = puller.pull_undelivered().await {
+                        ctx.record_turn(vec![ChatMessage::user(&msg)]).await;
+                        should_run = true;
+                    }
+                }
+
+                // Approval notifications.
                 if ctx.approvals.lock().await.has_notifications() {
+                    should_run = true;
+                }
+
+                if should_run {
                     clear_transient_retry(&ctx);
                     if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
                         break;
@@ -260,6 +308,36 @@ async fn terminate_cancelled(ctx: &AgentContext, agent_tx: &tokio::sync::mpsc::S
     agent_tx.send(AgentEvent::Cancelled).await.ok();
 }
 
+/// Drain the pending profile-reset cell (if set by the tagma's apply handler)
+/// and rebuild the failover state + client. Called at two sites: once at the
+/// top of each `run_and_report` wake-up, and once in the notify arm when a
+/// pending reset is detected. On error, logs and continues on prior config —
+/// the cell is cleared regardless so a bad reset does not retry forever.
+fn apply_pending_profile_reset(ctx: &mut AgentContext) {
+    let reset = ctx
+        .pending_profile_reset
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    let Some(reset) = reset else { return };
+    let new_window = reset.tier.active_profile().max_context_window;
+    match ctx.failover.reset_and_rebuild(reset.tier, reset.registry) {
+        Ok(new_client) => {
+            ctx.client = new_client;
+            if let Err(e) = ctx.config.set_context_window(new_window) {
+                tracing::warn!(
+                    window = new_window,
+                    "profile reset: failed to re-apply context window, keeping prior: {e:#}"
+                );
+            }
+            tracing::info!("agent profile reset applied");
+        }
+        Err(e) => {
+            tracing::error!("profile reset failed, continuing on prior config: {e:#}");
+        }
+    }
+}
+
 /// Run agent rounds for one external wake and send results via channel.
 ///
 /// Owns the heartbeat loop: a bare-assistant round (no `break`, no tool calls) no
@@ -278,6 +356,8 @@ pub async fn run_and_report(
     agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
 ) -> bool {
+    // Drain any pending profile reset before starting the round loop.
+    apply_pending_profile_reset(ctx);
     let mut no_progress: u32 = 0;
     loop {
         let round = RoundToken::new(&ctx.cancel);
@@ -458,5 +538,77 @@ mod tests {
         lifecycle.cancel();
         assert!(round.handle().is_cancelled());
         assert_eq!(CancelKind::classify(&lifecycle), CancelKind::Lifecycle);
+    }
+
+    /// Integration test: a MessagePuller returning a message drives the notify
+    /// arm to record the message as a user turn before any network call.
+    #[tokio::test]
+    async fn notify_pull_drives_round() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct StubPuller(Arc<AtomicBool>);
+        #[async_trait::async_trait]
+        impl MessagePuller for StubPuller {
+            async fn pull_undelivered(&self) -> Option<String> {
+                if self.0.swap(false, Ordering::SeqCst) {
+                    Some("inbox test message".to_string())
+                } else {
+                    None
+                }
+            }
+        }
+
+        let mut ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+
+        let flag = Arc::new(AtomicBool::new(true));
+        ctx.message_puller = Some(Arc::new(StubPuller(flag.clone())));
+
+        let notify = ctx.notify.clone();
+        let cancel = ctx.cancel.clone();
+        let store = ctx.store.clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+        let (_prompt_tx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+        let handle = tokio::spawn(agent_task(ctx, None, prompt_rx, tx));
+
+        // Trigger the notify arm.
+        notify.notify_one();
+
+        // Poll the store until the message appears (record_turn runs before
+        // any network call in run_and_report).
+        let found = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            async {
+                loop {
+                    let guard = store.lock().await;
+                    let has_msg = guard
+                        .turns()
+                        .iter()
+                        .flat_map(|t| &t.messages)
+                        .any(|m| {
+                            m.content()
+                                .map(|t| t.contains("inbox test message"))
+                                .unwrap_or(false)
+                        });
+                    drop(guard);
+                    if has_msg {
+                        return true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            },
+        )
+        .await;
+
+        cancel.cancel();
+        let _ = rx.recv().await;
+        handle.abort();
+
+        assert!(found.unwrap_or(false), "inbox message should drive a round");
     }
 }

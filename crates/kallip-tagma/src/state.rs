@@ -15,12 +15,28 @@ use kallip_runtime::agent_task::RoundToken;
 use kallip_runtime::approval::ApprovalStore;
 use kallip_runtime::config::AgentConfig;
 use kallip_runtime::context::ContextStore;
-use kallip_runtime::profile::ProfileRegistry;
+use arc_swap::ArcSwap;
+use kallip_runtime::profile::{ProfileConfig, ProfileRegistry};
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub type SharedState = Arc<AppState>;
+
+/// Atomic-swap container for the full profile state: the serializable config
+/// (for GET /profiles) and the assembled registry (for agent spawn + apply).
+/// Swapped as a unit on PUT /profiles via [`ArcSwap`]; readers load a
+/// consistent snapshot. Each running agent pins its own `Arc<ProfileRegistry>`
+/// snapshot in its [`FailoverState`] — a swap does not disturb running agents
+/// until an explicit apply.
+pub struct ProfileBundle {
+    /// The config as loaded (GET) or written (PUT) — serializable, no backends.
+    pub config: ProfileConfig,
+    /// The registry built from `config` — carries pre-built backends.
+    pub registry: Arc<ProfileRegistry>,
+}
+
+
 
 /// Tagma-side cache of the rooms this tagma belongs to. Rooms are plaintext
 /// server-readable (the lesche enforces member access), so the cache is pure
@@ -86,7 +102,7 @@ pub struct AppState {
     pub token_budget: kallip_runtime::token_budget::TokenBudget,
     /// Profile registry loaded once at startup (config file or implicit env profile).
     /// Shared so the pre-built backends survive across agents.
-    pub profiles: Arc<ProfileRegistry>,
+    pub profiles: Arc<ArcSwap<ProfileBundle>>,
     /// Tagma-wide directory write-lock coordinator. Shared across all agents so
     /// one agent holding a dir's write-lock blocks another. The tagma build
     /// enforces locks via landlock on Linux (mandatory); advisory elsewhere.
@@ -115,6 +131,15 @@ pub struct AppState {
     /// Populated by the room-membership pump; independent of the relay, so it
     /// stays usable even when the relay is not online. See [`JoinedRooms`].
     pub joined_rooms: Arc<JoinedRooms>,
+    /// Per-agent message inboxes (SQLite-backed). Installed at startup.
+    /// The off-duty gate buffers messages here; the phase
+    /// executor flushes them on wake-up.
+    pub inboxes: std::sync::OnceLock<crate::inbox::InboxStore>,
+    /// Per-agent duty status. The off-duty gate checks this before
+    /// delivering external messages; off-duty agents buffer to inbox.
+    pub duty: Arc<crate::duty::DutyStore>,
+    /// SQLite-backed work-schedule store. Opened at startup.
+    pub work_schedules: std::sync::OnceLock<crate::work_schedule::WorkScheduleStore>,
 }
 
 /// Combined index: agent map + token-hash→id lookup + subagent reverse pointers.
@@ -218,6 +243,9 @@ pub struct Agent {
     /// spawned under this agent). Stored on the agent so the carve-out paths
     /// (`Materialize::run`, `restore_one`) reach it via `AgentEntry`.
     pub exec_gate: Arc<kallip_runtime::ExecGate>,
+    /// Pending profile-reset cell shared with the agent task's `AgentContext`.
+    /// The apply route writes here; the agent drains it on its next wake-up.
+    pub pending_profile_reset: Arc<std::sync::Mutex<Option<kallip_runtime::ProfileReset>>>,
 }
 
 impl Agent {
@@ -353,6 +381,7 @@ impl RegistryEntry {
             role: identity.config.role.clone(),
             description: identity.config.description.clone(),
             activity,
+            duty: Default::default(),
             faulted_reason,
             // Populated only by `get_root_agent` (the sole external-conversation
             // surface); absent on list/metadata summaries.
@@ -364,7 +393,7 @@ impl RegistryEntry {
 impl AppState {
     /// Test-only constructor with generous resource limits.
     #[cfg(test)]
-    pub fn new(operator_token_hash: TokenHash, profiles: Arc<ProfileRegistry>) -> Self {
+    pub fn new(operator_token_hash: TokenHash, profiles: Arc<ArcSwap<ProfileBundle>>) -> Self {
         Self::new_with_preset(operator_token_hash, profiles, PolicyPreset::Default)
     }
 
@@ -372,7 +401,7 @@ impl AppState {
     #[cfg(test)]
     pub fn new_with_preset(
         operator_token_hash: TokenHash,
-        profiles: Arc<ProfileRegistry>,
+        profiles: Arc<ArcSwap<ProfileBundle>>,
         preset: PolicyPreset,
     ) -> Self {
         Self {
@@ -393,6 +422,9 @@ impl AppState {
             direct: std::sync::OnceLock::new(),
             external: std::sync::OnceLock::new(),
             joined_rooms: Arc::new(JoinedRooms::new()),
+            inboxes: std::sync::OnceLock::new(),
+            duty: Arc::new(crate::duty::DutyStore::new()),
+            work_schedules: std::sync::OnceLock::new(),
         }
     }
 
@@ -402,7 +434,7 @@ impl AppState {
         max_agents: usize,
         max_subagents: usize,
         prompt_queue_size: usize,
-        profiles: Arc<ProfileRegistry>,
+        profiles: Arc<ArcSwap<ProfileBundle>>,
         preset: PolicyPreset,
     ) -> Self {
         Self {
@@ -423,6 +455,9 @@ impl AppState {
             direct: std::sync::OnceLock::new(),
             external: std::sync::OnceLock::new(),
             joined_rooms: Arc::new(JoinedRooms::new()),
+            inboxes: std::sync::OnceLock::new(),
+            duty: Arc::new(crate::duty::DutyStore::new()),
+            work_schedules: std::sync::OnceLock::new(),
         }
     }
 }
@@ -1425,7 +1460,7 @@ mod tests {
             50,
             20,
             5,
-            make_profile_registry(),
+            make_profile_bundle(),
             PolicyPreset::Default,
         );
         assert_eq!(state.max_agents, 50);
@@ -1435,7 +1470,7 @@ mod tests {
 
     #[test]
     fn new_has_generous_limits() {
-        let state = AppState::new(TokenHash::of("tok"), make_profile_registry());
+        let state = AppState::new(TokenHash::of("tok"), make_profile_bundle());
         assert_eq!(state.max_agents, crate::args::MAX_AGENTS_LIMIT);
         assert_eq!(state.max_subagents, crate::args::MAX_SUBAGENTS_LIMIT);
     }

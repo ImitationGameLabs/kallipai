@@ -40,3 +40,179 @@ export interface ExternalHistoryResponse {
   readonly rows: readonly HistoryEntry[];
   readonly more: boolean;
 }
+
+// --- Management API wire types ---
+// All verified against Rust source. Budget/token fields are u64 numbers (safe
+// for JS Number within practical ranges).
+
+// Budget
+
+/** `GET /budget` / `POST /budget` response. */
+export interface BudgetResponse {
+  readonly budget: number;
+  readonly consumed: number;
+  readonly remaining: number;
+}
+
+/** `POST /budget` request body — exactly one of set_remaining or delta. */
+export interface BudgetUpdateRequest {
+  readonly set_remaining?: number;
+  readonly delta?: number;
+}
+
+// Agent management
+
+/** Agent list item (`GET /agents`). No token/budget fields. */
+export interface WireAgentManagementSummary {
+  readonly id: string;
+  readonly workspace_root: string;
+  readonly state: "idle" | "busy" | "faulted";
+  readonly created_by: string | null;
+  readonly role: string;
+  readonly description: string;
+  readonly activity: string;
+  readonly duty: "onduty" | "offduty";
+  readonly faulted_reason: string | null;
+  readonly conversation_id: string | null;
+}
+
+/** `GET /agents` response wrapper. */
+export interface ListAgentsManagementResponse {
+  readonly agents: readonly WireAgentManagementSummary[];
+}
+
+/** Cumulative token usage per agent. */
+export interface CumulativeUsage {
+  readonly prompt_tokens: number;
+  readonly completion_tokens: number;
+  readonly cache_hit_tokens: number;
+}
+
+/** Context usage snapshot (`AgentStatusResponse.context`). */
+export interface ContextUsage {
+  readonly pinned_items: readonly [string, number][];
+  readonly turn_count: number;
+  readonly turn_tokens: number;
+  readonly last_prompt_tokens: number | null;
+  readonly cumulative_usage: CumulativeUsage;
+}
+
+/** Retry record (`AgentStatusResponse.recent_retries`). */
+export interface RetryRecord {
+  readonly timestamp: number;
+  readonly round: number;
+  readonly attempt: number;
+  readonly max_attempts: number;
+  readonly error: string;
+  readonly delay_secs: number;
+  readonly endpoint: string | null;
+}
+
+/** `GET /agents/{id}/status` response. token_budget/token_consumed are tagma-wide. */
+export interface AgentStatusResponse {
+  readonly state: "idle" | "busy" | "faulted";
+  readonly context: ContextUsage;
+  readonly recent_retries: readonly RetryRecord[];
+  readonly token_budget: number;
+  readonly token_consumed: number;
+  readonly activity: string;
+}
+
+/** `PUT /agents/{id}/metadata` request body. */
+export interface UpdateAgentMetadataRequest {
+  readonly role?: string;
+  readonly description?: string;
+}
+
+/** `PUT /agents/{id}/duty` request body. */
+export interface UpdateDutyRequest {
+  readonly status: "onduty" | "offduty";
+}
+
+/** `GET /agents` list query. */
+export interface ListAgentsQuery {
+  readonly created_by?: string;
+}
+
+// Profiles
+
+/** Provider endpoint (credentials + optional base URL). */
+export interface ProfileEndpoint {
+  readonly id: string;
+  readonly family: string;
+  readonly api_key: string;
+  readonly base_url: string | null;
+}
+
+/** A model bound to an endpoint. */
+export interface ProfileModel {
+  readonly id: string;
+  readonly endpoint: string;
+  readonly model: string;
+  readonly max_context_window: number;
+}
+
+/** A capability tier — purely positional (tiers[depth]). */
+export interface ProfileTier {
+  readonly profiles: readonly ProfileModel[];
+}
+
+/** `GET /profiles` / `PUT /profiles` body. */
+export interface ProfileConfig {
+  readonly tiers: readonly ProfileTier[];
+  readonly endpoints: Readonly<Record<string, ProfileEndpoint>>;
+}
+
+/** `POST /profiles/apply` response. */
+export interface ProfileApplyResponse {
+  readonly applied: number;
+  readonly skipped: number;
+}
+
+// Work schedules
+
+/** A work schedule definition. */
+export interface WorkSchedule {
+  readonly id: string;
+  readonly name: string;
+  readonly agent_id: string;
+  readonly start_cron: string;
+  readonly end_cron: string;
+  readonly pre_warn_minutes: number;
+  readonly final_warn_minutes: number;
+  readonly wake_prompt: string;
+  readonly status: "active" | "paused";
+  readonly timezone: string | null;
+  readonly created_at: string;
+}
+
+/** `POST /work-schedules` request body. */
+export interface CreateWorkScheduleRequest {
+  readonly name: string;
+  readonly agent_id: string;
+  readonly start_cron: string;
+  readonly end_cron: string;
+  readonly pre_warn_minutes?: number;
+  readonly final_warn_minutes?: number;
+  readonly wake_prompt: string;
+  readonly status?: "active" | "paused";
+  readonly timezone?: string | null;
+}
+
+/** `PUT /work-schedules/{id}` request body (all fields optional). */
+export interface UpdateWorkScheduleRequest {
+  readonly name?: string;
+  readonly start_cron?: string;
+  readonly end_cron?: string;
+  readonly pre_warn_minutes?: number;
+  readonly final_warn_minutes?: number;
+  readonly wake_prompt?: string;
+  readonly status?: "active" | "paused";
+  readonly timezone?: string | null;
+}
+
+/** `GET /work-schedules` query params. */
+export interface ListWorkSchedulesQuery {
+  readonly agent_id?: string;
+  readonly status?: "active" | "paused";
+}

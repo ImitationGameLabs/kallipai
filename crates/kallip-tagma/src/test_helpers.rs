@@ -123,6 +123,7 @@ fn make_entry_inner(
             preset,
             exec_policy: Arc::new(std::sync::RwLock::new(exec_policy)),
             exec_gate: kallip_runtime::ExecGate::new(),
+            pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
         },
         subagent_ids: vec![],
     };
@@ -221,9 +222,9 @@ pub async fn enqueue_committed_approval(
     id
 }
 
-/// Minimal single-profile registry for tests that need an `AppState` but won't spawn real
-/// agents. No declared window (env-path semantics).
-pub fn make_profile_registry() -> Arc<kallip_runtime::profile::ProfileRegistry> {
+/// Minimal single-profile bundle for tests that need an `AppState` but won't
+/// spawn real agents. No declared window (env-path semantics).
+pub fn make_profile_bundle() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundle>> {
     use just_llm_client::family;
     use kallip_runtime::profile::{Endpoint, Profile, ProfileConfig, ProfileRegistry, Tier};
     use std::collections::HashMap;
@@ -254,7 +255,11 @@ pub fn make_profile_registry() -> Arc<kallip_runtime::profile::ProfileRegistry> 
         crate::backend::DEFAULT_USER_AGENT,
     )
     .expect("test backends build");
-    Arc::new(ProfileRegistry::new(cfg.tiers, source).expect("valid test registry"))
+    let registry = Arc::new(ProfileRegistry::new(cfg.tiers.clone(), source).expect("valid test registry"));
+    Arc::new(arc_swap::ArcSwap::from_pointee(crate::state::ProfileBundle {
+        config: cfg,
+        registry,
+    }))
 }
 
 /// Create a fresh `SharedState` (default preset) for testing. The operator token
@@ -268,7 +273,16 @@ pub fn make_state() -> SharedState {
 pub fn make_state_with_preset(preset: PolicyPreset) -> SharedState {
     Arc::new(AppState::new_with_preset(
         TokenHash::of("op-token"),
-        make_profile_registry(),
+        make_profile_bundle(),
         preset,
     ))
+}
+
+/// Install an in-memory inbox store on a test `SharedState`.
+/// Required for any test that exercises the off-duty duty gate.
+pub async fn install_inbox_store(state: &SharedState) {
+    state
+        .inboxes
+        .set(crate::inbox::InboxStore::open_in_memory().await)
+        .ok();
 }

@@ -143,10 +143,21 @@ Deno.test("tagmaNavIndicator maps each channel state (transport-only)", () => {
   );
 });
 
-Deno.test("navFor offline -> Chat only (Settings is in AccountMenu)", () => {
+Deno.test("navFor offline -> Chat + Manage sections", () => {
   const sections = navFor({ mode: "offline", icons });
   assertEquals(shape(sections), [
-    { title: null, manage: null, items: ["/chat/local"] },
+    { title: null, manage: null, items: ["/local/chat"] },
+    {
+      title: "Manage",
+      manage: null,
+      items: [
+        "/local/manage/overview",
+        "/local/manage/budget",
+        "/local/manage/agents",
+        "/local/manage/profiles",
+        "/local/manage/schedules",
+      ],
+    },
   ]);
 });
 

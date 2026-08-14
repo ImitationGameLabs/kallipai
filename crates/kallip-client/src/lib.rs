@@ -11,4 +11,5 @@ pub use kallip_common::protocol::{
     ListApprovalsResponse, MessageResponse, TokenBudgetResponse, TokenBudgetUpdateRequest,
     UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
+pub use kallip_common::protocol::{InboxEntry, InboxSummary};
 pub use types::ListApprovalsParams;

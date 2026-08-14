@@ -102,9 +102,13 @@ export class RelayChannel {
   private sendSeq = 0;
   private nextReqId = 1;
   private decryptFailures = 0;
-  private readonly inbound: Envelope[] = [];
+  private readonly inbound: { sender: Participant; reply: TagmaReply }[] = [];
   private resolveDrain: (() => void) | null = null;
   private closed = false;
+  private readonly pendingManage = new Map<
+    number,
+    { resolve: (v: { status: number; body: unknown }) => void; reject: (e: unknown) => void }
+  >();
 
   /** Assembled by [`openRelayChannel`]; do not construct directly — it skips
    * the key-exchange verification the factory performs. */
@@ -133,10 +137,33 @@ export class RelayChannel {
    * sender under `dir=1`, so a failure means corruption or a replay under the
    * wrong sequence, neither of which the app can recover. */
   enqueue(envelope: Envelope): void {
-    if (this.closed) return; // a late envelope after close is dropped
+    if (this.closed) return;
     if (envelope.conversation_id !== this.conversationId) return;
-    // The reply flows out via `replies` once a consumer is draining.
-    this.inbound.push(envelope);
+    const ciphertext = decodeB64(envelope.ciphertext);
+    const plaintext = aeadDecrypt(
+      this.sessionKey,
+      DIR_RESPONDER_TO_INITIATOR,
+      envelope.sequence_n,
+      ciphertext,
+    );
+    if (plaintext === null) {
+      if (this.decryptFailures++ === 0) {
+        console.warn(
+          `[RelayChannel ${this.conversationId}] dropped an undecryptable inbound envelope (seq=${envelope.sequence_n})`,
+        );
+      }
+      return;
+    }
+    const reply = JSON.parse(new TextDecoder().decode(plaintext)) as TagmaReply;
+    if (reply.kind === "manage_result") {
+      const pending = this.pendingManage.get(reply.req_id);
+      if (pending) {
+        this.pendingManage.delete(reply.req_id);
+        pending.resolve({ status: reply.status, body: reply.body });
+        return;
+      }
+    }
+    this.inbound.push({ sender: envelope.sender, reply });
     this.resolveDrain?.();
   }
 
@@ -148,33 +175,9 @@ export class RelayChannel {
   async *replies(): AsyncGenerator<{ sender: Participant; reply: TagmaReply }> {
     while (!this.closed) {
       while (this.inbound.length > 0) {
-        const envelope = this.inbound.shift()!;
-        const ciphertext = decodeB64(envelope.ciphertext);
-        const plaintext = aeadDecrypt(
-          this.sessionKey,
-          DIR_RESPONDER_TO_INITIATOR,
-          envelope.sequence_n,
-          ciphertext,
-        );
-        if (plaintext === null) {
-          // A failure under dir=1 means corruption, tampering, or a wrong
-          // session key. The first one logs (so a key mismatch during bring-up
-          // is not a silent stall); subsequent ones stay quiet to avoid log
-          // spam from a sustained mismatch.
-          if (this.decryptFailures++ === 0) {
-            console.warn(
-              `[RelayChannel ${this.conversationId}] dropped an undecryptable inbound envelope (seq=${envelope.sequence_n}); a persistent failure means the session key is wrong.`,
-            );
-          }
-          continue;
-        }
-        yield {
-          sender: envelope.sender,
-          reply: JSON.parse(new TextDecoder().decode(plaintext)) as TagmaReply,
-        };
+        yield this.inbound.shift()!;
       }
       if (this.closed) break;
-      // Wait for the next inbound envelope (or close).
       await new Promise<void>((resolve) => {
         this.resolveDrain = resolve;
       });
@@ -213,10 +216,38 @@ export class RelayChannel {
     return this.sendControl(ctrl);
   }
 
+  manage(
+    method: string,
+    path: string,
+    body: unknown = null,
+  ): Promise<{ status: number; body: unknown }> {
+    const req_id = this.nextReqId++;
+    const ctrl: TagmaControl = { op: "manage", req_id, method, path, body };
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingManage.delete(req_id);
+        reject(new Error(`manage timeout: ${method} ${path}`));
+      }, 15_000);
+      this.pendingManage.set(req_id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
+      this.sendControl(ctrl).catch((e) => {
+        clearTimeout(timer);
+        this.pendingManage.delete(req_id);
+        reject(e);
+      });
+    });
+  }
+
   /** Stop the channel. The `replies` generator ends; further enqueues are
    * dropped. Does not close the underlying agora SSE (owned by the demux). */
   close(): void {
     this.closed = true;
+    for (const { reject } of this.pendingManage.values()) {
+      reject(new Error("channel closed"));
+    }
+    this.pendingManage.clear();
     this.resolveDrain?.();
     this.resolveDrain = null;
   }

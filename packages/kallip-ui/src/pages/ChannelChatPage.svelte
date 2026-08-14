@@ -15,7 +15,7 @@
   let { conversationId }: { conversationId: string } = $props();
 
   // Resolves to undefined only briefly: online while a channel's key exchange
-  // runs, or offline on a /chat/local deep-link before the boot reconnect lands
+  // runs, or offline on a /local/chat deep-link before the boot reconnect lands
   // (the gate routes a failed reconnect to /connect, so this is a short window).
   const conv = $derived(channelsStore.get(conversationId));
   const isLocal = $derived(conversationId === "local");
@@ -38,7 +38,7 @@
 
 {#if !conv}
   {#if isLocal}
-    <!-- Offline /chat/local before the boot reconnect lands. The gate routes a
+    <!-- Offline /local/chat before the boot reconnect lands. The gate routes a
          failed reconnect to /connect; this is the brief resolving window. -->
     <div class="h-full grid place-items-center p-6">
       <p class="text-sm opacity-60">Connecting…</p>

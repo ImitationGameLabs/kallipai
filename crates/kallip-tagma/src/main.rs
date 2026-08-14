@@ -2,13 +2,18 @@ mod args;
 mod auth;
 mod backend;
 mod bridge;
+mod cron;
+mod duty;
+mod engine;
+mod work_schedule;
+mod inbox;
 mod credentials;
 mod direct;
 mod external;
 mod messaging;
 mod projector;
 mod relay;
-mod routes;
+pub(crate) mod routes;
 mod shutdown;
 mod sse;
 mod state;
@@ -21,6 +26,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use kallip_common::authtoken::MintedToken;
 use kallip_runtime::profile::ProfileRegistry;
+use state::ProfileBundle;
 use state::AppState;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -106,7 +112,11 @@ async fn main() -> Result<()> {
     let user_agent = backend::resolve_user_agent(args.llm_api_user_agent.as_deref());
     let source = backend::build_backends(&cfg, factory, user_agent)
         .context("failed to build LLM backends")?;
-    let profiles = Arc::new(ProfileRegistry::new(cfg.tiers, source)?);
+    let registry = Arc::new(ProfileRegistry::new(cfg.tiers.clone(), source)?);
+    let profiles = Arc::new(arc_swap::ArcSwap::from_pointee(ProfileBundle {
+        config: cfg,
+        registry,
+    }));
 
     let state = Arc::new(AppState::with_limits(
         operator.hash().clone(),
@@ -116,6 +126,21 @@ async fn main() -> Result<()> {
         profiles,
         kallip_runtime::config::policy_preset_from_env(),
     ));
+
+    // Open the work-schedule store and install it on AppState.
+    let ws_store = work_schedule::WorkScheduleStore::open(&work_schedule_path()?)
+        .await
+        .context("open work-schedule store")?;
+    state.work_schedules.set(ws_store).ok();
+
+    // Open the inbox store and install it on AppState.
+    let inbox_store = inbox::InboxStore::open(&inbox_path()?)
+        .await
+        .context("open inbox store")?;
+    state.inboxes.set(inbox_store).ok();
+
+    // Start the work-schedule engine (ticks every ~10 s, fires duty transitions).
+    engine::spawn(state.clone());
 
     // Ensure the shared skills dir exists before any agent is restored. The
     // root agent authors shared skills via `bash_exec`, and landlock `PathBeneath`
@@ -315,6 +340,16 @@ fn credentials_dir() -> Result<std::path::PathBuf> {
 /// The single chat_history store path: `<data_root>/chat_history.sqlite`.
 fn chat_history_path() -> Result<std::path::PathBuf> {
     data_root().map(|d| d.join("chat_history.sqlite"))
+}
+
+/// The work-schedule store path: `<data_root>/work_schedules.sqlite`.
+fn work_schedule_path() -> Result<std::path::PathBuf> {
+    data_root().map(|d| d.join("work_schedules.sqlite"))
+}
+
+/// The inbox store path: `<data_root>/inboxes.sqlite`.
+fn inbox_path() -> Result<std::path::PathBuf> {
+    data_root().map(|d| d.join("inboxes.sqlite"))
 }
 
 /// Install the [`DirectServing`](crate::direct::DirectServing) handle. Always

@@ -206,6 +206,12 @@ mod tests {
             "kallip dirlock who",
             // lesche
             "kallip lesche send",
+            // inbox
+            "kallip inbox list",
+            "kallip inbox read",
+            "kallip inbox summary",
+            "kallip inbox done",
+            "kallip inbox clear",
         ];
         for leaf in leaves {
             assert!(

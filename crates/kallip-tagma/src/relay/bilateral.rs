@@ -183,8 +183,28 @@ impl RelayHandle {
                     before,
                     limit,
                     ..
-                } = ctrl;
+                } = ctrl else { return };
                 self.handle_history(&trace, req_id, &sender, after, before, limit)
+                    .await;
+            }
+            "manage" => {
+                let ctrl: TagmaControl = match serde_json::from_value(value) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(req_id, "control decode failed: {e}");
+                        return;
+                    }
+                };
+                let TagmaControl::Manage {
+                    method,
+                    path,
+                    body,
+                    ..
+                } = ctrl
+                else {
+                    return;
+                };
+                self.handle_manage(&trace, req_id, &method, &path, body)
                     .await;
             }
             other => warn!(req_id, op = other, "unknown op; dropping"),

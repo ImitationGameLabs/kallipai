@@ -138,8 +138,10 @@ export function applyTagmaReply(
       // user sees (delivered via the signal channel, not this reply).
       return state;
     case "history_batch_end":
-      // A History-batch completion marker; the store uses it to flip back to
-      // live draining. No transcript effect.
+      return state;
+    case "manage_result":
+      // Management op response; intercepted in RelayChannel.enqueue and never
+      // reaches the transcript reducer. No-op if it somehow arrives here.
       return state;
     case "error":
       return {

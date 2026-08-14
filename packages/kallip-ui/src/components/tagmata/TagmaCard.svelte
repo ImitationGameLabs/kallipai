@@ -13,8 +13,9 @@
     presenceDotClass,
     presenceLabel,
   } from "../../lib/tagmata.svelte.ts";
-  import { DoorOpen } from "@lucide/svelte";
+  import { DoorOpen, Settings } from "@lucide/svelte";
   import ManageTagmaRoomsDialog from "./ManageTagmaRoomsDialog.svelte";
+  import { navigate } from "../../lib/shell/port.ts";
   import RevokeTagmaDialog from "./RevokeTagmaDialog.svelte";
 
   let {
@@ -197,7 +198,9 @@
       <Menu
         positioning={{ placement: "top-end" }}
         onSelect={(e) => {
-          if (e.value === "rooms") roomsOpen = true;
+          if (e.value === "manage") {
+            navigate(`/chat/t/${tagma.tagmaId}/manage/overview`);
+          } else if (e.value === "rooms") roomsOpen = true;
           else if (e.value === "rename" && onRename) startRename();
           else if (e.value === "revoke" && onRevoke) confirmingRevoke = true;
         }}
@@ -211,6 +214,13 @@
         <Portal>
           <Menu.Positioner>
             <Menu.Content class="card preset-tonal-surface p-1 min-w-[8rem]">
+              <Menu.Item
+                value="manage"
+                class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+              >
+                <Settings class="size-4" />
+                Manage
+              </Menu.Item>
               <Menu.Item
                 value="rooms"
                 class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"

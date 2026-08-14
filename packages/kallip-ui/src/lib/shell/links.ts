@@ -8,7 +8,7 @@
 //     relay channel is currently open -- the link is always navigable and the
 //     channel opens on demand at /chat/t/{tagmaId}); "Rooms" lists the caller's
 //     rooms as direct chat entries (`/rooms/{id}`).
-//   - offline -> Chat (the single local conversation at /chat/local), no header.
+//   - offline -> Chat (the single local conversation at /local/chat), no header.
 // Settings is intentionally NOT a nav link: it lives in the AccountMenu
 // dropdown (footer) alongside the other account/system actions.
 // Icons are injected by the caller so this package does not depend on an icon
@@ -36,6 +36,12 @@ export interface NavIcons {
   rooms: Component;
   /** Gear icon for the section-management entry beside each section title. */
   settings: Component;
+  /** Management section icons (offline mode only). */
+  manageOverview: Component;
+  manageBudget: Component;
+  manageAgents: Component;
+  manageProfiles: Component;
+  manageSchedules: Component;
 }
 
 /** One enrolled tagma as a sidebar chat entry. `indicator` is the channel
@@ -87,7 +93,17 @@ export function navFor(args: {
   const { mode, icons, tagmata, rooms } = args;
   if (mode === "offline") {
     return [
-      { items: [{ href: "/chat/local", label: "Chat", icon: icons.chat }] },
+      { items: [{ href: "/local/chat", label: "Chat", icon: icons.chat }] },
+      {
+        title: "Manage",
+        items: [
+          { href: "/local/manage/overview", label: "Overview", icon: icons.manageOverview },
+          { href: "/local/manage/budget", label: "Budget", icon: icons.manageBudget },
+          { href: "/local/manage/agents", label: "Agents", icon: icons.manageAgents },
+          { href: "/local/manage/profiles", label: "Profiles", icon: icons.manageProfiles },
+          { href: "/local/manage/schedules", label: "Schedules", icon: icons.manageSchedules },
+        ],
+      },
     ];
   }
   return [

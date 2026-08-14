@@ -65,10 +65,11 @@
     </div>
   </div>
 {:else if conversationId}
-  <!-- Channel settled: delegate the whole body to ChannelChatPage. It owns the
-       status header, transcript, composer, and the offline/error chrome, so the
-       last visible messages are preserved across transport hiccups. -->
-  <ChannelChatPage {conversationId} />
+  <div class="h-full flex flex-col">
+    <div class="flex-1 min-h-0">
+      <ChannelChatPage {conversationId} />
+    </div>
+  </div>
 {:else}
   <!-- absent / pending: ensureOpen has been fired by the effect above. -->
   <div class="h-full grid place-items-center p-6">

@@ -60,15 +60,25 @@ export type TagmaRequest =
  * cursor-based history pull). Carried in the same encrypted envelope channel as
  * TagmaRequest; the relay dispatches by the `op` discriminant (disjoint from
  * TagmaRequest's). serde tag = `op`, snake_case. */
-export type TagmaControl = {
-  readonly op: "history";
-  readonly req_id: number;
-  /** rows with id > after (incremental catch-up). */
-  readonly after: number | null;
-  /** rows with id < before (scroll-up lazy load). */
-  readonly before: number | null;
-  readonly limit: number;
-};
+export type TagmaControl =
+  | {
+      readonly op: "history";
+      readonly req_id: number;
+      /** rows with id > after (incremental catch-up). */
+      readonly after: number | null;
+      /** rows with id < before (scroll-up lazy load). */
+      readonly before: number | null;
+      readonly limit: number;
+    }
+  | {
+      /** A management operation (budget, agents, profiles, schedules). The
+       * relay dispatches it in-process against the tagma route handlers. */
+      readonly op: "manage";
+      readonly req_id: number;
+      readonly method: string;
+      readonly path: string;
+      readonly body: unknown;
+    };
 
 /** App -> tagma (relayed by the lesche): start a 1-RTT key exchange, carrying
  * the app's ephemeral X25519 public key (standard base64). */

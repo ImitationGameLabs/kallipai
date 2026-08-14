@@ -1,5 +1,5 @@
-mod agent;
-mod budget;
+pub(crate) mod agent;
+pub(crate) mod budget;
 mod dirlock;
 mod restore;
 pub(crate) use agent::ensure_root_agent;
@@ -8,12 +8,14 @@ pub use restore::restore_agents;
 pub(crate) mod approval;
 #[cfg(not(test))]
 mod approval;
-mod context;
+pub(crate) mod context;
 mod message;
+pub(crate) mod profiles;
 /// The in-process message-delivery seam shared by the `send_message` route and
 /// the relay's `execute_op`, plus its room inbound counterpart.
-pub(crate) use message::{deliver_inbound_room_message, deliver_message};
+pub(crate) use message::{deliver_inbound_room_message, deliver_message, enqueue_prompt};
 mod lesche;
+mod inbox;
 
 use axum::Router;
 use kallip_common::protocol::{ListAgentsResponse, ListApprovalsQuery, MessageRequest};
@@ -107,6 +109,22 @@ pub fn router() -> Router<SharedState> {
             axum::routing::put(agent::update_activity),
         )
         .route(
+            "/agents/{id}/duty",
+            axum::routing::put(agent::update_duty),
+        )
+        .route(
+            "/agents/{id}/inbox",
+            axum::routing::get(inbox::list_inbox).delete(inbox::clear_inbox),
+        )
+        .route(
+            "/agents/{id}/inbox/summary",
+            axum::routing::get(inbox::inbox_summary),
+        )
+        .route(
+            "/agents/{id}/inbox/{msg_id}",
+            axum::routing::get(inbox::read_inbox_message).put(inbox::mark_done),
+        )
+        .route(
             "/agents/{id}/dirlocks",
             axum::routing::post(dirlock::acquire)
                 .delete(dirlock::release)
@@ -121,5 +139,24 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/approvals/{id}",
             axum::routing::get(approval::get_approval).post(approval::respond_approval),
+        )
+        .route(
+            "/profiles",
+            axum::routing::get(profiles::get_profiles).put(profiles::put_profiles),
+        )
+        .route(
+            "/profiles/apply",
+            axum::routing::post(profiles::apply_profiles),
+        )
+        .route(
+            "/work-schedules",
+            axum::routing::get(crate::work_schedule::list_work_schedules)
+                .post(crate::work_schedule::create_work_schedule),
+        )
+        .route(
+            "/work-schedules/{id}",
+            axum::routing::get(crate::work_schedule::get_work_schedule)
+                .put(crate::work_schedule::update_work_schedule)
+                .delete(crate::work_schedule::delete_work_schedule),
         )
 }

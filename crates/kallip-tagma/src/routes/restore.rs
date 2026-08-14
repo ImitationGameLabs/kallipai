@@ -261,7 +261,7 @@ async fn restore_one(
     // Resolve the model tier purely by depth (positional tiers — no persisted binding). Warn if
     // the agent's depth exceeds the tier list: it clamps to the lowest-capability tier.
     let depth = config.permissions.depth();
-    let tier_count = shared_state.profiles.tiers().len();
+    let tier_count = shared_state.profiles.load().registry.tiers().len();
     if depth >= tier_count {
         tracing::warn!(
             depth,
@@ -269,7 +269,7 @@ async fn restore_one(
             "agent depth exceeds tier count; clamping to the lowest tier"
         );
     }
-    let tier = shared_state.profiles.select_profile(depth).clone();
+    let tier = shared_state.profiles.load().registry.select_profile(depth).clone();
 
     let store = Arc::new(tokio::sync::Mutex::new(restored.store));
     let approvals = Arc::new(tokio::sync::Mutex::new(restored.approvals));

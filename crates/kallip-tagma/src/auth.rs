@@ -30,6 +30,13 @@ impl AuthIdentity {
         &self.0
     }
 
+    /// Construct an [`AuthIdentity`] representing the operator. Used by the
+    /// relay manage dispatch to call management handlers in-process, the same
+    /// way `execute_op` calls `deliver_message` with `Identity::Operator`.
+    pub(crate) fn operator() -> Self {
+        Self(Identity::Operator)
+    }
+
     /// Construct an [`AuthIdentity`] for testing.
     #[cfg(test)]
     pub(crate) fn test_new(identity: Identity) -> Self {

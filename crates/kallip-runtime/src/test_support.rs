@@ -131,6 +131,8 @@ pub(crate) async fn ctx_from_source(
         retry_at: Arc::new(std::sync::Mutex::new(None)),
         transient_fails: 0,
         token_budget: TokenBudget::new(1_000_000, 0),
+        pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
+        message_puller: None,
     }
 }
 

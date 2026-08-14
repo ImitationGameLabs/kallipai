@@ -21,7 +21,7 @@ pub mod tools;
 
 // Re-exported so the tagma (another crate) can construct `AgentContext.failover`. The state's
 // accessors stay `pub(crate)` — only the runtime reads them.
-pub use failover::FailoverState;
+pub use failover::{FailoverState, ProfileReset};
 
 // Re-exported shell tool-name constants so downstream crates (e.g. the tagma's
 // approval gate) can refer to them without taking a direct `kallip-shell` dep.

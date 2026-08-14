@@ -17,6 +17,7 @@
 //! cycle with `AppState.relay`.
 
 mod bilateral;
+mod manage;
 pub(crate) mod chat_history;
 mod crypto;
 mod dispatch;

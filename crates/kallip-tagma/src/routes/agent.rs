@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU8;
 use std::time::Duration;
 
 use axum::Json;
+use serde::Deserialize;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -293,6 +294,8 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         args.config.set_context_window(profile.max_context_window)?;
         args.shared_state
             .profiles
+            .load()
+            .registry
             .build_client(profile, Some(system_prompt.clone()))?
     };
 
@@ -350,11 +353,22 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
 
     let token_budget = args.shared_state.token_budget.clone();
 
+    let pending_profile_reset = Arc::new(std::sync::Mutex::new(None));
+
+    let bundle = args.shared_state.profiles.load();
+    // Create the inbox message puller for this agent. None if the inbox store
+    // is not installed (edge case: should not happen in production).
+    let message_puller: Option<Arc<dyn kallip_runtime::agent_task::MessagePuller>> =
+        args.shared_state.inboxes.get().map(|store| {
+            Arc::new(crate::inbox::InboxPuller::new(store.clone(), args.agent_id.clone()))
+                as Arc<dyn kallip_runtime::agent_task::MessagePuller>
+        });
+
     let ctx = AgentContext {
         client,
         failover: kallip_runtime::FailoverState::new(
             args.tier,
-            args.shared_state.profiles.clone(),
+            bundle.registry.clone(),
             Some(system_prompt),
         ),
         store: args.store.clone(),
@@ -371,6 +385,8 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         retry_at: Arc::new(std::sync::Mutex::new(None)),
         transient_fails: 0,
         token_budget: token_budget.clone(),
+        pending_profile_reset: pending_profile_reset.clone(),
+        message_puller,
     };
 
     let agent_handle = tokio::spawn(agent_task::agent_task(
@@ -409,6 +425,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
             preset: args.preset,
             exec_policy: args.exec_policy,
             exec_gate,
+            pending_profile_reset,
         },
         AgentIdentity {
             config: args.config,
@@ -801,7 +818,7 @@ impl<'a> Materialize<'a> {
         // Resolve the model tier purely by depth (positional tiers — no
         // name/override). Carry the tier into SpawnArgs for failover.
         let depth = config.permissions.depth();
-        let tier = state.profiles.select_profile(depth).clone();
+        let tier = state.profiles.load().registry.select_profile(depth).clone();
 
         let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
         let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
@@ -1217,6 +1234,7 @@ pub async fn get_root_agent(
         .ok_or_else(|| ApiError::internal("root agent missing — startup invariant violated"))?;
     let mut summary = entry.summary(id);
     summary.conversation_id = conversation_id;
+    summary.duty = state.duty.get(id);
     Ok(Json(summary))
 }
 
@@ -1256,7 +1274,11 @@ pub async fn list_agents(
                 .as_ref()
                 .is_none_or(|sup| entry.identity().config.created_by.as_ref() == Some(sup))
         })
-        .map(|(id, entry)| entry.summary(id))
+        .map(|(id, entry)| {
+            let mut s = entry.summary(id);
+            s.duty = state.duty.get(&s.id);
+            s
+        })
         .collect();
     Json(ListAgentsResponse { agents: summaries })
 }
@@ -1316,7 +1338,9 @@ pub async fn update_metadata(
     if let Some(desc) = &body.description {
         entry.identity_mut().config.description = desc.clone();
     }
-    Ok(Json(entry.summary(&id)))
+    let mut summary = entry.summary(&id);
+    summary.duty = state.duty.get(&id);
+    Ok(Json(summary))
 }
 
 /// `PUT /agents/{id}/activity` — the agent reports its current activity.
@@ -1348,6 +1372,60 @@ pub async fn update_activity(
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = activity;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for `PUT /agents/{id}/duty`.
+#[derive(Debug, Deserialize)]
+pub struct UpdateDutyRequest {
+    /// Duty status (serialized as "onduty"/"offduty").
+    pub status: crate::duty::DutyStatus,
+}
+
+/// `PUT /agents/{id}/duty` — set an agent's duty status (on/off).
+///
+/// When off-duty, external messages are buffered to the agent's inbox instead
+/// of being delivered. This is the manual override; the scheduling engine
+/// drives it automatically. If an active work schedule exists, the engine
+/// may override this manual setting on the next transition. Operator-only.
+pub async fn update_duty(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+    Json(body): Json<UpdateDutyRequest>,
+) -> Result<Json<AgentSummary>, ApiError> {
+    crate::auth::require_operator(auth.identity())?;
+    let duty_status = body.status;
+
+    // Build the summary under the read lock, then drop it before any
+    // await that might need a write lock (enqueue_prompt's reactivation
+    // path calls registry.write() — holding the read lock here would
+    // self-deadlock).
+    let summary = {
+        let registry = state.registry.read().await;
+        let entry = registry
+            .get(&id)
+            .ok_or_else(|| ApiError::not_found("agent not found"))?;
+        let mut s = entry.summary(&id);
+        s.duty = duty_status;
+        s
+    };
+
+    state.duty.set(id.clone(), duty_status);
+    info!(id = %id, duty = ?duty_status, "duty status updated");
+
+    // When transitioning to OnDuty, notify the agent so it pulls buffered
+    // messages from its inbox. No separate flush step needed: the agent's
+    // notify arm calls pull_undelivered() which drains all in one atomic call.
+    if duty_status == crate::duty::DutyStatus::OnDuty {
+        let notify = {
+            let registry = state.registry.read().await;
+            registry.get(&id).and_then(|e| e.as_live()).map(|l| l.agent.notify.clone())
+        };
+        if let Some(notify) = notify {
+            notify.notify_one();
+        }
+    }
+    Ok(Json(summary))
 }
 
 /// Maximum activity length (chars). Longer inputs are truncated, not rejected,
@@ -1441,6 +1519,11 @@ pub async fn remove_agent(
     // not registry removal — see DirLockManager invariants). A no-op for
     // faulted entries, which never acquired locks.
     state.lock_manager.release_all(&id);
+    // Clear the duty status entry — the agent is gone.
+    state.duty.remove(&id);
+    if let Some(store) = state.inboxes.get() {
+        store.clear_for(&id).await;
+    }
 
     match entry {
         crate::state::RegistryEntry::Live(live) => {
@@ -1683,8 +1766,9 @@ mod tests {
     };
     use crate::auth::{AuthIdentity, Identity};
     use crate::test_helpers::{
-        add_faulted_root, add_faulted_sub, add_root, make_entry, make_state,
+        add_faulted_root, add_faulted_sub, add_root, make_entry, make_entry_with_rx, make_state,
     };
+    use crate::state::RegistryEntry;
     use axum::extract::{Path, Query, State};
     use kallip_common::protocol::ListAgentsQuery;
 
@@ -2368,5 +2452,95 @@ mod tests {
         .await
         .expect_err("interrupt faulted is a conflict");
         assert_eq!(err.status, 409);
+    }
+
+    #[tokio::test]
+    async fn update_duty_rejects_non_operator() {
+        use crate::test_helpers::install_inbox_store;
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let agent = AgentId::random();
+        { let mut reg = state.registry.write().await; add_root(&mut reg, &agent); }
+
+        let result = super::update_duty(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: agent.clone() }),
+            Path(agent),
+            axum::Json(super::UpdateDutyRequest {
+                status: crate::duty::DutyStatus::OffDuty,
+            }),
+        ).await;
+        assert!(result.is_err(), "non-operator should be rejected");
+    }
+
+    #[tokio::test]
+    async fn update_duty_toggles_on_off() {
+        use crate::test_helpers::install_inbox_store;
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let agent = AgentId::random();
+        { let mut reg = state.registry.write().await; add_root(&mut reg, &agent); }
+
+        // Set off-duty.
+        let resp = super::update_duty(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(agent.clone()),
+            axum::Json(super::UpdateDutyRequest {
+                status: crate::duty::DutyStatus::OffDuty,
+            }),
+        ).await.unwrap();
+        assert_eq!(resp.0.duty, crate::duty::DutyStatus::OffDuty);
+
+        // Set back on-duty.
+        let resp = super::update_duty(
+            State(state),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(agent),
+            axum::Json(super::UpdateDutyRequest {
+                status: crate::duty::DutyStatus::OnDuty,
+            }),
+        ).await.unwrap();
+        assert_eq!(resp.0.duty, crate::duty::DutyStatus::OnDuty);
+    }
+
+    #[tokio::test]
+    async fn update_duty_on_notifies_agent() {
+        use crate::test_helpers::install_inbox_store;
+        use crate::inbox::BufferedEvent;
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let agent = AgentId::random();
+        // Use make_entry_with_rx so the prompt channel stays open —
+        // add_root discards the receiver, causing the channel to close,
+        // which makes enqueue_prompt fall through to reactivation.
+        let (entry, mut _rx) = make_entry_with_rx(None, format!("agent-{agent}"));
+        state.registry.write().await
+            .register(agent.clone(), RegistryEntry::Live(entry));
+
+        // Set off-duty and buffer a message.
+        state.duty.set(agent.clone(), crate::duty::DutyStatus::OffDuty);
+        state.inboxes.get().unwrap().push(
+            agent.clone(),
+            BufferedEvent {
+                timestamp: time::OffsetDateTime::now_utc(),
+                source: "operator".into(),
+                body: "test buffered message".into(),
+            },
+        ).await;
+
+        // Transition to on-duty via the route — notifies the agent. The
+        // message stays in the inbox until the agent task loop pulls it.
+        let _ = super::update_duty(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(agent.clone()),
+            axum::Json(super::UpdateDutyRequest {
+                status: crate::duty::DutyStatus::OnDuty,
+            }),
+        ).await.unwrap();
+
+        // Message is still in the inbox (pull happens in the agent task loop).
+        assert_eq!(state.inboxes.get().unwrap().len_for(&agent).await, 1);
     }
 }
