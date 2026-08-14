@@ -12,6 +12,7 @@ use sea_orm_migration::MigratorTrait;
 use time::OffsetDateTime;
 use time::UtcOffset;
 use tokio::fs;
+use tokio::sync::Notify;
 
 use crate::state::AgentId;
 
@@ -50,6 +51,14 @@ use entities::work_schedule::{ActiveModel, Column, Entity};
 #[derive(Clone)]
 pub struct WorkScheduleStore {
     db: DatabaseConnection,
+    /// Wake signal for the scheduling engine: fired by every mutating method
+    /// (create/update/delete) after the DB write succeeds, so the engine
+    /// reloads and recomputes its deadlines without polling. The engine
+    /// fetches this via [`Self::engine_notify`] at spawn time. `Notify`
+    /// coalesces permits, so N mutations between engine wakes collapse to
+    /// one reload — the engine's recompute is drain-all (reads the full
+    /// table), so no mutation is ever missed.
+    engine_notify: std::sync::Arc<Notify>,
 }
 
 impl WorkScheduleStore {
@@ -68,7 +77,10 @@ impl WorkScheduleStore {
         });
         let db = Database::connect(opts).await.context("connect ws db")?;
         super::migration::Migrator::up(&db, None).await.context("apply ws migrations")?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            engine_notify: std::sync::Arc::new(Notify::new()),
+        })
     }
 
     /// Open an in-memory store (for tests).
@@ -78,7 +90,16 @@ impl WorkScheduleStore {
         opts.max_connections(1);
         let db = Database::connect(opts).await.expect("in-memory db");
         super::migration::Migrator::up(&db, None).await.expect("migrations");
-        Self { db }
+        Self {
+            db,
+            engine_notify: std::sync::Arc::new(Notify::new()),
+        }
+    }
+
+    /// The engine's wake signal. The engine task holds a clone for its
+    /// `select!` loop; mutations on this store fire `notify_one()` on it.
+    pub fn engine_notify(&self) -> &std::sync::Arc<Notify> {
+        &self.engine_notify
     }
 
     pub async fn create(&self, schedule: &WorkSchedule) -> Result<()> {
@@ -96,6 +117,7 @@ impl WorkScheduleStore {
             created_at: Set(to_unix(schedule.created_at)),
         };
         Entity::insert(model).exec(&self.db).await?;
+        self.engine_notify.notify_one();
         Ok(())
     }
 
@@ -125,9 +147,19 @@ impl WorkScheduleStore {
             .col_expr(Column::Timezone, schedule.timezone.clone().into())
             .filter(Column::Id.eq(schedule.id.clone()))
             .exec(&self.db).await?;
-        Ok(result.rows_affected > 0)
+        let updated = result.rows_affected > 0;
+        if updated {
+            // Wake the engine only on a real change: a no-op PUT (unknown
+            // id) would otherwise cost a redundant recompute pass.
+            self.engine_notify.notify_one();
+        }
+        Ok(updated)
     }
 
+    /// Test-only status toggle. NOTE: deliberately does NOT notify — it is
+    /// unreachable in production. If ever un-gated, it MUST fire
+    /// `self.engine_notify.notify_one()` like the other mutators, or the
+    /// engine will not see the change.
     #[cfg(test)]
     pub async fn update_status(&self, id: &str, status: WorkScheduleStatus) -> Result<bool> {
         let result = Entity::update_many()
@@ -141,6 +173,7 @@ impl WorkScheduleStore {
         let result = Entity::delete_many()
             .filter(Column::Id.eq(id))
             .exec(&self.db).await?;
+        self.engine_notify.notify_one();
         Ok(result.rows_affected > 0)
     }
 }

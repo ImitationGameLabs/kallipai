@@ -139,7 +139,8 @@ async fn main() -> Result<()> {
         .context("open inbox store")?;
     state.inboxes.set(inbox_store).ok();
 
-    // Start the work-schedule engine (ticks every ~10 s, fires duty transitions).
+    // Start the work-schedule engine (sleeps until the next due transition;
+    // wakes on store mutations, with a ~60 s heartbeat as clock-divergence net).
     engine::spawn(state.clone());
 
     // Ensure the shared skills dir exists before any agent is restored. The
