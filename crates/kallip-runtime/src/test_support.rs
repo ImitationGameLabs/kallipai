@@ -106,8 +106,10 @@ pub(crate) async fn ctx_from_source(
         AgentPolicy::new(
             Arc::new(RwLock::new(kallip_common::policy::ExecPolicy::default())),
             kallip_common::policy::PolicyPreset::Default,
+            Arc::new(Vec::new()),
         ),
         approvals.clone(),
+        None,
     );
     {
         let mut guard = store.lock().await;

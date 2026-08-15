@@ -88,6 +88,12 @@ pub struct AppState {
     /// `KALLIP_POLICY_PRESET` and immutable for the tagma's lifetime. Every agent
     /// inherits this same preset (it is not per-agent).
     pub preset: PolicyPreset,
+    /// Exec-hook rules (builtin preset + `exec_hooks.toml` overrides,
+    /// tagma-wide), loaded once at startup — same trust boundary and
+    /// lifetime as [`AppState::preset`].
+    /// Installed after construction (the `work_schedules` pattern): unset
+    /// means no rules, and every spawned agent clones the same set.
+    pub hook_rules: std::sync::OnceLock<Arc<Vec<kallip_runtime::policy::HookRule>>>,
     pub shutdown: CancellationToken,
     /// SHA-256 of the operator token. The plaintext is printed once at startup and
     /// never retained; this hash is what incoming bearer tokens are compared against.
@@ -407,6 +413,7 @@ impl AppState {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
             preset,
+            hook_rules: std::sync::OnceLock::new(),
             shutdown: CancellationToken::new(),
             operator_token_hash,
             max_agents: crate::args::MAX_AGENTS_LIMIT,
@@ -440,6 +447,7 @@ impl AppState {
         Self {
             registry: RwLock::new(AgentRegistry::new()),
             preset,
+            hook_rules: std::sync::OnceLock::new(),
             shutdown: CancellationToken::new(),
             operator_token_hash,
             max_agents,

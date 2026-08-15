@@ -328,7 +328,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         ctx: args.store.clone(),
         config: &args.config,
         env: args.env.clone(),
-        notice_sink,
+        notice_sink: notice_sink.clone(),
         exec_policy: args.exec_policy.clone(),
         lock_manager: args.shared_state.lock_manager.clone(),
         agent_id: args.agent_id.clone(),
@@ -338,10 +338,21 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
 
     let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(256);
 
+    // Hook rules ride AppState (parsed once at tagma startup); unset means
+    // no rules and zero hook behavior. The executor keeps its own clone of
+    // the notice sink so post-call hook notes reach the prompt channel
+    // without any runner involvement.
+    let hook_rules = args
+        .shared_state
+        .hook_rules
+        .get()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(Vec::new()));
     let executor = AuthorizedToolExecutor::new(
         dispatch,
-        AgentPolicy::new(args.exec_policy.clone(), args.preset),
+        AgentPolicy::new(args.exec_policy.clone(), args.preset, hook_rules),
         args.approvals.clone(),
+        Some(notice_sink),
     );
     let tool_defs = executor.tool_definitions();
     args.store.lock().await.set_tool_definitions(tool_defs);

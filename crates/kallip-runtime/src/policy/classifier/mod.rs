@@ -10,6 +10,7 @@
 mod catalog;
 mod delegate;
 mod helpers;
+pub mod hooks;
 mod util;
 mod walker;
 

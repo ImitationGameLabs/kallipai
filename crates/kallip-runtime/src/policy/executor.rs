@@ -34,10 +34,14 @@ pub enum ToolCallOutcome {
 /// [`ApprovalStore`] and a pending-approval result is returned immediately.
 /// The LLM can continue working. When approval arrives, the LLM
 /// calls `approval_redeem` to execute the stored action.
+/// Also delivers operator-declared post-call hook notes on the notice channel
+/// (v1: every `bash_exec` call whose command ran — redeemed approvals too;
+/// use is the trigger, exit code irrelevant).
 pub struct AuthorizedToolExecutor {
     dispatch: ToolDispatcher,
     policy: AgentPolicy,
     approvals: Arc<Mutex<ApprovalStore>>,
+    notice_sink: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl AuthorizedToolExecutor {
@@ -45,11 +49,13 @@ impl AuthorizedToolExecutor {
         dispatch: ToolDispatcher,
         policy: AgentPolicy,
         approvals: Arc<Mutex<ApprovalStore>>,
+        notice_sink: Option<Arc<dyn Fn(String) + Send + Sync>>,
     ) -> Self {
         Self {
             dispatch,
             policy,
             approvals,
+            notice_sink,
         }
     }
 
@@ -83,7 +89,12 @@ impl AuthorizedToolExecutor {
         match decision {
             super::ToolDecision::Allow => match self.dispatch.call_tool(tool_name, args_json).await
             {
-                Ok(output) => success_result(tool_name, output),
+                Ok(output) => {
+                    // Use is the trigger: bash ran the command, so the
+                    // note fires whatever exit code it recorded.
+                    self.fire_hook_notes(tool_name, args_json);
+                    success_result(tool_name, output)
+                }
                 Err(e) => error_result(tool_name, e.to_string()),
             },
             super::ToolDecision::Deny { reason } => {
@@ -94,6 +105,28 @@ impl AuthorizedToolExecutor {
                 let id = q.enqueue(tool_name, args_json, reason.clone());
                 approval_result_json(&id, tool_name, reason.as_deref())
             }
+        }
+    }
+
+    /// Deliver post-call hook notes once a `tool_name` call's command ran.
+    /// Use is the trigger — the note fires whatever exit code came back,
+    /// while calls that never reached dispatch (denied, deferred, or
+    /// infrastructure errors) fire nothing.
+    ///
+    /// Notes ride the notice channel (the same pipeline as background-task
+    /// notices) as independent `[hook] NOTE:` messages — never the tool
+    /// result itself. A full channel drops silently (`try_send` upstream):
+    /// a nudge, not correctness.
+    /// A background spawn (`background:true`, or a timeout conversion) is a
+    /// successful dispatch, not a completed command — its note fires at
+    /// spawn time, before the outcome is knowable. Bounded by the notes'
+    /// self-conditional wording; v1 accepts spawn time as the trigger point.
+    fn fire_hook_notes(&self, tool_name: &str, args_json: &str) {
+        let Some(sink) = &self.notice_sink else {
+            return;
+        };
+        for note in self.policy.post_hook_notes(tool_name, args_json) {
+            sink(format!("[hook] NOTE: {note}"));
         }
     }
 
@@ -154,7 +187,15 @@ impl AuthorizedToolExecutor {
             .call_tool(&action.tool_name, &action.args_json)
             .await
         {
-            Ok(output) => success_result(&action.tool_name, output),
+            Ok(output) => {
+                // The stored action is the real (approved) tool call — hook
+                // notes must observe it here, even though `execute` only saw
+                // the redeem tool's name. Use is the trigger, same as the
+                // direct path: the re-run executed, so its note fires
+                // regardless of the inner exit code.
+                self.fire_hook_notes(&action.tool_name, &action.args_json);
+                success_result(&action.tool_name, output)
+            }
             Err(e) => error_result(&action.tool_name, e.to_string()),
         }
     }
@@ -336,6 +377,7 @@ struct ApprovalCancelResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::Trigger;
     use kallip_shell::BashExecOutput;
 
     /// Build a bash_exec tool-output JSON string (the shape `call_tool` returns),
@@ -463,5 +505,219 @@ mod tests {
         let v: Value = serde_json::from_str(&t).unwrap();
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("30s"));
+    }
+
+    // -- Post-call hook notes (mock shell backend, captured notice sink) --
+
+    use std::sync::Mutex as StdMutex;
+
+    use crate::policy::HookPhase;
+    use crate::policy::HookRule;
+    use kallip_shell::MockShellBackend;
+    use kallip_shell::tools::names;
+    use tokio::sync::Mutex as TokioMutex;
+
+    fn hook_rule(prefix: &[&str], note: &str) -> HookRule {
+        HookRule {
+            tool: names::BASH_EXEC.into(),
+            trigger: Trigger::Prefix(prefix.iter().map(|p| (*p).into()).collect()),
+            phase: HookPhase::Post,
+            note: note.into(),
+        }
+    }
+
+    fn make_hook_executor(
+        rules: Vec<HookRule>,
+        sink: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    ) -> (AuthorizedToolExecutor, Arc<TokioMutex<MockShellBackend>>) {
+        let (tools, backend) = kallip_shell::mock_shell_tool_set();
+        let mut dispatch = ToolDispatcher::new();
+        dispatch.add_tools(tools).unwrap();
+        let policy = AgentPolicy::new(
+            Arc::new(std::sync::RwLock::new(
+                kallip_common::policy::ExecPolicy::default(),
+            )),
+            kallip_common::policy::PolicyPreset::Default,
+            Arc::new(rules),
+        );
+        let executor = AuthorizedToolExecutor::new(
+            dispatch,
+            policy,
+            Arc::new(TokioMutex::new(ApprovalStore::new())),
+            sink,
+        );
+        (executor, backend)
+    }
+
+    async fn queue_success(backend: &Arc<TokioMutex<MockShellBackend>>) {
+        backend.lock().await.push_output("").push_exit_code(Some(0));
+    }
+
+    async fn queue_failure(backend: &Arc<TokioMutex<MockShellBackend>>) {
+        backend.lock().await.push_output("").push_exit_code(Some(1));
+    }
+
+    #[tokio::test]
+    async fn hook_note_fires_on_successful_matching_call() {
+        let notes: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink_notes = notes.clone();
+        let (mut executor, backend) = make_hook_executor(
+            vec![hook_rule(&["echo", "hi"], "echo skill applies")],
+            Some(Arc::new(move |text| sink_notes.lock().unwrap().push(text))),
+        );
+        queue_success(&backend).await;
+        let outcome = executor
+            .execute(names::BASH_EXEC, r#"{"command":"echo hi"}"#)
+            .await;
+        assert!(matches!(outcome, ToolCallOutcome::Success(_)));
+        assert_eq!(
+            notes.lock().unwrap().as_slice(),
+            ["[hook] NOTE: echo skill applies"]
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_note_not_fired_for_echoed_argument() {
+        let notes: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink_notes = notes.clone();
+        let (mut executor, backend) = make_hook_executor(
+            vec![hook_rule(&["git", "commit"], "commit skill applies")],
+            Some(Arc::new(move |text| sink_notes.lock().unwrap().push(text))),
+        );
+        queue_success(&backend).await;
+        executor
+            .execute(names::BASH_EXEC, r#"{"command":"echo \"git commit\""}"#)
+            .await;
+        assert!(notes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hook_note_fires_on_nonzero_exit() {
+        let notes: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink_notes = notes.clone();
+        let (mut executor, backend) = make_hook_executor(
+            vec![hook_rule(&["echo", "hi"], "echo skill applies")],
+            Some(Arc::new(move |text| sink_notes.lock().unwrap().push(text))),
+        );
+        queue_failure(&backend).await;
+        let outcome = executor
+            .execute(names::BASH_EXEC, r#"{"command":"echo hi"}"#)
+            .await;
+        assert!(matches!(outcome, ToolCallOutcome::Failed(_)));
+        // Use is the trigger: the command ran, exit 1 or not.
+        assert_eq!(
+            notes.lock().unwrap().as_slice(),
+            ["[hook] NOTE: echo skill applies"]
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_rules_mean_zero_behavior_change() {
+        let notes: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink_notes = notes.clone();
+        let (mut executor, backend) = make_hook_executor(
+            vec![],
+            Some(Arc::new(move |text| sink_notes.lock().unwrap().push(text))),
+        );
+        queue_success(&backend).await;
+        let outcome = executor
+            .execute(names::BASH_EXEC, r#"{"command":"echo hi"}"#)
+            .await;
+        assert!(matches!(outcome, ToolCallOutcome::Success(_)));
+        assert!(notes.lock().unwrap().is_empty());
+        assert_eq!(backend.lock().await.executed_commands(), ["echo hi"]);
+    }
+
+    #[tokio::test]
+    async fn missing_sink_never_panics() {
+        let (mut executor, backend) =
+            make_hook_executor(vec![hook_rule(&["echo", "hi"], "echo skill applies")], None);
+        queue_success(&backend).await;
+        let outcome = executor
+            .execute(names::BASH_EXEC, r#"{"command":"echo hi"}"#)
+            .await;
+        assert!(matches!(outcome, ToolCallOutcome::Success(_)));
+    }
+
+    /// The flagship path under the default preset: `git commit` is Ask-gated,
+    /// so the note can only fire when the redeemed action executes.
+    #[tokio::test]
+    async fn redeemed_ask_gated_call_fires_hook_note() {
+        let notes: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink_notes = notes.clone();
+        let (mut executor, backend) = make_hook_executor(
+            vec![hook_rule(&["git", "commit"], "commit skill applies")],
+            Some(Arc::new(move |text| sink_notes.lock().unwrap().push(text))),
+        );
+        // 1. Ask-gated call defers with a pending-approval id.
+        let deferred = match executor
+            .execute(names::BASH_EXEC, r#"{"command":"git commit -m x"}"#)
+            .await
+        {
+            ToolCallOutcome::Deferred(envelope) => envelope,
+            other => panic!("expected Deferred, got {other:?}"),
+        };
+        assert!(notes.lock().unwrap().is_empty());
+        let id = serde_json::from_str::<Value>(&deferred).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // 2. Operator-side approval lifecycle, then redeem.
+        {
+            let mut q = executor.approvals.lock().await;
+            q.commit(&id, "test").unwrap();
+            q.approve(&id).unwrap();
+        }
+        queue_success(&backend).await;
+        let outcome = executor
+            .execute("approval_redeem", &format!("{{\"id\":\"{id}\"}}"))
+            .await;
+        assert!(matches!(outcome, ToolCallOutcome::Success(_)));
+        assert_eq!(
+            notes.lock().unwrap().as_slice(),
+            ["[hook] NOTE: commit skill applies"]
+        );
+        assert_eq!(
+            backend.lock().await.executed_commands(),
+            ["git commit -m x"]
+        );
+    }
+
+    /// A redeemed re-run that exits non-zero still ran the command —
+    /// use is the trigger, so the note fires (outcome aside).
+    #[tokio::test]
+    async fn redeemed_failed_call_still_fires_hook_note() {
+        let notes: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink_notes = notes.clone();
+        let (mut executor, backend) = make_hook_executor(
+            vec![hook_rule(&["git", "commit"], "commit skill applies")],
+            Some(Arc::new(move |text| sink_notes.lock().unwrap().push(text))),
+        );
+        let deferred = match executor
+            .execute(names::BASH_EXEC, r#"{"command":"git commit -m x"}"#)
+            .await
+        {
+            ToolCallOutcome::Deferred(envelope) => envelope,
+            other => panic!("expected Deferred, got {other:?}"),
+        };
+        let id = serde_json::from_str::<Value>(&deferred).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        {
+            let mut q = executor.approvals.lock().await;
+            q.commit(&id, "test").unwrap();
+            q.approve(&id).unwrap();
+        }
+        // The re-run exits non-zero (pre-commit hook rejection, say).
+        queue_failure(&backend).await;
+        let outcome = executor
+            .execute("approval_redeem", &format!("{{\"id\":\"{id}\"}}"))
+            .await;
+        assert!(matches!(outcome, ToolCallOutcome::Failed(_)));
+        assert_eq!(
+            notes.lock().unwrap().as_slice(),
+            ["[hook] NOTE: commit skill applies"]
+        );
     }
 }

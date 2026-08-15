@@ -18,6 +18,7 @@ pub enum ToolDecision {
 }
 
 pub use agent::AgentPolicy;
+pub use classifier::hooks::{HookPhase, HookRule, Trigger};
 pub use executor::{AuthorizedToolExecutor, ToolCallOutcome};
 
 pub(crate) use executor::{error_result, skipped_tool_result, timed_out_tool_result};

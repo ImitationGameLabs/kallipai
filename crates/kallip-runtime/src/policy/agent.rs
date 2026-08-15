@@ -10,6 +10,7 @@ use kallip_shell::tools::{BashExecArgs, names};
 
 use super::ToolDecision;
 use super::classifier::Classifier;
+use super::classifier::hooks::{HookRule, hook_matches, scan_command};
 
 /// Policy layer that gates tool calls.
 ///
@@ -19,19 +20,27 @@ use super::classifier::Classifier;
 /// [`ExecPolicy`] overrides. The preset is fixed for the agent's lifetime
 /// (tagma-global, selected once at startup), while the exec-policy is
 /// runtime-mutable.
+/// It also owns the operator-declared hook rules (post-call compliance
+/// notes; v1 observes `bash_exec` only) — fixed for the agent's lifetime.
 #[derive(Clone, Debug)]
 pub struct AgentPolicy {
     exec_policy: Arc<RwLock<ExecPolicy>>,
     classifier: Classifier,
     preset: PolicyPreset,
+    hook_rules: Arc<Vec<HookRule>>,
 }
 
 impl AgentPolicy {
-    pub fn new(exec_policy: Arc<RwLock<ExecPolicy>>, preset: PolicyPreset) -> Self {
+    pub fn new(
+        exec_policy: Arc<RwLock<ExecPolicy>>,
+        preset: PolicyPreset,
+        hook_rules: Arc<Vec<HookRule>>,
+    ) -> Self {
         Self {
             exec_policy,
             classifier: Classifier::DEFAULT,
             preset,
+            hook_rules,
         }
     }
 
@@ -58,15 +67,43 @@ impl AgentPolicy {
             .classifier
             .classify_with(&args.command, &overrides, self.preset))
     }
+
+    /// Post-call hook notes for a `tool_name` invocation whose command ran.
+    ///
+    /// v1 observes `bash_exec` only, and callers invoke this exclusively
+    /// once the command has been dispatched (the design's post phase): use
+    /// is the trigger, so a non-zero exit still notes. Deny/Ask paths —
+    /// the command never ran — never produce notes. Empty rules
+    /// short-circuit before any parsing — no rules configured means zero
+    /// behavior change.
+    pub fn post_hook_notes(&self, tool_name: &str, args_json: &str) -> Vec<String> {
+        if self.hook_rules.is_empty() || tool_name != names::BASH_EXEC {
+            return Vec::new();
+        }
+        let Ok(args) = serde_json::from_str::<BashExecArgs>(args_json) else {
+            return Vec::new();
+        };
+        let (segments, write_redirect) = scan_command(&args.command);
+        hook_matches(&self.hook_rules, &segments, write_redirect)
+            .into_iter()
+            .map(|rule| rule.note.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::Trigger;
+    use crate::policy::classifier::hooks::HookPhase;
     use kallip_common::policy::{ExecDecision, ExecOverride, PolicyPreset};
 
     fn make_policy(preset: PolicyPreset) -> AgentPolicy {
-        AgentPolicy::new(Arc::new(RwLock::new(ExecPolicy::default())), preset)
+        AgentPolicy::new(
+            Arc::new(RwLock::new(ExecPolicy::default())),
+            preset,
+            Arc::new(Vec::new()),
+        )
     }
 
     #[test]
@@ -169,7 +206,7 @@ mod tests {
             .unwrap()
             .overrides
             .insert("cargo".into(), ExecOverride::new(ExecDecision::Allow));
-        let policy = AgentPolicy::new(exec.clone(), PolicyPreset::Default);
+        let policy = AgentPolicy::new(exec.clone(), PolicyPreset::Default, Arc::new(Vec::new()));
         assert!(matches!(
             policy
                 .evaluate(names::BASH_EXEC, r#"{"command":"cargo"}"#)
@@ -189,5 +226,53 @@ mod tests {
             ToolDecision::Deny { reason } => assert_eq!(reason, "no ls here"),
             other => panic!("expected Deny, got {other:?}"),
         }
+    }
+
+    fn git_commit_rule() -> HookRule {
+        HookRule {
+            tool: names::BASH_EXEC.into(),
+            trigger: Trigger::Prefix(vec!["git".into(), "commit".into()]),
+            phase: HookPhase::Post,
+            note: "a commit message was just written".into(),
+        }
+    }
+
+    fn hook_policy(preset: PolicyPreset, rules: Vec<HookRule>) -> AgentPolicy {
+        AgentPolicy::new(
+            Arc::new(RwLock::new(ExecPolicy::default())),
+            preset,
+            Arc::new(rules),
+        )
+    }
+
+    #[test]
+    fn post_hook_notes_fire_on_matching_bash_command() {
+        let policy = hook_policy(PolicyPreset::Auto, vec![git_commit_rule()]);
+        let notes = policy.post_hook_notes(names::BASH_EXEC, r#"{"command":"git commit -m x"}"#);
+        assert_eq!(notes, ["a commit message was just written"]);
+    }
+
+    #[test]
+    fn post_hook_notes_empty_rules_or_non_bash_tool_give_nothing() {
+        // Empty rules: zero behavior change, no parsing at all.
+        let policy = hook_policy(PolicyPreset::Auto, vec![]);
+        assert!(
+            policy
+                .post_hook_notes(names::BASH_EXEC, r#"{"command":"git commit"}"#)
+                .is_empty()
+        );
+        // Non-bash_exec tools are never observed.
+        let policy = hook_policy(PolicyPreset::Auto, vec![git_commit_rule()]);
+        assert!(policy.post_hook_notes(names::BG_READ, "{}").is_empty());
+    }
+
+    #[test]
+    fn post_hook_notes_survive_malformed_args() {
+        let policy = hook_policy(PolicyPreset::Auto, vec![git_commit_rule()]);
+        assert!(
+            policy
+                .post_hook_notes(names::BASH_EXEC, "not json")
+                .is_empty()
+        );
     }
 }

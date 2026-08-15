@@ -88,7 +88,11 @@ pub(super) fn classify_redirects(ctx: &ClassifyCtx<'_>, redirects: &[Node]) -> T
 /// `/dev/stdout`/`/dev/tty` have observable output. Match is on the literal,
 /// quote-stripped target (no canonicalization — the classifier is pre-exec and
 /// symlink/TOCTOU-unsafe; the landlock sandbox canonicalizes at exec time).
-const READ_ONLY_REDIRECT_SINKS: &[&str] = &["/dev/null"];
+/// Shared with the hook matcher so the two never drift on what is a sink.
+pub(super) const READ_ONLY_REDIRECT_SINKS: &[&str] = &["/dev/null"];
+/// Redirect operators that open a file for writing. Shared with the hook
+/// matcher so the two never drift on what counts as a write.
+pub(super) const WRITE_REDIRECT_OPS: &[&str] = &[">", ">>", ">|", "<>", "&>", "&>>"];
 
 /// Whether `s` is an fd number (e.g. `"1"`, `"2"`), the target shape produced by
 /// rable for fd-duplication redirects like `2>&1`.
@@ -118,7 +122,7 @@ pub(super) fn classify_redirect_node(ctx: &ClassifyCtx<'_>, node: &Node) -> Tool
 /// strips the trailing `-` from a move-fd (`2>&1-`), leaving a digit target
 /// under `op = ">&"`.
 fn classify_redirect_op(ctx: &ClassifyCtx<'_>, op: &str, target_lit: Option<&str>) -> ToolDecision {
-    let is_write_op = matches!(op, ">" | ">>" | ">|" | "<>" | "&>" | "&>>");
+    let is_write_op = WRITE_REDIRECT_OPS.contains(&op);
     let is_dup_op = matches!(op, ">&" | "<&");
     match (op, target_lit) {
         // fd close: no file opened.

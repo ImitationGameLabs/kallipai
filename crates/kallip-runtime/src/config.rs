@@ -3,9 +3,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::env_util::{DEFAULT_CONTEXT_WINDOW_TOKENS, parse_env, parse_env_list};
+use crate::policy::classifier::hooks::WRITE_REDIRECT_KEY;
+use crate::policy::{HookPhase, HookRule, Trigger};
 use crate::retry::RetryPolicy;
 use kallip_common::AgentId;
 use kallip_common::policy::PolicyPreset;
+use kallip_shell::tools::names;
 
 const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "# Posture\n\n",
@@ -61,6 +64,224 @@ pub fn policy_preset_from_env() -> PolicyPreset {
     raw.parse::<PolicyPreset>().unwrap_or_else(|e| {
         panic!("KALLIP_POLICY_PRESET: {e}");
     })
+}
+
+/// Operator-declared exec-hook overrides from `exec_hooks.toml` (tagma-wide),
+/// layered over the builtin preset rules.
+///
+/// v1 observes `bash_exec` commands only (the exec domain) — hence *exec*
+/// hooks, the sibling of `exec_policy.toml`. The operator surface mirrors
+/// it: a builtin rule set ships with the tagma (no file needed — the
+/// flagship `git commit` note is on out of the box), and the file carries
+/// only overrides:
+///
+/// ```toml
+/// [overrides]
+/// "git commit" = "my own wording"                            # replaces the builtin note
+/// "cargo publish" = { note = "publishing is irreversible" }  # table form: room for v1.1 keys
+/// "@write-redirect" = "off"                                       # structural rule: any write redirect
+/// ```
+///
+/// A prefix key is whitespace-split into argv tokens (lowercased; matched
+/// per simple-command segment by the classifier's parse). `@`-prefixed keys
+/// are reserved structural pseudo-prefixes (`@write-redirect` fires on any
+/// write redirection that is not a pure sink); any other `@`-key is
+/// rejected at startup, so a reserved key never passes silently.
+/// missing file means builtin rules only. A present-but-malformed file —
+/// bad TOML, a typo'd top-level table, a value that is neither a note
+/// string, `off`, nor a `{ note }` table, or an unknown key in the table
+/// form — panics at startup (fail-closed, matching
+/// [`policy_preset_from_env`]): the operator asked for hooks and would
+/// silently lose them otherwise. An empty/whitespace prefix key or an empty
+/// note is dropped with a warning — the prefix would match every call, the
+/// note would emit nothing. Distinct raw keys that canonicalize to the same
+/// prefix warn; the byte-order-last wins. Read once at tagma startup; edits
+/// take effect on the next tagma start.
+pub fn load_exec_hook_rules(path: &std::path::Path) -> Vec<HookRule> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => panic!("{}: cannot read exec hook rules: {e}", path.display()),
+    };
+    let overrides = parse_exec_hook_overrides(&raw).unwrap_or_else(|e| {
+        panic!("{}: invalid exec hook rules TOML: {e}", path.display())
+    });
+    merge_exec_hook_rules(builtin_exec_hook_rules(), overrides)
+}
+
+/// The builtin preset: rules on out of the box, no file required. Kept
+/// deliberately tiny — every entry fires for every install — and phrased
+/// self-conditionally, naming no specific skill (paths shift; the note only
+/// asks whether the relevant ones were applied). aifed is the one exception:
+/// a fixed, special tool stable enough to name outright.
+fn builtin_exec_hook_rules() -> Vec<HookRule> {
+    vec![
+        HookRule {
+            tool: names::BASH_EXEC.into(),
+            trigger: Trigger::Prefix(vec!["git".into(), "commit".into()]),
+            phase: HookPhase::Post,
+            note: "a git commit command just ran; were the relevant skills applied to the task, the change, and the commit message?".into(),
+        },
+        HookRule {
+            tool: names::BASH_EXEC.into(),
+            trigger: Trigger::WriteRedirect,
+            phase: HookPhase::Post,
+            note: "the system detected a possible text edit via shell redirection; if this edited an existing file, prefer editing it with aifed, and make sure the aifed skill is loaded before use. creating a new file via redirection is fine.".into(),
+        },
+    ]
+}
+
+/// Layer `overrides` (key = canonical prefix or the `@write-redirect`
+/// pseudo-key, `None` note = `off`) over the builtin set: a matching key
+/// replaces the builtin rule, a new key adds one, and `off` removes it
+/// (builtin or not).
+fn merge_exec_hook_rules(
+    builtin: Vec<HookRule>,
+    overrides: std::collections::BTreeMap<String, HookSpec>,
+) -> Vec<HookRule> {
+    let mut merged: std::collections::BTreeMap<String, HookSpec> = builtin
+        .into_iter()
+        .map(|r| (r.override_key(), HookSpec { note: Some(r.note) }))
+        .collect();
+    merged.extend(overrides);
+    merged
+        .into_iter()
+        .filter_map(|(key, spec)| {
+            let note = spec.note?; // `off` → removed
+            let trigger = if key == WRITE_REDIRECT_KEY {
+                Trigger::WriteRedirect
+            } else {
+                Trigger::Prefix(key.split(' ').map(str::to_owned).collect())
+            };
+            Some(HookRule {
+                tool: names::BASH_EXEC.into(),
+                trigger,
+                phase: HookPhase::Post,
+                note,
+            })
+        })
+        .collect()
+}
+
+/// Parse the `[overrides]` table of `exec_hooks.toml` into canonical keys
+/// (lowercased, whitespace-split, rejoined) — parsing and merging stay
+/// separately testable.
+fn parse_exec_hook_overrides(
+    raw: &str,
+) -> Result<std::collections::BTreeMap<String, HookSpec>, toml::de::Error> {
+    let file: ExecHooksFile = toml::from_str(raw)?;
+    // Raw keys arrive in BTreeMap byte order (toml sorts at deserialize), so a
+    // canonical-key collision resolves last-in-byte-order — warn rather than
+    // decide silently.
+    let mut canonical_overrides = std::collections::BTreeMap::new();
+    for (key, spec) in file.overrides {
+        let canonical = key
+            .split_whitespace()
+            .map(|tok| tok.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if canonical.is_empty() {
+            tracing::warn!(
+                "exec hook override dropped: empty command prefix would match every call"
+            );
+            continue;
+        }
+        // `@`-prefixed keys are reserved structural pseudo-prefixes; a
+        // typo'd one would silently become a never-matching prefix rule.
+        if canonical.starts_with('@') && canonical != WRITE_REDIRECT_KEY {
+            return Err(<toml::de::Error as serde::de::Error>::custom(format!(
+                "unknown pseudo-prefix key \"{canonical}\" (only \"{WRITE_REDIRECT_KEY}\" is reserved)"
+            )));
+        }
+        if spec.note.as_deref() == Some("") {
+            tracing::warn!("exec hook override dropped: \"{key}\" carries an empty note");
+            continue;
+        }
+        if canonical_overrides
+            .insert(canonical.clone(), spec)
+            .is_some()
+        {
+            tracing::warn!(
+                "exec hook overrides collide on canonical prefix \"{canonical}\"; the byte-order-last key wins"
+            );
+        }
+    }
+    Ok(canonical_overrides)
+}
+
+/// The exec_hooks.toml document: one [overrides] table, nothing else — a
+/// typo'd top-level table ([hooks], [override]) fails the parse rather
+/// than being ignored.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecHooksFile {
+    #[serde(default)]
+    overrides: std::collections::BTreeMap<String, HookSpec>,
+}
+
+/// One override's value: the note text (bare string), `off` (remove the
+/// rule), or a `{ note }` table (room for v1.1 keys such as
+/// unless_skill_loaded) — ExecOverride's dual form plus a disable
+/// spelling. A table note of literal "off" is rejected: disabling is the
+/// bare form's job, and ambiguity there would be fail-open.
+#[derive(Debug)]
+struct HookSpec {
+    note: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for HookSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct HookSpecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for HookSpecVisitor {
+            type Value = HookSpec;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a note string, `off`, or a table { note }")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<HookSpec, E>
+            where
+                E: serde::de::Error,
+            {
+                // Bare `off` disables the rule (builtin included); anything
+                // else is the note text.
+                let note = (v != "off").then(|| v.to_owned());
+                Ok(HookSpec { note })
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<HookSpec, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut note: Option<String> = None;
+                while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+                    match key.as_ref() {
+                        "note" => {
+                            // Typed: a non-string note names its actual type in
+                            // the error (mirrors ExecOverride's visitor).
+                            let text = map.next_value::<std::borrow::Cow<'de, str>>()?;
+                            if text == "off" {
+                                return Err(serde::de::Error::invalid_value(
+                                    serde::de::Unexpected::Str(text.as_ref()),
+                                    &"a note other than \"off\" (use the bare `off` to disable)",
+                                ));
+                            }
+                            note = Some(text.into_owned())
+                        }
+                        other => return Err(serde::de::Error::unknown_field(other, &["note"])),
+                    }
+                }
+                note.map(|note| HookSpec { note: Some(note) })
+                    .ok_or_else(|| serde::de::Error::missing_field("note"))
+            }
+        }
+
+        deserializer.deserialize_any(HookSpecVisitor)
+    }
 }
 
 /// Resolve the root agent's permission class from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`.
@@ -620,6 +841,11 @@ mod tests {
     use super::*;
     use crate::tools::context::ContextUnpinTool;
     use kallip_common::policy::PolicyPreset;
+
+    fn prefix(tokens: &[&str]) -> Trigger {
+        Trigger::Prefix(tokens.iter().map(|t| (*t).to_owned()).collect())
+    }
+
     use kallip_shell::tools::names;
 
     #[test]
@@ -911,5 +1137,111 @@ mod tests {
         temp_env::with_vars([("KALLIP_POLICY_PRESET", Some("ask-all"))], || {
             let _ = policy_preset_from_env();
         });
+    }
+
+    #[test]
+    fn exec_hooks_missing_file_yields_builtin_preset() {
+        let dir = std::env::temp_dir().join(format!("exec-hooks-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rules = load_exec_hook_rules(&dir.join("exec_hooks.toml"));
+        assert_eq!(rules.len(), 2);
+        // BTreeMap canonical-key order: '@' sorts before letters.
+        assert_eq!(rules[0].trigger, Trigger::WriteRedirect);
+        assert_eq!(rules[1].trigger, prefix(&["git", "commit"]));
+        assert_eq!(
+            rules[1].note,
+            "a git commit command just ran; were the relevant skills applied to the task, the change, and the commit message?"
+        );
+    }
+
+    #[test]
+    fn exec_hooks_parse_both_value_forms_and_off() {
+        let raw = "[overrides]\n\"git commit\" = \"commit skill applies\"\n\"GIT PUSH\" = { note = \"confirm the remote\" }\n\"x\" = \"off\"\n";
+        let overrides = parse_exec_hook_overrides(raw).unwrap();
+        // Canonical (lowercased) keys sort: "git commit" < "git push" < "x".
+        let specs: Vec<_> = overrides.values().collect();
+        assert_eq!(specs[0].note.as_deref(), Some("commit skill applies"));
+        assert_eq!(specs[1].note.as_deref(), Some("confirm the remote"));
+        assert_eq!(specs[2].note, None); // bare off → disable
+        // Keys canonicalized: lowercased, whitespace-split, rejoined.
+        let keys: Vec<_> = overrides.keys().collect();
+        assert_eq!(keys, ["git commit", "git push", "x"]);
+    }
+
+    #[test]
+    fn exec_hooks_merge_replace_disable_add() {
+        let raw = "[overrides]\n\"GIT   commit\" = \"my wording\"\n\"new cmd\" = \"added\"\n";
+        let overrides = parse_exec_hook_overrides(raw).unwrap();
+        // Same builtin key (case/spacing-insensitive) → replaced; new → added.
+        let rules = merge_exec_hook_rules(builtin_exec_hook_rules(), overrides);
+        assert_eq!(rules.len(), 3);
+        // BTreeMap key order: "@write-redirect" < "git commit" < "new cmd".
+        assert_eq!(rules[0].trigger, Trigger::WriteRedirect);
+        assert_eq!(rules[1].trigger, prefix(&["git", "commit"]));
+        assert_eq!(rules[1].note, "my wording");
+        assert_eq!(rules[2].trigger, prefix(&["new", "cmd"]));
+        // `off` on one builtin key removes only that rule.
+        let overrides =
+            parse_exec_hook_overrides("[overrides]\n\"git commit\" = \"off\"\n").unwrap();
+        let rules = merge_exec_hook_rules(builtin_exec_hook_rules(), overrides);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].trigger, Trigger::WriteRedirect);
+    }
+
+    #[test]
+    fn exec_hooks_bad_toml_or_wrong_shapes_fail_closed() {
+        // Bad TOML.
+        assert!(parse_exec_hook_overrides("[overrides").is_err());
+        // Typo'd top-level table — including the v1-era [hooks] name.
+        assert!(parse_exec_hook_overrides("[hook]\n\"git\" = \"n\"").is_err());
+        assert!(parse_exec_hook_overrides("[hooks]\n\"git\" = \"n\"").is_err());
+        // Unknown key inside the table form.
+        assert!(parse_exec_hook_overrides("[overrides]\n\"git\" = { note = \"n\", phse = \"pre\" }").is_err());
+        // Table form without note.
+        assert!(parse_exec_hook_overrides("[overrides]\n\"git\" = {}").is_err());
+        // A table note of literal "off" — disabling is the bare form's job.
+        assert!(parse_exec_hook_overrides("[overrides]\n\"git\" = { note = \"off\" }").is_err());
+        // Value of an unsupported type.
+        assert!(parse_exec_hook_overrides("[overrides]\n\"git\" = 3").is_err());
+        // A typo'd reserved pseudo-prefix key fails closed.
+        assert!(parse_exec_hook_overrides("[overrides]\n\"@write-redirrect\" = \"n\"").is_err());
+    }
+
+    #[test]
+    fn exec_hooks_empty_prefix_dropped_others_kept() {
+        let raw = "[overrides]\n\"\" = \"would match everything\"\n\"git commit\" = \"keep me\"\n";
+        let overrides = parse_exec_hook_overrides(raw).unwrap();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides["git commit"].note.as_deref(), Some("keep me"));
+    }
+
+    #[test]
+    fn exec_hooks_colliding_keys_warn_last_in_byte_order_wins() {
+        // Two raw keys, one canonical prefix — the byte-order-last raw key wins.
+        let raw = "[overrides]\n\"git commit\" = \"second\"\n\"GIT   commit\" = \"first\"\n";
+        let overrides = parse_exec_hook_overrides(raw).unwrap();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides["git commit"].note.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn exec_hooks_empty_note_dropped() {
+        // Both the bare and table spellings of an empty note are dropped.
+        let raw = "[overrides]\n\"a\" = \"\"\n\"b\" = { note = \"\" }\n";
+        assert!(parse_exec_hook_overrides(raw).unwrap().is_empty());
+    }
+
+    #[test]
+    fn exec_hooks_non_string_table_note_names_the_type() {
+        let err = parse_exec_hook_overrides("[overrides]\n\"git\" = { note = 3 }").unwrap_err();
+        assert!(err.to_string().contains("invalid type"), "{err}");
+        assert!(err.to_string().contains("3"), "{err}");
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot read exec hook rules")]
+    fn exec_hooks_unreadable_path_panics() {
+        // A directory read is a non-NotFound IO error → fail closed at startup.
+        load_exec_hook_rules(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
     }
 }

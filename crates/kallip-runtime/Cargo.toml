@@ -40,6 +40,7 @@ seccomp = ["landlock", "kallip-shell/seccomp"]
 
 [dev-dependencies]
 temp-env = { workspace = true }
+kallip-shell = { workspace = true, features = ["testutils"] }
 tempfile = { workspace = true }
 wiremock = { workspace = true }
 serial_test = { workspace = true }

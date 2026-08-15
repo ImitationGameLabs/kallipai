@@ -127,6 +127,16 @@ async fn main() -> Result<()> {
         kallip_runtime::config::policy_preset_from_env(),
     ));
 
+    // Load exec-hook rules (builtin preset + exec_hooks.toml overrides,
+    // tagma-wide) here, once: a present-but-malformed file panics
+    // (fail-closed — the operator asked for hooks and would otherwise
+    // silently lose them), and every spawned agent clones this same set.
+    // Rule edits take effect on the next start.
+    state
+        .hook_rules
+        .set(Arc::new(kallip_runtime::config::load_exec_hook_rules(&exec_hooks_toml_path()?)))
+        .ok();
+
     // Open the work-schedule store and install it on AppState.
     let ws_store = work_schedule::WorkScheduleStore::open(&work_schedule_path()?)
         .await
@@ -351,6 +361,11 @@ fn work_schedule_path() -> Result<std::path::PathBuf> {
 /// The inbox store path: `<data_root>/inboxes.sqlite`.
 fn inbox_path() -> Result<std::path::PathBuf> {
     data_root().map(|d| d.join("inboxes.sqlite"))
+}
+
+/// The tagma-wide exec-hook overrides file: `<data_root>/exec_hooks.toml`.
+fn exec_hooks_toml_path() -> Result<std::path::PathBuf> {
+    data_root().map(|d| d.join("exec_hooks.toml"))
 }
 
 /// Install the [`DirectServing`](crate::direct::DirectServing) handle. Always
