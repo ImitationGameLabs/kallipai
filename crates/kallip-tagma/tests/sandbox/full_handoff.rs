@@ -35,7 +35,7 @@ async fn scenario5_full_handoff() {
         Reply::Tool(format!("echo root > {}/own.txt", ws.display())),
         // 1: spawn a full-handoff child on the SAME workspace (required: identity).
         Reply::Tool(format!(
-            "kallip subagent spawn --workspace-root {} --full-handoff --role worker --prompt noop > {}",
+            "kallip subagent spawn --workspace-root {} --full-handoff --role worker > {}",
             ws.display(),
             child_id_file.display()
         )),
@@ -43,7 +43,7 @@ async fn scenario5_full_handoff() {
         Reply::Tool(format!("echo blocked > {}/after.txt", ws.display())),
         // 3: a second subagent must be refused (full-handoff exclusivity).
         Reply::Tool(format!(
-            "kallip subagent spawn --workspace-root {} --full-handoff --role other --prompt noop",
+            "kallip subagent spawn --workspace-root {} --full-handoff --role other",
             ws.display()
         )),
         // 4: remove the child -- the lock transfers back to the supervisor.

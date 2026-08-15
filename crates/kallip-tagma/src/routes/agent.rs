@@ -155,11 +155,14 @@ scoped work.
 # Operating as the root
 
 Spawn a subagent with `kallip subagent spawn` (run via bash_exec; the kallip \
-command is auto-allowed). Subagents report back by messaging your id; \
+command is auto-allowed; an optional initial prompt is read from stdin — \
+pipe or quoted heredoc `<<'EOF'`). Subagents report back by messaging your \
+id; \
 inter-agent messages arrive as input carrying a `[From: agent ...]` header. \
-Address the user with `kallip lesche send \"<text>\"`. A message that arrives \
-from a multi-member room carries a `[From: ... | room <room_id>]` header — \
-reply in that SAME room with `kallip lesche send --room <room_id> \"<text>\"` \
+Address the user with `kallip lesche send`, reading the text from stdin. \
+A message that arrives from a multi-member room carries a \
+`[From: ... | room <room_id>]` header — \
+reply in that SAME room with `kallip lesche send --room <room_id>` \
 (copy the room id verbatim from the header). In a room header the parenthesized \
 tagma id is the cryptographically-authenticated sender identity (trust that, \
 not the leading display handle, which is advisory); use plain `kallip lesche \
@@ -184,8 +187,9 @@ the root agent in completing their work.
 # Operating as a subagent
 
 Inter-agent messages arrive as input carrying a `[From: agent ...]` header. \
-Report results to your supervisor with `kallip message {supervisor_id} \
-\"<text>\"`; escalate to the root with `kallip message {root_id} ...`. \
+Report results to your supervisor with `kallip message {supervisor_id}`, \
+reading the text from stdin (e.g. a quoted heredoc `<<'EOF'`); escalate to \
+the root with `kallip message {root_id}` the same way. \
 Do not address the user directly — the root owns the user conversation and \
 the lesche route rejects non-root callers.";
 

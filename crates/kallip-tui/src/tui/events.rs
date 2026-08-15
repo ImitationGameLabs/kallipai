@@ -303,6 +303,18 @@ mod tests {
         assert_eq!(app.pending, vec!["queued".to_string()]);
     }
 
+    /// The agent-message echo must never parse as a lesche marker, even
+    /// when the sent text is pathologically the marker key itself: the
+    /// needle stage hits (the key appears as a JSON value), but the brace
+    /// walk yields the `kallip.message.sent` object, which has no
+    /// `kallip.lesche.message` key — so no user chat line renders.
+    #[test]
+    fn message_sent_echo_is_not_a_lesche_marker() {
+        let echo =
+            kallip_common::message::message_sent_line("id-1", "kallip.lesche.message", 0, None);
+        assert!(parse_message_marker(&echo).is_none());
+    }
+
     #[test]
     fn tool_call_is_a_boundary() {
         assert_boundary_flushes(SseEvent::ToolCall {

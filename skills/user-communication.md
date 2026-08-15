@@ -22,7 +22,8 @@ reference covers the complete flag list.
 
 ## When NOT to use
 
-- Messaging a subagent or peer — use `kallip message <ID> <TEXT>` instead
+- Messaging a subagent or peer — use `kallip message <ID>` instead (text via
+  stdin)
 - Replying in a multi-member room — use `kallip lesche send --room <ROOM>`
   (copy the room id from the `[From: ... | room <id>]` header)
 - Internal reasoning that the operator does not need to see
@@ -30,20 +31,23 @@ reference covers the complete flag list.
 ## Sending a message
 
 ```bash
-kallip lesche send "<message>"
+kallip lesche send <<'MSG'
+Your message here.
+MSG
 ```
 
-For multiline messages, pipe via stdin to avoid shell escaping issues:
+The text is read from the full stdin — the only input path; there is no
+text argument. A pipe works too:
 
 ```bash
-cat <<'MSG' | kallip lesche send
+cat <<'MSG' | kallip lesche send   # or: echo 'short text' | kallip lesche send
 Your multiline message here.
 MSG
 ```
 
-Use the heredoc form whenever the message contains backticks, quotes,
-or special characters, because inline text with those characters gets
-mangled by the shell.
+Use the quoted-heredoc form (`<<'MSG'`, delimiter quoted) whenever the
+message contains backticks, quotes, or `$`, because the shell performs no
+expansion inside it — any text arrives verbatim.
 
 ## Semantics to remember
 
@@ -66,6 +70,6 @@ mangled by the shell.
 - **Answering without sending** — writing a response but not calling
   `kallip lesche send`, because the operator never receives plain text;
   the harness re-prompts you instead of delivering the message.
-- **Inline text with special characters** — backticks and quotes in
-  inline `lesche send "..."` get eaten by the shell, because the shell
-  interprets them before the command runs; use the heredoc form.
+- **Passing text as an argument** — there is no text argument; a string
+  after the command is a usage error (fail-fast). Always pipe or heredoc
+  the text in.

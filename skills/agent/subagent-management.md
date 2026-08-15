@@ -35,8 +35,11 @@ Key rules:
 ## Spawning Subagents
 
 `kallip subagent spawn` prints the new agent ID on stdout — **capture it
-immediately** (e.g. `CHILD=$(kallip subagent spawn ...)`) so you can message
-and clean up the agent.
+immediately** (e.g. `CHILD=$(kallip subagent spawn ... < /dev/null)`) so you
+can message and clean up the agent. The optional initial prompt is read
+from stdin — pipe or quoted heredoc (`<<'EOF'`) — and empty stdin means
+no prompt; redirect the spawn's stdin explicitly (`< /dev/null` inside the
+parens) so it cannot swallow a piped script while capturing the id.
 
 ### Workspace constraints
 

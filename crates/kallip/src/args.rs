@@ -56,7 +56,9 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum AgentCommand {
     /// Send a peer message to an agent (fire-and-forget; processed
-    /// asynchronously).
+    /// asynchronously). The message text is read from the full stdin
+    /// (multiline); prefer a quoted heredoc `<<'EOF'` so shell expansion
+    /// cannot corrupt it. Prints a one-line JSON echo on success.
     Message(MessageArgs),
     /// Show an agent's context token usage and recent retry history.
     Status(IdArgs),
@@ -80,14 +82,11 @@ pub enum LescheCommand {
     Read(ReadRoomArgs),
 }
 
-/// Text payload for `kallip lesche send`. The text is a positional argument;
-/// when omitted, the entire stdin is read (multiline — pipe, heredoc, or
-/// `< file` all work).
+/// Args for `kallip lesche send`. The text is read from the full stdin
+/// (multiline — pipe, heredoc, or `< file`); prefer a quoted heredoc
+/// `<<'EOF'` so shell expansion cannot corrupt it.
 #[derive(Args)]
 pub struct SendArgs {
-    /// The message text. If omitted, reads the full text from stdin (multiline).
-    #[arg(allow_hyphen_values = true)]
-    pub text: Option<String>,
     /// The room id to send into. Omit for the bilateral 1:1
     /// conversation; pass the room id (copied verbatim from the inbound
     /// `[From: ... | room <id>]` header) to reply in a multi-member room.
@@ -169,6 +168,10 @@ pub struct InboxClearArgs {
     pub all: bool,
 }
 
+/// Args for `kallip subagent spawn`. The optional initial prompt is read from
+/// the full stdin (multiline — pipe, heredoc, or `< file`); empty stdin (or
+/// whitespace-only) means no initial prompt. Prefer a quoted heredoc
+/// `<<'EOF'` so shell expansion cannot corrupt it.
 #[derive(Args)]
 pub struct SpawnArgs {
     /// Working directory for the agent (required).
@@ -177,9 +180,6 @@ pub struct SpawnArgs {
     /// Activate a skill by name (repeatable).
     #[arg(long = "skill", value_delimiter = ',')]
     pub skills: Vec<String>,
-    /// Optional initial prompt for the agent.
-    #[arg(long)]
-    pub prompt: Option<String>,
     /// Short display label (e.g. "researcher"). Required by the tagma when
     /// spawning a subordinate (the only spawn path: `subagent spawn`).
     #[arg(long)]
@@ -220,12 +220,13 @@ pub struct ActivityArgs {
     pub activity: String,
 }
 
+/// Args for `kallip message`. The message text is read from the full stdin
+/// (multiline — pipe, heredoc, or `< file`); prefer a quoted heredoc
+/// `<<'EOF'` so shell expansion cannot corrupt it.
 #[derive(Args)]
 pub struct MessageArgs {
     /// Agent ID.
     pub id: AgentId,
-    /// Message to send.
-    pub message: String,
 }
 
 #[derive(Args)]

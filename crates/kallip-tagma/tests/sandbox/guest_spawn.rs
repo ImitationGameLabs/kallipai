@@ -28,14 +28,14 @@ async fn scenario4_guest_spawn_downgrade() {
             // for canonicalize). Success prints the child agent id.
             "mkdir -p {0}/reviewer && \
              kallip subagent spawn --permission-class guest \
-             --workspace-root {0}/reviewer --role reviewer --prompt noop",
+             --workspace-root {0}/reviewer --role reviewer",
             ws.display()
         )),
         Reply::Tool(
             // 1: a bad spelling must be rejected by the CLI value_parser (exit != 0),
             // never reaching the tagma. Do not create the workspace first so a
             // tagma-side path can't accidentally succeed.
-            "kallip subagent spawn --permission-class admin --role x --prompt noop".to_string(),
+            "kallip subagent spawn --permission-class admin --role x".to_string(),
         ),
         Reply::End("done"),
     ];

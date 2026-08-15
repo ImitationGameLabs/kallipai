@@ -13,8 +13,7 @@ use kallip_common::tokens::parse_token_amount;
 
 use args::{
     AgentCommand, ApprovalCommand, BudgetCommand, Cli, Commands, DirlockCommand, InboxCommand,
-    LescheCommand,
-    PolicyCommand, SkillCommand, SubagentCommand,
+    LescheCommand, PolicyCommand, SkillCommand, SubagentCommand,
 };
 
 /// Read agent ID from KALLIP_ID env var.
@@ -22,6 +21,25 @@ fn agent_id_from_env() -> anyhow::Result<AgentId> {
     std::env::var("KALLIP_ID")
         .map_err(|_| anyhow::anyhow!("KALLIP_ID env var not set"))
         .and_then(|s| s.parse::<AgentId>().map_err(Into::into))
+}
+/// Read the full stdin as a text payload (multiline — pipe, heredoc, or
+/// `< file`). Stdin is the only text entry point for `message`,
+/// `lesche send`, and `subagent spawn`'s initial prompt: shell argument
+/// forms are removed so shell expansion (backticks/`$` inside double
+/// quotes) can never corrupt a message; prefer a quoted heredoc
+/// `<<'EOF'`.
+fn read_text_stdin() -> Result<String> {
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+    Ok(buf)
+}
+
+/// Map the stdin text to the optional initial spawn prompt: empty or
+/// whitespace-only stdin means no prompt, matching the optional prompt
+/// semantics of the wire request. Non-blank text is passed through
+/// verbatim (not trimmed).
+fn prompt_from_stdin_text(text: String) -> Option<String> {
+    (!text.trim().is_empty()).then_some(text)
 }
 
 #[tokio::main]
@@ -41,7 +59,19 @@ async fn main() -> Result<()> {
     match command {
         Commands::Agent(cmd) => match cmd {
             AgentCommand::Message(args) => {
-                client.post_message(&args.id, &args.message).await?;
+                // Echo prints only on success: a failed send must not look
+                // delivered.
+                let text = read_text_stdin()?;
+                let resp = client.post_message(&args.id, &text).await?;
+                println!(
+                    "{}",
+                    kallip_common::message::message_sent_line(
+                        args.id.as_ref(),
+                        &text,
+                        resp.queue_depth,
+                        resp.warning.as_deref()
+                    )
+                );
             }
             AgentCommand::Status(args) => {
                 let status = client.agent_status(&args.id).await?;
@@ -82,21 +112,13 @@ async fn main() -> Result<()> {
         },
         Commands::Lesche(cmd) => match cmd {
             LescheCommand::Send(args) => {
-                // Self-only: send as the calling agent (KALLIP_ID). The text is
-                // the positional arg, or stdin (multiline) when omitted. Deliver
-                // via the tagma's relay first, then print the stable marker only
-                // on success — so a failed POST (relay down, burst cap, etc.)
-                // does not let local clients render a message that was never
-                // delivered.
+                // Self-only: send as the calling agent (KALLIP_ID). The text
+                // is the full stdin (multiline). Deliver via the tagma's relay
+                // first, then print the stable marker only on success — so a
+                // failed POST (relay down, burst cap, etc.) does not let local
+                // clients render a message that was never delivered.
                 let id = agent_id_from_env()?;
-                let text = match args.text {
-                    Some(t) => t,
-                    None => {
-                        let mut buf = String::new();
-                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-                        buf
-                    }
-                };
+                let text = read_text_stdin()?;
                 client
                     .post_message_delivery(&id, &text, args.room.as_deref())
                     .await?;
@@ -129,11 +151,15 @@ async fn main() -> Result<()> {
             let current = agent_id_from_env()?;
             match cmd {
                 SubagentCommand::Spawn(args) => {
+                    // Initial prompt (optional) comes from stdin: empty or whitespace-only
+                    // stdin means none (`prompt_from_stdin_text`); the text is passed
+                    // through verbatim.
+                    let prompt = prompt_from_stdin_text(read_text_stdin()?);
                     let id = client
                         .spawn(kallip_common::protocol::CreateAgentRequest {
                             workspace_root: args.workspace_root,
                             skills: args.skills,
-                            prompt: args.prompt,
+                            prompt,
                             created_by: Some(current),
                             role: args.role.unwrap_or_default(),
                             description: args.description.unwrap_or_default(),
@@ -331,11 +357,7 @@ async fn main() -> Result<()> {
             InboxCommand::List(args) => {
                 let id = resolve_id(args.id)?;
                 let resp = client
-                    .inbox_list(
-                        &id,
-                        args.status.as_deref(),
-                        args.limit,
-                    )
+                    .inbox_list(&id, args.status.as_deref(), args.limit)
                     .await?;
                 if resp.is_empty() {
                     println!("Inbox is empty.");
@@ -474,4 +496,23 @@ fn annotate_remove_error(result: anyhow::Result<()>, id: &AgentId) -> anyhow::Re
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prompt_from_stdin_text;
+
+    #[test]
+    fn empty_or_whitespace_stdin_means_no_prompt() {
+        assert_eq!(prompt_from_stdin_text(String::new()), None);
+        assert_eq!(prompt_from_stdin_text(" \n\t".into()), None);
+    }
+
+    #[test]
+    fn nonblank_stdin_is_the_prompt_verbatim() {
+        assert_eq!(
+            prompt_from_stdin_text(" explore \n".into()).as_deref(),
+            Some(" explore \n")
+        );
+    }
 }

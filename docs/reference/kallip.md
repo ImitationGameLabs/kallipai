@@ -11,15 +11,41 @@ All subcommands use `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_TAGMA_URL`
 ### `message` — Send a message to an agent
 
 ```bash
-kallip message <ID> <MESSAGE>
+kallip message <ID>
 ```
 
-Sends a message to the agent's input queue. The tagma accepts the message
-immediately (202 Accepted) and processes it asynchronously. Poll `status` to
-observe results.
+Sends a message to the agent's input queue. The message text is read from
+the full stdin (multiline — pipe, heredoc, or `< file` all work); there is
+no text argument, so shell expansion can never corrupt the message. The
+tagma accepts the message immediately (202 Accepted) and processes it
+asynchronously. Poll `status` to observe results. On success the CLI
+prints a one-line JSON echo of the accepted text (and nothing on failure —
+a failed send never looks delivered):
+
+```json
+{"kallip.message.sent":{"to":"<id>","text":"<message>","queue_depth":0}}
+```
+
+`queue_depth` counts messages queued ahead of this one (0 = immediate
+processing); the tagma may also attach a `"warning"` note (e.g. when the
+message was buffered for an off-duty agent). The echo key is
+distinct from the lesche marker so local clients never render an
+agent-to-agent send as a user chat line.
+
+Prefer a quoted heredoc (`<<'EOF'`, delimiter quoted) so the shell performs
+no expansion at all: backticks and `$` stay literal, and multiline text
+needs no escaping. A pipe works too (`echo 'text' | kallip message <ID>`)
+for programmatically produced text. An empty stdin sends an empty message
+— the success echo makes that immediately visible.
 
 ```bash
-$ kallip message "$AGENT_ID" "List all TODO comments in src/"
+# Backticks and $ stay literal inside a quoted heredoc.
+$ kallip message "$AGENT_ID" <<'EOF'
+Run `cargo test` and report $CARGO_TARGET_DIR.
+EOF
+
+# Or pipe it:
+$ echo 'List all TODO comments in src/' | kallip message "$AGENT_ID"
 ```
 
 ### `status` — Show agent context usage
@@ -68,9 +94,12 @@ Scoping notes (server-enforced):
 ```bash
 $ kallip subagent list
 researcher  idle  ws=/projects/frontend
-$ kallip subagent spawn --role reviewer --description "reviews PRs"
+$ kallip subagent spawn --role reviewer --description "reviews PRs" < /dev/null
 b4c2d3e5-...
 ```
+The spawn reads an optional initial prompt from stdin: `< /dev/null` above
+means "no prompt" and keeps the spawn from swallowing a surrounding script's
+stdin when the id is captured. Pipe or heredoc the prompt instead.
 
 ### `approval` — Manage approvals
 
@@ -134,8 +163,13 @@ $ kallip approval deny "ap_a1b2c3d4..." "too risky"
 
 ```bash
 # Spawn a subordinate, then send it work and poll its progress
-CHILD=$(kallip subagent spawn --role researcher --prompt "explore the codebase")
-kallip message "$CHILD" "Summarize the project structure"
+CHILD=$(kallip subagent spawn --role researcher <<'EOF'
+explore the codebase
+EOF
+)
+kallip message "$CHILD" <<'EOF'
+Summarize the project structure
+EOF
 kallip status "$CHILD"
 ```
 
@@ -148,12 +182,16 @@ agents across multiple projects simultaneously.
 
 ```bash
 # Spawn two subagents for different scopes
-FRONTEND=$(kallip subagent spawn --role reviewer --workspace-root /projects/frontend)
-BACKEND=$(kallip subagent spawn --role auditor --workspace-root /projects/backend)
+FRONTEND=$(kallip subagent spawn --role reviewer --workspace-root /projects/frontend < /dev/null)
+BACKEND=$(kallip subagent spawn --role auditor --workspace-root /projects/backend < /dev/null)
 
 # Send work to both
-kallip message "$FRONTEND" "Review the latest changes for performance issues" &
-kallip message "$BACKEND" "Audit dependencies for known vulnerabilities" &
+kallip message "$FRONTEND" <<'EOF' &
+Review the latest changes for performance issues
+EOF
+kallip message "$BACKEND" <<'EOF' &
+Audit dependencies for known vulnerabilities
+EOF
 
 # Wait for both sends to complete
 wait

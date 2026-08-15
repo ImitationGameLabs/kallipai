@@ -28,11 +28,13 @@ include, and how to handle the auditor's feedback.
 Send the report to the auditor subagent via `kallip message`:
 
 ```bash
-kallip message <auditor-id> "CHECKPOINT REPORT
+kallip message <auditor-id> <<'REPORT'
+CHECKPOINT REPORT
 Tasks: <what you did>
 Skills loaded: <which skills you loaded and followed, or 'none'>
 Process: <which process skills you ran, and whether you completed all steps>
-Artifacts: <commits, files changed, reviews completed>"
+Artifacts: <commits, files changed, reviews completed>
+REPORT
 ```
 
 Done when:
