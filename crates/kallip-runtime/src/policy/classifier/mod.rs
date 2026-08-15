@@ -20,6 +20,8 @@ mod tests;
 use kallip_common::policy::{ExecDecision, ExecOverride, ExecPolicy, PolicyPreset};
 use serde::Serialize;
 
+use rable::ast::Node;
+
 use super::ToolDecision;
 use catalog::CommandSpec;
 
@@ -139,14 +141,23 @@ pub fn is_valid_override_key(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// The curated reason a command is builtin-denied, if any. Matched
-/// case-insensitively (command names are lowercased before the override site, but
-/// this keeps the contract consistent with the rest of the classifier).
+/// The curated reason a name-only builtin-denied command, if any — structured
+/// (subcommand/flag) rules do not deny the bare command name, so names like
+/// `git` remain valid override keys. Matched case-insensitively (command names
+/// are lowercased before the override site, but this keeps the contract
+/// consistent with the rest of the classifier).
 pub fn builtin_deny_reason(name: &str) -> Option<&'static str> {
     catalog::BUILTIN_DENYLIST
         .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        .map(|(_, reason)| *reason)
+        .find(|r| r.subcommand.is_none() && r.name.eq_ignore_ascii_case(name))
+        .map(|r| r.reason)
+}
+
+/// The full denylist verdict for one invocation: name-only rules match the
+/// name; structured rules (`git rebase -i`) also match the subcommand and
+/// flags. This is the hard floor the walker checks.
+pub(crate) fn builtin_deny_reason_for(name: &str, words: &[Node]) -> Option<&'static str> {
+    catalog::builtin_deny_reason(name, words)
 }
 
 /// One row of the read-only catalog, rendered for external display.
@@ -172,16 +183,33 @@ pub fn default_catalog_summary() -> Vec<CatalogEntry> {
 #[derive(Serialize, Clone)]
 pub struct DenylistEntry {
     pub name: &'static str,
+    /// `None` for name-only rules; `"rebase -i/--interactive"`-style for
+    /// structured ones.
+    pub shape: Option<String>,
     pub reason: &'static str,
 }
 
-/// Summarize every builtin-denied command (name + reason). Surfaced to the agent
-/// via the `exec_policy` self-query tool — denylisted names never appear in
-/// `overrides`, so this is the only way the agent learns them proactively.
+/// Summarize every builtin-denied rule (name + shape + reason). Surfaced to the
+/// agent via the `exec_policy` self-query tool — denylisted names never appear
+/// in `overrides`, so this is the only way the agent learns them proactively.
 pub fn builtin_denylist_summary() -> Vec<DenylistEntry> {
     catalog::BUILTIN_DENYLIST
         .iter()
-        .map(|(name, reason)| DenylistEntry { name, reason })
+        .map(|r| DenylistEntry {
+            name: r.name,
+            shape: r.subcommand.map(|s| {
+                if r.deny_flags.is_empty() {
+                    if r.except_flags.is_empty() {
+                        s.to_string()
+                    } else {
+                        format!("{s} (except read flags)")
+                    }
+                } else {
+                    format!("{s} {}", r.deny_flags.join("/"))
+                }
+            }),
+            reason: r.reason,
+        })
         .collect()
 }
 
@@ -206,8 +234,8 @@ pub const STRUCTURAL_RULES: &[(&str, &str)] = &[
     ),
     ("download piped to a shell (curl|sh)", "deny"),
     (
-        "builtin denylist (sed/awk/ed/ex)",
-        "deny with a curated reason",
+        "builtin denylist (sed/awk/ed/ex; git history-surgery shapes)",
+        "deny with a curated reason; git rules match subcommand+flags, fail-closed on unverifiable shapes",
     ),
     (
         "output redirect (> >> >| <> &> &>>)",

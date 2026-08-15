@@ -375,6 +375,7 @@ fn classify_simple_command(
     let base_dec = apply_override(
         ctx,
         &cmd_name,
+        words,
         catalog::classify_named_command(ctx, &cmd_name, words),
     );
 
@@ -412,13 +413,14 @@ fn classify_simple_command(
 fn apply_override(
     ctx: &ClassifyCtx<'_>,
     cmd_name: &str,
+    words: &[Node],
     catalog_verdict: Option<ToolDecision>,
 ) -> ToolDecision {
     // Hard floor: builtin-denied commands are always Deny, regardless of the
     // catalog verdict or any per-agent override. Checked first so it cannot be
     // widened. Fires inside delegated bodies too (`bash -c 'sed …'` re-enters
     // here via interpreter delegation).
-    if let Some(reason) = super::builtin_deny_reason(cmd_name) {
+    if let Some(reason) = super::builtin_deny_reason_for(cmd_name, words) {
         return ToolDecision::Deny {
             reason: reason.to_string(),
         };

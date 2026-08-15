@@ -640,13 +640,14 @@ fn env_predicate_reason_says_runs_a_command() {
 }
 
 #[test]
-fn non_literal_subcommand_caught_by_expansion_not_subcommand_constraint() {
-    // `git $(...)` has a non-literal subcommand; the Subcommands constraint
-    // ignores it (bare/non-literal is not its concern), but the word-expansion
-    // check catches the inner command substitution.
+fn non_literal_subcommand_denies_via_structured_floor() {
+    // `git $(...)` has a non-literal subcommand; the structured git floor is
+    // checked first and fail-closed (an unverifiable subcommand could be
+    // rebase/push/config), so it denies before the word-expansion check
+    // could even ask.
     assert!(matches!(
         cls("git $(sudo rm -rf /)"),
-        ToolDecision::Ask { .. }
+        ToolDecision::Deny { .. }
     ));
 }
 
@@ -1102,6 +1103,156 @@ fn is_valid_override_key_rejects_denylisted() {
     assert!(super::is_valid_override_key("rm").is_ok());
 }
 
+// -------------------------------------------------------------------------
+// Structured denylist (git history-surgery shapes) — hard floor, fail-closed
+// -------------------------------------------------------------------------
+
+#[test]
+fn structured_deny_interactive_rebase() {
+    for cmd in [
+        "git rebase -i",
+        "git rebase --interactive main",
+        "git rebase -fi main",
+        "git rebase -if main",
+        "git rebase --onto X -i main",
+        "git -c rebase.autoStash=true rebase -i main",
+        "git --no-pager rebase -i",
+        "bash -c 'git rebase -i main'",
+    ] {
+        assert!(
+            matches!(cls(cmd), ToolDecision::Deny { .. }),
+            "no deny: {cmd}"
+        );
+    }
+    // Non-interactive rebase is not denied (catalog still gates it: Ask).
+    assert!(matches!(cls("git rebase main"), ToolDecision::Ask { .. }));
+}
+
+#[test]
+fn structured_deny_force_push() {
+    for cmd in [
+        "git push -f origin main",
+        "git push --force origin main",
+        "git push --force-with-lease origin main",
+        "git push --force-with-lease=up:main origin main",
+        "git -c x=y push -f origin main",
+    ] {
+        assert!(
+            matches!(cls(cmd), ToolDecision::Deny { .. }),
+            "no deny: {cmd}"
+        );
+    }
+    // A plain push is not denied by the floor (catalog still gates it).
+    assert!(matches!(
+        cls("git push origin main"),
+        ToolDecision::Ask { .. }
+    ));
+}
+
+#[test]
+fn structured_deny_filter_branch_any_flags() {
+    assert!(matches!(
+        cls("git filter-branch --env-filter x HEAD"),
+        ToolDecision::Deny { .. }
+    ));
+    assert!(matches!(
+        cls("git filter-branch"),
+        ToolDecision::Deny { .. }
+    ));
+}
+
+#[test]
+fn structured_deny_git_config_writes_but_not_reads() {
+    for cmd in [
+        "git config user.name X",
+        "git config user.name", // bare read idiom: no read flag, denied
+        "git config --global alias.ri 'rebase -i'",
+        "git config --unset user.name",
+    ] {
+        assert!(
+            matches!(cls(cmd), ToolDecision::Deny { .. }),
+            "no deny: {cmd}"
+        );
+    }
+    // Read escapes pass the floor (the catalog never listed config, so the
+    // fallback Ask applies).
+    assert!(matches!(
+        cls("git config --get user.name"),
+        ToolDecision::Ask { .. }
+    ));
+    assert!(matches!(cls("git config --list"), ToolDecision::Ask { .. }));
+    assert!(matches!(cls("git config -l"), ToolDecision::Ask { .. }));
+}
+
+#[test]
+fn structured_deny_fail_closed_on_unverifiable_shapes() {
+    // Expansions in the subcommand position or as flag operands: cannot be
+    // verified statically, so the floor denies rather than guess.
+    assert!(matches!(
+        cls("git push $flags origin"),
+        ToolDecision::Deny { .. }
+    ));
+    assert!(matches!(cls("git rebase $up"), ToolDecision::Deny { .. }));
+    // An unknown flag before the subcommand cannot be attributed to any
+    // rule — the generic unverifiable reason names the gated classes.
+    match cls("git --frobnicate rebase -i") {
+        ToolDecision::Deny { reason } => {
+            assert!(reason.contains("could not be verified"), "reason: {reason}");
+        }
+        other => panic!("expected Deny, got {other:?}"),
+    }
+    assert!(matches!(
+        cls("git --frobnicate rebase -i"),
+        ToolDecision::Deny { .. }
+    ));
+    assert!(matches!(
+        cls("git -c $cfg rebase -i"),
+        ToolDecision::Deny { .. }
+    ));
+}
+
+#[test]
+fn structured_rules_do_not_touch_other_git_shapes() {
+    // Read-only catalog shapes stay Allow; structured subcommands without
+    // deny flags stay on their catalog/fallback path.
+    assert_eq!(cls("git log --oneline"), ToolDecision::Allow);
+    assert_eq!(cls("git status"), ToolDecision::Allow);
+    // Known catalog limitation (catalog.rs): a global flag at words[1] is taken
+    // as the subcommand candidate, so this over-defers to Ask — the floor
+    // itself does not deny it.
+    assert!(matches!(cls("git -c x=y log"), ToolDecision::Ask { .. }));
+    assert!(matches!(cls("git commit -m x"), ToolDecision::Ask { .. }));
+    assert!(matches!(
+        cls("git rebase --onto X main"),
+        ToolDecision::Ask { .. }
+    ));
+    // Glued short-with-value forms are values, not boolean clusters — the
+    // char scan must not false-deny them (regression: -Xtheirs contains
+    // 'i').
+    assert!(matches!(
+        cls("git rebase -Xtheirs main"),
+        ToolDecision::Ask { .. }
+    ));
+    assert!(matches!(
+        cls("git push -oskip-ci=false origin"),
+        ToolDecision::Ask { .. }
+    ));
+    // Terminal global probes are benign: skipped as boolean globals, no
+    // subcommand follows, so the floor does not deny.
+    assert!(matches!(cls("git --version"), ToolDecision::Ask { .. }));
+    assert!(matches!(cls("git --help"), ToolDecision::Ask { .. }));
+}
+
+#[test]
+fn structured_deny_wins_over_allow_override() {
+    // The floor cannot be widened, same as name-only rules.
+    assert!(matches!(
+        cls_with("git rebase -i", &[("git", ExecDecision::Allow)]),
+        ToolDecision::Deny { .. }
+    ));
+    // `git` remains a valid override key (only name-only rules reject keys).
+    assert!(super::is_valid_override_key("git").is_ok());
+}
 #[test]
 fn exec_baseline_is_unaffected_by_denylist() {
     // exec_baseline stays catalog-only (Allow if listed, else Ask); the denylist
