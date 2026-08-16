@@ -2,13 +2,30 @@
    Centralized here so kallip-web and kallip-app import a single source rather
    than each maintaining a copy in its own app.css.
 
-   color-scheme: Skeleton's `preset-*` utilities resolve via CSS `light-dark()`,
-   which keys off `color-scheme`. Pinning to light forces the light side of those
-   presets regardless of OS dark mode (kallip ships a single light UI).
+   Dark mode: mode is driven by the `data-mode` attribute on <html> (set before
+   first paint by the boot script in each app.html, toggled by LightSwitch).
+   Skeleton's globals already ship :root { color-scheme: light; @variant dark
+   { color-scheme: dark } }, which keys off the dark variant declared below,
+   so no color-scheme rule is needed here — light-dark() based utilities
+   (preset-*, dual-tone pairings) follow the active mode automatically.
 
    Visual theming (page/card background shades, etc.) is done with utility
-   classes on the relevant elements, not by overriding Skeleton's theme tokens. */
+   classes on the relevant elements; the one Skeleton token override lives
+   at the bottom of this file, with its rationale. */
 
-:root {
-  color-scheme: light;
+/* Key Tailwind's `dark:` variant (and Skeleton's @variant dark) to the
+   data-mode attribute instead of prefers-color-scheme, per the Skeleton
+   Light Switch cookbook. */
+@custom-variant dark (&:where([data-mode="dark"], [data-mode="dark"] *));
+
+/* Skeleton's rocket theme sets the dark root background to surface-950 — the
+   same shade the 50-950 pairing resolves to in dark mode — so every tonal
+   surface sitting directly on the page (preset-tonal-surface cards, agent
+   chat bubbles, tonal buttons) would render 950-on-950 and vanish. Light
+   mode is unaffected (the rocket root bg is pure white, tonal fills are
+   surface-50). Step the dark side of this one pairing up to surface-900 so
+   tonal fills stay exactly one shade off the root background in both
+   modes; imported after Skeleton, so this later definition wins. */
+@theme inline {
+  --color-surface-50-950: light-dark(var(--color-surface-50), var(--color-surface-900));
 }

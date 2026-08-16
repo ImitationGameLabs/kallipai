@@ -151,7 +151,7 @@
           {#if invitesPhase === "loading"}
             <p class="text-sm opacity-60">Loading...</p>
           {:else if invitesPhase === "error"}
-            <p class="text-sm text-error-500">Failed to load invites.</p>
+            <p class="text-sm text-error-500 dark:text-error-400">Failed to load invites.</p>
           {:else}
             {#each invites as inv (inv.invite_id)}
               <!-- The invite carries only a room id (no name); the room is not in
@@ -177,7 +177,7 @@
                   {/if}
                 </div>
                 {#if acceptErrors[inv.invite_id]}
-                  <p class="text-xs text-error-500">
+                  <p class="text-xs text-error-500 dark:text-error-400">
                     {acceptErrors[inv.invite_id]}
                   </p>
                 {/if}
@@ -191,7 +191,7 @@
         <section class="flex flex-col gap-2">
           <h2 class="text-sm font-semibold opacity-70">Public rooms</h2>
           {#if publicRoomsError}
-            <p class="text-xs text-error-500">
+            <p class="text-xs text-error-500 dark:text-error-400">
               Could not load public rooms: {publicRoomsError}
             </p>
           {:else}
@@ -219,7 +219,7 @@
                 </button>
               </div>
               {#if joinErrors[room.room_id]}
-                <p class="text-xs text-error-500 -mt-1">
+                <p class="text-xs text-error-500 dark:text-error-400 -mt-1">
                   {joinErrors[room.room_id]}
                 </p>
               {/if}
@@ -232,7 +232,7 @@
         {#if roomsPhase === "loading"}
           <p class="text-sm opacity-60">Loading...</p>
         {:else if roomsPhase === "error"}
-          <p class="text-sm text-error-500">Failed to load rooms.</p>
+          <p class="text-sm text-error-500 dark:text-error-400">Failed to load rooms.</p>
         {:else}
           {#each rooms as room (room.room_id)}
             <RoomCard

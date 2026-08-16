@@ -56,7 +56,7 @@
 <svelte:head><title>KallipAI · {handle}</title></svelte:head>
 
 <div class="flex flex-col h-full">
-  <header class="px-4 py-2 border-b border-surface-200 flex items-center gap-2">
+  <header class="px-4 py-2 border-b border-surface-200-800 flex items-center gap-2">
     <button
       type="button"
       class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
@@ -76,7 +76,7 @@
       {#if loading}
         <p class="text-sm opacity-60">Loading…</p>
       {:else if error}
-        <p class="text-sm text-error-500">{error}</p>
+        <p class="text-sm text-error-500 dark:text-error-400">{error}</p>
       {:else if profile}
         <section
           class="card preset-tonal-surface p-4 flex flex-col gap-1 text-sm"

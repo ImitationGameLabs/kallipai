@@ -27,7 +27,7 @@
   aria-pressed={pressed}
   title={label}
   aria-label={label}
-  class="rounded p-1.5 text-surface-500 opacity-60 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 focus-visible:opacity-100 hover:bg-surface-200 transition {klass}"
+  class="rounded p-1.5 text-surface-500 dark:text-surface-400 opacity-60 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 focus-visible:opacity-100 hover:bg-surface-200-800 transition {klass}"
 >
   {#if pressed}
     <Eye class="size-4" />

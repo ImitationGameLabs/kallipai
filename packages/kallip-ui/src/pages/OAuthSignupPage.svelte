@@ -93,10 +93,10 @@
 
 <svelte:head><title>KallipAI · pick a username</title></svelte:head>
 
-<div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100">
+<div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100-900">
   {#if ctx}
     <form
-      class="w-full max-w-sm space-y-6 p-6 bg-surface-50 border border-surface-200 shadow-sm rounded-xl"
+      class="w-full max-w-sm space-y-6 p-6 bg-surface-50-950 border border-surface-200-800 shadow-sm rounded-xl"
       onsubmit={submit}
     >
       <div class="text-center space-y-1">
@@ -109,12 +109,12 @@
       <UsernameField bind:value={username} />
 
       {#if result && !result.ok}
-        <p role="alert" class="text-sm text-error-500">
+        <p role="alert" class="text-sm text-error-500 dark:text-error-400">
           {reasonMessage(result)}
         </p>
       {/if}
       {#if error}
-        <p role="alert" class="text-sm text-error-500">{error}</p>
+        <p role="alert" class="text-sm text-error-500 dark:text-error-400">{error}</p>
       {/if}
 
       <button
@@ -128,7 +128,7 @@
       <p class="text-center text-sm">
         <a
           href="/register"
-          class="font-medium text-primary-500 hover:underline cursor-pointer"
+          class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
           >Use a different sign-in method</a
         >
       </p>

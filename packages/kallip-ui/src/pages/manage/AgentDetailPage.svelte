@@ -76,7 +76,7 @@
     </div>
 
     {#if statusError}
-      <p class="text-error-500 text-sm">{statusError}</p>
+      <p class="text-error-500 dark:text-error-400 text-sm">{statusError}</p>
     {/if}
 
     {#if agent}

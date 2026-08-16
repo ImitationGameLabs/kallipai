@@ -11,5 +11,5 @@
 </script>
 
 <span class="{cls} font-bold tracking-tight">
-  Kallip<span class="text-primary-500">AI</span>
+  Kallip<span class="text-primary-500 dark:text-primary-400">AI</span>
 </span>

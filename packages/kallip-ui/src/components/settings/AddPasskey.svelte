@@ -72,8 +72,8 @@
   {#if hint}
     <div
       class="text-xs {hint.tone === 'ok'
-        ? 'text-success-600'
-        : 'text-error-600'}"
+        ? 'text-success-600 dark:text-success-500'
+        : 'text-error-600 dark:text-error-500'}"
     >
       {hint.text}
     </div>

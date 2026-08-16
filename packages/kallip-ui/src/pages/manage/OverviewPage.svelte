@@ -26,7 +26,7 @@
     <h1 class="text-xl font-semibold">Overview</h1>
 
     {#if budgetStore.error}
-      <p class="text-error-500 text-sm">{budgetStore.error}</p>
+      <p class="text-error-500 dark:text-error-400 text-sm">{budgetStore.error}</p>
     {/if}
 
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -46,7 +46,7 @@
           <div>{agentsStore.idleCount} idle</div>
           <div>{agentsStore.busyCount} busy</div>
           {#if agentsStore.faultedCount > 0}
-            <div class="text-error-500">{agentsStore.faultedCount} faulted</div>
+            <div class="text-error-500 dark:text-error-400">{agentsStore.faultedCount} faulted</div>
           {/if}
         </div>
       </a>

@@ -38,7 +38,7 @@
     </div>
 
     {#if agentsStore.error}
-      <p class="text-error-500 text-sm">{agentsStore.error}</p>
+      <p class="text-error-500 dark:text-error-400 text-sm">{agentsStore.error}</p>
     {/if}
 
     {#if agentsStore.isLoading && !agentsStore.hasLoaded}
@@ -70,7 +70,7 @@
           </div>
 
           {#if agent.state === "faulted" && agent.faulted_reason}
-            <p class="text-error-500 text-xs mt-2">{agent.faulted_reason}</p>
+            <p class="text-error-500 dark:text-error-400 text-xs mt-2">{agent.faulted_reason}</p>
           {/if}
 
           <div class="flex flex-wrap gap-2 mt-3">

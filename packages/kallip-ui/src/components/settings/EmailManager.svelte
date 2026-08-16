@@ -119,7 +119,7 @@
               {#if e.verified_at}
                 <span class="text-xs opacity-60">verified</span>
               {:else}
-                <span class="text-xs text-warning-500">unverified</span>
+                <span class="text-xs text-warning-500 dark:text-warning-400">unverified</span>
               {/if}
             </span>
             <span class="flex shrink-0 items-center gap-2">
@@ -144,7 +144,7 @@
     {/if}
 
     {#if error}
-      <p role="alert" class="text-xs text-error-500">{error}</p>
+      <p role="alert" class="text-xs text-error-500 dark:text-error-400">{error}</p>
     {/if}
     {#if notice}
       <p class="text-xs opacity-70">{notice}</p>
@@ -173,7 +173,7 @@
     </form>
 
     {#if newAddress.length > 0 && !addressValid}
-      <p class="text-xs text-error-500">Enter a valid email address.</p>
+      <p class="text-xs text-error-500 dark:text-error-400">Enter a valid email address.</p>
     {/if}
 
     <details class="text-xs">

@@ -15,6 +15,7 @@
   import PasskeyManager from "../components/settings/PasskeyManager.svelte";
   import LinkedAccounts from "../components/settings/LinkedAccounts.svelte";
   import EmailManager from "../components/settings/EmailManager.svelte";
+  import LightSwitch from "../components/LightSwitch.svelte";
 
   // Settings is now info-only: account actions (logout, mode switch) live in
   // the sidebar AccountMenu. Online shows the account (identity lives in
@@ -133,6 +134,16 @@
 <div class="h-full overflow-y-auto">
   <div class="p-6 max-w-md space-y-6">
     <h1 class="text-xl font-semibold">Settings</h1>
+
+    <section class="space-y-3">
+      <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+        Appearance
+      </h2>
+      <div class="card preset-tonal-surface p-4 flex items-center justify-between gap-3">
+        <div class="text-sm">Dark mode</div>
+        <LightSwitch />
+      </div>
+    </section>
 
     {#if mode === "online"}
       {#if agoraSession.user}

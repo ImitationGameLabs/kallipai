@@ -75,7 +75,7 @@ let showPauseDialog = $state(false);
     <h1 class="text-xl font-semibold">Budget</h1>
 
     {#if budgetStore.error}
-      <p class="text-error-500 text-sm">{budgetStore.error}</p>
+      <p class="text-error-500 dark:text-error-400 text-sm">{budgetStore.error}</p>
     {/if}
 
     <!-- Progress bar -->

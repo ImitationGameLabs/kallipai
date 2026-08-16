@@ -185,7 +185,7 @@
       <p class="text-xs opacity-70">{formatTagmaStatusLine(tagma.status)}</p>
     {/if}
     {#if renameError}
-      <p class="text-error-500 text-xs">Rename failed: {renameError}</p>
+      <p class="text-error-500 dark:text-error-400 text-xs">Rename failed: {renameError}</p>
     {/if}
   </div>
 
@@ -239,7 +239,7 @@
               {#if onRevoke}
                 <Menu.Item
                   value="revoke"
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 cursor-pointer hover:preset-filled-error-500"
+                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
                 >
                   <Trash class="size-4" />
                   Revoke

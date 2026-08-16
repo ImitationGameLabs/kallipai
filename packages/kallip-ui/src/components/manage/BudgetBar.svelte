@@ -26,7 +26,7 @@
     <div class="text-xs opacity-60 mb-1">{label}</div>
   {/if}
   <div
-    class="w-full h-3 rounded-full bg-surface-200 dark:bg-surface-700 overflow-hidden"
+    class="w-full h-3 rounded-full bg-surface-200-800 overflow-hidden"
     role="progressbar"
     aria-label={label ?? "Budget"}
     aria-valuenow={pct}

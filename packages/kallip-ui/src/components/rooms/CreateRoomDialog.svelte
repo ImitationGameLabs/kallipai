@@ -68,7 +68,7 @@
 
 <Dialog {open} {onOpenChange}>
   <Portal>
-    <Dialog.Backdrop class="fixed inset-0 bg-surface-950/60 z-50" />
+    <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
     <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
       <Dialog.Content
         class="card preset-tonal-surface w-full max-w-md p-6 flex flex-col gap-4"
@@ -87,7 +87,7 @@
         >
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium"
-              >Name <span class="text-error-500">*</span></span
+              >Name <span class="text-error-500 dark:text-error-400">*</span></span
             >
             <input
               class="input text-sm"
@@ -126,10 +126,10 @@
                 class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition {visibility ===
                 'public'
                   ? 'bg-primary-500'
-                  : 'bg-surface-300'}"
+                  : 'bg-surface-300-700'}"
               >
                 <span
-                  class="inline-block size-5 transform rounded-full bg-surface-50 shadow-sm transition {visibility ===
+                  class="inline-block size-5 transform rounded-full bg-surface-50-950 shadow-sm transition {visibility ===
                   'public'
                     ? 'translate-x-5'
                     : 'translate-x-0.5'}"
@@ -145,7 +145,7 @@
           </div>
 
           {#if error}
-            <p class="text-error-500 text-xs">Create failed: {error}</p>
+            <p class="text-error-500 dark:text-error-400 text-xs">Create failed: {error}</p>
           {/if}
 
           <div class="flex justify-end gap-2">

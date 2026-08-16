@@ -40,11 +40,11 @@
   function rootIconClass(state: TagmaAgentState): string {
     switch (state) {
       case "busy":
-        return "text-success-500";
+        return "text-success-500 dark:text-success-400";
       case "faulted":
-        return "text-error-500";
+        return "text-error-500 dark:text-error-400";
       case "idle":
-        return "text-surface-500";
+        return "text-surface-500 dark:text-surface-400";
     }
   }
 </script>
@@ -83,7 +83,7 @@
           <span
             class="size-2 rounded-full {status.subagentsActive > 0
               ? 'bg-success-500'
-              : 'bg-surface-400'}"
+              : 'bg-surface-400-600'}"
             aria-hidden="true"
           ></span>
           <span class="font-medium">{status.subagentsActive}</span>
@@ -95,7 +95,7 @@
       <div class="flex items-center gap-3">
         <span class="w-24 shrink-0 text-right text-base">budget</span>
         <div class="flex flex-1 items-center gap-2">
-          <div class="h-2 flex-1 rounded-full bg-surface-200 overflow-hidden">
+          <div class="h-2 flex-1 rounded-full bg-surface-200-800 overflow-hidden">
             <div
               class="h-full rounded-full bg-primary-500 transition-[width] duration-500"
               style="width: {budgetPct}%"
@@ -114,7 +114,7 @@
         <span class="w-24 shrink-0 text-right">status</span>
         <div class="flex flex-1 items-center gap-1.5">
           <span
-            class="size-2 rounded-full bg-surface-400 animate-pulse"
+            class="size-2 rounded-full bg-surface-400-600 animate-pulse"
             aria-hidden="true"
           ></span>
           <span>waiting…</span>

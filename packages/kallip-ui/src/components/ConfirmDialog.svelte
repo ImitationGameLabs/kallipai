@@ -43,7 +43,7 @@
 
 <Dialog {open} {onOpenChange}>
   <Portal>
-    <Dialog.Backdrop class="fixed inset-0 bg-surface-950/60 z-50" />
+    <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
     <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
       <Dialog.Content
         class="card preset-tonal-surface w-full max-w-sm p-6 flex flex-col gap-4"
@@ -53,7 +53,7 @@
           {description}
         </Dialog.Description>
         {#if error}
-          <p class="text-error-500 text-xs">{error}</p>
+          <p class="text-error-500 dark:text-error-400 text-xs">{error}</p>
         {/if}
         <div class="flex justify-end gap-2">
           <button

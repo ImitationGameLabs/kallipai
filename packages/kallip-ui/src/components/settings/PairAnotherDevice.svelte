@@ -102,7 +102,7 @@
       {minting ? "Generating..." : "Generate pairing code"}
     </button>
     {#if error}
-      <div class="text-xs text-error-600">{error}</div>
+      <div class="text-xs text-error-600 dark:text-error-500">{error}</div>
     {/if}
   </div>
 {/if}

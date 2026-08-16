@@ -112,7 +112,7 @@
     {/if}
 
     {#if error}
-      <p role="alert" class="text-xs text-error-500">{error}</p>
+      <p role="alert" class="text-xs text-error-500 dark:text-error-400">{error}</p>
     {/if}
 
     {#if linkable.length > 0}

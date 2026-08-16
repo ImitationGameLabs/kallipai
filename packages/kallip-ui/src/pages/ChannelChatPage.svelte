@@ -75,7 +75,7 @@
     >
       {#snippet notice()}
         {#if conv.status === "offline"}
-          <p class="text-xs text-error-500 text-center">
+          <p class="text-xs text-error-500 dark:text-error-400 text-center">
             {#if isLocal}
               The tagma connection dropped. Reconnect from settings.
             {:else}

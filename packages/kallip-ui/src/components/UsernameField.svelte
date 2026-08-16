@@ -11,7 +11,7 @@
 
 <label class="block space-y-1">
   <span class="text-sm opacity-70">
-    Username <span class="text-error-500">*</span>
+    Username <span class="text-error-500 dark:text-error-400">*</span>
   </span>
   <input
     class="input"
@@ -21,7 +21,7 @@
     required
   />
   {#if value.length > 0 && !valid}
-    <span class="text-xs text-error-500">
+    <span class="text-xs text-error-500 dark:text-error-400">
       3-32 chars: a-z 0-9, single hyphens only (no leading/trailing/consecutive)
     </span>
   {/if}

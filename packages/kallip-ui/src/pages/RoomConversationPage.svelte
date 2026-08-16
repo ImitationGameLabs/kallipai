@@ -121,7 +121,7 @@
 />
 
 <div class="flex flex-col h-full">
-  <header class="px-4 py-2 border-b border-surface-200 flex items-center gap-2">
+  <header class="px-4 py-2 border-b border-surface-200-800 flex items-center gap-2">
     <div class="flex flex-col min-w-0 flex-1">
       <p class="text-sm font-semibold truncate">{roomLabel}</p>
       <p class="text-xs opacity-50 truncate">
@@ -222,7 +222,7 @@
               {:else if line.mine && line.failed}
                 <button
                   type="button"
-                  class="text-xs text-error-500 hover:underline"
+                  class="text-xs text-error-500 dark:text-error-400 hover:underline"
                   onclick={() => {
                     // A re-failure marks the new optimistic line failed + renders
                     // its own Retry; the rejection is already surfaced, so swallow
@@ -236,7 +236,7 @@
             </div>
           {/each}
           {#if conv.status === "error" && conv.error}
-            <p class="text-xs text-error-500 text-center">{conv.error}</p>
+            <p class="text-xs text-error-500 dark:text-error-400 text-center">{conv.error}</p>
           {/if}
         </div>
       </div>
@@ -250,11 +250,11 @@
           onclick={() => (showMembers = false)}
         ></div>
         <aside
-          class="absolute right-0 top-0 h-full w-80 max-w-[80vw] flex flex-col bg-surface-100 border-l border-surface-200 shadow-lg lg:static lg:shadow-none z-10"
+          class="absolute right-0 top-0 h-full w-80 max-w-[80vw] flex flex-col bg-surface-100-900 border-l border-surface-200-800 shadow-lg lg:static lg:shadow-none z-10"
           aria-label="Room members"
         >
           <div
-            class="px-3 py-2 border-b border-surface-200 flex items-center justify-between shrink-0"
+            class="px-3 py-2 border-b border-surface-200-800 flex items-center justify-between shrink-0"
           >
             <span class="text-sm font-semibold">Members</span>
             <button

@@ -82,7 +82,7 @@
   <div class="h-full grid place-items-center p-6">
     <div class="text-center flex flex-col gap-3 max-w-sm">
       {#if error}
-        <p class="text-error-500 text-sm">{error}</p>
+        <p class="text-error-500 dark:text-error-400 text-sm">{error}</p>
       {:else}
         <p class="text-sm opacity-60">Opening management channel…</p>
       {/if}

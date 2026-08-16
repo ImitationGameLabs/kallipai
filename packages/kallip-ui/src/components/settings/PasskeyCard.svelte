@@ -74,7 +74,7 @@
       >
     </div>
     {#if renameError}
-      <div class="text-xs text-error-600">{renameError}</div>
+      <div class="text-xs text-error-600 dark:text-error-500">{renameError}</div>
     {/if}
   {:else}
     <div class="flex items-center justify-between gap-2">
@@ -85,7 +85,7 @@
           </span>
           {#if passkey.discoverable}
             <span
-              class="shrink-0 text-[0.65rem] px-1.5 py-0.5 rounded-full bg-primary-500/15 text-primary-600"
+              class="shrink-0 text-[0.65rem] px-1.5 py-0.5 rounded-full bg-primary-500/15 text-primary-600 dark:text-primary-500"
               title="Enables passwordless sign-in via passkey autofill"
             >passwordless</span>
           {/if}
@@ -122,7 +122,7 @@
       </div>
     </div>
     {#if revokeError}
-      <div class="text-xs text-error-600">{revokeError}</div>
+      <div class="text-xs text-error-600 dark:text-error-500">{revokeError}</div>
     {/if}
   {/if}
 </li>

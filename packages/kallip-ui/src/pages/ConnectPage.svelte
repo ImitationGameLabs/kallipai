@@ -100,9 +100,9 @@
   />
 {/if}
 
-<div class="flex items-center justify-center min-h-dvh p-4 bg-surface-200">
+<div class="flex items-center justify-center min-h-dvh p-4 bg-surface-200-800">
   <form
-    class="w-full max-w-sm space-y-6 p-6 bg-surface-100 border border-surface-200 shadow-sm rounded-xl"
+    class="w-full max-w-sm space-y-6 p-6 bg-surface-100-900 border border-surface-200-800 shadow-sm rounded-xl"
     onsubmit={submit}
   >
     <div class="text-center space-y-1">
@@ -112,7 +112,7 @@
 
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
-        Tagma URL <span class="text-error-500">*</span>
+        Tagma URL <span class="text-error-500 dark:text-error-400">*</span>
       </span>
       <input
         class="input"
@@ -128,7 +128,7 @@
 
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
-        Auth token <span class="text-error-500">*</span>
+        Auth token <span class="text-error-500 dark:text-error-400">*</span>
       </span>
       <input
         class="input"
@@ -144,7 +144,7 @@
     </label>
 
     {#if error}
-      <p role="alert" class="text-sm text-error-500">{error}</p>
+      <p role="alert" class="text-sm text-error-500 dark:text-error-400">{error}</p>
     {/if}
 
     <button
@@ -159,7 +159,7 @@
       <button
         type="button"
         onclick={useOnline}
-        class="font-medium text-primary-500 hover:underline cursor-pointer"
+        class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
         >Online mode</button
       >
     </p>

@@ -53,7 +53,7 @@
     self
       ? "preset-filled-primary-500"
       : online === false
-        ? "preset-tonal-surface text-surface-500"
+        ? "preset-tonal-surface text-surface-500 dark:text-surface-400"
         : "preset-tonal-surface",
   );
   // Profile link (shared rule): human -> /user/<username>, agent ->
@@ -74,7 +74,7 @@
       <span
         class="size-2 rounded-full shrink-0 {online
           ? 'bg-success-500'
-          : 'border border-surface-400 bg-transparent'}"
+          : 'border border-surface-400-600 bg-transparent'}"
         role="img"
         aria-label={online ? "online" : "offline"}
       ></span>

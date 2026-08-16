@@ -18,14 +18,14 @@
       case "live":
         return "bg-success-500";
       case "down":
-        return "bg-surface-400";
+        return "bg-surface-400-600";
       case "error":
         return "bg-error-500";
       // Unreachable at runtime: the snippet renders a spinner for "pending"
       // before reaching here. Kept so the switch stays exhaustive (required for
       // the return type); do NOT delete without restructuring.
       case "pending":
-        return "bg-surface-400";
+        return "bg-surface-400-600";
     }
   }
 
@@ -86,7 +86,7 @@
            motion. Size-matched to the size-2 status dot. aria-hidden; the
            sr-only "connecting" label below carries state. -->
       <span
-        class="size-2 rounded-full border-2 border-surface-400 border-t-transparent animate-spin shrink-0"
+        class="size-2 rounded-full border-2 border-surface-400-600 border-t-transparent animate-spin shrink-0"
         aria-hidden="true"
       ></span>
     {:else if indicator}
@@ -121,7 +121,7 @@
           </a>
         {/if}
       </div>
-      <div class="border-b border-surface-200" role="separator"></div>
+      <div class="border-b border-surface-200-800" role="separator"></div>
     {/if}
     {#each section.items as item (item.href)}
       {@render navLink(item)}

@@ -77,7 +77,7 @@ let { basePath = "/local/manage" }: { basePath?: string } = $props();
     </div>
 
     {#if schedulesStore.error}
-      <p class="text-error-500 text-sm">{schedulesStore.error}</p>
+      <p class="text-error-500 dark:text-error-400 text-sm">{schedulesStore.error}</p>
     {/if}
 
     {#if schedulesStore.isLoading && !schedulesStore.hasLoaded}
@@ -89,7 +89,7 @@ let { basePath = "/local/manage" }: { basePath?: string } = $props();
       <div class="card preset-tonal-surface p-4 space-y-2">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
-            <span class="size-2 rounded-full {sched.status === 'active' ? 'bg-success-500' : 'bg-surface-400'}" aria-hidden="true"></span>
+            <span class="size-2 rounded-full {sched.status === 'active' ? 'bg-success-500' : 'bg-surface-400-600'}" aria-hidden="true"></span>
             <span class="font-medium">{sched.name}</span>
           </div>
           <span class="text-xs px-2 py-0.5 rounded-full preset-tonal-surface capitalize">{sched.status}</span>
@@ -122,13 +122,13 @@ let { basePath = "/local/manage" }: { basePath?: string } = $props();
 <!-- Create dialog -->
 <Dialog open={showCreate} onOpenChange={(e) => { if (!e.open) showCreate = false; }}>
   <Portal>
-    <Dialog.Backdrop class="fixed inset-0 bg-surface-950/60 z-50" />
+    <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
     <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
       <Dialog.Content class="card preset-tonal-surface w-full max-w-md p-6 space-y-4 max-h-[90vh] overflow-y-auto">
         <Dialog.Title class="text-lg font-semibold">New Schedule</Dialog.Title>
         <Dialog.Description class="text-sm opacity-60">Configure a new work schedule for an agent.</Dialog.Description>
         {#if schedulesStore.error}
-          <p class="text-error-500 text-xs">{schedulesStore.error}</p>
+          <p class="text-error-500 dark:text-error-400 text-xs">{schedulesStore.error}</p>
         {/if}
         <div class="space-y-3 text-sm">
           <label class="block">
@@ -152,7 +152,7 @@ let { basePath = "/local/manage" }: { basePath?: string } = $props();
             <span class="opacity-60 text-xs">End cron</span>
             <input class="input w-full font-mono" bind:value={formData.end_cron} />
           </label>
-        {#if cronError}<p class="text-error-500 text-xs">{cronError}</p>{/if}
+        {#if cronError}<p class="text-error-500 dark:text-error-400 text-xs">{cronError}</p>{/if}
           <div class="grid grid-cols-2 gap-2">
             <label class="block">
               <span class="opacity-60 text-xs">Pre-warn (min)</span>
@@ -163,7 +163,7 @@ let { basePath = "/local/manage" }: { basePath?: string } = $props();
               <input type="number" class="input w-full" bind:value={formData.final_warn_minutes} />
             </label>
           </div>
-          {#if warnError}<p class="text-error-500 text-xs col-span-2">{warnError}</p>{/if}
+          {#if warnError}<p class="text-error-500 dark:text-error-400 text-xs col-span-2">{warnError}</p>{/if}
           <label class="block">
             <span class="opacity-60 text-xs">Wake prompt</span>
             <input class="input w-full" bind:value={formData.wake_prompt} />

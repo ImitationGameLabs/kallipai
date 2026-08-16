@@ -77,9 +77,9 @@ export function presenceDotClass(presence: TagmaPresence): string {
     case "online":
       return "bg-success-500";
     case "offline":
-      return "bg-surface-400";
+      return "bg-surface-400-600";
     case "checking":
-      return "bg-surface-400 animate-pulse";
+      return "bg-surface-400-600 animate-pulse";
   }
 }
 

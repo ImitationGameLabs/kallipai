@@ -37,12 +37,12 @@
       </button>
     {/each}
     <div class="flex items-center gap-2 text-xs opacity-40 py-1">
-      <span class="flex-1 border-t border-surface-300"></span>
+      <span class="flex-1 border-t border-surface-300-700"></span>
       <span>or</span>
-      <span class="flex-1 border-t border-surface-300"></span>
+      <span class="flex-1 border-t border-surface-300-700"></span>
     </div>
     {#if error}
-      <p role="alert" class="text-xs text-error-500">{error}</p>
+      <p role="alert" class="text-xs text-error-500 dark:text-error-400">{error}</p>
     {/if}
   </div>
 {/if}

@@ -61,10 +61,10 @@ let { basePath = "/local/manage" }: { basePath?: string } = $props();
     </div>
 
     {#if profilesStore.error}
-      <p class="text-error-500 text-sm">{profilesStore.error}</p>
+      <p class="text-error-500 dark:text-error-400 text-sm">{profilesStore.error}</p>
     {/if}
     {#if applyResult}
-      <p class="text-success-500 text-sm">{applyResult}</p>
+      <p class="text-success-500 dark:text-success-400 text-sm">{applyResult}</p>
     {/if}
     {#if profilesStore.isDirty}
       <button class="text-xs opacity-60 hover:opacity-100" onclick={() => profilesStore.reset()}>

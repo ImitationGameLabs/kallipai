@@ -84,9 +84,9 @@
   <Banner floating title={`Couldn't reach the server: ${notice}`} />
 {/if}
 
-<div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100">
+<div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100-900">
   <form
-    class="w-full max-w-sm space-y-6 p-6 bg-surface-50 border border-surface-200 shadow-sm rounded-xl"
+    class="w-full max-w-sm space-y-6 p-6 bg-surface-50-950 border border-surface-200-800 shadow-sm rounded-xl"
     onsubmit={submit}
   >
     <div class="text-center space-y-1">
@@ -109,7 +109,7 @@
     </label>
 
     {#if result && !result.ok}
-      <p role="alert" class="text-sm text-error-500">
+      <p role="alert" class="text-sm text-error-500 dark:text-error-400">
         {reasonMessage(result)}
       </p>
     {/if}
@@ -126,7 +126,7 @@
       Already have one?
       <a
         href="/login"
-        class="font-medium text-primary-500 hover:underline cursor-pointer"
+        class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
         >Sign in</a
       >
     </p>
@@ -134,7 +134,7 @@
     <p class="text-center text-sm">
       <a
         href="/connect"
-        class="font-medium text-primary-500 hover:underline cursor-pointer"
+        class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
         >Offline mode</a
       >
     </p>

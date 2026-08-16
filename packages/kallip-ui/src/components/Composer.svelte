@@ -56,7 +56,7 @@
          textarea itself is borderless/transparent and the card outline is the
          sole edge. focus-within retints the border to signal the active field. -->
     <div
-      class="rounded-2xl border-2 border-surface-300 shadow-sm p-2 transition hover:shadow-xl focus-within:border-surface-500"
+      class="rounded-2xl border-2 border-surface-300-700 shadow-sm p-2 transition hover:shadow-xl focus-within:border-surface-400-600"
     >
       <textarea
         bind:this={area}
@@ -92,7 +92,7 @@
         {:else}
           <a
             href="/connect"
-            class="font-medium text-primary-500 hover:underline cursor-pointer"
+            class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
             >Connect a tagma</a
           >
           to send.

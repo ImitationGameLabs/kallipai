@@ -141,7 +141,7 @@
           <Settings class="size-4" />
           Settings
         </Menu.Item>
-        <Menu.Separator class="my-1 border-surface-200" />
+        <Menu.Separator class="my-1 border-surface-200-800" />
         {#if mode === "online"}
           <Menu.Item
             value="logout"
@@ -150,7 +150,7 @@
             <LogOut class="size-4" />
             Log out
           </Menu.Item>
-          <Menu.Separator class="my-1 border-surface-200" />
+          <Menu.Separator class="my-1 border-surface-200-800" />
           <Menu.Item
             value="switch-offline"
             class="flex items-center gap-2 px-3 py-2 rounded-base text-sm hover:preset-filled-surface-500 cursor-pointer"

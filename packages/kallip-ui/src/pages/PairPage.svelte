@@ -105,9 +105,9 @@
   <Banner floating title={`Couldn't reach the server: ${notice}`} />
 {/if}
 
-<div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100">
+<div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100-900">
   <form
-    class="w-full max-w-sm space-y-6 p-6 bg-surface-50 border border-surface-200 shadow-sm rounded-xl"
+    class="w-full max-w-sm space-y-6 p-6 bg-surface-50-950 border border-surface-200-800 shadow-sm rounded-xl"
     onsubmit={submit}
   >
     <div class="text-center space-y-1">
@@ -117,7 +117,7 @@
 
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
-        Pairing code <span class="text-error-500">*</span>
+        Pairing code <span class="text-error-500 dark:text-error-400">*</span>
       </span>
       <input
         class="input font-mono tracking-widest"
@@ -149,19 +149,19 @@
           onclick={stopScan}>Cancel scan</button
         >
         {#if scanError}
-          <div class="text-xs text-error-600">Camera unavailable: {scanError}</div>
+          <div class="text-xs text-error-600 dark:text-error-500">Camera unavailable: {scanError}</div>
         {/if}
       </div>
     {:else}
       <button
         type="button"
-        class="text-xs text-primary-500 hover:underline"
+        class="text-xs text-primary-500 dark:text-primary-400 hover:underline"
         onclick={startScan}>Scan QR instead</button
       >
     {/if}
 
     {#if result && !result.ok}
-      <p role="alert" class="text-sm text-error-500">
+      <p role="alert" class="text-sm text-error-500 dark:text-error-400">
         {reasonMessage(result)}
       </p>
     {/if}
@@ -178,7 +178,7 @@
       Already signed in here?
       <a
         href="/login"
-        class="font-medium text-primary-500 hover:underline cursor-pointer"
+        class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
         >Sign in</a
       >
     </p>

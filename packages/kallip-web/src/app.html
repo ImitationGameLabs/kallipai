@@ -7,6 +7,25 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
+    <script>
+      // Set data-mode before first paint so light-dark() utilities and the
+      // `dark:` variant resolve without a flash. Manual choice (localStorage)
+      // wins; otherwise follow the OS preference (default light).
+      (() => {
+        let stored = null;
+        try {
+          stored = localStorage.getItem("mode");
+        } catch {
+          // Storage access can be blocked (private mode); fall through
+          // to the OS preference.
+        }
+        const dark =
+          stored === "dark" ||
+          (stored === null &&
+            matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.mode = dark ? "dark" : "light";
+      })();
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

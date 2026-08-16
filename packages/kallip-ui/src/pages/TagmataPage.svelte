@@ -61,7 +61,7 @@
   />
 {:else if agoraSession.authError}
   <div class="p-4">
-    <p class="text-error-500 text-sm">
+    <p class="text-error-500 dark:text-error-400 text-sm">
       Could not reach the server: {agoraSession.authError}
     </p>
     <p class="opacity-60 text-sm">Retrying...</p>

@@ -119,7 +119,7 @@
       {/if}
     {/each}
     {#if status === "error" && error}
-      <p class="text-xs text-error-500 text-center">
+      <p class="text-xs text-error-500 dark:text-error-400 text-center">
         {error}
       </p>
     {/if}

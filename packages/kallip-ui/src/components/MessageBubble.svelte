@@ -54,7 +54,7 @@
 <div
   bind:this={box}
   class="max-w-[80%] min-w-0 rounded-base px-3 py-2 text-sm {mine
-    ? 'preset-filled-primary-500'
+    ? 'preset-filled-primary-100-900'
     : 'preset-tonal-surface'} {!markdown
     ? 'whitespace-pre-wrap break-words'
     : ''} {pending ? 'opacity-60' : ''}"

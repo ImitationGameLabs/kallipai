@@ -61,10 +61,10 @@
     {#if busy}
       <p class="text-sm opacity-60">Completing sign-in…</p>
     {:else}
-      <p class="text-sm text-error-500">{error}</p>
+      <p class="text-sm text-error-500 dark:text-error-400">{error}</p>
       <a
         href="/login"
-        class="inline-block font-medium text-primary-500 hover:underline cursor-pointer"
+        class="inline-block font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
       >Back to sign in</a>
     {/if}
   </div>

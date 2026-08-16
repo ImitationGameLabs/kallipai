@@ -211,7 +211,7 @@
 <svelte:head><title>KallipAI · room settings</title></svelte:head>
 
 <div class="flex flex-col h-full">
-  <header class="px-4 py-2 border-b border-surface-200 flex items-center gap-2">
+  <header class="px-4 py-2 border-b border-surface-200-800 flex items-center gap-2">
     <button
       type="button"
       class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
@@ -270,7 +270,7 @@
       <section class="flex flex-col gap-2">
         <h2 class="text-sm font-semibold opacity-70">Members</h2>
         {#if rosterError}
-          <p class="text-xs text-error-500">
+          <p class="text-xs text-error-500 dark:text-error-400">
             Could not load members: {rosterError}
           </p>
         {:else if !roster}
@@ -317,9 +317,9 @@
               inbox.
             </p>
             {#if inviteError}
-              <p class="text-xs text-error-500">{inviteError}</p>
+              <p class="text-xs text-error-500 dark:text-error-400">{inviteError}</p>
             {:else if inviteDone}
-              <p class="text-xs text-success-500">Invite sent.</p>
+              <p class="text-xs text-success-500 dark:text-success-400">Invite sent.</p>
             {/if}
           </form>
         </section>
@@ -398,15 +398,15 @@
           </button>
         </form>
         {#if addError}
-          <p class="text-xs text-error-500">{addError}</p>
+          <p class="text-xs text-error-500 dark:text-error-400">{addError}</p>
         {:else if addDone}
-          <p class="text-xs text-success-500">Tagma added.</p>
+          <p class="text-xs text-success-500 dark:text-success-400">Tagma added.</p>
         {/if}
       </section>
 
       <!-- Danger zone -->
       <section class="flex flex-col gap-2 mt-2">
-        <h2 class="text-sm font-semibold text-error-500">Danger zone</h2>
+        <h2 class="text-sm font-semibold text-error-500 dark:text-error-400">Danger zone</h2>
         <button
           type="button"
           class="btn btn-sm preset-outlined-surface-500 self-start hover:preset-filled-error-500 disabled:opacity-60"

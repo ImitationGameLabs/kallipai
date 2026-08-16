@@ -128,9 +128,9 @@
   <Banner floating title={`Couldn't reach the server: ${notice}`} />
 {/if}
 
-<div class="flex items-center justify-center min-h-dvh p-4 bg-surface-200">
+<div class="flex items-center justify-center min-h-dvh p-4 bg-surface-200-800">
   <form
-    class="w-full max-w-sm space-y-6 p-6 bg-surface-100 border border-surface-200 shadow-sm rounded-xl"
+    class="w-full max-w-sm space-y-6 p-6 bg-surface-100-900 border border-surface-200-800 shadow-sm rounded-xl"
     onsubmit={submit}
   >
     <div class="text-center space-y-1">
@@ -142,7 +142,7 @@
 
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
-        Username <span class="text-error-500">*</span>
+        Username <span class="text-error-500 dark:text-error-400">*</span>
       </span>
       <input
         class="input"
@@ -153,12 +153,12 @@
         required
       />
       {#if username.length > 0 && !usernameValid}
-        <span class="text-xs text-error-500">Enter a valid username.</span>
+        <span class="text-xs text-error-500 dark:text-error-400">Enter a valid username.</span>
       {/if}
     </label>
 
     {#if result && !result.ok}
-      <p role="alert" class="text-sm text-error-500">
+      <p role="alert" class="text-sm text-error-500 dark:text-error-400">
         {reasonMessage(result)}
       </p>
     {/if}
@@ -175,7 +175,7 @@
       New here?
       <a
         href="/register"
-        class="font-medium text-primary-500 hover:underline cursor-pointer"
+        class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
         >Create account</a
       >
     </p>
@@ -184,7 +184,7 @@
       On a new device?
       <a
         href="/pair"
-        class="font-medium text-primary-500 hover:underline cursor-pointer"
+        class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
         >Add this device</a
       >
     </p>
@@ -192,7 +192,7 @@
     <p class="text-center text-sm">
       <a
         href="/connect"
-        class="font-medium text-primary-500 hover:underline cursor-pointer"
+        class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
         >Offline mode</a
       >
     </p>
