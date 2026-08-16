@@ -206,8 +206,9 @@ export type ProfileProbeStatus =
 export interface ProfileProbeEndpointReport {
   readonly endpoint_id: string;
   readonly status: ProfileProbeStatus;
+  readonly latency_ms: number | null;
+  readonly catalog_count: number | null;
   readonly models: readonly string[] | null;
-  readonly catalog: unknown;
   readonly balance: unknown;
   readonly detail: string | null;
 }
@@ -215,8 +216,7 @@ export interface ProfileProbeEndpointReport {
 /** Probe outcome for one profile (model reference) inside a tier. */
 export interface ProfileProbeProfileReport {
   readonly profile_id: string;
-  readonly endpoint: string;
-  readonly model: string;
+  readonly endpoint_id: string;
   readonly status: ProfileProbeStatus;
   readonly detail: string | null;
 }

@@ -46,8 +46,8 @@
     manage_profiles_apply,
   } from "../../paraglide/messages.js";
 
-  // (not "password") so browser password managers never fire for API keys.
   // Track which endpoints show their API key in plaintext. Uses type="text"
+  // (not "password") so browser password managers never fire for API keys.
   let showKeys = new SvelteSet<string>();
 
   let { basePath = "/local/manage" }: { basePath?: string } = $props();
@@ -178,7 +178,7 @@
             {#each t.profiles as p (p.profile_id)}
               {#if p.status !== "ok"}
                 <span class="text-xs opacity-60 font-mono break-all">
-                  {p.profile_id} · {p.model} — {probeStatusLabel(p.status)}{p.detail ? `: ${p.detail}` : ""}
+                  {p.profile_id} — {probeStatusLabel(p.status)}{p.detail ? `: ${p.detail}` : ""}
                 </span>
               {/if}
             {/each}

@@ -4,7 +4,10 @@
 // and component delegate to these functions; the $state/$derived plumbing stays
 // in the .svelte.ts / .svelte files.
 
-import type { ProfileConfig } from "@kallipai/kallip-client";
+import type {
+  ProfileConfig,
+  ProfileProbeRequest,
+} from "@kallipai/kallip-client";
 import {
   manage_schedules_warn_invalid,
   manage_schedules_warn_order,
@@ -165,6 +168,87 @@ export function profileConfigEqual(
   b: ProfileConfig,
 ): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * The probe key rule shared by every probe path: only a freshly typed key —
+ * one that differs from the committed (masked) value — is sent inline;
+ * anything else probes with the live key (`null`), so the masked value from
+ * GET never travels back up as a credential.
+ */
+function probeWireKey(
+  draftKey: string | null,
+  committedKey: string | null | undefined,
+): string | null {
+  return draftKey && draftKey !== committedKey ? draftKey : null;
+}
+
+/**
+ * Translate the editable draft into a PUT wire body: an empty key means "keep
+ * the live key" (null on the wire); a masked echo is passed through — the
+ * server also treats it as "keep".
+ */
+export function profileConfigToWire(draft: ProfileConfig): ProfileConfig {
+  const endpoints = Object.fromEntries(
+    Object.entries(draft.endpoints).map(([id, ep]) => [
+      id,
+      { ...ep, api_key: ep.api_key === "" ? null : ep.api_key },
+    ]),
+  );
+  return { ...draft, endpoints };
+}
+
+/**
+ * Build a probe request from the draft: endpoints not carrying a freshly
+ * typed key probe with the live key (`api_key: null`), so the masked value
+ * from GET is never sent as a credential. `tierIdx` probes a single tier;
+ * omit for all.
+ */
+export function buildProbeRequest(
+  committed: ProfileConfig | null,
+  draft: ProfileConfig,
+  tierIdx?: number,
+): ProfileProbeRequest {
+  const endpoints = Object.values(draft.endpoints).map((ep) => ({
+    id: ep.id,
+    family: ep.family,
+    base_url: ep.base_url,
+    api_key: probeWireKey(ep.api_key, committed?.endpoints[ep.id]?.api_key),
+  }));
+  const tiers = [
+    ...(tierIdx === undefined
+      ? draft.tiers
+      : [draft.tiers[tierIdx]].filter((t) => t !== undefined)),
+  ].map((t) => ({
+    profiles: t.profiles.map((p) => ({
+      id: p.id,
+      endpoint: p.endpoint,
+      model: p.model,
+    })),
+  }));
+  return { endpoints, tiers };
+}
+
+/**
+ * Build a single-endpoint probe request (no tier checks); null when the
+ * endpoint id is not in the draft.
+ */
+export function singleEndpointProbeRequest(
+  committed: ProfileConfig | null,
+  draft: ProfileConfig,
+  id: string,
+): ProfileProbeRequest | null {
+  const ep = draft.endpoints[id];
+  if (!ep) return null;
+  return {
+    endpoints: [{
+      id: ep.id,
+      family: ep.family,
+      base_url: ep.base_url,
+      api_key: probeWireKey(ep.api_key, committed?.endpoints[id]?.api_key),
+    }],
+    tiers: [],
+  };
 }
 
 // ---------------------------------------------------------------------------

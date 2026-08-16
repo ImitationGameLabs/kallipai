@@ -10,10 +10,13 @@ import {
   addEndpoint as addEndpointFn,
   addProfile as addProfileFn,
   addTier as addTierFn,
+  buildProbeRequest as buildProbeRequestFn,
   profileConfigEqual,
+  profileConfigToWire as profileConfigToWireFn,
   removeEndpoint as removeEndpointFn,
   removeLastTier as removeLastTierFn,
   removeProfile as removeProfileFn,
+  singleEndpointProbeRequest as singleEndpointProbeRequestFn,
 } from "./compute.ts";
 import { type ManagementBackend, managementBackend } from "./client.ts";
 
@@ -65,7 +68,9 @@ class ProfilesStore {
     this.isSaving = true;
     this.error = null;
     try {
-      const resp = await this.backend.updateProfiles(toWire(this.draft));
+      const resp = await this.backend.updateProfiles(
+        profileConfigToWireFn(this.draft),
+      );
       this.config = resp;
       this.draft = structuredClone(resp);
     } catch (e) {
@@ -98,27 +103,7 @@ class ProfilesStore {
    */
   private buildProbeRequest(tierIdx?: number): ProfileProbeRequest | null {
     if (!this.draft) return null;
-    const committed = this.config;
-    const endpoints = Object.values(this.draft.endpoints).map((ep) => ({
-      id: ep.id,
-      family: ep.family,
-      base_url: ep.base_url,
-      api_key: ep.api_key && ep.api_key !== committed?.endpoints[ep.id]?.api_key
-        ? ep.api_key
-        : null,
-    }));
-    const tiers = [
-      ...(tierIdx === undefined
-        ? this.draft.tiers
-        : [this.draft.tiers[tierIdx]].filter((t) => t !== undefined)),
-    ].map((t) => ({
-      profiles: t.profiles.map((p) => ({
-        id: p.id,
-        endpoint: p.endpoint,
-        model: p.model,
-      })),
-    }));
-    return { endpoints, tiers };
+    return buildProbeRequestFn(this.config, this.draft, tierIdx);
   }
 
   private async runProbe(tierIdx?: number): Promise<void> {
@@ -148,23 +133,8 @@ class ProfilesStore {
   /** Probe a single endpoint (no tier checks). */
   async probeEndpoint(id: string): Promise<void> {
     if (!this.draft) return;
-    const ep = this.draft.endpoints[id];
-    if (!ep) return;
-    const committed = this.config;
-    const body: ProfileProbeRequest = {
-      endpoints: [
-        {
-          id: ep.id,
-          family: ep.family,
-          base_url: ep.base_url,
-          api_key:
-            ep.api_key && ep.api_key !== committed?.endpoints[id]?.api_key
-              ? ep.api_key
-              : null,
-        },
-      ],
-      tiers: [],
-    };
+    const body = singleEndpointProbeRequestFn(this.config, this.draft, id);
+    if (!body) return;
     this.isProbing = true;
     this.error = null;
     try {
@@ -233,18 +203,4 @@ class ProfilesStore {
   }
 }
 
-/**
- * Translate the editable draft into a PUT wire body: an empty key means "keep the
- * live key" (null on the wire); a masked echo is passed through — the server also
- * treats it as "keep".
- */
-function toWire(draft: ProfileConfig): ProfileConfig {
-  const endpoints = Object.fromEntries(
-    Object.entries(draft.endpoints).map(([id, ep]) => [
-      id,
-      { ...ep, api_key: ep.api_key === "" ? null : ep.api_key },
-    ]),
-  );
-  return { ...draft, endpoints };
-}
 export const profilesStore = new ProfilesStore();

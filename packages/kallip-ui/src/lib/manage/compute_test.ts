@@ -11,15 +11,18 @@ import {
   barColorClass,
   barFillPct,
   type BudgetSample,
+  buildProbeRequest,
   burnRate,
   consumedPct,
   cronHasFiveFields,
   etaMinutes,
   isBudgetPaused,
   profileConfigEqual,
+  profileConfigToWire,
   removeEndpoint,
   removeLastTier,
   removeProfile,
+  singleEndpointProbeRequest,
   validateWarnMinutes,
 } from "./compute.ts";
 
@@ -277,4 +280,131 @@ Deno.test("validateWarnMinutes: non-positive returns error", () => {
 
 Deno.test("validateWarnMinutes: NaN returns error", () => {
   assertEquals(validateWarnMinutes(NaN, 5) !== null, true);
+});
+
+// --- profile wire translation (PUT body + probe requests) ---
+
+const maskedKey = "sk-a…wxyz";
+
+function draftConfig(apiKey: string | null): ProfileConfig {
+  return {
+    tiers: [{
+      profiles: [{
+        id: "p1",
+        endpoint: "main",
+        model: "deepseek-chat",
+        max_context_window: 128000,
+      }],
+    }],
+    endpoints: {
+      main: { id: "main", family: "deepseek", api_key: apiKey, base_url: null },
+    },
+  };
+}
+
+function multiTierConfig(): ProfileConfig {
+  return {
+    ...draftConfig(maskedKey),
+    tiers: [
+      ...draftConfig(maskedKey).tiers,
+      {
+        profiles: [{
+          id: "p2",
+          endpoint: "main",
+          model: "other",
+          max_context_window: 1,
+        }],
+      },
+      {
+        profiles: [{
+          id: "p3",
+          endpoint: "main",
+          model: "third",
+          max_context_window: 1,
+        }],
+      },
+    ],
+  };
+}
+
+Deno.test("profileConfigToWire: empty key becomes null (keep live)", () => {
+  const wire = profileConfigToWire(draftConfig(""));
+  assertEquals(wire.endpoints.main.api_key, null);
+});
+
+Deno.test("profileConfigToWire: masked echo passes through (server treats as keep)", () => {
+  const wire = profileConfigToWire(draftConfig(maskedKey));
+  assertEquals(wire.endpoints.main.api_key, maskedKey);
+});
+
+Deno.test("profileConfigToWire: null key stays null; tiers untouched", () => {
+  const draft = draftConfig(null);
+  assertEquals(profileConfigToWire(draft).endpoints.main.api_key, null);
+});
+
+Deno.test("buildProbeRequest: unchanged masked key probes with null (never echoes the mask)", () => {
+  // The draft holds the masked value from GET; so does the committed copy.
+  const req = buildProbeRequest(draftConfig(maskedKey), draftConfig(maskedKey));
+  assertEquals(req.endpoints[0].api_key, null);
+});
+
+Deno.test("buildProbeRequest: freshly typed key is sent inline", () => {
+  const req = buildProbeRequest(
+    draftConfig(maskedKey),
+    draftConfig("sk-fresh-key"),
+  );
+  assertEquals(req.endpoints[0].api_key, "sk-fresh-key");
+});
+
+Deno.test("buildProbeRequest: no committed config — null key stays null", () => {
+  assertEquals(
+    buildProbeRequest(null, draftConfig(null)).endpoints[0].api_key,
+    null,
+  );
+});
+
+Deno.test("buildProbeRequest: no committed config — typed key sent inline", () => {
+  assertEquals(
+    buildProbeRequest(null, draftConfig("sk-fresh")).endpoints[0].api_key,
+    "sk-fresh",
+  );
+});
+
+Deno.test("buildProbeRequest: tierIdx restricts to that tier", () => {
+  const req = buildProbeRequest(draftConfig(maskedKey), multiTierConfig(), 1);
+  assertEquals(req.tiers.length, 1);
+  assertEquals(req.tiers[0].profiles[0].id, "p2");
+});
+
+Deno.test("buildProbeRequest: omitted tierIdx probes all tiers", () => {
+  const req = buildProbeRequest(draftConfig(maskedKey), multiTierConfig());
+  assertEquals(req.tiers.length, 3);
+});
+
+Deno.test("singleEndpointProbeRequest: single endpoint, empty tiers, masked key → null", () => {
+  const req = singleEndpointProbeRequest(
+    draftConfig(maskedKey),
+    draftConfig(maskedKey),
+    "main",
+  );
+  assertEquals(req!.endpoints.length, 1);
+  assertEquals(req!.endpoints[0].id, "main");
+  assertEquals(req!.endpoints[0].api_key, null);
+  assertEquals(req!.tiers.length, 0);
+});
+
+Deno.test("singleEndpointProbeRequest: unknown id returns null", () => {
+  assertEquals(
+    singleEndpointProbeRequest(null, draftConfig(null), "ghost"),
+    null,
+  );
+});
+
+Deno.test("singleEndpointProbeRequest: fresh key inline", () => {
+  const req = singleEndpointProbeRequest(
+    draftConfig(maskedKey),
+    draftConfig("sk-new"),
+    "main",
+  );
+  assertEquals(req!.endpoints[0].api_key, "sk-new");
 });
