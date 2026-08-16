@@ -1,15 +1,19 @@
 // Profiles store: model profile config (tiers + endpoints) with local editing,
-// save (PUT), and apply (POST /profiles/apply).
+// save (PUT), apply (POST /profiles/apply), and probe (POST /profiles/probe).
 
-import type { ProfileConfig } from "@kallipai/kallip-client";
+import type {
+  ProfileConfig,
+  ProfileProbeRequest,
+  ProfileProbeResponse,
+} from "@kallipai/kallip-client";
 import {
-  addTier as addTierFn,
-  removeLastTier as removeLastTierFn,
-  addProfile as addProfileFn,
-  removeProfile as removeProfileFn,
   addEndpoint as addEndpointFn,
-  removeEndpoint as removeEndpointFn,
+  addProfile as addProfileFn,
+  addTier as addTierFn,
   profileConfigEqual,
+  removeEndpoint as removeEndpointFn,
+  removeLastTier as removeLastTierFn,
+  removeProfile as removeProfileFn,
 } from "./compute.ts";
 import { type ManagementBackend, managementBackend } from "./client.ts";
 
@@ -27,7 +31,10 @@ class ProfilesStore {
   isLoading = $state(false);
   isSaving = $state(false);
   error = $state<string | null>(null);
+  isProbing = $state(false);
 
+  /** Latest probe outcome (POST /profiles/probe), or null. */
+  probe = $state<ProfileProbeResponse | null>(null);
   /** True when draft diverges from the committed config. */
   get isDirty(): boolean {
     if (!this.config || !this.draft) return false;
@@ -58,7 +65,7 @@ class ProfilesStore {
     this.isSaving = true;
     this.error = null;
     try {
-      const resp = await this.backend.updateProfiles(this.draft);
+      const resp = await this.backend.updateProfiles(toWire(this.draft));
       this.config = resp;
       this.draft = structuredClone(resp);
     } catch (e) {
@@ -84,6 +91,90 @@ class ProfilesStore {
     }
   }
 
+  /**
+   * Build a probe request from the draft: endpoints not carrying a freshly typed
+   * key probe with the live key (api_key: null), so the masked value from GET is
+   * never sent as a credential. `tierIdx` probes a single tier; omit for all.
+   */
+  private buildProbeRequest(tierIdx?: number): ProfileProbeRequest | null {
+    if (!this.draft) return null;
+    const committed = this.config;
+    const endpoints = Object.values(this.draft.endpoints).map((ep) => ({
+      id: ep.id,
+      family: ep.family,
+      base_url: ep.base_url,
+      api_key: ep.api_key && ep.api_key !== committed?.endpoints[ep.id]?.api_key
+        ? ep.api_key
+        : null,
+    }));
+    const tiers = [
+      ...(tierIdx === undefined
+        ? this.draft.tiers
+        : [this.draft.tiers[tierIdx]].filter((t) => t !== undefined)),
+    ].map((t) => ({
+      profiles: t.profiles.map((p) => ({
+        id: p.id,
+        endpoint: p.endpoint,
+        model: p.model,
+      })),
+    }));
+    return { endpoints, tiers };
+  }
+
+  private async runProbe(tierIdx?: number): Promise<void> {
+    const body = this.buildProbeRequest(tierIdx);
+    if (!body) return;
+    this.isProbing = true;
+    this.error = null;
+    try {
+      this.probe = await this.backend.probeProfiles(body);
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.isProbing = false;
+    }
+  }
+
+  /** Probe every endpoint in the draft. */
+  probeAll(): Promise<void> {
+    return this.runProbe();
+  }
+
+  /** Probe the endpoints referenced by one tier. */
+  probeTier(tierIdx: number): Promise<void> {
+    return this.runProbe(tierIdx);
+  }
+
+  /** Probe a single endpoint (no tier checks). */
+  async probeEndpoint(id: string): Promise<void> {
+    if (!this.draft) return;
+    const ep = this.draft.endpoints[id];
+    if (!ep) return;
+    const committed = this.config;
+    const body: ProfileProbeRequest = {
+      endpoints: [
+        {
+          id: ep.id,
+          family: ep.family,
+          base_url: ep.base_url,
+          api_key:
+            ep.api_key && ep.api_key !== committed?.endpoints[id]?.api_key
+              ? ep.api_key
+              : null,
+        },
+      ],
+      tiers: [],
+    };
+    this.isProbing = true;
+    this.error = null;
+    try {
+      this.probe = await this.backend.probeProfiles(body);
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.isProbing = false;
+    }
+  }
   /** Discard local changes and revert to the last committed config. */
   reset(): void {
     if (this.config) {
@@ -142,4 +233,18 @@ class ProfilesStore {
   }
 }
 
+/**
+ * Translate the editable draft into a PUT wire body: an empty key means "keep the
+ * live key" (null on the wire); a masked echo is passed through — the server also
+ * treats it as "keep".
+ */
+function toWire(draft: ProfileConfig): ProfileConfig {
+  const endpoints = Object.fromEntries(
+    Object.entries(draft.endpoints).map(([id, ep]) => [
+      id,
+      { ...ep, api_key: ep.api_key === "" ? null : ep.api_key },
+    ]),
+  );
+  return { ...draft, endpoints };
+}
 export const profilesStore = new ProfilesStore();

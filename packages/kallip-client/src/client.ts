@@ -17,6 +17,8 @@ import type {
     MessageResponse,
     ProfileApplyResponse,
     ProfileConfig,
+    ProfileProbeRequest,
+    ProfileProbeResponse,
     UpdateAgentMetadataRequest,
     UpdateDutyRequest,
     UpdateWorkScheduleRequest,
@@ -218,6 +220,14 @@ export class TagmaClient {
   /** POST /profiles/apply — push current registry to all live agents (operator-only). */
   applyProfiles(): Promise<ProfileApplyResponse> {
     return this.json<ProfileApplyResponse>("/profiles/apply", { method: "POST" });
+  }
+
+  /** POST /profiles/probe — dry-run validation of a (draft) config (operator-only). */
+  probeProfiles(body: ProfileProbeRequest): Promise<ProfileProbeResponse> {
+    return this.json<ProfileProbeResponse>("/profiles/probe", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   }
 
   // --- management: work schedules ---

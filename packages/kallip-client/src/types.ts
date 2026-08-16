@@ -136,11 +136,12 @@ export interface ListAgentsQuery {
 
 // Profiles
 
-/** Provider endpoint (credentials + optional base URL). */
+/** Provider endpoint (credentials + optional base URL). GET returns a masked
+ * api_key; on PUT null keeps the live key. */
 export interface ProfileEndpoint {
   readonly id: string;
   readonly family: string;
-  readonly api_key: string;
+  readonly api_key: string | null;
   readonly base_url: string | null;
 }
 
@@ -167,6 +168,70 @@ export interface ProfileConfig {
 export interface ProfileApplyResponse {
   readonly applied: number;
   readonly skipped: number;
+}
+
+// Profile probe (dry-run validation before applying)
+
+/** Per-endpoint definition sent to POST /profiles/probe. `api_key: null` reuses the live key. */
+export interface ProfileProbeEndpoint {
+  readonly id: string;
+  readonly family: string;
+  readonly api_key: string | null;
+  readonly base_url: string | null;
+}
+
+/** Per-profile model reference inside a probed tier. */
+export interface ProfileProbeProfile {
+  readonly id: string;
+  readonly endpoint: string;
+  readonly model: string;
+}
+
+/** `POST /profiles/probe` request. */
+export interface ProfileProbeRequest {
+  readonly endpoints: readonly ProfileProbeEndpoint[];
+  readonly tiers: readonly {
+    readonly profiles: readonly ProfileProbeProfile[];
+  }[];
+}
+
+export type ProfileProbeStatus =
+  | "ok"
+  | "unreachable"
+  | "unauthorized"
+  | "invalid_config"
+  | "partial";
+
+/** Probe outcome for one endpoint: catalog/balance info on success, reason otherwise. */
+export interface ProfileProbeEndpointReport {
+  readonly endpoint_id: string;
+  readonly status: ProfileProbeStatus;
+  readonly models: readonly string[] | null;
+  readonly catalog: unknown;
+  readonly balance: unknown;
+  readonly detail: string | null;
+}
+
+/** Probe outcome for one profile (model reference) inside a tier. */
+export interface ProfileProbeProfileReport {
+  readonly profile_id: string;
+  readonly endpoint: string;
+  readonly model: string;
+  readonly status: ProfileProbeStatus;
+  readonly detail: string | null;
+}
+
+/** Probe rollup for one tier. */
+export interface ProfileProbeTierReport {
+  readonly index: number;
+  readonly all_ok: boolean;
+  readonly profiles: readonly ProfileProbeProfileReport[];
+}
+
+/** `POST /profiles/probe` response. */
+export interface ProfileProbeResponse {
+  readonly results: readonly ProfileProbeEndpointReport[];
+  readonly tiers: readonly ProfileProbeTierReport[];
 }
 
 // Work schedules

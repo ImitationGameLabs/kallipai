@@ -2,10 +2,23 @@
   import { SvelteSet } from "svelte/reactivity";
   import { profilesStore } from "../../lib/manage/profiles.svelte.ts";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
+  import type { ProfileProbeStatus } from "@kallipai/kallip-client";
   import {
-    common_loading,
     common_hide,
+    common_loading,
     common_show,
+    manage_profiles_test,
+    manage_profiles_test_all,
+    manage_profiles_probe_results,
+    manage_profiles_probe_status_ok,
+    manage_profiles_probe_status_partial,
+    manage_profiles_probe_status_unreachable,
+    manage_profiles_probe_status_unauthorized,
+    manage_profiles_probe_status_invalid,
+    manage_profiles_probe_models_one,
+    manage_profiles_probe_models_other,
+    manage_profiles_probe_tier_ok,
+    manage_profiles_probe_tier_fail,
     manage_profiles_title,
     manage_profiles_heading,
     manage_profiles_save_changes,
@@ -33,8 +46,8 @@
     manage_profiles_apply,
   } from "../../paraglide/messages.js";
 
-  // Track which endpoints show their API key in plaintext. Uses type="text"
   // (not "password") so browser password managers never fire for API keys.
+  // Track which endpoints show their API key in plaintext. Uses type="text"
   let showKeys = new SvelteSet<string>();
 
   let { basePath = "/local/manage" }: { basePath?: string } = $props();
@@ -59,14 +72,34 @@
     }
   }
 
+
   async function onSave() {
     await profilesStore.save().catch(() => {});
   }
 
-  function apiKeyMasked(key: string): string {
-    if (key.length <= 4) return "••••";
-    return "••••••••" + key.slice(-4);
+  function probeStatusLabel(s: ProfileProbeStatus): string {
+    switch (s) {
+      case "ok":
+        return manage_profiles_probe_status_ok();
+      case "partial":
+        return manage_profiles_probe_status_partial();
+      case "unreachable":
+        return manage_profiles_probe_status_unreachable();
+      case "unauthorized":
+        return manage_profiles_probe_status_unauthorized();
+      case "invalid_config":
+        return manage_profiles_probe_status_invalid();
+    }
   }
+
+  const probeStatusColor: Record<ProfileProbeStatus, string> = {
+    ok: "text-success-500 dark:text-success-400",
+    partial: "text-warning-500 dark:text-warning-400",
+    unreachable: "text-error-500 dark:text-error-400",
+    unauthorized: "text-error-500 dark:text-error-400",
+    invalid_config: "text-error-500 dark:text-error-400",
+  };
+
 </script>
 
 <svelte:head><title>{manage_profiles_title()}</title></svelte:head>
@@ -79,6 +112,12 @@
         <button
           class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
           onclick={() => profilesStore.refresh()}>⟳</button
+        >
+        <button
+          class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+          disabled={profilesStore.isProbing}
+          onclick={() => profilesStore.probeAll()}
+          >{profilesStore.isProbing ? "…" : manage_profiles_test_all()}</button
         >
         <button
           class="btn btn-sm preset-filled-primary-500"
@@ -103,6 +142,49 @@
       <p class="text-success-500 dark:text-success-400 text-sm">
         {applyResult}
       </p>
+    {/if}
+
+    {#if profilesStore.probe}
+      <section class="card preset-tonal-surface p-4 space-y-2 text-sm">
+        <h2 class="text-xs font-medium uppercase opacity-60 tracking-wide">
+          {manage_profiles_probe_results()}
+        </h2>
+        {#each profilesStore.probe.results as r (r.endpoint_id)}
+          <div class="flex flex-wrap items-baseline gap-x-2">
+            <span class="font-mono text-xs">{r.endpoint_id}</span>
+            <span class={probeStatusColor[r.status]}>{probeStatusLabel(r.status)}</span>
+            {#if r.models}
+              <span class="text-xs opacity-60">
+                {r.models!.length === 1
+                  ? manage_profiles_probe_models_one({ count: r.models!.length })
+                  : manage_profiles_probe_models_other({ count: r.models!.length })}
+              </span>
+            {/if}
+            {#if r.detail}
+              <span class="text-xs opacity-60 font-mono break-all">{r.detail}</span>
+            {/if}
+          </div>
+        {/each}
+        {#each profilesStore.probe.tiers as t (t.index)}
+          <div class="flex flex-wrap items-baseline gap-x-2">
+            <span class="text-xs font-medium">{manage_profiles_tier({ index: t.index })}</span>
+            {#if t.all_ok}
+              <span class={probeStatusColor.ok}>{manage_profiles_probe_tier_ok()}</span>
+            {:else}
+              <span class={probeStatusColor.invalid_config}>
+                {manage_profiles_probe_tier_fail()}
+              </span>
+            {/if}
+            {#each t.profiles as p (p.profile_id)}
+              {#if p.status !== "ok"}
+                <span class="text-xs opacity-60 font-mono break-all">
+                  {p.profile_id} · {p.model} — {probeStatusLabel(p.status)}{p.detail ? `: ${p.detail}` : ""}
+                </span>
+              {/if}
+            {/each}
+          </div>
+        {/each}
+      </section>
     {/if}
     {#if profilesStore.isDirty}
       <button
@@ -132,8 +214,16 @@
         </h2>
         {#each profilesStore.draft.tiers as tier, tierIdx (tierIdx)}
           <div class="border-l-2 border-l-surface-300 pl-4 space-y-2">
-            <div class="text-xs font-medium">
-              {manage_profiles_tier({ index: tierIdx })}
+            <div class="flex items-center justify-between">
+              <div class="text-xs font-medium">
+                {manage_profiles_tier({ index: tierIdx })}
+              </div>
+              <button
+                class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+                disabled={profilesStore.isProbing}
+                onclick={() => profilesStore.probeTier(tierIdx)}
+                >{manage_profiles_test()}</button
+              >
             </div>
             {#each tier.profiles as profile, profileIdx (profileIdx)}
               <div class="grid grid-cols-2 gap-2 text-sm">
@@ -227,8 +317,16 @@
               </div>
             </div>
             <div class="text-xs opacity-50 font-mono">
-              {manage_profiles_current_key({ key: apiKeyMasked(ep.api_key) })}
+              {manage_profiles_current_key({
+                key: profilesStore.config?.endpoints[epId]?.api_key ?? "",
+              })}
             </div>
+            <button
+              class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+              disabled={profilesStore.isProbing}
+              onclick={() => profilesStore.probeEndpoint(epId)}
+              >{profilesStore.isProbing ? "…" : manage_profiles_test()}</button
+            >
             <button
               class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
               onclick={() => profilesStore.removeEndpoint(epId)}

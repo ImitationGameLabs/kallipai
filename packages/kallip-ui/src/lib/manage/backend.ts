@@ -24,6 +24,8 @@ import type {
   ListWorkSchedulesQuery,
   ProfileApplyResponse,
   ProfileConfig,
+  ProfileProbeRequest,
+  ProfileProbeResponse,
   UpdateAgentMetadataRequest,
   UpdateDutyRequest,
   UpdateWorkScheduleRequest,
@@ -46,6 +48,7 @@ export interface ManagementBackend {
   getProfiles(): Promise<ProfileConfig>;
   updateProfiles(body: ProfileConfig): Promise<ProfileConfig>;
   applyProfiles(): Promise<ProfileApplyResponse>;
+  probeProfiles(body: ProfileProbeRequest): Promise<ProfileProbeResponse>;
   listWorkSchedules(query?: ListWorkSchedulesQuery): Promise<WorkSchedule[]>;
   createWorkSchedule(body: CreateWorkScheduleRequest): Promise<WorkSchedule>;
   updateWorkSchedule(
@@ -92,6 +95,10 @@ export class OfflineBackend implements ManagementBackend {
   }
   applyProfiles() {
     return this.client.applyProfiles();
+  }
+
+  probeProfiles(body: ProfileProbeRequest) {
+    return this.client.probeProfiles(body);
   }
   listWorkSchedules(query?: ListWorkSchedulesQuery) {
     return this.client.listWorkSchedules(query);
@@ -169,6 +176,10 @@ export class OnlineBackend implements ManagementBackend {
   }
   applyProfiles() {
     return this.req<ProfileApplyResponse>("POST", "/profiles/apply");
+  }
+
+  probeProfiles(body: ProfileProbeRequest) {
+    return this.req<ProfileProbeResponse>("POST", "/profiles/probe", body);
   }
   listWorkSchedules(query?: ListWorkSchedulesQuery) {
     const params = new URLSearchParams();
