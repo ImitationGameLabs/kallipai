@@ -123,7 +123,7 @@ impl RelayHandle {
                 State(state.clone()), AuthIdentity::operator()).await.into_response(),
             ("PUT", ["profiles"]) => {
                 let req = match serde_json::from_value::<
-                    kallip_runtime::profile::ProfileConfig>(body)
+                    crate::routes::profiles::ProfileConfigWire>(body)
                 { Ok(r) => r, Err(e) => return bad_request(e) };
                 profiles::put_profiles(
                     State(state.clone()), AuthIdentity::operator(), axum::Json(req))

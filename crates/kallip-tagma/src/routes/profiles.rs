@@ -1,19 +1,21 @@
 //! Profile management API: read, update, and apply model profiles online.
 //!
-//! GET /profiles — return the current profile configuration as JSON.
-//! PUT /profiles — validate, persist to disk, and hot-swap the in-memory registry.
+//! GET /profiles — return the current profile configuration with api_keys masked.
+//! PUT /profiles — merge tri-state wire api_keys, validate, persist to disk, and
+//!   hot-swap the in-memory registry.
 //!   Does NOT affect running agents — new agents pick up the swap at spawn.
 //! POST /profiles/apply — push the current registry to all live agents via a
 //!   pending-reset cell; each agent rebuilds its failover state on its next wake-up.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use axum::response::IntoResponse;
+
 use kallip_common::protocol::ApiError;
-use kallip_runtime::profile::{ProfileConfig, ProfileRegistry};
-use serde::Serialize;
+use kallip_runtime::profile::{Endpoint, Profile, ProfileConfig, ProfileRegistry, Tier};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::auth::AuthIdentity;
@@ -25,25 +27,27 @@ use crate::state::SharedState;
 pub async fn get_profiles(
     State(state): State<SharedState>,
     auth: AuthIdentity,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     crate::auth::require_operator(auth.identity())?;
     let bundle = state.profiles.load();
-    Ok(Json(bundle.config.clone()))
+    Ok(Json(masked_config(&bundle.config)?))
 }
 
 /// PUT /profiles — validate, persist, and hot-swap the profile registry.
 ///
-/// Accepts a full [`ProfileConfig`] as JSON. Validates by building backends +
-/// a trial registry (fail-fast on misconfiguration). On success, writes to
-/// disk and swaps the [`ArcSwap`]. Running agents are unaffected until an
-/// explicit [`apply_profiles`] call.
+/// Accepts a wire config where each endpoint's `api_key` is tri-state: null keeps
+/// the live key, a string replaces it, and the masked form echoed back counts as
+/// "keep" (round-trip safe). Merged against the live config, validated by building
+/// backends + a trial registry (fail-fast). On success, writes to disk and swaps
+/// the [`ArcSwap`]; running agents are unaffected until an explicit apply.
 pub async fn put_profiles(
     State(state): State<SharedState>,
     auth: AuthIdentity,
-    Json(config): Json<ProfileConfig>,
-) -> Result<impl IntoResponse, ApiError> {
+    Json(wire): Json<ProfileConfigWire>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     crate::auth::require_operator(auth.identity())?;
 
+    let config = merge_wire(&state.profiles.load().config, wire)?;
     // Validate: build backends + trial registry. If this fails, nothing changes.
     let factory = just_llm_client::client::BackendFactory::new();
     let user_agent = crate::backend::DEFAULT_USER_AGENT;
@@ -77,9 +81,132 @@ pub async fn put_profiles(
     state.profiles.store(Arc::new(bundle));
 
     info!("profile registry hot-swapped");
-    Ok(Json(config))
+    Ok(Json(masked_config(&config)?))
 }
 
+/// Wire DTO for PUT /profiles: same shape as [`ProfileConfig`] except each endpoint's
+/// `api_key` is optional (see [`merge_wire`]).
+#[derive(Deserialize)]
+struct EndpointWire {
+    id: String,
+    family: String,
+    api_key: Option<String>,
+    base_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProfileWire {
+    id: String,
+    endpoint: String,
+    model: String,
+    max_context_window: usize,
+}
+
+#[derive(Deserialize)]
+struct TierWire {
+    profiles: Vec<ProfileWire>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ProfileConfigWire {
+    tiers: Vec<TierWire>,
+    endpoints: HashMap<String, EndpointWire>,
+}
+
+/// Resolve the wire tri-state `api_key` fields against the live config into a full
+/// [`ProfileConfig`] carrying real keys.
+fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileConfig, ApiError> {
+    let mut endpoints = HashMap::new();
+    for (key, ep) in wire.endpoints {
+        if key != ep.id {
+            return Err(ApiError::bad_request(format!(
+                "endpoint map key '{key}' does not match id '{}'",
+                ep.id
+            )));
+        }
+        let api_key = match ep.api_key {
+            None => live
+                .endpoints
+                .get(&key)
+                .map(|e| e.api_key.clone())
+                .ok_or_else(|| {
+                    ApiError::bad_request(format!("endpoint '{key}' is new; api_key is required"))
+                })?,
+            Some(k) if k.is_empty() => {
+                return Err(ApiError::bad_request(format!(
+                    "endpoint '{key}': api_key must not be empty"
+                )));
+            }
+            // Round-trip safety: the masked form echoed back means "keep".
+            Some(k)
+                if live
+                    .endpoints
+                    .get(&key)
+                    .is_some_and(|e| mask_key(&e.api_key) == k) =>
+            {
+                live.endpoints
+                    .get(&key)
+                    .expect("checked above")
+                    .api_key
+                    .clone()
+            }
+            Some(k) => k,
+        };
+        endpoints.insert(
+            key.clone(),
+            Endpoint {
+                id: ep.id,
+                family: ep.family,
+                api_key,
+                base_url: ep.base_url,
+            },
+        );
+    }
+    let tiers = wire
+        .tiers
+        .into_iter()
+        .map(|t| Tier {
+            profiles: t
+                .profiles
+                .into_iter()
+                .map(|p| Profile {
+                    id: p.id,
+                    endpoint: p.endpoint,
+                    model: p.model,
+                    max_context_window: p.max_context_window,
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(ProfileConfig { tiers, endpoints })
+}
+
+/// Mask an API key for wire responses: `first4…last4`, all bullets when the key is
+/// too short to leave anything identifiable.
+fn mask_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 8 {
+        return "•".repeat(chars.len());
+    }
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+/// Serialize a config with every endpoint's `api_key` replaced by its masked form —
+/// the shape GET and PUT responses return.
+fn masked_config(config: &ProfileConfig) -> Result<serde_json::Value, ApiError> {
+    let mut value = serde_json::to_value(config)
+        .map_err(|e| ApiError::internal(format!("profile serialization failed: {e}")))?;
+    if let Some(endpoints) = value.get_mut("endpoints").and_then(|v| v.as_object_mut()) {
+        for ep in endpoints.values_mut() {
+            if let Some(masked) = ep.get("api_key").and_then(|k| k.as_str()).map(mask_key) {
+                ep["api_key"] = serde_json::Value::String(masked);
+            }
+        }
+    }
+    Ok(value)
+}
 /// Response body for POST /profiles/apply.
 #[derive(Serialize)]
 pub struct ApplyResponse {
@@ -98,7 +225,7 @@ pub struct ApplyResponse {
 pub async fn apply_profiles(
     State(state): State<SharedState>,
     auth: AuthIdentity,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Json<ApplyResponse>, ApiError> {
     crate::auth::require_operator(auth.identity())?;
 
     let bundle = state.profiles.load();
@@ -135,9 +262,7 @@ pub async fn apply_profiles(
     skipped = non_live;
 
     for (reset, cell_lock, notify) in targets {
-        let mut cell = cell_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cell = cell_lock.lock().unwrap_or_else(|e| e.into_inner());
         *cell = Some(reset);
         drop(cell);
         notify.notify_one();
@@ -151,8 +276,8 @@ pub async fn apply_profiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::RegistryEntry;
     use crate::test_helpers::{make_entry_with_rx, make_state};
-    use crate::state::{RegistryEntry};
     use kallip_common::agentid::AgentId;
 
     fn op_auth() -> AuthIdentity {
@@ -160,10 +285,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_profiles_returns_config() {
+    async fn get_profiles_masks_api_keys() {
         let state = make_state();
-        // Just verify it doesn't error — returns the default test config.
-        let _ = get_profiles(State(state), op_auth()).await.unwrap();
+        // The default test endpoint carries api_key "test" (4 chars → all bullets).
+        let Json(value) = get_profiles(State(state), op_auth()).await.unwrap();
+        assert_eq!(value["endpoints"]["test"]["api_key"], "••••");
+        // Non-key fields are untouched.
+        assert_eq!(value["endpoints"]["test"]["family"], "deepseek");
+    }
+
+    #[test]
+    fn mask_key_shapes() {
+        assert_eq!(mask_key(""), "");
+        assert_eq!(mask_key("12345678"), "•".repeat(8));
+        assert_eq!(mask_key("123456789"), "1234…6789");
+        assert_eq!(mask_key("sk-abcdef123456wxyz"), "sk-a…wxyz");
+        // Multibyte input masks by chars, never splitting a code point.
+        assert_eq!(mask_key("密钥密钥"), "•".repeat(4));
+    }
+
+    fn live_config() -> ProfileConfig {
+        ProfileConfig {
+            tiers: vec![],
+            endpoints: std::collections::HashMap::from([(
+                "main".into(),
+                Endpoint {
+                    id: "main".into(),
+                    family: "deepseek".into(),
+                    api_key: "sk-live-secret-key".into(),
+                    base_url: None,
+                },
+            )]),
+        }
+    }
+
+    fn wire(api_key: serde_json::Value) -> ProfileConfigWire {
+        serde_json::from_value(serde_json::json!({
+            "endpoints": { "main": {
+                "id": "main",
+                "family": "deepseek",
+                "api_key": api_key,
+                "base_url": null
+            }},
+            "tiers": [{ "profiles": [{
+                "id": "p", "endpoint": "main", "model": "m", "max_context_window": 128000
+            }]}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_wire_null_keeps_live_key() {
+        let merged = merge_wire(&live_config(), wire(serde_json::Value::Null)).unwrap();
+        assert_eq!(merged.endpoints["main"].api_key, "sk-live-secret-key");
+    }
+
+    #[test]
+    fn merge_wire_masked_echo_keeps_live_key() {
+        // A GET→PUT round-trip of the masked form must not corrupt the key.
+        let masked = mask_key("sk-live-secret-key");
+        let merged = merge_wire(&live_config(), wire(serde_json::json!(masked))).unwrap();
+        assert_eq!(merged.endpoints["main"].api_key, "sk-live-secret-key");
+    }
+
+    #[test]
+    fn merge_wire_string_replaces_key() {
+        let merged = merge_wire(&live_config(), wire(serde_json::json!("sk-new-key-123"))).unwrap();
+        assert_eq!(merged.endpoints["main"].api_key, "sk-new-key-123");
+    }
+
+    #[test]
+    fn merge_wire_new_endpoint_without_key_is_rejected() {
+        let mut w = wire(serde_json::Value::Null);
+        w.endpoints.insert(
+            "extra".into(),
+            serde_json::from_value(serde_json::json!({
+                "id": "extra", "family": "deepseek", "api_key": null, "base_url": null
+            }))
+            .unwrap(),
+        );
+        let err = merge_wire(&live_config(), w).unwrap_err();
+        assert!(err.to_string().contains("'extra' is new"), "got: {err}");
+    }
+
+    #[test]
+    fn merge_wire_empty_key_is_rejected() {
+        let err = merge_wire(&live_config(), wire(serde_json::json!(""))).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "got: {err}");
     }
 
     #[tokio::test]
@@ -171,9 +379,15 @@ mod tests {
         let state = make_state();
         let agent = AgentId::random();
         let (entry, _rx) = make_entry_with_rx(None, format!("agent-{agent}"));
-        state.registry.write().await.register(agent.clone(), RegistryEntry::Live(entry));
+        state
+            .registry
+            .write()
+            .await
+            .register(agent.clone(), RegistryEntry::Live(entry));
 
-        let _resp = apply_profiles(State(state.clone()), op_auth()).await.unwrap();
+        let _resp = apply_profiles(State(state.clone()), op_auth())
+            .await
+            .unwrap();
         // Check that pending_profile_reset was set.
         let reg = state.registry.read().await;
         let entry = reg.get(&agent).unwrap();
