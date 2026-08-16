@@ -88,7 +88,7 @@ fn validate_endpoints(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<(
 /// illegal in a header value (e.g. CR/LF, control bytes) fails fast here —
 /// `reqwest::ClientBuilder::build` rejects it and the error bubbles up to the caller — at startup
 /// for the active set, lazily on first failover use otherwise.
-fn build_one(
+pub(crate) fn build_one(
     factory: &BackendFactory,
     endpoint: &Endpoint,
     user_agent: &str,

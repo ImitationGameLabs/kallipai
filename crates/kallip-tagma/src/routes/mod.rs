@@ -11,6 +11,7 @@ mod approval;
 pub(crate) mod context;
 mod message;
 pub(crate) mod profiles;
+mod profile_probe;
 /// The in-process message-delivery seam shared by the `send_message` route and
 /// the relay's `execute_op`, plus its room inbound counterpart.
 pub(crate) use message::{deliver_inbound_room_message, deliver_message, enqueue_prompt};
@@ -147,6 +148,10 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/profiles/apply",
             axum::routing::post(profiles::apply_profiles),
+        )
+        .route(
+            "/profiles/probe",
+            axum::routing::post(profile_probe::probe_profiles),
         )
         .route(
             "/work-schedules",
