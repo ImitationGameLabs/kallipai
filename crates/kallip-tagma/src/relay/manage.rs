@@ -18,7 +18,7 @@ use kallip_common::protocol::{ListAgentsQuery, TokenBudgetUpdateRequest};
 use kallip_lesche_common::message::TagmaReply;
 use tracing::{error, warn};
 use crate::auth::AuthIdentity;
-use crate::routes::{agent, budget, context, profiles};
+use crate::routes::{agent, budget, context, profile_probe, profiles};
 use crate::work_schedule;
 use super::RelayHandle;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
@@ -126,6 +126,14 @@ impl RelayHandle {
                     crate::routes::profiles::ProfileConfigWire>(body)
                 { Ok(r) => r, Err(e) => return bad_request(e) };
                 profiles::put_profiles(
+                    State(state.clone()), AuthIdentity::operator(), axum::Json(req))
+                    .await.into_response()
+            }
+            ("POST", ["profiles", "probe"]) => {
+                let req = match serde_json::from_value::<
+                    crate::routes::profile_probe::ProbeRequest>(body)
+                { Ok(r) => r, Err(e) => return bad_request(e) };
+                profile_probe::probe_profiles(
                     State(state.clone()), AuthIdentity::operator(), axum::Json(req))
                     .await.into_response()
             }

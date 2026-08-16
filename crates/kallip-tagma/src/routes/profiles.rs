@@ -183,7 +183,7 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
 
 /// Mask an API key for wire responses: `first4…last4`, all bullets when the key is
 /// too short to leave anything identifiable.
-fn mask_key(key: &str) -> String {
+pub(crate) fn mask_key(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
     if chars.len() <= 8 {
         return "•".repeat(chars.len());

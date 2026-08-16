@@ -11,7 +11,7 @@ mod approval;
 pub(crate) mod context;
 mod message;
 pub(crate) mod profiles;
-mod profile_probe;
+pub(crate) mod profile_probe;
 /// The in-process message-delivery seam shared by the `send_message` route and
 /// the relay's `execute_op`, plus its room inbound counterpart.
 pub(crate) use message::{deliver_inbound_room_message, deliver_message, enqueue_prompt};

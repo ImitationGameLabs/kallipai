@@ -265,10 +265,18 @@ fn profile_report_for(p: &ProbeProfile, ep: Option<&EndpointReport>) -> ProfileR
     }
 }
 
-/// Merge an inline probe definition with the live config: `api_key: null`
-/// means "keep the live key for this endpoint id".
+/// Merge an inline probe definition with the live config: a null `api_key` or
+/// null `base_url` means "keep the live value for this endpoint id".
 fn resolve_endpoint(probe: &ProbeEndpoint, live: &ProfileConfig) -> Result<Endpoint, String> {
     let api_key = match &probe.api_key {
+        Some(key)
+            if live
+                .endpoints
+                .get(&probe.id)
+                .is_some_and(|ep| crate::routes::profiles::mask_key(&ep.api_key) == *key) =>
+        {
+            live.endpoints[&probe.id].api_key.clone()
+        }
         Some(key) => key.clone(),
         None => live
             .endpoints
@@ -285,7 +293,11 @@ fn resolve_endpoint(probe: &ProbeEndpoint, live: &ProfileConfig) -> Result<Endpo
         id: probe.id.clone(),
         family: probe.family.clone(),
         api_key,
-        base_url: probe.base_url.clone(),
+        base_url: probe.base_url.clone().or_else(|| {
+            live.endpoints
+                .get(&probe.id)
+                .and_then(|ep| ep.base_url.clone())
+        }),
     })
 }
 
@@ -405,10 +417,27 @@ async fn balance_value(
 
 /// Map a backend capability error onto the probe status taxonomy. The HTTP
 /// status, when present, is recovered from the error's source chain — the
-/// same downcast pattern the runtime's `llm_error::extract_http_body` uses.
+/// same downcast pattern the runtime's `llm_error::extract_http_body` uses —
+/// while transport-layer InvalidConfig and unparseable 2xx bodies classify
+/// as invalid_config before the status match, since neither implies
+/// unreachability.
 fn classify_backend_error(e: &just_llm_client::BackendError) -> (ProbeStatus, String) {
     let status = http_status_of(e);
     let detail = format!("{e:#}");
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(error) = current {
+        if let Some(transport) = error.downcast_ref::<just_llm_client::TransportError>()
+            && matches!(transport, just_llm_client::TransportError::InvalidConfig(_))
+        {
+            return (ProbeStatus::InvalidConfig, detail);
+        }
+        if let Some(provider) = error.downcast_ref::<just_llm_client::ProviderError>()
+            && matches!(provider, just_llm_client::ProviderError::Deserialize { .. })
+        {
+            return (ProbeStatus::InvalidConfig, detail);
+        }
+        current = error.source();
+    }
     match status {
         Some(code) if code.as_u16() == 401 || code.as_u16() == 403 => {
             (ProbeStatus::Unauthorized, detail)
@@ -448,7 +477,144 @@ mod tests {
         serde_json::from_value(json).expect("valid probe request")
     }
 
+    #[test]
+    fn masked_key_echo_resolves_to_live_key() {
+        // GET /profiles returns masked keys; a draft probed unchanged echoes the
+        // mask back. That must resolve to the live key, not probe with the mask.
+        let live = make_state().profiles.load().config.clone();
+        let masked = crate::routes::profiles::mask_key(&live.endpoints["test"].api_key);
+        let probe_ep = ProbeEndpoint {
+            id: "test".into(),
+            family: "deepseek".into(),
+            api_key: Some(masked),
+            base_url: None,
+        };
+        let resolved = resolve_endpoint(&probe_ep, &live).expect("masked echo resolves");
+        assert_eq!(resolved.api_key, live.endpoints["test"].api_key);
+    }
+
+    fn endpoint_report(status: ProbeStatus, models: Option<Vec<String>>) -> EndpointReport {
+        EndpointReport {
+            endpoint_id: "test".into(),
+            status,
+            latency_ms: None,
+            models,
+            balance: None,
+            catalog_count: None,
+            detail: None,
+        }
+    }
+
+    fn probe_profile(model: &str) -> ProbeProfile {
+        ProbeProfile {
+            id: "p".into(),
+            endpoint: "test".into(),
+            model: model.into(),
+        }
+    }
+
+    #[test]
+    fn profile_report_matches_catalog_hit_and_miss() {
+        let hit = profile_report_for(
+            &probe_profile("m1"),
+            Some(&endpoint_report(
+                ProbeStatus::Ok,
+                Some(vec!["m1".into(), "m2".into()]),
+            )),
+        );
+        assert_eq!(hit.status, ProbeStatus::Ok);
+        assert!(hit.detail.is_none());
+
+        let miss = profile_report_for(
+            &probe_profile("nope"),
+            Some(&endpoint_report(ProbeStatus::Ok, Some(vec!["m1".into()]))),
+        );
+        assert_eq!(miss.status, ProbeStatus::InvalidConfig);
+        assert!(
+            miss.detail
+                .as_deref()
+                .unwrap()
+                .contains("not in endpoint catalog")
+        );
+    }
+
+    #[test]
+    fn profile_report_without_catalog_is_partial() {
+        let r = profile_report_for(
+            &probe_profile("any"),
+            Some(&endpoint_report(ProbeStatus::Ok, None)),
+        );
+        assert_eq!(r.status, ProbeStatus::Partial);
+    }
+
+    #[test]
+    fn profile_report_inherits_endpoint_failure() {
+        let r = profile_report_for(
+            &probe_profile("m1"),
+            Some(&endpoint_report(ProbeStatus::Unauthorized, None)),
+        );
+        assert_eq!(r.status, ProbeStatus::Unauthorized);
+    }
+
+    #[test]
+    fn profile_report_without_endpoint_report_is_invalid() {
+        let r = profile_report_for(&probe_profile("m1"), None);
+        assert_eq!(r.status, ProbeStatus::InvalidConfig);
+    }
+
+    fn backend_error_with_transport(
+        transport: just_llm_client::TransportError,
+    ) -> just_llm_client::BackendError {
+        just_llm_client::BackendError::provider(
+            "deepseek",
+            just_llm_client::ProviderError::Transport(transport),
+        )
+    }
+
+    #[test]
+    fn classify_http_401_is_unauthorized() {
+        let e = backend_error_with_transport(just_llm_client::TransportError::HttpStatus {
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            body: "bad key".into(),
+        });
+        assert_eq!(classify_backend_error(&e).0, ProbeStatus::Unauthorized);
+    }
+
+    #[test]
+    fn classify_transport_invalid_config_is_invalid_config() {
+        let e = backend_error_with_transport(just_llm_client::TransportError::InvalidConfig(
+            "invalid base URL",
+        ));
+        assert_eq!(classify_backend_error(&e).0, ProbeStatus::InvalidConfig);
+    }
+
+    #[test]
+    fn classify_unparseable_2xx_body_is_invalid_config() {
+        let e = just_llm_client::BackendError::provider(
+            "deepseek",
+            just_llm_client::ProviderError::Deserialize {
+                source: serde_json::from_str::<serde_json::Value>("nope").unwrap_err(),
+                body: "<html>hi</html>".into(),
+            },
+        );
+        assert_eq!(classify_backend_error(&e).0, ProbeStatus::InvalidConfig);
+    }
+
+    #[test]
+    fn resolve_endpoint_null_base_url_merges_live() {
+        let mut live = make_state().profiles.load().config.clone();
+        live.endpoints.get_mut("test").unwrap().base_url = Some("https://live.example".into());
+        let probe_ep = ProbeEndpoint {
+            id: "test".into(),
+            family: "deepseek".into(),
+            api_key: None,
+            base_url: None,
+        };
+        let resolved = resolve_endpoint(&probe_ep, &live).unwrap();
+        assert_eq!(resolved.base_url.as_deref(), Some("https://live.example"));
+    }
     #[tokio::test]
+
     async fn probe_requires_operator() {
         let state = make_state();
         let anon = AuthIdentity::test_new(crate::auth::Identity::Agent {
