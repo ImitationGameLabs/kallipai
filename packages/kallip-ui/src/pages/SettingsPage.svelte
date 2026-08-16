@@ -16,6 +16,26 @@
   import LinkedAccounts from "../components/settings/LinkedAccounts.svelte";
   import EmailManager from "../components/settings/EmailManager.svelte";
   import LightSwitch from "../components/LightSwitch.svelte";
+  import LanguageSwitch from "../components/LanguageSwitch.svelte";
+  import {
+    settings_appearance,
+    settings_dark_mode,
+    settings_language,
+    settings_title,
+    settings_heading,
+    settings_account,
+    settings_connection,
+    settings_connected,
+    settings_disconnected,
+    settings_disconnect,
+    settings_reconnect,
+    settings_device_added,
+    settings_cancelled,
+    settings_reauth_failed,
+    settings_passkey_duplicate,
+    settings_rate_limited,
+    settings_error_unknown,
+  } from "../paraglide/messages.js";
 
   // Settings is now info-only: account actions (logout, mode switch) live in
   // the sidebar AccountMenu. Online shows the account (identity lives in
@@ -117,31 +137,39 @@
   // here (the components stay free of the client import).
   function addHintFor(r: AddPasskeyResult | null): PasskeyAddHint | null {
     if (!r) return null;
-    if (r.ok) return { tone: "ok", text: "Device added." };
+    if (r.ok) return { tone: "ok", text: settings_device_added() };
     const map: Record<string, string> = {
-      cancelled: "Cancelled.",
-      "reauth-required": "Re-authentication failed; try again.",
-      "duplicate-credential": "That device is already registered.",
-      "rate-limited": "Too many attempts. Try again later.",
-      unknown: r.message ?? "Something went wrong.",
+      cancelled: settings_cancelled(),
+      "reauth-required": settings_reauth_failed(),
+      "duplicate-credential": settings_passkey_duplicate(),
+      "rate-limited": settings_rate_limited(),
+      unknown: r.message ?? settings_error_unknown(),
     };
-    return { tone: "err", text: map[r.reason] ?? "Something went wrong." };
+    return { tone: "err", text: map[r.reason] ?? settings_error_unknown() };
   }
 </script>
 
-<svelte:head><title>KallipAI · settings</title></svelte:head>
+<svelte:head><title>{settings_title()}</title></svelte:head>
 
 <div class="h-full overflow-y-auto">
   <div class="p-6 max-w-md space-y-6">
-    <h1 class="text-xl font-semibold">Settings</h1>
+    <h1 class="text-xl font-semibold">{settings_heading()}</h1>
 
     <section class="space-y-3">
       <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-        Appearance
+        {settings_appearance()}
       </h2>
-      <div class="card preset-tonal-surface p-4 flex items-center justify-between gap-3">
-        <div class="text-sm">Dark mode</div>
+      <div
+        class="card preset-tonal-surface p-4 flex items-center justify-between gap-3"
+      >
+        <div class="text-sm">{settings_dark_mode()}</div>
         <LightSwitch />
+      </div>
+      <div
+        class="card preset-tonal-surface p-4 flex items-center justify-between gap-3"
+      >
+        <div class="text-sm">{settings_language()}</div>
+        <LanguageSwitch />
       </div>
     </section>
 
@@ -150,7 +178,7 @@
         {@const me = agoraSession.user}
         <section class="space-y-3">
           <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-            Account
+            {settings_account()}
           </h2>
           <div class="card preset-tonal-surface p-4">
             <!-- display_name is nullable; fall back to the username handle when
@@ -189,7 +217,7 @@
     {:else}
       <section class="space-y-3">
         <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-          Connection
+          {settings_connection()}
         </h2>
         <div class="card preset-tonal-surface p-4 space-y-3">
           <div class="flex items-center gap-2 text-sm">
@@ -201,8 +229,8 @@
             ></span>
             <span class="font-medium"
               >{channelsStore.localConnected
-                ? "Connected"
-                : "Disconnected"}</span
+                ? settings_connected()
+                : settings_disconnected()}</span
             >
           </div>
           <div class="text-xs opacity-60 font-mono break-all">{offlineUrl}</div>
@@ -210,11 +238,11 @@
             {#if channelsStore.localConnected}
               <button
                 class="btn btn-sm preset-tonal-surface"
-                onclick={disconnect}>Disconnect</button
+                onclick={disconnect}>{settings_disconnect()}</button
               >
             {:else}
               <a href="/connect" class="btn btn-sm preset-filled-primary-500"
-                >Reconnect</a
+                >{settings_reconnect()}</a
               >
             {/if}
           </div>

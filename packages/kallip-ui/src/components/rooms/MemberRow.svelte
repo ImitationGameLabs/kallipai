@@ -25,6 +25,12 @@
   import SenderIdentity from "./SenderIdentity.svelte";
   import { profileHref } from "../../lib/room-message.ts";
   import { UserMinus } from "@lucide/svelte";
+  import {
+    room_creator_badge,
+    room_member_online_aria,
+    room_member_offline_aria,
+    room_remove_member_aria,
+  } from "../../paraglide/messages.js";
 
   let {
     member,
@@ -76,7 +82,9 @@
           ? 'bg-success-500'
           : 'border border-surface-400-600 bg-transparent'}"
         role="img"
-        aria-label={online ? "online" : "offline"}
+        aria-label={online
+          ? room_member_online_aria()
+          : room_member_offline_aria()}
       ></span>
     {/if}
     <SenderIdentity
@@ -89,15 +97,15 @@
   <span class="flex items-center gap-2 shrink-0">
     {#if isCreator}
       <span class="text-xs preset-tonal-surface px-2 py-0.5 rounded-base"
-        >creator</span
+        >{room_creator_badge()}</span
       >
     {/if}
     {#if removable && onRemove}
       <button
         type="button"
         class="size-7 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-error-500 hover:text-on-error-500"
-        aria-label="Remove {member.handle}"
-        title="Remove {member.handle}"
+        aria-label={room_remove_member_aria({ handle: member.handle })}
+        title={room_remove_member_aria({ handle: member.handle })}
         onclick={onRemove}
       >
         <UserMinus class="size-4" />

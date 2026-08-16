@@ -1,0 +1,13 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "tagmata_title": "KallipAI · 智能体编队",
+  "tagmata_new": "新建智能体编队",
+  "tagmata_new_action": "+ 新建智能体编队",
+  "tagmata_minting": "生成中…",
+  "tagmata_new_hint": "生成一个注册码，注册你的第一台设备或身份。",
+  "tagmata_load_failed": "智能体编队加载失败。",
+  "tagmata_expired_badge": "已过期",
+  "tagmata_pending_badge": "待注册",
+  "tagmata_secret_title": "密钥仅在生成时显示",
+  "tagmata_expires_in": "{duration} 后过期"
+}

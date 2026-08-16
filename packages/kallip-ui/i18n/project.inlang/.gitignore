@@ -1,0 +1,6 @@
+cache/
+# Tracked: settings.json, messages/, README.md, .meta.json. The latter two are
+`paraglide-js init` boilerplate but MUST be tracked: the SDK regenerates a
+template .gitignore (`*` + `!settings.json`) when it finds them missing,
+which would clobber this file and hide new message files from git.
+# cache/ holds downloaded plugin bundles (ephemeral).

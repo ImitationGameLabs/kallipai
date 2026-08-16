@@ -4,6 +4,12 @@
   import { realtimeStore } from "../lib/session/realtime.svelte";
   import type { TagmaCardProps } from "../lib/tagmata.svelte.ts";
   import TagmataDashboard from "../components/tagmata/TagmataDashboard.svelte";
+  import {
+    tagmata_title,
+    rooms_couldnt_reach,
+    rooms_retrying,
+    common_loading,
+  } from "../paraglide/messages.js";
 
   // The registry is fetched by RootLayout's user_id $effect (it drives
   // auto-connect, so it must load regardless of which page the user lands on,
@@ -40,7 +46,7 @@
   );
 </script>
 
-<svelte:head><title>KallipAI · tagmata</title></svelte:head>
+<svelte:head><title>{tagmata_title()}</title></svelte:head>
 
 {#if agoraSession.user}
   <TagmataDashboard
@@ -62,10 +68,10 @@
 {:else if agoraSession.authError}
   <div class="p-4">
     <p class="text-error-500 dark:text-error-400 text-sm">
-      Could not reach the server: {agoraSession.authError}
+      {rooms_couldnt_reach({ error: agoraSession.authError })}
     </p>
-    <p class="opacity-60 text-sm">Retrying...</p>
+    <p class="opacity-60 text-sm">{rooms_retrying()}</p>
   </div>
 {:else}
-  <div class="p-4"><p class="opacity-60">Loading...</p></div>
+  <div class="p-4"><p class="opacity-60">{common_loading()}</p></div>
 {/if}

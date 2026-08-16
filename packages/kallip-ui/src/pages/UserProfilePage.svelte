@@ -9,6 +9,12 @@
   import { navigate } from "../lib/shell/port.ts";
   import { formatDateTime } from "../lib/tagmata.svelte.ts";
   import type { PublicUserProfile } from "@kallipai/kallip-agora-client";
+  import {
+    common_loading,
+    common_back_aria,
+    user_profile_subtitle,
+    user_profile_joined,
+  } from "../paraglide/messages.js";
 
   let { handle }: { handle: string } = $props();
 
@@ -56,25 +62,27 @@
 <svelte:head><title>KallipAI · {handle}</title></svelte:head>
 
 <div class="flex flex-col h-full">
-  <header class="px-4 py-2 border-b border-surface-200-800 flex items-center gap-2">
+  <header
+    class="px-4 py-2 border-b border-surface-200-800 flex items-center gap-2"
+  >
     <button
       type="button"
       class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
-      aria-label="Back"
+      aria-label={common_back_aria()}
       onclick={back}
     >
       <ArrowLeft class="size-4" />
     </button>
     <div class="flex flex-col min-w-0 flex-1">
       <p class="text-sm font-semibold truncate">@{handle}</p>
-      <p class="text-xs opacity-50 truncate">User profile</p>
+      <p class="text-xs opacity-50 truncate">{user_profile_subtitle()}</p>
     </div>
   </header>
 
   <div class="flex-1 min-h-0 overflow-auto">
     <div class="mx-auto w-full max-w-2xl p-4">
       {#if loading}
-        <p class="text-sm opacity-60">Loading…</p>
+        <p class="text-sm opacity-60">{common_loading()}</p>
       {:else if error}
         <p class="text-sm text-error-500 dark:text-error-400">{error}</p>
       {:else if profile}
@@ -88,7 +96,7 @@
             @{profile.username}
           </div>
           <div class="text-xs opacity-50">
-            Joined {formatDateTime(profile.created_at)}
+            {user_profile_joined({ date: formatDateTime(profile.created_at) })}
           </div>
         </section>
       {/if}

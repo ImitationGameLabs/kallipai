@@ -25,13 +25,58 @@
   import { roomConversationsStore } from "../lib/session/roomConversations.svelte";
   import MemberRow from "../components/rooms/MemberRow.svelte";
   import { navigate } from "../lib/shell/port.ts";
+  import { getLocale } from "../paraglide/runtime.js";
 
+  import {
+    common_loading,
+    common_add,
+    common_remove,
+    room_label_fallback,
+    room_id_label,
+    room_public_badge,
+    room_private_badge,
+    room_member_one,
+    room_member_other,
+    room_members,
+    roomsettings_title,
+    roomsettings_subtitle,
+    roomsettings_back_aria,
+    roomsettings_created,
+    roomsettings_members_error,
+    roomsettings_invite_title,
+    roomsettings_invite,
+    roomsettings_invite_hint,
+    roomsettings_invite_sent,
+    roomsettings_add_tagma,
+    roomsettings_add_tagma_hint,
+    roomsettings_pick_tagma,
+    roomsettings_tagma_id_placeholder,
+    roomsettings_no_tagmata,
+    roomsettings_loading_tagmata,
+    tagma_fallback_label,
+    roomsettings_added,
+    roomsettings_tagma_added,
+    roomsettings_danger,
+    roomsettings_leave,
+    roomsettings_leave_title,
+    roomsettings_leave_desc_named,
+    roomsettings_leave_desc,
+    roomsettings_leaving,
+    roomsettings_leave_confirm,
+    roomsettings_leave_failed,
+    roomsettings_remove_title,
+    roomsettings_remove_desc,
+    roomsettings_removing,
+    roomsettings_remove_failed,
+  } from "../paraglide/messages.js";
   let { roomId }: { roomId: string } = $props();
 
   const room = $derived(
     roomsStore.rooms.find((r) => r.room_id === roomId) ?? null,
   );
-  const roomLabel = $derived(room?.name || `room ${roomId.slice(0, 8)}`);
+  const roomLabel = $derived(
+    room?.name || room_label_fallback({ id: roomId.slice(0, 8) }),
+  );
   const isPublic = $derived(room?.visibility === "public");
 
   // The live roster. Independent of the conversation store (no transcript
@@ -208,25 +253,27 @@
   }
 </script>
 
-<svelte:head><title>KallipAI · room settings</title></svelte:head>
+<svelte:head><title>{roomsettings_title()}</title></svelte:head>
 
 <div class="flex flex-col h-full">
-  <header class="px-4 py-2 border-b border-surface-200-800 flex items-center gap-2">
+  <header
+    class="px-4 py-2 border-b border-surface-200-800 flex items-center gap-2"
+  >
     <button
       type="button"
       class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
-      aria-label="Back to room"
+      aria-label={roomsettings_back_aria()}
       onclick={() => navigate(`/rooms/${roomId}`)}
     >
       <ArrowLeft class="size-4" />
     </button>
     <div class="flex flex-col min-w-0 flex-1">
       <p class="text-sm font-semibold truncate">{roomLabel}</p>
-      <p class="text-xs opacity-50 truncate">Room settings</p>
+      <p class="text-xs opacity-50 truncate">{roomsettings_subtitle()}</p>
     </div>
     {#if isPublic}
       <span class="text-xs preset-tonal-surface px-2 py-0.5 rounded-base"
-        >public</span
+        >{room_public_badge()}</span
       >
     {/if}
   </header>
@@ -243,38 +290,44 @@
         <div class="flex flex-wrap items-center gap-2 text-xs opacity-60">
           {#if isPublic}
             <span class="preset-tonal-surface px-2 py-0.5 rounded-base"
-              >public</span
+              >{room_public_badge()}</span
             >
           {:else}
             <span class="preset-tonal-surface px-2 py-0.5 rounded-base"
-              >private</span
+              >{room_private_badge()}</span
             >
           {/if}
           {#if roster}
             <span>
-              {roster.members.length} member{#if roster.members.length !== 1}s{/if}
+              {roster.members.length === 1
+                ? room_member_one({ count: roster.members.length })
+                : room_member_other({ count: roster.members.length })}
             </span>
           {/if}
           {#if room}
-            <span>created {new Date(room.created_at).toLocaleString()}</span>
+            <span
+              >{roomsettings_created({
+                date: new Date(room.created_at).toLocaleString(getLocale()),
+              })}</span
+            >
           {/if}
         </div>
         <p class="text-xs opacity-50 break-all">
-          <span class="opacity-70">Room ID: </span><span class="font-mono"
-            >{roomId}</span
+          <span class="opacity-70">{room_id_label()}</span><span
+            class="font-mono">{roomId}</span
           >
         </p>
       </section>
 
       <!-- Members -->
       <section class="flex flex-col gap-2">
-        <h2 class="text-sm font-semibold opacity-70">Members</h2>
+        <h2 class="text-sm font-semibold opacity-70">{room_members()}</h2>
         {#if rosterError}
           <p class="text-xs text-error-500 dark:text-error-400">
-            Could not load members: {rosterError}
+            {roomsettings_members_error({ error: rosterError })}
           </p>
         {:else if !roster}
-          <p class="text-sm opacity-60">Loading…</p>
+          <p class="text-sm opacity-60">{common_loading()}</p>
         {:else}
           <div class="flex flex-col gap-1">
             {#each roster.members as m (m.id)}
@@ -295,7 +348,9 @@
       <!-- Invite a user -->
       {#if !isPublic}
         <section class="flex flex-col gap-2">
-          <h2 class="text-sm font-semibold opacity-70">Invite a user</h2>
+          <h2 class="text-sm font-semibold opacity-70">
+            {roomsettings_invite_title()}
+          </h2>
           <form class="flex flex-col gap-1" onsubmit={invite}>
             <div class="flex gap-2">
               <input
@@ -309,17 +364,20 @@
                 class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500 disabled:opacity-60"
                 disabled={inviteBusy || !inviteeUsername.trim()}
               >
-                {inviteBusy ? "…" : "Invite"}
+                {inviteBusy ? "…" : roomsettings_invite()}
               </button>
             </div>
             <p class="text-xs opacity-50">
-              Enter the user's @username. They receive an invite in their Rooms
-              inbox.
+              {roomsettings_invite_hint()}
             </p>
             {#if inviteError}
-              <p class="text-xs text-error-500 dark:text-error-400">{inviteError}</p>
+              <p class="text-xs text-error-500 dark:text-error-400">
+                {inviteError}
+              </p>
             {:else if inviteDone}
-              <p class="text-xs text-success-500 dark:text-success-400">Invite sent.</p>
+              <p class="text-xs text-success-500 dark:text-success-400">
+                {roomsettings_invite_sent()}
+              </p>
             {/if}
           </form>
         </section>
@@ -327,9 +385,11 @@
 
       <!-- Add a tagma -->
       <section class="flex flex-col gap-2">
-        <h2 class="text-sm font-semibold opacity-70">Add a tagma</h2>
+        <h2 class="text-sm font-semibold opacity-70">
+          {roomsettings_add_tagma()}
+        </h2>
         <p class="text-xs opacity-60">
-          Pick one of your tagmata, or add a tagma by id directly.
+          {roomsettings_add_tagma_hint()}
         </p>
 
         <Menu
@@ -340,7 +400,7 @@
             class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500 self-start flex items-center gap-2 disabled:opacity-60"
             disabled={addBusy || !agoraSession.tagmataLoaded}
           >
-            Pick a tagma
+            {roomsettings_pick_tagma()}
             <ChevronDown class="size-4" />
           </Menu.Trigger>
           <Portal>
@@ -351,8 +411,8 @@
                 {#if myTagmas.length === 0}
                   <p class="px-3 py-2 text-sm opacity-60">
                     {agoraSession.tagmataLoaded
-                      ? "No enrolled tagmata."
-                      : "Loading your tagmata…"}
+                      ? roomsettings_no_tagmata()
+                      : roomsettings_loading_tagmata()}
                   </p>
                 {:else}
                   {#each myTagmas as t (t.tagma_id)}
@@ -363,10 +423,15 @@
                       class="flex items-center justify-between gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500 disabled:opacity-60"
                     >
                       <span class="truncate">
-                        {t.label ?? `tagma ${t.tagma_id.slice(0, 8)}`}
+                        {t.label ??
+                          tagma_fallback_label({
+                            id: t.tagma_id.slice(0, 8),
+                          })}
                       </span>
                       {#if added}
-                        <span class="text-xs opacity-60 shrink-0">added</span>
+                        <span class="text-xs opacity-60 shrink-0"
+                          >{roomsettings_added()}</span
+                        >
                       {/if}
                     </Menu.Item>
                   {/each}
@@ -385,7 +450,7 @@
         >
           <input
             class="input flex-1 text-sm"
-            placeholder="tagma id"
+            placeholder={roomsettings_tagma_id_placeholder()}
             bind:value={manualTagmaId}
             disabled={addBusy}
           />
@@ -394,19 +459,23 @@
             class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500 disabled:opacity-60"
             disabled={addBusy || !manualTagmaId.trim()}
           >
-            {addBusy ? "…" : "Add"}
+            {addBusy ? "…" : common_add()}
           </button>
         </form>
         {#if addError}
           <p class="text-xs text-error-500 dark:text-error-400">{addError}</p>
         {:else if addDone}
-          <p class="text-xs text-success-500 dark:text-success-400">Tagma added.</p>
+          <p class="text-xs text-success-500 dark:text-success-400">
+            {roomsettings_tagma_added()}
+          </p>
         {/if}
       </section>
 
       <!-- Danger zone -->
       <section class="flex flex-col gap-2 mt-2">
-        <h2 class="text-sm font-semibold text-error-500 dark:text-error-400">Danger zone</h2>
+        <h2 class="text-sm font-semibold text-error-500 dark:text-error-400">
+          {roomsettings_danger()}
+        </h2>
         <button
           type="button"
           class="btn btn-sm preset-outlined-surface-500 self-start hover:preset-filled-error-500 disabled:opacity-60"
@@ -415,7 +484,7 @@
             leaveOpen = true;
           }}
         >
-          Leave room
+          {roomsettings_leave()}
         </button>
       </section>
     </div>
@@ -424,14 +493,16 @@
 
 <ConfirmDialog
   open={leaveOpen}
-  title="Leave room?"
+  title={roomsettings_leave_title()}
   description={room?.name
-    ? `"${room.name}" will be removed from your rooms. You will stop receiving messages and be removed from the member list.`
-    : "This room will be removed from your rooms. You will stop receiving messages and be removed from the member list."}
-  confirmLabel={leaveBusy ? "Leaving…" : "Leave"}
+    ? roomsettings_leave_desc_named({ name: room.name })
+    : roomsettings_leave_desc()}
+  confirmLabel={leaveBusy
+    ? roomsettings_leaving()
+    : roomsettings_leave_confirm()}
   busy={leaveBusy}
   tone="danger"
-  error={leaveError ? `Leave failed: ${leaveError}` : null}
+  error={leaveError ? roomsettings_leave_failed({ error: leaveError }) : null}
   onConfirm={confirmLeave}
   onCancel={() => {
     leaveOpen = false;
@@ -441,14 +512,16 @@
 
 <ConfirmDialog
   open={removeTarget !== null}
-  title="Remove member?"
+  title={roomsettings_remove_title()}
   description={removeTarget
-    ? `Remove ${removeTarget.handle} from this room? They will stop receiving messages and be removed from the member list.`
+    ? roomsettings_remove_desc({ handle: removeTarget.handle })
     : ""}
-  confirmLabel={removeBusy ? "Removing…" : "Remove"}
+  confirmLabel={removeBusy ? roomsettings_removing() : common_remove()}
   busy={removeBusy}
   tone="danger"
-  error={removeError ? `Remove failed: ${removeError}` : null}
+  error={removeError
+    ? roomsettings_remove_failed({ error: removeError })
+    : null}
   onConfirm={confirmRemove}
   onCancel={() => {
     removeTarget = null;

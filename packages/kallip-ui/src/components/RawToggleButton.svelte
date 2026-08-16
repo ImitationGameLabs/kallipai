@@ -6,6 +6,10 @@
   // ("view rendered") while raw -- rather than by recoloring, so there is no
   // same-property class conflict and the state reads at a glance.
   import { CodeXml, Eye } from "@lucide/svelte";
+  import {
+    chat_show_raw_text,
+    chat_show_rendered_markdown,
+  } from "../paraglide/messages.js";
 
   let {
     pressed,
@@ -18,7 +22,9 @@
   } = $props();
 
   // Label names the next action (matches CopyButton's "Copy"/"Copied" style).
-  const label = $derived(pressed ? "Show rendered markdown" : "Show raw text");
+  const label = $derived(
+    pressed ? chat_show_rendered_markdown() : chat_show_raw_text(),
+  );
 </script>
 
 <button

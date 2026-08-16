@@ -8,6 +8,18 @@
     formatPasskeyDate,
     type PasskeyCardProps,
   } from "../../lib/passkeys.svelte.ts";
+  import {
+    settings_unnamed_device,
+    settings_passwordless_badge_title,
+    settings_passwordless_badge,
+    settings_added_date,
+    settings_last_used,
+    settings_confirm_remove,
+    common_save,
+    common_cancel,
+    common_rename,
+    common_remove,
+  } from "../../paraglide/messages.js";
 
   let {
     passkey,
@@ -66,49 +78,56 @@
         onkeydown={(e) => e.key === "Enter" && saveRename()}
       />
       <button class="btn btn-sm preset-tonal-surface" onclick={saveRename}>
-        Save
+        {common_save()}
       </button>
       <button
         class="btn btn-sm preset-tonal-surface"
-        onclick={() => (editing = false)}>Cancel</button
+        onclick={() => (editing = false)}>{common_cancel()}</button
       >
     </div>
     {#if renameError}
-      <div class="text-xs text-error-600 dark:text-error-500">{renameError}</div>
+      <div class="text-xs text-error-600 dark:text-error-500">
+        {renameError}
+      </div>
     {/if}
   {:else}
     <div class="flex items-center justify-between gap-2">
       <div class="min-w-0">
         <div class="flex items-center gap-2">
           <span class="text-sm font-medium truncate">
-            {passkey.label || "Unnamed device"}
+            {passkey.label || settings_unnamed_device()}
           </span>
           {#if passkey.discoverable}
             <span
               class="shrink-0 text-[0.65rem] px-1.5 py-0.5 rounded-full bg-primary-500/15 text-primary-600 dark:text-primary-500"
-              title="Enables passwordless sign-in via passkey autofill"
-            >passwordless</span>
+              title={settings_passwordless_badge_title()}
+              >{settings_passwordless_badge()}</span
+            >
           {/if}
         </div>
         <div class="text-xs opacity-60">
-          Added {formatPasskeyDate(passkey.createdAt)}
+          {settings_added_date({ date: formatPasskeyDate(passkey.createdAt) })}
           {#if Date.parse(passkey.lastUsedAt) > Date.parse(passkey.createdAt)}
-            <span class="opacity-70">· Last used {formatPasskeyDate(passkey.lastUsedAt)}</span>
+            <span class="opacity-70"
+              >· {settings_last_used({
+                date: formatPasskeyDate(passkey.lastUsedAt),
+              })}</span
+            >
           {/if}
         </div>
       </div>
       <div class="flex gap-2">
         <button class="btn btn-sm preset-tonal-surface" onclick={beginRename}
-          >Rename</button
+          >{common_rename()}</button
         >
         {#if confirming}
           <button
             class="btn btn-sm preset-filled-error-500"
-            onclick={confirmRevoke}>Confirm remove</button
+            onclick={confirmRevoke}>{settings_confirm_remove()}</button
           >
           <button
             class="btn btn-sm preset-tonal-surface"
-            onclick={() => (confirming = false)}>Cancel</button
+            onclick={() => (confirming = false)}>{common_cancel()}</button
           >
         {:else}
           <button
@@ -116,13 +135,15 @@
             onclick={() => {
               revokeError = null;
               confirming = true;
-            }}>Remove</button
+            }}>{common_remove()}</button
           >
         {/if}
       </div>
     </div>
     {#if revokeError}
-      <div class="text-xs text-error-600 dark:text-error-500">{revokeError}</div>
+      <div class="text-xs text-error-600 dark:text-error-500">
+        {revokeError}
+      </div>
     {/if}
   {/if}
 </li>

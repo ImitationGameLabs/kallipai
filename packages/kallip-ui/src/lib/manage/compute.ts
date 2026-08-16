@@ -5,6 +5,11 @@
 // in the .svelte.ts / .svelte files.
 
 import type { ProfileConfig } from "@kallipai/kallip-client";
+import {
+  manage_schedules_warn_invalid,
+  manage_schedules_warn_order,
+  manage_schedules_warn_positive,
+} from "../../paraglide/messages.js";
 
 // ---------------------------------------------------------------------------
 // Budget helpers
@@ -105,17 +110,17 @@ export function addProfile(
   const tiers = config.tiers.map((t, i) =>
     i === tierIdx
       ? {
-        profiles: [
-          ...t.profiles,
-          {
-            id: "",
-            endpoint: "",
-            model: "",
-            max_context_window: DEFAULT_MAX_CONTEXT,
-          },
-        ],
-      }
-      : t
+          profiles: [
+            ...t.profiles,
+            {
+              id: "",
+              endpoint: "",
+              model: "",
+              max_context_window: DEFAULT_MAX_CONTEXT,
+            },
+          ],
+        }
+      : t,
   );
   return { ...config, tiers };
 }
@@ -129,16 +134,13 @@ export function removeProfile(
   const tiers = config.tiers.map((t, i) =>
     i === tierIdx
       ? { profiles: t.profiles.filter((_, pi) => pi !== profileIdx) }
-      : t
+      : t,
   );
   return { ...config, tiers };
 }
 
 /** Add a new endpoint under the given id. */
-export function addEndpoint(
-  config: ProfileConfig,
-  id: string,
-): ProfileConfig {
+export function addEndpoint(config: ProfileConfig, id: string): ProfileConfig {
   return {
     ...config,
     endpoints: {
@@ -176,14 +178,11 @@ export function cronHasFiveFields(expr: string): boolean {
 
 /**
  * Validate warn-minute fields. pre must be >= final and both must be positive.
- * Returns null if valid, or an error message string.
+ * Returns null if valid, or a localized error message string.
  */
-export function validateWarnMinutes(
-  pre: number,
-  final: number,
-): string | null {
-  if (isNaN(pre) || isNaN(final)) return "warn minutes must be valid numbers";
-  if (pre <= 0 || final <= 0) return "warn minutes must be positive";
-  if (pre < final) return "pre-warn must be >= final-warn";
+export function validateWarnMinutes(pre: number, final: number): string | null {
+  if (isNaN(pre) || isNaN(final)) return manage_schedules_warn_invalid();
+  if (pre <= 0 || final <= 0) return manage_schedules_warn_positive();
+  if (pre < final) return manage_schedules_warn_order();
   return null;
 }

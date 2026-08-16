@@ -18,6 +18,22 @@
 
 <script lang="ts">
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import {
+    common_cancel,
+    rooms_create_title,
+    rooms_create_desc,
+    rooms_name_label,
+    rooms_name_placeholder,
+    rooms_description_label,
+    rooms_description_placeholder,
+    rooms_visibility_aria,
+    rooms_visibility_public,
+    rooms_visibility_public_hint,
+    rooms_visibility_private_hint,
+    rooms_create_failed,
+    rooms_creating,
+    rooms_create_action,
+  } from "../../paraglide/messages.js";
 
   let {
     open,
@@ -73,9 +89,11 @@
       <Dialog.Content
         class="card preset-tonal-surface w-full max-w-md p-6 flex flex-col gap-4"
       >
-        <Dialog.Title class="text-lg font-semibold">New room</Dialog.Title>
+        <Dialog.Title class="text-lg font-semibold"
+          >{rooms_create_title()}</Dialog.Title
+        >
         <Dialog.Description class="sr-only">
-          Create a chat room. A name is required; description is optional.
+          {rooms_create_desc()}
         </Dialog.Description>
 
         <form
@@ -87,11 +105,12 @@
         >
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium"
-              >Name <span class="text-error-500 dark:text-error-400">*</span></span
+              >{rooms_name_label()}
+              <span class="text-error-500 dark:text-error-400">*</span></span
             >
             <input
               class="input text-sm"
-              placeholder="e.g. Eng team"
+              placeholder={rooms_name_placeholder()}
               maxlength={128}
               bind:value={name}
               disabled={busy}
@@ -100,10 +119,10 @@
           </label>
 
           <label class="flex flex-col gap-1">
-            <span class="text-sm font-medium">Description (optional)</span>
+            <span class="text-sm font-medium">{rooms_description_label()}</span>
             <textarea
               class="input text-sm min-h-[4rem] resize-y"
-              placeholder="What this room is for"
+              placeholder={rooms_description_placeholder()}
               maxlength={1024}
               bind:value={description}
               disabled={busy}></textarea>
@@ -116,7 +135,7 @@
               type="button"
               role="switch"
               aria-checked={visibility === "public"}
-              aria-label="Room visibility"
+              aria-label={rooms_visibility_aria()}
               class="flex items-center gap-3 text-left disabled:opacity-60"
               disabled={busy}
               onclick={() =>
@@ -135,17 +154,21 @@
                     : 'translate-x-0.5'}"
                 ></span>
               </span>
-              <span class="text-sm font-medium">Public</span>
+              <span class="text-sm font-medium"
+                >{rooms_visibility_public()}</span
+              >
             </button>
             <p class="text-xs opacity-60">
               {visibility === "public"
-                ? "Open-access. Anyone can discover and join."
-                : "Invite-only membership. Private to members."}
+                ? rooms_visibility_public_hint()
+                : rooms_visibility_private_hint()}
             </p>
           </div>
 
           {#if error}
-            <p class="text-error-500 dark:text-error-400 text-xs">Create failed: {error}</p>
+            <p class="text-error-500 dark:text-error-400 text-xs">
+              {rooms_create_failed({ error })}
+            </p>
           {/if}
 
           <div class="flex justify-end gap-2">
@@ -155,14 +178,14 @@
               disabled={busy}
               onclick={onCancel}
             >
-              Cancel
+              {common_cancel()}
             </button>
             <button
               type="submit"
               class="btn preset-filled-primary-500 text-on-primary-500"
               disabled={!canSubmit}
             >
-              {busy ? "Creating…" : "Create room"}
+              {busy ? rooms_creating() : rooms_create_action()}
             </button>
           </div>
         </form>

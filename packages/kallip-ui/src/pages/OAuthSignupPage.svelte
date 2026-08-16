@@ -20,6 +20,19 @@
   import type { OAuthSignupResult } from "@kallipai/kallip-agora-client";
   import Brand from "../components/Brand.svelte";
   import UsernameField from "../components/UsernameField.svelte";
+  import {
+    auth_rate_limited,
+    auth_username_taken,
+    auth_username_rule,
+    auth_creating,
+    auth_create_account,
+    oauth_signup_title,
+    oauth_signup_pick,
+    oauth_signup_disabled,
+    oauth_signup_failed,
+    oauth_signup_other_method,
+    oauth_redirecting,
+  } from "../paraglide/messages.js";
 
   let ctx: OAuthSignupContext | null = $state(null);
   let username = $state("");
@@ -41,15 +54,15 @@
     if (r.ok) return null;
     switch (r.reason) {
       case "duplicate-username":
-        return "That username is taken.";
+        return auth_username_taken();
       case "invalid-username":
-        return "3-32 chars: a-z 0-9, single hyphens only.";
+        return auth_username_rule();
       case "signup-disabled":
-        return "New sign-ups are currently disabled. Try again later.";
+        return oauth_signup_disabled();
       case "rate-limited":
-        return "Too many attempts. Wait a moment and try again.";
+        return auth_rate_limited();
       default:
-        return r.message ?? "Sign-up failed.";
+        return r.message ?? oauth_signup_failed();
     }
   }
 
@@ -91,7 +104,7 @@
   });
 </script>
 
-<svelte:head><title>KallipAI · pick a username</title></svelte:head>
+<svelte:head><title>{oauth_signup_title()}</title></svelte:head>
 
 <div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100-900">
   {#if ctx}
@@ -102,7 +115,7 @@
       <div class="text-center space-y-1">
         <Brand size="lg" />
         <p class="text-sm opacity-60">
-          Pick a username to finish signing up with {providerLabel(ctx.provider)}
+          {oauth_signup_pick({ provider: providerLabel(ctx.provider) })}
         </p>
       </div>
 
@@ -114,7 +127,9 @@
         </p>
       {/if}
       {#if error}
-        <p role="alert" class="text-sm text-error-500 dark:text-error-400">{error}</p>
+        <p role="alert" class="text-sm text-error-500 dark:text-error-400">
+          {error}
+        </p>
       {/if}
 
       <button
@@ -122,21 +137,21 @@
         class="btn preset-filled-primary-500 w-full"
         disabled={!canSubmit}
       >
-        {submitting ? "Creating…" : "Create account"}
+        {submitting ? auth_creating() : auth_create_account()}
       </button>
 
       <p class="text-center text-sm">
         <a
           href="/register"
           class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
-          >Use a different sign-in method</a
+          >{oauth_signup_other_method()}</a
         >
       </p>
     </form>
   {:else}
     <div class="w-full max-w-sm p-6 text-center">
       <Brand size="lg" />
-      <p class="text-sm opacity-60 mt-2">Redirecting…</p>
+      <p class="text-sm opacity-60 mt-2">{oauth_redirecting()}</p>
     </div>
   {/if}
 </div>

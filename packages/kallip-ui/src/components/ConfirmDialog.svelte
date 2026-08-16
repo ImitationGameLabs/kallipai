@@ -7,12 +7,13 @@
   // picks the confirm button's preset (`danger` for destructive actions,
   // `primary` otherwise).
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import { common_cancel } from "../paraglide/messages.js";
 
   let {
     open,
     title,
     description,
-    confirmLabel = "Confirm",
+    confirmLabel,
     busy = false,
     tone = "primary",
     error = null,
@@ -22,7 +23,7 @@
     open: boolean;
     title: string;
     description: string;
-    confirmLabel?: string;
+    confirmLabel: string;
     busy?: boolean;
     tone?: "primary" | "danger";
     error?: string | null;
@@ -62,7 +63,7 @@
             disabled={busy}
             onclick={onCancel}
           >
-            Cancel
+            {common_cancel()}
           </button>
           <button
             type="button"

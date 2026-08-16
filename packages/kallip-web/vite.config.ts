@@ -1,4 +1,5 @@
 import path from "node:path";
+import { paraglideVitePlugin } from "@inlang/paraglide-js";
 import tailwindcss from "@tailwindcss/vite";
 import adapter from "@sveltejs/adapter-static";
 import { sveltekit } from "@sveltejs/kit/vite";
@@ -17,6 +18,24 @@ const webHost = `web.${devDomain}`;
 export default defineConfig({
   plugins: [
     tailwindcss(),
+    // i18n: compiles the shared inlang project (kallip-ui/i18n) into
+    // kallip-ui/src/paraglide on dev/build start. project/outdir resolve
+    // against this package's cwd; the project's pathPattern resolves
+    // against the project directory's parent (@inlang/sdk behavior).
+    // Pinned to 2.20.0: on 2.24.x the compile silently produced zero
+    // messages while reporting success (root cause not identified).
+    // outputStructure is pinned so dev, build, and the root `npm run i18n`
+    // (CLI default) all emit the same layout — the plugin default is
+    // locale-modules in dev, which would flip the shared outdir layout
+    // between dev and build.
+    // Keep exactly one compile trigger running per app.
+    paraglideVitePlugin({
+      project: "../kallip-ui/i18n/project.inlang",
+      outdir: "../kallip-ui/src/paraglide",
+      strategy: ["cookie", "preferredLanguage", "baseLocale"],
+      emitTsDeclarations: true,
+      outputStructure: "message-modules",
+    }),
     sveltekit({
       compilerOptions: {
         // Force runes mode for the project, except for libraries. Can be removed in svelte 6.

@@ -5,6 +5,12 @@
   // `PairAnotherDevice`. Owns only the in-progress label text (the typed label
   // threads through the step-up re-auth, so it must not be dropped while busy).
   import type { PasskeyAddHint } from "../../lib/passkeys.svelte.ts";
+  import {
+    settings_passkey_label_placeholder,
+    settings_add_passkey,
+    settings_passwordless_hint,
+    common_adding,
+  } from "../../paraglide/messages.js";
 
   let {
     busy = false,
@@ -37,7 +43,8 @@
   async function submit() {
     const trimmed = label.trim();
     if (!trimmed || busy) return;
-    const ok = (await onAdd?.(trimmed, discoverable ? { discoverable: true } : {})) ??
+    const ok =
+      (await onAdd?.(trimmed, discoverable ? { discoverable: true } : {})) ??
       false;
     if (ok) {
       label = "";
@@ -51,7 +58,7 @@
   <div class="flex flex-wrap gap-2">
     <input
       class="input input-sm flex-1 min-w-32"
-      placeholder="Passkey label (e.g. MacBook, YubiKey)"
+      placeholder={settings_passkey_label_placeholder()}
       maxlength={64}
       bind:value={label}
       disabled={busy}
@@ -62,12 +69,12 @@
       disabled={!label.trim() || busy}
       onclick={submit}
     >
-      {busy ? "Adding..." : "Add passkey"}
+      {busy ? common_adding() : settings_add_passkey()}
     </button>
   </div>
   <label class="flex items-center gap-2 text-xs opacity-70 select-none">
     <input type="checkbox" bind:checked={discoverable} disabled={busy} />
-    Enable passwordless sign-in (sign in from autofill, no username)
+    {settings_passwordless_hint()}
   </label>
   {#if hint}
     <div

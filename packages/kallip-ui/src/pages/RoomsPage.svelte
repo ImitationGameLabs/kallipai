@@ -4,6 +4,12 @@
   import { roomConversationsStore } from "../lib/session/roomConversations.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import RoomsDashboard from "../components/rooms/RoomsDashboard.svelte";
+  import {
+    rooms_title,
+    rooms_couldnt_reach,
+    rooms_retrying,
+    common_loading,
+  } from "../paraglide/messages.js";
 
   // The registry is fetched by RootLayout's user_id $effect (it must load
   // regardless of which page the user lands on, and re-load on re-login); this
@@ -25,7 +31,7 @@
   );
 </script>
 
-<svelte:head><title>KallipAI · rooms</title></svelte:head>
+<svelte:head><title>{rooms_title()}</title></svelte:head>
 
 {#if agoraSession.user}
   <RoomsDashboard
@@ -51,10 +57,10 @@
 {:else if agoraSession.authError}
   <div class="p-4">
     <p class="text-error-500 dark:text-error-400 text-sm">
-      Could not reach the server: {agoraSession.authError}
+      {rooms_couldnt_reach({ error: agoraSession.authError })}
     </p>
-    <p class="opacity-60 text-sm">Retrying...</p>
+    <p class="opacity-60 text-sm">{rooms_retrying()}</p>
   </div>
 {:else}
-  <div class="p-4"><p class="opacity-60">Loading...</p></div>
+  <div class="p-4"><p class="opacity-60">{common_loading()}</p></div>
 {/if}

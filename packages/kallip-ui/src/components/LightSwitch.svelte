@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { settings_dark_mode } from "../paraglide/messages.js";
   import { Switch } from "@skeletonlabs/skeleton-svelte";
 
   // Mirrors the boot script in each app.html: manual choice (localStorage)
@@ -30,5 +31,5 @@
   <Switch.Control>
     <Switch.Thumb />
   </Switch.Control>
-  <Switch.HiddenInput aria-label="Dark mode" />
+  <Switch.HiddenInput aria-label={settings_dark_mode()} />
 </Switch>

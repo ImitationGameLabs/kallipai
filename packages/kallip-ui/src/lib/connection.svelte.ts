@@ -4,6 +4,11 @@
 // caller passes a reactive source and wraps the call in `$derived` to retain
 // reactivity.
 
+import {
+  connection_connected,
+  connection_connecting,
+  connection_not_connected,
+} from "../paraglide/messages.js";
 export type ConnectionState = "connected" | "connecting" | "offline";
 
 export interface ConnectionViewModel {
@@ -25,16 +30,20 @@ export function connectionViewModel(
   if (src.connecting) {
     return {
       state: "connecting",
-      label: "connecting",
+      label: connection_connecting(),
       dotClass: "bg-warning-500",
     };
   }
   if (src.connected) {
     return {
       state: "connected",
-      label: "connected",
+      label: connection_connected(),
       dotClass: "bg-success-500",
     };
   }
-  return { state: "offline", label: "not connected", dotClass: "bg-error-500" };
+  return {
+    state: "offline",
+    label: connection_not_connected(),
+    dotClass: "bg-error-500",
+  };
 }

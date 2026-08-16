@@ -20,8 +20,12 @@
   import AgentsPage from "./AgentsPage.svelte";
   import ProfilesPage from "./ProfilesPage.svelte";
   import SchedulesPage from "./SchedulesPage.svelte";
+  import { manage_opening } from "../../paraglide/messages.js";
 
-  let { tagmaId, page }: {
+  let {
+    tagmaId,
+    page,
+  }: {
     tagmaId: string;
     page: "overview" | "budget" | "agents" | "profiles" | "schedules";
   } = $props();
@@ -30,8 +34,10 @@
 
   const channelState = $derived(channelsStore.getTagmaChannelState(tagmaId));
   const conversationId = $derived(
-    channelState.kind === "open" || channelState.kind === "offline" || channelState.kind === "error"
-      ? channelState.conversationId ?? null
+    channelState.kind === "open" ||
+      channelState.kind === "offline" ||
+      channelState.kind === "error"
+      ? (channelState.conversationId ?? null)
       : null,
   );
 
@@ -50,7 +56,8 @@
     }
     try {
       // conv.kind === "relay" narrows to RelayConversation
-      const relayConv = conv as import("../../lib/session/conversation.svelte.ts").RelayConversation;
+      const relayConv =
+        conv as import("../../lib/session/conversation.svelte.ts").RelayConversation;
       const channel = relayConv.relayTransport.relayChannel;
       const backend = new OnlineBackend(channel);
       budgetStore.switchBackend(backend);
@@ -73,7 +80,9 @@
         agentsStore.switchBackend(b);
         profilesStore.switchBackend(b);
         schedulesStore.switchBackend(b);
-      } catch { /* no offline config */ }
+      } catch {
+        /* no offline config */
+      }
     };
   });
 </script>
@@ -84,7 +93,7 @@
       {#if error}
         <p class="text-error-500 dark:text-error-400 text-sm">{error}</p>
       {:else}
-        <p class="text-sm opacity-60">Opening management channel…</p>
+        <p class="text-sm opacity-60">{manage_opening()}</p>
       {/if}
     </div>
   </div>

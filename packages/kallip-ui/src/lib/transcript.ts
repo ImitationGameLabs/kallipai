@@ -19,6 +19,8 @@
 // negative id minted by the store; they are never cached and are replaced by
 // the real id when the `MessageAccepted` ack lands. Signal-produced system
 // lines are also synthetic (signals carry no history id) and are never cached.
+// Signal-produced text is localized at signal time under the active locale;
+// signals are transient, so a mid-error locale switch keeps the old language.
 
 import type {
   AuthoredEvent,
@@ -26,6 +28,16 @@ import type {
   SignalEvent,
   TagmaReply,
 } from "@kallipai/kallip-lesche-client";
+import {
+  signal_failover_error,
+  signal_failover_line,
+  signal_max_rounds_error,
+  signal_max_rounds_line,
+  signal_token_budget_error,
+  signal_token_budget_line,
+  signal_turn_cancelled,
+  signal_turn_interrupted,
+} from "../paraglide/messages.js";
 
 type ConversationRole = "user" | "assistant" | "system";
 
@@ -183,18 +195,24 @@ function signalSystemLine(signal: SignalEvent): { text: string } | null {
     case "error":
       return { text: signal.message };
     case "interrupted":
-      return { text: "Turn interrupted." };
+      return { text: signal_turn_interrupted() };
     case "cancelled":
-      return { text: "Turn cancelled." };
+      return { text: signal_turn_cancelled() };
     case "token_budget_exceeded":
       return {
-        text: `Token budget exceeded (consumed ${signal.consumed} of ${signal.budget}).`,
+        text: signal_token_budget_line({
+          consumed: signal.consumed,
+          budget: signal.budget,
+        }),
       };
     case "max_rounds_exceeded":
-      return { text: "Max tool rounds exceeded." };
+      return { text: signal_max_rounds_line() };
     case "failover_chain_exhausted":
       return {
-        text: `Model failover exhausted (${signal.reason}): ${signal.detail}`,
+        text: signal_failover_line({
+          reason: signal.reason,
+          detail: signal.detail,
+        }),
       };
     case "busy":
     case "idle":
@@ -229,18 +247,22 @@ export function applySignal(
     case "cancelled":
       return { ...withLine, status: "idle", error: undefined };
     case "token_budget_exceeded":
-      return { ...withLine, status: "error", error: "Token budget exceeded" };
+      return {
+        ...withLine,
+        status: "error",
+        error: signal_token_budget_error(),
+      };
     case "max_rounds_exceeded":
       return {
         ...withLine,
         status: "error",
-        error: "Max tool rounds exceeded",
+        error: signal_max_rounds_error(),
       };
     case "failover_chain_exhausted":
       return {
         ...withLine,
         status: "error",
-        error: "Model failover exhausted",
+        error: signal_failover_error(),
       };
   }
 }

@@ -9,6 +9,21 @@
   import ConfirmDialog from "../ConfirmDialog.svelte";
   import { lescheClientOrFail } from "../../lib/session/agora.svelte";
   import { roomsStore } from "../../lib/session/rooms.svelte";
+  import {
+    common_loading,
+    common_remove,
+    common_close,
+    room_label_fallback,
+    tagma_this,
+    tagma_rooms_title,
+    tagma_rooms_desc,
+    tagma_rooms_load_failed,
+    tagma_rooms_empty,
+    tagma_rooms_remove_title,
+    tagma_rooms_remove_desc,
+    tagma_rooms_removing,
+    tagma_rooms_remove_failed,
+  } from "../../paraglide/messages.js";
 
   let {
     open,
@@ -32,7 +47,7 @@
   let removeError = $state<string | null>(null);
 
   function roomLabel(r: TagmaRoomView): string {
-    return r.name?.trim() || `room ${r.room_id.slice(0, 8)}`;
+    return r.name?.trim() || room_label_fallback({ id: r.room_id.slice(0, 8) });
   }
 
   async function fetchRooms(): Promise<void> {
@@ -91,21 +106,20 @@
         class="card preset-tonal-surface w-full max-w-sm p-6 flex flex-col gap-4"
       >
         <Dialog.Title class="text-lg font-semibold">
-          {tagmaLabel ?? "Tagma"} rooms
+          {tagma_rooms_title({ name: tagmaLabel ?? "Tagma" })}
         </Dialog.Title>
         <Dialog.Description class="text-sm opacity-80">
-          Rooms this tagma has joined. You can remove it from any of them, even
-          a room you are not a member of.
+          {tagma_rooms_desc()}
         </Dialog.Description>
 
         {#if loadError}
           <p class="text-error-500 dark:text-error-400 text-xs">
-            Could not load rooms: {loadError}
+            {tagma_rooms_load_failed({ error: loadError })}
           </p>
         {:else if loading}
-          <p class="text-sm opacity-60">Loading…</p>
+          <p class="text-sm opacity-60">{common_loading()}</p>
         {:else if rooms.length === 0}
-          <p class="text-sm opacity-60">This tagma has not joined any rooms.</p>
+          <p class="text-sm opacity-60">{tagma_rooms_empty()}</p>
         {:else}
           <ul class="flex flex-col gap-1 max-h-[50vh] overflow-auto">
             {#each rooms as r (r.room_id)}
@@ -119,7 +133,7 @@
                     confirmTarget = r;
                   }}
                 >
-                  Remove
+                  {common_remove()}
                 </button>
               </li>
             {/each}
@@ -132,7 +146,7 @@
             class="btn preset-outlined-surface-500"
             onclick={onCancel}
           >
-            Close
+            {common_close()}
           </button>
         </div>
       </Dialog.Content>
@@ -142,14 +156,17 @@
 
 <ConfirmDialog
   open={confirmTarget !== null}
-  title="Remove tagma from room?"
+  title={tagma_rooms_remove_title()}
   description={confirmTarget
-    ? `Remove ${tagmaLabel ?? "this tagma"} from "${roomLabel(confirmTarget)}"? It will stop receiving messages there.`
+    ? tagma_rooms_remove_desc({
+        name: tagmaLabel ?? tagma_this(),
+        room: roomLabel(confirmTarget),
+      })
     : ""}
-  confirmLabel={removeBusy ? "Removing…" : "Remove"}
+  confirmLabel={removeBusy ? tagma_rooms_removing() : common_remove()}
   busy={removeBusy}
   tone="danger"
-  error={removeError ? `Remove failed: ${removeError}` : null}
+  error={removeError ? tagma_rooms_remove_failed({ error: removeError }) : null}
   onConfirm={confirmRemove}
   onCancel={() => {
     confirmTarget = null;

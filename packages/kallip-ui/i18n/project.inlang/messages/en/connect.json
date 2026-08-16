@@ -1,0 +1,13 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "connect_title": "KallipAI · offline connect",
+  "connect_subtitle": "Connect an offline tagma",
+  "connect_url_label": "Tagma URL",
+  "connect_url_hint": "Base URL of the kallip tagma HTTP API.",
+  "connect_token_label": "Auth token",
+  "connect_token_hint": "Operator token accepted by the tagma.",
+  "connect_url_invalid": "Tagma URL must be a valid http(s) URL.",
+  "connect_connecting": "Connecting…",
+  "connect_submit": "Connect",
+  "connect_online_mode": "Online mode"
+}

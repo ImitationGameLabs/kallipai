@@ -1,0 +1,13 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "tagmata_title": "KallipAI · tagmata",
+  "tagmata_new": "New Tagma",
+  "tagmata_new_action": "+ New Tagma",
+  "tagmata_minting": "Minting…",
+  "tagmata_new_hint": "Mint an enrollment code to enroll your first device or identity.",
+  "tagmata_load_failed": "Failed to load tagmata.",
+  "tagmata_expired_badge": "expired",
+  "tagmata_pending_badge": "pending",
+  "tagmata_secret_title": "Secret shown only at mint time",
+  "tagmata_expires_in": "expires in {duration}"
+}

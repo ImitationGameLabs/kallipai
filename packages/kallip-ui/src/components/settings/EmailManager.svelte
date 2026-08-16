@@ -4,9 +4,28 @@
   // added address starts UNVERIFIED; with only the logging transport wired, the
   // verification token is emitted to the agora log -- paste it into the verify
   // field here (or follow the link once a real SMTP provider is configured).
-  import { agoraClientOrFail, agoraSession } from "../../lib/session/agora.svelte";
+  import {
+    agoraClientOrFail,
+    agoraSession,
+  } from "../../lib/session/agora.svelte";
   import type { EmailSummary } from "@kallipai/kallip-agora-client";
   import { isValidEmail } from "../../lib/email.ts";
+  import {
+    settings_email,
+    settings_email_intro,
+    settings_email_none,
+    settings_email_primary,
+    settings_email_verified,
+    settings_email_unverified,
+    settings_email_make_primary,
+    settings_email_token_notice,
+    settings_email_verified_notice,
+    common_add,
+    settings_email_invalid,
+    settings_email_verify_token,
+    common_remove,
+    common_verify,
+  } from "../../paraglide/messages.js";
 
   const emails = $derived(agoraSession.user?.emails ?? []);
 
@@ -38,8 +57,7 @@
       await agoraClientOrFail().addEmail({ address: newAddress.trim() });
       await refresh();
       newAddress = "";
-      notice =
-        "Verification token emitted to the agora log (paste it below) until SMTP is wired.";
+      notice = settings_email_token_notice();
     } catch (e) {
       error = msgOf(e);
     } finally {
@@ -56,7 +74,7 @@
       await agoraClientOrFail().verifyEmail({ token: token.trim() });
       await refresh();
       token = "";
-      notice = "Email verified.";
+      notice = settings_email_verified_notice();
     } catch (e) {
       error = msgOf(e);
     } finally {
@@ -96,16 +114,17 @@
 </script>
 
 <section class="space-y-3">
-  <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">Email</h2>
+  <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+    {settings_email()}
+  </h2>
 
   <div class="card preset-tonal-surface p-4 space-y-3">
     <p class="text-xs opacity-60">
-      Optional contact channel. Not used for login. Link an address, then verify
-      it to mark it primary.
+      {settings_email_intro()}
     </p>
 
     {#if emails.length === 0}
-      <p class="text-sm opacity-60">No email linked.</p>
+      <p class="text-sm opacity-60">{settings_email_none()}</p>
     {:else}
       <ul class="space-y-2">
         {#each emails as e (e.id)}
@@ -114,12 +133,18 @@
             >
             <span class="flex shrink-0 items-center gap-2">
               {#if e.is_primary}
-                <span class="badge preset-filled-secondary-500">primary</span>
+                <span class="badge preset-filled-secondary-500"
+                  >{settings_email_primary()}</span
+                >
               {/if}
               {#if e.verified_at}
-                <span class="text-xs opacity-60">verified</span>
+                <span class="text-xs opacity-60"
+                  >{settings_email_verified()}</span
+                >
               {:else}
-                <span class="text-xs text-warning-500 dark:text-warning-400">unverified</span>
+                <span class="text-xs text-warning-500 dark:text-warning-400"
+                  >{settings_email_unverified()}</span
+                >
               {/if}
             </span>
             <span class="flex shrink-0 items-center gap-2">
@@ -128,14 +153,15 @@
                   type="button"
                   class="btn btn-sm preset-tonal-surface"
                   disabled={busy}
-                  onclick={() => makePrimary(e)}>Make primary</button
+                  onclick={() => makePrimary(e)}
+                  >{settings_email_make_primary()}</button
                 >
               {/if}
               <button
                 type="button"
                 class="btn btn-sm preset-tonal-surface"
                 disabled={busy}
-                onclick={() => remove(e)}>Remove</button
+                onclick={() => remove(e)}>{common_remove()}</button
               >
             </span>
           </li>
@@ -144,7 +170,9 @@
     {/if}
 
     {#if error}
-      <p role="alert" class="text-xs text-error-500 dark:text-error-400">{error}</p>
+      <p role="alert" class="text-xs text-error-500 dark:text-error-400">
+        {error}
+      </p>
     {/if}
     {#if notice}
       <p class="text-xs opacity-70">{notice}</p>
@@ -168,16 +196,20 @@
       <button
         type="submit"
         class="btn preset-filled-primary-500 shrink-0"
-        disabled={!canAdd}>{busy ? "…" : "Add"}</button
+        disabled={!canAdd}>{busy ? "…" : common_add()}</button
       >
     </form>
 
     {#if newAddress.length > 0 && !addressValid}
-      <p class="text-xs text-error-500 dark:text-error-400">Enter a valid email address.</p>
+      <p class="text-xs text-error-500 dark:text-error-400">
+        {settings_email_invalid()}
+      </p>
     {/if}
 
     <details class="text-xs">
-      <summary class="cursor-pointer opacity-60">Verify a token</summary>
+      <summary class="cursor-pointer opacity-60"
+        >{settings_email_verify_token()}</summary
+      >
       <form
         class="mt-2 flex gap-2"
         onsubmit={(ev) => {
@@ -195,7 +227,7 @@
         <button
           type="submit"
           class="btn preset-tonal-surface shrink-0"
-          disabled={busy || !token.trim()}>Verify</button
+          disabled={busy || !token.trim()}>{common_verify()}</button
         >
       </form>
     </details>

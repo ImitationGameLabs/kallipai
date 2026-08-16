@@ -10,6 +10,10 @@
     PasskeyCardProps,
     PasskeyPhase,
   } from "../../lib/passkeys.svelte.ts";
+  import {
+    settings_passkeys,
+    common_loading,
+  } from "../../paraglide/messages.js";
   import AddDevice from "./AddDevice.svelte";
   import PasskeyCard from "./PasskeyCard.svelte";
 
@@ -53,7 +57,7 @@
 
 <section class="space-y-3">
   <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-    Passkeys
+    {settings_passkeys()}
   </h2>
 
   {#if error}
@@ -61,7 +65,7 @@
   {/if}
 
   {#if phase === "loading"}
-    <p class="text-sm opacity-60">Loading...</p>
+    <p class="text-sm opacity-60">{common_loading()}</p>
   {:else}
     <ul class="space-y-2">
       {#each passkeys as pk (pk.id)}

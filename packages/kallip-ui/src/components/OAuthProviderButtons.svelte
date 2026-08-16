@@ -7,6 +7,7 @@
   // after a signin; register has none (a brand-new account always lands on
   // /tagmata).
   import { agoraSession } from "../lib/session/agora.svelte";
+  import { auth_continue_with, auth_or } from "../paraglide/messages.js";
 
   let { returnPath = undefined }: { returnPath?: string } = $props();
 
@@ -33,16 +34,18 @@
         class="btn btn-sm preset-tonal-surface w-full"
         onclick={() => begin(p.id)}
       >
-        Continue with {p.label}
+        {auth_continue_with({ label: p.label })}
       </button>
     {/each}
     <div class="flex items-center gap-2 text-xs opacity-40 py-1">
       <span class="flex-1 border-t border-surface-300-700"></span>
-      <span>or</span>
+      <span>{auth_or()}</span>
       <span class="flex-1 border-t border-surface-300-700"></span>
     </div>
     {#if error}
-      <p role="alert" class="text-xs text-error-500 dark:text-error-400">{error}</p>
+      <p role="alert" class="text-xs text-error-500 dark:text-error-400">
+        {error}
+      </p>
     {/if}
   </div>
 {/if}

@@ -4,6 +4,11 @@
   // cannot drift. The owning page binds `value` and derives submit-readiness
   // from `isValidUsername` (the server is the final authority either way).
   import { isValidUsername } from "../lib/username.ts";
+  import {
+    auth_username,
+    auth_username_hint,
+    auth_username_placeholder,
+  } from "../paraglide/messages.js";
 
   let { value = $bindable("") }: { value?: string } = $props();
   const valid = $derived(isValidUsername(value));
@@ -11,18 +16,18 @@
 
 <label class="block space-y-1">
   <span class="text-sm opacity-70">
-    Username <span class="text-error-500 dark:text-error-400">*</span>
+    {auth_username()} <span class="text-error-500 dark:text-error-400">*</span>
   </span>
   <input
     class="input"
     autocomplete="username"
-    placeholder="a-z, 0-9, -, 3-32 chars"
+    placeholder={auth_username_placeholder()}
     bind:value
     required
   />
   {#if value.length > 0 && !valid}
     <span class="text-xs text-error-500 dark:text-error-400">
-      3-32 chars: a-z 0-9, single hyphens only (no leading/trailing/consecutive)
+      {auth_username_hint()}
     </span>
   {/if}
 </label>

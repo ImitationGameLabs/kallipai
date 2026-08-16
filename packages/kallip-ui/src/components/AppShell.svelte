@@ -6,6 +6,12 @@
   import type { ErrorView } from "../lib/errors.ts";
   import Brand from "./Brand.svelte";
   import Banner from "./Banner.svelte";
+  import {
+    shell_connecting,
+    shell_error,
+    shell_live,
+    shell_offline,
+  } from "../paraglide/messages.js";
 
   // AppShell owns the indicator visual tokens (mirrors how it owns the icon's
   // `size-4`), so callers only express a domain tri-state, not a class string.
@@ -35,13 +41,13 @@
   function navIndicatorLabel(indicator: NavIndicator): string {
     switch (indicator) {
       case "live":
-        return "live";
+        return shell_live();
       case "pending":
-        return "connecting";
+        return shell_connecting();
       case "down":
-        return "offline";
+        return shell_offline();
       case "error":
-        return "error";
+        return shell_error();
     }
   }
 

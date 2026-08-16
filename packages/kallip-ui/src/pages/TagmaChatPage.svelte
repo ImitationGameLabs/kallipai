@@ -11,6 +11,11 @@
   import { agoraSession } from "../lib/session/agora.svelte";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { navigate } from "../lib/shell/port.ts";
+  import {
+    tagma_chat_not_enrolled,
+    chat_opening,
+    chat_go_tagmata,
+  } from "../paraglide/messages.js";
 
   let { tagmaId }: { tagmaId: string } = $props();
 
@@ -54,13 +59,13 @@
        revoked tagma falls here on the next refresh. -->
   <div class="h-full grid place-items-center p-6">
     <div class="text-center flex flex-col gap-3 max-w-sm">
-      <p class="text-sm opacity-80">This tagma is not enrolled.</p>
+      <p class="text-sm opacity-80">{tagma_chat_not_enrolled()}</p>
       <button
         type="button"
         class="btn preset-tonal-surface self-center"
         onclick={() => navigate("/tagmata")}
       >
-        Go to tagmata
+        {chat_go_tagmata()}
       </button>
     </div>
   </div>
@@ -74,13 +79,13 @@
   <!-- absent / pending: ensureOpen has been fired by the effect above. -->
   <div class="h-full grid place-items-center p-6">
     <div class="text-center flex flex-col gap-3 max-w-sm">
-      <p class="text-sm opacity-60">Opening channel…</p>
+      <p class="text-sm opacity-60">{chat_opening()}</p>
       <button
         type="button"
         class="btn preset-tonal-surface self-center"
         onclick={() => navigate("/tagmata")}
       >
-        Go to tagmata
+        {chat_go_tagmata()}
       </button>
     </div>
   </div>

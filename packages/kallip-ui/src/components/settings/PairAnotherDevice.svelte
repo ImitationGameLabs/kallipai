@@ -6,7 +6,20 @@
   // trigger live in `AddDevice`. User-facing copy says "Add a device"; the
   // internal name keeps "pair" as the mechanism (the issued credential is a
   // pairing code, like Bluetooth pairing).
-  import { pairSecondsRemaining, type PairingCodeView } from "../../lib/passkeys.svelte.ts";
+  import {
+    pairSecondsRemaining,
+    type PairingCodeView,
+  } from "../../lib/passkeys.svelte.ts";
+  import {
+    settings_pair_qr_alt,
+    settings_pair_show,
+    settings_pair_expires,
+    settings_copy_code,
+    settings_pair_intro,
+    settings_generate_pair_code,
+    common_copied,
+    common_generating,
+  } from "../../paraglide/messages.js";
   import QRCode from "qrcode";
 
   let {
@@ -34,7 +47,9 @@
   // Ticks every second while a code is shown, to drive the countdown.
   let now = $state(Date.now());
 
-  const remaining = $derived(view ? pairSecondsRemaining(view.expiresAt, now) : 0);
+  const remaining = $derived(
+    view ? pairSecondsRemaining(view.expiresAt, now) : 0,
+  );
 
   // Drive the countdown + drop the code when it expires.
   $effect(() => {
@@ -74,32 +89,36 @@
 {#if view}
   <div class="flex flex-col items-center gap-3">
     {#if qrDataUrl}
-      <img src={qrDataUrl} alt="Pairing code QR" class="w-48 h-48 rounded" />
+      <img
+        src={qrDataUrl}
+        alt={settings_pair_qr_alt()}
+        class="w-48 h-48 rounded"
+      />
     {/if}
     <div class="text-center">
-      <div class="text-xs opacity-60">Show this to the new device</div>
+      <div class="text-xs opacity-60">{settings_pair_show()}</div>
       <div class="text-2xl font-mono tracking-widest font-semibold mt-1">
         {view.code}
       </div>
       <div class="text-xs opacity-60 mt-1">
-        Expires in {remaining}s · or scan the QR
+        {settings_pair_expires({ seconds: remaining })}
       </div>
     </div>
     <button class="btn btn-sm preset-tonal-surface" onclick={copy}>
-      {copied ? "Copied" : "Copy code"}
+      {copied ? common_copied() : settings_copy_code()}
     </button>
   </div>
 {:else}
   <div class="space-y-2">
     <p class="text-sm opacity-70">
-      Generate a one-time code (or QR) to add a passkey on another device.
+      {settings_pair_intro()}
     </p>
     <button
       class="btn btn-sm preset-filled-primary-500"
       disabled={minting}
       onclick={onMint}
     >
-      {minting ? "Generating..." : "Generate pairing code"}
+      {minting ? common_generating() : settings_generate_pair_code()}
     </button>
     {#if error}
       <div class="text-xs text-error-600 dark:text-error-500">{error}</div>

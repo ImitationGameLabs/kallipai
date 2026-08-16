@@ -1,0 +1,7 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "manage_agents_title": "KallipAI · 编队细节",
+  "manage_agents_heading": "编队细节",
+  "manage_agents_empty": "暂无智能体。",
+  "manage_agents_details": "详情"
+}

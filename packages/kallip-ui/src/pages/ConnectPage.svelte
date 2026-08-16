@@ -8,6 +8,18 @@
   import { classifyError } from "../lib/errors.ts";
   import Brand from "../components/Brand.svelte";
   import Banner from "../components/Banner.svelte";
+  import {
+    connect_title,
+    connect_subtitle,
+    connect_url_label,
+    connect_url_hint,
+    connect_token_label,
+    connect_token_hint,
+    connect_url_invalid,
+    connect_connecting,
+    connect_submit,
+    connect_online_mode,
+  } from "../paraglide/messages.js";
 
   let tagmaUrl = $state("http://127.0.0.1:3000");
   let authToken = $state("");
@@ -53,7 +65,7 @@
     error = null;
     connectError = null;
     if (!validUrl(tagmaUrl.trim())) {
-      error = "Tagma URL must be a valid http(s) URL.";
+      error = connect_url_invalid();
       return;
     }
     connecting = true;
@@ -88,7 +100,7 @@
   }
 </script>
 
-<svelte:head><title>KallipAI · offline connect</title></svelte:head>
+<svelte:head><title>{connect_title()}</title></svelte:head>
 
 {#if connectView}
   <!-- Floats over the centered form; the URL-validation hint stays inline. -->
@@ -107,12 +119,13 @@
   >
     <div class="text-center space-y-1">
       <Brand size="lg" />
-      <p class="text-sm opacity-60">Connect an offline tagma</p>
+      <p class="text-sm opacity-60">{connect_subtitle()}</p>
     </div>
 
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
-        Tagma URL <span class="text-error-500 dark:text-error-400">*</span>
+        {connect_url_label()}
+        <span class="text-error-500 dark:text-error-400">*</span>
       </span>
       <input
         class="input"
@@ -121,14 +134,13 @@
         placeholder="http://127.0.0.1:3000"
         required
       />
-      <span class="block text-xs opacity-50"
-        >Base URL of the kallip tagma HTTP API.</span
-      >
+      <span class="block text-xs opacity-50">{connect_url_hint()}</span>
     </label>
 
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
-        Auth token <span class="text-error-500 dark:text-error-400">*</span>
+        {connect_token_label()}
+        <span class="text-error-500 dark:text-error-400">*</span>
       </span>
       <input
         class="input"
@@ -138,13 +150,13 @@
         placeholder="sk-operator-…"
         required
       />
-      <span class="block text-xs opacity-50"
-        >Operator token accepted by the tagma.</span
-      >
+      <span class="block text-xs opacity-50">{connect_token_hint()}</span>
     </label>
 
     {#if error}
-      <p role="alert" class="text-sm text-error-500 dark:text-error-400">{error}</p>
+      <p role="alert" class="text-sm text-error-500 dark:text-error-400">
+        {error}
+      </p>
     {/if}
 
     <button
@@ -152,7 +164,7 @@
       class="btn preset-filled-primary-500 w-full"
       disabled={connecting || !authToken.trim()}
     >
-      {connecting ? "Connecting…" : "Connect"}
+      {connecting ? connect_connecting() : connect_submit()}
     </button>
 
     <p class="text-center text-sm">
@@ -160,7 +172,7 @@
         type="button"
         onclick={useOnline}
         class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
-        >Online mode</button
+        >{connect_online_mode()}</button
       >
     </p>
   </form>

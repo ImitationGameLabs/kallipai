@@ -12,6 +12,10 @@
     createTogglePin,
   } from "../lib/transcript.svelte.ts";
   import { timelineMarkers } from "../lib/channel/timeline.ts";
+  import {
+    chat_send_to_start,
+    room_sending_aria,
+  } from "../paraglide/messages.js";
   import type {
     ConversationLine,
     ConversationTranscript,
@@ -68,7 +72,7 @@
   <div class="mx-auto w-full max-w-[80rem] p-4 flex flex-col gap-3">
     {#if lines.length === 0 && !busy}
       <p class="text-sm opacity-60 text-center mt-8">
-        Send a message to start the conversation.
+        {chat_send_to_start()}
       </p>
     {/if}
     {#each lines as line, i (line.historyId)}
@@ -111,8 +115,9 @@
             pin={togglePin}
           />
           {#if line.role === "user" && line.status === "sending"}
-            <span class="text-xs opacity-50 animate-pulse" aria-label="sending"
-              >··</span
+            <span
+              class="text-xs opacity-50 animate-pulse"
+              aria-label={room_sending_aria()}>··</span
             >
           {/if}
         </div>

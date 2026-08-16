@@ -7,6 +7,15 @@
   // routed through `onCancel`. Dismiss is suppressed while a revoke is in flight
   // so a transient failure is surfaced rather than dropped.
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import {
+    common_cancel,
+    tagma_revoke,
+    tagma_revoking,
+    tagma_revoke_title,
+    tagma_revoke_body_named,
+    tagma_revoke_body_unnamed,
+    tagma_revoke_failed,
+  } from "../../paraglide/messages.js";
 
   let {
     open,
@@ -37,14 +46,18 @@
       <Dialog.Content
         class="card preset-tonal-surface w-full max-w-sm p-6 flex flex-col gap-4"
       >
-        <Dialog.Title class="text-lg font-semibold">Revoke tagma?</Dialog.Title>
+        <Dialog.Title class="text-lg font-semibold"
+          >{tagma_revoke_title()}</Dialog.Title
+        >
         <Dialog.Description class="text-sm opacity-80">
-          {tagmaLabel ? `"${tagmaLabel}"` : "This tagma"} will lose access immediately.
-          The device is disconnected on its next attempt to reach the server, and
-          the tagma disappears from this list.
+          {tagmaLabel
+            ? tagma_revoke_body_named({ name: tagmaLabel })
+            : tagma_revoke_body_unnamed()}
         </Dialog.Description>
         {#if error}
-          <p class="text-error-500 dark:text-error-400 text-xs">Revoke failed: {error}</p>
+          <p class="text-error-500 dark:text-error-400 text-xs">
+            {tagma_revoke_failed({ error })}
+          </p>
         {/if}
         <div class="flex justify-end gap-2">
           <button
@@ -53,7 +66,7 @@
             disabled={busy}
             onclick={onCancel}
           >
-            Cancel
+            {common_cancel()}
           </button>
           <button
             type="button"
@@ -61,7 +74,7 @@
             disabled={busy}
             onclick={onConfirm}
           >
-            {busy ? "Revoking…" : "Revoke"}
+            {busy ? tagma_revoking() : tagma_revoke()}
           </button>
         </div>
       </Dialog.Content>

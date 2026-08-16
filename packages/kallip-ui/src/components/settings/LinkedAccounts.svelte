@@ -7,6 +7,15 @@
   // the store directly, surfaces per-action errors inline.
   import { agoraSession } from "../../lib/session/agora.svelte";
   import { AgoraApiError } from "@kallipai/kallip-agora-client";
+  import {
+    settings_linked_accounts,
+    settings_linked_intro,
+    settings_linked_none,
+    settings_unlink,
+    settings_link_provider,
+    settings_last_signin_error,
+    auth_reauth_required,
+  } from "../../paraglide/messages.js";
 
   const identities = $derived(agoraSession.externalIdentities);
 
@@ -32,12 +41,12 @@
   function msgOf(e: unknown): string {
     if (e instanceof AgoraApiError) {
       if (e.status === 409) {
-        return "Cannot remove your last sign-in method.";
+        return settings_last_signin_error();
       }
       // The link begin is step-up gated; a 403 means the session's freshness
       // has expired. Surface a friendly prompt (the retry UI is a follow-up).
       if (e.status === 403) {
-        return "Re-authentication required. Sign in again, then retry.";
+        return auth_reauth_required();
       }
     }
     return e instanceof Error ? e.message : String(e);
@@ -77,17 +86,16 @@
 
 <section class="space-y-3">
   <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-    Linked accounts
+    {settings_linked_accounts()}
   </h2>
 
   <div class="card preset-tonal-surface p-4 space-y-3">
     <p class="text-xs opacity-60">
-      Sign-in methods beyond passkeys. Link a provider to sign in with it;
-      keep at least one sign-in method on the account.
+      {settings_linked_intro()}
     </p>
 
     {#if identities.length === 0}
-      <p class="text-sm opacity-60">No provider linked.</p>
+      <p class="text-sm opacity-60">{settings_linked_none()}</p>
     {:else}
       <ul class="space-y-2">
         {#each identities as ident (ident.id)}
@@ -104,7 +112,7 @@
               type="button"
               class="btn btn-sm preset-tonal-surface shrink-0"
               disabled={busy}
-              onclick={() => unlink(ident.id)}>Unlink</button
+              onclick={() => unlink(ident.id)}>{settings_unlink()}</button
             >
           </li>
         {/each}
@@ -112,7 +120,9 @@
     {/if}
 
     {#if error}
-      <p role="alert" class="text-xs text-error-500 dark:text-error-400">{error}</p>
+      <p role="alert" class="text-xs text-error-500 dark:text-error-400">
+        {error}
+      </p>
     {/if}
 
     {#if linkable.length > 0}
@@ -122,7 +132,8 @@
             type="button"
             class="btn btn-sm preset-tonal-surface"
             disabled={busy}
-            onclick={() => link(p.id)}>Link {p.label}</button
+            onclick={() => link(p.id)}
+            >{settings_link_provider({ provider: p.label })}</button
           >
         {/each}
       </div>

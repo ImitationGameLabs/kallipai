@@ -17,12 +17,21 @@
 <script lang="ts">
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
   import { MoreVertical, Settings } from "@lucide/svelte";
+  import { getLocale } from "../../paraglide/runtime.js";
+  import {
+    room_label_fallback,
+    room_public_badge,
+    room_actions_aria,
+    rooms_menu_settings,
+  } from "../../paraglide/messages.js";
 
   let { room, onOpen, onSettings }: RoomCardProps = $props();
 
   // The human label: the room name, falling back to a short id prefix for rooms
   // created before names existed (or seeded empty). The full id is shown muted.
-  const name = $derived(room.name || `room ${room.room_id.slice(0, 8)}`);
+  const name = $derived(
+    room.name || room_label_fallback({ id: room.room_id.slice(0, 8) }),
+  );
   const isPublic = $derived(room.visibility === "public");
 </script>
 
@@ -39,7 +48,7 @@
       {#if isPublic}
         <span
           class="text-xs preset-tonal-surface px-2 py-0.5 rounded-base shrink-0"
-          >public</span
+          >{room_public_badge()}</span
         >
       {/if}
     </div>
@@ -47,7 +56,7 @@
       <p class="text-xs opacity-70 line-clamp-2">{room.description}</p>
     {/if}
     <p class="text-xs opacity-50">
-      {new Date(room.created_at).toLocaleDateString()}
+      {new Date(room.created_at).toLocaleDateString(getLocale())}
     </p>
   </button>
 
@@ -61,7 +70,7 @@
       >
         <Menu.Trigger
           class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
-          aria-label="Room actions"
+          aria-label={room_actions_aria()}
         >
           <MoreVertical class="size-4" />
         </Menu.Trigger>
@@ -73,7 +82,7 @@
                 class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
               >
                 <Settings class="size-4" />
-                Settings
+                {rooms_menu_settings()}
               </Menu.Item>
             </Menu.Content>
           </Menu.Positioner>

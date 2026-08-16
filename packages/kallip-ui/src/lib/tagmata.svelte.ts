@@ -3,6 +3,20 @@
 // prop-driven and portable. The consuming app (kallip-web) maps agora-client
 // response types into these `Props` before passing them down.
 
+import { getLocale } from "../paraglide/runtime.js";
+import {
+  remaining_days,
+  remaining_hours,
+  remaining_minutes,
+  remaining_under_minute,
+  shell_status_agents_one,
+  shell_status_agents_other,
+  shell_status_tokens,
+  tagma_presence_checking,
+  tagma_presence_offline,
+  tagma_presence_online,
+  tagmata_expired_badge,
+} from "../paraglide/messages.js";
 /** Liveness of an enrolled tagma, as shown by the dashboard dot. `checking`
  * means presence has not yet resolved for this session (the realtime SSE has
  * not delivered its snapshot); the card shows a neutral placeholder rather
@@ -87,18 +101,18 @@ export function presenceDotClass(presence: TagmaPresence): string {
 export function presenceLabel(presence: TagmaPresence): string {
   switch (presence) {
     case "online":
-      return "online";
+      return tagma_presence_online();
     case "offline":
-      return "offline";
+      return tagma_presence_offline();
     case "checking":
-      return "checking…";
+      return tagma_presence_checking();
   }
 }
 
 /** Locale-formatted timestamp for an RFC3339 string. */
 export function formatDateTime(iso: string): string {
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(getLocale());
 }
 
 /** Compact token-count formatting: `12k`, `1.2M`, or the raw number below 1k.
@@ -120,10 +134,14 @@ export function formatTagmaStatusLine(s: TagmaStatusSummary): string {
   // when it is busy.
   const total = 1 + s.subagentsTotal;
   const active = (s.rootState === "busy" ? 1 : 0) + s.subagentsActive;
-  const agents = `${active}/${total} ${total === 1 ? "agent" : "agents"}`;
-  const tokens = `${formatTokenCount(s.tokenConsumed)}/${formatTokenCount(
-    s.tokenBudget,
-  )} tokens`;
+  const agents =
+    total === 1
+      ? shell_status_agents_one({ count: active, total })
+      : shell_status_agents_other({ count: active, total });
+  const tokens = shell_status_tokens({
+    consumed: formatTokenCount(s.tokenConsumed),
+    total: formatTokenCount(s.tokenBudget),
+  });
   return `${agents} · ${tokens}`;
 }
 
@@ -139,13 +157,13 @@ export function isExpired(iso: string): boolean {
  * Pure; callers pass `expiresAt - now` so a reactive `now` drives the countdown.
  */
 export function formatRemaining(ms: number): string {
-  if (ms <= 0) return "expired";
+  if (ms <= 0) return tagmata_expired_badge();
   const days = Math.floor(ms / 86_400_000);
   const hours = Math.floor((ms % 86_400_000) / 3_600_000);
   const minutes = Math.floor((ms % 3_600_000) / 60_000);
   const parts: string[] = [];
-  if (days > 0) parts.push(`${days}d`);
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0) parts.push(`${minutes}min`);
-  return parts.length === 0 ? "<1min" : parts.join(" ");
+  if (days > 0) parts.push(remaining_days({ d: days }));
+  if (hours > 0) parts.push(remaining_hours({ h: hours }));
+  if (minutes > 0) parts.push(remaining_minutes({ m: minutes }));
+  return parts.length === 0 ? remaining_under_minute() : parts.join(" ");
 }

@@ -8,6 +8,11 @@
 // field existed) are transparent: they render no marker and do NOT reset the
 // group, so a stray system line between two messages doesn't split them.
 
+import { getLocale } from "../../paraglide/runtime.js";
+import {
+  timeline_today,
+  timeline_yesterday,
+} from "../../paraglide/messages.js";
 /** Per-line render hints. Both absent (an empty object) means "render nothing
  * above this line." */
 export interface TimelineMarker {
@@ -33,11 +38,11 @@ const DEFAULT_GROUP_WINDOW_MS = 5 * 60_000;
 
 // Locale formatters are process-constant; hoist them so a recompute on every
 // transcript mutation (the `$derived` in ChannelChatPage) doesn't rebuild them.
-const dayFmt = new Intl.DateTimeFormat(undefined, {
+const dayFmt = new Intl.DateTimeFormat(getLocale(), {
   month: "short",
   day: "numeric",
 });
-const timeFmt = new Intl.DateTimeFormat(undefined, {
+const timeFmt = new Intl.DateTimeFormat(getLocale(), {
   hour: "numeric",
   minute: "2-digit",
 });
@@ -62,8 +67,8 @@ export function timelineMarkers(
 
   const dayLabel = (ms: number): string => {
     const k = dayKey(ms);
-    if (k === todayKey) return "Today";
-    if (k === yesterdayKey) return "Yesterday";
+    if (k === todayKey) return timeline_today();
+    if (k === yesterdayKey) return timeline_yesterday();
     return dayFmt.format(ms);
   };
 

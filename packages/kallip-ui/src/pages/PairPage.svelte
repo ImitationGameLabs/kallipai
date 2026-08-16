@@ -8,6 +8,26 @@
   import type { PairResult } from "@kallipai/kallip-agora-client";
   import Brand from "../components/Brand.svelte";
   import Banner from "../components/Banner.svelte";
+  import {
+    auth_passkey_cancelled,
+    auth_rate_limited,
+    auth_couldnt_reach,
+    auth_add_this_device,
+    auth_sign_in,
+    settings_passkey_duplicate,
+    pair_title,
+    pair_subtitle,
+    pair_code_label,
+    pair_device_name,
+    pair_device_placeholder,
+    pair_cancel_scan,
+    pair_camera_unavailable,
+    pair_scan_qr,
+    pair_invalid_code,
+    pair_failed,
+    pair_adding,
+    pair_already,
+  } from "../paraglide/messages.js";
 
   // A pairing-code link can pre-fill via ?code=... (e.g. the QR deep link).
   let { code: initialCode = "" }: { code?: string } = $props();
@@ -46,8 +66,10 @@
           if (decoded) {
             // Accept either the raw code or a `${origin}/pair?code=...` deep link.
             const text = decoded.getText();
-            const fromUrl = new URL(text, window.location.origin).searchParams
-              .get("code");
+            const fromUrl = new URL(
+              text,
+              window.location.origin,
+            ).searchParams.get("code");
             code = fromUrl ?? text;
             stopScan();
           }
@@ -69,15 +91,15 @@
     if (r.ok) return null;
     switch (r.reason) {
       case "cancelled":
-        return "Passkey prompt cancelled.";
+        return auth_passkey_cancelled();
       case "invalid-code":
-        return "That pairing code is invalid, expired, or already used.";
+        return pair_invalid_code();
       case "duplicate-credential":
-        return "That device is already registered.";
+        return settings_passkey_duplicate();
       case "rate-limited":
-        return "Too many attempts. Wait a moment and try again.";
+        return auth_rate_limited();
       default:
-        return r.message ?? "Pairing failed.";
+        return r.message ?? pair_failed();
     }
   }
 
@@ -99,10 +121,10 @@
   }
 </script>
 
-<svelte:head><title>KallipAI · add device</title></svelte:head>
+<svelte:head><title>{pair_title()}</title></svelte:head>
 
 {#if notice}
-  <Banner floating title={`Couldn't reach the server: ${notice}`} />
+  <Banner floating title={auth_couldnt_reach({ notice })} />
 {/if}
 
 <div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100-900">
@@ -112,12 +134,13 @@
   >
     <div class="text-center space-y-1">
       <Brand size="lg" />
-      <p class="text-sm opacity-60">Add this device to your account</p>
+      <p class="text-sm opacity-60">{pair_subtitle()}</p>
     </div>
 
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
-        Pairing code <span class="text-error-500 dark:text-error-400">*</span>
+        {pair_code_label()}
+        <span class="text-error-500 dark:text-error-400">*</span>
       </span>
       <input
         class="input font-mono tracking-widest"
@@ -129,11 +152,11 @@
     </label>
 
     <label class="block space-y-1">
-      <span class="text-sm opacity-70">Device name</span>
+      <span class="text-sm opacity-70">{pair_device_name()}</span>
       <input
         class="input"
         autocomplete="off"
-        placeholder="e.g. iPhone"
+        placeholder={pair_device_placeholder()}
         maxlength={64}
         bind:value={label}
       />
@@ -142,21 +165,29 @@
     {#if scanning}
       <div class="space-y-2">
         <!-- The camera feed the scanner decodes from. -->
-        <video bind:this={videoEl} class="w-full rounded" autoplay muted playsinline></video>
+        <video
+          bind:this={videoEl}
+          class="w-full rounded"
+          autoplay
+          muted
+          playsinline
+        ></video>
         <button
           type="button"
           class="btn btn-sm preset-tonal-surface"
-          onclick={stopScan}>Cancel scan</button
+          onclick={stopScan}>{pair_cancel_scan()}</button
         >
         {#if scanError}
-          <div class="text-xs text-error-600 dark:text-error-500">Camera unavailable: {scanError}</div>
+          <div class="text-xs text-error-600 dark:text-error-500">
+            {pair_camera_unavailable({ error: scanError })}
+          </div>
         {/if}
       </div>
     {:else}
       <button
         type="button"
         class="text-xs text-primary-500 dark:text-primary-400 hover:underline"
-        onclick={startScan}>Scan QR instead</button
+        onclick={startScan}>{pair_scan_qr()}</button
       >
     {/if}
 
@@ -171,15 +202,15 @@
       class="btn preset-filled-primary-500 w-full"
       disabled={!canSubmit}
     >
-      {submitting ? "Adding…" : "Add this device"}
+      {submitting ? pair_adding() : auth_add_this_device()}
     </button>
 
     <p class="text-center text-sm">
-      Already signed in here?
+      {pair_already()}
       <a
         href="/login"
         class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
-        >Sign in</a
+        >{auth_sign_in()}</a
       >
     </p>
   </form>

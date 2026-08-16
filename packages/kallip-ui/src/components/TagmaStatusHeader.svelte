@@ -25,6 +25,18 @@
     type TagmaStatusSummary,
   } from "../lib/tagmata.svelte.ts";
   import { Circle, LoaderCircle, TriangleAlert } from "@lucide/svelte";
+  import {
+    agent_state_busy,
+    agent_state_faulted,
+    agent_state_idle,
+    tagma_status_active_total,
+    tagma_status_aria,
+    tagma_status_budget,
+    tagma_status_root,
+    tagma_status_subagents,
+    tagma_status_label,
+    tagma_status_waiting,
+  } from "../paraglide/messages.js";
 
   let { status }: { status: TagmaStatusSummary | undefined } = $props();
 
@@ -49,12 +61,17 @@
   }
 </script>
 
-<header class="mx-auto w-full max-w-2xl px-4 pt-3" aria-label="Tagma status">
+<header
+  class="mx-auto w-full max-w-2xl px-4 pt-3"
+  aria-label={tagma_status_aria()}
+>
   <div class="card preset-tonal-surface px-4 py-3 flex flex-col gap-2 text-lg">
     {#if status}
       <!-- Row 1: root state. Icon shape + motion + color encode the state. -->
       <div class="flex items-center gap-3">
-        <span class="w-24 shrink-0 text-right text-base">root</span>
+        <span class="w-24 shrink-0 text-right text-base"
+          >{tagma_status_root()}</span
+        >
         <div class="flex flex-1 items-center gap-1.5">
           {#if status.rootState === "busy"}
             <LoaderCircle
@@ -72,14 +89,25 @@
               aria-hidden="true"
             />
           {/if}
-          <span>{status.rootState}</span>
+          <span
+            >{status.rootState === "busy"
+              ? agent_state_busy()
+              : status.rootState === "faulted"
+                ? agent_state_faulted()
+                : agent_state_idle()}</span
+          >
         </div>
       </div>
       <!-- Row 2: subagents. Always shown (even 0/0) so the header keeps a stable
            3-row height as subagents spawn/remove. -->
       <div class="flex items-center gap-3">
-        <span class="w-24 shrink-0 text-right text-base">subagents</span>
-        <div class="flex flex-1 items-center gap-1.5" title="active / total">
+        <span class="w-24 shrink-0 text-right text-base"
+          >{tagma_status_subagents()}</span
+        >
+        <div
+          class="flex flex-1 items-center gap-1.5"
+          title={tagma_status_active_total()}
+        >
           <span
             class="size-2 rounded-full {status.subagentsActive > 0
               ? 'bg-success-500'
@@ -93,9 +121,13 @@
       </div>
       <!-- Row 3: token budget. The bar gets the full row width to breathe. -->
       <div class="flex items-center gap-3">
-        <span class="w-24 shrink-0 text-right text-base">budget</span>
+        <span class="w-24 shrink-0 text-right text-base"
+          >{tagma_status_budget()}</span
+        >
         <div class="flex flex-1 items-center gap-2">
-          <div class="h-2 flex-1 rounded-full bg-surface-200-800 overflow-hidden">
+          <div
+            class="h-2 flex-1 rounded-full bg-surface-200-800 overflow-hidden"
+          >
             <div
               class="h-full rounded-full bg-primary-500 transition-[width] duration-500"
               style="width: {budgetPct}%"
@@ -111,13 +143,13 @@
     {:else}
       <!-- No snapshot yet: keep the row's height with a muted placeholder. -->
       <div class="flex items-center gap-3 text-base opacity-50">
-        <span class="w-24 shrink-0 text-right">status</span>
+        <span class="w-24 shrink-0 text-right">{tagma_status_label()}</span>
         <div class="flex flex-1 items-center gap-1.5">
           <span
             class="size-2 rounded-full bg-surface-400-600 animate-pulse"
             aria-hidden="true"
           ></span>
-          <span>waiting…</span>
+          <span>{tagma_status_waiting()}</span>
         </div>
       </div>
     {/if}

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { paraglideVitePlugin } from "@inlang/paraglide-js";
 import tailwindcss from "@tailwindcss/vite";
 import adapter from "@sveltejs/adapter-static";
 import { sveltekit } from "@sveltejs/kit/vite";
@@ -15,6 +16,16 @@ const here = import.meta.dirname;
 export default defineConfig({
   plugins: [
     tailwindcss(),
+    // i18n: same setup as kallip-web (see its vite.config.ts for the
+    // rationale — pathPattern resolution, the 2.20.0 pin, and the
+    // shared-outdir dev/build layout note).
+    paraglideVitePlugin({
+      project: "../kallip-ui/i18n/project.inlang",
+      outdir: "../kallip-ui/src/paraglide",
+      strategy: ["cookie", "preferredLanguage", "baseLocale"],
+      emitTsDeclarations: true,
+      outputStructure: "message-modules",
+    }),
     sveltekit({
       compilerOptions: {
         // Force runes mode for the project, except for libraries. Can be removed in svelte 6.

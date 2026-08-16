@@ -1,0 +1,14 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "manage_overview_title": "KallipAI · 概览",
+  "manage_overview_heading": "概览",
+  "manage_overview_budget_consumed_line": "已用 {pct}% · 剩余 {remaining}",
+  "manage_overview_agents_idle": "{count} 个空闲",
+  "manage_overview_agents_busy": "{count} 个忙碌",
+  "manage_overview_agents_faulted": "{count} 个故障",
+  "manage_overview_quick_actions": "快捷操作",
+  "manage_overview_100m_budget": "+100M 预算",
+  "manage_overview_configuration": "配置",
+  "manage_overview_profiles_link": "模型配置 →",
+  "manage_overview_schedules_link": "日程 →"
+}

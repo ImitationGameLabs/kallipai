@@ -1,0 +1,14 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "manage_overview_title": "KallipAI · overview",
+  "manage_overview_heading": "Overview",
+  "manage_overview_budget_consumed_line": "{pct}% consumed · {remaining} remaining",
+  "manage_overview_agents_idle": "{count} idle",
+  "manage_overview_agents_busy": "{count} busy",
+  "manage_overview_agents_faulted": "{count} faulted",
+  "manage_overview_quick_actions": "Quick Actions",
+  "manage_overview_100m_budget": "+100M budget",
+  "manage_overview_configuration": "Configuration",
+  "manage_overview_profiles_link": "Profiles →",
+  "manage_overview_schedules_link": "Schedules →"
+}

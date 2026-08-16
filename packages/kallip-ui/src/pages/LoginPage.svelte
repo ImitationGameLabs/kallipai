@@ -7,6 +7,24 @@
   import Brand from "../components/Brand.svelte";
   import Banner from "../components/Banner.svelte";
   import OAuthProviderButtons from "../components/OAuthProviderButtons.svelte";
+  import {
+    auth_couldnt_reach,
+    auth_passkey_cancelled,
+    auth_rate_limited,
+    auth_create_account,
+    auth_offline_mode,
+    login_title,
+    login_welcome_back,
+    login_username,
+    login_username_placeholder,
+    login_username_invalid,
+    login_failed,
+    login_signing_in,
+    login_submit,
+    login_new_here,
+    login_new_device,
+    auth_add_this_device,
+  } from "../paraglide/messages.js";
 
   let { returnPath = undefined }: { returnPath?: string } = $props();
 
@@ -34,13 +52,13 @@
     if (r.ok) return null;
     switch (r.reason) {
       case "cancelled":
-        return "Passkey prompt cancelled.";
+        return auth_passkey_cancelled();
       case "rate-limited":
-        return "Too many attempts. Wait a moment and try again.";
+        return auth_rate_limited();
       default:
         // Unknown includes invalid-credentials (401) -- kept generic so as not
         // to leak which usernames exist (closed-beta enumeration residual).
-        return r.message ?? "Login failed.";
+        return r.message ?? login_failed();
     }
   }
 
@@ -119,13 +137,13 @@
   });
 </script>
 
-<svelte:head><title>KallipAI · log in</title></svelte:head>
+<svelte:head><title>{login_title()}</title></svelte:head>
 
 {#if notice}
   <!-- Floats over the centered form so an agora-unreachable error is visible
        without displacing the fields; the ceremony's own failures render inline
        below. -->
-  <Banner floating title={`Couldn't reach the server: ${notice}`} />
+  <Banner floating title={auth_couldnt_reach({ notice })} />
 {/if}
 
 <div class="flex items-center justify-center min-h-dvh p-4 bg-surface-200-800">
@@ -135,25 +153,28 @@
   >
     <div class="text-center space-y-1">
       <Brand size="lg" />
-      <p class="text-sm opacity-60">Welcome back</p>
+      <p class="text-sm opacity-60">{login_welcome_back()}</p>
     </div>
 
     <OAuthProviderButtons {returnPath} />
 
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
-        Username <span class="text-error-500 dark:text-error-400">*</span>
+        {login_username()}
+        <span class="text-error-500 dark:text-error-400">*</span>
       </span>
       <input
         class="input"
         type="text"
         autocomplete="username webauthn"
-        placeholder="your-handle"
+        placeholder={login_username_placeholder()}
         bind:value={username}
         required
       />
       {#if username.length > 0 && !usernameValid}
-        <span class="text-xs text-error-500 dark:text-error-400">Enter a valid username.</span>
+        <span class="text-xs text-error-500 dark:text-error-400"
+          >{login_username_invalid()}</span
+        >
       {/if}
     </label>
 
@@ -168,24 +189,25 @@
       class="btn preset-filled-primary-500 w-full"
       disabled={!canSubmit}
     >
-      {submitting ? "Signing in…" : "Sign in with passkey"}
+      {submitting ? login_signing_in() : login_submit()}
     </button>
 
     <p class="text-center text-sm">
-      New here?
+      {login_new_here()}
       <a
         href="/register"
         class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
-        >Create account</a
+        >{auth_create_account()}</a
       >
     </p>
 
     <p class="text-center text-sm">
-      On a new device?
+      {login_new_device()}
       <a
         href="/pair"
         class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
-        >Add this device</a
+        >{auth_add_this_device()}</a
+      >
       >
     </p>
 
@@ -193,7 +215,7 @@
       <a
         href="/connect"
         class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
-        >Offline mode</a
+        >{auth_offline_mode()}</a
       >
     </p>
   </form>

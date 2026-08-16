@@ -27,6 +27,26 @@
   import { agoraSession } from "../lib/session/agora.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import { profileHref } from "../lib/room-message.ts";
+  import {
+    common_loading,
+    common_retry,
+    room_title,
+    room_label_fallback,
+    room_member_one,
+    room_member_other,
+    room_id_label,
+    room_public_badge,
+    room_creator_badge,
+    room_toggle_members_aria,
+    room_settings_aria,
+    room_loading_history,
+    room_empty,
+    room_sending_aria,
+    room_members_aria,
+    room_members,
+    room_close_members_aria,
+    room_unavailable,
+  } from "../paraglide/messages.js";
 
   let { roomId }: { roomId: string } = $props();
 
@@ -37,7 +57,9 @@
   const room = $derived(
     roomsStore.rooms.find((r) => r.room_id === roomId) ?? null,
   );
-  const roomLabel = $derived(room?.name || `room ${roomId.slice(0, 8)}`);
+  const roomLabel = $derived(
+    room?.name || room_label_fallback({ id: roomId.slice(0, 8) }),
+  );
   // Display labels keyed by participant id. The wire `Participant` on each
   // message carries the sender's kind + server-resolved handle (the lesche
   // derives it fresh at read time, so it is already correct); it does NOT carry
@@ -114,34 +136,38 @@
   // additionally marked by right-alignment + filled-primary fill (no "you").
 </script>
 
-<svelte:head><title>KallipAI · room</title></svelte:head>
+<svelte:head><title>{room_title()}</title></svelte:head>
 
 <svelte:window
   onkeydown={(e) => showMembers && e.key === "Escape" && (showMembers = false)}
 />
 
 <div class="flex flex-col h-full">
-  <header class="px-4 py-2 border-b border-surface-200-800 flex items-center gap-2">
+  <header
+    class="px-4 py-2 border-b border-surface-200-800 flex items-center gap-2"
+  >
     <div class="flex flex-col min-w-0 flex-1">
       <p class="text-sm font-semibold truncate">{roomLabel}</p>
       <p class="text-xs opacity-50 truncate">
-        <span class="opacity-70">Room ID: </span><span class="font-mono"
+        <span class="opacity-70">{room_id_label()}</span><span class="font-mono"
           >{roomId}</span
         >
       </p>
     </div>
     {#if room?.visibility === "public"}
       <span class="text-xs preset-tonal-surface px-2 py-0.5 rounded-base"
-        >public</span
+        >{room_public_badge()}</span
       >
     {/if}
     {#if conv?.roster}
       <span class="text-xs opacity-60">
-        {conv.roster.members.length} member{#if conv.roster.members.length !== 1}s{/if}
+        {conv.roster.members.length === 1
+          ? room_member_one({ count: conv.roster.members.length })
+          : room_member_other({ count: conv.roster.members.length })}
       </span>
       {#if conv.roster.is_creator}
         <span class="text-xs preset-tonal-surface px-2 py-0.5 rounded-base"
-          >creator</span
+          >{room_creator_badge()}</span
         >
       {/if}
     {/if}
@@ -150,7 +176,7 @@
       class="size-8 grid place-items-center rounded-base shrink-0 disabled:opacity-60 {showMembers
         ? 'preset-filled-surface-500'
         : 'preset-tonal-surface hover:preset-filled-surface-500'}"
-      aria-label="Toggle member list"
+      aria-label={room_toggle_members_aria()}
       aria-pressed={showMembers}
       disabled={!conv || conv.status === "loading"}
       onclick={() => (showMembers = !showMembers)}
@@ -160,7 +186,7 @@
     <button
       type="button"
       class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
-      aria-label="Room settings"
+      aria-label={room_settings_aria()}
       onclick={() => navigate(`/rooms/${roomId}/settings`)}
     >
       <Settings class="size-4" />
@@ -169,7 +195,7 @@
 
   {#if !conv || conv.status === "loading"}
     <div class="flex-1 grid place-items-center p-6">
-      <p class="text-sm opacity-60">Loading room history…</p>
+      <p class="text-sm opacity-60">{room_loading_history()}</p>
     </div>
   {:else}
     <div class="flex-1 min-h-0 flex relative">
@@ -181,7 +207,7 @@
         <div class="mx-auto w-full max-w-[80rem] p-4 flex flex-col gap-3">
           {#if conv.lines.length === 0}
             <p class="text-sm opacity-60 text-center mt-8">
-              Send a message to start the room.
+              {room_empty()}
             </p>
           {/if}
           {#each conv.lines as line (line.seq)}
@@ -217,7 +243,7 @@
               {#if line.mine && pending && !line.failed}
                 <span
                   class="text-xs opacity-50 animate-pulse"
-                  aria-label="sending">··</span
+                  aria-label={room_sending_aria()}>··</span
                 >
               {:else if line.mine && line.failed}
                 <button
@@ -230,13 +256,15 @@
                     void roomConversationsStore
                       .resend(roomId, line)
                       .catch(() => {});
-                  }}>Retry</button
+                  }}>{common_retry()}</button
                 >
               {/if}
             </div>
           {/each}
           {#if conv.status === "error" && conv.error}
-            <p class="text-xs text-error-500 dark:text-error-400 text-center">{conv.error}</p>
+            <p class="text-xs text-error-500 dark:text-error-400 text-center">
+              {conv.error}
+            </p>
           {/if}
         </div>
       </div>
@@ -251,16 +279,16 @@
         ></div>
         <aside
           class="absolute right-0 top-0 h-full w-80 max-w-[80vw] flex flex-col bg-surface-100-900 border-l border-surface-200-800 shadow-lg lg:static lg:shadow-none z-10"
-          aria-label="Room members"
+          aria-label={room_members_aria()}
         >
           <div
             class="px-3 py-2 border-b border-surface-200-800 flex items-center justify-between shrink-0"
           >
-            <span class="text-sm font-semibold">Members</span>
+            <span class="text-sm font-semibold">{room_members()}</span>
             <button
               type="button"
               class="size-7 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
-              aria-label="Close member list"
+              aria-label={room_close_members_aria()}
               onclick={() => (showMembers = false)}
             >
               <X class="size-4" />
@@ -268,7 +296,7 @@
           </div>
           <div class="flex-1 min-h-0 overflow-auto p-2 flex flex-col gap-1">
             {#if !conv.roster}
-              <p class="text-sm opacity-60 px-1 py-2">Loading…</p>
+              <p class="text-sm opacity-60 px-1 py-2">{common_loading()}</p>
             {:else}
               {#each conv.roster.members as m (m.id)}
                 <MemberRow
@@ -288,7 +316,7 @@
       {composer}
       {disabled}
       pendingCount={0}
-      disabledNotice="This room is unavailable."
+      disabledNotice={room_unavailable()}
     />
   {/if}
 </div>

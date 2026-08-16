@@ -14,6 +14,14 @@
   } from "../../lib/tagmata.svelte.ts";
   import EnrollmentCodeCard from "./EnrollmentCodeCard.svelte";
   import TagmaCard from "./TagmaCard.svelte";
+  import {
+    common_loading,
+    tagmata_new,
+    tagmata_new_action,
+    tagmata_minting,
+    tagmata_new_hint,
+    tagmata_load_failed,
+  } from "../../paraglide/messages.js";
 
   let {
     pending,
@@ -70,18 +78,20 @@
             onclick={() => onMint()}
           >
             <div class="text-2xl font-semibold">
-              {busy ? "Minting…" : "New Tagma"}
+              {busy ? tagmata_minting() : tagmata_new()}
             </div>
             <div class="opacity-80">
-              Mint an enrollment code to enroll your first device or identity.
+              {tagmata_new_hint()}
             </div>
           </button>
         </div>
       {/if}
     {:else if phase === "loading"}
-      <p class="text-sm opacity-60">Loading...</p>
+      <p class="text-sm opacity-60">{common_loading()}</p>
     {:else if phase === "error"}
-      <p class="text-sm text-error-500 dark:text-error-400">Failed to load tagmata.</p>
+      <p class="text-sm text-error-500 dark:text-error-400">
+        {tagmata_load_failed()}
+      </p>
     {:else}
       <!-- Pending cards first (time-sensitive codes), then enrolled. -->
       <div class="flex flex-col gap-3">
@@ -104,7 +114,7 @@
             disabled={busy}
             onclick={() => onMint()}
           >
-            {busy ? "Minting…" : "+ New Tagma"}
+            {busy ? tagmata_minting() : tagmata_new_action()}
           </button>
         {/if}
       </div>

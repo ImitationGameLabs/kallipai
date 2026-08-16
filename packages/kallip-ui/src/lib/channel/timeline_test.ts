@@ -1,6 +1,8 @@
 // Timeline grouping tests. Assertions stay locale-independent: `dateDivider`
 // compares the fixed strings ("Today") or just presence, and `timeLabel` checks
-// presence (its exact text depends on the runtime locale).
+// presence (its exact text depends on the runtime locale). "Today" also
+// assumes paraglide's default en locale (no PARAGLIDE_LOCALE cookie/env in
+// the test runner).
 
 import { assertEquals } from "@std/assert";
 import { timelineMarkers } from "./timeline.ts";

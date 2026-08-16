@@ -7,9 +7,20 @@
   // minting a code, does not resize the dialog. Prop-driven and portable; owns
   // only the dialog + the tabs.
   import { Dialog, Portal, Tabs } from "@skeletonlabs/skeleton-svelte";
-  import type { PasskeyAddHint, PairingCodeView } from "../../lib/passkeys.svelte.ts";
+  import type {
+    PasskeyAddHint,
+    PairingCodeView,
+  } from "../../lib/passkeys.svelte.ts";
   import AddPasskey from "./AddPasskey.svelte";
   import PairAnotherDevice from "./PairAnotherDevice.svelte";
+  import {
+    settings_add_device_trigger,
+    settings_add_device_title,
+    settings_add_device_desc,
+    settings_another_device,
+    settings_this_device,
+    common_done,
+  } from "../../paraglide/messages.js";
 
   let {
     adding = false,
@@ -47,20 +58,24 @@
   let mode = $state<Mode>("another");
 </script>
 
-<Dialog open={open} onOpenChange={(e) => (open = e.open)}>
+<Dialog {open} onOpenChange={(e) => (open = e.open)}>
   <Dialog.Trigger
     class="text-sm opacity-60 hover:opacity-100 transition-opacity cursor-pointer"
   >
-    + Add device
+    {settings_add_device_trigger()}
   </Dialog.Trigger>
 
   <Portal>
     <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
     <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
-      <Dialog.Content class="card preset-tonal-surface w-full max-w-md p-5 space-y-4">
-        <Dialog.Title class="text-lg font-semibold">Add a device</Dialog.Title>
+      <Dialog.Content
+        class="card preset-tonal-surface w-full max-w-md p-5 space-y-4"
+      >
+        <Dialog.Title class="text-lg font-semibold"
+          >{settings_add_device_title()}</Dialog.Title
+        >
         <Dialog.Description class="sr-only">
-          Add a passkey on another device, or on this browser.
+          {settings_add_device_desc()}
         </Dialog.Description>
 
         <Tabs value={mode} onValueChange={(e) => (mode = e.value as Mode)}>
@@ -71,7 +86,7 @@
                 ? 'preset-filled-primary-500'
                 : 'preset-tonal-surface'}"
             >
-              Another device
+              {settings_another_device()}
             </Tabs.Trigger>
             <Tabs.Trigger
               value="this"
@@ -79,7 +94,7 @@
                 ? 'preset-filled-primary-500'
                 : 'preset-tonal-surface'}"
             >
-              This device
+              {settings_this_device()}
             </Tabs.Trigger>
           </Tabs.List>
 
@@ -106,7 +121,7 @@
 
         <div class="flex justify-end">
           <Dialog.CloseTrigger class="btn btn-sm preset-tonal-surface">
-            Done
+            {common_done()}
           </Dialog.CloseTrigger>
         </div>
       </Dialog.Content>

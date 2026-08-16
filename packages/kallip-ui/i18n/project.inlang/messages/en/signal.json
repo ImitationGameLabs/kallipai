@@ -1,0 +1,11 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "signal_turn_interrupted": "Turn interrupted.",
+  "signal_turn_cancelled": "Turn cancelled.",
+  "signal_token_budget_line": "Token budget exceeded (consumed {consumed} of {budget}).",
+  "signal_max_rounds_line": "Max tool rounds exceeded.",
+  "signal_failover_line": "Model failover exhausted ({reason}): {detail}",
+  "signal_token_budget_error": "Token budget exceeded",
+  "signal_max_rounds_error": "Max tool rounds exceeded",
+  "signal_failover_error": "Model failover exhausted"
+}

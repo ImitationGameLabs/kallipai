@@ -17,6 +17,20 @@ import type { Component } from "svelte";
 import type { AppMode } from "../config/mode.ts";
 import type { NavIndicator, NavItem } from "../shell.ts";
 import type { TagmaChannelState } from "../session/channels.svelte.ts";
+import {
+  nav_agents,
+  nav_budget,
+  nav_chat,
+  nav_manage,
+  nav_overview,
+  nav_profiles,
+  nav_room_management,
+  nav_rooms,
+  nav_schedules,
+  nav_tagmata,
+  nav_tagma_management,
+  tagma_profile_unnamed,
+} from "../../paraglide/messages.js";
 
 // One sidebar section. `title` renders as a small header with a divider
 // beneath it; `manage` renders as a settings gear beside the title, linking to
@@ -93,25 +107,45 @@ export function navFor(args: {
   const { mode, icons, tagmata, rooms } = args;
   if (mode === "offline") {
     return [
-      { items: [{ href: "/local/chat", label: "Chat", icon: icons.chat }] },
+      { items: [{ href: "/local/chat", label: nav_chat(), icon: icons.chat }] },
       {
-        title: "Manage",
+        title: nav_manage(),
         items: [
-          { href: "/local/manage/overview", label: "Overview", icon: icons.manageOverview },
-          { href: "/local/manage/budget", label: "Budget", icon: icons.manageBudget },
-          { href: "/local/manage/agents", label: "Agents", icon: icons.manageAgents },
-          { href: "/local/manage/profiles", label: "Profiles", icon: icons.manageProfiles },
-          { href: "/local/manage/schedules", label: "Schedules", icon: icons.manageSchedules },
+          {
+            href: "/local/manage/overview",
+            label: nav_overview(),
+            icon: icons.manageOverview,
+          },
+          {
+            href: "/local/manage/budget",
+            label: nav_budget(),
+            icon: icons.manageBudget,
+          },
+          {
+            href: "/local/manage/agents",
+            label: nav_agents(),
+            icon: icons.manageAgents,
+          },
+          {
+            href: "/local/manage/profiles",
+            label: nav_profiles(),
+            icon: icons.manageProfiles,
+          },
+          {
+            href: "/local/manage/schedules",
+            label: nav_schedules(),
+            icon: icons.manageSchedules,
+          },
         ],
       },
     ];
   }
   return [
     {
-      title: "Tagmata",
+      title: nav_tagmata(),
       manage: {
         href: "/tagmata",
-        label: "Tagma management",
+        label: nav_tagma_management(),
         icon: icons.settings,
       },
       items: (tagmata ?? []).map((t) => {
@@ -120,16 +154,16 @@ export function navFor(args: {
         // always navigable; the channel opens on demand at the tagma route.
         return {
           href: `/chat/t/${t.tagmaId}`,
-          label: t.label ?? "Unnamed tagma",
+          label: t.label ?? tagma_profile_unnamed(),
           indicator: t.indicator,
         };
       }),
     },
     {
-      title: "Rooms",
+      title: nav_rooms(),
       manage: {
         href: "/rooms",
-        label: "Room management",
+        label: nav_room_management(),
         icon: icons.settings,
       },
       items: (rooms ?? []).map((r) => ({

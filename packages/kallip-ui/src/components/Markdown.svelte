@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { chat_link_open_title } from "../paraglide/messages.js";
   import SvelteMarkdown, {
     buildUnsupportedHTML,
   } from "@humanspeak/svelte-markdown";
@@ -104,7 +105,7 @@
       {#if href}
         <a
           {href}
-          title={title ?? "Ctrl/Cmd+click to open"}
+          title={title ?? chat_link_open_title()}
           target="_blank"
           rel="noopener noreferrer"
           onclick={(event) => {

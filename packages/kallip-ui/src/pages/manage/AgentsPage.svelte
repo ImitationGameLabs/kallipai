@@ -4,6 +4,19 @@
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
   let { basePath = "/local/manage" }: { basePath?: string } = $props();
   import StateDot from "../../components/manage/StateDot.svelte";
+  import {
+    common_loading,
+    common_remove,
+    manage_agents_title,
+    manage_agents_heading,
+    manage_agents_empty,
+    manage_agent_duty_onduty,
+    manage_agent_duty_offduty,
+    manage_agents_details,
+    manage_agent_interrupt,
+    manage_agent_remove_agent,
+    manage_agent_remove_agent_desc,
+  } from "../../paraglide/messages.js";
 
   $effect(() => {
     agentsStore.startPolling(5000);
@@ -21,30 +34,32 @@
   }
 
   function dutyLabel(duty: "onduty" | "offduty"): string {
-    return duty === "onduty" ? "On-duty" : "Off-duty";
+    return duty === "onduty" ? manage_agent_duty_onduty() : manage_agent_duty_offduty();
   }
 </script>
 
-<svelte:head><title>KallipAI · agents</title></svelte:head>
+<svelte:head><title>{manage_agents_title()}</title></svelte:head>
 
 <div class="h-full overflow-y-auto">
   <div class="p-6 max-w-2xl space-y-6">
     <div class="flex items-center justify-between">
-      <h1 class="text-xl font-semibold">Agents</h1>
+      <h1 class="text-xl font-semibold">{manage_agents_heading()}</h1>
       <button
         class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-        onclick={() => agentsStore.refresh(true)}
-      >⟳</button>
+        onclick={() => agentsStore.refresh(true)}>⟳</button
+      >
     </div>
 
     {#if agentsStore.error}
-      <p class="text-error-500 dark:text-error-400 text-sm">{agentsStore.error}</p>
+      <p class="text-error-500 dark:text-error-400 text-sm">
+        {agentsStore.error}
+      </p>
     {/if}
 
     {#if agentsStore.isLoading && !agentsStore.hasLoaded}
-      <p class="opacity-60 text-sm">Loading…</p>
+      <p class="opacity-60 text-sm">{common_loading()}</p>
     {:else if agentsStore.agents.length === 0}
-      <p class="opacity-60 text-sm">No agents.</p>
+      <p class="opacity-60 text-sm">{manage_agents_empty()}</p>
     {/if}
     <div class="space-y-2">
       {#each agentsStore.agents as agent (agent.id)}
@@ -60,40 +75,52 @@
               </div>
             </div>
             <div class="flex flex-col items-end gap-1">
-              <span class="text-xs px-2 py-0.5 rounded-full preset-tonal-surface">
+              <span
+                class="text-xs px-2 py-0.5 rounded-full preset-tonal-surface"
+              >
                 {dutyLabel(agent.duty)}
               </span>
               {#if agent.activity}
-                <span class="text-xs opacity-50 truncate max-w-32">{agent.activity}</span>
+                <span class="text-xs opacity-50 truncate max-w-32"
+                  >{agent.activity}</span
+                >
               {/if}
             </div>
           </div>
 
           {#if agent.state === "faulted" && agent.faulted_reason}
-            <p class="text-error-500 dark:text-error-400 text-xs mt-2">{agent.faulted_reason}</p>
+            <p class="text-error-500 dark:text-error-400 text-xs mt-2">
+              {agent.faulted_reason}
+            </p>
           {/if}
 
           <div class="flex flex-wrap gap-2 mt-3">
             <a
               href={`${basePath}/agents/${agent.id}`}
               class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-primary-500"
-            >Details</a>
+              >{manage_agents_details()}</a
+            >
             {#if agent.state === "busy"}
               <button
                 class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
                 disabled={agentsStore.isInFlight(agent.id)}
                 onclick={() => agentsStore.interrupt(agent.id).catch(() => {})}
-              >Interrupt</button>
+                >{manage_agent_interrupt()}</button
+              >
             {/if}
             <button
               class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
               disabled={agentsStore.isInFlight(agent.id)}
               onclick={() => agentsStore.toggleDuty(agent.id).catch(() => {})}
-            >{agent.duty === "onduty" ? "Off-duty" : "On-duty"}</button>
+              >{agent.duty === "onduty"
+                ? manage_agent_duty_offduty()
+                : manage_agent_duty_onduty()}</button
+            >
             <button
               class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
               onclick={() => (removeTarget = agent.id)}
-            >Remove</button>
+              >{common_remove()}</button
+            >
           </div>
         </div>
       {/each}
@@ -104,9 +131,9 @@
 <ConfirmDialog
   busy={removeTarget !== null && agentsStore.isInFlight(removeTarget)}
   open={removeTarget !== null}
-  title="Remove Agent"
-  description="This will permanently remove the agent, archive its directory, and release its workspace lock. This cannot be undone."
-  confirmLabel="Remove"
+  title={manage_agent_remove_agent()}
+  description={manage_agent_remove_agent_desc()}
+  confirmLabel={common_remove()}
   tone="danger"
   onConfirm={onConfirmRemove}
   onCancel={() => (removeTarget = null)}

@@ -10,6 +10,12 @@
   import { navigate } from "../lib/shell/port.ts";
   import { modeOf } from "../lib/config/mode.ts";
   import { connectionViewModel } from "../lib/connection.svelte.ts";
+  import {
+    account_go_offline,
+    account_go_online,
+    account_logout,
+    settings_heading,
+  } from "../paraglide/messages.js";
 
   // The account menu is the single entry point for identity + mode actions.
   // It renders in the sidebar footer (online and offline alike): online shows
@@ -139,7 +145,7 @@
           class="flex items-center gap-2 px-3 py-2 rounded-base text-sm hover:preset-filled-surface-500 cursor-pointer"
         >
           <Settings class="size-4" />
-          Settings
+          {settings_heading()}
         </Menu.Item>
         <Menu.Separator class="my-1 border-surface-200-800" />
         {#if mode === "online"}
@@ -148,7 +154,7 @@
             class="flex items-center gap-2 px-3 py-2 rounded-base text-sm hover:preset-filled-surface-500 cursor-pointer"
           >
             <LogOut class="size-4" />
-            Log out
+            {account_logout()}
           </Menu.Item>
           <Menu.Separator class="my-1 border-surface-200-800" />
           <Menu.Item
@@ -156,7 +162,7 @@
             class="flex items-center gap-2 px-3 py-2 rounded-base text-sm hover:preset-filled-surface-500 cursor-pointer"
           >
             <ArrowRightLeft class="size-4" />
-            Go offline
+            {account_go_offline()}
           </Menu.Item>
         {:else}
           <Menu.Item
@@ -164,7 +170,7 @@
             class="flex items-center gap-2 px-3 py-2 rounded-base text-sm hover:preset-filled-surface-500 cursor-pointer"
           >
             <ArrowRightLeft class="size-4" />
-            Go online
+            {account_go_online()}
           </Menu.Item>
         {/if}
       </Menu.Content>

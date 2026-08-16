@@ -28,6 +28,11 @@
   // by the consumer.
   import { Cpu, User } from "@lucide/svelte";
   import { parseParticipantHandle } from "../../lib/room-message.ts";
+  import {
+    sender_agent_aria,
+    sender_user_aria,
+    sender_view_profile_aria,
+  } from "../../paraglide/messages.js";
 
   let {
     kind,
@@ -52,7 +57,7 @@
   <span
     class="shrink-0 inline-flex"
     role="img"
-    aria-label={kind === "agent" ? "agent" : "user"}
+    aria-label={kind === "agent" ? sender_agent_aria() : sender_user_aria()}
   >
     {#if kind === "agent"}
       <Cpu class="size-3.5" aria-hidden="true" />
@@ -70,7 +75,7 @@
 {#if href}
   <a
     {href}
-    aria-label="View {parts.handle}'s profile"
+    aria-label={sender_view_profile_aria({ handle: parts.handle })}
     class="inline-flex items-center gap-1 min-w-0 rounded-base text-inherit hover:underline underline-offset-2 {klass}"
   >
     <span aria-hidden="true" class="contents">

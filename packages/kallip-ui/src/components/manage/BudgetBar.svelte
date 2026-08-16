@@ -1,5 +1,6 @@
 <script lang="ts">
   import { barFillPct, barColorClass } from "../../lib/manage/compute.ts";
+  import { manage_budget_heading } from "../../paraglide/messages.js";
 
   // Reusable budget progress bar with color-coded fill.
   // Green: remaining > 60% of budget.
@@ -28,7 +29,7 @@
   <div
     class="w-full h-3 rounded-full bg-surface-200-800 overflow-hidden"
     role="progressbar"
-    aria-label={label ?? "Budget"}
+    aria-label={label ?? manage_budget_heading()}
     aria-valuenow={pct}
     aria-valuemin={0}
     aria-valuemax={100}

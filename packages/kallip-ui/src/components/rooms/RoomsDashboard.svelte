@@ -15,6 +15,23 @@
   import CreateRoomDialog, {
     type CreateRoomOpts,
   } from "./CreateRoomDialog.svelte";
+  import { getLocale } from "../../paraglide/runtime.js";
+  import {
+    common_loading,
+    rooms_new_room,
+    rooms_new_room_action,
+    rooms_creating,
+    rooms_hero_hint,
+    rooms_invites_title,
+    rooms_invites_failed,
+    rooms_invite_meta,
+    rooms_accept,
+    rooms_public_title,
+    rooms_public_failed,
+    room_label_fallback,
+    rooms_join,
+    rooms_load_failed,
+  } from "../../paraglide/messages.js";
 
   let {
     rooms,
@@ -136,10 +153,10 @@
           }}
         >
           <div class="text-2xl font-semibold">
-            {busy ? "Creating…" : "New Room"}
+            {busy ? rooms_creating() : rooms_new_room()}
           </div>
           <div class="opacity-80">
-            Invite-only and private by default, or open a public room.
+            {rooms_hero_hint()}
           </div>
         </button>
       </div>
@@ -147,11 +164,15 @@
       <!-- Pending invites first (time-sensitive), then the rooms list. -->
       {#if invites.length > 0 || invitesPhase === "loading" || invitesPhase === "error"}
         <section class="flex flex-col gap-2">
-          <h2 class="text-sm font-semibold opacity-70">Pending invites</h2>
+          <h2 class="text-sm font-semibold opacity-70">
+            {rooms_invites_title()}
+          </h2>
           {#if invitesPhase === "loading"}
-            <p class="text-sm opacity-60">Loading...</p>
+            <p class="text-sm opacity-60">{common_loading()}</p>
           {:else if invitesPhase === "error"}
-            <p class="text-sm text-error-500 dark:text-error-400">Failed to load invites.</p>
+            <p class="text-sm text-error-500 dark:text-error-400">
+              {rooms_invites_failed()}
+            </p>
           {:else}
             {#each invites as inv (inv.invite_id)}
               <!-- The invite carries only a room id (no name); the room is not in
@@ -161,8 +182,12 @@
                   <div class="flex flex-col">
                     <span class="font-mono">{inv.room_id.slice(0, 8)}</span>
                     <span class="text-xs opacity-50">
-                      from {inv.invited_by} · expires
-                      {new Date(inv.expires_at).toLocaleDateString()}</span
+                      {rooms_invite_meta({
+                        invitedBy: inv.invited_by,
+                        date: new Date(inv.expires_at).toLocaleDateString(
+                          getLocale(),
+                        ),
+                      })}</span
                     >
                   </div>
                   {#if onAcceptInvite}
@@ -172,7 +197,7 @@
                       disabled={acceptingId === inv.invite_id}
                       onclick={() => accept(inv)}
                     >
-                      {acceptingId === inv.invite_id ? "…" : "Accept"}
+                      {acceptingId === inv.invite_id ? "…" : rooms_accept()}
                     </button>
                   {/if}
                 </div>
@@ -189,10 +214,12 @@
 
       {#if onJoinPublic && (joinablePublic.length > 0 || publicRoomsError)}
         <section class="flex flex-col gap-2">
-          <h2 class="text-sm font-semibold opacity-70">Public rooms</h2>
+          <h2 class="text-sm font-semibold opacity-70">
+            {rooms_public_title()}
+          </h2>
           {#if publicRoomsError}
             <p class="text-xs text-error-500 dark:text-error-400">
-              Could not load public rooms: {publicRoomsError}
+              {rooms_public_failed({ error: publicRoomsError })}
             </p>
           {:else}
             {#each joinablePublic as room (room.room_id)}
@@ -201,7 +228,8 @@
               >
                 <div class="flex flex-col min-w-0">
                   <span class="font-medium truncate">
-                    {room.name || `room ${room.room_id.slice(0, 8)}`}
+                    {room.name ||
+                      room_label_fallback({ id: room.room_id.slice(0, 8) })}
                   </span>
                   {#if room.description}
                     <span class="text-xs opacity-60 truncate"
@@ -215,7 +243,7 @@
                   disabled={joiningId === room.room_id}
                   onclick={() => joinPublic(room.room_id)}
                 >
-                  {joiningId === room.room_id ? "…" : "Join"}
+                  {joiningId === room.room_id ? "…" : rooms_join()}
                 </button>
               </div>
               {#if joinErrors[room.room_id]}
@@ -230,9 +258,11 @@
 
       <section class="flex flex-col gap-3">
         {#if roomsPhase === "loading"}
-          <p class="text-sm opacity-60">Loading...</p>
+          <p class="text-sm opacity-60">{common_loading()}</p>
         {:else if roomsPhase === "error"}
-          <p class="text-sm text-error-500 dark:text-error-400">Failed to load rooms.</p>
+          <p class="text-sm text-error-500 dark:text-error-400">
+            {rooms_load_failed()}
+          </p>
         {:else}
           {#each rooms as room (room.room_id)}
             <RoomCard
@@ -254,7 +284,7 @@
               createOpen = true;
             }}
           >
-            {busy ? "Creating…" : "+ New Room"}
+            {busy ? rooms_creating() : rooms_new_room_action()}
           </button>
         {/if}
       </section>

@@ -9,6 +9,13 @@
   import { agoraSession, stashOAuthSignup } from "../lib/session/agora.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import Brand from "../components/Brand.svelte";
+  import {
+    oauth_callback_title,
+    oauth_missing_data,
+    oauth_signin_failed,
+    oauth_completing,
+    oauth_back_to_signin,
+  } from "../paraglide/messages.js";
 
   let { code, oauthState }: { code?: string; oauthState?: string } = $props();
 
@@ -18,7 +25,7 @@
   onMount(async () => {
     if (!code || !oauthState) {
       busy = false;
-      error = "Missing sign-in data in the callback URL.";
+      error = oauth_missing_data();
       return;
     }
     try {
@@ -28,7 +35,7 @@
       );
       if (!result.ok) {
         busy = false;
-        error = result.message ?? "Sign-in failed.";
+        error = result.message ?? oauth_signin_failed();
         return;
       }
       if (result.kind === "signin") {
@@ -53,19 +60,20 @@
   });
 </script>
 
-<svelte:head><title>KallipAI · signing in</title></svelte:head>
+<svelte:head><title>{oauth_callback_title()}</title></svelte:head>
 
 <div class="flex items-center justify-center min-h-dvh p-4">
   <div class="w-full max-w-sm space-y-4 p-6 text-center">
     <Brand size="lg" />
     {#if busy}
-      <p class="text-sm opacity-60">Completing sign-in…</p>
+      <p class="text-sm opacity-60">{oauth_completing()}</p>
     {:else}
       <p class="text-sm text-error-500 dark:text-error-400">{error}</p>
       <a
         href="/login"
         class="inline-block font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
-      >Back to sign in</a>
+        >{oauth_back_to_signin()}</a
+      >
     {/if}
   </div>
 </div>

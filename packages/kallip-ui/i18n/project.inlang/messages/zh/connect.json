@@ -1,0 +1,13 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "connect_title": "KallipAI · 离线连接",
+  "connect_subtitle": "连接离线智能体编队",
+  "connect_url_label": "智能体编队 URL",
+  "connect_url_hint": "kallip 智能体编队 HTTP API 的基础 URL。",
+  "connect_token_label": "认证令牌",
+  "connect_token_hint": "智能体编队接受的操作者令牌。",
+  "connect_url_invalid": "智能体编队 URL 必须是有效的 http(s) 地址。",
+  "connect_connecting": "连接中…",
+  "connect_submit": "连接",
+  "connect_online_mode": "在线模式"
+}

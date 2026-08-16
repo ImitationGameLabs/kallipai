@@ -8,6 +8,22 @@
   import Banner from "../components/Banner.svelte";
   import OAuthProviderButtons from "../components/OAuthProviderButtons.svelte";
   import UsernameField from "../components/UsernameField.svelte";
+  import {
+    auth_couldnt_reach,
+    auth_passkey_cancelled,
+    auth_rate_limited,
+    auth_username_taken,
+    auth_creating,
+    auth_create_account,
+    auth_offline_mode,
+    register_title,
+    register_subtitle,
+    register_display_name,
+    register_failed,
+    register_create_passkey,
+    register_have_account,
+    auth_sign_in,
+  } from "../paraglide/messages.js";
 
   // display_name length cap enforced on the trimmed value by the agora
   // (auth.rs:179). HTML maxlength counts untrimmed length, so this is a UX
@@ -34,13 +50,13 @@
     if (r.ok) return null;
     switch (r.reason) {
       case "cancelled":
-        return "Passkey prompt cancelled.";
+        return auth_passkey_cancelled();
       case "duplicate-username":
-        return "That username is taken.";
+        return auth_username_taken();
       case "rate-limited":
-        return "Too many attempts. Wait a moment and try again.";
+        return auth_rate_limited();
       default:
-        return r.message ?? "Registration failed.";
+        return r.message ?? register_failed();
     }
   }
 
@@ -75,13 +91,13 @@
   });
 </script>
 
-<svelte:head><title>KallipAI · register</title></svelte:head>
+<svelte:head><title>{register_title()}</title></svelte:head>
 
 {#if notice}
   <!-- Floats over the centered form so an agora-unreachable error is visible
        without displacing the fields; the ceremony's own failures render inline
        below. -->
-  <Banner floating title={`Couldn't reach the server: ${notice}`} />
+  <Banner floating title={auth_couldnt_reach({ notice })} />
 {/if}
 
 <div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100-900">
@@ -91,7 +107,7 @@
   >
     <div class="text-center space-y-1">
       <Brand size="lg" />
-      <p class="text-sm opacity-60">Create your account</p>
+      <p class="text-sm opacity-60">{register_subtitle()}</p>
     </div>
 
     <OAuthProviderButtons />
@@ -99,7 +115,7 @@
     <UsernameField bind:value={username} />
 
     <label class="block space-y-1">
-      <span class="text-sm opacity-70">Display name</span>
+      <span class="text-sm opacity-70">{register_display_name()}</span>
       <input
         class="input"
         autocomplete="name"
@@ -119,15 +135,16 @@
       class="btn preset-filled-primary-500 w-full"
       disabled={!canSubmit}
     >
-      {submitting ? "Creating…" : "Create passkey"}
+      {submitting ? auth_creating() : register_create_passkey()}
     </button>
 
     <p class="text-center text-sm">
-      Already have one?
+      {register_have_account()}
       <a
         href="/login"
         class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
-        >Sign in</a
+        >{auth_sign_in()}</a
+      >
       >
     </p>
 
@@ -135,7 +152,7 @@
       <a
         href="/connect"
         class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
-        >Offline mode</a
+        >{auth_offline_mode()}</a
       >
     </p>
   </form>

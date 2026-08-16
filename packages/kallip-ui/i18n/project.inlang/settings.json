@@ -1,0 +1,33 @@
+{
+  "$schema": "https://inlang.com/schema/project-settings",
+  "baseLocale": "en",
+  "locales": ["en", "zh"],
+  "modules": [
+    "https://cdn.jsdelivr.net/npm/@inlang/plugin-message-format@4.4.0/dist/index.js",
+    "https://cdn.jsdelivr.net/npm/@inlang/plugin-m-function-matcher@2.2.6/dist/index.js"
+  ],
+  "plugin.inlang.messageFormat": {
+    "pathPattern": [
+      "./project.inlang/messages/{locale}/common.json",
+      "./project.inlang/messages/{locale}/shell.json",
+      "./project.inlang/messages/{locale}/auth.json",
+      "./project.inlang/messages/{locale}/connect.json",
+      "./project.inlang/messages/{locale}/chat.json",
+      "./project.inlang/messages/{locale}/signal.json",
+      "./project.inlang/messages/{locale}/user.json",
+      "./project.inlang/messages/{locale}/tagma.json",
+      "./project.inlang/messages/{locale}/tagmata.json",
+      "./project.inlang/messages/{locale}/room.json",
+      "./project.inlang/messages/{locale}/rooms.json",
+      "./project.inlang/messages/{locale}/roomsettings.json",
+      "./project.inlang/messages/{locale}/settings.json",
+      "./project.inlang/messages/{locale}/manage.json",
+      "./project.inlang/messages/{locale}/manage_overview.json",
+      "./project.inlang/messages/{locale}/manage_agent.json",
+      "./project.inlang/messages/{locale}/manage_agents.json",
+      "./project.inlang/messages/{locale}/manage_budget.json",
+      "./project.inlang/messages/{locale}/manage_profiles.json",
+      "./project.inlang/messages/{locale}/manage_schedules.json"
+    ]
+  }
+}

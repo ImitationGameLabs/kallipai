@@ -1,0 +1,7 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "manage_agents_title": "KallipAI · tagma details",
+  "manage_agents_heading": "Tagma Details",
+  "manage_agents_empty": "No agents.",
+  "manage_agents_details": "Details"
+}

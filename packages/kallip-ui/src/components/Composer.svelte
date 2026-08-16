@@ -1,6 +1,14 @@
 <script lang="ts">
   import { ArrowUp } from "@lucide/svelte";
   import type { ComposerModel } from "../lib/composer.svelte";
+  import {
+    composer_placeholder,
+    composer_message_aria,
+    composer_send_aria,
+    composer_queued,
+    composer_connect_link,
+    composer_connect_tail,
+  } from "../paraglide/messages.js";
 
   let {
     composer,
@@ -62,9 +70,9 @@
         bind:this={area}
         bind:value={composer.draft}
         onkeydown={onKeydown}
-        placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
+        placeholder={composer_placeholder()}
         rows="2"
-        aria-label="Message"
+        aria-label={composer_message_aria()}
         {disabled}
         class="block w-full resize-none bg-transparent border-0 outline-none focus:ring-0 px-2 pt-1.5 pb-2 text-base leading-relaxed"
       ></textarea>
@@ -73,7 +81,7 @@
           type="button"
           onclick={() => void composer.submit()}
           disabled={!composer.canSend}
-          aria-label="Send"
+          aria-label={composer_send_aria()}
           class="size-9 shrink-0 rounded-full preset-filled-primary-500 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <ArrowUp class="size-5" aria-hidden="true" />
@@ -83,7 +91,9 @@
 
     {#if pendingCount > 0}
       <div class="mt-1.5 text-xs opacity-60">
-        <span class="badge preset-tonal-surface">queued: {pendingCount}</span>
+        <span class="badge preset-tonal-surface"
+          >{composer_queued({ count: pendingCount })}</span
+        >
       </div>
     {:else if disabled}
       <div class="mt-1.5 text-xs opacity-60">
@@ -93,9 +103,9 @@
           <a
             href="/connect"
             class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
-            >Connect a tagma</a
+            >{composer_connect_link()}</a
           >
-          to send.
+          {composer_connect_tail()}
         {/if}
       </div>
     {/if}

@@ -13,6 +13,22 @@
     formatRemaining,
     isExpired,
   } from "../../lib/tagmata.svelte.ts";
+  import {
+    common_copied,
+    common_copy,
+    common_rename,
+    tagma_profile_unnamed,
+    tagma_save_name_aria,
+    tagma_cancel_rename_aria,
+    tagma_actions_aria,
+    tagma_revoke,
+    tagma_rename_failed,
+    tagma_revoke_failed,
+    tagmata_expired_badge,
+    tagmata_pending_badge,
+    tagmata_secret_title,
+    tagmata_expires_in,
+  } from "../../paraglide/messages.js";
 
   let {
     code,
@@ -151,7 +167,7 @@
           class="size-7 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-primary-500"
           disabled={saving}
           onclick={save}
-          aria-label="Save name"
+          aria-label={tagma_save_name_aria()}
         >
           <Check class="size-4" />
         </button>
@@ -160,22 +176,22 @@
           class="size-7 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
           disabled={saving}
           onclick={cancel}
-          aria-label="Cancel rename"
+          aria-label={tagma_cancel_rename_aria()}
         >
           <X class="size-4" />
         </button>
       </div>
     {:else}
       <h3 class="text-base font-semibold truncate">
-        {code.label ?? "Unnamed tagma"}
+        {code.label ?? tagma_profile_unnamed()}
       </h3>
       {#if expired}
         <span class="badge preset-filled-warning-500 text-xs shrink-0"
-          >expired</span
+          >{tagmata_expired_badge()}</span
         >
       {:else}
         <span class="badge preset-filled-surface-500 text-xs shrink-0"
-          >pending</span
+          >{tagmata_pending_badge()}</span
         >
       {/if}
     {/if}
@@ -183,7 +199,7 @@
 
   <code
     class="block w-full min-w-0 font-mono text-sm break-all px-3 py-2 rounded preset-tonal"
-    title={code.copyable ? code.code : "Secret shown only at mint time"}
+    title={code.copyable ? code.code : tagmata_secret_title()}
   >
     {code.code}
   </code>
@@ -191,14 +207,18 @@
   <div class="flex flex-col gap-1 text-sm opacity-80">
     <p class="truncate" title={code.expiresAt}>
       {remainingMs > 0
-        ? `expires in ${formatRemaining(remainingMs)}`
-        : "expired"}
+        ? tagmata_expires_in({ duration: formatRemaining(remainingMs) })
+        : tagmata_expired_badge()}
     </p>
     {#if renameError}
-      <p class="text-error-500 dark:text-error-400 text-xs">Rename failed: {renameError}</p>
+      <p class="text-error-500 dark:text-error-400 text-xs">
+        {tagma_rename_failed({ error: renameError })}
+      </p>
     {/if}
     {#if revokeError}
-      <p class="text-error-500 dark:text-error-400 text-xs">Revoke failed: {revokeError}</p>
+      <p class="text-error-500 dark:text-error-400 text-xs">
+        {tagma_revoke_failed({ error: revokeError })}
+      </p>
     {/if}
   </div>
 
@@ -210,7 +230,7 @@
           class="btn min-w-24 preset-outlined-primary-500 hover:preset-filled-primary-500"
           onclick={() => onCopy(code.id, code.code)}
         >
-          {copied ? "Copied" : "Copy"}
+          {copied ? common_copied() : common_copy()}
         </button>
       {/if}
     </div>
@@ -229,7 +249,7 @@
         >
           <Menu.Trigger
             class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
-            aria-label="Tagma actions"
+            aria-label={tagma_actions_aria()}
           >
             <MoreVertical class="size-4" />
           </Menu.Trigger>
@@ -241,7 +261,7 @@
                     value="rename"
                     class="px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
                   >
-                    Rename
+                    {common_rename()}
                   </Menu.Item>
                 {/if}
                 {#if onRevoke}
@@ -250,7 +270,7 @@
                     class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
                   >
                     <Trash class="size-4" />
-                    Revoke
+                    {tagma_revoke()}
                   </Menu.Item>
                 {/if}
               </Menu.Content>

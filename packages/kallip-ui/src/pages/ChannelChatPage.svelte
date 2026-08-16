@@ -11,6 +11,15 @@
   import { createComposer } from "../lib/composer.svelte.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { navigate } from "../lib/shell/port.ts";
+  import {
+    connect_connecting,
+    chat_opening,
+    chat_go_tagmata,
+    chat_title_local,
+    chat_title_channel,
+    chat_notice_local,
+    chat_notice_offline,
+  } from "../paraglide/messages.js";
 
   let { conversationId }: { conversationId: string } = $props();
 
@@ -33,7 +42,8 @@
 </script>
 
 <svelte:head
-  ><title>KallipAI · {isLocal ? "chat" : "channel"}</title></svelte:head
+  ><title>{isLocal ? chat_title_local() : chat_title_channel()}</title
+  ></svelte:head
 >
 
 {#if !conv}
@@ -41,7 +51,7 @@
     <!-- Offline /local/chat before the boot reconnect lands. The gate routes a
          failed reconnect to /connect; this is the brief resolving window. -->
     <div class="h-full grid place-items-center p-6">
-      <p class="text-sm opacity-60">Connecting…</p>
+      <p class="text-sm opacity-60">{connect_connecting()}</p>
     </div>
   {:else}
     <!-- No open channel for this conversation yet. Channels auto-connect at
@@ -51,13 +61,13 @@
          user needs a way out. -->
     <div class="h-full grid place-items-center p-6">
       <div class="text-center flex flex-col gap-3 max-w-sm">
-        <p class="text-sm opacity-80">Opening channel…</p>
+        <p class="text-sm opacity-80">{chat_opening()}</p>
         <button
           type="button"
           class="btn preset-tonal-surface self-center"
           onclick={() => navigate("/tagmata")}
         >
-          Go to tagmata
+          {chat_go_tagmata()}
         </button>
       </div>
     </div>
@@ -77,10 +87,9 @@
         {#if conv.status === "offline"}
           <p class="text-xs text-error-500 dark:text-error-400 text-center">
             {#if isLocal}
-              The tagma connection dropped. Reconnect from settings.
+              {chat_notice_local()}
             {:else}
-              The tagma is offline. The channel will reconnect automatically
-              when it returns.
+              {chat_notice_offline()}
             {/if}
           </p>
         {/if}

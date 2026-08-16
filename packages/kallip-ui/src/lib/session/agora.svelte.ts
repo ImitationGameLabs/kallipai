@@ -38,6 +38,13 @@ import {
 } from "@kallipai/kallip-agora-client";
 import type { PairingCodeView } from "../passkeys.svelte.ts";
 import { LescheClient } from "@kallipai/kallip-lesche-client";
+import {
+  auth_no_signed_in_user,
+  auth_passkey_cancelled,
+  oauth_context_lost,
+  pair_reauth_failed,
+  auth_reauth_required,
+} from "../../paraglide/messages.js";
 import { participantIdForUser } from "@kallipai/kallip-common";
 import type {
   EnrollmentCodeCardProps,
@@ -357,7 +364,7 @@ class AgoraSessionStore {
     await client().renameTagma(id, label);
     const resolved = label && label.trim() ? label.trim() : null;
     this.tagmata = this.tagmata.map((t) =>
-      t.tagma_id === id ? { ...t, label: resolved } : t
+      t.tagma_id === id ? { ...t, label: resolved } : t,
     );
   }
 
@@ -433,7 +440,7 @@ class AgoraSessionStore {
       const result: AddPasskeyResult = {
         ok: false,
         reason: "unknown",
-        message: "no signed-in user",
+        message: auth_no_signed_in_user(),
       };
       this.lastAddPasskey = result;
       return result;
@@ -493,9 +500,7 @@ class AgoraSessionStore {
   async refreshExternalIdentities(): Promise<void> {
     this.externalIdentitiesError = null;
     try {
-      this.externalIdentities = [
-        ...(await client().listExternalIdentities()),
-      ];
+      this.externalIdentities = [...(await client().listExternalIdentities())];
       this.externalIdentitiesLoaded = true;
     } catch (e) {
       this.externalIdentitiesError = messageOf(e);
@@ -551,8 +556,8 @@ class AgoraSessionStore {
    *  guard (the caller surfaces it). */
   async unlinkExternalIdentity(id: string): Promise<void> {
     await client().unlinkExternalIdentity(id);
-    this.externalIdentities = this.externalIdentities.filter((e) =>
-      e.id !== id
+    this.externalIdentities = this.externalIdentities.filter(
+      (e) => e.id !== id,
     );
   }
 
@@ -580,9 +585,10 @@ class AgoraSessionStore {
   /** Submit the chosen username for a held OAuth signup (the token came from a
    *  needs-username finish). On success the complete XHR set the session cookie,
    *  so `whoami()` is re-run before the caller navigates. */
-  async completeOAuthSignup(
-    body: { signupToken: string; username: string },
-  ): Promise<OAuthSignupResult> {
+  async completeOAuthSignup(body: {
+    signupToken: string;
+    username: string;
+  }): Promise<OAuthSignupResult> {
     const result = await completeOAuthSignup(client(), body);
     if (result.ok) {
       await this.whoami();
@@ -612,7 +618,7 @@ class AgoraSessionStore {
       return {
         ok: false,
         reason: "unknown",
-        message: "OAuth context lost; restart the sign-in.",
+        message: oauth_context_lost(),
       };
     }
     return this.completeOAuth(ctx.provider, { state, code });
@@ -631,7 +637,7 @@ class AgoraSessionStore {
     const username = this.user?.username;
     const hasPasskey = (this.user?.passkey_count ?? 0) > 0;
     if (!username) {
-      this.pairingError = "no signed-in user";
+      this.pairingError = auth_no_signed_in_user();
       return false;
     }
     this.pairingError = null;
@@ -650,17 +656,17 @@ class AgoraSessionStore {
       // surface a clear re-auth prompt instead. (The in-page OAuth retry that
       // refreshes authed_at is a documented follow-up.)
       if (!hasPasskey) {
-        this.pairingError =
-          "Re-authentication required. Sign in again, then retry.";
+        this.pairingError = auth_reauth_required();
         return false;
       }
       const login = await loginWithPasskey(client(), username);
       if (!login.ok) {
         // Surface the step-up login's own failure (e.g. a bad assertion), not
         // the original 403 body that triggered the re-auth.
-        this.pairingError = login.reason === "cancelled"
-          ? "Cancelled."
-          : (login.message ?? "Re-authentication failed.");
+        this.pairingError =
+          login.reason === "cancelled"
+            ? auth_passkey_cancelled()
+            : (login.message ?? pair_reauth_failed());
         return false;
       }
       try {

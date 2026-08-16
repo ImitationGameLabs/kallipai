@@ -25,6 +25,19 @@
             matchMedia("(prefers-color-scheme: dark)").matches);
         document.documentElement.dataset.mode = dark ? "dark" : "light";
       })();
+      // Mirror the Paraglide locale strategy (cookie > navigator.languages
+      // > baseLocale) for <html lang> before hydration; LanguageSwitch
+      // keeps it in sync after user changes. NOTE: the (en|zh) set below and
+      // the zh-only navigator probe duplicate settings.json's locale list;
+      // adding a locale means updating this script in BOTH apps' app.html.
+      (() => {
+        const cookie = document.cookie.match(/(?:^|;\s*)PARAGLIDE_LOCALE=(en|zh)/);
+        if (cookie) {
+          document.documentElement.lang = cookie[1];
+        } else if (navigator.languages?.some((l) => l.startsWith("zh"))) {
+          document.documentElement.lang = "zh";
+        }
+      })();
     </script>
     %sveltekit.head%
   </head>

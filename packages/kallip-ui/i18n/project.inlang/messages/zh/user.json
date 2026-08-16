@@ -1,0 +1,5 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "user_profile_subtitle": "用户资料",
+  "user_profile_joined": "加入于 {date}"
+}
