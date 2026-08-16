@@ -37,9 +37,11 @@ pub async fn get_profiles(
 ///
 /// Accepts a wire config where each endpoint's `api_key` is tri-state: null keeps
 /// the live key, a string replaces it, and the masked form echoed back counts as
-/// "keep" (round-trip safe). Merged against the live config, validated by building
-/// backends + a trial registry (fail-fast). On success, writes to disk and swaps
-/// the [`ArcSwap`]; running agents are unaffected until an explicit apply.
+/// "keep" (round-trip safe). `base_url` follows the same null-keeps rule; an
+/// empty string resets it to the family default. Merged against the live
+/// config, validated by building backends + a trial registry (fail-fast). On
+/// success, writes to disk and swaps the [`ArcSwap`]; running agents are
+/// unaffected until an explicit apply.
 pub async fn put_profiles(
     State(state): State<SharedState>,
     auth: AuthIdentity,
@@ -84,8 +86,8 @@ pub async fn put_profiles(
     Ok(Json(masked_config(&config)?))
 }
 
-/// Wire DTO for PUT /profiles: same shape as [`ProfileConfig`] except each endpoint's
-/// `api_key` is optional (see [`merge_wire`]).
+/// Wire DTO for PUT /profiles: same shape as [`ProfileConfig`] except each
+/// endpoint's `api_key` and `base_url` are tri-state (see [`merge_wire`]).
 #[derive(Deserialize)]
 struct EndpointWire {
     id: String,
@@ -113,8 +115,8 @@ pub(crate) struct ProfileConfigWire {
     endpoints: HashMap<String, EndpointWire>,
 }
 
-/// Resolve the wire tri-state `api_key` fields against the live config into a full
-/// [`ProfileConfig`] carrying real keys.
+/// Resolve the wire tri-state `api_key` and `base_url` fields against the live
+/// config into a full [`ProfileConfig`] carrying real keys.
 fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileConfig, ApiError> {
     let mut endpoints = HashMap::new();
     for (key, ep) in wire.endpoints {
@@ -137,20 +139,20 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                     "endpoint '{key}': api_key must not be empty"
                 )));
             }
-            // Round-trip safety: the masked form echoed back means "keep".
-            Some(k)
-                if live
-                    .endpoints
-                    .get(&key)
-                    .is_some_and(|e| mask_key(&e.api_key) == k) =>
-            {
-                live.endpoints
-                    .get(&key)
-                    .expect("checked above")
-                    .api_key
-                    .clone()
-            }
-            Some(k) => k,
+            Some(k) => match live.endpoints.get(&key) {
+                // Round-trip safety: the masked form echoed back means "keep".
+                Some(e) if mask_key(&e.api_key) == k => e.api_key.clone(),
+                _ => k,
+            },
+        };
+
+        // `base_url` mirrors the api_key tri-state so a partial PUT that omits
+        // it keeps the live URL instead of silently clearing it: null keeps,
+        // "" resets to the family default, a value replaces.
+        let base_url = match ep.base_url {
+            None => live.endpoints.get(&key).and_then(|e| e.base_url.clone()),
+            Some(url) if url.is_empty() => None,
+            Some(url) => Some(url),
         };
         endpoints.insert(
             key.clone(),
@@ -158,7 +160,7 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                 id: ep.id,
                 family: ep.family,
                 api_key,
-                base_url: ep.base_url,
+                base_url,
             },
         );
     }
@@ -313,19 +315,19 @@ mod tests {
                     id: "main".into(),
                     family: "deepseek".into(),
                     api_key: "sk-live-secret-key".into(),
-                    base_url: None,
+                    base_url: Some("https://live.example/v1".into()),
                 },
             )]),
         }
     }
 
-    fn wire(api_key: serde_json::Value) -> ProfileConfigWire {
+    fn wire(api_key: serde_json::Value, base_url: serde_json::Value) -> ProfileConfigWire {
         serde_json::from_value(serde_json::json!({
             "endpoints": { "main": {
                 "id": "main",
                 "family": "deepseek",
                 "api_key": api_key,
-                "base_url": null
+                "base_url": base_url
             }},
             "tiers": [{ "profiles": [{
                 "id": "p", "endpoint": "main", "model": "m", "max_context_window": 128000
@@ -336,7 +338,11 @@ mod tests {
 
     #[test]
     fn merge_wire_null_keeps_live_key() {
-        let merged = merge_wire(&live_config(), wire(serde_json::Value::Null)).unwrap();
+        let merged = merge_wire(
+            &live_config(),
+            wire(serde_json::Value::Null, serde_json::Value::Null),
+        )
+        .unwrap();
         assert_eq!(merged.endpoints["main"].api_key, "sk-live-secret-key");
     }
 
@@ -344,19 +350,27 @@ mod tests {
     fn merge_wire_masked_echo_keeps_live_key() {
         // A GET→PUT round-trip of the masked form must not corrupt the key.
         let masked = mask_key("sk-live-secret-key");
-        let merged = merge_wire(&live_config(), wire(serde_json::json!(masked))).unwrap();
+        let merged = merge_wire(
+            &live_config(),
+            wire(serde_json::json!(masked), serde_json::Value::Null),
+        )
+        .unwrap();
         assert_eq!(merged.endpoints["main"].api_key, "sk-live-secret-key");
     }
 
     #[test]
     fn merge_wire_string_replaces_key() {
-        let merged = merge_wire(&live_config(), wire(serde_json::json!("sk-new-key-123"))).unwrap();
+        let merged = merge_wire(
+            &live_config(),
+            wire(serde_json::json!("sk-new-key-123"), serde_json::Value::Null),
+        )
+        .unwrap();
         assert_eq!(merged.endpoints["main"].api_key, "sk-new-key-123");
     }
 
     #[test]
     fn merge_wire_new_endpoint_without_key_is_rejected() {
-        let mut w = wire(serde_json::Value::Null);
+        let mut w = wire(serde_json::Value::Null, serde_json::Value::Null);
         w.endpoints.insert(
             "extra".into(),
             serde_json::from_value(serde_json::json!({
@@ -370,8 +384,64 @@ mod tests {
 
     #[test]
     fn merge_wire_empty_key_is_rejected() {
-        let err = merge_wire(&live_config(), wire(serde_json::json!(""))).unwrap_err();
+        let err = merge_wire(
+            &live_config(),
+            wire(serde_json::json!(""), serde_json::Value::Null),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn merge_wire_null_base_url_keeps_live_url() {
+        let merged = merge_wire(
+            &live_config(),
+            wire(serde_json::Value::Null, serde_json::Value::Null),
+        )
+        .unwrap();
+        assert_eq!(
+            merged.endpoints["main"].base_url.as_deref(),
+            Some("https://live.example/v1")
+        );
+    }
+
+    #[test]
+    fn merge_wire_empty_base_url_clears_to_family_default() {
+        let merged = merge_wire(
+            &live_config(),
+            wire(serde_json::Value::Null, serde_json::json!("")),
+        )
+        .unwrap();
+        assert_eq!(merged.endpoints["main"].base_url, None);
+    }
+
+    #[test]
+    fn merge_wire_base_url_string_replaces() {
+        let merged = merge_wire(
+            &live_config(),
+            wire(
+                serde_json::Value::Null,
+                serde_json::json!("https://new.example/v1"),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            merged.endpoints["main"].base_url.as_deref(),
+            Some("https://new.example/v1")
+        );
+    }
+
+    #[test]
+    fn merge_wire_map_key_mismatch_is_rejected() {
+        let w: ProfileConfigWire = serde_json::from_value(serde_json::json!({
+            "endpoints": { "wrong": {
+                "id": "main", "family": "deepseek", "api_key": null, "base_url": null
+            }},
+            "tiers": []
+        }))
+        .unwrap();
+        let err = merge_wire(&live_config(), w).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "got: {err}");
     }
 
     #[tokio::test]

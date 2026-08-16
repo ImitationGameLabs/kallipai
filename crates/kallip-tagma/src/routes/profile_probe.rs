@@ -33,6 +33,10 @@ use crate::state::SharedState;
 /// that a wedged endpoint cannot pin the request.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Upper bound on inline endpoints per request: every endpoint fans out one
+/// concurrent outbound connection, so an unbounded list is a self-DoS lever
+/// on an operator-only route.
+const MAX_PROBE_ENDPOINTS: usize = 64;
 #[derive(Deserialize)]
 pub struct ProbeRequest {
     /// Inline endpoint definitions (draft config). `api_key: null` means
@@ -136,6 +140,13 @@ pub async fn probe_profiles(
     Json(request): Json<ProbeRequest>,
 ) -> Result<Json<ProbeResponse>, ApiError> {
     crate::auth::require_operator(auth.identity())?;
+
+    if request.endpoints.len() > MAX_PROBE_ENDPOINTS {
+        return Err(ApiError::bad_request(format!(
+            "probe request carries {} endpoints; at most {MAX_PROBE_ENDPOINTS} per request",
+            request.endpoints.len()
+        )));
+    }
 
     let live = state.profiles.load().config.clone();
     let wants_models = !request.tiers.is_empty();
@@ -269,15 +280,14 @@ fn profile_report_for(p: &ProbeProfile, ep: Option<&EndpointReport>) -> ProfileR
 /// null `base_url` means "keep the live value for this endpoint id".
 fn resolve_endpoint(probe: &ProbeEndpoint, live: &ProfileConfig) -> Result<Endpoint, String> {
     let api_key = match &probe.api_key {
-        Some(key)
-            if live
-                .endpoints
-                .get(&probe.id)
-                .is_some_and(|ep| crate::routes::profiles::mask_key(&ep.api_key) == *key) =>
-        {
-            live.endpoints[&probe.id].api_key.clone()
-        }
-        Some(key) => key.clone(),
+        Some(key) => match live.endpoints.get(&probe.id) {
+            // The masked form echoed back (GET → draft → probe) means "keep",
+            // never a credential to dial out with.
+            Some(ep) if crate::routes::profiles::mask_key(&ep.api_key) == *key => {
+                ep.api_key.clone()
+            }
+            _ => key.clone(),
+        },
         None => live
             .endpoints
             .get(&probe.id)
@@ -614,7 +624,6 @@ mod tests {
         assert_eq!(resolved.base_url.as_deref(), Some("https://live.example"));
     }
     #[tokio::test]
-
     async fn probe_requires_operator() {
         let state = make_state();
         let anon = AuthIdentity::test_new(crate::auth::Identity::Agent {
@@ -623,6 +632,27 @@ mod tests {
         let result =
             probe_profiles(State(state), anon, Json(probe_req(serde_json::json!({})))).await;
         assert!(result.is_err(), "non-operator must be rejected");
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_more_than_max_endpoints() {
+        let state = make_state();
+        let endpoints: Vec<serde_json::Value> = (0..=MAX_PROBE_ENDPOINTS)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("ep{i}"),
+                    "family": "deepseek",
+                    "api_key": "sk-test",
+                    "base_url": null
+                })
+            })
+            .collect();
+        let req = probe_req(serde_json::json!({ "endpoints": endpoints }));
+        let err = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("at most"), "got: {err}");
     }
 
     #[tokio::test]
