@@ -27,11 +27,33 @@ const BODY_DISPLAY_LIMIT: usize = 512;
 pub(crate) fn render_error(e: &(dyn std::error::Error + 'static)) -> String {
     let chain = dedup_chain(e);
     match extract_http_body(e) {
-        Some(body) => format!("{chain}: {}", format_body(&body)),
+        Some(body) => format!("{chain}: {}", format_body(body)),
         None => chain,
     }
 }
 
+/// Cap on how much of the HTTP error body goes into LOG fields (warn/error).
+/// Looser than the user-facing [`BODY_DISPLAY_LIMIT`]: logs are the
+/// diagnostics channel, so they carry the (near-)full body; the cap only
+/// defends against pathological bodies in log lines.
+const BODY_LOG_LIMIT: usize = 8 * 1024;
+
+/// The captured HTTP error body for LOG fields — the full body, unlike
+/// [`render_error`]'s 512-char summary. Returns `None` when the error chain
+/// carries no HTTP body (e.g. a connect failure, or a body-less 4xx).
+/// Truncates at [`BODY_LOG_LIMIT`] chars, appending the original length so
+/// the truncation itself is visible.
+pub(crate) fn http_body_for_log(e: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let body = extract_http_body(e)?;
+    let mut chars = body.chars();
+    let mut out = chars.by_ref().take(BODY_LOG_LIMIT).collect::<String>();
+    if chars.next().is_some() {
+        // +1 for the char just consumed, plus the untouched tail.
+        let total = BODY_LOG_LIMIT + 1 + chars.count();
+        out.push_str(&format!("…[truncated, {total} chars total]"));
+    }
+    Some(out)
+}
 /// Walk `source()` joining each level with `": "`, but skip a level whose `Display`
 /// is already a suffix of the accumulated message.
 ///
@@ -70,14 +92,14 @@ fn dedup_chain(e: &(dyn std::error::Error + 'static)) -> String {
 /// `BackendError::Provider { source: BoxError }` boxing layer that just-common's
 /// test does not exercise: each `source()` returns the concrete inner error behind
 /// a trait object, so `downcast_ref` still resolves the concrete `TransportError`.
-fn extract_http_body(e: &(dyn std::error::Error + 'static)) -> Option<String> {
+fn extract_http_body<'a>(e: &'a (dyn std::error::Error + 'static)) -> Option<&'a str> {
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(error) = current {
         if let Some(transport) = error.downcast_ref::<just_llm_client::TransportError>()
             && let just_llm_client::TransportError::HttpStatus { body, .. } = transport
             && !body.is_empty()
         {
-            return Some(body.clone());
+            return Some(body.as_str());
         }
         current = error.source();
     }
@@ -178,6 +200,59 @@ mod tests {
         // An error with no HttpStatus in its chain renders as the plain chain.
         let rendered = render_error(&std::io::Error::other("boom"));
         assert_eq!(rendered, "boom");
+    }
+
+    #[test]
+    fn http_body_for_log_returns_full_body() {
+        let body = r#"{"error":{"message":"rate limited","code":"429"}}"#;
+        assert_eq!(
+            http_body_for_log(fatal_chain(body).as_ref()).as_deref(),
+            Some(body)
+        );
+    }
+
+    #[test]
+    fn http_body_for_log_truncates_with_length_marker() {
+        let body = "x".repeat(BODY_LOG_LIMIT + 10);
+        let out = http_body_for_log(fatal_chain(&body).as_ref()).unwrap();
+        assert!(out.starts_with(&"x".repeat(BODY_LOG_LIMIT)));
+        assert!(
+            out.ends_with(&format!(
+                "…[truncated, {} chars total]",
+                BODY_LOG_LIMIT + 10
+            )),
+            "missing truncation marker: {out}"
+        );
+    }
+
+    #[test]
+    fn http_body_for_log_at_exact_limit_is_not_truncated() {
+        // Off-by-one classic: a body of exactly the limit keeps every char.
+        let body = "x".repeat(BODY_LOG_LIMIT);
+        assert_eq!(
+            http_body_for_log(fatal_chain(&body).as_ref()).as_deref(),
+            Some(body.as_str())
+        );
+    }
+
+    #[test]
+    fn http_body_for_log_cuts_on_char_boundaries() {
+        // Multibyte input pins the invariant that truncation counts chars,
+        // never splitting a UTF-8 sequence at the byte level.
+        let body = "é".repeat(BODY_LOG_LIMIT + 5);
+        let out = http_body_for_log(fatal_chain(&body).as_ref()).unwrap();
+        let (head, marker) = out.split_once('…').expect("truncation marker missing");
+        assert_eq!(head.chars().count(), BODY_LOG_LIMIT);
+        assert!(head.chars().all(|c| c == 'é'));
+        assert_eq!(
+            marker,
+            format!("[truncated, {} chars total]", BODY_LOG_LIMIT + 5)
+        );
+    }
+
+    #[test]
+    fn http_body_for_log_is_none_without_http_body() {
+        assert!(http_body_for_log(&std::io::Error::other("boom")).is_none());
     }
 
     #[test]

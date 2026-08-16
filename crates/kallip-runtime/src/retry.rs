@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use just_llm_client::{BackendError, ChatCompletionStream};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::event::AgentEvent;
 use kallip_common::retry::RetryRecord;
@@ -226,8 +226,18 @@ pub async fn stream_with_retry(
             Attempt::Failover(error) => return Err(RequestFailure::Failover(error)),
             Attempt::Fatal(error) => return Err(RequestFailure::Fatal(error)),
             Attempt::Retry { error, retry_after } => {
+                let retry_after_secs = retry_after.map(|d| d.as_secs());
+                let body = crate::llm_error::http_body_for_log(&error);
+                let error_msg = crate::llm_error::render_error(&error);
                 // Budget exhausted — surface the final error without recording a retry.
                 if attempt == max_attempts {
+                    error!(
+                        attempt = prior_retries + attempt,
+                        retry_after_secs = ?retry_after_secs,
+                        body = ?body,
+                        error = %error_msg,
+                        "retry budget exhausted, advancing failover chain"
+                    );
                     return Err(RequestFailure::Failover(error));
                 }
 
@@ -236,19 +246,27 @@ pub async fn stream_with_retry(
                 // at the remaining deadline), so telemetry never over-reports.
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
+                    error!(
+                        attempt = prior_retries + attempt,
+                        retry_after_secs = ?retry_after_secs,
+                        body = ?body,
+                        error = %error_msg,
+                        "retry deadline exhausted, advancing failover chain"
+                    );
                     return Err(RequestFailure::Failover(error));
                 }
                 let actual = backoff_delay(policy, attempt - 1)
                     .max(retry_after.unwrap_or_default())
                     .min(remaining);
                 let delay_secs = actual.as_secs_f64();
-                let error_msg = crate::llm_error::render_error(&error);
                 let global_attempt = prior_retries + attempt;
 
                 warn!(
                     attempt = global_attempt,
                     max_attempts = policy.max_retries,
                     delay_secs,
+                    retry_after_secs = ?retry_after_secs,
+                    body = ?body,
                     error = %error_msg,
                     "LLM request failed, retrying"
                 );
