@@ -31,5 +31,6 @@
   "agent_state_idle": "Idle",
   "agent_state_busy": "Busy",
   "agent_state_faulted": "Faulted",
-  "common_create": "Create"
+  "common_create": "Create",
+  "common_edit": "Edit"
 }

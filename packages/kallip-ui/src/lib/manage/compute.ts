@@ -6,6 +6,8 @@
 
 import type {
   ProfileConfig,
+  ProfileEndpoint,
+  ProfileModel,
   ProfileProbeRequest,
 } from "@kallipai/kallip-client";
 import {
@@ -113,17 +115,17 @@ export function addProfile(
   const tiers = config.tiers.map((t, i) =>
     i === tierIdx
       ? {
-          profiles: [
-            ...t.profiles,
-            {
-              id: "",
-              endpoint: "",
-              model: "",
-              max_context_window: DEFAULT_MAX_CONTEXT,
-            },
-          ],
-        }
-      : t,
+        profiles: [
+          ...t.profiles,
+          {
+            id: "",
+            endpoint: "",
+            model: "",
+            max_context_window: DEFAULT_MAX_CONTEXT,
+          },
+        ],
+      }
+      : t
   );
   return { ...config, tiers };
 }
@@ -137,7 +139,7 @@ export function removeProfile(
   const tiers = config.tiers.map((t, i) =>
     i === tierIdx
       ? { profiles: t.profiles.filter((_, pi) => pi !== profileIdx) }
-      : t,
+      : t
   );
   return { ...config, tiers };
 }
@@ -160,6 +162,52 @@ export function removeEndpoint(
 ): ProfileConfig {
   const { [id]: _, ...rest } = config.endpoints;
   return { ...config, endpoints: rest };
+}
+
+/** Insert or replace an endpoint under its id (id-keyed upsert).
+ * Replacing is the Edit path — the dialog locks the id there, so a matching
+ * id is always the same endpoint being updated; New-mode duplicate ids are
+ * rejected by dialog validation before this runs.
+ */
+export function upsertEndpoint(
+  config: ProfileConfig,
+  endpoint: ProfileEndpoint,
+): ProfileConfig {
+  return {
+    ...config,
+    endpoints: { ...config.endpoints, [endpoint.id]: endpoint },
+  };
+}
+
+/** Replace the profile list of the tier at tierIdx (dialog Save path).
+ * Out-of-range tierIdx leaves the config unchanged.
+ */
+export function replaceTierProfiles(
+  config: ProfileConfig,
+  tierIdx: number,
+  profiles: readonly ProfileModel[],
+): ProfileConfig {
+  const tiers = config.tiers.map((t, i) => i === tierIdx ? { profiles } : t);
+  return { ...config, tiers };
+}
+
+/** Move a profile from one tier to another (drag-and-drop draft update).
+ * The profile lands at the end of the target tier; a move within the same
+ * tier reorders it to last. Invalid coordinates leave the config unchanged.
+ */
+export function moveProfile(
+  config: ProfileConfig,
+  fromTier: number,
+  fromIdx: number,
+  toTier: number,
+): ProfileConfig {
+  const profile = config.tiers[fromTier]?.profiles[fromIdx];
+  if (!profile || toTier < 0 || toTier >= config.tiers.length) return config;
+  const without = removeProfile(config, fromTier, fromIdx);
+  const tiers = without.tiers.map((t, i) =>
+    i === toTier ? { profiles: [...t.profiles, profile] } : t
+  );
+  return { ...without, tiers };
 }
 
 /** Structural equality check (used for isDirty). */
@@ -248,6 +296,42 @@ export function singleEndpointProbeRequest(
       api_key: probeWireKey(ep.api_key, committed?.endpoints[id]?.api_key),
     }],
     tiers: [],
+  };
+}
+
+/**
+ * Build a single-profile probe request (the profile Test button): the
+ * tier carries only that profile, and its endpoint rides inline under the
+ * shared key rule. A dangling endpoint reference still probes — the server
+ * reports the missing reference as invalid_config, which is the honest
+ * verdict for that profile. Null when the coordinates are out of range.
+ */
+export function singleProfileProbeRequest(
+  committed: ProfileConfig | null,
+  draft: ProfileConfig,
+  tierIdx: number,
+  profileIdx: number,
+): ProfileProbeRequest | null {
+  const profile = draft.tiers[tierIdx]?.profiles[profileIdx];
+  if (!profile) return null;
+  const ep = draft.endpoints[profile.endpoint];
+  const endpoints = ep
+    ? [{
+      id: ep.id,
+      family: ep.family,
+      base_url: ep.base_url,
+      api_key: probeWireKey(ep.api_key, committed?.endpoints[ep.id]?.api_key),
+    }]
+    : [];
+  return {
+    endpoints,
+    tiers: [{
+      profiles: [{
+        id: profile.id,
+        endpoint: profile.endpoint,
+        model: profile.model,
+      }],
+    }],
   };
 }
 

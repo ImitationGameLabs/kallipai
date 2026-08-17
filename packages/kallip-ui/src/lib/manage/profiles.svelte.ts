@@ -149,6 +149,28 @@ class ProfilesStore {
       this.isProbing = false;
     }
   }
+
+  /**
+   * Run an arbitrary probe request (single-profile Test) and return the
+   * raw response; the page routes the reports inline. Null on failure
+   * (probeError then carries the reason).
+   */
+  async probeRaw(
+    body: ProfileProbeRequest,
+  ): Promise<ProfileProbeResponse | null> {
+    this.isProbing = true;
+    this.probeError = null;
+    try {
+      this.probe = await this.backend.probeProfiles(body);
+      return this.probe;
+    } catch (e) {
+      this.probeError = e instanceof Error ? e.message : String(e);
+      this.probe = null;
+      return null;
+    } finally {
+      this.isProbing = false;
+    }
+  }
   /** Discard local changes and revert to the last committed config. */
   reset(): void {
     if (this.config) {

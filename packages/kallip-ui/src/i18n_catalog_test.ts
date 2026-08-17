@@ -235,8 +235,9 @@ Deno.test(
     const fromSettings = settings["plugin.inlang.messageFormat"].pathPattern
       .map((p) => {
         const m = p.match(/\/([a-z_]+)\.json$/);
-        if (!m)
+        if (!m) {
           throw new Error(`pathPattern entry is not a catalog file: ${p}`);
+        }
         return m[1]!;
       })
       .sort();
@@ -260,8 +261,9 @@ Deno.test("catalog: en and zh share keys and placeholders", () => {
 Deno.test("catalog: values are non-empty in both locales", () => {
   for (const [key, value] of Object.entries(en)) {
     if (value.trim() === "") throw new Error(`${key}: empty en value`);
-    if ((zh[key] ?? "").trim() === "")
+    if ((zh[key] ?? "").trim() === "") {
       throw new Error(`${key}: empty zh value`);
+    }
   }
 });
 
@@ -442,6 +444,11 @@ const SYNONYMS: string[][] = [
   ["roomsettings_removing", "tagma_rooms_removing"],
   ["roomsettings_remove_failed", "tagma_rooms_remove_failed"],
   ["composer_message_aria", "tagma_profile_message"],
+  ["manage_profiles_model_placeholder", "manage_profiles_profile_model_label"],
+  [
+    "manage_profiles_max_context_placeholder",
+    "manage_profiles_max_context_label",
+  ],
 ];
 
 Deno.test("catalog: same-value keys are all deliberate synonyms", () => {

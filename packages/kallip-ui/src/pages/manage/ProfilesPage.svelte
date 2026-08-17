@@ -1,49 +1,73 @@
 <script lang="ts">
+  // Profiles manage page — card-based three-layer view (endpoint cards in a
+  // global pool, tier containers holding profile cards), matching the wire
+  // shape 1:1. Read-mostly: editing goes through the Endpoint/Tier dialogs;
+  // profile cards drag between tiers (HTML5 DnD updating the draft).
+  //
+  // Probe results route inline to the card that triggered them: the page
+  // accumulates endpointReports/profileReports maps keyed by id, because the
+  // store's single `probe` field is replaced wholesale on every call.
   import { profilesStore } from "../../lib/manage/profiles.svelte.ts";
+  import { SvelteMap } from "svelte/reactivity";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
-  import type { ProfileProbeStatus } from "@kallipai/kallip-client";
+  import EndpointDialog from "../../components/manage/EndpointDialog.svelte";
+  import TierDialog from "../../components/manage/TierDialog.svelte";
   import {
+    moveProfile,
+    replaceTierProfiles,
+    singleProfileProbeRequest,
+    upsertEndpoint,
+  } from "../../lib/manage/compute.ts";
+  import type {
+    ProfileEndpoint,
+    ProfileProbeEndpointReport,
+    ProfileProbeProfileReport,
+    ProfileProbeRequest,
+    ProfileProbeResponse,
+    ProfileProbeStatus,
+  } from "@kallipai/kallip-client";
+  import {
+    common_edit,
     common_loading,
-    manage_profiles_test,
-    manage_profiles_test_all,
-    manage_profiles_probe_results,
-    manage_profiles_probe_request_failed,
-    manage_profiles_probe_status_ok,
-    manage_profiles_probe_status_partial,
-    manage_profiles_probe_status_unreachable,
-    manage_profiles_probe_status_unauthorized,
-    manage_profiles_probe_status_invalid,
+    manage_profiles_add_endpoint,
+    manage_profiles_add_tier,
+    manage_profiles_apply,
+    manage_profiles_apply_all,
+    manage_profiles_apply_desc,
+    manage_profiles_apply_title,
+    manage_profiles_applied_result,
+    manage_profiles_discard,
+    manage_profiles_edit_aria,
+    manage_profiles_endpoint_base_url_default,
+    manage_profiles_endpoint_card_base_url_label,
+    manage_profiles_endpoint_test_aria,
+    manage_profiles_endpoints,
+    manage_profiles_heading,
+    manage_profiles_heading_desc,
+    manage_profiles_max_context_label,
     manage_profiles_probe_models_one,
     manage_profiles_probe_models_other,
+    manage_profiles_probe_request_failed,
+    manage_profiles_probe_status_invalid,
+    manage_profiles_probe_status_ok,
+    manage_profiles_probe_status_partial,
+    manage_profiles_probe_status_unauthorized,
+    manage_profiles_probe_status_unreachable,
     manage_profiles_probe_tier_ok,
     manage_profiles_probe_tier_fail,
-    manage_profiles_title,
-    manage_profiles_heading,
-    manage_profiles_save_changes,
-    manage_profiles_apply_all,
-    manage_profiles_discard,
-    manage_profiles_applied_result,
-    manage_profiles_tiers_hazard,
-    manage_profiles_tiers,
-    manage_profiles_tier,
-    manage_profiles_id_placeholder,
-    manage_profiles_model_placeholder,
-    manage_profiles_max_context_placeholder,
-    manage_profiles_remove_profile,
-    manage_profiles_add_profile,
-    manage_profiles_add_tier,
+    manage_profiles_profile_endpoint_label,
+    manage_profiles_profile_model_label,
+    manage_profiles_profile_test_aria,
     manage_profiles_remove_last_tier,
-    manage_profiles_endpoints,
-    manage_profiles_base_url_placeholder,
-    manage_profiles_api_key_placeholder,
-    manage_profiles_current_key,
-    manage_profiles_remove_endpoint,
-    manage_profiles_add_endpoint,
-    manage_profiles_apply_title,
-    manage_profiles_apply_desc,
-    manage_profiles_apply,
+    manage_profiles_save_changes,
+    manage_profiles_test,
+    manage_profiles_test_all,
+    manage_profiles_tier,
+    manage_profiles_tier_drop_here,
+    manage_profiles_tiers,
+    manage_profiles_tiers_hazard,
+    manage_profiles_title,
   } from "../../paraglide/messages.js";
-
 
   let { basePath = "/local/manage" }: { basePath?: string } = $props();
   $effect(() => {
@@ -67,10 +91,189 @@
     }
   }
 
-
   async function onSave() {
     await profilesStore.save().catch(() => {});
+    endpointReports.clear();
+    profileReports.clear();
   }
+
+  // --- inline probe results, routed by call-site scope ---
+
+  const endpointReports = new SvelteMap<string, ProfileProbeEndpointReport>();
+  const profileReports = new SvelteMap<string, ProfileProbeProfileReport>();
+
+  /** `${tierIdx}:${profileId}` — profile ids can repeat across tiers. */
+  function profileKey(tierIdx: number, profileId: string): string {
+    return `${tierIdx}:${profileId}`;
+  }
+
+  function mergeEndpointScope(resp: ProfileProbeResponse): void {
+    for (const r of resp.results) endpointReports.set(r.endpoint_id, r);
+  }
+
+  function mergeProfileScope(tierIdx: number, resp: ProfileProbeResponse): void {
+    // A tier-scoped response's tiers[0] is the requested tier.
+    const t = resp.tiers[0];
+    if (!t) return;
+    for (const p of t.profiles) {
+      profileReports.set(profileKey(tierIdx, p.profile_id), p);
+    }
+  }
+  /**
+   * Merge an all-scope response: response tiers line up 1:1 with the draft
+   * tiers by request order — tiers[i] reports on draft tier i.
+   */
+  function mergeProfileScopeAll(resp: ProfileProbeResponse): void {
+    for (const t of resp.tiers) {
+      for (const p of t.profiles) {
+        profileReports.set(profileKey(t.index, p.profile_id), p);
+      }
+    }
+  }
+
+  function clearProfileResult(tierIdx: number, profileId: string): void {
+    profileReports.delete(profileKey(tierIdx, profileId));
+  }
+
+  async function onTestEndpoint(id: string) {
+    await profilesStore.probeEndpoint(id);
+    if (profilesStore.probe) mergeEndpointScope(profilesStore.probe);
+  }
+
+  async function onTestTier(tierIdx: number) {
+    await profilesStore.probeTier(tierIdx);
+    if (profilesStore.probe) mergeProfileScope(tierIdx, profilesStore.probe);
+  }
+
+  async function onTestProfile(tierIdx: number, profileIdx: number) {
+    const draft = profilesStore.draft;
+    if (!draft) return;
+    const body = singleProfileProbeRequest(
+      profilesStore.config,
+      draft,
+      tierIdx,
+      profileIdx,
+    );
+    if (!body) return;
+    const resp = await profilesStore.probeRaw(body);
+    if (!resp) return;
+    mergeEndpointScope(resp);
+    mergeProfileScope(tierIdx, resp);
+  }
+
+  async function onTestAll() {
+    await profilesStore.probeAll();
+    if (!profilesStore.probe) return;
+    mergeEndpointScope(profilesStore.probe);
+    mergeProfileScopeAll(profilesStore.probe);
+  }
+
+  function onDiscard() {
+    profilesStore.reset();
+    endpointReports.clear();
+    profileReports.clear();
+  }
+
+  // --- drag & drop (profile cards between tiers) ---
+
+  interface DragPayload {
+    fromTier: number;
+    fromIdx: number;
+  }
+
+  let drag = $state<DragPayload | null>(null);
+  let dragOverTier = $state(-1);
+
+  function onDrop(toTier: number): void {
+    const d = drag;
+    drag = null;
+    dragOverTier = -1;
+    const draft = profilesStore.draft;
+    if (!d || !draft) return;
+    if (d.fromTier !== toTier) {
+      // Cross-tier: the key is tier-scoped, so clear the stale source entry
+      // (same-tier keeps its key — the report survives the reorder).
+      const id = draft.tiers[d.fromTier]?.profiles[d.fromIdx]?.id;
+      if (id) clearProfileResult(d.fromTier, id);
+    }
+    profilesStore.draft = moveProfile(draft, d.fromTier, d.fromIdx, toTier);
+  }
+
+  // --- dialogs ---
+
+  let endpointDialog = $state<{
+    open: boolean;
+    mode: "new" | "edit";
+    endpoint: ProfileEndpoint | null;
+  }>({ open: false, mode: "new", endpoint: null });
+
+  function openEndpointNew() {
+    endpointDialog = { open: true, mode: "new", endpoint: null };
+  }
+
+  function openEndpointEdit(ep: ProfileEndpoint) {
+    endpointDialog = { open: true, mode: "edit", endpoint: ep };
+  }
+
+  function onEndpointSave(result: {
+    id: string;
+    family: string;
+    baseUrl: string | null;
+    apiKey: string | null;
+  }) {
+    const draft = profilesStore.draft;
+    if (!draft) return;
+    const existing =
+      result.apiKey === null
+        ? draft.endpoints[result.id]?.api_key ?? ""
+        : result.apiKey;
+    profilesStore.draft = upsertEndpoint(draft, {
+      id: result.id,
+      family: result.family,
+      api_key: existing,
+      base_url: result.baseUrl,
+    });
+    endpointDialog.open = false;
+  }
+
+  function onEndpointRemove() {
+    if (endpointDialog.mode === "edit" && endpointDialog.endpoint) {
+      profilesStore.removeEndpoint(endpointDialog.endpoint.id);
+      endpointReports.delete(endpointDialog.endpoint.id);
+    }
+    endpointDialog.open = false;
+  }
+
+  let tierDialog = $state<{
+    open: boolean;
+    mode: "new" | "edit";
+    tierIdx: number;
+  }>({ open: false, mode: "new", tierIdx: 0 });
+
+  function onTierSave(rows: {
+    id: string;
+    endpoint: string;
+    model: string;
+    max_context_window: number;
+  }[]) {
+    const draft = profilesStore.draft;
+    if (!draft) return;
+    if (tierDialog.mode === "new") {
+      profilesStore.addTier();
+      const appended = profilesStore.draft;
+      if (!appended) return;
+      profilesStore.draft = replaceTierProfiles(
+        appended,
+        appended.tiers.length - 1,
+        rows,
+      );
+    } else {
+      profilesStore.draft = replaceTierProfiles(draft, tierDialog.tierIdx, rows);
+    }
+    tierDialog.open = false;
+  }
+
+  // --- display helpers ---
 
   function probeStatusLabel(s: ProfileProbeStatus): string {
     switch (s) {
@@ -95,14 +298,26 @@
     invalid_config: "text-error-500 dark:text-error-400",
   };
 
+  function modelsCountLabel(count: number): string {
+    return count === 1
+      ? manage_profiles_probe_models_one({ count })
+      : manage_profiles_probe_models_other({ count });
+  }
+
+  const endpointIds = $derived(
+    Object.keys(profilesStore.draft?.endpoints ?? {}),
+  );
 </script>
 
 <svelte:head><title>{manage_profiles_title()}</title></svelte:head>
 
 <div class="h-full overflow-y-auto">
-  <div class="p-6 max-w-2xl space-y-6">
+  <div class="p-6 max-w-3xl space-y-6">
     <div class="flex items-center justify-between">
-      <h1 class="text-xl font-semibold">{manage_profiles_heading()}</h1>
+      <div>
+        <h1 class="text-xl font-semibold">{manage_profiles_heading()}</h1>
+        <p class="text-xs opacity-60 mt-1">{manage_profiles_heading_desc()}</p>
+      </div>
       <div class="flex gap-2">
         <button
           class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
@@ -111,7 +326,7 @@
         <button
           class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
           disabled={profilesStore.isProbing}
-          onclick={() => profilesStore.probeAll()}
+          onclick={onTestAll}
           >{profilesStore.isProbing ? "…" : manage_profiles_test_all()}</button
         >
         <button
@@ -138,60 +353,15 @@
         {applyResult}
       </p>
     {/if}
-
-    {#if profilesStore.probeError || profilesStore.probe}
-      <section class="card preset-tonal-surface p-4 space-y-2 text-sm">
-        <h2 class="text-xs font-medium uppercase opacity-60 tracking-wide">
-          {manage_profiles_probe_results()}
-        </h2>
-        {#if profilesStore.probeError}
-          <p class="text-error-500 dark:text-error-400 font-mono break-all">
-            {manage_profiles_probe_request_failed({ error: profilesStore.probeError })}
-          </p>
-        {:else if profilesStore.probe}
-        {#each profilesStore.probe.results as r (r.endpoint_id)}
-          <div class="flex flex-wrap items-baseline gap-x-2">
-            <span class="font-mono text-xs">{r.endpoint_id}</span>
-            <span class={probeStatusColor[r.status]}>{probeStatusLabel(r.status)}</span>
-            {#if r.models}
-              <span class="text-xs opacity-60">
-                {r.models!.length === 1
-                  ? manage_profiles_probe_models_one({ count: r.models!.length })
-                  : manage_profiles_probe_models_other({ count: r.models!.length })}
-              </span>
-            {/if}
-            {#if r.detail}
-              <span class="text-xs opacity-60 font-mono break-all">{r.detail}</span>
-            {/if}
-          </div>
-        {/each}
-        {#each profilesStore.probe.tiers as t (t.index)}
-          <div class="flex flex-wrap items-baseline gap-x-2">
-            <span class="text-xs font-medium">{manage_profiles_tier({ index: t.index })}</span>
-            {#if t.all_ok}
-              <span class={probeStatusColor.ok}>{manage_profiles_probe_tier_ok()}</span>
-            {:else}
-              <span class={probeStatusColor.invalid_config}>
-                {manage_profiles_probe_tier_fail()}
-              </span>
-            {/if}
-            {#each t.profiles as p (p.profile_id)}
-              {#if p.status !== "ok"}
-                <span class="text-xs opacity-60 font-mono break-all">
-                  {p.profile_id} — {probeStatusLabel(p.status)}{p.detail ? `: ${p.detail}` : ""}
-                </span>
-              {/if}
-            {/each}
-          </div>
-        {/each}
-        {/if}
-      </section>
+    {#if profilesStore.probeError}
+      <p
+        class="text-error-500 dark:text-error-400 text-sm font-mono break-all"
+      >
+        {manage_profiles_probe_request_failed({ error: profilesStore.probeError })}
+      </p>
     {/if}
     {#if profilesStore.isDirty}
-      <button
-        class="text-xs opacity-60 hover:opacity-100"
-        onclick={() => profilesStore.reset()}
-      >
+      <button class="text-xs opacity-60 hover:opacity-100" onclick={onDiscard}>
         {manage_profiles_discard()}
       </button>
     {/if}
@@ -201,131 +371,247 @@
     {/if}
 
     {#if profilesStore.draft}
-      <!-- Tier hazard warning -->
       <div
         class="card preset-tonal-surface p-3 text-xs opacity-70 border-l-4 border-l-warning-500"
       >
         ⚠ {manage_profiles_tiers_hazard()}
       </div>
 
-      <!-- Tiers -->
-      <section class="card preset-tonal-surface p-5 space-y-4">
-        <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-          {manage_profiles_tiers()}
-        </h2>
-        {#each profilesStore.draft.tiers as tier, tierIdx (tierIdx)}
-          <div class="border-l-2 border-l-surface-300 pl-4 space-y-2">
-            <div class="flex items-center justify-between">
-              <div class="text-xs font-medium">
-                {manage_profiles_tier({ index: tierIdx })}
-              </div>
-              <button
-                class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-                disabled={profilesStore.isProbing}
-                onclick={() => profilesStore.probeTier(tierIdx)}
-                >{manage_profiles_test()}</button
-              >
-            </div>
-            {#each tier.profiles as profile, profileIdx (profileIdx)}
-              <div class="grid grid-cols-2 gap-2 text-sm">
-                <input
-                  class="input"
-                  placeholder={manage_profiles_id_placeholder()}
-                  bind:value={profile.id}
-                />
-                <select class="select" bind:value={profile.endpoint}>
-                  {#each Object.keys(profilesStore.draft.endpoints) as epId}
-                    <option value={epId}>{epId}</option>
-                  {/each}
-                </select>
-                <input
-                  class="input"
-                  placeholder={manage_profiles_model_placeholder()}
-                  bind:value={profile.model}
-                />
-                <input
-                  type="number"
-                  class="input"
-                  placeholder={manage_profiles_max_context_placeholder()}
-                  bind:value={profile.max_context_window}
-                />
-                <button
-                  class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500 col-span-2"
-                  onclick={() =>
-                    profilesStore.removeProfile(tierIdx, profileIdx)}
-                  >{manage_profiles_remove_profile()}</button
-                >
-              </div>
-            {/each}
-            <button
-              class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-              onclick={() => profilesStore.addProfile(tierIdx)}
-              >{manage_profiles_add_profile()}</button
-            >
-          </div>
-        {/each}
-        <div class="flex gap-2 pt-2">
+      <!-- Endpoints: global pool of endpoint cards -->
+      <section class="space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+            {manage_profiles_endpoints()}
+          </h2>
           <button
             class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-            onclick={() => profilesStore.addTier()}>{manage_profiles_add_tier()}</button
+            onclick={openEndpointNew}
+            >{manage_profiles_add_endpoint()}</button
           >
-          <button
-            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
-            disabled={profilesStore.draft.tiers.length === 0}
-            onclick={() => profilesStore.removeLastTier()}
-            >{manage_profiles_remove_last_tier()}</button
-          >
+        </div>
+        <div class="grid gap-3 sm:grid-cols-2">
+          {#each Object.values(profilesStore.draft.endpoints) as ep (ep.id)}
+            {@const report = endpointReports.get(ep.id)}
+            <div class="card preset-tonal-surface p-4 space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <span class="font-mono text-sm font-semibold">{ep.id}</span>
+                <div class="flex gap-1">
+                  <button
+                    class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+                    aria-label={manage_profiles_endpoint_test_aria()}
+                    disabled={profilesStore.isProbing}
+                    onclick={() => onTestEndpoint(ep.id)}
+                    >{manage_profiles_test()}</button
+                  >
+                  <button
+                    class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+                    aria-label={manage_profiles_edit_aria({ name: ep.id })}
+                    onclick={() => openEndpointEdit(ep)}
+                    >{common_edit()}</button
+                  >
+                </div>
+              </div>
+              <dl class="text-xs space-y-1">
+                <div class="flex gap-2">
+                  <dt class="opacity-60">
+                    {manage_profiles_profile_endpoint_label()}:
+                  </dt>
+                  <dd class="font-mono">{ep.family}</dd>
+                </div>
+                <div class="flex gap-2">
+                  <dt class="opacity-60">
+                    {manage_profiles_endpoint_card_base_url_label()}:
+                  </dt>
+                  <dd class="font-mono truncate">
+                    {ep.base_url ?? manage_profiles_endpoint_base_url_default()}
+                  </dd>
+                </div>
+                <div class="flex gap-2">
+                  <dt class="opacity-60">API key:</dt>
+                  <dd class="font-mono">{ep.api_key}</dd>
+                </div>
+              </dl>
+              {#if report}
+                <div class="border-t border-surface-300 pt-2 text-xs space-y-1">
+                  <span class={probeStatusColor[report.status]}>
+                    {probeStatusLabel(report.status)}
+                  </span>
+                  {#if report.latency_ms != null}
+                    <span class="opacity-60 ml-2">{report.latency_ms}ms</span>
+                  {/if}
+                  {#if report.catalog_count != null}
+                    <span class="opacity-60 ml-2">
+                      {modelsCountLabel(report.catalog_count)}
+                    </span>
+                  {/if}
+                  {#if report.detail}
+                    <p class="opacity-60 font-mono break-all">{report.detail}</p>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/each}
         </div>
       </section>
 
-      <!-- Endpoints -->
-      <section class="card preset-tonal-surface p-5 space-y-4">
-        <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-          {manage_profiles_endpoints()}
-        </h2>
-        {#each Object.entries(profilesStore.draft.endpoints) as [epId, ep] (epId)}
-          <div class="space-y-2 border-l-2 border-l-surface-300 pl-4">
-            <div class="text-xs font-medium font-mono">{epId}</div>
-            <div class="grid grid-cols-2 gap-2 text-sm">
-              <select class="select" bind:value={ep.family}>
-                <option value="deepseek">deepseek</option>
-                <option value="openai-compatible">openai-compatible</option>
-              </select>
-              <input
-                class="input"
-                placeholder={manage_profiles_base_url_placeholder()}
-                bind:value={ep.base_url}
-              />
-              <input
-                class="input col-span-2"
-                type="text"
-                placeholder={manage_profiles_api_key_placeholder()}
-                bind:value={ep.api_key}
-              />
-            </div>
-            <div class="text-xs opacity-50 font-mono">
-              {manage_profiles_current_key({
-                key: profilesStore.config?.endpoints[epId]?.api_key ?? "",
-              })}
-            </div>
+      <!-- Tiers: one container per tier holding draggable profile cards -->
+      <section class="space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+            {manage_profiles_tiers()}
+          </h2>
+          <div class="flex gap-2">
             <button
               class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-              disabled={profilesStore.isProbing}
-              onclick={() => profilesStore.probeEndpoint(epId)}
-              >{profilesStore.isProbing ? "…" : manage_profiles_test()}</button
+              onclick={() => (tierDialog = { open: true, mode: "new", tierIdx: 0 })}
+              >{manage_profiles_add_tier()}</button
             >
             <button
               class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
-              onclick={() => profilesStore.removeEndpoint(epId)}
-              >{manage_profiles_remove_endpoint()}</button
+              disabled={profilesStore.draft.tiers.length === 0}
+              onclick={() => {
+                profilesStore.removeLastTier();
+                profileReports.clear();
+              }}
+              >{manage_profiles_remove_last_tier()}</button
             >
           </div>
+        </div>
+
+        {#each profilesStore.draft.tiers as tier, tierIdx (tierIdx)}
+          {@const tierReport = [...profileReports.entries()]
+            .filter(([k]) => k.startsWith(`${tierIdx}:`))
+            .map(([, v]) => v)}
+          <div
+            role="list"
+            class="card preset-tonal-surface p-4 space-y-3 {dragOverTier === tierIdx
+              ? 'outline-2 outline-dashed outline-primary-500'
+              : ''}"
+            ondragover={(e) => {
+              e.preventDefault();
+              dragOverTier = tierIdx;
+            }}
+            ondragleave={() => (dragOverTier = tierIdx === dragOverTier ? -1 : dragOverTier)}
+            ondrop={(e) => {
+              e.preventDefault();
+              onDrop(tierIdx);
+            }}
+          >
+            <div class="flex items-center justify-between">
+              <span class="text-sm font-medium">
+                {manage_profiles_tier({ index: tierIdx + 1 })}
+                {#if tierReport.length > 0}
+                  {#if tierReport.every((r) => r.status === "ok")}
+                    <span class={probeStatusColor.ok + " ml-2 text-xs"}>
+                      {manage_profiles_probe_tier_ok()}
+                    </span>
+                  {:else}
+                    <span class={probeStatusColor.invalid_config + " ml-2 text-xs"}>
+                      {manage_profiles_probe_tier_fail()}
+                      {tierReport
+                        .filter((r) => r.status !== "ok")
+                        .map((r) => r.profile_id)
+                        .join(", ")}
+                    </span>
+                  {/if}
+                {/if}
+              </span>
+              <div class="flex gap-1">
+                <button
+                  class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+                  disabled={profilesStore.isProbing}
+                  onclick={() => onTestTier(tierIdx)}
+                  >{manage_profiles_test()}</button
+                >
+                <button
+                  class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+                  aria-label={manage_profiles_edit_aria({
+                    name: manage_profiles_tier({ index: tierIdx + 1 }),
+                  })}
+                  onclick={() =>
+                    (tierDialog = { open: true, mode: "edit", tierIdx })}
+                  >{common_edit()}</button
+                >
+              </div>
+            </div>
+
+            {#each tier.profiles as profile, profileIdx (profileIdx)}
+              {@const report = profileReports.get(profileKey(tierIdx, profile.id))}
+              <div
+                role="listitem"
+                class="card preset-filled-surface-100-900 p-3 space-y-1 cursor-grab"
+                draggable="true"
+                ondragstart={(e) => {
+                  drag = { fromTier: tierIdx, fromIdx: profileIdx };
+                  // Firefox only starts a drag session if dataTransfer gets data.
+                  if (e.dataTransfer) {
+                    e.dataTransfer.setData("text/plain", profile.id);
+                    e.dataTransfer.effectAllowed = "move";
+                  }
+                }}
+                ondragend={() => {
+                  drag = null;
+                  dragOverTier = -1;
+                }}
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <span class="font-mono text-sm">{profile.id}</span>
+                  <div class="flex gap-1">
+                    <button
+                      class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+                      aria-label={manage_profiles_profile_test_aria()}
+                      disabled={profilesStore.isProbing}
+                      onclick={() => onTestProfile(tierIdx, profileIdx)}
+                      >{manage_profiles_test()}</button
+                    >
+                    <button
+                      class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+                      aria-label={manage_profiles_edit_aria({ name: profile.id })}
+                      onclick={() =>
+                        (tierDialog = { open: true, mode: "edit", tierIdx })}
+                      >{common_edit()}</button
+                    >
+                  </div>
+                </div>
+                <dl class="text-xs space-y-0.5">
+                  <div class="flex gap-2">
+                    <dt class="opacity-60">
+                      {manage_profiles_profile_endpoint_label()}:
+                    </dt>
+                    <dd class="font-mono">{profile.endpoint}</dd>
+                  </div>
+                  <div class="flex gap-2">
+                    <dt class="opacity-60">
+                      {manage_profiles_profile_model_label()}:
+                    </dt>
+                    <dd class="font-mono">{profile.model}</dd>
+                  </div>
+                  <div class="flex gap-2">
+                    <dt class="opacity-60">
+                      {manage_profiles_max_context_label()}:
+                    </dt>
+                    <dd class="font-mono">{profile.max_context_window}</dd>
+                  </div>
+                </dl>
+                {#if report}
+                  <div class="text-xs">
+                    <span class={probeStatusColor[report.status]}>
+                      {probeStatusLabel(report.status)}
+                    </span>
+                    {#if report.detail}
+                      <span class="opacity-60 ml-2 font-mono break-all">
+                        {report.detail}
+                      </span>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+            {#if tier.profiles.length === 0}
+              <p class="text-xs opacity-50">{manage_profiles_tier_drop_here()}</p>
+            {/if}
+          </div>
         {/each}
-        <button
-          class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-          onclick={() => profilesStore.addEndpoint()}
-          >{manage_profiles_add_endpoint()}</button
-        >
       </section>
     {/if}
   </div>
@@ -340,4 +626,26 @@
   tone="primary"
   onConfirm={onApply}
   onCancel={() => (showApplyDialog = false)}
+/>
+
+<EndpointDialog
+  open={endpointDialog.open}
+  mode={endpointDialog.mode}
+  endpoint={endpointDialog.endpoint}
+  existingIds={endpointIds}
+  onSave={onEndpointSave}
+  onCancel={() => (endpointDialog.open = false)}
+  onRemove={endpointDialog.mode === "edit" ? onEndpointRemove : null}
+/>
+
+<TierDialog
+  open={tierDialog.open}
+  mode={tierDialog.mode}
+  tierIdx={tierDialog.tierIdx}
+  profiles={tierDialog.mode === "edit"
+    ? profilesStore.draft?.tiers[tierDialog.tierIdx]?.profiles ?? []
+    : []}
+  endpointIds={endpointIds}
+  onSave={onTierSave}
+  onCancel={() => (tierDialog.open = false)}
 />

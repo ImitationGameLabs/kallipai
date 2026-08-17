@@ -31,5 +31,6 @@
   "agent_state_idle": "空闲",
   "agent_state_busy": "忙碌",
   "agent_state_faulted": "故障",
-  "common_create": "创建"
+  "common_create": "创建",
+  "common_edit": "编辑"
 }
