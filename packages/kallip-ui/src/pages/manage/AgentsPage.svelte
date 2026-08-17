@@ -34,8 +34,20 @@
   }
 
   function dutyLabel(duty: "onduty" | "offduty"): string {
-    return duty === "onduty" ? manage_agent_duty_onduty() : manage_agent_duty_offduty();
+    return duty === "onduty"
+      ? manage_agent_duty_onduty()
+      : manage_agent_duty_offduty();
   }
+
+  // Root agent (created_by is null only for the tagma-managed root) sorts
+  // first; rootCount feeds the divider position in the template.
+  const rootCount = $derived(
+    agentsStore.agents.filter((a) => a.created_by === null).length,
+  );
+  const orderedAgents = $derived([
+    ...agentsStore.agents.filter((a) => a.created_by === null),
+    ...agentsStore.agents.filter((a) => a.created_by !== null),
+  ]);
 </script>
 
 <svelte:head><title>{manage_agents_title()}</title></svelte:head>
@@ -62,7 +74,10 @@
       <p class="opacity-60 text-sm">{manage_agents_empty()}</p>
     {/if}
     <div class="space-y-2">
-      {#each agentsStore.agents as agent (agent.id)}
+      {#each orderedAgents as agent, idx (agent.id)}
+        {#if idx === rootCount && rootCount > 0}
+          <hr class="border-surface-300-700" />
+        {/if}
         <div class="card preset-tonal-surface p-4">
           <div class="flex items-start justify-between gap-3">
             <div class="flex items-center gap-2 min-w-0">
