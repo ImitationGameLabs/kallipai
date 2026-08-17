@@ -59,10 +59,10 @@
             {tagma_revoke_failed({ error })}
           </p>
         {/if}
-        <div class="flex justify-end gap-2">
+        <div class="flex gap-2">
           <button
             type="button"
-            class="btn preset-outlined-surface-500"
+            class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
             disabled={busy}
             onclick={onCancel}
           >
@@ -70,7 +70,7 @@
           </button>
           <button
             type="button"
-            class="btn preset-filled-error-500 text-on-error-500"
+            class="btn flex-1 preset-filled-error-500 text-on-error-500 transition hover:brightness-110"
             disabled={busy}
             onclick={onConfirm}
           >

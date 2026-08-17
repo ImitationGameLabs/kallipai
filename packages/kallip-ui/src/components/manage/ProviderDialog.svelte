@@ -96,8 +96,7 @@
       id: trimmedId,
       family,
       baseUrl: baseUrl.trim() === "" ? null : baseUrl.trim(),
-      apiKey:
-        mode === "new" || trimmedKey !== "" ? trimmedKey : null,
+      apiKey: mode === "new" || trimmedKey !== "" ? trimmedKey : null,
     });
   }
 </script>
@@ -142,9 +141,9 @@
               {manage_profiles_provider_id_hint()}
             </span>
             {#if duplicateId}
-              <span
-                class="text-xs text-error-500 dark:text-error-400"
-              >{manage_profiles_provider_id_duplicate()}</span>
+              <span class="text-xs text-error-500 dark:text-error-400"
+                >{manage_profiles_provider_id_duplicate()}</span
+              >
             {/if}
           </label>
 
@@ -163,10 +162,7 @@
             <span class="text-sm font-medium">
               {manage_profiles_provider_base_url_label()}
             </span>
-            <input
-              class="input text-sm font-mono"
-              bind:value={baseUrl}
-            />
+            <input class="input text-sm font-mono" bind:value={baseUrl} />
             <span class="text-xs opacity-60">
               {manage_profiles_provider_base_url_hint()}
             </span>
@@ -206,17 +202,17 @@
             </div>
           {/if}
 
-          <div class="flex justify-end gap-2">
+          <div class="flex gap-2">
             <button
               type="button"
-              class="btn preset-outlined-surface-500"
+              class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
               onclick={onCancel}
             >
               {common_cancel()}
             </button>
             <button
               type="submit"
-              class="btn preset-filled-primary-500 text-on-primary-500"
+              class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
               disabled={!canSubmit}
             >
               {common_save()}

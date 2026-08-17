@@ -46,7 +46,7 @@
     open: boolean;
     /** The tier's current profiles (the dialog's initial rows). */
     profiles?: readonly ProfileModel[];
-    /** Tier index for the title (0-based, shown 1-based). */
+    /** Tier index for the title (0-based, shown as-is — tiers are 0-based). */
     tierIdx?: number;
     /** Provider ids available in the draft (the provider dropdown). */
     providerIds?: string[];
@@ -127,7 +127,8 @@
         class="card preset-tonal-surface w-full max-w-2xl p-6 flex flex-col gap-4 max-h-[85vh] overflow-y-auto"
       >
         <Dialog.Title class="text-lg font-semibold">
-          {manage_profiles_tier_dialog_edit_title({ index: tierIdx + 1 })}
+          {manage_profiles_tier_dialog_edit_title()}
+          <span class="font-mono opacity-80">#{tierIdx}</span>
         </Dialog.Title>
         <Dialog.Description class="sr-only">
           {manage_profiles_tier_dialog_desc()}
@@ -215,17 +216,17 @@
             </button>
           </div>
 
-          <div class="flex justify-end gap-2">
+          <div class="flex gap-2">
             <button
               type="button"
-              class="btn preset-outlined-surface-500"
+              class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
               onclick={onCancel}
             >
               {common_cancel()}
             </button>
             <button
               type="submit"
-              class="btn preset-filled-primary-500 text-on-primary-500"
+              class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
               disabled={!canSubmit}
             >
               {common_save()}

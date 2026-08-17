@@ -37,8 +37,8 @@
 
   const confirmClass = $derived(
     tone === "danger"
-      ? "btn preset-filled-error-500 text-on-error-500"
-      : "btn preset-filled-primary-500 text-on-primary-500",
+      ? "btn flex-1 preset-filled-error-500 text-on-error-500 transition hover:brightness-110"
+      : "btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110",
   );
 </script>
 
@@ -56,10 +56,10 @@
         {#if error}
           <p class="text-error-500 dark:text-error-400 text-xs">{error}</p>
         {/if}
-        <div class="flex justify-end gap-2">
+        <div class="flex gap-2">
           <button
             type="button"
-            class="btn preset-outlined-surface-500"
+            class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
             disabled={busy}
             onclick={onCancel}
           >

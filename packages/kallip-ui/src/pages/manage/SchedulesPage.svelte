@@ -125,7 +125,8 @@
         >
         <button
           class="btn btn-sm preset-filled-primary-500"
-          onclick={() => (showCreate = true)}>{manage_schedules_new_schedule()}</button
+          onclick={() => (showCreate = true)}
+          >{manage_schedules_new_schedule()}</button
         >
       </div>
     </div>
@@ -226,7 +227,9 @@
             <input class="input w-full" bind:value={formData.name} />
           </label>
           <label class="block">
-            <span class="opacity-60 text-xs">{manage_schedules_agent_name()}</span>
+            <span class="opacity-60 text-xs"
+              >{manage_schedules_agent_name()}</span
+            >
             <select class="select w-full" bind:value={formData.agent_id}>
               <option value="">{manage_schedules_select_agent()}</option>
               {#each agentsStore.agents as agent}
@@ -235,14 +238,17 @@
             </select>
           </label>
           <label class="block">
-            <span class="opacity-60 text-xs">{manage_schedules_start_cron()}</span>
+            <span class="opacity-60 text-xs"
+              >{manage_schedules_start_cron()}</span
+            >
             <input
               class="input w-full font-mono"
               bind:value={formData.start_cron}
             />
           </label>
           <label class="block">
-            <span class="opacity-60 text-xs">{manage_schedules_end_cron()}</span>
+            <span class="opacity-60 text-xs">{manage_schedules_end_cron()}</span
+            >
             <input
               class="input w-full font-mono"
               bind:value={formData.end_cron}
@@ -253,7 +259,9 @@
             </p>{/if}
           <div class="grid grid-cols-2 gap-2">
             <label class="block">
-              <span class="opacity-60 text-xs">{manage_schedules_pre_warn()}</span>
+              <span class="opacity-60 text-xs"
+                >{manage_schedules_pre_warn()}</span
+              >
               <input
                 type="number"
                 class="input w-full"
@@ -261,7 +269,9 @@
               />
             </label>
             <label class="block">
-              <span class="opacity-60 text-xs">{manage_schedules_final_warn()}</span>
+              <span class="opacity-60 text-xs"
+                >{manage_schedules_final_warn()}</span
+              >
               <input
                 type="number"
                 class="input w-full"
@@ -275,11 +285,14 @@
               {warnError}
             </p>{/if}
           <label class="block">
-            <span class="opacity-60 text-xs">{manage_schedules_wake_prompt()}</span>
+            <span class="opacity-60 text-xs"
+              >{manage_schedules_wake_prompt()}</span
+            >
             <input class="input w-full" bind:value={formData.wake_prompt} />
           </label>
           <label class="block">
-            <span class="opacity-60 text-xs">{manage_schedules_timezone()}</span>
+            <span class="opacity-60 text-xs">{manage_schedules_timezone()}</span
+            >
             <input
               class="input w-full"
               placeholder="America/New_York"
@@ -287,13 +300,13 @@
             />
           </label>
         </div>
-        <div class="flex justify-end gap-2">
+        <div class="flex gap-2">
           <button
-            class="btn preset-outlined-surface-500 hover:preset-filled-surface-500"
+            class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
             onclick={() => (showCreate = false)}>{common_cancel()}</button
           >
           <button
-            class="btn preset-filled-primary-500"
+            class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
             disabled={!formData.name ||
               !formData.agent_id ||
               !formData.wake_prompt ||

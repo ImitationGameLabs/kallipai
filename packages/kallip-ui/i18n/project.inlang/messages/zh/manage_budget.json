@@ -27,5 +27,5 @@
   "manage_budget_budget_cleared_hint": "剩余预算为 0，所有智能体已停止。在上方输入额度可恢复。",
   "manage_budget_amount_restore": "恢复额度",
   "manage_budget_set_resume": "设置并恢复",
-  "manage_budget_clear_hint": "将剩余预算设为 0——所有智能体将立即停止。"
+  "manage_budget_clear_hint": "将剩余预算设为 0 后，所有智能体将立即停止。"
 }

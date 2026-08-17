@@ -11,7 +11,13 @@
   import { SvelteMap } from "svelte/reactivity";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
-  import { MoreVertical, Plus, Trash } from "@lucide/svelte";
+  import {
+    FlaskConical,
+    MoreVertical,
+    Pencil,
+    Plus,
+    Trash,
+  } from "@lucide/svelte";
   import ProviderDialog from "../../components/manage/ProviderDialog.svelte";
   import TierDialog from "../../components/manage/TierDialog.svelte";
   import {
@@ -40,13 +46,14 @@
     manage_profiles_apply_title,
     manage_profiles_applied_result,
     manage_profiles_discard,
-    manage_profiles_edit_aria,
     manage_profiles_provider_base_url_default,
     manage_profiles_provider_card_base_url_label,
-    manage_profiles_provider_test_aria,
+    manage_profiles_provider_actions_aria,
     manage_profiles_providers,
     manage_profiles_heading,
-    manage_profiles_heading_desc,
+    manage_profiles_heading_desc_l1,
+    manage_profiles_heading_desc_l2,
+    manage_profiles_heading_desc_l3,
     manage_profiles_max_context_label,
     manage_profiles_probe_models_one,
     manage_profiles_probe_models_other,
@@ -59,8 +66,8 @@
     manage_profiles_probe_tier_ok,
     manage_profiles_probe_tier_fail,
     manage_profiles_profile_provider_label,
+    manage_profiles_profile_actions_aria,
     manage_profiles_profile_model_label,
-    manage_profiles_profile_test_aria,
     manage_profiles_remove_tier_confirm_desc,
     manage_profiles_remove_tier_confirm_title,
     manage_profiles_save_changes,
@@ -70,8 +77,11 @@
     manage_profiles_tier_drop_here,
     manage_profiles_tier_actions_aria,
     manage_profiles_tiers,
+    manage_profiles_tiers_desc_l1,
+    manage_profiles_tiers_desc_l2,
+    manage_profiles_tiers_desc_l3,
+    manage_profiles_tiers_desc_l4,
     manage_profiles_tiers_hazard,
-    manage_profiles_tiers_desc,
     manage_profiles_title,
   } from "../../paraglide/messages.js";
 
@@ -325,7 +335,11 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-xl font-semibold">{manage_profiles_heading()}</h1>
-        <p class="text-xs opacity-60 mt-1">{manage_profiles_heading_desc()}</p>
+        <div class="text-xs opacity-60 mt-1 space-y-0.5">
+          <p>{manage_profiles_heading_desc_l1()}</p>
+          <p>{manage_profiles_heading_desc_l2()}</p>
+          <p>{manage_profiles_heading_desc_l3()}</p>
+        </div>
       </div>
       <div class="flex gap-2">
         <button
@@ -400,20 +414,43 @@
             <div class="card preset-tonal-surface p-4 space-y-2">
               <div class="flex items-center justify-between gap-2">
                 <span class="font-mono text-sm font-semibold">{ep.id}</span>
-                <div class="flex gap-1">
-                  <button
-                    class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-                    aria-label={manage_profiles_provider_test_aria()}
+                <Menu
+                  positioning={{ placement: "bottom-end" }}
+                  onSelect={(e) => {
+                    if (e.value === "test") onTestProvider(ep.id);
+                    else if (e.value === "edit") openProviderEdit(ep);
+                  }}
+                >
+                  <Menu.Trigger
+                    class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+                    aria-label={manage_profiles_provider_actions_aria()}
                     disabled={profilesStore.isProbing}
-                    onclick={() => onTestProvider(ep.id)}
-                    >{manage_profiles_test()}</button
                   >
-                  <button
-                    class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-                    aria-label={manage_profiles_edit_aria({ name: ep.id })}
-                    onclick={() => openProviderEdit(ep)}>{common_edit()}</button
-                  >
-                </div>
+                    <MoreVertical class="size-4" />
+                  </Menu.Trigger>
+                  <Portal>
+                    <Menu.Positioner>
+                      <Menu.Content
+                        class="card preset-tonal-surface p-1 min-w-[8rem]"
+                      >
+                        <Menu.Item
+                          value="test"
+                          class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+                        >
+                          <FlaskConical class="size-4" />
+                          {manage_profiles_test()}
+                        </Menu.Item>
+                        <Menu.Item
+                          value="edit"
+                          class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+                        >
+                          <Pencil class="size-4" />
+                          {common_edit()}
+                        </Menu.Item>
+                      </Menu.Content>
+                    </Menu.Positioner>
+                  </Portal>
+                </Menu>
               </div>
               <dl class="text-xs space-y-1">
                 <div class="flex gap-2">
@@ -475,7 +512,12 @@
         <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
           {manage_profiles_tiers()}
         </h2>
-        <p class="text-xs opacity-60 mt-1">{manage_profiles_tiers_desc()}</p>
+        <div class="text-xs opacity-60 mt-1 space-y-0.5">
+          <p>{manage_profiles_tiers_desc_l1()}</p>
+          <p>{manage_profiles_tiers_desc_l2()}</p>
+          <p>{manage_profiles_tiers_desc_l3()}</p>
+          <p>{manage_profiles_tiers_desc_l4()}</p>
+        </div>
 
         {#each profilesStore.draft.tiers as tier, tierIdx (tierIdx)}
           {@const tierReport = [...profileReports.entries()]
@@ -498,43 +540,57 @@
               onDrop(tierIdx);
             }}
           >
-            <div class="flex items-center justify-between">
-              <span class="text-sm font-medium">
-                {manage_profiles_tier({ index: tierIdx + 1 })}
-                {#if tierReport.length > 0}
-                  {#if tierReport.every((r) => r.status === "ok")}
-                    <span class={probeStatusColor.ok + " ml-2 text-xs"}>
-                      {manage_profiles_probe_tier_ok()}
-                    </span>
-                  {:else}
-                    <span
-                      class={probeStatusColor.invalid_config + " ml-2 text-xs"}
-                    >
-                      {manage_profiles_probe_tier_fail()}
-                      {tierReport
-                        .filter((r) => r.status !== "ok")
-                        .map((r) => r.profile_id)
-                        .join(", ")}
-                    </span>
-                  {/if}
-                {/if}
-              </span>
-              <div class="flex gap-1">
-                <button
-                  class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-                  disabled={profilesStore.isProbing}
-                  onclick={() => onTestTier(tierIdx)}
-                  >{manage_profiles_test()}</button
-                >
-                <button
-                  class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-                  aria-label={manage_profiles_edit_aria({
-                    name: manage_profiles_tier({ index: tierIdx + 1 }),
-                  })}
-                  onclick={() => (tierDialog = { open: true, tierIdx })}
-                  >{common_edit()}</button
-                >
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-sm font-medium">
+                {manage_profiles_tier()}
+                <span class="font-mono opacity-80">#{tierIdx}</span>
               </div>
+              <Menu
+                positioning={{ placement: "bottom-end" }}
+                onSelect={(e) => {
+                  if (e.value === "test") onTestTier(tierIdx);
+                  else if (e.value === "edit")
+                    tierDialog = { open: true, tierIdx };
+                  else if (e.value === "remove") removeTierIdx = tierIdx;
+                }}
+              >
+                <Menu.Trigger
+                  class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+                  aria-label={manage_profiles_tier_actions_aria()}
+                  disabled={profilesStore.isProbing}
+                >
+                  <MoreVertical class="size-4" />
+                </Menu.Trigger>
+                <Portal>
+                  <Menu.Positioner>
+                    <Menu.Content
+                      class="card preset-tonal-surface p-1 min-w-[8rem]"
+                    >
+                      <Menu.Item
+                        value="test"
+                        class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+                      >
+                        <FlaskConical class="size-4" />
+                        {manage_profiles_test_all()}
+                      </Menu.Item>
+                      <Menu.Item
+                        value="edit"
+                        class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+                      >
+                        <Pencil class="size-4" />
+                        {common_edit()}
+                      </Menu.Item>
+                      <Menu.Item
+                        value="remove"
+                        class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
+                      >
+                        <Trash class="size-4" />
+                        {common_remove()}
+                      </Menu.Item>
+                    </Menu.Content>
+                  </Menu.Positioner>
+                </Portal>
+              </Menu>
             </div>
 
             {#each tier.profiles as profile, profileIdx (profileIdx)}
@@ -560,23 +616,45 @@
               >
                 <div class="flex items-center justify-between gap-2">
                   <span class="font-mono text-sm">{profile.id}</span>
-                  <div class="flex gap-1">
-                    <button
-                      class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-                      aria-label={manage_profiles_profile_test_aria()}
+                  <Menu
+                    positioning={{ placement: "bottom-end" }}
+                    onSelect={(e) => {
+                      if (e.value === "test")
+                        onTestProfile(tierIdx, profileIdx);
+                      else if (e.value === "edit")
+                        tierDialog = { open: true, tierIdx };
+                    }}
+                  >
+                    <Menu.Trigger
+                      class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+                      aria-label={manage_profiles_profile_actions_aria()}
                       disabled={profilesStore.isProbing}
-                      onclick={() => onTestProfile(tierIdx, profileIdx)}
-                      >{manage_profiles_test()}</button
                     >
-                    <button
-                      class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-                      aria-label={manage_profiles_edit_aria({
-                        name: profile.id,
-                      })}
-                      onclick={() => (tierDialog = { open: true, tierIdx })}
-                      >{common_edit()}</button
-                    >
-                  </div>
+                      <MoreVertical class="size-4" />
+                    </Menu.Trigger>
+                    <Portal>
+                      <Menu.Positioner>
+                        <Menu.Content
+                          class="card preset-tonal-surface p-1 min-w-[8rem]"
+                        >
+                          <Menu.Item
+                            value="test"
+                            class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+                          >
+                            <FlaskConical class="size-4" />
+                            {manage_profiles_test()}
+                          </Menu.Item>
+                          <Menu.Item
+                            value="edit"
+                            class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+                          >
+                            <Pencil class="size-4" />
+                            {common_edit()}
+                          </Menu.Item>
+                        </Menu.Content>
+                      </Menu.Positioner>
+                    </Portal>
+                  </Menu>
                 </div>
                 <dl class="text-xs space-y-0.5">
                   <div class="flex gap-2">
@@ -618,40 +696,25 @@
               </p>
             {/if}
 
-            <!-- Kebab settings menu (TagmaCard bottom-row pattern): the
-                 card-level actions entry at the card's bottom-right;
-                 Remove goes through the confirm (positional rebind). -->
-            <div class="flex items-center justify-end">
-              <Menu
-                positioning={{ placement: "top-end" }}
-                onSelect={(e) => {
-                  if (e.value === "remove") removeTierIdx = tierIdx;
-                }}
-              >
-                <Menu.Trigger
-                  class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
-                  aria-label={manage_profiles_tier_actions_aria()}
-                  disabled={profilesStore.isProbing}
-                >
-                  <MoreVertical class="size-4" />
-                </Menu.Trigger>
-                <Portal>
-                  <Menu.Positioner>
-                    <Menu.Content
-                      class="card preset-tonal-surface p-1 min-w-[8rem]"
-                    >
-                      <Menu.Item
-                        value="remove"
-                        class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
-                      >
-                        <Trash class="size-4" />
-                        {common_remove()}
-                      </Menu.Item>
-                    </Menu.Content>
-                  </Menu.Positioner>
-                </Portal>
-              </Menu>
-            </div>
+            <!-- Card footer: the tier probe summary (a result lands beside
+                 the kebab menu that produced it). -->
+            {#if tierReport.length > 0}
+              <div class="flex items-center gap-2 flex-wrap text-xs">
+                {#if tierReport.every((r) => r.status === "ok")}
+                  <span class={probeStatusColor.ok}>
+                    {manage_profiles_probe_tier_ok()}
+                  </span>
+                {:else}
+                  <span class={probeStatusColor.invalid_config}>
+                    {manage_profiles_probe_tier_fail()}
+                    {tierReport
+                      .filter((r) => r.status !== "ok")
+                      .map((r) => r.profile_id)
+                      .join(", ")}
+                  </span>
+                {/if}
+              </div>
+            {/if}
           </div>
         {/each}
 

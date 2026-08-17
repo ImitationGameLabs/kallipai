@@ -171,10 +171,10 @@
             </p>
           {/if}
 
-          <div class="flex justify-end gap-2">
+          <div class="flex gap-2">
             <button
               type="button"
-              class="btn preset-outlined-surface-500"
+              class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
               disabled={busy}
               onclick={onCancel}
             >
@@ -182,7 +182,7 @@
             </button>
             <button
               type="submit"
-              class="btn preset-filled-primary-500 text-on-primary-500"
+              class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
               disabled={!canSubmit}
             >
               {busy ? rooms_creating() : rooms_create_action()}
