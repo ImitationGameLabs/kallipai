@@ -1,7 +1,7 @@
 {
   "$schema": "https://inlang.com/schema/message-format",
-  "manage_budget_title": "KallipAI · 预算",
-  "manage_budget_heading": "预算",
+  "manage_budget_title": "KallipAI · 预算管理",
+  "manage_budget_heading": "预算管理",
   "manage_budget_clear": "清除预算",
   "manage_budget_clear_desc": "这将把剩余预算设为 0，所有智能体将立即停止。使用“设置”按钮输入新额度可恢复。",
   "manage_budget_consumed": "已用",

@@ -1,7 +1,7 @@
 {
   "$schema": "https://inlang.com/schema/message-format",
-  "manage_schedules_title": "KallipAI · 日程",
-  "manage_schedules_heading": "日程",
+  "manage_schedules_title": "KallipAI · 日程管理",
+  "manage_schedules_heading": "日程管理",
   "manage_schedules_new_schedule": "+ 新建日程",
   "manage_schedules_empty": "暂无日程。",
   "manage_schedules_agent": "智能体：{id}",
