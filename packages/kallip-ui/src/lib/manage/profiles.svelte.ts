@@ -38,6 +38,8 @@ class ProfilesStore {
 
   /** Latest probe outcome (POST /profiles/probe), or null. */
   probe = $state<ProfileProbeResponse | null>(null);
+  /** Error from the last probe request (HTTP/network level), or null. */
+  probeError = $state<string | null>(null);
   /** True when draft diverges from the committed config. */
   get isDirty(): boolean {
     if (!this.config || !this.draft) return false;
@@ -110,11 +112,12 @@ class ProfilesStore {
     const body = this.buildProbeRequest(tierIdx);
     if (!body) return;
     this.isProbing = true;
-    this.error = null;
+    this.probeError = null;
     try {
       this.probe = await this.backend.probeProfiles(body);
     } catch (e) {
-      this.error = e instanceof Error ? e.message : String(e);
+      this.probeError = e instanceof Error ? e.message : String(e);
+      this.probe = null;
     } finally {
       this.isProbing = false;
     }
@@ -136,11 +139,12 @@ class ProfilesStore {
     const body = singleEndpointProbeRequestFn(this.config, this.draft, id);
     if (!body) return;
     this.isProbing = true;
-    this.error = null;
+    this.probeError = null;
     try {
       this.probe = await this.backend.probeProfiles(body);
     } catch (e) {
-      this.error = e instanceof Error ? e.message : String(e);
+      this.probeError = e instanceof Error ? e.message : String(e);
+      this.probe = null;
     } finally {
       this.isProbing = false;
     }

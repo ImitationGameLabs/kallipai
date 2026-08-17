@@ -144,11 +144,16 @@
       </p>
     {/if}
 
-    {#if profilesStore.probe}
+    {#if profilesStore.probeError || profilesStore.probe}
       <section class="card preset-tonal-surface p-4 space-y-2 text-sm">
         <h2 class="text-xs font-medium uppercase opacity-60 tracking-wide">
           {manage_profiles_probe_results()}
         </h2>
+        {#if profilesStore.probeError}
+          <p class="text-error-500 dark:text-error-400 font-mono break-all">
+            {profilesStore.probeError}
+          </p>
+        {:else if profilesStore.probe}
         {#each profilesStore.probe.results as r (r.endpoint_id)}
           <div class="flex flex-wrap items-baseline gap-x-2">
             <span class="font-mono text-xs">{r.endpoint_id}</span>
@@ -184,6 +189,7 @@
             {/each}
           </div>
         {/each}
+        {/if}
       </section>
     {/if}
     {#if profilesStore.isDirty}
