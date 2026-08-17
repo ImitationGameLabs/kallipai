@@ -6,7 +6,7 @@
   "manage_profiles_apply_all": "Apply All",
   "manage_profiles_discard": "Discard changes",
   "manage_profiles_applied_result": "Applied: {applied}, Skipped: {skipped}",
-  "manage_profiles_tiers_hazard": "⚠ Tiers are positional — adding or removing the last tier is safe; reordering or removing a middle tier will silently rebind agents.",
+  "manage_profiles_tiers_hazard": "Tiers are positional — adding or removing the last tier is safe; reordering or removing a middle tier will silently rebind agents.",
   "manage_profiles_tiers": "Tiers",
   "manage_profiles_tier": "Tier {index}",
   "manage_profiles_id_placeholder": "profile id",

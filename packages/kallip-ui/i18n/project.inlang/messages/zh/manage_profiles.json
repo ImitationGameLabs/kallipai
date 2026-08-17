@@ -6,7 +6,7 @@
   "manage_profiles_apply_all": "全部应用",
   "manage_profiles_discard": "放弃更改",
   "manage_profiles_applied_result": "已应用：{applied}，跳过：{skipped}",
-  "manage_profiles_tiers_hazard": "⚠ 层级按位置对应——在末尾增删层级是安全的；重排或删除中间层级会静默改变智能体的绑定。",
+  "manage_profiles_tiers_hazard": "层级按位置对应——在末尾增删层级是安全的；重排或删除中间层级会静默改变智能体的绑定。",
   "manage_profiles_tiers": "层级",
   "manage_profiles_tier": "层级 {index}",
   "manage_profiles_id_placeholder": "配置 id",
