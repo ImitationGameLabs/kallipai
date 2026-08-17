@@ -164,7 +164,7 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
             },
         );
     }
-    let tiers = wire
+    let tiers: Vec<Tier> = wire
         .tiers
         .into_iter()
         .map(|t| Tier {
@@ -180,19 +180,38 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                 .collect(),
         })
         .collect();
+    // Cross-tier duplicate profile ids pass registry validation but the stricter
+    // load-time validate() bails on them — a config the tagma could no longer
+    // start from. Reject here so the wire boundary matches the file boundary.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for tier in &tiers {
+        for p in &tier.profiles {
+            if !seen.insert(p.id.as_str()) {
+                return Err(ApiError::bad_request(format!(
+                    "duplicate profile id '{}'",
+                    p.id
+                )));
+            }
+        }
+    }
     Ok(ProfileConfig { tiers, endpoints })
 }
 
-/// Mask an API key for wire responses: `first4…last4`, all bullets when the key is
-/// too short to leave anything identifiable.
+/// Mask an API key for wire responses: `first4********last4`, a fixed run of
+/// eight stars when the key is too short to expose anything — the star count
+/// never leaks the key's length.
 pub(crate) fn mask_key(key: &str) -> String {
+    const STARS: &str = "********";
     let chars: Vec<char> = key.chars().collect();
-    if chars.len() <= 8 {
-        return "•".repeat(chars.len());
+    match chars.len() {
+        0 => String::new(),
+        1..=8 => STARS.to_string(),
+        _ => {
+            let head: String = chars[..4].iter().collect();
+            let tail: String = chars[chars.len() - 4..].iter().collect();
+            format!("{head}{STARS}{tail}")
+        }
     }
-    let head: String = chars[..4].iter().collect();
-    let tail: String = chars[chars.len() - 4..].iter().collect();
-    format!("{head}…{tail}")
 }
 
 /// Serialize a config with every endpoint's `api_key` replaced by its masked form —
@@ -289,9 +308,9 @@ mod tests {
     #[tokio::test]
     async fn get_profiles_masks_api_keys() {
         let state = make_state();
-        // The default test endpoint carries api_key "test" (4 chars → all bullets).
+        // The default test endpoint carries api_key "test" (4 chars → fixed stars).
         let Json(value) = get_profiles(State(state), op_auth()).await.unwrap();
-        assert_eq!(value["endpoints"]["test"]["api_key"], "••••");
+        assert_eq!(value["endpoints"]["test"]["api_key"], "********");
         // Non-key fields are untouched.
         assert_eq!(value["endpoints"]["test"]["family"], "deepseek");
     }
@@ -299,11 +318,24 @@ mod tests {
     #[test]
     fn mask_key_shapes() {
         assert_eq!(mask_key(""), "");
-        assert_eq!(mask_key("12345678"), "•".repeat(8));
-        assert_eq!(mask_key("123456789"), "1234…6789");
-        assert_eq!(mask_key("sk-abcdef123456wxyz"), "sk-a…wxyz");
+        assert_eq!(mask_key("12345678"), "********");
+        assert_eq!(mask_key("123456789"), "1234********6789");
+        assert_eq!(mask_key("sk-abcdef123456wxyz"), "sk-a********wxyz");
         // Multibyte input masks by chars, never splitting a code point.
-        assert_eq!(mask_key("密钥密钥"), "•".repeat(4));
+        assert_eq!(mask_key("密钥密钥"), "********");
+    }
+    #[test]
+    fn merge_wire_duplicate_profile_id_across_tiers_is_rejected() {
+        let w: ProfileConfigWire = serde_json::from_value(serde_json::json!({
+            "endpoints": { "main": { "id": "main", "family": "deepseek", "api_key": null, "base_url": null } },
+            "tiers": [
+                { "profiles": [ { "id": "p", "endpoint": "main", "model": "m", "max_context_window": 8 } ] },
+                { "profiles": [ { "id": "p", "endpoint": "main", "model": "m", "max_context_window": 8 } ] }
+            ]
+        }))
+        .unwrap();
+        let err = merge_wire(&live_config(), w).unwrap_err();
+        assert!(err.to_string().contains("duplicate profile id 'p'"), "got: {err}");
     }
 
     fn live_config() -> ProfileConfig {

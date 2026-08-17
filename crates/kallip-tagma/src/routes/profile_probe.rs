@@ -5,8 +5,10 @@
 //! save) or references live endpoints by id; the tagma builds throwaway
 //! backends and exercises the zero-cost capability probes upstream offers
 //! (`ModelCatalog::list_models`, `Balance::get_balance`). Nothing is
-//! persisted, the live registry (`ArcSwap`) is untouched, and no chat
-//! request is ever sent — probing costs no tokens.
+//! persisted and the live registry (`ArcSwap`) is untouched. Endpoint tests
+//! stay zero-cost, but a tier profile that survives its catalog pre-check
+//! is verified with one minimal, billed chat completion (test prompt,
+//! 256-token cap) — that call is the profile Test's real verdict.
 //!
 //! Statuses are layered so the UI can tell apart the failure classes an
 //! operator can act on differently: `invalid_config` (fix the definition),
@@ -21,6 +23,7 @@ use axum::Json;
 use axum::extract::State;
 use futures_util::future::join_all;
 use just_llm_client::client::BackendFactory;
+use just_llm_client::types::chat::{ChatCompletionRequest, ChatMessage};
 use kallip_common::protocol::ApiError;
 use kallip_runtime::profile::{Endpoint, ProfileConfig};
 use serde::{Deserialize, Serialize};
@@ -37,6 +40,20 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// concurrent outbound connection, so an unbounded list is a self-DoS lever
 /// on an operator-only route.
 const MAX_PROBE_ENDPOINTS: usize = 64;
+/// Upper bound on tier profiles per request: every profile that survives the
+/// catalog pre-check fans out one real (billed) inference call, so an
+/// unbounded list is a spend lever on an operator-only route.
+const MAX_PROBE_PROFILES: usize = 64;
+
+/// Per-profile inference budget. A non-streaming 256-token generation can
+/// legitimately run past PROBE_TIMEOUT; reusing it would misreport slow
+/// models as unreachable.
+const INFERENCE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The one user message a profile Test sends. Announces itself as a test so
+/// provider-side logs are self-explanatory, and asks for brevity.
+const INFERENCE_TEST_PROMPT: &str = "This is a one-shot connectivity test of this model from the kallip management UI. Reply with a single short sentence confirming that you respond.";
+
 #[derive(Deserialize)]
 pub struct ProbeRequest {
     /// Inline endpoint definitions (draft config). `api_key: null` means
@@ -147,6 +164,12 @@ pub async fn probe_profiles(
             request.endpoints.len()
         )));
     }
+    let profile_count: usize = request.tiers.iter().map(|t| t.profiles.len()).sum();
+    if profile_count > MAX_PROBE_PROFILES {
+        return Err(ApiError::bad_request(format!(
+            "probe request carries {profile_count} tier profiles; at most {MAX_PROBE_PROFILES} per request"
+        )));
+    }
 
     let live = state.profiles.load().config.clone();
     let wants_models = !request.tiers.is_empty();
@@ -187,6 +210,9 @@ pub async fn probe_profiles(
     }
 
     // Probe all resolved endpoints concurrently; each is independent.
+    // The inference stage below needs the definitions after this join_all
+    // consumes `defs` (into_values moves them out).
+    let inference_pool: HashMap<String, Endpoint> = defs.clone();
     let factory = BackendFactory::new();
     let mut probed = join_all(
         defs.into_values()
@@ -195,21 +221,88 @@ pub async fn probe_profiles(
     .await;
     reports.append(&mut probed);
 
-    // Tier checks reuse the per-endpoint reports; a missing catalog cannot
-    // verify a model name, which reports as partial rather than a failure.
+    // Tier checks run in two stages. Stage 1 settles every profile the
+    // per-endpoint reports already condemn (failed endpoint, catalog miss);
+    // catalog hits and catalog-less ok endpoints defer to stage 2 — one
+    // minimal real inference per unique (endpoint, model), shared by every
+    // profile that referenced the pair.
     let by_id: HashMap<&str, &EndpointReport> = reports
         .iter()
         .map(|r| (r.endpoint_id.as_str(), r))
         .collect();
+    let mut settled: Vec<Vec<Option<ProfileReport>>> = request
+        .tiers
+        .iter()
+        .map(|t| (0..t.profiles.len()).map(|_| None).collect::<Vec<_>>())
+        .collect();
+    // One deferred (endpoint, model) pair and the tier/profile coordinates
+    // waiting on its shared inference verdict.
+    struct PendingInference {
+        endpoint_id: String,
+        model: String,
+        coords: Vec<(usize, usize)>,
+    }
+    let mut pending: Vec<PendingInference> = Vec::new();
+    for (t_idx, tier) in request.tiers.iter().enumerate() {
+        for (p_idx, p) in tier.profiles.iter().enumerate() {
+            match catalog_stage(p, by_id.get(p.endpoint.as_str()).copied()) {
+                CatalogStage::Settled(report) => settled[t_idx][p_idx] = Some(report),
+                CatalogStage::DeferInference => {
+                    match pending
+                        .iter_mut()
+                        .find(|job| job.endpoint_id == p.endpoint && job.model == p.model)
+                    {
+                        Some(job) => job.coords.push((t_idx, p_idx)),
+                        None => pending.push(PendingInference {
+                            endpoint_id: p.endpoint.clone(),
+                            model: p.model.clone(),
+                            coords: vec![(t_idx, p_idx)],
+                        }),
+                    }
+                }
+            }
+        }
+    }
+
+    let jobs = pending.into_iter().map(|job| {
+        let def = inference_pool.get(&job.endpoint_id).cloned();
+        let factory = &factory;
+        async move {
+            let verdict = match def {
+                Some(def) => inference_verdict(factory, &def, &job.model, INFERENCE_TIMEOUT).await,
+                // Unreachable in practice: deferring requires an ok endpoint
+                // report, which only resolved endpoints produce.
+                None => (
+                    ProbeStatus::InvalidConfig,
+                    Some("endpoint was not probed".to_string()),
+                ),
+            };
+            (verdict, job.coords)
+        }
+    });
+    for ((status, detail), coords) in join_all(jobs).await {
+        for (t_idx, p_idx) in coords {
+            let p = &request.tiers[t_idx].profiles[p_idx];
+            settled[t_idx][p_idx] = Some(ProfileReport {
+                profile_id: p.id.clone(),
+                endpoint_id: p.endpoint.clone(),
+                status,
+                detail: detail.clone(),
+            });
+        }
+    }
+
     let tiers = request
         .tiers
         .iter()
+        .zip(settled)
         .enumerate()
-        .map(|(index, tier)| {
+        .map(|(index, (tier, reports))| {
             let profiles = tier
                 .profiles
                 .iter()
-                .map(|p| profile_report_for(p, by_id.get(p.endpoint.as_str()).copied()))
+                .zip(reports)
+                .map(|(p, report)| report.unwrap_or_else(|| not_probed_report(p)))
                 .collect::<Vec<_>>();
             let all_ok = profiles.iter().all(|p| p.status == ProbeStatus::Ok);
             TierReport {
@@ -237,42 +330,85 @@ fn invalid_config_report(endpoint_id: String, detail: String) -> EndpointReport 
         models: None,
     }
 }
+/// Outcome of the catalog pre-check for one tier profile: the report is
+/// either settled without spending tokens, or it defers to a real inference.
+enum CatalogStage {
+    Settled(ProfileReport),
+    DeferInference,
+}
 
-fn profile_report_for(p: &ProbeProfile, ep: Option<&EndpointReport>) -> ProfileReport {
-    match ep {
-        Some(ep) => {
-            let (status, detail) = match ep.status {
-                ProbeStatus::Ok => match &ep.models {
-                    Some(models) if models.iter().any(|m| m == &p.model) => (ProbeStatus::Ok, None),
-                    Some(models) => (
-                        ProbeStatus::InvalidConfig,
-                        Some(format!(
-                            "model '{}' not in endpoint catalog ({} models)",
-                            p.model,
-                            models.len()
-                        )),
-                    ),
-                    // Catalog-less ok (balance-only probe): cannot verify.
-                    None => (
-                        ProbeStatus::Partial,
-                        Some("endpoint ok but no catalog to verify the model name".to_string()),
-                    ),
-                },
-                other => (other, None),
-            };
-            ProfileReport {
+/// A profile whose endpoint has no report to consult at all.
+fn not_probed_report(p: &ProbeProfile) -> ProfileReport {
+    ProfileReport {
+        profile_id: p.id.clone(),
+        endpoint_id: p.endpoint.clone(),
+        status: ProbeStatus::InvalidConfig,
+        detail: Some("endpoint was not probed".to_string()),
+    }
+}
+
+/// Stage 1 of tier checking — settle what the per-endpoint reports already
+/// decide, for free: a failed endpoint propagates its status, a catalog miss
+/// settles as invalid_config, and a catalog hit (or a catalog-less-but-ok
+/// endpoint) defers to a real inference, which is the profile Test's verdict.
+fn catalog_stage(p: &ProbeProfile, ep: Option<&EndpointReport>) -> CatalogStage {
+    let Some(ep) = ep else {
+        return CatalogStage::Settled(not_probed_report(p));
+    };
+    match ep.status {
+        ProbeStatus::Ok => match &ep.models {
+            Some(models) if models.iter().any(|m| m == &p.model) => CatalogStage::DeferInference,
+            Some(models) => CatalogStage::Settled(ProfileReport {
                 profile_id: p.id.clone(),
                 endpoint_id: p.endpoint.clone(),
-                status,
-                detail,
-            }
-        }
-        None => ProfileReport {
+                status: ProbeStatus::InvalidConfig,
+                detail: Some(format!(
+                    "model '{}' not in endpoint catalog ({} models)",
+                    p.model,
+                    models.len()
+                )),
+            }),
+            // Catalog-less ok (balance-only probe): inference is the only judge.
+            None => CatalogStage::DeferInference,
+        },
+        other => CatalogStage::Settled(ProfileReport {
             profile_id: p.id.clone(),
             endpoint_id: p.endpoint.clone(),
-            status: ProbeStatus::InvalidConfig,
-            detail: Some("endpoint was not probed".to_string()),
-        },
+            status: other,
+            detail: None,
+        }),
+    }
+}
+
+/// Stage 2 of tier checking — the minimal real inference behind a profile's
+/// Test button: one non-streaming chat completion with a fixed test prompt
+/// and a 256-token cap. `timeout` is a parameter so tests can exercise the
+/// deadline without waiting out the production budget.
+async fn inference_verdict(
+    factory: &BackendFactory,
+    def: &Endpoint,
+    model: &str,
+    timeout: Duration,
+) -> (ProbeStatus, Option<String>) {
+    let backend = match backend::build_one(factory, def, DEFAULT_USER_AGENT) {
+        Ok(backend) => backend,
+        Err(e) => return (ProbeStatus::InvalidConfig, Some(format!("{e:#}"))),
+    };
+    let request = ChatCompletionRequest::new(
+        model.to_string(),
+        vec![ChatMessage::user(INFERENCE_TEST_PROMPT)],
+    )
+    .with_max_tokens(256);
+    match tokio::time::timeout(timeout, backend.chat_completion(request)).await {
+        Ok(Ok(_)) => (ProbeStatus::Ok, None),
+        Ok(Err(e)) => {
+            let (status, detail) = classify_backend_error(&e);
+            (status, Some(detail))
+        }
+        Err(_) => (
+            ProbeStatus::Unreachable,
+            Some(format!("inference timed out after {timeout:?}")),
+        ),
     }
 }
 
@@ -524,21 +660,27 @@ mod tests {
     }
 
     #[test]
-    fn profile_report_matches_catalog_hit_and_miss() {
-        let hit = profile_report_for(
+    fn catalog_stage_settles_miss_and_defers_hit() {
+        // Catalog hit: nothing settled yet — the real inference decides.
+        match catalog_stage(
             &probe_profile("m1"),
             Some(&endpoint_report(
                 ProbeStatus::Ok,
                 Some(vec!["m1".into(), "m2".into()]),
             )),
-        );
-        assert_eq!(hit.status, ProbeStatus::Ok);
-        assert!(hit.detail.is_none());
+        ) {
+            CatalogStage::DeferInference => {}
+            CatalogStage::Settled(_) => panic!("catalog hit must defer to inference"),
+        }
 
-        let miss = profile_report_for(
+        // Catalog miss: settled invalid_config without spending tokens.
+        let miss = match catalog_stage(
             &probe_profile("nope"),
             Some(&endpoint_report(ProbeStatus::Ok, Some(vec!["m1".into()]))),
-        );
+        ) {
+            CatalogStage::Settled(report) => report,
+            CatalogStage::DeferInference => panic!("catalog miss must settle"),
+        };
         assert_eq!(miss.status, ProbeStatus::InvalidConfig);
         assert!(
             miss.detail
@@ -549,26 +691,36 @@ mod tests {
     }
 
     #[test]
-    fn profile_report_without_catalog_is_partial() {
-        let r = profile_report_for(
+    fn catalog_less_ok_endpoint_defers_inference() {
+        // A balance-only ok endpoint has no catalog to check against; the
+        // inference is the profile's only judge.
+        match catalog_stage(
             &probe_profile("any"),
             Some(&endpoint_report(ProbeStatus::Ok, None)),
-        );
-        assert_eq!(r.status, ProbeStatus::Partial);
+        ) {
+            CatalogStage::DeferInference => {}
+            CatalogStage::Settled(_) => panic!("catalog-less ok endpoint must defer to inference"),
+        }
     }
 
     #[test]
-    fn profile_report_inherits_endpoint_failure() {
-        let r = profile_report_for(
+    fn catalog_stage_inherits_endpoint_failure() {
+        let r = match catalog_stage(
             &probe_profile("m1"),
             Some(&endpoint_report(ProbeStatus::Unauthorized, None)),
-        );
+        ) {
+            CatalogStage::Settled(report) => report,
+            CatalogStage::DeferInference => panic!("failed endpoint must settle"),
+        };
         assert_eq!(r.status, ProbeStatus::Unauthorized);
     }
 
     #[test]
-    fn profile_report_without_endpoint_report_is_invalid() {
-        let r = profile_report_for(&probe_profile("m1"), None);
+    fn catalog_stage_without_endpoint_report_is_invalid() {
+        let r = match catalog_stage(&probe_profile("m1"), None) {
+            CatalogStage::Settled(report) => report,
+            CatalogStage::DeferInference => panic!("missing endpoint report must settle"),
+        };
         assert_eq!(r.status, ProbeStatus::InvalidConfig);
     }
 
@@ -648,6 +800,20 @@ mod tests {
             })
             .collect();
         let req = probe_req(serde_json::json!({ "endpoints": endpoints }));
+        let err = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("at most"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_more_than_max_profiles() {
+        let state = make_state();
+        let profiles: Vec<serde_json::Value> = (0..=MAX_PROBE_PROFILES)
+            .map(|i| serde_json::json!({ "id": format!("p{i}"), "endpoint": "test", "model": "m" }))
+            .collect();
+        let req = probe_req(serde_json::json!({ "tiers": [{ "profiles": profiles }] }));
         let err = probe_profiles(State(state), op_auth(), Json(req))
             .await
             .map(|_| ())
@@ -749,5 +915,204 @@ mod tests {
                 .unwrap()
                 .contains("does-not-exist")
         );
+    }
+
+    /// Inline openai-compatible endpoint pointing at a wiremock server, so
+    /// catalog and chat requests both land on mocks.
+    fn mock_endpoint(server_uri: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "mock",
+            "family": "openai-compatible",
+            "api_key": "sk-test",
+            "base_url": server_uri
+        })
+    }
+
+    /// Minimal legal openai-shaped chat completion body.
+    fn chat_ok_body() -> serde_json::Value {
+        serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "m1",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" }
+            }]
+        })
+    }
+
+    async fn mock_catalog(server: &wiremock::MockServer, models: &[&str]) {
+        use wiremock::matchers::{method, path};
+        let data: Vec<serde_json::Value> = models
+            .iter()
+            .map(|m| serde_json::json!({ "id": m, "object": "model", "owned_by": "probe" }))
+            .collect();
+        wiremock::Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "object": "list",
+                    "data": data
+                })),
+            )
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn tier_profile_test_runs_minimal_inference() {
+        use wiremock::matchers::{method, path};
+
+        let server = wiremock::MockServer::start().await;
+        mock_catalog(&server, &["m1"]).await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = make_state();
+        let req = probe_req(serde_json::json!({
+            "endpoints": [mock_endpoint(&server.uri())],
+            "tiers": [{ "profiles": [{ "id": "p1", "endpoint": "mock", "model": "m1" }] }]
+        }));
+        let resp = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(resp.results[0].status, ProbeStatus::Ok);
+        let report = &resp.tiers[0].profiles[0];
+        assert_eq!(report.status, ProbeStatus::Ok);
+        assert!(report.detail.is_none());
+        assert!(resp.tiers[0].all_ok);
+    }
+
+    #[tokio::test]
+    async fn inference_auth_failure_is_unauthorized() {
+        use wiremock::matchers::{method, path};
+
+        let server = wiremock::MockServer::start().await;
+        mock_catalog(&server, &["m1"]).await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(401).set_body_string("bad key"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = make_state();
+        let req = probe_req(serde_json::json!({
+            "endpoints": [mock_endpoint(&server.uri())],
+            "tiers": [{ "profiles": [{ "id": "p1", "endpoint": "mock", "model": "m1" }] }]
+        }));
+        let resp = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .unwrap()
+            .0;
+        // The catalog probe succeeded, so the profile's verdict is the
+        // inference call's own classification.
+        assert_eq!(resp.results[0].status, ProbeStatus::Ok);
+        assert_eq!(resp.tiers[0].profiles[0].status, ProbeStatus::Unauthorized);
+        assert!(!resp.tiers[0].all_ok);
+    }
+
+    #[tokio::test]
+    async fn catalog_miss_settles_without_inference() {
+        use wiremock::matchers::{method, path};
+
+        let server = wiremock::MockServer::start().await;
+        mock_catalog(&server, &["m2"]).await;
+        // Zero expected hits: the catalog miss must settle before any chat
+        // request is spent.
+        wiremock::Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok_body()))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let state = make_state();
+        let req = probe_req(serde_json::json!({
+            "endpoints": [mock_endpoint(&server.uri())],
+            "tiers": [{ "profiles": [{ "id": "p1", "endpoint": "mock", "model": "m1" }] }]
+        }));
+        let resp = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .unwrap()
+            .0;
+        let report = &resp.tiers[0].profiles[0];
+        assert_eq!(report.status, ProbeStatus::InvalidConfig);
+        assert!(
+            report
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("not in endpoint catalog")
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_endpoint_model_pair_dedupes_inference() {
+        use wiremock::matchers::{method, path};
+
+        let server = wiremock::MockServer::start().await;
+        mock_catalog(&server, &["m1"]).await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok_body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = make_state();
+        let req = probe_req(serde_json::json!({
+            "endpoints": [mock_endpoint(&server.uri())],
+            "tiers": [{ "profiles": [
+                { "id": "p1", "endpoint": "mock", "model": "m1" },
+                { "id": "p2", "endpoint": "mock", "model": "m1" }
+            ] }]
+        }));
+        let resp = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(resp.tiers[0].profiles[0].status, ProbeStatus::Ok);
+        assert_eq!(resp.tiers[0].profiles[1].status, ProbeStatus::Ok);
+        assert!(resp.tiers[0].all_ok);
+    }
+
+    #[tokio::test]
+    async fn inference_verdict_times_out() {
+        use wiremock::matchers::{method, path};
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(chat_ok_body())
+                    .set_delay(Duration::from_secs(5)),
+            )
+            .mount(&server)
+            .await;
+
+        let endpoint = Endpoint {
+            id: "mock".into(),
+            family: "openai-compatible".into(),
+            api_key: "sk-test".into(),
+            base_url: Some(server.uri()),
+        };
+        let (status, detail) = inference_verdict(
+            &BackendFactory::new(),
+            &endpoint,
+            "m1",
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(status, ProbeStatus::Unreachable);
+        assert!(detail.as_deref().unwrap().contains("timed out"));
     }
 }
