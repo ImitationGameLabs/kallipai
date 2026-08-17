@@ -36,5 +36,6 @@
   "manage_profiles_probe_models_one": "{count} model",
   "manage_profiles_probe_models_other": "{count} models",
   "manage_profiles_probe_tier_ok": "all profiles ok",
-  "manage_profiles_probe_tier_fail": "failing profiles:"
+  "manage_profiles_probe_tier_fail": "failing profiles:",
+  "manage_profiles_probe_request_failed": "probe request failed: {error}"
 }

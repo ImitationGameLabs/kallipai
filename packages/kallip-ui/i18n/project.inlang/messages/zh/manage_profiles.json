@@ -36,5 +36,6 @@
   "manage_profiles_probe_models_one": "{count} 个模型",
   "manage_profiles_probe_models_other": "{count} 个模型",
   "manage_profiles_probe_tier_ok": "全部配置可用",
-  "manage_profiles_probe_tier_fail": "问题配置："
+  "manage_profiles_probe_tier_fail": "问题配置：",
+  "manage_profiles_probe_request_failed": "测试请求失败：{error}"
 }

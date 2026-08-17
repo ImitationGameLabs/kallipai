@@ -10,6 +10,7 @@
     manage_profiles_test,
     manage_profiles_test_all,
     manage_profiles_probe_results,
+    manage_profiles_probe_request_failed,
     manage_profiles_probe_status_ok,
     manage_profiles_probe_status_partial,
     manage_profiles_probe_status_unreachable,
@@ -151,7 +152,7 @@
         </h2>
         {#if profilesStore.probeError}
           <p class="text-error-500 dark:text-error-400 font-mono break-all">
-            {profilesStore.probeError}
+            {manage_profiles_probe_request_failed({ error: profilesStore.probeError })}
           </p>
         {:else if profilesStore.probe}
         {#each profilesStore.probe.results as r (r.endpoint_id)}
