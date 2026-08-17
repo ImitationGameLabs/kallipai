@@ -23,7 +23,6 @@
     common_save,
     manage_profiles_provider_api_key_hint_edit,
     manage_profiles_provider_api_key_label,
-    manage_profiles_provider_api_key_required,
     manage_profiles_provider_base_url_hint,
     manage_profiles_provider_base_url_label,
     manage_profiles_provider_dialog_desc,
@@ -186,15 +185,13 @@
               autocomplete="off"
               bind:value={apiKey}
             />
-            <span class="text-xs opacity-60">
-              {#if mode === "new"}
-                {manage_profiles_provider_api_key_required()}
-              {:else if provider}
+            {#if provider}
+              <span class="text-xs opacity-60">
                 {manage_profiles_provider_api_key_hint_edit({
                   mask: provider.api_key ?? "",
                 })}
-              {/if}
-            </span>
+              </span>
+            {/if}
           </label>
 
           {#if mode === "edit" && onRemove}

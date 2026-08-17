@@ -1,10 +1,11 @@
 <script lang="ts" module>
-  // Tier create/edit dialog for the Profiles page's tier containers: a
-  // compact row form for the tier's profiles (id / provider / model /
-  // max context), rows removable, "+ add profile" at the bottom.
+  // Tier edit dialog for the Profiles page's tier containers: a compact
+  // row form for the tier's profiles (id / provider / model / max
+  // context), rows removable, add-profile button at the bottom. Tiers are
+  // created empty by the page's add-card, so there is no create mode.
   // Prop-driven (CreateRoomDialog pattern): the dialog never touches a
-  // store; on save it hands the full profile list back and the page applies
-  // it (replaceTierProfiles / addTier+replace).
+  // store; on save it hands the full profile list back and the page
+  // applies it (replaceTierProfiles).
   import type { ProfileModel } from "@kallipai/kallip-client";
 
   export interface TierDialogRow {
@@ -28,7 +29,6 @@
     manage_profiles_tier_dialog_desc,
     manage_profiles_tier_dialog_edit_title,
     manage_profiles_tier_dialog_max_context_label,
-    manage_profiles_tier_dialog_new_title,
     manage_profiles_tier_dialog_id_label,
     manage_profiles_tier_dialog_provider_label,
     manage_profiles_tier_dialog_model_label,
@@ -37,7 +37,6 @@
 
   let {
     open,
-    mode,
     profiles = [],
     tierIdx = 0,
     providerIds = [],
@@ -45,10 +44,9 @@
     onCancel,
   }: {
     open: boolean;
-    mode: "new" | "edit";
-    /** The tier's current profiles (edit mode's initial rows). */
+    /** The tier's current profiles (the dialog's initial rows). */
     profiles?: readonly ProfileModel[];
-    /** Tier index for the edit title (0-based, shown 1-based). */
+    /** Tier index for the title (0-based, shown 1-based). */
     tierIdx?: number;
     /** Provider ids available in the draft (the provider dropdown). */
     providerIds?: string[];
@@ -68,15 +66,13 @@
   let lastOpen = false;
   $effect(() => {
     if (open && !lastOpen) {
-      rows = mode === "edit"
-        ? profiles.map((p) => ({
-            id: p.id,
-            endpoint: p.endpoint,
-            model: p.model,
-            maxContext: String(p.max_context_window),
-          }))
-        : [];
-      if (mode === "new" && rows.length === 0) rows = [blankRow()];
+      rows = profiles.map((p) => ({
+        id: p.id,
+        endpoint: p.endpoint,
+        model: p.model,
+        maxContext: String(p.max_context_window),
+      }));
+      if (rows.length === 0) rows = [blankRow()];
     }
     lastOpen = open;
   });
@@ -91,7 +87,7 @@
   }
 
   const duplicateIds = $derived(
-    new Set(rows.map((r) => r.id.trim())).size !== rows.length
+    new Set(rows.map((r) => r.id.trim())).size !== rows.length,
   );
   const canSubmit = $derived(
     rows.length > 0 &&
@@ -131,9 +127,7 @@
         class="card preset-tonal-surface w-full max-w-2xl p-6 flex flex-col gap-4 max-h-[85vh] overflow-y-auto"
       >
         <Dialog.Title class="text-lg font-semibold">
-          {mode === "new"
-            ? manage_profiles_tier_dialog_new_title()
-            : manage_profiles_tier_dialog_edit_title({ index: tierIdx + 1 })}
+          {manage_profiles_tier_dialog_edit_title({ index: tierIdx + 1 })}
         </Dialog.Title>
         <Dialog.Description class="sr-only">
           {manage_profiles_tier_dialog_desc()}
@@ -154,7 +148,9 @@
 
           <div class="flex flex-col gap-3">
             {#each rows as row, i (i)}
-              <div class="grid grid-cols-[1fr_1fr_1fr_5rem_2.25rem] items-start gap-2">
+              <div
+                class="grid grid-cols-[1fr_1fr_1fr_5rem_2.25rem] items-start gap-2"
+              >
                 <label class="flex flex-col gap-1">
                   <span class="text-xs font-medium">
                     {i === 0 ? manage_profiles_tier_dialog_id_label() : ""}
@@ -167,7 +163,9 @@
                 </label>
                 <label class="flex flex-col gap-1">
                   <span class="text-xs font-medium">
-                    {i === 0 ? manage_profiles_tier_dialog_provider_label() : ""}
+                    {i === 0
+                      ? manage_profiles_tier_dialog_provider_label()
+                      : ""}
                   </span>
                   <select class="select text-sm" bind:value={row.endpoint}>
                     {#each providerIds as eid (eid)}
@@ -187,7 +185,9 @@
                 </label>
                 <label class="flex flex-col gap-1">
                   <span class="text-xs font-medium">
-                    {i === 0 ? manage_profiles_tier_dialog_max_context_label() : ""}
+                    {i === 0
+                      ? manage_profiles_tier_dialog_max_context_label()
+                      : ""}
                   </span>
                   <input
                     class="input text-sm font-mono"

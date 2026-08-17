@@ -10,6 +10,8 @@
   import { profilesStore } from "../../lib/manage/profiles.svelte.ts";
   import { SvelteMap } from "svelte/reactivity";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
+  import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
+  import { MoreVertical, Plus, Trash } from "@lucide/svelte";
   import ProviderDialog from "../../components/manage/ProviderDialog.svelte";
   import TierDialog from "../../components/manage/TierDialog.svelte";
   import {
@@ -28,6 +30,7 @@
   } from "@kallipai/kallip-client";
   import {
     common_edit,
+    common_remove,
     common_loading,
     manage_profiles_add_provider,
     manage_profiles_add_tier,
@@ -58,14 +61,17 @@
     manage_profiles_profile_provider_label,
     manage_profiles_profile_model_label,
     manage_profiles_profile_test_aria,
-    manage_profiles_remove_last_tier,
+    manage_profiles_remove_tier_confirm_desc,
+    manage_profiles_remove_tier_confirm_title,
     manage_profiles_save_changes,
     manage_profiles_test,
     manage_profiles_test_all,
     manage_profiles_tier,
     manage_profiles_tier_drop_here,
+    manage_profiles_tier_actions_aria,
     manage_profiles_tiers,
     manage_profiles_tiers_hazard,
+    manage_profiles_tiers_desc,
     manage_profiles_title,
   } from "../../paraglide/messages.js";
 
@@ -111,7 +117,10 @@
     for (const r of resp.results) providerReports.set(r.endpoint_id, r);
   }
 
-  function mergeProfileScope(tierIdx: number, resp: ProfileProbeResponse): void {
+  function mergeProfileScope(
+    tierIdx: number,
+    resp: ProfileProbeResponse,
+  ): void {
     // A tier-scoped response's tiers[0] is the requested tier.
     const t = resp.tiers[0];
     if (!t) return;
@@ -225,7 +234,7 @@
     if (!draft) return;
     const existing =
       result.apiKey === null
-        ? draft.endpoints[result.id]?.api_key ?? ""
+        ? (draft.endpoints[result.id]?.api_key ?? "")
         : result.apiKey;
     profilesStore.draft = upsertProvider(draft, {
       id: result.id,
@@ -244,32 +253,32 @@
     providerDialog.open = false;
   }
 
-  let tierDialog = $state<{
-    open: boolean;
-    mode: "new" | "edit";
-    tierIdx: number;
-  }>({ open: false, mode: "new", tierIdx: 0 });
+  // Tier removal confirm: every removal rebinds agents (positional tiers),
+  // so the kebab Remove always opens a confirm before mutating the draft.
+  let removeTierIdx = $state<number | null>(null);
 
-  function onTierSave(rows: {
-    id: string;
-    endpoint: string;
-    model: string;
-    max_context_window: number;
-  }[]) {
+  function onTierRemoveConfirmed() {
+    if (removeTierIdx === null) return;
+    profilesStore.removeTier(removeTierIdx);
+    profileReports.clear();
+    removeTierIdx = null;
+  }
+  let tierDialog = $state<{ open: boolean; tierIdx: number }>({
+    open: false,
+    tierIdx: 0,
+  });
+
+  function onTierSave(
+    rows: {
+      id: string;
+      endpoint: string;
+      model: string;
+      max_context_window: number;
+    }[],
+  ) {
     const draft = profilesStore.draft;
     if (!draft) return;
-    if (tierDialog.mode === "new") {
-      profilesStore.addTier();
-      const appended = profilesStore.draft;
-      if (!appended) return;
-      profilesStore.draft = replaceTierProfiles(
-        appended,
-        appended.tiers.length - 1,
-        rows,
-      );
-    } else {
-      profilesStore.draft = replaceTierProfiles(draft, tierDialog.tierIdx, rows);
-    }
+    profilesStore.draft = replaceTierProfiles(draft, tierDialog.tierIdx, rows);
     tierDialog.open = false;
   }
 
@@ -333,12 +342,15 @@
           class="btn btn-sm preset-filled-primary-500"
           disabled={!profilesStore.isDirty || profilesStore.isSaving}
           onclick={onSave}
-          >{profilesStore.isSaving ? "…" : manage_profiles_save_changes()}</button
+          >{profilesStore.isSaving
+            ? "…"
+            : manage_profiles_save_changes()}</button
         >
         <button
           class="btn btn-sm preset-filled-secondary-500"
           disabled={profilesStore.isDirty || profilesStore.isSaving}
-          onclick={() => (showApplyDialog = true)}>{manage_profiles_apply_all()}</button
+          onclick={() => (showApplyDialog = true)}
+          >{manage_profiles_apply_all()}</button
         >
       </div>
     </div>
@@ -354,10 +366,10 @@
       </p>
     {/if}
     {#if profilesStore.probeError}
-      <p
-        class="text-error-500 dark:text-error-400 text-sm font-mono break-all"
-      >
-        {manage_profiles_probe_request_failed({ error: profilesStore.probeError })}
+      <p class="text-error-500 dark:text-error-400 text-sm font-mono break-all">
+        {manage_profiles_probe_request_failed({
+          error: profilesStore.probeError,
+        })}
       </p>
     {/if}
     {#if profilesStore.isDirty}
@@ -379,16 +391,9 @@
 
       <!-- Providers: global pool of provider cards -->
       <section class="space-y-3">
-        <div class="flex items-center justify-between">
-          <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-            {manage_profiles_providers()}
-          </h2>
-          <button
-            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-            onclick={openProviderNew}
-            >{manage_profiles_add_provider()}</button
-          >
-        </div>
+        <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+          {manage_profiles_providers()}
+        </h2>
         <div class="grid gap-3 sm:grid-cols-2">
           {#each Object.values(profilesStore.draft.endpoints) as ep (ep.id)}
             {@const report = providerReports.get(ep.id)}
@@ -406,8 +411,7 @@
                   <button
                     class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
                     aria-label={manage_profiles_edit_aria({ name: ep.id })}
-                    onclick={() => openProviderEdit(ep)}
-                    >{common_edit()}</button
+                    onclick={() => openProviderEdit(ep)}>{common_edit()}</button
                   >
                 </div>
               </div>
@@ -445,38 +449,33 @@
                     </span>
                   {/if}
                   {#if report.detail}
-                    <p class="opacity-60 font-mono break-all">{report.detail}</p>
+                    <p class="opacity-60 font-mono break-all">
+                      {report.detail}
+                    </p>
                   {/if}
                 </div>
               {/if}
             </div>
           {/each}
+          <button
+            type="button"
+            class="card preset-tonal-surface border-2 border-dashed border-surface-400 p-4 flex items-center justify-center gap-2 min-h-24 hover:preset-filled-surface-100-900 transition cursor-pointer"
+            onclick={openProviderNew}
+          >
+            <Plus class="size-6 opacity-70" />
+            <span class="text-sm opacity-70">
+              {manage_profiles_add_provider()}
+            </span>
+          </button>
         </div>
       </section>
 
       <!-- Tiers: one container per tier holding draggable profile cards -->
       <section class="space-y-3">
-        <div class="flex items-center justify-between">
-          <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-            {manage_profiles_tiers()}
-          </h2>
-          <div class="flex gap-2">
-            <button
-              class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-              onclick={() => (tierDialog = { open: true, mode: "new", tierIdx: 0 })}
-              >{manage_profiles_add_tier()}</button
-            >
-            <button
-              class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
-              disabled={profilesStore.draft.tiers.length === 0}
-              onclick={() => {
-                profilesStore.removeLastTier();
-                profileReports.clear();
-              }}
-              >{manage_profiles_remove_last_tier()}</button
-            >
-          </div>
-        </div>
+        <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+          {manage_profiles_tiers()}
+        </h2>
+        <p class="text-xs opacity-60 mt-1">{manage_profiles_tiers_desc()}</p>
 
         {#each profilesStore.draft.tiers as tier, tierIdx (tierIdx)}
           {@const tierReport = [...profileReports.entries()]
@@ -484,14 +483,16 @@
             .map(([, v]) => v)}
           <div
             role="list"
-            class="card preset-tonal-surface p-4 space-y-3 {dragOverTier === tierIdx
+            class="card preset-tonal-surface p-4 space-y-3 {dragOverTier ===
+            tierIdx
               ? 'outline-2 outline-dashed outline-primary-500'
               : ''}"
             ondragover={(e) => {
               e.preventDefault();
               dragOverTier = tierIdx;
             }}
-            ondragleave={() => (dragOverTier = tierIdx === dragOverTier ? -1 : dragOverTier)}
+            ondragleave={() =>
+              (dragOverTier = tierIdx === dragOverTier ? -1 : dragOverTier)}
             ondrop={(e) => {
               e.preventDefault();
               onDrop(tierIdx);
@@ -506,7 +507,9 @@
                       {manage_profiles_probe_tier_ok()}
                     </span>
                   {:else}
-                    <span class={probeStatusColor.invalid_config + " ml-2 text-xs"}>
+                    <span
+                      class={probeStatusColor.invalid_config + " ml-2 text-xs"}
+                    >
                       {manage_profiles_probe_tier_fail()}
                       {tierReport
                         .filter((r) => r.status !== "ok")
@@ -528,15 +531,16 @@
                   aria-label={manage_profiles_edit_aria({
                     name: manage_profiles_tier({ index: tierIdx + 1 }),
                   })}
-                  onclick={() =>
-                    (tierDialog = { open: true, mode: "edit", tierIdx })}
+                  onclick={() => (tierDialog = { open: true, tierIdx })}
                   >{common_edit()}</button
                 >
               </div>
             </div>
 
             {#each tier.profiles as profile, profileIdx (profileIdx)}
-              {@const report = profileReports.get(profileKey(tierIdx, profile.id))}
+              {@const report = profileReports.get(
+                profileKey(tierIdx, profile.id),
+              )}
               <div
                 role="listitem"
                 class="card preset-filled-surface-100-900 p-3 space-y-1 cursor-grab"
@@ -566,9 +570,10 @@
                     >
                     <button
                       class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-                      aria-label={manage_profiles_edit_aria({ name: profile.id })}
-                      onclick={() =>
-                        (tierDialog = { open: true, mode: "edit", tierIdx })}
+                      aria-label={manage_profiles_edit_aria({
+                        name: profile.id,
+                      })}
+                      onclick={() => (tierDialog = { open: true, tierIdx })}
                       >{common_edit()}</button
                     >
                   </div>
@@ -608,10 +613,62 @@
               </div>
             {/each}
             {#if tier.profiles.length === 0}
-              <p class="text-xs opacity-50">{manage_profiles_tier_drop_here()}</p>
+              <p class="text-xs opacity-50">
+                {manage_profiles_tier_drop_here()}
+              </p>
             {/if}
+
+            <!-- Kebab settings menu (TagmaCard bottom-row pattern): the
+                 card-level actions entry at the card's bottom-right;
+                 Remove goes through the confirm (positional rebind). -->
+            <div class="flex items-center justify-end">
+              <Menu
+                positioning={{ placement: "top-end" }}
+                onSelect={(e) => {
+                  if (e.value === "remove") removeTierIdx = tierIdx;
+                }}
+              >
+                <Menu.Trigger
+                  class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+                  aria-label={manage_profiles_tier_actions_aria()}
+                  disabled={profilesStore.isProbing}
+                >
+                  <MoreVertical class="size-4" />
+                </Menu.Trigger>
+                <Portal>
+                  <Menu.Positioner>
+                    <Menu.Content
+                      class="card preset-tonal-surface p-1 min-w-[8rem]"
+                    >
+                      <Menu.Item
+                        value="remove"
+                        class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
+                      >
+                        <Trash class="size-4" />
+                        {common_remove()}
+                      </Menu.Item>
+                    </Menu.Content>
+                  </Menu.Positioner>
+                </Portal>
+              </Menu>
+            </div>
           </div>
         {/each}
+
+        <!-- Add-tier card: same level as the tier containers; appends an
+             empty tier directly (no dialog) — drag profiles in or use a
+             tier's Edit. An empty tier cannot be saved (PUT rejects), by
+             design: fill it before saving. -->
+        <button
+          type="button"
+          class="card preset-tonal-surface border-2 border-dashed border-surface-400 p-4 flex items-center justify-center gap-2 min-h-24 w-full hover:preset-filled-surface-100-900 transition cursor-pointer"
+          onclick={() => profilesStore.addTier()}
+        >
+          <Plus class="size-6 opacity-70" />
+          <span class="text-sm opacity-70">
+            {manage_profiles_add_tier()}
+          </span>
+        </button>
       </section>
     {/if}
   </div>
@@ -628,6 +685,16 @@
   onCancel={() => (showApplyDialog = false)}
 />
 
+<ConfirmDialog
+  open={removeTierIdx !== null}
+  title={manage_profiles_remove_tier_confirm_title()}
+  description={manage_profiles_remove_tier_confirm_desc()}
+  confirmLabel={common_remove()}
+  tone="danger"
+  onConfirm={onTierRemoveConfirmed}
+  onCancel={() => (removeTierIdx = null)}
+/>
+
 <ProviderDialog
   open={providerDialog.open}
   mode={providerDialog.mode}
@@ -640,12 +707,9 @@
 
 <TierDialog
   open={tierDialog.open}
-  mode={tierDialog.mode}
   tierIdx={tierDialog.tierIdx}
-  profiles={tierDialog.mode === "edit"
-    ? profilesStore.draft?.tiers[tierDialog.tierIdx]?.profiles ?? []
-    : []}
-  providerIds={providerIds}
+  profiles={profilesStore.draft?.tiers[tierDialog.tierIdx]?.profiles ?? []}
+  {providerIds}
   onSave={onTierSave}
   onCancel={() => (tierDialog.open = false)}
 />

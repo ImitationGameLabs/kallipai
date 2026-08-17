@@ -14,7 +14,7 @@ import {
   profileConfigEqual,
   profileConfigToWire as profileConfigToWireFn,
   removeProvider as removeProviderFn,
-  removeLastTier as removeLastTierFn,
+  removeTier as removeTierFn,
   removeProfile as removeProfileFn,
   singleProviderProbeRequest as singleProviderProbeRequestFn,
 } from "./compute.ts";
@@ -195,10 +195,11 @@ class ProfilesStore {
     this.draft = addTierFn(this.draft);
   }
 
-  /** Remove the LAST tier only (truncate-tail — middle removal rebinds agents). */
-  removeLastTier(): void {
+  /** Remove the tier at tierIdx (callers gate behind a confirm — removal
+   * rebinds agents positioned after it). */
+  removeTier(tierIdx: number): void {
     if (!this.draft) return;
-    this.draft = removeLastTierFn(this.draft);
+    this.draft = removeTierFn(this.draft, tierIdx);
   }
 
   /** Add a profile to a tier at the given index. */
@@ -216,9 +217,10 @@ class ProfilesStore {
   /** Add a new provider with a generated id. */
   addProvider(): void {
     if (!this.draft) return;
-    const id = typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `ep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `ep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     this.draft = addProviderFn(this.draft, id);
   }
 

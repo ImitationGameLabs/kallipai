@@ -21,7 +21,7 @@ import {
   profileConfigEqual,
   profileConfigToWire,
   removeProvider,
-  removeLastTier,
+  removeTier,
   removeProfile,
   replaceTierProfiles,
   singleProviderProbeRequest,
@@ -97,37 +97,49 @@ Deno.test("burnRate: null when fewer than 2 samples", () => {
 });
 Deno.test("burnRate: null when timestamps equal (zero elapsed)", () => {
   assertEquals(
-    burnRate([{ consumed: 100, timestamp: 1000 }, {
-      consumed: 200,
-      timestamp: 1000,
-    }]),
+    burnRate([
+      { consumed: 100, timestamp: 1000 },
+      {
+        consumed: 200,
+        timestamp: 1000,
+      },
+    ]),
     null,
   );
 });
 Deno.test("burnRate: 0 when consumption is flat (idle)", () => {
   assertEquals(
-    burnRate([{ consumed: 100, timestamp: 1000 }, {
-      consumed: 100,
-      timestamp: 2000,
-    }]),
+    burnRate([
+      { consumed: 100, timestamp: 1000 },
+      {
+        consumed: 100,
+        timestamp: 2000,
+      },
+    ]),
     0,
   );
 });
 Deno.test("burnRate: correct tokens/min over 1 minute", () => {
   assertEquals(
-    burnRate([{ consumed: 400, timestamp: 0 }, {
-      consumed: 1000,
-      timestamp: 60_000,
-    }]),
+    burnRate([
+      { consumed: 400, timestamp: 0 },
+      {
+        consumed: 1000,
+        timestamp: 60_000,
+      },
+    ]),
     600,
   );
 });
 Deno.test("burnRate: correct tokens/min over sub-minute window", () => {
   assertEquals(
-    burnRate([{ consumed: 0, timestamp: 0 }, {
-      consumed: 100,
-      timestamp: 10_000,
-    }]),
+    burnRate([
+      { consumed: 0, timestamp: 0 },
+      {
+        consumed: 100,
+        timestamp: 10_000,
+      },
+    ]),
     600,
   );
 });
@@ -176,13 +188,23 @@ Deno.test("addTier: preserves existing tiers and endpoints", () => {
   assertEquals(r.endpoints, base.endpoints);
   assertEquals(r.tiers[0], base.tiers[0]);
 });
-Deno.test("removeLastTier: removes the last tier", () => {
+Deno.test("removeTier: removes a middle tier and shifts the rest up", () => {
+  const base = addTier(addTier(addTier(emptyConfig)));
+  const r = removeTier(base, 1);
+  assertEquals(r.tiers.length, 2);
+});
+Deno.test("removeTier: removes the last tier", () => {
   const base = addTier(addTier(emptyConfig));
-  const r = removeLastTier(base);
+  const r = removeTier(base, 1);
   assertEquals(r.tiers.length, 1);
 });
-Deno.test("removeLastTier: no-op when already empty", () => {
-  assertEquals(removeLastTier(emptyConfig), emptyConfig);
+Deno.test("removeTier: removes the only tier leaving an empty list", () => {
+  const base = addTier(emptyConfig);
+  assertEquals(removeTier(base, 0).tiers, []);
+});
+Deno.test("removeTier: no-op when out of range", () => {
+  assertEquals(removeTier(addTier(emptyConfig), 5), addTier(emptyConfig));
+  assertEquals(removeTier(addTier(emptyConfig), -1), addTier(emptyConfig));
 });
 Deno.test("addProfile: adds blank profile to correct tier", () => {
   const base = addTier(addTier(emptyConfig));
@@ -226,30 +248,38 @@ Deno.test("upsertProvider: inserts a new provider under its id", () => {
   assertEquals(r.endpoints["ep1"], base.endpoints["ep1"]);
 });
 
-Deno.test("upsertProvider: replaces an existing provider with the same id", () => {
-  const base = addProvider(emptyConfig, "ep1");
-  const updated = {
-    id: "ep1",
-    family: "openai-compatible",
-    api_key: "sk-new",
-    base_url: null,
-  };
-  const r = upsertProvider(base, updated);
-  assertEquals(r.endpoints["ep1"], updated);
-  assertEquals(Object.keys(r.endpoints).length, 1);
-});
+Deno.test(
+  "upsertProvider: replaces an existing provider with the same id",
+  () => {
+    const base = addProvider(emptyConfig, "ep1");
+    const updated = {
+      id: "ep1",
+      family: "openai-compatible",
+      api_key: "sk-new",
+      base_url: null,
+    };
+    const r = upsertProvider(base, updated);
+    assertEquals(r.endpoints["ep1"], updated);
+    assertEquals(Object.keys(r.endpoints).length, 1);
+  },
+);
 
-Deno.test("replaceTierProfiles: swaps the tier's profile list wholesale", () => {
-  const profiles = [{
-    id: "p9",
-    endpoint: "ep1",
-    model: "m9",
-    max_context_window: 1,
-  }];
-  const base = addProfile(addTier(emptyConfig), 0);
-  const r = replaceTierProfiles(base, 0, profiles);
-  assertEquals(r.tiers[0].profiles, profiles);
-});
+Deno.test(
+  "replaceTierProfiles: swaps the tier's profile list wholesale",
+  () => {
+    const profiles = [
+      {
+        id: "p9",
+        endpoint: "ep1",
+        model: "m9",
+        max_context_window: 1,
+      },
+    ];
+    const base = addProfile(addTier(emptyConfig), 0);
+    const r = replaceTierProfiles(base, 0, profiles);
+    assertEquals(r.tiers[0].profiles, profiles);
+  },
+);
 
 Deno.test("replaceTierProfiles: out-of-range tierIdx is a no-op", () => {
   const base = addTier(emptyConfig);
@@ -269,30 +299,42 @@ Deno.test("profileConfigEqual: false when draft diverges", () => {
 
 Deno.test("burnRate: decreasing consumption returns 0 (idle)", () => {
   assertEquals(
-    burnRate([{ consumed: 200, timestamp: 0 }, {
-      consumed: 100,
-      timestamp: 60_000,
-    }]),
+    burnRate([
+      { consumed: 200, timestamp: 0 },
+      {
+        consumed: 100,
+        timestamp: 60_000,
+      },
+    ]),
     0,
   );
 });
 
-Deno.test("barColorClass: consumed exceeding budget still clamps correctly", () => {
-  // 150% consumed → pct clamps to 100 → 0% remaining → red
-  assertEquals(barColorClass(1500, 1000), "bg-error-500");
-});
+Deno.test(
+  "barColorClass: consumed exceeding budget still clamps correctly",
+  () => {
+    // 150% consumed → pct clamps to 100 → 0% remaining → red
+    assertEquals(barColorClass(1500, 1000), "bg-error-500");
+  },
+);
 
-Deno.test("addProfile: out-of-range tierIdx is a no-op (no tier created)", () => {
-  const base = addTier(emptyConfig);
-  const result = addProfile(base, 99);
-  assertEquals(result.tiers[0].profiles.length, 0);
-});
+Deno.test(
+  "addProfile: out-of-range tierIdx is a no-op (no tier created)",
+  () => {
+    const base = addTier(emptyConfig);
+    const result = addProfile(base, 99);
+    assertEquals(result.tiers[0].profiles.length, 0);
+  },
+);
 
-Deno.test("etaMinutes: negative remaining returns negative (over-budget scenario)", () => {
-  // Edge: remaining can go negative briefly during optimistic updates.
-  // The function does NOT clamp — caller handles display.
-  assertEquals(etaMinutes(-500, 100), -5);
-});
+Deno.test(
+  "etaMinutes: negative remaining returns negative (over-budget scenario)",
+  () => {
+    // Edge: remaining can go negative briefly during optimistic updates.
+    // The function does NOT clamp — caller handles display.
+    assertEquals(etaMinutes(-500, 100), -5);
+  },
+);
 
 // --- Schedule validation ---
 
@@ -335,14 +377,18 @@ const maskedKey = "sk-a********wxyz";
 
 function draftConfig(apiKey: string | null): ProfileConfig {
   return {
-    tiers: [{
-      profiles: [{
-        id: "p1",
-        endpoint: "main",
-        model: "deepseek-chat",
-        max_context_window: 128000,
-      }],
-    }],
+    tiers: [
+      {
+        profiles: [
+          {
+            id: "p1",
+            endpoint: "main",
+            model: "deepseek-chat",
+            max_context_window: 128000,
+          },
+        ],
+      },
+    ],
     endpoints: {
       main: { id: "main", family: "deepseek", api_key: apiKey, base_url: null },
     },
@@ -355,20 +401,24 @@ function multiTierConfig(): ProfileConfig {
     tiers: [
       ...draftConfig(maskedKey).tiers,
       {
-        profiles: [{
-          id: "p2",
-          endpoint: "main",
-          model: "other",
-          max_context_window: 1,
-        }],
+        profiles: [
+          {
+            id: "p2",
+            endpoint: "main",
+            model: "other",
+            max_context_window: 1,
+          },
+        ],
       },
       {
-        profiles: [{
-          id: "p3",
-          endpoint: "main",
-          model: "third",
-          max_context_window: 1,
-        }],
+        profiles: [
+          {
+            id: "p3",
+            endpoint: "main",
+            model: "third",
+            max_context_window: 1,
+          },
+        ],
       },
     ],
   };
@@ -379,21 +429,30 @@ Deno.test("profileConfigToWire: empty key becomes null (keep live)", () => {
   assertEquals(wire.endpoints.main.api_key, null);
 });
 
-Deno.test("profileConfigToWire: masked echo passes through (server treats as keep)", () => {
-  const wire = profileConfigToWire(draftConfig(maskedKey));
-  assertEquals(wire.endpoints.main.api_key, maskedKey);
-});
+Deno.test(
+  "profileConfigToWire: masked echo passes through (server treats as keep)",
+  () => {
+    const wire = profileConfigToWire(draftConfig(maskedKey));
+    assertEquals(wire.endpoints.main.api_key, maskedKey);
+  },
+);
 
 Deno.test("profileConfigToWire: null key stays null; tiers untouched", () => {
   const draft = draftConfig(null);
   assertEquals(profileConfigToWire(draft).endpoints.main.api_key, null);
 });
 
-Deno.test("buildProbeRequest: unchanged masked key probes with null (never echoes the mask)", () => {
-  // The draft holds the masked value from GET; so does the committed copy.
-  const req = buildProbeRequest(draftConfig(maskedKey), draftConfig(maskedKey));
-  assertEquals(req.endpoints[0].api_key, null);
-});
+Deno.test(
+  "buildProbeRequest: unchanged masked key probes with null (never echoes the mask)",
+  () => {
+    // The draft holds the masked value from GET; so does the committed copy.
+    const req = buildProbeRequest(
+      draftConfig(maskedKey),
+      draftConfig(maskedKey),
+    );
+    assertEquals(req.endpoints[0].api_key, null);
+  },
+);
 
 Deno.test("buildProbeRequest: freshly typed key is sent inline", () => {
   const req = buildProbeRequest(
@@ -403,19 +462,25 @@ Deno.test("buildProbeRequest: freshly typed key is sent inline", () => {
   assertEquals(req.endpoints[0].api_key, "sk-fresh-key");
 });
 
-Deno.test("buildProbeRequest: no committed config — null key stays null", () => {
-  assertEquals(
-    buildProbeRequest(null, draftConfig(null)).endpoints[0].api_key,
-    null,
-  );
-});
+Deno.test(
+  "buildProbeRequest: no committed config — null key stays null",
+  () => {
+    assertEquals(
+      buildProbeRequest(null, draftConfig(null)).endpoints[0].api_key,
+      null,
+    );
+  },
+);
 
-Deno.test("buildProbeRequest: no committed config — typed key sent inline", () => {
-  assertEquals(
-    buildProbeRequest(null, draftConfig("sk-fresh")).endpoints[0].api_key,
-    "sk-fresh",
-  );
-});
+Deno.test(
+  "buildProbeRequest: no committed config — typed key sent inline",
+  () => {
+    assertEquals(
+      buildProbeRequest(null, draftConfig("sk-fresh")).endpoints[0].api_key,
+      "sk-fresh",
+    );
+  },
+);
 
 Deno.test("buildProbeRequest: tierIdx restricts to that tier", () => {
   const req = buildProbeRequest(draftConfig(maskedKey), multiTierConfig(), 1);
@@ -428,17 +493,20 @@ Deno.test("buildProbeRequest: omitted tierIdx probes all tiers", () => {
   assertEquals(req.tiers.length, 3);
 });
 
-Deno.test("singleProviderProbeRequest: single provider, empty tiers, masked key → null", () => {
-  const req = singleProviderProbeRequest(
-    draftConfig(maskedKey),
-    draftConfig(maskedKey),
-    "main",
-  );
-  assertEquals(req!.endpoints.length, 1);
-  assertEquals(req!.endpoints[0].id, "main");
-  assertEquals(req!.endpoints[0].api_key, null);
-  assertEquals(req!.tiers.length, 0);
-});
+Deno.test(
+  "singleProviderProbeRequest: single provider, empty tiers, masked key → null",
+  () => {
+    const req = singleProviderProbeRequest(
+      draftConfig(maskedKey),
+      draftConfig(maskedKey),
+      "main",
+    );
+    assertEquals(req!.endpoints.length, 1);
+    assertEquals(req!.endpoints[0].id, "main");
+    assertEquals(req!.endpoints[0].api_key, null);
+    assertEquals(req!.tiers.length, 0);
+  },
+);
 
 Deno.test("singleProviderProbeRequest: unknown id returns null", () => {
   assertEquals(
@@ -467,16 +535,21 @@ Deno.test("moveProfile: moves to the end of the target tier", () => {
 
 Deno.test("moveProfile: same-tier move reorders the profile to last", () => {
   const sameTier: ProfileConfig = {
-    tiers: [{
-      profiles: [
-        { id: "a", endpoint: "main", model: "m", max_context_window: 1 },
-        { id: "b", endpoint: "main", model: "m", max_context_window: 1 },
-      ],
-    }],
+    tiers: [
+      {
+        profiles: [
+          { id: "a", endpoint: "main", model: "m", max_context_window: 1 },
+          { id: "b", endpoint: "main", model: "m", max_context_window: 1 },
+        ],
+      },
+    ],
     endpoints: {},
   };
   const r = moveProfile(sameTier, 0, 0, 0);
-  assertEquals(r.tiers[0].profiles.map((p) => p.id), ["b", "a"]);
+  assertEquals(
+    r.tiers[0].profiles.map((p) => p.id),
+    ["b", "a"],
+  );
 });
 
 Deno.test("moveProfile: invalid coordinates leave the config unchanged", () => {
@@ -488,20 +561,23 @@ Deno.test("moveProfile: invalid coordinates leave the config unchanged", () => {
 
 // --- single-profile probe requests (profile Test button) ---
 
-Deno.test("singleProfileProbeRequest: one profile, its provider inline, masked key → null", () => {
-  const req = singleProfileProbeRequest(
-    draftConfig(maskedKey),
-    draftConfig(maskedKey),
-    0,
-    0,
-  );
-  assertEquals(req!.tiers.length, 1);
-  assertEquals(req!.tiers[0].profiles.length, 1);
-  assertEquals(req!.tiers[0].profiles[0].id, "p1");
-  assertEquals(req!.endpoints.length, 1);
-  assertEquals(req!.endpoints[0].id, "main");
-  assertEquals(req!.endpoints[0].api_key, null);
-});
+Deno.test(
+  "singleProfileProbeRequest: one profile, its provider inline, masked key → null",
+  () => {
+    const req = singleProfileProbeRequest(
+      draftConfig(maskedKey),
+      draftConfig(maskedKey),
+      0,
+      0,
+    );
+    assertEquals(req!.tiers.length, 1);
+    assertEquals(req!.tiers[0].profiles.length, 1);
+    assertEquals(req!.tiers[0].profiles[0].id, "p1");
+    assertEquals(req!.endpoints.length, 1);
+    assertEquals(req!.endpoints[0].id, "main");
+    assertEquals(req!.endpoints[0].api_key, null);
+  },
+);
 
 Deno.test("singleProfileProbeRequest: fresh key sent inline", () => {
   const req = singleProfileProbeRequest(
@@ -513,30 +589,40 @@ Deno.test("singleProfileProbeRequest: fresh key sent inline", () => {
   assertEquals(req!.endpoints[0].api_key, "sk-fresh");
 });
 
-Deno.test("singleProfileProbeRequest: dangling provider still probes with empty providers", () => {
-  const draft: ProfileConfig = {
-    tiers: [{
-      profiles: [{
-        id: "p1",
-        endpoint: "ghost",
-        model: "m",
-        max_context_window: 1,
-      }],
-    }],
-    endpoints: {},
-  };
-  const req = singleProfileProbeRequest(draft, draft, 0, 0);
-  assertEquals(req!.endpoints.length, 0);
-  assertEquals(req!.tiers[0].profiles[0].endpoint, "ghost");
-});
+Deno.test(
+  "singleProfileProbeRequest: dangling provider still probes with empty providers",
+  () => {
+    const draft: ProfileConfig = {
+      tiers: [
+        {
+          profiles: [
+            {
+              id: "p1",
+              endpoint: "ghost",
+              model: "m",
+              max_context_window: 1,
+            },
+          ],
+        },
+      ],
+      endpoints: {},
+    };
+    const req = singleProfileProbeRequest(draft, draft, 0, 0);
+    assertEquals(req!.endpoints.length, 0);
+    assertEquals(req!.tiers[0].profiles[0].endpoint, "ghost");
+  },
+);
 
-Deno.test("singleProfileProbeRequest: out-of-range coordinates return null", () => {
-  assertEquals(
-    singleProfileProbeRequest(null, draftConfig(maskedKey), 3, 0),
-    null,
-  );
-  assertEquals(
-    singleProfileProbeRequest(null, draftConfig(maskedKey), 0, 3),
-    null,
-  );
-});
+Deno.test(
+  "singleProfileProbeRequest: out-of-range coordinates return null",
+  () => {
+    assertEquals(
+      singleProfileProbeRequest(null, draftConfig(maskedKey), 3, 0),
+      null,
+    );
+    assertEquals(
+      singleProfileProbeRequest(null, draftConfig(maskedKey), 0, 3),
+      null,
+    );
+  },
+);

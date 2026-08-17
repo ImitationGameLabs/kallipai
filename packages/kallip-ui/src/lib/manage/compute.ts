@@ -101,10 +101,13 @@ export function addTier(config: ProfileConfig): ProfileConfig {
   return { ...config, tiers: [...config.tiers, { profiles: [] }] };
 }
 
-/** Remove the last tier (truncate-tail). No-op if already empty. */
-export function removeLastTier(config: ProfileConfig): ProfileConfig {
-  if (config.tiers.length === 0) return config;
-  return { ...config, tiers: config.tiers.slice(0, -1) };
+/** Remove the tier at tierIdx. No-op when out of range. */
+export function removeTier(
+  config: ProfileConfig,
+  tierIdx: number,
+): ProfileConfig {
+  if (tierIdx < 0 || tierIdx >= config.tiers.length) return config;
+  return { ...config, tiers: config.tiers.filter((_, i) => i !== tierIdx) };
 }
 
 /** Add a blank profile with default fields to the tier at tierIdx. */
@@ -115,17 +118,17 @@ export function addProfile(
   const tiers = config.tiers.map((t, i) =>
     i === tierIdx
       ? {
-        profiles: [
-          ...t.profiles,
-          {
-            id: "",
-            endpoint: "",
-            model: "",
-            max_context_window: DEFAULT_MAX_CONTEXT,
-          },
-        ],
-      }
-      : t
+          profiles: [
+            ...t.profiles,
+            {
+              id: "",
+              endpoint: "",
+              model: "",
+              max_context_window: DEFAULT_MAX_CONTEXT,
+            },
+          ],
+        }
+      : t,
   );
   return { ...config, tiers };
 }
@@ -139,7 +142,7 @@ export function removeProfile(
   const tiers = config.tiers.map((t, i) =>
     i === tierIdx
       ? { profiles: t.profiles.filter((_, pi) => pi !== profileIdx) }
-      : t
+      : t,
   );
   return { ...config, tiers };
 }
@@ -187,7 +190,7 @@ export function replaceTierProfiles(
   tierIdx: number,
   profiles: readonly ProfileModel[],
 ): ProfileConfig {
-  const tiers = config.tiers.map((t, i) => i === tierIdx ? { profiles } : t);
+  const tiers = config.tiers.map((t, i) => (i === tierIdx ? { profiles } : t));
   return { ...config, tiers };
 }
 
@@ -205,7 +208,7 @@ export function moveProfile(
   if (!profile || toTier < 0 || toTier >= config.tiers.length) return config;
   const without = removeProfile(config, fromTier, fromIdx);
   const tiers = without.tiers.map((t, i) =>
-    i === toTier ? { profiles: [...t.profiles, profile] } : t
+    i === toTier ? { profiles: [...t.profiles, profile] } : t,
   );
   return { ...without, tiers };
 }
@@ -289,12 +292,14 @@ export function singleProviderProbeRequest(
   const ep = draft.endpoints[id];
   if (!ep) return null;
   return {
-    endpoints: [{
-      id: ep.id,
-      family: ep.family,
-      base_url: ep.base_url,
-      api_key: probeWireKey(ep.api_key, committed?.endpoints[id]?.api_key),
-    }],
+    endpoints: [
+      {
+        id: ep.id,
+        family: ep.family,
+        base_url: ep.base_url,
+        api_key: probeWireKey(ep.api_key, committed?.endpoints[id]?.api_key),
+      },
+    ],
     tiers: [],
   };
 }
@@ -316,22 +321,31 @@ export function singleProfileProbeRequest(
   if (!profile) return null;
   const ep = draft.endpoints[profile.endpoint];
   const endpoints = ep
-    ? [{
-      id: ep.id,
-      family: ep.family,
-      base_url: ep.base_url,
-      api_key: probeWireKey(ep.api_key, committed?.endpoints[ep.id]?.api_key),
-    }]
+    ? [
+        {
+          id: ep.id,
+          family: ep.family,
+          base_url: ep.base_url,
+          api_key: probeWireKey(
+            ep.api_key,
+            committed?.endpoints[ep.id]?.api_key,
+          ),
+        },
+      ]
     : [];
   return {
     endpoints,
-    tiers: [{
-      profiles: [{
-        id: profile.id,
-        endpoint: profile.endpoint,
-        model: profile.model,
-      }],
-    }],
+    tiers: [
+      {
+        profiles: [
+          {
+            id: profile.id,
+            endpoint: profile.endpoint,
+            model: profile.model,
+          },
+        ],
+      },
+    ],
   };
 }
 
