@@ -2,10 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-
 /// A provider instance: credentials + endpoint. Maps ~1:1 to a just-llm-client backend.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Endpoint {
+pub struct Provider {
     pub id: String,
     /// Backend family — dispatched by the tagma's `BackendFactory` ("deepseek" /
     /// "openai-compatible").
@@ -14,11 +13,11 @@ pub struct Endpoint {
     pub base_url: Option<String>,
 }
 
-/// A model bound to an [`Endpoint`], carrying its declared capabilities.
+/// A model bound to a [`Provider`], carrying its declared capabilities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
-    /// The [`Endpoint::id`] this profile connects through.
+    /// The [`Provider::id`] this profile connects through.
     pub endpoint: String,
     pub model: String,
     /// Declared context window — the authoritative source for this profile's window. Required on

@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use just_llm_client::family;
 use serde::{Deserialize, Serialize};
 
-use super::model::{Endpoint, Profile, Tier};
+use super::model::{Profile, Provider, Tier};
 
 /// Env override for the profiles config file path.
 pub(crate) const PROFILES_FILE_ENV: &str = "KALLIP_PROFILES_FILE";
@@ -25,8 +25,8 @@ pub(crate) const PROFILES_FILE_ENV: &str = "KALLIP_PROFILES_FILE";
 pub struct ProfileConfig {
     /// Ordered capability tiers (selection reads `tiers[depth]`).
     pub tiers: Vec<Tier>,
-    /// Named provider instances keyed by [`Endpoint::id`].
-    pub endpoints: HashMap<String, Endpoint>,
+    /// Named provider instances keyed by [`Provider::id`].
+    pub endpoints: HashMap<String, Provider>,
 }
 
 /// Load profile configuration: from `KALLIP_PROFILES_FILE` (or a default path) if present,
@@ -59,7 +59,7 @@ pub fn from_env() -> Result<ProfileConfig> {
         }
         other => bail!("unsupported KALLIP_LLM_PROVIDER: {other}"),
     };
-    let endpoint = Endpoint {
+    let implicit_provider = Provider {
         id: provider.clone(),
         family: family_id.into(),
         api_key,
@@ -76,7 +76,7 @@ pub fn from_env() -> Result<ProfileConfig> {
         max_context_window,
     };
     let mut endpoints = HashMap::new();
-    endpoints.insert(provider, endpoint);
+    endpoints.insert(provider, implicit_provider);
     Ok(ProfileConfig {
         tiers: vec![Tier {
             profiles: vec![profile],
@@ -93,7 +93,7 @@ fn load_file(path: &Path) -> Result<ProfileConfig> {
         .with_context(|| format!("failed to parse profiles config {}", path.display()))?;
     validate(&file)?;
 
-    let endpoints: HashMap<String, Endpoint> = file
+    let endpoints: HashMap<String, Provider> = file
         .endpoints
         .into_iter()
         .map(|(id, body)| {
@@ -103,7 +103,7 @@ fn load_file(path: &Path) -> Result<ProfileConfig> {
             if api_key.trim().is_empty() {
                 bail!("endpoint '{id}': api_key is required");
             }
-            let endpoint = Endpoint {
+            let endpoint = Provider {
                 id: id.clone(),
                 family: body.family,
                 api_key,
@@ -113,13 +113,9 @@ fn load_file(path: &Path) -> Result<ProfileConfig> {
         })
         .collect::<Result<_>>()?;
 
-    let tiers = file
-        .tiers
-        .into_iter()
-        .map(|t| Tier {
-            profiles: t.profiles.into_iter().map(Profile::from).collect(),
-        })
-        .collect();
+    // Tier/Profile deserialize directly (fields identical, no id issues — profiles
+    // carry their id inline); no pass-through mirror types needed.
+    let tiers = file.tiers;
 
     Ok(ProfileConfig { tiers, endpoints })
 }
@@ -136,7 +132,6 @@ fn resolve_config_path() -> Result<Option<PathBuf>> {
     let path = dir.join("kallip").join("profiles.toml");
     Ok(if path.exists() { Some(path) } else { None })
 }
-
 
 /// Resolve the config file path for writing: explicit env override, else the
 /// default `<config_dir>/kallip/profiles.toml`. Unlike [`resolve_config_path`]
@@ -157,9 +152,10 @@ pub fn config_path() -> Result<PathBuf> {
 /// redundant with the map key but harmless: [`load_file`] uses an intermediate
 /// type that ignores it.
 pub fn save(config: &ProfileConfig, path: &Path) -> Result<()> {
-    let toml = toml::to_string_pretty(config)
-        .context("failed to serialize profiles config to TOML")?;
-    let parent = path.parent()
+    let toml =
+        toml::to_string_pretty(config).context("failed to serialize profiles config to TOML")?;
+    let parent = path
+        .parent()
         .context("profiles config path has no parent directory")?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("failed to create config dir {}", parent.display()))?;
@@ -273,41 +269,17 @@ fn validate(file: &ConfigFile) -> Result<()> {
 #[derive(Deserialize)]
 struct ConfigFile {
     #[serde(default)]
-    endpoints: HashMap<String, EndpointBody>,
+    endpoints: HashMap<String, ProviderEntry>,
     #[serde(default)]
-    tiers: Vec<TierBody>,
+    tiers: Vec<Tier>,
 }
 
 #[derive(Deserialize)]
-struct EndpointBody {
+struct ProviderEntry {
     family: String,
     api_key: String,
     #[serde(default)]
     base_url: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TierBody {
-    profiles: Vec<ProfileBody>,
-}
-
-#[derive(Deserialize)]
-struct ProfileBody {
-    id: String,
-    endpoint: String,
-    model: String,
-    max_context_window: usize,
-}
-
-impl From<ProfileBody> for Profile {
-    fn from(p: ProfileBody) -> Self {
-        Profile {
-            id: p.id,
-            endpoint: p.endpoint,
-            model: p.model,
-            max_context_window: p.max_context_window,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -408,13 +380,13 @@ api_key = "fake"
 
     #[test]
     fn save_load_roundtrip() {
+        use super::{Profile, Provider, Tier};
         use std::collections::HashMap;
-        use super::{Endpoint, Profile, Tier};
 
         let mut endpoints = HashMap::new();
         endpoints.insert(
             "ds".into(),
-            Endpoint {
+            Provider {
                 id: "ds".into(),
                 family: "deepseek".into(),
                 api_key: "secret-key".into(),
@@ -423,7 +395,7 @@ api_key = "fake"
         );
         endpoints.insert(
             "oa".into(),
-            Endpoint {
+            Provider {
                 id: "oa".into(),
                 family: "openai-compatible".into(),
                 api_key: "other-key".into(),
@@ -431,24 +403,22 @@ api_key = "fake"
             },
         );
         let original = ProfileConfig {
-            tiers: vec![
-                Tier {
-                    profiles: vec![
-                        Profile {
-                            id: "pro".into(),
-                            endpoint: "ds".into(),
-                            model: "deepseek-pro".into(),
-                            max_context_window: 500_000,
-                        },
-                        Profile {
-                            id: "backup".into(),
-                            endpoint: "oa".into(),
-                            model: "gpt-4".into(),
-                            max_context_window: 128_000,
-                        },
-                    ],
-                },
-            ],
+            tiers: vec![Tier {
+                profiles: vec![
+                    Profile {
+                        id: "pro".into(),
+                        endpoint: "ds".into(),
+                        model: "deepseek-pro".into(),
+                        max_context_window: 500_000,
+                    },
+                    Profile {
+                        id: "backup".into(),
+                        endpoint: "oa".into(),
+                        model: "gpt-4".into(),
+                        max_context_window: 128_000,
+                    },
+                ],
+            }],
             endpoints,
         };
 
@@ -466,6 +436,9 @@ api_key = "fake"
         assert_eq!(file.endpoints.len(), 2);
         assert_eq!(file.endpoints["ds"].family, "deepseek");
         assert_eq!(file.endpoints["ds"].api_key, "secret-key");
-        assert_eq!(file.endpoints["oa"].base_url.as_deref(), Some("https://api.example.com"));
+        assert_eq!(
+            file.endpoints["oa"].base_url.as_deref(),
+            Some("https://api.example.com")
+        );
     }
 }

@@ -226,12 +226,12 @@ pub async fn enqueue_committed_approval(
 /// spawn real agents. No declared window (env-path semantics).
 pub fn make_profile_bundle() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundle>> {
     use just_llm_client::family;
-    use kallip_runtime::profile::{Endpoint, Profile, ProfileConfig, ProfileRegistry, Tier};
+    use kallip_runtime::profile::{Profile, ProfileConfig, ProfileRegistry, Provider, Tier};
     use std::collections::HashMap;
     let mut endpoints = HashMap::new();
     endpoints.insert(
         "test".into(),
-        Endpoint {
+        Provider {
             id: "test".into(),
             family: family::DEEPSEEK.into(),
             api_key: "test".into(),
@@ -255,11 +255,14 @@ pub fn make_profile_bundle() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundl
         crate::backend::DEFAULT_USER_AGENT,
     )
     .expect("test backends build");
-    let registry = Arc::new(ProfileRegistry::new(cfg.tiers.clone(), source).expect("valid test registry"));
-    Arc::new(arc_swap::ArcSwap::from_pointee(crate::state::ProfileBundle {
-        config: cfg,
-        registry,
-    }))
+    let registry =
+        Arc::new(ProfileRegistry::new(cfg.tiers.clone(), source).expect("valid test registry"));
+    Arc::new(arc_swap::ArcSwap::from_pointee(
+        crate::state::ProfileBundle {
+            config: cfg,
+            registry,
+        },
+    ))
 }
 
 /// Create a fresh `SharedState` (default preset) for testing. The operator token

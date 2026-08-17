@@ -45,8 +45,8 @@ enum Attempt {
         error: BackendError,
         retry_after: Option<Duration>,
     },
-    /// Endpoint/profile-level permanent failure (401/403/404). A different profile (different
-    /// credentials / endpoint / model) may succeed, so the failover loop advances the chain.
+    /// Provider/profile-level permanent failure (401/403/404). A different profile (different
+    /// credentials / provider / model) may succeed, so the failover loop advances the chain.
     Failover(BackendError),
     /// Request-level permanent failure (400/422). Fails identically on every profile, so the
     /// failover loop does not advance — it errors the round.
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn is_failover_status_matches_auth_and_not_found() {
-        // Endpoint/profile-level — a different profile (credentials / model) may recover.
+        // Provider/profile-level — a different profile (credentials / model) may recover.
         assert!(is_failover_status(reqwest::StatusCode::UNAUTHORIZED));
         assert!(is_failover_status(reqwest::StatusCode::FORBIDDEN));
         assert!(is_failover_status(reqwest::StatusCode::NOT_FOUND));

@@ -5,7 +5,7 @@
 import { assertEquals } from "@std/assert";
 import type { ProfileConfig } from "@kallipai/kallip-client";
 import {
-  addEndpoint,
+  addProvider,
   addProfile,
   addTier,
   barColorClass,
@@ -20,13 +20,13 @@ import {
   moveProfile,
   profileConfigEqual,
   profileConfigToWire,
-  removeEndpoint,
+  removeProvider,
   removeLastTier,
   removeProfile,
   replaceTierProfiles,
-  singleEndpointProbeRequest,
+  singleProviderProbeRequest,
   singleProfileProbeRequest,
-  upsertEndpoint,
+  upsertProvider,
   validateWarnMinutes,
 } from "./compute.ts";
 
@@ -201,40 +201,40 @@ Deno.test("removeProfile: removes correct profile from correct tier", () => {
   assertEquals(r.tiers[0].profiles.length, 1);
   assertEquals(r.tiers[0].profiles[0], c.tiers[0].profiles[1]);
 });
-Deno.test("addEndpoint: adds endpoint under given id", () => {
-  const r = addEndpoint(emptyConfig, "new-ep");
+Deno.test("addProvider: adds provider under given id", () => {
+  const r = addProvider(emptyConfig, "new-ep");
   assertEquals(r.endpoints["new-ep"].family, "deepseek");
   assertEquals(r.endpoints["new-ep"].api_key, "");
   assertEquals(r.endpoints["new-ep"].base_url, null);
 });
-Deno.test("removeEndpoint: removes endpoint by id", () => {
-  const base = addEndpoint(emptyConfig, "ep1");
+Deno.test("removeProvider: removes provider by id", () => {
+  const base = addProvider(emptyConfig, "ep1");
   assertEquals(base.endpoints["ep1"] !== undefined, true);
-  assertEquals(removeEndpoint(base, "ep1").endpoints["ep1"], undefined);
+  assertEquals(removeProvider(base, "ep1").endpoints["ep1"], undefined);
 });
 
-Deno.test("upsertEndpoint: inserts a new endpoint under its id", () => {
+Deno.test("upsertProvider: inserts a new provider under its id", () => {
   const ep = {
     id: "ep2",
     family: "openai-compatible",
     api_key: "sk-x",
     base_url: "https://x.example/v1",
   };
-  const base = addEndpoint(emptyConfig, "ep1");
-  const r = upsertEndpoint(base, ep);
+  const base = addProvider(emptyConfig, "ep1");
+  const r = upsertProvider(base, ep);
   assertEquals(r.endpoints["ep2"], ep);
   assertEquals(r.endpoints["ep1"], base.endpoints["ep1"]);
 });
 
-Deno.test("upsertEndpoint: replaces an existing endpoint with the same id", () => {
-  const base = addEndpoint(emptyConfig, "ep1");
+Deno.test("upsertProvider: replaces an existing provider with the same id", () => {
+  const base = addProvider(emptyConfig, "ep1");
   const updated = {
     id: "ep1",
     family: "openai-compatible",
     api_key: "sk-new",
     base_url: null,
   };
-  const r = upsertEndpoint(base, updated);
+  const r = upsertProvider(base, updated);
   assertEquals(r.endpoints["ep1"], updated);
   assertEquals(Object.keys(r.endpoints).length, 1);
 });
@@ -428,8 +428,8 @@ Deno.test("buildProbeRequest: omitted tierIdx probes all tiers", () => {
   assertEquals(req.tiers.length, 3);
 });
 
-Deno.test("singleEndpointProbeRequest: single endpoint, empty tiers, masked key → null", () => {
-  const req = singleEndpointProbeRequest(
+Deno.test("singleProviderProbeRequest: single provider, empty tiers, masked key → null", () => {
+  const req = singleProviderProbeRequest(
     draftConfig(maskedKey),
     draftConfig(maskedKey),
     "main",
@@ -440,15 +440,15 @@ Deno.test("singleEndpointProbeRequest: single endpoint, empty tiers, masked key 
   assertEquals(req!.tiers.length, 0);
 });
 
-Deno.test("singleEndpointProbeRequest: unknown id returns null", () => {
+Deno.test("singleProviderProbeRequest: unknown id returns null", () => {
   assertEquals(
-    singleEndpointProbeRequest(null, draftConfig(null), "ghost"),
+    singleProviderProbeRequest(null, draftConfig(null), "ghost"),
     null,
   );
 });
 
-Deno.test("singleEndpointProbeRequest: fresh key inline", () => {
-  const req = singleEndpointProbeRequest(
+Deno.test("singleProviderProbeRequest: fresh key inline", () => {
+  const req = singleProviderProbeRequest(
     draftConfig(maskedKey),
     draftConfig("sk-new"),
     "main",
@@ -488,7 +488,7 @@ Deno.test("moveProfile: invalid coordinates leave the config unchanged", () => {
 
 // --- single-profile probe requests (profile Test button) ---
 
-Deno.test("singleProfileProbeRequest: one profile, its endpoint inline, masked key → null", () => {
+Deno.test("singleProfileProbeRequest: one profile, its provider inline, masked key → null", () => {
   const req = singleProfileProbeRequest(
     draftConfig(maskedKey),
     draftConfig(maskedKey),
@@ -513,7 +513,7 @@ Deno.test("singleProfileProbeRequest: fresh key sent inline", () => {
   assertEquals(req!.endpoints[0].api_key, "sk-fresh");
 });
 
-Deno.test("singleProfileProbeRequest: dangling endpoint still probes with empty endpoints", () => {
+Deno.test("singleProfileProbeRequest: dangling provider still probes with empty providers", () => {
   const draft: ProfileConfig = {
     tiers: [{
       profiles: [{

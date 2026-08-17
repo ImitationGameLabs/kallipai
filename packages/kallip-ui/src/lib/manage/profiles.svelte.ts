@@ -7,16 +7,16 @@ import type {
   ProfileProbeResponse,
 } from "@kallipai/kallip-client";
 import {
-  addEndpoint as addEndpointFn,
+  addProvider as addProviderFn,
   addProfile as addProfileFn,
   addTier as addTierFn,
   buildProbeRequest as buildProbeRequestFn,
   profileConfigEqual,
   profileConfigToWire as profileConfigToWireFn,
-  removeEndpoint as removeEndpointFn,
+  removeProvider as removeProviderFn,
   removeLastTier as removeLastTierFn,
   removeProfile as removeProfileFn,
-  singleEndpointProbeRequest as singleEndpointProbeRequestFn,
+  singleProviderProbeRequest as singleProviderProbeRequestFn,
 } from "./compute.ts";
 import { type ManagementBackend, managementBackend } from "./client.ts";
 
@@ -123,7 +123,7 @@ class ProfilesStore {
     }
   }
 
-  /** Probe every endpoint in the draft. */
+  /** Probe every provider in the draft. */
   probeAll(): Promise<void> {
     return this.runProbe();
   }
@@ -133,10 +133,10 @@ class ProfilesStore {
     return this.runProbe(tierIdx);
   }
 
-  /** Probe a single endpoint (no tier checks). */
-  async probeEndpoint(id: string): Promise<void> {
+  /** Probe a single provider (no tier checks). */
+  async probeProvider(id: string): Promise<void> {
     if (!this.draft) return;
-    const body = singleEndpointProbeRequestFn(this.config, this.draft, id);
+    const body = singleProviderProbeRequestFn(this.config, this.draft, id);
     if (!body) return;
     this.isProbing = true;
     this.probeError = null;
@@ -213,19 +213,19 @@ class ProfilesStore {
     this.draft = removeProfileFn(this.draft, tierIdx, profileIdx);
   }
 
-  /** Add a new endpoint with a generated id. */
-  addEndpoint(): void {
+  /** Add a new provider with a generated id. */
+  addProvider(): void {
     if (!this.draft) return;
     const id = typeof crypto !== "undefined" && crypto.randomUUID
       ? crypto.randomUUID()
       : `ep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    this.draft = addEndpointFn(this.draft, id);
+    this.draft = addProviderFn(this.draft, id);
   }
 
-  /** Remove an endpoint by id. */
-  removeEndpoint(id: string): void {
+  /** Remove a provider by id. */
+  removeProvider(id: string): void {
     if (!this.draft) return;
-    this.draft = removeEndpointFn(this.draft, id);
+    this.draft = removeProviderFn(this.draft, id);
   }
 }
 

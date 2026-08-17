@@ -1,27 +1,27 @@
 <script lang="ts">
-  // Profiles manage page — card-based three-layer view (endpoint cards in a
+  // Profiles manage page — card-based three-layer view (provider cards in a
   // global pool, tier containers holding profile cards), matching the wire
-  // shape 1:1. Read-mostly: editing goes through the Endpoint/Tier dialogs;
+  // shape 1:1. Read-mostly: editing goes through the Provider/Tier dialogs;
   // profile cards drag between tiers (HTML5 DnD updating the draft).
   //
   // Probe results route inline to the card that triggered them: the page
-  // accumulates endpointReports/profileReports maps keyed by id, because the
+  // accumulates providerReports/profileReports maps keyed by id, because the
   // store's single `probe` field is replaced wholesale on every call.
   import { profilesStore } from "../../lib/manage/profiles.svelte.ts";
   import { SvelteMap } from "svelte/reactivity";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
-  import EndpointDialog from "../../components/manage/EndpointDialog.svelte";
+  import ProviderDialog from "../../components/manage/ProviderDialog.svelte";
   import TierDialog from "../../components/manage/TierDialog.svelte";
   import {
     moveProfile,
     replaceTierProfiles,
     singleProfileProbeRequest,
-    upsertEndpoint,
+    upsertProvider,
   } from "../../lib/manage/compute.ts";
   import type {
-    ProfileEndpoint,
-    ProfileProbeEndpointReport,
-    ProfileProbeProfileReport,
+    ProfileProvider,
+    ProfileProviderProbeReport,
+    ProfileModelProbeReport,
     ProfileProbeRequest,
     ProfileProbeResponse,
     ProfileProbeStatus,
@@ -29,7 +29,7 @@
   import {
     common_edit,
     common_loading,
-    manage_profiles_add_endpoint,
+    manage_profiles_add_provider,
     manage_profiles_add_tier,
     manage_profiles_apply,
     manage_profiles_apply_all,
@@ -38,10 +38,10 @@
     manage_profiles_applied_result,
     manage_profiles_discard,
     manage_profiles_edit_aria,
-    manage_profiles_endpoint_base_url_default,
-    manage_profiles_endpoint_card_base_url_label,
-    manage_profiles_endpoint_test_aria,
-    manage_profiles_endpoints,
+    manage_profiles_provider_base_url_default,
+    manage_profiles_provider_card_base_url_label,
+    manage_profiles_provider_test_aria,
+    manage_profiles_providers,
     manage_profiles_heading,
     manage_profiles_heading_desc,
     manage_profiles_max_context_label,
@@ -55,7 +55,7 @@
     manage_profiles_probe_status_unreachable,
     manage_profiles_probe_tier_ok,
     manage_profiles_probe_tier_fail,
-    manage_profiles_profile_endpoint_label,
+    manage_profiles_profile_provider_label,
     manage_profiles_profile_model_label,
     manage_profiles_profile_test_aria,
     manage_profiles_remove_last_tier,
@@ -93,22 +93,22 @@
 
   async function onSave() {
     await profilesStore.save().catch(() => {});
-    endpointReports.clear();
+    providerReports.clear();
     profileReports.clear();
   }
 
   // --- inline probe results, routed by call-site scope ---
 
-  const endpointReports = new SvelteMap<string, ProfileProbeEndpointReport>();
-  const profileReports = new SvelteMap<string, ProfileProbeProfileReport>();
+  const providerReports = new SvelteMap<string, ProfileProviderProbeReport>();
+  const profileReports = new SvelteMap<string, ProfileModelProbeReport>();
 
   /** `${tierIdx}:${profileId}` — profile ids can repeat across tiers. */
   function profileKey(tierIdx: number, profileId: string): string {
     return `${tierIdx}:${profileId}`;
   }
 
-  function mergeEndpointScope(resp: ProfileProbeResponse): void {
-    for (const r of resp.results) endpointReports.set(r.endpoint_id, r);
+  function mergeProviderScope(resp: ProfileProbeResponse): void {
+    for (const r of resp.results) providerReports.set(r.endpoint_id, r);
   }
 
   function mergeProfileScope(tierIdx: number, resp: ProfileProbeResponse): void {
@@ -135,9 +135,9 @@
     profileReports.delete(profileKey(tierIdx, profileId));
   }
 
-  async function onTestEndpoint(id: string) {
-    await profilesStore.probeEndpoint(id);
-    if (profilesStore.probe) mergeEndpointScope(profilesStore.probe);
+  async function onTestProvider(id: string) {
+    await profilesStore.probeProvider(id);
+    if (profilesStore.probe) mergeProviderScope(profilesStore.probe);
   }
 
   async function onTestTier(tierIdx: number) {
@@ -157,20 +157,20 @@
     if (!body) return;
     const resp = await profilesStore.probeRaw(body);
     if (!resp) return;
-    mergeEndpointScope(resp);
+    mergeProviderScope(resp);
     mergeProfileScope(tierIdx, resp);
   }
 
   async function onTestAll() {
     await profilesStore.probeAll();
     if (!profilesStore.probe) return;
-    mergeEndpointScope(profilesStore.probe);
+    mergeProviderScope(profilesStore.probe);
     mergeProfileScopeAll(profilesStore.probe);
   }
 
   function onDiscard() {
     profilesStore.reset();
-    endpointReports.clear();
+    providerReports.clear();
     profileReports.clear();
   }
 
@@ -201,21 +201,21 @@
 
   // --- dialogs ---
 
-  let endpointDialog = $state<{
+  let providerDialog = $state<{
     open: boolean;
     mode: "new" | "edit";
-    endpoint: ProfileEndpoint | null;
-  }>({ open: false, mode: "new", endpoint: null });
+    provider: ProfileProvider | null;
+  }>({ open: false, mode: "new", provider: null });
 
-  function openEndpointNew() {
-    endpointDialog = { open: true, mode: "new", endpoint: null };
+  function openProviderNew() {
+    providerDialog = { open: true, mode: "new", provider: null };
   }
 
-  function openEndpointEdit(ep: ProfileEndpoint) {
-    endpointDialog = { open: true, mode: "edit", endpoint: ep };
+  function openProviderEdit(ep: ProfileProvider) {
+    providerDialog = { open: true, mode: "edit", provider: ep };
   }
 
-  function onEndpointSave(result: {
+  function onProviderSave(result: {
     id: string;
     family: string;
     baseUrl: string | null;
@@ -227,21 +227,21 @@
       result.apiKey === null
         ? draft.endpoints[result.id]?.api_key ?? ""
         : result.apiKey;
-    profilesStore.draft = upsertEndpoint(draft, {
+    profilesStore.draft = upsertProvider(draft, {
       id: result.id,
       family: result.family,
       api_key: existing,
       base_url: result.baseUrl,
     });
-    endpointDialog.open = false;
+    providerDialog.open = false;
   }
 
-  function onEndpointRemove() {
-    if (endpointDialog.mode === "edit" && endpointDialog.endpoint) {
-      profilesStore.removeEndpoint(endpointDialog.endpoint.id);
-      endpointReports.delete(endpointDialog.endpoint.id);
+  function onProviderRemove() {
+    if (providerDialog.mode === "edit" && providerDialog.provider) {
+      profilesStore.removeProvider(providerDialog.provider.id);
+      providerReports.delete(providerDialog.provider.id);
     }
-    endpointDialog.open = false;
+    providerDialog.open = false;
   }
 
   let tierDialog = $state<{
@@ -304,7 +304,7 @@
       : manage_profiles_probe_models_other({ count });
   }
 
-  const endpointIds = $derived(
+  const providerIds = $derived(
     Object.keys(profilesStore.draft?.endpoints ?? {}),
   );
 </script>
@@ -377,36 +377,36 @@
         ⚠ {manage_profiles_tiers_hazard()}
       </div>
 
-      <!-- Endpoints: global pool of endpoint cards -->
+      <!-- Providers: global pool of provider cards -->
       <section class="space-y-3">
         <div class="flex items-center justify-between">
           <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-            {manage_profiles_endpoints()}
+            {manage_profiles_providers()}
           </h2>
           <button
             class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-            onclick={openEndpointNew}
-            >{manage_profiles_add_endpoint()}</button
+            onclick={openProviderNew}
+            >{manage_profiles_add_provider()}</button
           >
         </div>
         <div class="grid gap-3 sm:grid-cols-2">
           {#each Object.values(profilesStore.draft.endpoints) as ep (ep.id)}
-            {@const report = endpointReports.get(ep.id)}
+            {@const report = providerReports.get(ep.id)}
             <div class="card preset-tonal-surface p-4 space-y-2">
               <div class="flex items-center justify-between gap-2">
                 <span class="font-mono text-sm font-semibold">{ep.id}</span>
                 <div class="flex gap-1">
                   <button
                     class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-                    aria-label={manage_profiles_endpoint_test_aria()}
+                    aria-label={manage_profiles_provider_test_aria()}
                     disabled={profilesStore.isProbing}
-                    onclick={() => onTestEndpoint(ep.id)}
+                    onclick={() => onTestProvider(ep.id)}
                     >{manage_profiles_test()}</button
                   >
                   <button
                     class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
                     aria-label={manage_profiles_edit_aria({ name: ep.id })}
-                    onclick={() => openEndpointEdit(ep)}
+                    onclick={() => openProviderEdit(ep)}
                     >{common_edit()}</button
                   >
                 </div>
@@ -414,16 +414,16 @@
               <dl class="text-xs space-y-1">
                 <div class="flex gap-2">
                   <dt class="opacity-60">
-                    {manage_profiles_profile_endpoint_label()}:
+                    {manage_profiles_profile_provider_label()}:
                   </dt>
                   <dd class="font-mono">{ep.family}</dd>
                 </div>
                 <div class="flex gap-2">
                   <dt class="opacity-60">
-                    {manage_profiles_endpoint_card_base_url_label()}:
+                    {manage_profiles_provider_card_base_url_label()}:
                   </dt>
                   <dd class="font-mono truncate">
-                    {ep.base_url ?? manage_profiles_endpoint_base_url_default()}
+                    {ep.base_url ?? manage_profiles_provider_base_url_default()}
                   </dd>
                 </div>
                 <div class="flex gap-2">
@@ -576,7 +576,7 @@
                 <dl class="text-xs space-y-0.5">
                   <div class="flex gap-2">
                     <dt class="opacity-60">
-                      {manage_profiles_profile_endpoint_label()}:
+                      {manage_profiles_profile_provider_label()}:
                     </dt>
                     <dd class="font-mono">{profile.endpoint}</dd>
                   </div>
@@ -628,14 +628,14 @@
   onCancel={() => (showApplyDialog = false)}
 />
 
-<EndpointDialog
-  open={endpointDialog.open}
-  mode={endpointDialog.mode}
-  endpoint={endpointDialog.endpoint}
-  existingIds={endpointIds}
-  onSave={onEndpointSave}
-  onCancel={() => (endpointDialog.open = false)}
-  onRemove={endpointDialog.mode === "edit" ? onEndpointRemove : null}
+<ProviderDialog
+  open={providerDialog.open}
+  mode={providerDialog.mode}
+  provider={providerDialog.provider}
+  existingIds={providerIds}
+  onSave={onProviderSave}
+  onCancel={() => (providerDialog.open = false)}
+  onRemove={providerDialog.mode === "edit" ? onProviderRemove : null}
 />
 
 <TierDialog
@@ -645,7 +645,7 @@
   profiles={tierDialog.mode === "edit"
     ? profilesStore.draft?.tiers[tierDialog.tierIdx]?.profiles ?? []
     : []}
-  endpointIds={endpointIds}
+  providerIds={providerIds}
   onSave={onTierSave}
   onCancel={() => (tierDialog.open = false)}
 />

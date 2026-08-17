@@ -1,4 +1,4 @@
-//! The profile registry: ordered capability tiers over named endpoints, backed by a
+//! The profile registry: ordered capability tiers over named providers, backed by a
 //! [`BackendSource`].
 //!
 //! Selection resolves a [`Tier`] per agent purely by supervisor depth: `tiers[depth.min(len-1)]`
@@ -14,25 +14,25 @@ use just_llm_client::{ChatClient, ChatClientOptions, LlmBackend};
 
 use super::model::{Profile, Tier};
 
-/// Lazily provides [`LlmBackend`]s keyed by endpoint id. The tagma owns the implementation
+/// Lazily provides [`LlmBackend`]s keyed by provider id. The tagma owns the implementation
 /// (reqwest + [`just_llm_client::client::BackendFactory`]); the registry looks up the active
 /// profile's backend via [`get`](Self::get), and a failover profile's backend is built on first
-/// use. Implementations must construct a given endpoint's backend at most once under concurrent
+/// use. Implementations must construct a given provider's backend at most once under concurrent
 /// access (e.g. a locked cache), so repeated lookups share one backend.
 pub trait BackendSource: Send + Sync {
-    fn get(&self, endpoint_id: &str) -> Result<Arc<dyn LlmBackend>>;
+    fn get(&self, provider_id: &str) -> Result<Arc<dyn LlmBackend>>;
 }
 
 pub struct ProfileRegistry {
     tiers: Vec<Tier>,
-    /// Backends keyed by endpoint id. The active set is pre-built at tagma startup; failover
+    /// Backends keyed by provider id. The active set is pre-built at tagma startup; failover
     /// endpoints are built lazily by the [`BackendSource`] on first lookup. The registry itself
     /// never constructs — it calls [`BackendSource::get`].
     source: Arc<dyn BackendSource>,
 }
 
 impl ProfileRegistry {
-    /// Construct and validate: non-empty tier list, every tier non-empty. Endpoint existence,
+    /// Construct and validate: non-empty tier list, every tier non-empty. Provider existence,
     /// family, and base_url are validated by the tagma when it builds the active set (see
     /// `kallip_tagma::backend`); the registry only checks structure.
     pub fn new(tiers: Vec<Tier>, source: Arc<dyn BackendSource>) -> Result<Self> {
@@ -64,7 +64,7 @@ impl ProfileRegistry {
         &self.tiers[idx]
     }
 
-    /// Build a [`ChatClient`] for a profile, looking up its endpoint's backend via the
+    /// Build a [`ChatClient`] for a profile, looking up its provider's backend via the
     /// [`BackendSource`] (pre-built for the active set, lazily constructed for failover profiles).
     pub fn build_client(
         &self,
@@ -187,8 +187,8 @@ mod tests {
     }
 
     #[test]
-    fn build_client_errors_when_endpoint_missing() {
-        // Endpoint existence is tagma-validated at startup; this covers the runtime lookup path.
+    fn build_client_errors_when_provider_missing() {
+        // Provider existence is tagma-validated at startup; this covers the runtime lookup path.
         let reg = ProfileRegistry::new(
             vec![Tier {
                 profiles: vec![Profile {
@@ -204,7 +204,7 @@ mod tests {
         let profile = reg.select_profile(0).active_profile().clone();
         let err = reg
             .build_client(&profile, None)
-            .expect_err("build_client should error on a missing endpoint");
+            .expect_err("build_client should error on a missing provider");
         assert!(format!("{err}").contains("no backend"), "got: {err}");
     }
 }

@@ -33,23 +33,23 @@ pub(crate) fn ds_backend() -> Arc<dyn LlmBackend> {
     .expect("deepseek backend constructs without network")
 }
 
-/// Test-only [`BackendSource`]: endpoint id → backend. A missing endpoint yields `Err`, used to
+/// Test-only [`BackendSource`]: provider id → backend. A missing provider yields `Err`, used to
 /// simulate an unbuildable failover candidate (the skip path).
 pub(crate) struct MapSource(pub(crate) HashMap<String, Arc<dyn LlmBackend>>);
 impl BackendSource for MapSource {
-    fn get(&self, endpoint_id: &str) -> anyhow::Result<Arc<dyn LlmBackend>> {
+    fn get(&self, provider_id: &str) -> anyhow::Result<Arc<dyn LlmBackend>> {
         self.0
-            .get(endpoint_id)
+            .get(provider_id)
             .cloned()
-            .with_context(|| format!("unknown endpoint '{endpoint_id}'"))
+            .with_context(|| format!("unknown provider '{provider_id}'"))
     }
 }
 
 /// A minimal [`Profile`] with `{id}`-derived model name.
-pub(crate) fn profile(id: &str, endpoint: &str, window: usize) -> Profile {
+pub(crate) fn profile(id: &str, provider: &str, window: usize) -> Profile {
     Profile {
         id: id.into(),
-        endpoint: endpoint.into(),
+        endpoint: provider.into(),
         model: format!("{id}-model"),
         max_context_window: window,
     }
@@ -139,9 +139,9 @@ pub(crate) async fn ctx_from_source(
 }
 
 /// A `MapSource` of network-free DeepSeek backends for `endpoints` (unit-test convenience).
-pub(crate) fn map_source(endpoints: &[&str]) -> Arc<dyn BackendSource> {
+pub(crate) fn map_source(providers: &[&str]) -> Arc<dyn BackendSource> {
     let mut map = HashMap::new();
-    for ep in endpoints {
+    for ep in providers {
         map.insert((*ep).into(), ds_backend());
     }
     Arc::new(MapSource(map))
@@ -149,8 +149,8 @@ pub(crate) fn map_source(endpoints: &[&str]) -> Arc<dyn BackendSource> {
 
 /// Convenience: build an `AgentContext` over `profiles` whose endpoints are `endpoints`, with the
 /// default retry policy.
-pub(crate) async fn make_ctx(profiles: Vec<Profile>, endpoints: &[&str]) -> AgentContext {
-    ctx_from_source(profiles, map_source(endpoints), RetryPolicy::default()).await
+pub(crate) async fn make_ctx(profiles: Vec<Profile>, providers: &[&str]) -> AgentContext {
+    ctx_from_source(profiles, map_source(providers), RetryPolicy::default()).await
 }
 
 /// A [`Usage`] with only `prompt_tokens` set (and derived `total_tokens`).

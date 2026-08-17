@@ -136,16 +136,16 @@ export interface ListAgentsQuery {
 
 // Profiles
 
-/** Provider endpoint (credentials + optional base URL). GET returns a masked
+/** Provider (credentials + optional base URL). GET returns a masked
  * api_key; on PUT null keeps the live key. */
-export interface ProfileEndpoint {
+export interface ProfileProvider {
   readonly id: string;
   readonly family: string;
   readonly api_key: string | null;
   readonly base_url: string | null;
 }
 
-/** A model bound to an endpoint. */
+/** A model bound to a provider. */
 export interface ProfileModel {
   readonly id: string;
   readonly endpoint: string;
@@ -161,7 +161,7 @@ export interface ProfileTier {
 /** `GET /profiles` / `PUT /profiles` body. */
 export interface ProfileConfig {
   readonly tiers: readonly ProfileTier[];
-  readonly endpoints: Readonly<Record<string, ProfileEndpoint>>;
+  readonly endpoints: Readonly<Record<string, ProfileProvider>>;
 }
 
 /** `POST /profiles/apply` response. */
@@ -172,8 +172,8 @@ export interface ProfileApplyResponse {
 
 // Profile probe (dry-run validation before applying)
 
-/** Per-endpoint definition sent to POST /profiles/probe. `api_key: null` reuses the live key. */
-export interface ProfileProbeEndpoint {
+/** Per-provider definition sent to POST /profiles/probe. `api_key: null` reuses the live key. */
+export interface ProfileProviderProbeRequest {
   readonly id: string;
   readonly family: string;
   readonly api_key: string | null;
@@ -181,7 +181,7 @@ export interface ProfileProbeEndpoint {
 }
 
 /** Per-profile model reference inside a probed tier. */
-export interface ProfileProbeProfile {
+export interface ProfileModelProbeRequest {
   readonly id: string;
   readonly endpoint: string;
   readonly model: string;
@@ -189,9 +189,9 @@ export interface ProfileProbeProfile {
 
 /** `POST /profiles/probe` request. */
 export interface ProfileProbeRequest {
-  readonly endpoints: readonly ProfileProbeEndpoint[];
+  readonly endpoints: readonly ProfileProviderProbeRequest[];
   readonly tiers: readonly {
-    readonly profiles: readonly ProfileProbeProfile[];
+    readonly profiles: readonly ProfileModelProbeRequest[];
   }[];
 }
 
@@ -203,7 +203,7 @@ export type ProfileProbeStatus =
   | "partial";
 
 /** Probe outcome for one endpoint: catalog/balance info on success, reason otherwise. */
-export interface ProfileProbeEndpointReport {
+export interface ProfileProviderProbeReport {
   readonly endpoint_id: string;
   readonly status: ProfileProbeStatus;
   readonly latency_ms: number | null | undefined;
@@ -214,7 +214,7 @@ export interface ProfileProbeEndpointReport {
 }
 
 /** Probe outcome for one profile (model reference) inside a tier. */
-export interface ProfileProbeProfileReport {
+export interface ProfileModelProbeReport {
   readonly profile_id: string;
   readonly endpoint_id: string;
   readonly status: ProfileProbeStatus;
@@ -222,16 +222,16 @@ export interface ProfileProbeProfileReport {
 }
 
 /** Probe rollup for one tier. */
-export interface ProfileProbeTierReport {
+export interface ProfileTierProbeReport {
   readonly index: number;
   readonly all_ok: boolean;
-  readonly profiles: readonly ProfileProbeProfileReport[];
+  readonly profiles: readonly ProfileModelProbeReport[];
 }
 
 /** `POST /profiles/probe` response. */
 export interface ProfileProbeResponse {
-  readonly results: readonly ProfileProbeEndpointReport[];
-  readonly tiers: readonly ProfileProbeTierReport[];
+  readonly results: readonly ProfileProviderProbeReport[];
+  readonly tiers: readonly ProfileTierProbeReport[];
 }
 
 // Work schedules

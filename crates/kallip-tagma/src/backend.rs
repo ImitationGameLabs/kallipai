@@ -1,9 +1,9 @@
 //! Tagma-owned backend construction.
 //!
 //! The tagma owns the HTTP-client concern (reqwest TLS + connect/read timeouts) and, via [`BackendFactory`],
-//! builds one shared [`LlmBackend`] per endpoint. At startup only the **active set** — each
+//! builds one shared [`LlmBackend`] per provider. At startup only the **active set** — each
 //! tier's `profiles[0]` — is built, so misconfiguration of the primary path fails fast. Failover
-//! profiles' endpoints are built lazily by [`TagmaBackendSource`] on first use (within-tier
+//! profiles' providers are built lazily by [`TagmaBackendSource`] on first use (within-tier
 //! failover). The resulting [`BackendSource`] is handed to `ProfileRegistry`, which does
 //! selection + lookup only; the runtime reuses `reqwest` types for HTTP-shape retry
 //! classification (see `retry.rs`) but never constructs a backend.
@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use just_llm_client::LlmBackend;
 use just_llm_client::client::BackendFactory;
 use just_llm_client::family;
-use kallip_runtime::profile::{BackendSource, Endpoint, ProfileConfig};
+use kallip_runtime::profile::{BackendSource, ProfileConfig, Provider};
 
 /// Default timeout for establishing the outbound LLM HTTP connection (DNS + TCP + TLS). Distinct
 /// from [`DEFAULT_READ_TIMEOUT`], which bounds per-read idle.
@@ -44,32 +44,32 @@ pub(crate) fn resolve_user_agent(provided: Option<&str>) -> &str {
         .unwrap_or(DEFAULT_USER_AGENT)
 }
 
-/// Validate every endpoint referenced by `cfg`'s tiers (active **and** failover): the endpoint
-/// exists, its family is registered with `factory`, and an openai-compatible endpoint declares a
+/// Validate every provider referenced by `cfg`'s tiers (active **and** failover): the provider
+/// exists, its family is registered with `factory`, and an openai-compatible provider declares a
 /// `base_url`. Cheap — no construction — so misconfiguration fails fast at startup, before any
-/// agent relies on a failover profile. Unreferenced endpoints are not checked (dead config).
-fn validate_endpoints(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<()> {
+/// agent relies on a failover profile. Unreferenced providers are not checked (dead config).
+fn validate_providers(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<()> {
     let families: Vec<&str> = factory.families().collect();
     for tier in &cfg.tiers {
         for profile in &tier.profiles {
-            let endpoint = cfg.endpoints.get(&profile.endpoint).with_context(|| {
+            let provider = cfg.endpoints.get(&profile.endpoint).with_context(|| {
                 format!(
-                    "profile '{}' references unknown endpoint '{}'",
+                    "profile '{}' references unknown provider '{}'",
                     profile.id, profile.endpoint
                 )
             })?;
-            if !families.contains(&endpoint.family.as_str()) {
+            if !families.contains(&provider.family.as_str()) {
                 bail!(
-                    "endpoint '{}' has unknown family '{}' (registered: {})",
-                    endpoint.id,
-                    endpoint.family,
+                    "provider '{}' has unknown family '{}' (registered: {})",
+                    provider.id,
+                    provider.family,
                     families.join(", ")
                 );
             }
-            if endpoint.family == family::OPENAI_COMPATIBLE && endpoint.base_url.is_none() {
+            if provider.family == family::OPENAI_COMPATIBLE && provider.base_url.is_none() {
                 bail!(
-                    "endpoint '{}' (openai-compatible) requires a base_url",
-                    endpoint.id
+                    "provider '{}' (openai-compatible) requires a base_url",
+                    provider.id
                 );
             }
         }
@@ -77,7 +77,7 @@ fn validate_endpoints(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<(
     Ok(())
 }
 
-/// Build one backend for `endpoint` via the factory: a fresh `reqwest::Client` (rustls TLS, the
+/// Build one backend for `provider` via the factory: a fresh `reqwest::Client` (rustls TLS, the
 /// default connect + per-read idle timeouts, and the resolved `User-Agent`) with credentials
 /// passed into the constructor.
 ///
@@ -90,7 +90,7 @@ fn validate_endpoints(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<(
 /// for the active set, lazily on first failover use otherwise.
 pub(crate) fn build_one(
     factory: &BackendFactory,
-    endpoint: &Endpoint,
+    provider: &Provider,
     user_agent: &str,
 ) -> Result<Arc<dyn LlmBackend>> {
     let builder = reqwest::Client::builder()
@@ -100,12 +100,12 @@ pub(crate) fn build_one(
         .user_agent(user_agent);
     factory
         .create(
-            &endpoint.family,
+            &provider.family,
             builder,
-            &endpoint.api_key,
-            endpoint.base_url.as_deref(),
+            &provider.api_key,
+            provider.base_url.as_deref(),
         )
-        .with_context(|| format!("failed to build backend for endpoint '{}'", endpoint.id))
+        .with_context(|| format!("failed to build backend for provider '{}'", provider.id))
 }
 
 /// Validate the whole config, pre-build the **active set**, and return a lazily-constructing
@@ -116,7 +116,7 @@ pub fn build_backends(
     factory: BackendFactory,
     user_agent: &str,
 ) -> Result<Arc<dyn BackendSource>> {
-    validate_endpoints(cfg, &factory)?;
+    validate_providers(cfg, &factory)?;
 
     let mut cache = HashMap::new();
     for tier in &cfg.tiers {
@@ -124,38 +124,38 @@ pub fn build_backends(
         if cache.contains_key(&active.endpoint) {
             continue;
         }
-        let endpoint = cfg.endpoints.get(&active.endpoint).with_context(|| {
+        let provider = cfg.endpoints.get(&active.endpoint).with_context(|| {
             format!(
-                "active profile '{}' references unknown endpoint '{}'",
+                "active profile '{}' references unknown provider '{}'",
                 active.id, active.endpoint
             )
         })?;
         cache.insert(
             active.endpoint.clone(),
-            build_one(&factory, endpoint, user_agent)?,
+            build_one(&factory, provider, user_agent)?,
         );
     }
 
     Ok(Arc::new(TagmaBackendSource {
-        endpoints: cfg.endpoints.clone(),
+        providers: cfg.endpoints.clone(),
         factory,
         user_agent: user_agent.to_string(),
         cache: std::sync::Mutex::new(cache),
     }))
 }
 
-/// Tagma-owned [`BackendSource`]: a locked cache of built backends over the endpoint config and
-/// factory. Active endpoints are pre-seeded at construction; failover endpoints are built on first
+/// Tagma-owned [`BackendSource`]: a locked cache of built backends over the provider config and
+/// factory. Active providers are pre-seeded at construction; failover providers are built on first
 /// [`get`](BackendSource::get), under the cache lock, so concurrent callers share one backend.
 pub struct TagmaBackendSource {
-    endpoints: HashMap<String, Endpoint>,
+    providers: HashMap<String, Provider>,
     factory: BackendFactory,
     user_agent: String,
     cache: std::sync::Mutex<HashMap<String, Arc<dyn LlmBackend>>>,
 }
 
 impl BackendSource for TagmaBackendSource {
-    fn get(&self, endpoint_id: &str) -> Result<Arc<dyn LlmBackend>> {
+    fn get(&self, provider_id: &str) -> Result<Arc<dyn LlmBackend>> {
         // Fast path: return the cached backend if present. `.ok()` treats a poisoned mutex as a
         // cache miss (a panicked builder doesn't invalidate already-built backends, so poison must
         // not brick subsequent lookups).
@@ -163,27 +163,27 @@ impl BackendSource for TagmaBackendSource {
             .cache
             .lock()
             .ok()
-            .and_then(|cache| cache.get(endpoint_id).cloned())
+            .and_then(|cache| cache.get(provider_id).cloned())
         {
             return Ok(backend);
         }
         // Slow path: resolve + build OUTSIDE the lock, so concurrent first-failover lookups for
-        // *other* endpoints aren't blocked on reqwest/rustls client construction.
-        let endpoint = self
-            .endpoints
-            .get(endpoint_id)
-            .with_context(|| format!("unknown endpoint '{endpoint_id}'"))?;
-        let backend = build_one(&self.factory, endpoint, &self.user_agent)?;
+        // *other* providers aren't blocked on reqwest/rustls client construction.
+        let provider = self
+            .providers
+            .get(provider_id)
+            .with_context(|| format!("unknown provider '{provider_id}'"))?;
+        let backend = build_one(&self.factory, provider, &self.user_agent)?;
         // Re-lock to publish; a racing builder may have inserted first — reuse theirs. Poison is
         // recovered (the map is still valid data), so a prior panic doesn't propagate.
         let mut cache = self
             .cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = cache.get(endpoint_id) {
+        if let Some(existing) = cache.get(provider_id) {
             return Ok(existing.clone());
         }
-        cache.insert(endpoint_id.to_string(), backend.clone());
+        cache.insert(provider_id.to_string(), backend.clone());
         Ok(backend)
     }
 }
@@ -194,18 +194,18 @@ mod tests {
     use just_llm_client::types::chat::{ChatCompletionRequest, ChatMessage};
     use kallip_runtime::profile::{Profile, Tier};
 
-    /// One deepseek endpoint + a single-profile tier referencing it.
+    /// One deepseek provider + a single-profile tier referencing it.
     fn ds_cfg() -> ProfileConfig {
         single_tier_cfg("ds", "p", "ds")
     }
 
-    /// Build a one-tier config whose active profile references `endpoint_id`.
-    fn single_tier_cfg(endpoint_id: &str, profile: &str, endpoint: &str) -> ProfileConfig {
+    /// Build a one-tier config whose active profile references `provider_id`.
+    fn single_tier_cfg(provider_id: &str, profile: &str, endpoint: &str) -> ProfileConfig {
         let mut endpoints = HashMap::new();
         endpoints.insert(
-            endpoint_id.into(),
-            Endpoint {
-                id: endpoint_id.into(),
+            provider_id.into(),
+            Provider {
+                id: provider_id.into(),
                 family: family::DEEPSEEK.into(),
                 api_key: "fake".into(),
                 base_url: None,
@@ -225,9 +225,9 @@ mod tests {
     }
 
     #[test]
-    fn active_endpoint_pre_built_and_lookup_succeeds() {
+    fn active_provider_pre_built_and_lookup_succeeds() {
         let source = build_backends(&ds_cfg(), BackendFactory::new(), DEFAULT_USER_AGENT).unwrap();
-        // The active endpoint is pre-built, so lookup succeeds without lazy construction.
+        // The active provider is pre-built, so lookup succeeds without lazy construction.
         assert!(source.get("ds").is_ok());
     }
 
@@ -237,7 +237,7 @@ mod tests {
         let mut cfg = ds_cfg();
         cfg.endpoints.insert(
             "backup".into(),
-            Endpoint {
+            Provider {
                 id: "backup".into(),
                 family: family::DEEPSEEK.into(),
                 api_key: "fake".into(),
@@ -252,20 +252,20 @@ mod tests {
         });
 
         let source = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT).unwrap();
-        // The failover endpoint is validated but not pre-built — its lookup builds it lazily.
+        // The failover provider is validated but not pre-built — its lookup builds it lazily.
         assert!(
             source.get("backup").is_ok(),
-            "failover endpoint builds lazily"
+            "failover provider builds lazily"
         );
     }
 
     #[test]
-    fn unreferenced_endpoint_does_not_block_startup() {
-        // A second endpoint no profile references: not validated, not built — startup succeeds.
+    fn unreferenced_provider_does_not_block_startup() {
+        // A second provider no profile references: not validated, not built — startup succeeds.
         let mut cfg = ds_cfg();
         cfg.endpoints.insert(
             "dead".into(),
-            Endpoint {
+            Provider {
                 id: "dead".into(),
                 family: "anthropic".into(), // would be invalid if referenced, but it's not
                 api_key: "fake".into(),
@@ -287,11 +287,11 @@ mod tests {
     }
 
     #[test]
-    fn openai_compat_endpoint_without_base_url_errors() {
+    fn openai_compat_provider_without_base_url_errors() {
         let mut endpoints = HashMap::new();
         endpoints.insert(
             "oa".into(),
-            Endpoint {
+            Provider {
                 id: "oa".into(),
                 family: family::OPENAI_COMPATIBLE.into(),
                 api_key: "fake".into(),
@@ -334,7 +334,7 @@ mod tests {
             .await;
 
         // openai-compatible so the request targets `{base_url}/chat/completions`.
-        let endpoint = Endpoint {
+        let endpoint = Provider {
             id: "ua".into(),
             family: family::OPENAI_COMPATIBLE.into(),
             api_key: "test".into(),

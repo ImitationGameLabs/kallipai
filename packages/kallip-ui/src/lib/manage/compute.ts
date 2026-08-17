@@ -6,7 +6,7 @@
 
 import type {
   ProfileConfig,
-  ProfileEndpoint,
+  ProfileProvider,
   ProfileModel,
   ProfileProbeRequest,
 } from "@kallipai/kallip-client";
@@ -144,8 +144,8 @@ export function removeProfile(
   return { ...config, tiers };
 }
 
-/** Add a new endpoint under the given id. */
-export function addEndpoint(config: ProfileConfig, id: string): ProfileConfig {
+/** Add a new provider under the given id. */
+export function addProvider(config: ProfileConfig, id: string): ProfileConfig {
   return {
     ...config,
     endpoints: {
@@ -155,8 +155,8 @@ export function addEndpoint(config: ProfileConfig, id: string): ProfileConfig {
   };
 }
 
-/** Remove an endpoint by id. */
-export function removeEndpoint(
+/** Remove a provider by id. */
+export function removeProvider(
   config: ProfileConfig,
   id: string,
 ): ProfileConfig {
@@ -164,18 +164,18 @@ export function removeEndpoint(
   return { ...config, endpoints: rest };
 }
 
-/** Insert or replace an endpoint under its id (id-keyed upsert).
+/** Insert or replace a provider under its id (id-keyed upsert).
  * Replacing is the Edit path — the dialog locks the id there, so a matching
- * id is always the same endpoint being updated; New-mode duplicate ids are
+ * id is always the same provider being updated; New-mode duplicate ids are
  * rejected by dialog validation before this runs.
  */
-export function upsertEndpoint(
+export function upsertProvider(
   config: ProfileConfig,
-  endpoint: ProfileEndpoint,
+  provider: ProfileProvider,
 ): ProfileConfig {
   return {
     ...config,
-    endpoints: { ...config.endpoints, [endpoint.id]: endpoint },
+    endpoints: { ...config.endpoints, [provider.id]: provider },
   };
 }
 
@@ -278,10 +278,10 @@ export function buildProbeRequest(
 }
 
 /**
- * Build a single-endpoint probe request (no tier checks); null when the
- * endpoint id is not in the draft.
+ * Build a single-provider probe request (no tier checks); null when the
+ * provider id is not in the draft.
  */
-export function singleEndpointProbeRequest(
+export function singleProviderProbeRequest(
   committed: ProfileConfig | null,
   draft: ProfileConfig,
   id: string,
@@ -301,8 +301,8 @@ export function singleEndpointProbeRequest(
 
 /**
  * Build a single-profile probe request (the profile Test button): the
- * tier carries only that profile, and its endpoint rides inline under the
- * shared key rule. A dangling endpoint reference still probes — the server
+ * tier carries only that profile, and its provider rides inline under the
+ * shared key rule. A dangling provider reference still probes — the server
  * reports the missing reference as invalid_config, which is the honest
  * verdict for that profile. Null when the coordinates are out of range.
  */

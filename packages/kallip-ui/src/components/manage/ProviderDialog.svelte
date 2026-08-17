@@ -1,13 +1,13 @@
 <script lang="ts" module>
-  // Endpoint create/edit dialog for the Profiles page's endpoint cards.
+  // Provider create/edit dialog for the Profiles page's provider cards.
   // Prop-driven (CreateRoomDialog pattern): the dialog never touches a store —
   // the owning page applies the result to its draft. In edit mode an empty key
   // means "keep the draft's existing (masked) key", so an untouched round-trip
   // leaves isDirty alone; the id is locked because renaming would dangle every
-  // profile referencing it (the PUT's validate_endpoints rejects that).
-  import type { ProfileEndpoint } from "@kallipai/kallip-client";
+  // profile referencing it (the PUT's validate_providers rejects that).
+  import type { ProfileProvider } from "@kallipai/kallip-client";
 
-  export interface EndpointDialogResult {
+  export interface ProviderDialogResult {
     readonly id: string;
     readonly family: string;
     readonly baseUrl: string | null;
@@ -21,25 +21,25 @@
   import {
     common_cancel,
     common_save,
-    manage_profiles_endpoint_api_key_hint_edit,
-    manage_profiles_endpoint_api_key_label,
-    manage_profiles_endpoint_api_key_required,
-    manage_profiles_endpoint_base_url_hint,
-    manage_profiles_endpoint_base_url_label,
-    manage_profiles_endpoint_dialog_desc,
-    manage_profiles_endpoint_dialog_edit_title,
-    manage_profiles_endpoint_dialog_new_title,
-    manage_profiles_endpoint_family_label,
-    manage_profiles_endpoint_id_duplicate,
-    manage_profiles_endpoint_id_hint,
-    manage_profiles_endpoint_id_label,
-    manage_profiles_remove_endpoint,
+    manage_profiles_provider_api_key_hint_edit,
+    manage_profiles_provider_api_key_label,
+    manage_profiles_provider_api_key_required,
+    manage_profiles_provider_base_url_hint,
+    manage_profiles_provider_base_url_label,
+    manage_profiles_provider_dialog_desc,
+    manage_profiles_provider_dialog_edit_title,
+    manage_profiles_provider_dialog_new_title,
+    manage_profiles_provider_family_label,
+    manage_profiles_provider_id_duplicate,
+    manage_profiles_provider_id_hint,
+    manage_profiles_provider_id_label,
+    manage_profiles_remove_provider,
   } from "../../paraglide/messages.js";
 
   let {
     open,
     mode,
-    endpoint = null,
+    provider = null,
     existingIds = [],
     onSave,
     onCancel,
@@ -47,11 +47,11 @@
   }: {
     open: boolean;
     mode: "new" | "edit";
-    /** The draft endpoint being edited (edit mode's initial values). */
-    endpoint?: ProfileEndpoint | null;
+    /** The draft provider being edited (edit mode's initial values). */
+    provider?: ProfileProvider | null;
     /** Ids already present in the draft (new-mode duplicate check). */
     existingIds?: string[];
-    onSave: (result: EndpointDialogResult) => void;
+    onSave: (result: ProviderDialogResult) => void;
     onCancel: () => void;
     /** Edit mode's danger action; hide the zone when absent. */
     onRemove?: (() => void) | null;
@@ -68,9 +68,9 @@
   let lastOpen = false;
   $effect(() => {
     if (open && !lastOpen) {
-      id = mode === "edit" && endpoint ? endpoint.id : "";
-      family = endpoint?.family ?? FAMILIES[0]!;
-      baseUrl = endpoint?.base_url ?? "";
+      id = mode === "edit" && provider ? provider.id : "";
+      family = provider?.family ?? FAMILIES[0]!;
+      baseUrl = provider?.base_url ?? "";
       apiKey = "";
     }
     lastOpen = open;
@@ -112,11 +112,11 @@
       >
         <Dialog.Title class="text-lg font-semibold">
           {mode === "new"
-            ? manage_profiles_endpoint_dialog_new_title()
-            : manage_profiles_endpoint_dialog_edit_title()}
+            ? manage_profiles_provider_dialog_new_title()
+            : manage_profiles_provider_dialog_edit_title()}
         </Dialog.Title>
         <Dialog.Description class="sr-only">
-          {manage_profiles_endpoint_dialog_desc()}
+          {manage_profiles_provider_dialog_desc()}
         </Dialog.Description>
 
         <form
@@ -128,7 +128,7 @@
         >
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
-              {manage_profiles_endpoint_id_label()}
+              {manage_profiles_provider_id_label()}
               {#if mode === "new"}
                 <span class="text-error-500 dark:text-error-400">*</span>
               {/if}
@@ -140,18 +140,18 @@
               required
             />
             <span class="text-xs opacity-60">
-              {manage_profiles_endpoint_id_hint()}
+              {manage_profiles_provider_id_hint()}
             </span>
             {#if duplicateId}
               <span
                 class="text-xs text-error-500 dark:text-error-400"
-              >{manage_profiles_endpoint_id_duplicate()}</span>
+              >{manage_profiles_provider_id_duplicate()}</span>
             {/if}
           </label>
 
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
-              {manage_profiles_endpoint_family_label()}
+              {manage_profiles_provider_family_label()}
             </span>
             <select class="select text-sm" bind:value={family}>
               {#each FAMILIES as f (f)}
@@ -162,20 +162,20 @@
 
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
-              {manage_profiles_endpoint_base_url_label()}
+              {manage_profiles_provider_base_url_label()}
             </span>
             <input
               class="input text-sm font-mono"
               bind:value={baseUrl}
             />
             <span class="text-xs opacity-60">
-              {manage_profiles_endpoint_base_url_hint()}
+              {manage_profiles_provider_base_url_hint()}
             </span>
           </label>
 
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
-              {manage_profiles_endpoint_api_key_label()}
+              {manage_profiles_provider_api_key_label()}
               {#if mode === "new"}
                 <span class="text-error-500 dark:text-error-400">*</span>
               {/if}
@@ -188,10 +188,10 @@
             />
             <span class="text-xs opacity-60">
               {#if mode === "new"}
-                {manage_profiles_endpoint_api_key_required()}
-              {:else if endpoint}
-                {manage_profiles_endpoint_api_key_hint_edit({
-                  mask: endpoint.api_key ?? "",
+                {manage_profiles_provider_api_key_required()}
+              {:else if provider}
+                {manage_profiles_provider_api_key_hint_edit({
+                  mask: provider.api_key ?? "",
                 })}
               {/if}
             </span>
@@ -204,7 +204,7 @@
                 class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
                 onclick={onRemove}
               >
-                {manage_profiles_remove_endpoint()}
+                {manage_profiles_remove_provider()}
               </button>
             </div>
           {/if}

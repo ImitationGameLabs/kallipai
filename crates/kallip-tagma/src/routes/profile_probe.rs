@@ -5,7 +5,7 @@
 //! save) or references live endpoints by id; the tagma builds throwaway
 //! backends and exercises the zero-cost capability probes upstream offers
 //! (`ModelCatalog::list_models`, `Balance::get_balance`). Nothing is
-//! persisted and the live registry (`ArcSwap`) is untouched. Endpoint tests
+//! persisted and the live registry (`ArcSwap`) is untouched. Provider tests
 //! stay zero-cost, but a tier profile that survives its catalog pre-check
 //! is verified with one minimal, billed chat completion (test prompt,
 //! 256-token cap) — that call is the profile Test's real verdict.
@@ -25,21 +25,21 @@ use futures_util::future::join_all;
 use just_llm_client::client::BackendFactory;
 use just_llm_client::types::chat::{ChatCompletionRequest, ChatMessage};
 use kallip_common::protocol::ApiError;
-use kallip_runtime::profile::{Endpoint, ProfileConfig};
+use kallip_runtime::profile::{ProfileConfig, Provider};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthIdentity;
 use crate::backend::{self, DEFAULT_USER_AGENT};
 use crate::state::SharedState;
 
-/// Per-endpoint probe budget. Generous for slow cold starts, tight enough
-/// that a wedged endpoint cannot pin the request.
+/// Per-provider probe budget. Generous for slow cold starts, tight enough
+/// that a wedged provider cannot pin the request.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Upper bound on inline endpoints per request: every endpoint fans out one
+/// Upper bound on inline providers per request: every provider fans out one
 /// concurrent outbound connection, so an unbounded list is a self-DoS lever
 /// on an operator-only route.
-const MAX_PROBE_ENDPOINTS: usize = 64;
+const MAX_PROBE_PROVIDERS: usize = 64;
 /// Upper bound on tier profiles per request: every profile that survives the
 /// catalog pre-check fans out one real (billed) inference call, so an
 /// unbounded list is a spend lever on an operator-only route.
@@ -56,19 +56,19 @@ const INFERENCE_TEST_PROMPT: &str = "This is a one-shot connectivity test of thi
 
 #[derive(Deserialize)]
 pub struct ProbeRequest {
-    /// Inline endpoint definitions (draft config). `api_key: null` means
-    /// "reuse the live key stored for this endpoint id" — the same draft
+    /// Inline provider definitions (draft config). `api_key: null` means
+    /// "reuse the live key stored for this provider id" — the same draft
     /// semantics the masked PUT uses, so an unchanged key never needs to be
     /// sent back up.
     #[serde(default)]
-    pub endpoints: Vec<ProbeEndpoint>,
+    pub endpoints: Vec<ProbeProvider>,
     /// Tiers of profiles to check model names against the fetched catalogs.
     #[serde(default)]
     pub tiers: Vec<ProbeTier>,
 }
 
 #[derive(Deserialize)]
-pub struct ProbeEndpoint {
+pub struct ProbeProvider {
     pub id: String,
     pub family: String,
     pub api_key: Option<String>,
@@ -83,7 +83,7 @@ pub struct ProbeTier {
 #[derive(Deserialize)]
 pub struct ProbeProfile {
     pub id: String,
-    /// Endpoint id this profile connects through (inline or live).
+    /// Provider id this profile connects through (inline or live).
     pub endpoint: String,
     pub model: String,
 }
@@ -91,23 +91,23 @@ pub struct ProbeProfile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeStatus {
-    /// Catalog (or balance) came back — endpoint is reachable and authorized.
+    /// Catalog (or balance) came back — provider is reachable and authorized.
     Ok,
     /// Transport-level failure or timeout — nothing HTTP-shaped responded.
     Unreachable,
     /// HTTP 401/403 — the credential was rejected.
     Unauthorized,
-    /// The definition failed backend construction, the endpoint answered
+    /// The definition failed backend construction, the provider answered
     /// with an unexpected HTTP status (404/429/5xx on the probe path), or a
-    /// tier profile's model is absent from the endpoint's catalog.
+    /// tier profile's model is absent from the provider's catalog.
     InvalidConfig,
-    /// Endpoint responded, but the family offers no zero-cost probe
+    /// Provider responded, but the family offers no zero-cost probe
     /// capability — liveness could not be established without a chat call.
     Partial,
 }
 
 #[derive(Serialize)]
-pub struct EndpointReport {
+pub struct ProviderReport {
     pub endpoint_id: String,
     pub status: ProbeStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,7 +144,7 @@ pub struct TierReport {
 
 #[derive(Serialize)]
 pub struct ProbeResponse {
-    pub results: Vec<EndpointReport>,
+    pub results: Vec<ProviderReport>,
     pub tiers: Vec<TierReport>,
 }
 
@@ -158,9 +158,9 @@ pub async fn probe_profiles(
 ) -> Result<Json<ProbeResponse>, ApiError> {
     crate::auth::require_operator(auth.identity())?;
 
-    if request.endpoints.len() > MAX_PROBE_ENDPOINTS {
+    if request.endpoints.len() > MAX_PROBE_PROVIDERS {
         return Err(ApiError::bad_request(format!(
-            "probe request carries {} endpoints; at most {MAX_PROBE_ENDPOINTS} per request",
+            "probe request carries {} endpoints; at most {MAX_PROBE_PROVIDERS} per request",
             request.endpoints.len()
         )));
     }
@@ -174,12 +174,12 @@ pub async fn probe_profiles(
     let live = state.profiles.load().config.clone();
     let wants_models = !request.tiers.is_empty();
 
-    // Resolve the endpoint set: inline definitions win; tiers may reference
-    // endpoint ids not submitted inline — those resolve to live definitions.
-    let mut defs: HashMap<String, Endpoint> = HashMap::new();
-    let mut reports: Vec<EndpointReport> = Vec::new();
+    // Resolve the provider set: inline definitions win; tiers may reference
+    // provider ids not submitted inline — those resolve to live definitions.
+    let mut defs: HashMap<String, Provider> = HashMap::new();
+    let mut reports: Vec<ProviderReport> = Vec::new();
     for probe_ep in &request.endpoints {
-        match resolve_endpoint(probe_ep, &live) {
+        match resolve_provider(probe_ep, &live) {
             Ok(def) => {
                 defs.insert(def.id.clone(), def);
             }
@@ -205,14 +205,14 @@ pub async fn probe_profiles(
     for id in referenced {
         reports.push(invalid_config_report(
             id,
-            "referenced endpoint is neither inline nor live".to_string(),
+            "referenced provider is neither inline nor live".to_string(),
         ));
     }
 
-    // Probe all resolved endpoints concurrently; each is independent.
+    // Probe all resolved providers concurrently; each is independent.
     // The inference stage below needs the definitions after this join_all
     // consumes `defs` (into_values moves them out).
-    let inference_pool: HashMap<String, Endpoint> = defs.clone();
+    let inference_pool: HashMap<String, Provider> = defs.clone();
     let factory = BackendFactory::new();
     let mut probed = join_all(
         defs.into_values()
@@ -222,11 +222,11 @@ pub async fn probe_profiles(
     reports.append(&mut probed);
 
     // Tier checks run in two stages. Stage 1 settles every profile the
-    // per-endpoint reports already condemn (failed endpoint, catalog miss);
-    // catalog hits and catalog-less ok endpoints defer to stage 2 — one
-    // minimal real inference per unique (endpoint, model), shared by every
+    // per-provider reports already condemn (failed endpoint, catalog miss);
+    // catalog hits and catalog-less ok providers defer to stage 2 — one
+    // minimal real inference per unique (provider, model), shared by every
     // profile that referenced the pair.
-    let by_id: HashMap<&str, &EndpointReport> = reports
+    let by_id: HashMap<&str, &ProviderReport> = reports
         .iter()
         .map(|r| (r.endpoint_id.as_str(), r))
         .collect();
@@ -235,7 +235,7 @@ pub async fn probe_profiles(
         .iter()
         .map(|t| (0..t.profiles.len()).map(|_| None).collect::<Vec<_>>())
         .collect();
-    // One deferred (endpoint, model) pair and the tier/profile coordinates
+    // One deferred (provider, model) pair and the tier/profile coordinates
     // waiting on its shared inference verdict.
     struct PendingInference {
         endpoint_id: String,
@@ -271,10 +271,10 @@ pub async fn probe_profiles(
             let verdict = match def {
                 Some(def) => inference_verdict(factory, &def, &job.model, INFERENCE_TIMEOUT).await,
                 // Unreachable in practice: deferring requires an ok endpoint
-                // report, which only resolved endpoints produce.
+                // report, which only resolved providers produce.
                 None => (
                     ProbeStatus::InvalidConfig,
-                    Some("endpoint was not probed".to_string()),
+                    Some("provider was not probed".to_string()),
                 ),
             };
             (verdict, job.coords)
@@ -319,8 +319,8 @@ pub async fn probe_profiles(
     }))
 }
 
-fn invalid_config_report(endpoint_id: String, detail: String) -> EndpointReport {
-    EndpointReport {
+fn invalid_config_report(endpoint_id: String, detail: String) -> ProviderReport {
+    ProviderReport {
         endpoint_id,
         status: ProbeStatus::InvalidConfig,
         latency_ms: None,
@@ -337,21 +337,21 @@ enum CatalogStage {
     DeferInference,
 }
 
-/// A profile whose endpoint has no report to consult at all.
+/// A profile whose provider has no report to consult at all.
 fn not_probed_report(p: &ProbeProfile) -> ProfileReport {
     ProfileReport {
         profile_id: p.id.clone(),
         endpoint_id: p.endpoint.clone(),
         status: ProbeStatus::InvalidConfig,
-        detail: Some("endpoint was not probed".to_string()),
+        detail: Some("provider was not probed".to_string()),
     }
 }
 
 /// Stage 1 of tier checking — settle what the per-endpoint reports already
-/// decide, for free: a failed endpoint propagates its status, a catalog miss
+/// decide, for free: a failed provider propagates its status, a catalog miss
 /// settles as invalid_config, and a catalog hit (or a catalog-less-but-ok
 /// endpoint) defers to a real inference, which is the profile Test's verdict.
-fn catalog_stage(p: &ProbeProfile, ep: Option<&EndpointReport>) -> CatalogStage {
+fn catalog_stage(p: &ProbeProfile, ep: Option<&ProviderReport>) -> CatalogStage {
     let Some(ep) = ep else {
         return CatalogStage::Settled(not_probed_report(p));
     };
@@ -363,7 +363,7 @@ fn catalog_stage(p: &ProbeProfile, ep: Option<&EndpointReport>) -> CatalogStage 
                 endpoint_id: p.endpoint.clone(),
                 status: ProbeStatus::InvalidConfig,
                 detail: Some(format!(
-                    "model '{}' not in endpoint catalog ({} models)",
+                    "model '{}' not in provider catalog ({} models)",
                     p.model,
                     models.len()
                 )),
@@ -386,7 +386,7 @@ fn catalog_stage(p: &ProbeProfile, ep: Option<&EndpointReport>) -> CatalogStage 
 /// deadline without waiting out the production budget.
 async fn inference_verdict(
     factory: &BackendFactory,
-    def: &Endpoint,
+    def: &Provider,
     model: &str,
     timeout: Duration,
 ) -> (ProbeStatus, Option<String>) {
@@ -413,8 +413,8 @@ async fn inference_verdict(
 }
 
 /// Merge an inline probe definition with the live config: a null `api_key` or
-/// null `base_url` means "keep the live value for this endpoint id".
-fn resolve_endpoint(probe: &ProbeEndpoint, live: &ProfileConfig) -> Result<Endpoint, String> {
+/// null `base_url` means "keep the live value for this provider id".
+fn resolve_provider(probe: &ProbeProvider, live: &ProfileConfig) -> Result<Provider, String> {
     let api_key = match &probe.api_key {
         Some(key) => match live.endpoints.get(&probe.id) {
             // The masked form echoed back (GET → draft → probe) means "keep",
@@ -430,12 +430,12 @@ fn resolve_endpoint(probe: &ProbeEndpoint, live: &ProfileConfig) -> Result<Endpo
             .map(|ep| ep.api_key.clone())
             .ok_or_else(|| {
                 format!(
-                    "no api_key given and no live endpoint '{}' to take one from",
+                    "no api_key given and no live provider '{}' to take one from",
                     probe.id
                 )
             })?,
     };
-    Ok(Endpoint {
+    Ok(Provider {
         id: probe.id.clone(),
         family: probe.family.clone(),
         api_key,
@@ -449,9 +449,9 @@ fn resolve_endpoint(probe: &ProbeEndpoint, live: &ProfileConfig) -> Result<Endpo
 
 /// Build a throwaway backend and run the zero-cost probes, classifying the
 /// outcome. `wants_models` keeps the catalog ids for tier model checks.
-async fn probe_one(factory: &BackendFactory, def: Endpoint, wants_models: bool) -> EndpointReport {
+async fn probe_one(factory: &BackendFactory, def: Provider, wants_models: bool) -> ProviderReport {
     let endpoint_id = def.id.clone();
-    let mut report = EndpointReport {
+    let mut report = ProviderReport {
         endpoint_id,
         status: ProbeStatus::InvalidConfig,
         latency_ms: None,
@@ -588,7 +588,7 @@ fn classify_backend_error(e: &just_llm_client::BackendError) -> (ProbeStatus, St
         Some(code) if code.as_u16() == 401 || code.as_u16() == 403 => {
             (ProbeStatus::Unauthorized, detail)
         }
-        // The endpoint answered HTTP — reachable, but the probe path itself
+        // The provider answered HTTP — reachable, but the probe path itself
         // failed (404 on /models, 429, 5xx, ...). InvalidConfig is the
         // closest actionable bucket: inspect the definition/provider.
         Some(_) => (ProbeStatus::InvalidConfig, detail),
@@ -629,18 +629,18 @@ mod tests {
         // mask back. That must resolve to the live key, not probe with the mask.
         let live = make_state().profiles.load().config.clone();
         let masked = crate::routes::profiles::mask_key(&live.endpoints["test"].api_key);
-        let probe_ep = ProbeEndpoint {
+        let probe_ep = ProbeProvider {
             id: "test".into(),
             family: "deepseek".into(),
             api_key: Some(masked),
             base_url: None,
         };
-        let resolved = resolve_endpoint(&probe_ep, &live).expect("masked echo resolves");
+        let resolved = resolve_provider(&probe_ep, &live).expect("masked echo resolves");
         assert_eq!(resolved.api_key, live.endpoints["test"].api_key);
     }
 
-    fn endpoint_report(status: ProbeStatus, models: Option<Vec<String>>) -> EndpointReport {
-        EndpointReport {
+    fn provider_report(status: ProbeStatus, models: Option<Vec<String>>) -> ProviderReport {
+        ProviderReport {
             endpoint_id: "test".into(),
             status,
             latency_ms: None,
@@ -664,7 +664,7 @@ mod tests {
         // Catalog hit: nothing settled yet — the real inference decides.
         match catalog_stage(
             &probe_profile("m1"),
-            Some(&endpoint_report(
+            Some(&provider_report(
                 ProbeStatus::Ok,
                 Some(vec!["m1".into(), "m2".into()]),
             )),
@@ -676,7 +676,7 @@ mod tests {
         // Catalog miss: settled invalid_config without spending tokens.
         let miss = match catalog_stage(
             &probe_profile("nope"),
-            Some(&endpoint_report(ProbeStatus::Ok, Some(vec!["m1".into()]))),
+            Some(&provider_report(ProbeStatus::Ok, Some(vec!["m1".into()]))),
         ) {
             CatalogStage::Settled(report) => report,
             CatalogStage::DeferInference => panic!("catalog miss must settle"),
@@ -686,28 +686,28 @@ mod tests {
             miss.detail
                 .as_deref()
                 .unwrap()
-                .contains("not in endpoint catalog")
+                .contains("not in provider catalog")
         );
     }
 
     #[test]
-    fn catalog_less_ok_endpoint_defers_inference() {
+    fn catalog_less_ok_provider_defers_inference() {
         // A balance-only ok endpoint has no catalog to check against; the
         // inference is the profile's only judge.
         match catalog_stage(
             &probe_profile("any"),
-            Some(&endpoint_report(ProbeStatus::Ok, None)),
+            Some(&provider_report(ProbeStatus::Ok, None)),
         ) {
             CatalogStage::DeferInference => {}
-            CatalogStage::Settled(_) => panic!("catalog-less ok endpoint must defer to inference"),
+            CatalogStage::Settled(_) => panic!("catalog-less ok provider must defer to inference"),
         }
     }
 
     #[test]
-    fn catalog_stage_inherits_endpoint_failure() {
+    fn catalog_stage_inherits_provider_failure() {
         let r = match catalog_stage(
             &probe_profile("m1"),
-            Some(&endpoint_report(ProbeStatus::Unauthorized, None)),
+            Some(&provider_report(ProbeStatus::Unauthorized, None)),
         ) {
             CatalogStage::Settled(report) => report,
             CatalogStage::DeferInference => panic!("failed endpoint must settle"),
@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_stage_without_endpoint_report_is_invalid() {
+    fn catalog_stage_without_provider_report_is_invalid() {
         let r = match catalog_stage(&probe_profile("m1"), None) {
             CatalogStage::Settled(report) => report,
             CatalogStage::DeferInference => panic!("missing endpoint report must settle"),
@@ -763,16 +763,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_endpoint_null_base_url_merges_live() {
+    fn resolve_provider_null_base_url_merges_live() {
         let mut live = make_state().profiles.load().config.clone();
         live.endpoints.get_mut("test").unwrap().base_url = Some("https://live.example".into());
-        let probe_ep = ProbeEndpoint {
+        let probe_ep = ProbeProvider {
             id: "test".into(),
             family: "deepseek".into(),
             api_key: None,
             base_url: None,
         };
-        let resolved = resolve_endpoint(&probe_ep, &live).unwrap();
+        let resolved = resolve_provider(&probe_ep, &live).unwrap();
         assert_eq!(resolved.base_url.as_deref(), Some("https://live.example"));
     }
     #[tokio::test]
@@ -787,9 +787,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_rejects_more_than_max_endpoints() {
+    async fn probe_rejects_more_than_max_providers() {
         let state = make_state();
-        let endpoints: Vec<serde_json::Value> = (0..=MAX_PROBE_ENDPOINTS)
+        let endpoints: Vec<serde_json::Value> = (0..=MAX_PROBE_PROVIDERS)
             .map(|i| {
                 serde_json::json!({
                     "id": format!("ep{i}"),
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn null_key_without_live_endpoint_is_invalid_config() {
+    async fn null_key_without_live_provider_is_invalid_config() {
         let state = make_state();
         let req = probe_req(serde_json::json!({
             "endpoints": [{
@@ -843,12 +843,12 @@ mod tests {
                 .detail
                 .as_deref()
                 .unwrap()
-                .contains("no live endpoint 'ghost'")
+                .contains("no live provider 'ghost'")
         );
     }
 
     #[tokio::test]
-    async fn tier_reference_to_unknown_endpoint_reports_invalid() {
+    async fn tier_reference_to_unknown_provider_reports_invalid() {
         let state = make_state();
         let req = probe_req(serde_json::json!({
             "tiers": [{ "profiles": [{
@@ -859,7 +859,7 @@ mod tests {
             .await
             .unwrap()
             .0;
-        // Endpoint-level report for the dangling reference...
+        // Provider-level report for the dangling reference...
         assert!(
             resp.results
                 .iter()
@@ -917,9 +917,9 @@ mod tests {
         );
     }
 
-    /// Inline openai-compatible endpoint pointing at a wiremock server, so
+    /// Inline openai-compatible provider pointing at a wiremock server, so
     /// catalog and chat requests both land on mocks.
-    fn mock_endpoint(server_uri: &str) -> serde_json::Value {
+    fn mock_provider(server_uri: &str) -> serde_json::Value {
         serde_json::json!({
             "id": "mock",
             "family": "openai-compatible",
@@ -976,7 +976,7 @@ mod tests {
 
         let state = make_state();
         let req = probe_req(serde_json::json!({
-            "endpoints": [mock_endpoint(&server.uri())],
+            "endpoints": [mock_provider(&server.uri())],
             "tiers": [{ "profiles": [{ "id": "p1", "endpoint": "mock", "model": "m1" }] }]
         }));
         let resp = probe_profiles(State(state), op_auth(), Json(req))
@@ -1005,7 +1005,7 @@ mod tests {
 
         let state = make_state();
         let req = probe_req(serde_json::json!({
-            "endpoints": [mock_endpoint(&server.uri())],
+            "endpoints": [mock_provider(&server.uri())],
             "tiers": [{ "profiles": [{ "id": "p1", "endpoint": "mock", "model": "m1" }] }]
         }));
         let resp = probe_profiles(State(state), op_auth(), Json(req))
@@ -1036,7 +1036,7 @@ mod tests {
 
         let state = make_state();
         let req = probe_req(serde_json::json!({
-            "endpoints": [mock_endpoint(&server.uri())],
+            "endpoints": [mock_provider(&server.uri())],
             "tiers": [{ "profiles": [{ "id": "p1", "endpoint": "mock", "model": "m1" }] }]
         }));
         let resp = probe_profiles(State(state), op_auth(), Json(req))
@@ -1050,12 +1050,12 @@ mod tests {
                 .detail
                 .as_deref()
                 .unwrap()
-                .contains("not in endpoint catalog")
+                .contains("not in provider catalog")
         );
     }
 
     #[tokio::test]
-    async fn shared_endpoint_model_pair_dedupes_inference() {
+    async fn shared_provider_model_pair_dedupes_inference() {
         use wiremock::matchers::{method, path};
 
         let server = wiremock::MockServer::start().await;
@@ -1069,7 +1069,7 @@ mod tests {
 
         let state = make_state();
         let req = probe_req(serde_json::json!({
-            "endpoints": [mock_endpoint(&server.uri())],
+            "endpoints": [mock_provider(&server.uri())],
             "tiers": [{ "profiles": [
                 { "id": "p1", "endpoint": "mock", "model": "m1" },
                 { "id": "p2", "endpoint": "mock", "model": "m1" }
@@ -1099,7 +1099,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let endpoint = Endpoint {
+        let provider = Provider {
             id: "mock".into(),
             family: "openai-compatible".into(),
             api_key: "sk-test".into(),
@@ -1107,7 +1107,7 @@ mod tests {
         };
         let (status, detail) = inference_verdict(
             &BackendFactory::new(),
-            &endpoint,
+            &provider,
             "m1",
             Duration::from_millis(100),
         )

@@ -14,7 +14,7 @@ use axum::Json;
 use axum::extract::State;
 
 use kallip_common::protocol::ApiError;
-use kallip_runtime::profile::{Endpoint, Profile, ProfileConfig, ProfileRegistry, Tier};
+use kallip_runtime::profile::{Profile, ProfileConfig, ProfileRegistry, Provider, Tier};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -89,7 +89,7 @@ pub async fn put_profiles(
 /// Wire DTO for PUT /profiles: same shape as [`ProfileConfig`] except each
 /// endpoint's `api_key` and `base_url` are tri-state (see [`merge_wire`]).
 #[derive(Deserialize)]
-struct EndpointWire {
+struct ProviderPatch {
     id: String,
     family: String,
     api_key: Option<String>,
@@ -112,7 +112,7 @@ struct TierWire {
 #[derive(Deserialize)]
 pub(crate) struct ProfileConfigWire {
     tiers: Vec<TierWire>,
-    endpoints: HashMap<String, EndpointWire>,
+    endpoints: HashMap<String, ProviderPatch>,
 }
 
 /// Resolve the wire tri-state `api_key` and `base_url` fields against the live
@@ -122,7 +122,7 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
     for (key, ep) in wire.endpoints {
         if key != ep.id {
             return Err(ApiError::bad_request(format!(
-                "endpoint map key '{key}' does not match id '{}'",
+                "provider map key '{key}' does not match id '{}'",
                 ep.id
             )));
         }
@@ -132,11 +132,11 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                 .get(&key)
                 .map(|e| e.api_key.clone())
                 .ok_or_else(|| {
-                    ApiError::bad_request(format!("endpoint '{key}' is new; api_key is required"))
+                    ApiError::bad_request(format!("provider '{key}' is new; api_key is required"))
                 })?,
             Some(k) if k.is_empty() => {
                 return Err(ApiError::bad_request(format!(
-                    "endpoint '{key}': api_key must not be empty"
+                    "provider '{key}': api_key must not be empty"
                 )));
             }
             Some(k) => match live.endpoints.get(&key) {
@@ -156,7 +156,7 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
         };
         endpoints.insert(
             key.clone(),
-            Endpoint {
+            Provider {
                 id: ep.id,
                 family: ep.family,
                 api_key,
@@ -335,7 +335,10 @@ mod tests {
         }))
         .unwrap();
         let err = merge_wire(&live_config(), w).unwrap_err();
-        assert!(err.to_string().contains("duplicate profile id 'p'"), "got: {err}");
+        assert!(
+            err.to_string().contains("duplicate profile id 'p'"),
+            "got: {err}"
+        );
     }
 
     fn live_config() -> ProfileConfig {
@@ -343,7 +346,7 @@ mod tests {
             tiers: vec![],
             endpoints: std::collections::HashMap::from([(
                 "main".into(),
-                Endpoint {
+                Provider {
                     id: "main".into(),
                     family: "deepseek".into(),
                     api_key: "sk-live-secret-key".into(),

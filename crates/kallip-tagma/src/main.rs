@@ -2,14 +2,13 @@ mod args;
 mod auth;
 mod backend;
 mod bridge;
+mod credentials;
 mod cron;
+mod direct;
 mod duty;
 mod engine;
-mod work_schedule;
-mod inbox;
-mod credentials;
-mod direct;
 mod external;
+mod inbox;
 mod messaging;
 mod projector;
 mod relay;
@@ -18,6 +17,7 @@ mod shutdown;
 mod sse;
 mod state;
 mod token;
+mod work_schedule;
 
 #[cfg(test)]
 mod test_helpers;
@@ -26,8 +26,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use kallip_common::authtoken::MintedToken;
 use kallip_runtime::profile::ProfileRegistry;
-use state::ProfileBundle;
 use state::AppState;
+use state::ProfileBundle;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -102,11 +102,11 @@ async fn main() -> Result<()> {
     }
 
     // Load profile config once at startup (config file or implicit env profile), then build one
-    // backend per referenced endpoint and assemble the registry before restoring agents —
+    // backend per referenced provider and assemble the registry before restoring agents —
     // restored agents resolve their profile from here too. The tagma owns reqwest + backend
     // construction; the runtime holds the pre-built backends and does selection (plus reuse of
     // `reqwest` types for HTTP-shape retry classification). A
-    // misconfigured endpoint (unknown family, bad config) fails fast here at startup.
+    // misconfigured provider (unknown family, bad config) fails fast here at startup.
     let cfg = kallip_runtime::profile::load().context("failed to load model profiles")?;
     let factory = just_llm_client::client::BackendFactory::new();
     let user_agent = backend::resolve_user_agent(args.llm_api_user_agent.as_deref());
@@ -134,7 +134,9 @@ async fn main() -> Result<()> {
     // Rule edits take effect on the next start.
     state
         .hook_rules
-        .set(Arc::new(kallip_runtime::config::load_exec_hook_rules(&exec_hooks_toml_path()?)))
+        .set(Arc::new(kallip_runtime::config::load_exec_hook_rules(
+            &exec_hooks_toml_path()?,
+        )))
         .ok();
 
     // Open the work-schedule store and install it on AppState.

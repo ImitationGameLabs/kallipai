@@ -1,6 +1,6 @@
 <script lang="ts" module>
   // Tier create/edit dialog for the Profiles page's tier containers: a
-  // compact row form for the tier's profiles (id / endpoint / model /
+  // compact row form for the tier's profiles (id / provider / model /
   // max context), rows removable, "+ add profile" at the bottom.
   // Prop-driven (CreateRoomDialog pattern): the dialog never touches a
   // store; on save it hands the full profile list back and the page applies
@@ -30,9 +30,9 @@
     manage_profiles_tier_dialog_max_context_label,
     manage_profiles_tier_dialog_new_title,
     manage_profiles_tier_dialog_id_label,
-    manage_profiles_tier_dialog_endpoint_label,
+    manage_profiles_tier_dialog_provider_label,
     manage_profiles_tier_dialog_model_label,
-    manage_profiles_tier_dialog_no_endpoints,
+    manage_profiles_tier_dialog_no_providers,
   } from "../../paraglide/messages.js";
 
   let {
@@ -40,7 +40,7 @@
     mode,
     profiles = [],
     tierIdx = 0,
-    endpointIds = [],
+    providerIds = [],
     onSave,
     onCancel,
   }: {
@@ -50,8 +50,8 @@
     profiles?: readonly ProfileModel[];
     /** Tier index for the edit title (0-based, shown 1-based). */
     tierIdx?: number;
-    /** Endpoint ids available in the draft (the endpoint dropdown). */
-    endpointIds?: string[];
+    /** Provider ids available in the draft (the provider dropdown). */
+    providerIds?: string[];
     onSave: (rows: TierDialogRow[]) => void;
     onCancel: () => void;
   } = $props();
@@ -84,7 +84,7 @@
   function blankRow(): Row {
     return {
       id: "",
-      endpoint: endpointIds[0] ?? "",
+      endpoint: providerIds[0] ?? "",
       model: "",
       maxContext: "128000",
     };
@@ -146,9 +146,9 @@
             submit();
           }}
         >
-          {#if endpointIds.length === 0}
+          {#if providerIds.length === 0}
             <p class="text-xs text-error-500 dark:text-error-400">
-              {manage_profiles_tier_dialog_no_endpoints()}
+              {manage_profiles_tier_dialog_no_providers()}
             </p>
           {/if}
 
@@ -167,10 +167,10 @@
                 </label>
                 <label class="flex flex-col gap-1">
                   <span class="text-xs font-medium">
-                    {i === 0 ? manage_profiles_tier_dialog_endpoint_label() : ""}
+                    {i === 0 ? manage_profiles_tier_dialog_provider_label() : ""}
                   </span>
                   <select class="select text-sm" bind:value={row.endpoint}>
-                    {#each endpointIds as eid (eid)}
+                    {#each providerIds as eid (eid)}
                       <option value={eid}>{eid}</option>
                     {/each}
                   </select>
