@@ -1,12 +1,9 @@
 <script lang="ts">
-  import { SvelteSet } from "svelte/reactivity";
   import { profilesStore } from "../../lib/manage/profiles.svelte.ts";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
   import type { ProfileProbeStatus } from "@kallipai/kallip-client";
   import {
-    common_hide,
     common_loading,
-    common_show,
     manage_profiles_test,
     manage_profiles_test_all,
     manage_profiles_probe_results,
@@ -47,9 +44,6 @@
     manage_profiles_apply,
   } from "../../paraglide/messages.js";
 
-  // Track which endpoints show their API key in plaintext. Uses type="text"
-  // (not "password") so browser password managers never fire for API keys.
-  let showKeys = new SvelteSet<string>();
 
   let { basePath = "/local/manage" }: { basePath?: string } = $props();
   $effect(() => {
@@ -302,26 +296,12 @@
                 placeholder={manage_profiles_base_url_placeholder()}
                 bind:value={ep.base_url}
               />
-              <div class="col-span-2 flex gap-1">
-                <input
-                  class="input flex-1"
-                  type="text"
-                  placeholder={manage_profiles_api_key_placeholder()}
-                  style="-webkit-text-security: {showKeys.has(epId)
-                    ? 'none'
-                    : 'disc'}"
-                  bind:value={ep.api_key}
-                />
-                <button
-                  type="button"
-                  class="btn btn-sm preset-outlined-surface-500 shrink-0"
-                  onclick={() =>
-                    showKeys.has(epId)
-                      ? showKeys.delete(epId)
-                      : showKeys.add(epId)}
-                  >{showKeys.has(epId) ? common_hide() : common_show()}</button
-                >
-              </div>
+              <input
+                class="input col-span-2"
+                type="text"
+                placeholder={manage_profiles_api_key_placeholder()}
+                bind:value={ep.api_key}
+              />
             </div>
             <div class="text-xs opacity-50 font-mono">
               {manage_profiles_current_key({
