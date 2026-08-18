@@ -63,7 +63,7 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
       enc.encode(JSON.stringify(reply)),
     );
     channel.enqueue({
-      conversation_id: convId,
+      channel_id: convId,
       sender: { id: tagmaId, kind: "agent", handle: "Tagma" },
       sequence_n: seq,
       trace_id: "trace",
@@ -211,7 +211,7 @@ Deno.test(
     // A garbage-ciphertext envelope (the SSE demux would route this in) that
     // cannot decrypt under the session key.
     channel.enqueue({
-      conversation_id: channel.conversationId,
+      channel_id: channel.conversationId,
       sender: { id: "tagma-d", kind: "agent", handle: "Tagma" },
       sequence_n: 99,
       trace_id: "t",

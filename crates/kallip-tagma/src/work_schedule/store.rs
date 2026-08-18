@@ -64,7 +64,8 @@ pub struct WorkScheduleStore {
 impl WorkScheduleStore {
     pub async fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await
+            fs::create_dir_all(parent)
+                .await
                 .with_context(|| format!("create ws db dir {}", parent.display()))?;
         }
         let url = format!("sqlite://{}?mode=rwc", path.display());
@@ -76,7 +77,9 @@ impl WorkScheduleStore {
                 .busy_timeout(std::time::Duration::from_secs(5))
         });
         let db = Database::connect(opts).await.context("connect ws db")?;
-        super::migration::Migrator::up(&db, None).await.context("apply ws migrations")?;
+        super::migration::Migrator::up(&db, None)
+            .await
+            .context("apply ws migrations")?;
         Ok(Self {
             db,
             engine_notify: std::sync::Arc::new(Notify::new()),
@@ -89,7 +92,9 @@ impl WorkScheduleStore {
         let mut opts = ConnectOptions::new("sqlite::memory:".to_owned());
         opts.max_connections(1);
         let db = Database::connect(opts).await.expect("in-memory db");
-        super::migration::Migrator::up(&db, None).await.expect("migrations");
+        super::migration::Migrator::up(&db, None)
+            .await
+            .expect("migrations");
         Self {
             db,
             engine_notify: std::sync::Arc::new(Notify::new()),
@@ -126,13 +131,23 @@ impl WorkScheduleStore {
     }
 
     pub async fn list(
-        &self, agent_id: Option<&AgentId>, status: Option<WorkScheduleStatus>,
+        &self,
+        agent_id: Option<&AgentId>,
+        status: Option<WorkScheduleStatus>,
     ) -> Result<Vec<WorkSchedule>> {
         let mut q = Entity::find();
-        if let Some(aid) = agent_id { q = q.filter(Column::AgentId.eq(aid.as_ref())); }
-        if let Some(s) = status { q = q.filter(Column::Status.eq(s.to_string())); }
-        Ok(q.order_by_desc(Column::CreatedAt).all(&self.db).await?
-            .into_iter().map(decode).collect())
+        if let Some(aid) = agent_id {
+            q = q.filter(Column::AgentId.eq(aid.as_ref()));
+        }
+        if let Some(s) = status {
+            q = q.filter(Column::Status.eq(s.to_string()));
+        }
+        Ok(q.order_by_desc(Column::CreatedAt)
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .map(decode)
+            .collect())
     }
 
     pub async fn update(&self, schedule: &WorkSchedule) -> Result<bool> {
@@ -140,13 +155,20 @@ impl WorkScheduleStore {
             .col_expr(Column::Name, schedule.name.clone().into())
             .col_expr(Column::StartCron, schedule.start_cron.clone().into())
             .col_expr(Column::EndCron, schedule.end_cron.clone().into())
-            .col_expr(Column::PreWarnMinutes, (schedule.pre_warn_minutes as i64).into())
-            .col_expr(Column::FinalWarnMinutes, (schedule.final_warn_minutes as i64).into())
+            .col_expr(
+                Column::PreWarnMinutes,
+                (schedule.pre_warn_minutes as i64).into(),
+            )
+            .col_expr(
+                Column::FinalWarnMinutes,
+                (schedule.final_warn_minutes as i64).into(),
+            )
             .col_expr(Column::WakePrompt, schedule.wake_prompt.clone().into())
             .col_expr(Column::Status, schedule.status.to_string().into())
             .col_expr(Column::Timezone, schedule.timezone.clone().into())
             .filter(Column::Id.eq(schedule.id.clone()))
-            .exec(&self.db).await?;
+            .exec(&self.db)
+            .await?;
         let updated = result.rows_affected > 0;
         if updated {
             // Wake the engine only on a real change: a no-op PUT (unknown
@@ -165,14 +187,16 @@ impl WorkScheduleStore {
         let result = Entity::update_many()
             .col_expr(Column::Status, status.to_string().into())
             .filter(Column::Id.eq(id))
-            .exec(&self.db).await?;
+            .exec(&self.db)
+            .await?;
         Ok(result.rows_affected > 0)
     }
 
     pub async fn delete(&self, id: &str) -> Result<bool> {
         let result = Entity::delete_many()
             .filter(Column::Id.eq(id))
-            .exec(&self.db).await?;
+            .exec(&self.db)
+            .await?;
         self.engine_notify.notify_one();
         Ok(result.rows_affected > 0)
     }
@@ -184,11 +208,16 @@ fn decode(m: entities::work_schedule::Model) -> WorkSchedule {
         Default::default()
     });
     WorkSchedule {
-        id: m.id, name: m.name, agent_id: m.agent_id.into(),
-        start_cron: m.start_cron, end_cron: m.end_cron,
+        id: m.id,
+        name: m.name,
+        agent_id: m.agent_id.into(),
+        start_cron: m.start_cron,
+        end_cron: m.end_cron,
         pre_warn_minutes: m.pre_warn_minutes as u32,
         final_warn_minutes: m.final_warn_minutes as u32,
-        wake_prompt: m.wake_prompt, status, timezone: m.timezone,
+        wake_prompt: m.wake_prompt,
+        status,
+        timezone: m.timezone,
         created_at: from_unix(m.created_at),
     }
 }
@@ -211,18 +240,24 @@ mod tests {
 
     async fn open_tmp() -> (WorkScheduleStore, TempDir) {
         let dir = TempDir::new().unwrap();
-        let store = WorkScheduleStore::open(&dir.path().join("ws.sqlite")).await.unwrap();
+        let store = WorkScheduleStore::open(&dir.path().join("ws.sqlite"))
+            .await
+            .unwrap();
         (store, dir)
     }
 
     fn sample(id: &str) -> WorkSchedule {
         WorkSchedule {
-            id: id.into(), name: "Day shift".into(),
+            id: id.into(),
+            name: "Day shift".into(),
             agent_id: "agent-1".parse().unwrap(),
-            start_cron: "0 9 * * 1-5".into(), end_cron: "0 17 * * 1-5".into(),
-            pre_warn_minutes: 10, final_warn_minutes: 5,
+            start_cron: "0 9 * * 1-5".into(),
+            end_cron: "0 17 * * 1-5".into(),
+            pre_warn_minutes: 10,
+            final_warn_minutes: 5,
             wake_prompt: "Good morning.".into(),
-            status: WorkScheduleStatus::Active, timezone: None,
+            status: WorkScheduleStatus::Active,
+            timezone: None,
             created_at: OffsetDateTime::now_utc(),
         }
     }
@@ -245,14 +280,23 @@ mod tests {
     #[tokio::test]
     async fn list_filters_by_agent_and_status() {
         let (store, _d) = open_tmp().await;
-        let mut a = sample("ws1"); a.agent_id = "agent-a".parse().unwrap();
-        let mut b = sample("ws2"); b.agent_id = "agent-b".parse().unwrap();
+        let mut a = sample("ws1");
+        a.agent_id = "agent-a".parse().unwrap();
+        let mut b = sample("ws2");
+        b.agent_id = "agent-b".parse().unwrap();
         b.status = WorkScheduleStatus::Paused;
         store.create(&a).await.unwrap();
         store.create(&b).await.unwrap();
         let aid: AgentId = "agent-a".parse().unwrap();
         assert_eq!(store.list(Some(&aid), None).await.unwrap().len(), 1);
-        assert_eq!(store.list(None, Some(WorkScheduleStatus::Active)).await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .list(None, Some(WorkScheduleStatus::Active))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(store.list(None, None).await.unwrap().len(), 2);
     }
 
@@ -273,8 +317,16 @@ mod tests {
     async fn update_status_toggles() {
         let (store, _d) = open_tmp().await;
         store.create(&sample("ws1")).await.unwrap();
-        assert!(store.update_status("ws1", WorkScheduleStatus::Paused).await.unwrap());
-        assert_eq!(store.get("ws1").await.unwrap().unwrap().status, WorkScheduleStatus::Paused);
+        assert!(
+            store
+                .update_status("ws1", WorkScheduleStatus::Paused)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.get("ws1").await.unwrap().unwrap().status,
+            WorkScheduleStatus::Paused
+        );
     }
 
     #[tokio::test]

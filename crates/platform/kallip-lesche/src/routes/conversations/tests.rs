@@ -2,7 +2,7 @@ use super::*;
 use crate::test_support::{make_state, seed_presence};
 use kallip_agora_common::bytes::{Ciphertext, Ed25519PublicKey, X25519PublicKey};
 use kallip_agora_common::ids::{
-    ConversationId, ParticipantId, ParticipantKind, TagmaId, TraceId, UserId,
+    ChannelId, ConversationId, ParticipantId, ParticipantKind, TagmaId, TraceId, UserId,
 };
 use kallip_agora_common::principal::Principal;
 use kallip_lesche_common::control::KeyExchangeInit;
@@ -177,7 +177,7 @@ async fn post_envelope_conversation_id_mismatch_400() {
     let owner = user("owner");
     let (_tagma, conv, _tx) = seed_fixture(&state, &control, &owner);
     let env = Envelope {
-        conversation_id: ConversationId::from("other".to_string()),
+        channel_id: ChannelId::from("other".to_string()),
         sender: Participant {
             id: ParticipantId::for_user(&owner),
             kind: ParticipantKind::Human,
@@ -204,7 +204,7 @@ async fn post_envelope_conversation_id_mismatch_400() {
 /// Ciphertext/seq are irrelevant to routing (the relay never decrypts).
 fn envelope(conv: &ConversationId, sender: Participant) -> Envelope {
     Envelope {
-        conversation_id: conv.clone(),
+        channel_id: ChannelId::from(conv.as_ref().to_string()),
         sender,
         sequence_n: 1,
         trace_id: TraceId::from("t".to_string()),

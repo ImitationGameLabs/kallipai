@@ -566,10 +566,7 @@ enum WaitOutcome {
 /// Wait for `child` to exit naturally, or report that the timeout elapsed
 /// with it still running. Nothing is killed here: the timeout branch hands
 /// the live child to the conversion path.
-async fn run_until_exit_or_timeout(
-    child: &mut Child,
-    timeout_dur: Duration,
-) -> WaitOutcome {
+async fn run_until_exit_or_timeout(child: &mut Child, timeout_dur: Duration) -> WaitOutcome {
     tokio::select! {
         result = child.wait() => WaitOutcome::Exited(result.ok()),
         _ = tokio::time::sleep(timeout_dur) => WaitOutcome::TimedOut,
@@ -758,7 +755,9 @@ fn drop_spill(cap: &capture::CaptureResult) {
 /// keeps appending to the now-anonymous inode; its space is freed when the
 /// fd closes at terminal state.
 fn drop_spill_live(cap: &Arc<Mutex<capture::BoundedCapture>>) {
-    let cap = cap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cap = cap
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(path) = cap.spill_path() {
         let _ = std::fs::remove_file(path);
     }

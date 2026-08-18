@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::{
-    AgentConfig, AgentId, DelegationMode, EstablishLockFailure, MAX_ACTIVITY_CHARS,
-    PermissionClass, PermissionProfile, compose_system_prompt, establish_workspace_lock,
-    inject_identity_env, interrupt_agent, list_agents, meta_skill_content, remove_agent,
-    resolve_granted_class, resolve_root_agent, truncate_chars,
+    AgentConfig, AgentId, DelegationMode, MAX_ACTIVITY_CHARS, PermissionClass, PermissionProfile,
+    interrupt_agent, list_agents, remove_agent, resolve_granted_class, truncate_chars,
 };
 use crate::auth::{AuthIdentity, Identity};
+use crate::lifecycle::{
+    EstablishLockFailure, compose_system_prompt, establish_workspace_lock, inject_identity_env,
+    meta_skill_content, resolve_root_agent,
+};
 use crate::state::RegistryEntry;
 use crate::test_helpers::{
     add_faulted_root, add_faulted_sub, add_root, make_entry, make_entry_with_rx, make_state,
@@ -450,10 +452,10 @@ fn establish_lock_api_error_maps_status_codes() {
         holder: AgentId::from("x".to_owned()),
         conflict: PathBuf::from("/p"),
     };
-    assert_eq!(super::establish_lock_api_error(busy).status, 409);
+    assert_eq!(crate::lifecycle::establish_lock_api_error(busy).status, 409);
     let other = EstablishLockFailure::AcquireFailed(std::io::Error::other("boom"));
     assert_eq!(
-        super::establish_lock_api_error(other).status,
+        crate::lifecycle::establish_lock_api_error(other).status,
         ApiError::bad_request("").status
     );
 }

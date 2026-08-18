@@ -4,12 +4,15 @@ mod backend;
 mod bridge;
 mod credentials;
 mod cron;
+mod delivery;
 mod direct;
 mod duty;
 mod engine;
 mod external;
 mod inbox;
+mod lifecycle;
 mod messaging;
+mod probe;
 mod projector;
 mod relay;
 pub(crate) mod routes;
@@ -179,7 +182,7 @@ async fn main() -> Result<()> {
     // tagma-global root agent exists. Both run before the router accepts a single
     // connection, so the singleton root invariant holds for every client (clients
     // fetch it via `GET /agents/root` instead of check-then-create).
-    routes::restore_agents(&state).await?;
+    lifecycle::restore_agents(&state).await?;
     routes::ensure_root_agent(&state).await?;
 
     // Resolve the data root, credentials, and the tagma's conversation id ONCE

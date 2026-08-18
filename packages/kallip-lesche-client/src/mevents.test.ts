@@ -7,7 +7,7 @@ import { LescheClient } from "./http.ts";
 
 Deno.test("meEvents parses an SSE stream into LescheEvents", async () => {
   const envelope = {
-    conversation_id: "c1",
+    channel_id: "c1",
     sender: { id: "p-tagma-1", kind: "agent", handle: "Tagma" },
     sequence_n: 0,
     trace_id: "tr",
@@ -37,7 +37,7 @@ Deno.test("meEvents parses an SSE stream into LescheEvents", async () => {
     const first = events[0]!;
     const second = events[1]!;
     if (first.type !== "envelope") throw new Error("expected envelope");
-    assertEquals(first.envelope.conversation_id, "c1");
+    assertEquals(first.envelope.channel_id, "c1");
     if (second.type !== "tagma_online")
       throw new Error("expected tagma_online");
     assertEquals(second.tagma_id, "t2");

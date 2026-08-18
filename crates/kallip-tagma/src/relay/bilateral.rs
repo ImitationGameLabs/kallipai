@@ -8,6 +8,7 @@
 //! driven by `dispatch` and by the pump (`pump.rs`).
 
 use super::*;
+use kallip_agora_common::ids::ChannelId;
 
 impl RelayHandle {
     /// Respond to a key exchange. This is also the re-KEX boundary: cancel any
@@ -79,14 +80,15 @@ impl RelayHandle {
             // The AppState is gone (shutdown/teardown); the envelope is dropped
             // silently by design. Logged at debug so a drain-time drop stays
             // diagnosable without spamming healthy shutdowns.
-            debug!(conv = %envelope.conversation_id, "user op dropped: relay shutting down");
+            debug!(conv = %envelope.channel_id, "user op dropped: relay shutting down");
             return;
         };
-        let room = RoomId::from(envelope.conversation_id.as_ref().to_string());
-        // A 1:1 conversation_id is a v5 UUID (ConversationId::for_tagma) and a
-        // room_id is a v4 UUID, so the two string spaces are disjoint -- a 1:1
-        // envelope can never collide with a joined room, and falls through to
-        // the bilateral path below.
+        let room = RoomId::from(envelope.channel_id.as_ref().to_string());
+        // The joined-rooms membership check below dispatches on the
+        // channel_id value domain (see the Envelope field doc): a room id
+        // is a v4 UUID, a 1:1 conversation id a v5 UUID, so the two string
+        // spaces are disjoint -- a 1:1 envelope never collides with a
+        // joined room and falls through to the bilateral path below.
         //
         // Room path: a joined room's envelope payload IS the plaintext
         // `RoomMessage` JSON bytes (rooms are plaintext server-readable; the
@@ -183,7 +185,10 @@ impl RelayHandle {
                     before,
                     limit,
                     ..
-                } = ctrl else { return };
+                } = ctrl
+                else {
+                    return;
+                };
                 self.handle_history(&trace, req_id, &sender, after, before, limit)
                     .await;
             }
@@ -196,10 +201,7 @@ impl RelayHandle {
                     }
                 };
                 let TagmaControl::Manage {
-                    method,
-                    path,
-                    body,
-                    ..
+                    method, path, body, ..
                 } = ctrl
                 else {
                     return;
@@ -274,7 +276,7 @@ impl RelayHandle {
             let json = serde_json::to_vec(&reply).context("encode tagma reply")?;
             let ciphertext = e2e::encrypt(key, seq, &json);
             Envelope {
-                conversation_id: self.inner.conversation_id.clone(),
+                channel_id: ChannelId::from(self.inner.conversation_id.as_ref().to_string()),
                 sender,
                 sequence_n: seq,
                 trace_id: trace.clone(),

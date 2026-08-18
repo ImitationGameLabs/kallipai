@@ -38,7 +38,7 @@ export interface CreateConversationResponse {
  * ISO 8601 with fractional seconds (time::serde::iso8601); do not round-trip a
  * received value through `Date`. */
 export interface Envelope {
-  readonly conversation_id: string;
+  readonly channel_id: string;
   readonly sender: Participant;
   readonly sequence_n: number;
   readonly trace_id: string;

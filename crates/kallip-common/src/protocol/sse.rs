@@ -144,3 +144,286 @@ pub enum SseEvent {
         detail: String,
     },
 }
+impl SseEvent {
+    /// Whether this event terminates the current turn/stream.
+    ///
+    /// Turn-level, not lifecycle-level: after a terminal event the agent goes
+    /// idle, but stays alive and can be re-prompted — only [`Cancelled`](Self::Cancelled)
+    /// removes the agent. A new turn is opened by [`Busy`](Self::Busy). The consumers that
+    /// branch on this (the one-shot `kallip-run` stream loop, the tagma bridge's idle mark
+    /// via the runtime-side mirror `AgentEvent::is_terminal`) must stay in sync with this
+    /// classification.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Idle
+                | Self::MaxRoundsExceeded
+                | Self::Error { .. }
+                | Self::Cancelled
+                | Self::Interrupted
+                | Self::TokenBudgetExceeded { .. }
+                | Self::FailoverChainExhausted { .. }
+        )
+    }
+
+    /// Whether this event is a point where the tagma can interject a queued
+    /// prompt into the running agent: [`ToolCall`](Self::ToolCall) (the assistant
+    /// committed this batch of tool calls, ending the streamed message) or any
+    /// terminal event (see [`is_terminal`](Self::is_terminal)). The runtime drains
+    /// queued prompts at the top of the next round iteration, so consumers flush
+    /// their queues here to land in time. Within-stream retries ([`Retrying`](Self::Retrying),
+    /// [`StreamReset`](Self::StreamReset), [`Failover`](Self::Failover)) are not boundaries.
+    pub fn is_boundary(&self) -> bool {
+        self.is_terminal() || matches!(self, Self::ToolCall { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exhaustive classification snapshot for [`SseEvent::is_terminal`] and
+    /// [`SseEvent::is_boundary`]. The `let _: () = match` arm set must cover
+    /// every variant, so adding a variant without classifying it here (and in
+    /// the predicates) is a compile error, not a silent drift — the whole
+    /// point of centralizing the classification.
+    #[test]
+    fn classification_is_exhaustive_and_matches_predicates() {
+        for v in ALL_VARIANTS {
+            let (terminal, boundary) = (v.is_terminal(), v.is_boundary());
+            let _: () = match v {
+                // Streaming content — neither terminal nor a boundary.
+                SseEvent::Reasoning { .. }
+                | SseEvent::AssistantContent { .. }
+                | SseEvent::AssistantContentDelta { .. }
+                | SseEvent::ReasoningDelta { .. } => {
+                    assert!(!terminal && !boundary, "{v:?}");
+                }
+                // Tool completion — not a boundary (the ToolCall before it was).
+                SseEvent::ToolResult { .. } => {
+                    assert!(!terminal && !boundary, "{v:?}");
+                }
+                // Interjection point: queued-prompt flush lands here.
+                SseEvent::ToolCall { .. } => {
+                    assert!(!terminal && boundary, "{v:?}");
+                }
+                // Within-stream retries — the agent stays busy through them.
+                SseEvent::Retrying { .. }
+                | SseEvent::StreamReset { .. }
+                | SseEvent::Failover { .. } => {
+                    assert!(!terminal && !boundary, "{v:?}");
+                }
+                // Status transitions — informational only.
+                SseEvent::Busy | SseEvent::Status { .. } | SseEvent::ApprovalUpdated { .. } => {
+                    assert!(!terminal && !boundary, "{v:?}");
+                }
+                // Turn-terminal: boundary too (is_boundary = terminal ∪ ToolCall).
+                SseEvent::Idle
+                | SseEvent::MaxRoundsExceeded
+                | SseEvent::Error { .. }
+                | SseEvent::Cancelled
+                | SseEvent::Interrupted
+                | SseEvent::TokenBudgetExceeded { .. }
+                | SseEvent::FailoverChainExhausted { .. } => {
+                    assert!(terminal && boundary, "{v:?}");
+                }
+            };
+        }
+    }
+
+    /// One instance of every variant, for the exhaustive snapshot above.
+    const ALL_VARIANTS: &[SseEvent] = &[
+        SseEvent::Reasoning {
+            content: String::new(),
+        },
+        SseEvent::AssistantContent {
+            content: String::new(),
+        },
+        SseEvent::AssistantContentDelta {
+            delta: String::new(),
+        },
+        SseEvent::ReasoningDelta {
+            delta: String::new(),
+        },
+        SseEvent::ToolCall {
+            name: String::new(),
+            args: String::new(),
+        },
+        SseEvent::ToolResult {
+            result: String::new(),
+        },
+        SseEvent::Idle,
+        SseEvent::MaxRoundsExceeded,
+        SseEvent::Error {
+            message: String::new(),
+        },
+        SseEvent::Status {
+            message: String::new(),
+        },
+        SseEvent::Busy,
+        SseEvent::ApprovalUpdated {
+            id: String::new(),
+            status: ApprovalStatus::Committed,
+        },
+        SseEvent::Retrying {
+            attempt: 0,
+            max_attempts: 0,
+            error: String::new(),
+            delay_secs: 0.0,
+        },
+        SseEvent::StreamReset {
+            error: String::new(),
+            attempt: 0,
+            max_attempts: 0,
+            delay_secs: 0.0,
+        },
+        SseEvent::Failover {
+            from: String::new(),
+            to: String::new(),
+            reason: String::new(),
+        },
+        SseEvent::Cancelled,
+        SseEvent::Interrupted,
+        SseEvent::TokenBudgetExceeded {
+            consumed: 0,
+            budget: 0,
+        },
+        SseEvent::FailoverChainExhausted {
+            reason: FailoverChainExhaustion::NoFailoverConfigured,
+            detail: String::new(),
+        },
+    ];
+
+    /// Wire-shape snapshot: the serde tag and the exact field-name set of
+    /// every variant. This is the cross-language contract surface — external
+    /// clients (and a future TS typing of the event stream) branch on these
+    /// names, so adding/renaming/removing a variant or field must red here
+    /// before it ships. Values are not pinned (semantics live in the
+    /// predicate tests above); fixtures reuse [`ALL_VARIANTS`]' empty values.
+    #[test]
+    fn wire_schema_snapshot() {
+        let expected: &[(&str, &[&str])] = &[
+            ("reasoning", &["content"]),
+            ("assistantContent", &["content"]),
+            ("assistantContentDelta", &["delta"]),
+            ("reasoningDelta", &["delta"]),
+            ("toolCall", &["args", "name"]),
+            ("toolResult", &["result"]),
+            ("idle", &[]),
+            ("maxRoundsExceeded", &[]),
+            ("error", &["message"]),
+            ("status", &["message"]),
+            ("busy", &[]),
+            ("approvalUpdated", &["id", "status"]),
+            (
+                "retrying",
+                &["attempt", "delay_secs", "error", "max_attempts"],
+            ),
+            (
+                "streamReset",
+                &["attempt", "delay_secs", "error", "max_attempts"],
+            ),
+            ("failover", &["from", "reason", "to"]),
+            ("cancelled", &[]),
+            ("interrupted", &[]),
+            ("tokenBudgetExceeded", &["budget", "consumed"]),
+            ("failoverChainExhausted", &["detail", "reason"]),
+        ];
+        assert_eq!(
+            ALL_VARIANTS.len(),
+            expected.len(),
+            "variant count drifted — extend both tables"
+        );
+        for (v, (tag, fields)) in ALL_VARIANTS.iter().zip(expected) {
+            let obj = serde_json::to_value(v).expect("SseEvent serializes");
+            let map = obj.as_object().expect("internally tagged -> object");
+            let actual_tag = map
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            assert_eq!(actual_tag, *tag, "{v:?}: serde tag drifted");
+            let mut actual: Vec<&str> = map
+                .keys()
+                .map(String::as_str)
+                .filter(|k| *k != "type")
+                .collect();
+            actual.sort_unstable();
+            let mut want: Vec<&str> = fields.to_vec();
+            want.sort_unstable();
+            assert_eq!(actual, want, "{v:?}: field-name set drifted");
+        }
+    }
+
+    /// The enums embedded in the wire shape carry their own contract: their
+    /// serialized strings (`status`, `reason`) are what clients branch on.
+    /// Each state's string is pinned, and the explicit match arms double as
+    /// a compile-time exhaustiveness pin: adding a state without extending
+    /// this match is a compile error, not a silent escape to the wire (the
+    /// runtime-side consumers match single variants, so no other compile
+    /// lock exists for these enums).
+    #[test]
+    fn embedded_enum_value_domains_snapshot() {
+        for v in [
+            ApprovalStatus::Pending,
+            ApprovalStatus::Committed,
+            ApprovalStatus::Approved,
+            ApprovalStatus::Denied,
+            ApprovalStatus::Redeemed,
+            ApprovalStatus::Cancelled,
+        ] {
+            let _: () = match v {
+                ApprovalStatus::Pending => {
+                    assert_eq!(serde_json::to_string(&v).unwrap(), "\"pending\"");
+                }
+                ApprovalStatus::Committed => {
+                    assert_eq!(serde_json::to_string(&v).unwrap(), "\"committed\"");
+                }
+                ApprovalStatus::Approved => {
+                    assert_eq!(serde_json::to_string(&v).unwrap(), "\"approved\"");
+                }
+                ApprovalStatus::Denied => {
+                    assert_eq!(serde_json::to_string(&v).unwrap(), "\"denied\"");
+                }
+                ApprovalStatus::Redeemed => {
+                    assert_eq!(serde_json::to_string(&v).unwrap(), "\"redeemed\"");
+                }
+                ApprovalStatus::Cancelled => {
+                    assert_eq!(serde_json::to_string(&v).unwrap(), "\"cancelled\"");
+                }
+            };
+        }
+        for v in [
+            FailoverChainExhaustion::NoFailoverConfigured,
+            FailoverChainExhaustion::AllBackupsExhausted,
+            FailoverChainExhaustion::AllCandidatesUnbuildable,
+            FailoverChainExhaustion::AllCandidatesInfeasible,
+        ] {
+            let _: () = match v {
+                FailoverChainExhaustion::NoFailoverConfigured => {
+                    assert_eq!(
+                        serde_json::to_string(&v).unwrap(),
+                        "\"noFailoverConfigured\""
+                    );
+                }
+                FailoverChainExhaustion::AllBackupsExhausted => {
+                    assert_eq!(
+                        serde_json::to_string(&v).unwrap(),
+                        "\"allBackupsExhausted\""
+                    );
+                }
+                FailoverChainExhaustion::AllCandidatesUnbuildable => {
+                    assert_eq!(
+                        serde_json::to_string(&v).unwrap(),
+                        "\"allCandidatesUnbuildable\""
+                    );
+                }
+                FailoverChainExhaustion::AllCandidatesInfeasible => {
+                    assert_eq!(
+                        serde_json::to_string(&v).unwrap(),
+                        "\"allCandidatesInfeasible\""
+                    );
+                }
+            };
+        }
+    }
+}

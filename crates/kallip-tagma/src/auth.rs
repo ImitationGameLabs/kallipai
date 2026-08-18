@@ -51,6 +51,15 @@ impl FromRequestParts<SharedState> for AuthIdentity {
         parts: &mut axum::http::request::Parts,
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
+        // Trusted in-process callers (the relay's manage dispatch) insert a
+        // pre-authenticated identity via request extensions instead of
+        // hand-passing an `AuthIdentity::operator()` argument to each handler.
+        // Extensions cannot arrive over the wire, so this cannot be spoofed
+        // remotely; it is the same trust model dispatch::execute_op uses for
+        // `Identity::Operator`.
+        if let Some(identity) = parts.extensions.get::<AuthIdentity>() {
+            return Ok(identity.clone());
+        }
         let token = extract_bearer_token(&parts.headers)?;
 
         // Compare SHA-256 hashes: the operator secret via constant-time compare

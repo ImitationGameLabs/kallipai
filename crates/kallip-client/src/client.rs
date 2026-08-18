@@ -676,7 +676,7 @@ impl TagmaClient {
         .await
     }
 
-// -- Inbox -----------------------------------------------------------------
+    // -- Inbox -----------------------------------------------------------------
 
     /// List messages in an agent's inbox (`GET /agents/{id}/inbox`).
     pub async fn inbox_list(
@@ -696,7 +696,10 @@ impl TagmaClient {
             req = req.query(&[("limit", n)]);
         }
         self.handle_response(
-            self.with_auth(req).send().await.context("failed to list inbox")?,
+            self.with_auth(req)
+                .send()
+                .await
+                .context("failed to list inbox")?,
             "failed to parse inbox list response",
         )
         .await

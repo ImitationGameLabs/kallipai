@@ -16,18 +16,8 @@
 
 use crate::bytes::Ed25519PublicKey;
 use crate::ids::{TagmaId, UserId};
-use crate::participant::RoomMember;
 use crate::principal::Principal;
-
-/// A room's live membership snapshot, read by the lesche from its own chat
-/// store to authorize senders and fan out envelopes. `members` is the current
-/// participants (id + kind); `membership_epoch` is the version counter the
-/// roster compares to detect staleness.
-#[derive(Debug, Clone)]
-pub struct RoomMembership {
-    pub members: Vec<RoomMember>,
-    pub membership_epoch: i64,
-}
+use serde::{Deserialize, Serialize};
 
 /// A tagma's registry facts: the raw identity + usability state the relay reads
 /// to (a) verify a tunnel-reconnect proof against `pinned_public_key`, (b) stamp
@@ -38,7 +28,9 @@ pub struct RoomMembership {
 /// so the relay, not the registry, owns the policy that combines them. A tagma
 /// missing from the result is simply unknown (omitted); the relay degrades its
 /// roster row to a prefix-only handle.
-#[derive(Debug, Clone)]
+/// The serde form IS the `tagma-profiles` wire contract -- `TagmaProfileResponse`
+/// in [`crate::internal_api`] is a type alias of this struct.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagmaProfile {
     pub tagma_id: TagmaId,
     /// The Ed25519 public key pinned at enrollment (`None` while pending).
@@ -65,7 +57,10 @@ pub struct TagmaProfile {
 /// HUMAN roster member and to derive locally whether they may be invited
 /// (`!disabled`). The registry returns rows UNFILTERED; a user missing from the
 /// result is unknown (omitted).
-#[derive(Debug, Clone)]
+/// The serde form IS the user-identity wire contract (both the bulk and the
+/// by-username reads) -- `UserIdentityResponse` in [`crate::internal_api`]
+/// is a type alias of this struct.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserIdentity {
     pub user_id: UserId,
     pub username: String,
@@ -83,7 +78,10 @@ pub struct UserIdentity {
 /// once per connection-open alongside the auth check, not per-message -- the
 /// relay caches it for the connection lifetime, matching the no-auth-cache /
 /// low-RPC-volume design of the control plane.
-#[derive(Debug, Clone)]
+/// The serde form IS the verify-session wire contract --
+/// `VerifySessionResponse` in [`crate::internal_api`] is a type alias of
+/// this struct.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedSession {
     pub user_id: UserId,
     /// Login name; always present (a fallback render when `display_name` is

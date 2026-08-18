@@ -22,13 +22,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use futures_util::StreamExt;
-use kallip_agora_common::ids::{ConversationId, RoomId, TagmaId};
-use kallip_agora_common::rooms::TagmaRoomView;
+use kallip_agora_common::ids::{ChannelId, ConversationId, TagmaId};
 use kallip_e2ee::DeviceKey;
 use kallip_lesche_common::control::KeyExchangeResponse;
 use kallip_lesche_common::event::{SignalEvent, TagmaStatusPayload};
 use kallip_lesche_common::message::Envelope;
 use kallip_lesche_common::proof::tunnel_transcript;
+use kallip_lesche_common::rooms::{RoomId, TagmaRoomView};
 use kallip_lesche_common::tunnel::TunnelInbound;
 
 struct Inner {
@@ -155,7 +155,7 @@ impl LescheClient {
             Duration::from_secs(8),
             Duration::from_secs(16),
         ];
-        // The room route rejects (400) any envelope whose `conversation_id` does
+        // The room route rejects (400) any envelope whose `channel_id` does
         // not equal the path room. The field is dual-purpose -- a bilateral
         // `ConversationId` (v5) on the 1:1 path, a `RoomId` (v4) on the room
         // path -- and a caller building a room envelope off a bilateral-shaped
@@ -163,7 +163,7 @@ impl LescheClient {
         // here so no caller can address a room with the wrong id; the type
         // system will not catch it (both are UUID-string newtypes).
         let mut envelope = envelope.clone();
-        envelope.conversation_id = ConversationId::from(room_id.as_ref().to_string());
+        envelope.channel_id = ChannelId::from(room_id.as_ref().to_string());
         let url = self.url(&format!("/v1/rooms/{room_id}/envelopes"));
         for wait in BACKOFF {
             let resp = self
@@ -483,7 +483,7 @@ mod tests {
     fn sample_envelope(seq: u64) -> Envelope {
         let tagma_id = TagmaId::from("tagma-1".to_string());
         Envelope {
-            conversation_id: ConversationId::for_tagma(&tagma_id),
+            channel_id: ChannelId::from(ConversationId::for_tagma(&tagma_id).to_string()),
             sender: Participant {
                 id: ParticipantId::for_tagma(&tagma_id),
                 kind: ParticipantKind::Agent,
@@ -574,8 +574,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_room_envelope_stamps_conversation_id_from_room() {
-        // The room route rejects (400) an envelope whose conversation_id does
+    async fn post_room_envelope_stamps_channel_id_from_room() {
+        // The room route rejects (400) an envelope whose channel_id does
         // not match the path room. The client must overwrite whatever the caller
         // set (here a bilateral conversation id) with the room id, so a caller
         // cannot address a room with a stale bilateral id.
@@ -585,7 +585,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(format!("/v1/rooms/{room}/envelopes")))
             .and(body_partial_json(
-                serde_json::json!({ "conversation_id": "room-1" }),
+                serde_json::json!({ "channel_id": "room-1" }),
             ))
             .respond_with(ResponseTemplate::new(202))
             .mount(&server)

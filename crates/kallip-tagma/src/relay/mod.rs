@@ -17,11 +17,11 @@
 //! cycle with `AppState.relay`.
 
 mod bilateral;
-mod manage;
 pub(crate) mod chat_history;
 mod crypto;
 mod dispatch;
 mod kex;
+mod manage;
 pub(crate) mod ops;
 mod pump;
 pub(crate) mod room_poll;
@@ -33,12 +33,13 @@ use std::sync::{Arc, Weak};
 use anyhow::{Context, Result};
 use futures_util::{FutureExt, StreamExt};
 use kallip_agora_common::bytes::Ciphertext;
-use kallip_agora_common::ids::{ConversationId, ParticipantId, ParticipantKind, RoomId, TagmaId};
+use kallip_agora_common::ids::{ConversationId, ParticipantId, ParticipantKind, TagmaId};
 use kallip_e2ee::{self as e2e, DeviceKey};
 use kallip_lesche_client::LescheClient;
 use kallip_lesche_common::message::{
     Envelope, Participant, RoomMessage, TagmaControl, TagmaReply, TagmaRequest,
 };
+use kallip_lesche_common::rooms::RoomId;
 use kallip_lesche_common::tunnel::TunnelInbound;
 use std::panic::AssertUnwindSafe;
 use time::OffsetDateTime;

@@ -96,12 +96,12 @@ async fn post_envelope(
 ) -> Result<StatusCode, ApiError> {
     let conv_id = ConversationId::from(id);
 
-    // The path is authoritative: a body claiming a different conversation_id
+    // The path is authoritative: a body claiming a different channel_id
     // would otherwise be trusted by the tagma, which keys its decrypt state on
     // the envelope field.
-    if env.conversation_id != conv_id {
+    if env.channel_id.as_ref() != conv_id.as_ref() {
         return Err(ApiError::bad_request(
-            "envelope conversation_id does not match the path",
+            "envelope channel_id does not match the path",
         ));
     }
 

@@ -17,9 +17,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
-use sea_orm::{QuerySelect,
+use sea_orm::{
     ActiveValue::Set, ConnectOptions, Database, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, Statement,
+    QueryOrder, QuerySelect, Statement,
 };
 use sea_orm_migration::MigratorTrait;
 use serde::{Deserialize, Serialize};
@@ -52,8 +52,6 @@ pub struct InboxFilter {
     pub limit: Option<u32>,
 }
 
-
-
 /// SQLite-backed store of per-agent message inboxes.
 #[derive(Clone)]
 pub struct InboxStore {
@@ -64,7 +62,8 @@ pub struct InboxStore {
 impl InboxStore {
     pub async fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await
+            fs::create_dir_all(parent)
+                .await
                 .with_context(|| format!("create inbox db dir {}", parent.display()))?;
         }
         let url = format!("sqlite://{}?mode=rwc", path.display());
@@ -76,8 +75,13 @@ impl InboxStore {
                 .busy_timeout(std::time::Duration::from_secs(5))
         });
         let db = Database::connect(opts).await.context("connect inbox db")?;
-        migration::Migrator::up(&db, None).await.context("apply inbox migrations")?;
-        Ok(Self { db, max_retained: DEFAULT_MAX_RETAINED })
+        migration::Migrator::up(&db, None)
+            .await
+            .context("apply inbox migrations")?;
+        Ok(Self {
+            db,
+            max_retained: DEFAULT_MAX_RETAINED,
+        })
     }
 
     #[cfg(test)]
@@ -85,8 +89,13 @@ impl InboxStore {
         let mut opts = ConnectOptions::new("sqlite::memory:".to_owned());
         opts.max_connections(1);
         let db = Database::connect(opts).await.expect("in-memory db");
-        migration::Migrator::up(&db, None).await.expect("migrations");
-        Self { db, max_retained: DEFAULT_MAX_RETAINED }
+        migration::Migrator::up(&db, None)
+            .await
+            .expect("migrations");
+        Self {
+            db,
+            max_retained: DEFAULT_MAX_RETAINED,
+        }
     }
 
     /// Push a message into an agent's inbox.
@@ -119,34 +128,55 @@ impl InboxStore {
     /// Uses UPDATE...RETURNING (no LIMIT) to drain all in one atomic call,
     /// surviving notify coalescing where multiple notify_one() collapse to one wake.
     pub async fn pull_undelivered(&self, agent_id: &AgentId) -> Option<String> {
-        let rows = self.db.query_all(Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Sqlite,
-            "UPDATE inbox_events SET delivered = 1 \
+        let rows = self
+            .db
+            .query_all(Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Sqlite,
+                "UPDATE inbox_events SET delivered = 1 \
              WHERE agent_id = ? AND delivered = 0 \
              RETURNING id, timestamp, source, body",
-            [agent_id.as_ref().into()],
-        )).await.ok()?;
+                [agent_id.as_ref().into()],
+            ))
+            .await
+            .ok()?;
 
-        if rows.is_empty() { return None; }
+        if rows.is_empty() {
+            return None;
+        }
 
-        let mut events: Vec<(i64, BufferedEvent)> = rows.into_iter().map(|r| {
-            let id: i64 = r.try_get("", "id").unwrap_or(0);
-            let ts: i64 = r.try_get("", "timestamp").unwrap_or(0);
-            let source: String = r.try_get("", "source").unwrap_or_default();
-            let body: String = r.try_get("", "body").unwrap_or_default();
-            (id, BufferedEvent { timestamp: from_unix(ts), source, body })
-        }).collect();
+        let mut events: Vec<(i64, BufferedEvent)> = rows
+            .into_iter()
+            .map(|r| {
+                let id: i64 = r.try_get("", "id").unwrap_or(0);
+                let ts: i64 = r.try_get("", "timestamp").unwrap_or(0);
+                let source: String = r.try_get("", "source").unwrap_or_default();
+                let body: String = r.try_get("", "body").unwrap_or_default();
+                (
+                    id,
+                    BufferedEvent {
+                        timestamp: from_unix(ts),
+                        source,
+                        body,
+                    },
+                )
+            })
+            .collect();
         events.sort_by_key(|(id, _)| *id);
 
         let count = events.len();
         let mut lines = Vec::with_capacity(count);
-        lines.push(format!("\u{1F4EC} While you were away ({count} message{}):",
-            if count == 1 { "" } else { "s" }));
+        lines.push(format!(
+            "\u{1F4EC} While you were away ({count} message{}):",
+            if count == 1 { "" } else { "s" }
+        ));
         for (_, ev) in &events {
-            lines.push(format!("  [{}] {}:",
-                ev.timestamp.format(&time::format_description::well_known::Rfc3339)
+            lines.push(format!(
+                "  [{}] {}:",
+                ev.timestamp
+                    .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_else(|_| "?".into()),
-                ev.source));
+                ev.source
+            ));
             for line in ev.body.lines() {
                 lines.push(format!("    {line}"));
             }
@@ -159,7 +189,9 @@ impl InboxStore {
         Entity::find()
             .filter(Column::AgentId.eq(agent_id.as_ref()))
             .filter(Column::Status.eq("unread"))
-            .count(&self.db).await.unwrap_or(0) as usize
+            .count(&self.db)
+            .await
+            .unwrap_or(0) as usize
     }
 
     pub async fn list(&self, agent_id: &AgentId, filter: &InboxFilter) -> Vec<InboxEntry> {
@@ -167,36 +199,55 @@ impl InboxStore {
         let mut q = Entity::find()
             .filter(Column::AgentId.eq(agent_id.as_ref()))
             .order_by_desc(Column::Id);
-        if let Some(ref s) = filter.status { q = q.filter(Column::Status.eq(s)); }
-        q.limit(limit).all(&self.db).await.unwrap_or_default()
-            .into_iter().map(model_to_entry).collect()
+        if let Some(ref s) = filter.status {
+            q = q.filter(Column::Status.eq(s));
+        }
+        q.limit(limit)
+            .all(&self.db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(model_to_entry)
+            .collect()
     }
 
     pub async fn read(&self, agent_id: &AgentId, msg_id: i64) -> Option<InboxEntry> {
         let model = Entity::find_by_id(msg_id)
             .filter(Column::AgentId.eq(agent_id.as_ref()))
-            .one(&self.db).await
+            .one(&self.db)
+            .await
             .map_err(|e| tracing::warn!(error = %e, "inbox read find failed"))
-            .ok().flatten()?;
+            .ok()
+            .flatten()?;
         let mut a: ActiveModel = model.into();
         a.status = Set("read".to_string());
-        let updated = a.update(&self.db).await.map_err(|e| {
-            tracing::warn!(error = %e, "inbox read status update failed");
-            e
-        }).ok()?;
+        let updated = a
+            .update(&self.db)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "inbox read status update failed");
+                e
+            })
+            .ok()?;
         Some(model_to_entry(updated))
     }
 
     pub async fn summary(&self, agent_id: &AgentId) -> InboxSummary {
-        let total = Entity::find().filter(Column::AgentId.eq(agent_id.as_ref()))
-            .count(&self.db).await.unwrap_or(0) as usize;
+        let total = Entity::find()
+            .filter(Column::AgentId.eq(agent_id.as_ref()))
+            .count(&self.db)
+            .await
+            .unwrap_or(0) as usize;
         let unread = self.count_unread(agent_id).await;
         InboxSummary { total, unread }
     }
 
     pub async fn mark_done(&self, agent_id: &AgentId, msg_id: i64) -> bool {
-        match Entity::find_by_id(msg_id).filter(Column::AgentId.eq(agent_id.as_ref()))
-            .one(&self.db).await {
+        match Entity::find_by_id(msg_id)
+            .filter(Column::AgentId.eq(agent_id.as_ref()))
+            .one(&self.db)
+            .await
+        {
             Ok(Some(m)) => {
                 let mut a: ActiveModel = m.into();
                 a.status = Set("done".to_string());
@@ -218,34 +269,49 @@ impl InboxStore {
 
     pub async fn clear(&self, agent_id: &AgentId, all: bool) -> usize {
         let mut q = Entity::delete_many().filter(Column::AgentId.eq(agent_id.as_ref()));
-        if !all { q = q.filter(Column::Status.eq("done")); }
-        else {
+        if !all {
+            q = q.filter(Column::Status.eq("done"));
+        } else {
             // Guard: never delete undelivered messages.
             q = q.filter(Column::Delivered.eq(1));
         }
-        q.exec(&self.db).await.map(|r| r.rows_affected as usize).unwrap_or(0)
+        q.exec(&self.db)
+            .await
+            .map(|r| r.rows_affected as usize)
+            .unwrap_or(0)
     }
 
     pub async fn clear_for(&self, agent_id: &AgentId) {
-        Entity::delete_many().filter(Column::AgentId.eq(agent_id.as_ref()))
-            .exec(&self.db).await.ok();
+        Entity::delete_many()
+            .filter(Column::AgentId.eq(agent_id.as_ref()))
+            .exec(&self.db)
+            .await
+            .ok();
     }
 
     #[cfg(test)]
     pub async fn len_for(&self, agent_id: &AgentId) -> usize {
-        Entity::find().filter(Column::AgentId.eq(agent_id.as_ref()))
-            .count(&self.db).await.unwrap_or(0) as usize
+        Entity::find()
+            .filter(Column::AgentId.eq(agent_id.as_ref()))
+            .count(&self.db)
+            .await
+            .unwrap_or(0) as usize
     }
 }
 
 fn model_to_entry(m: entities::inbox_event::Model) -> InboxEntry {
     InboxEntry {
-        id: m.id, timestamp: from_unix(m.timestamp), source: m.source,
-        body: m.body, status: m.status,
+        id: m.id,
+        timestamp: from_unix(m.timestamp),
+        source: m.source,
+        body: m.body,
+        status: m.status,
     }
 }
 
-fn to_unix(t: OffsetDateTime) -> i64 { t.to_offset(UtcOffset::UTC).unix_timestamp() }
+fn to_unix(t: OffsetDateTime) -> i64 {
+    t.to_offset(UtcOffset::UTC).unix_timestamp()
+}
 
 fn from_unix(secs: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(secs).unwrap_or_else(|_| {
@@ -271,7 +337,9 @@ mod tests {
     async fn push_and_pull_single() {
         let store = InboxStore::open_in_memory().await;
         let id = AgentId::random();
-        store.push(id.clone(), event("operator", "hello world")).await;
+        store
+            .push(id.clone(), event("operator", "hello world"))
+            .await;
         let msg = store.pull_undelivered(&id).await.unwrap();
         assert!(msg.contains("1 message"));
         assert!(msg.contains("operator"));
@@ -334,7 +402,11 @@ mod tests {
         for i in 0..5u8 {
             store.push(id.clone(), event("s", &format!("ev-{i}"))).await;
         }
-        assert_eq!(store.len_for(&id).await, 5, "undelivered must not be evicted");
+        assert_eq!(
+            store.len_for(&id).await,
+            5,
+            "undelivered must not be evicted"
+        );
         // Pull all -> delivered=1. Next push triggers eviction of delivered.
         let _ = store.pull_undelivered(&id).await;
         // Push 1 more -> eviction fires: 5 delivered > cap 3, evicts 2 oldest.
@@ -342,9 +414,18 @@ mod tests {
         let remaining = store.list(&id, &InboxFilter::default()).await;
         // 3 delivered (ev-4, ev-3, ev-2) + 1 undelivered (after-pull) = 4.
         assert_eq!(remaining.len(), 4, "got {remaining:?}");
-        assert!(!remaining.iter().any(|e| e.body.contains("ev-0")), "oldest delivered evicted");
-        assert!(!remaining.iter().any(|e| e.body.contains("ev-1")), "2nd oldest delivered evicted");
-        assert!(remaining.iter().any(|e| e.body.contains("after-pull")), "new undelivered kept");
+        assert!(
+            !remaining.iter().any(|e| e.body.contains("ev-0")),
+            "oldest delivered evicted"
+        );
+        assert!(
+            !remaining.iter().any(|e| e.body.contains("ev-1")),
+            "2nd oldest delivered evicted"
+        );
+        assert!(
+            remaining.iter().any(|e| e.body.contains("after-pull")),
+            "new undelivered kept"
+        );
     }
 
     #[tokio::test]
@@ -420,11 +501,21 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("inboxes.sqlite");
         let id = AgentId::random();
-        { let store = InboxStore::open(&path).await.unwrap();
-          store.push(id.clone(), event("operator", "persistent")).await; }
+        {
+            let store = InboxStore::open(&path).await.unwrap();
+            store
+                .push(id.clone(), event("operator", "persistent"))
+                .await;
+        }
         let store = InboxStore::open(&path).await.unwrap();
         assert_eq!(store.len_for(&id).await, 1);
-        assert!(store.pull_undelivered(&id).await.unwrap().contains("persistent"));
+        assert!(
+            store
+                .pull_undelivered(&id)
+                .await
+                .unwrap()
+                .contains("persistent")
+        );
     }
 
     #[tokio::test]
@@ -442,57 +533,69 @@ mod tests {
         push_handle.await.unwrap();
         let in_inbox = store.len_for(&id).await;
         if let Some(ref msg) = pull_msg {
-            assert!(msg.contains("late") || in_inbox > 2,
-                "late message lost: not in pull, inbox has {in_inbox}");
+            assert!(
+                msg.contains("late") || in_inbox > 2,
+                "late message lost: not in pull, inbox has {in_inbox}"
+            );
         } else {
             assert!(in_inbox >= 1, "messages lost on empty pull");
         }
     }
 }
 
-    #[tokio::test]
-    async fn migration_backfills_and_preserves() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("inboxes.sqlite");
+#[tokio::test]
+async fn migration_backfills_and_preserves() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("inboxes.sqlite");
 
-        // Seed at the m_01 schema (old columns).
-        {
-            let mut opts = ConnectOptions::new(format!("sqlite://{}?mode=rwc", path.display()));
-            opts.max_connections(1);
-            let db = Database::connect(opts).await.unwrap();
-            db.execute(Statement::from_sql_and_values(
-                sea_orm::DatabaseBackend::Sqlite,
-                "CREATE TABLE inbox_events ( \
+    // Seed at the m_01 schema (old columns).
+    {
+        let mut opts = ConnectOptions::new(format!("sqlite://{}?mode=rwc", path.display()));
+        opts.max_connections(1);
+        let db = Database::connect(opts).await.unwrap();
+        db.execute(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "CREATE TABLE inbox_events ( \
                     id INTEGER PRIMARY KEY AUTOINCREMENT, \
                     agent_id TEXT NOT NULL, \
                     timestamp INTEGER NOT NULL, \
                     source TEXT NOT NULL, \
                     summary TEXT NOT NULL \
                 )",
-                [],
-            )).await.unwrap();
-            db.execute(Statement::from_sql_and_values(
-                sea_orm::DatabaseBackend::Sqlite,
-                "INSERT INTO inbox_events (agent_id, timestamp, source, summary) \
+            [],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "INSERT INTO inbox_events (agent_id, timestamp, source, summary) \
                  VALUES ('agent-x', 1700000000, 'operator', 'legacy message body')",
-                [],
-            )).await.unwrap();
-        }
+            [],
+        ))
+        .await
+        .unwrap();
+    }
 
-        // Open with new migration -- table-rebuild should run.
-        let store = InboxStore::open(&path).await.unwrap();
-        let id: AgentId = "agent-x".parse().unwrap();
-        let msg = store.pull_undelivered(&id).await.expect("legacy row should be undelivered");
-        assert!(msg.contains("legacy message body"), "body backfilled from summary: {msg}");
+    // Open with new migration -- table-rebuild should run.
+    let store = InboxStore::open(&path).await.unwrap();
+    let id: AgentId = "agent-x".parse().unwrap();
+    let msg = store
+        .pull_undelivered(&id)
+        .await
+        .expect("legacy row should be undelivered");
+    assert!(
+        msg.contains("legacy message body"),
+        "body backfilled from summary: {msg}"
+    );
 
-        // Verify summary column no longer exists.
-        let result = store.db.execute(Statement::from_sql_and_values(
+    // Verify summary column no longer exists.
+    let result = store.db.execute(Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Sqlite,
             "INSERT INTO inbox_events (agent_id, timestamp, source, summary) VALUES ('x', 0, 'x', 'x')",
             [],
         )).await;
-        assert!(result.is_err(), "summary column should be gone");
-    }
+    assert!(result.is_err(), "summary column should be gone");
+}
 
 /// Concrete `MessagePuller` implementation: wraps an `InboxStore` + `AgentId`
 /// so the runtime crate can pull undelivered messages without depending on the

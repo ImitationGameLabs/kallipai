@@ -400,7 +400,7 @@ Auth: any authenticated identity. See [auth.md](auth.md).
       "timestamp": 1717000000,
       "round": 3,
       "attempt": 2,
-      "max_attempts": 3,
+      "max_attempts": 10,
       "error": "tool timeout",
       "delay_secs": 2.0
     }

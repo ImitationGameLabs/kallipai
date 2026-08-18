@@ -13,7 +13,7 @@ use axum::{Router, routing::post};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, aead::Aead};
 use kallip_agora_common::bytes::Ciphertext;
 use kallip_agora_common::ids::{
-    ConversationId, ParticipantId, ParticipantKind, RoomId, TagmaId, TraceId, UserId,
+    ChannelId, ConversationId, ParticipantId, ParticipantKind, TagmaId, TraceId, UserId,
 };
 use kallip_common::protocol::{AuthoredEvent, SignalEvent, SseEvent};
 use kallip_e2ee::{
@@ -21,6 +21,7 @@ use kallip_e2ee::{
 };
 use kallip_lesche_common::control::KeyExchangeInit;
 use kallip_lesche_common::message::{Envelope, Participant, RoomMessage, TagmaReply, TagmaRequest};
+use kallip_lesche_common::rooms::RoomId;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -223,7 +224,7 @@ async fn setup_inner(
 /// user-sender envelope, dir 0 (initiator->responder).
 fn payload_envelope(key: &SessionKey, conv: &ConversationId, seq: u64, bytes: &[u8]) -> Envelope {
     Envelope {
-        conversation_id: conv.clone(),
+        channel_id: ChannelId::from(conv.as_ref().to_string()),
         sender: Participant {
             id: ParticipantId::for_user(&UserId::from("u".to_string())),
             kind: ParticipantKind::Human,
@@ -309,7 +310,13 @@ async fn send_message_round_trips() {
     // The root agent's prompt channel received the text, prefixed with the
     // `[From: user <handle>]` header (a Human sender carries its handle).
     // Message is stored in the root agent's inbox.
-    let delivered = state.inboxes.get().unwrap().pull_undelivered(&root_id).await.unwrap();
+    let delivered = state
+        .inboxes
+        .get()
+        .unwrap()
+        .pull_undelivered(&root_id)
+        .await
+        .unwrap();
     assert!(delivered.contains("[From: user Alice]"));
     assert!(delivered.contains("hello"));
     // The app got a MessageAccepted reply.
@@ -427,7 +434,7 @@ async fn garbage_ciphertext_does_not_advance_replay_window() {
     let (handle, key, capture, _prompt_rx, _root_id, _state) = setup(1).await;
     let conv = conv_of(&handle);
     let forged = Envelope {
-        conversation_id: conv.clone(),
+        channel_id: ChannelId::from(conv.as_ref().to_string()),
         sender: Participant {
             id: ParticipantId::for_user(&UserId::from("u".to_string())),
             kind: ParticipantKind::Human,
@@ -580,8 +587,7 @@ fn key_zero() -> SessionKey {
 /// The row then replays as a `UserMessage` echo under its row id.
 #[tokio::test]
 async fn send_message_persists_inbound_and_forwards_usermessage() {
-    let (handle, key, capture, _prompt_rx, root_id, state, db, _dir) =
-        setup_with_history(8).await;
+    let (handle, key, capture, _prompt_rx, root_id, state, db, _dir) = setup_with_history(8).await;
     let conv = conv_of(&handle);
     handle
         .handle_user_op(user_envelope(
@@ -595,7 +601,12 @@ async fn send_message_persists_inbound_and_forwards_usermessage() {
         ))
         .await;
     // The root agent received the prompt.
-    let _ = state.inboxes.get().unwrap().pull_undelivered(&root_id).await;
+    let _ = state
+        .inboxes
+        .get()
+        .unwrap()
+        .pull_undelivered(&root_id)
+        .await;
     let replies = drain_replies(&capture, &key).await;
 
     // The ack is present and carries history_id = 0: the inbound row id no
@@ -874,7 +885,13 @@ async fn handle_user_op_routes_joined_room_to_the_room_path() {
 
     // Fail fast (timeout) if a regression skips the room path instead of
     // hanging the suite on a bare `recv()`.
-    let delivered = state.inboxes.get().unwrap().pull_undelivered(&root_id).await.unwrap();
+    let delivered = state
+        .inboxes
+        .get()
+        .unwrap()
+        .pull_undelivered(&root_id)
+        .await
+        .unwrap();
     // The room header names the sender kind + handle + room id.
     assert!(
         delivered.contains(&format!("| room {room}")),
@@ -907,7 +924,12 @@ async fn handle_user_op_skips_room_path_for_non_joined_room() {
     let envelope = room_envelope(&not_joined, "hi room", "Alice");
     handle.handle_user_op(envelope).await;
     // No message delivered to inbox on the bilateral fallthrough.
-    let leaked = state.inboxes.get().unwrap().pull_undelivered(&root_id).await;
+    let leaked = state
+        .inboxes
+        .get()
+        .unwrap()
+        .pull_undelivered(&root_id)
+        .await;
     assert!(
         leaked.is_none(),
         "no inbox message expected on the bilateral fallthrough"
@@ -920,7 +942,7 @@ async fn handle_user_op_skips_room_path_for_non_joined_room() {
 fn room_envelope(room: &RoomId, text: &str, handle: &str) -> Envelope {
     let plaintext = serde_json::to_vec(&RoomMessage { text: text.into() }).unwrap();
     Envelope {
-        conversation_id: ConversationId::from(room.as_ref().to_string()),
+        channel_id: ChannelId::from(room.as_ref().to_string()),
         sender: Participant {
             id: ParticipantId::for_user(&UserId::from("u".to_string())),
             kind: ParticipantKind::Human,

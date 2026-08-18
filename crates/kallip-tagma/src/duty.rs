@@ -50,7 +50,10 @@ impl DutyStore {
 
     /// Set the duty status for an agent.
     pub fn set(&self, id: AgentId, status: DutyStatus) {
-        self.map.lock().expect("duty map poisoned").insert(id, status);
+        self.map
+            .lock()
+            .expect("duty map poisoned")
+            .insert(id, status);
     }
 
     /// Remove the duty entry for an agent (cleanup on removal).

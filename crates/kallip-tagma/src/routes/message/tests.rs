@@ -1,6 +1,6 @@
 use super::*;
 use crate::auth::{AuthIdentity, Identity};
-use crate::state::AgentId;
+use crate::state::{AgentId, RegistryEntry};
 use crate::test_helpers::{add_faulted_root, install_inbox_store, make_entry_with_rx, make_state};
 use axum::Json;
 use axum::extract::{Path, State};

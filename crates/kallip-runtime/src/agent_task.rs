@@ -581,28 +581,21 @@ mod tests {
 
         // Poll the store until the message appears (record_turn runs before
         // any network call in run_and_report).
-        let found = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            async {
-                loop {
-                    let guard = store.lock().await;
-                    let has_msg = guard
-                        .turns()
-                        .iter()
-                        .flat_map(|t| &t.messages)
-                        .any(|m| {
-                            m.content()
-                                .map(|t| t.contains("inbox test message"))
-                                .unwrap_or(false)
-                        });
-                    drop(guard);
-                    if has_msg {
-                        return true;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let guard = store.lock().await;
+                let has_msg = guard.turns().iter().flat_map(|t| &t.messages).any(|m| {
+                    m.content()
+                        .map(|t| t.contains("inbox test message"))
+                        .unwrap_or(false)
+                });
+                drop(guard);
+                if has_msg {
+                    return true;
                 }
-            },
-        )
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
         .await;
 
         cancel.cancel();

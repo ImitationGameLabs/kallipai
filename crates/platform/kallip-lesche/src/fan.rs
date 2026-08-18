@@ -13,11 +13,10 @@
 //! message on reconnect. The caller decides whether zero-delivered
 //! is a 503 (no one reachable).
 
-use kallip_agora_common::control_plane::RoomMembership;
-use kallip_agora_common::ids::{MemberId, ParticipantKind, RoomId};
-use kallip_agora_common::participant::RoomMember;
+use kallip_agora_common::ids::ParticipantKind;
 use kallip_lesche_common::event::LescheEvent;
 use kallip_lesche_common::message::Envelope;
+use kallip_lesche_common::rooms::{MemberId, RoomId, RoomMember, RoomMembership};
 use kallip_lesche_common::tunnel::TunnelInbound;
 
 use crate::state::Registry;
@@ -118,13 +117,13 @@ mod tests {
     use super::*;
     use crate::test_support::make_state;
     use kallip_agora_common::bytes::Ciphertext;
-    use kallip_agora_common::ids::{ConversationId, ParticipantId, TagmaId, TraceId, UserId};
+    use kallip_agora_common::ids::{ChannelId, ParticipantId, TagmaId, TraceId, UserId};
     use kallip_lesche_common::message::Participant;
     use time::OffsetDateTime;
 
     fn envelope_from(sender: Participant) -> Envelope {
         Envelope {
-            conversation_id: ConversationId::from("room-1".to_string()),
+            channel_id: ChannelId::from("room-1".to_string()),
             sender,
             sequence_n: 1,
             trace_id: TraceId::from("t".to_string()),

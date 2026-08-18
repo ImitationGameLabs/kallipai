@@ -38,7 +38,7 @@ pub struct Model {
     /// Room visibility, stored as the `Visibility::as_str` label (`private` or
     /// `public`). Immutable after create. Validated to `Visibility` on read via
     /// `Visibility::from_db`; an unknown value degrades to `Private`. See
-    /// [`kallip_agora_common::rooms::Visibility`].
+    /// [`kallip_lesche_common::rooms::Visibility`].
     #[sea_orm(column_type = "Text")]
     pub visibility: String,
 }

@@ -24,7 +24,7 @@ use kallip_agora_common::internal_api::{
     TagmaProfilesRequest, TagmaProfilesResponse, TunnelProofTsRequest, TunnelProofTsResponse,
     UserIdentitiesRequest, UserIdentitiesResponse, UserIdentityByUsernameRequest,
     UserIdentityResponse, VerifyBearerRequest, VerifyBearerResponse, VerifySessionRequest,
-    VerifySessionResponse, WirePrincipal,
+    VerifySessionResponse,
 };
 use kallip_agora_common::principal::Principal;
 
@@ -110,11 +110,8 @@ impl ControlPlane for HttpControlPlane {
                 },
             )
             .await?;
-        Ok(resp.map(|r| VerifiedSession {
-            user_id: r.user_id,
-            username: r.username,
-            display_name: r.display_name,
-        }))
+        // The wire body aliases VerifiedSession: no field mapping.
+        Ok(resp)
     }
 
     async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError> {
@@ -126,10 +123,9 @@ impl ControlPlane for HttpControlPlane {
                 },
             )
             .await?;
-        Ok(resp.map(|r| match r.principal {
-            WirePrincipal::Admin => Principal::Admin,
-            WirePrincipal::Tagma { tagma_id } => Principal::Tagma(tagma_id),
-        }))
+        // The wire enum is the bearer-reachable subset of Principal; the
+        // From impl (in internal_api) is the single mapping site.
+        Ok(resp.map(|r| Principal::from(r.principal)))
     }
 
     async fn tagma_profiles(
@@ -146,24 +142,9 @@ impl ControlPlane for HttpControlPlane {
                 },
             )
             .await?;
-        Ok(resp
-            .map(|r| {
-                r.profiles
-                    .into_iter()
-                    .map(|p| TagmaProfile {
-                        tagma_id: p.tagma_id,
-                        pinned_public_key: p.pinned_public_key,
-                        owner_user_id: p.owner_user_id,
-                        label: p.label,
-                        owner_username: p.owner_username,
-                        owner_display_name: p.owner_display_name,
-                        enrolled: p.enrolled,
-                        revoked: p.revoked,
-                        owner_disabled: p.owner_disabled,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default())
+        // The wire entry type aliases TagmaProfile, so the response body
+        // deserializes straight into the trait type -- no field mapping.
+        Ok(resp.map(|r| r.profiles).unwrap_or_default())
     }
 
     async fn user_identities(
@@ -178,19 +159,8 @@ impl ControlPlane for HttpControlPlane {
                 },
             )
             .await?;
-        Ok(resp
-            .map(|r| {
-                r.users
-                    .into_iter()
-                    .map(|u| UserIdentity {
-                        user_id: u.user_id,
-                        username: u.username,
-                        display_name: u.display_name,
-                        disabled: u.disabled,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default())
+        // The wire entry aliases UserIdentity: no field mapping.
+        Ok(resp.map(|r| r.users).unwrap_or_default())
     }
 
     async fn user_identity_by_username(
@@ -208,12 +178,7 @@ impl ControlPlane for HttpControlPlane {
                 },
             )
             .await?;
-        Ok(resp.map(|u| UserIdentity {
-            user_id: u.user_id,
-            username: u.username,
-            display_name: u.display_name,
-            disabled: u.disabled,
-        }))
+        Ok(resp)
     }
 
     async fn bump_tunnel_proof_ts(

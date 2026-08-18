@@ -50,7 +50,7 @@ impl RelayHandle {
         // rejects it); the handle is spoofable + sanitized in `format_room_incoming`.
         let sender_kind = sender.kind.as_str();
         let sender_handle = sender.handle.clone();
-        if let Err(e) = crate::routes::deliver_inbound_room_message(
+        if let Err(e) = crate::delivery::deliver_inbound_room_message(
             state,
             &self.inner.root_agent,
             room,
@@ -244,7 +244,7 @@ impl RelayHandle {
             .context("tagma shutting down; relay op dropped")?;
         match request {
             TagmaRequest::SendMessage { req_id, text } => {
-                let resp = crate::routes::deliver_message(
+                let resp = crate::delivery::deliver_message(
                     &state,
                     Identity::Operator,
                     Some(sender),

@@ -1,6 +1,8 @@
 //! Wire types for the `kallip-lesche` relay (data plane): E2EE conversation
 //! envelopes, the tunnel inbound frames, the multiplexed `GET /v1/me/events`
-//! SSE union ([`event::LescheEvent`]), and the 1-RTT key-exchange handshake.
+//! SSE union ([`event::LescheEvent`]), the 1-RTT key-exchange handshake, and
+//! the room-domain wire types ([`rooms`]: the `/v1/rooms` DTOs, the room
+//! identity atoms, the membership snapshot).
 //!
 //! This crate depends on `kallip-agora-common` for the foundation the data
 //! plane shares with the control plane (identity newtypes, crypto-byte
@@ -16,4 +18,5 @@ pub mod control;
 pub mod event;
 pub mod message;
 pub mod proof;
+pub mod rooms;
 pub mod tunnel;

@@ -385,6 +385,70 @@ impl App {
 mod tests {
     use super::*;
 
+    /// Vocabulary snapshot: the Debug shape of every ChatLine variant —
+    /// variant name plus, for struct variants, field names. Tuple-variant
+    /// payloads (User/Assistant/ToolResult/Reasoning/Status/Error/System
+    /// carry one String) show only the value; their meaning is positional.
+    /// ChatLine is TUI-internal (never serialized), so this Debug pin is the
+    /// layer's shape contract in the event chain: adding/renaming/removing a
+    /// variant or field reds here. Values are not pinned; the SseEvent→
+    /// ChatLine mapping is compiler-locked by the exhaustive match in
+    /// events.rs.
+    #[test]
+    fn chatline_schema_snapshot() {
+        let samples: Vec<ChatLine> = vec![
+            ChatLine::User(String::new()),
+            ChatLine::Assistant(String::new()),
+            ChatLine::ToolCall {
+                name: String::new(),
+                args: String::new(),
+            },
+            ChatLine::ToolResult(String::new()),
+            ChatLine::Reasoning(String::new()),
+            ChatLine::Status(String::new()),
+            ChatLine::Error(String::new()),
+            ChatLine::System(String::new()),
+            ChatLine::Retrying {
+                attempt: 0,
+                max_attempts: 0,
+                error: String::new(),
+                delay_secs: 0.0,
+            },
+            ChatLine::Failover {
+                from: String::new(),
+                to: String::new(),
+                reason: String::new(),
+            },
+            ChatLine::FailoverExhausted {
+                reason: String::new(),
+                detail: String::new(),
+            },
+            ChatLine::StreamDropped {
+                attempt: 0,
+                max_attempts: 0,
+                error: String::new(),
+                delay_secs: 0.0,
+            },
+        ];
+        assert_eq!(samples.len(), 12, "variant count drifted — extend samples");
+        let expected: &[&str] = &[
+            "User(\"\")",
+            "Assistant(\"\")",
+            "ToolCall { name: \"\", args: \"\" }",
+            "ToolResult(\"\")",
+            "Reasoning(\"\")",
+            "Status(\"\")",
+            "Error(\"\")",
+            "System(\"\")",
+            "Retrying { attempt: 0, max_attempts: 0, error: \"\", delay_secs: 0.0 }",
+            "Failover { from: \"\", to: \"\", reason: \"\" }",
+            "FailoverExhausted { reason: \"\", detail: \"\" }",
+            "StreamDropped { attempt: 0, max_attempts: 0, error: \"\", delay_secs: 0.0 }",
+        ];
+        for (v, want) in samples.iter().zip(expected) {
+            assert_eq!(format!("{v:?}"), *want);
+        }
+    }
     #[test]
     fn request_flush_merges_and_clears() {
         let mut app = App::new();

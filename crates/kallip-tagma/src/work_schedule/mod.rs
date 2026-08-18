@@ -70,8 +70,12 @@ pub struct WorkSchedule {
     pub created_at: OffsetDateTime,
 }
 
-fn default_pre_warn() -> u32 { 10 }
-fn default_final_warn() -> u32 { 5 }
+fn default_pre_warn() -> u32 {
+    10
+}
+fn default_final_warn() -> u32 {
+    5
+}
 
 /// Request body for creating a work schedule.
 #[derive(Debug, Deserialize)]
@@ -113,22 +117,22 @@ pub struct ListWorkSchedulesQuery {
 
 /// Validate cron expressions and warn-minute fields.
 fn validate_schedule(
-    start_cron: &str, end_cron: &str, pre_warn: u32, final_warn: u32,
+    start_cron: &str,
+    end_cron: &str,
+    pre_warn: u32,
+    final_warn: u32,
 ) -> Result<(), ApiError> {
-    let start = crate::cron::CronExpr::parse(start_cron).map_err(|e| {
-        ApiError::bad_request(format!("invalid start_cron: {e}"))
-    })?;
-    let end = crate::cron::CronExpr::parse(end_cron).map_err(|e| {
-        ApiError::bad_request(format!("invalid end_cron: {e}"))
-    })?;
+    let start = crate::cron::CronExpr::parse(start_cron)
+        .map_err(|e| ApiError::bad_request(format!("invalid start_cron: {e}")))?;
+    let end = crate::cron::CronExpr::parse(end_cron)
+        .map_err(|e| ApiError::bad_request(format!("invalid end_cron: {e}")))?;
     // Reject cron expressions that will never fire (e.g. Feb 30).
     let now = time::OffsetDateTime::now_utc();
-    start.next_after(now).map_err(|_| {
-        ApiError::bad_request("start_cron will never fire within the next 5 years")
-    })?;
-    end.next_after(now).map_err(|_| {
-        ApiError::bad_request("end_cron will never fire within the next 5 years")
-    })?;
+    start
+        .next_after(now)
+        .map_err(|_| ApiError::bad_request("start_cron will never fire within the next 5 years"))?;
+    end.next_after(now)
+        .map_err(|_| ApiError::bad_request("end_cron will never fire within the next 5 years"))?;
     if pre_warn < final_warn {
         return Err(ApiError::bad_request(
             "pre_warn_minutes must be >= final_warn_minutes",
@@ -137,12 +141,12 @@ fn validate_schedule(
     Ok(())
 }
 
-
 /// Get the work-schedule store from AppState, returning 503 if not configured.
 fn get_store(state: &SharedState) -> Result<&WorkScheduleStore, ApiError> {
-    state.work_schedules.get().ok_or_else(|| {
-        ApiError::unavailable("work schedules not configured")
-    })
+    state
+        .work_schedules
+        .get()
+        .ok_or_else(|| ApiError::unavailable("work schedules not configured"))
 }
 
 // --- Route handlers ---
@@ -159,7 +163,12 @@ pub async fn create_work_schedule(
             "timezone scheduling is not yet supported; use UTC cron expressions",
         ));
     }
-    validate_schedule(&req.start_cron, &req.end_cron, req.pre_warn_minutes, req.final_warn_minutes)?;
+    validate_schedule(
+        &req.start_cron,
+        &req.end_cron,
+        req.pre_warn_minutes,
+        req.final_warn_minutes,
+    )?;
     let schedule = WorkSchedule {
         id: uuid::Uuid::new_v4().to_string(),
         name: req.name,
@@ -173,7 +182,8 @@ pub async fn create_work_schedule(
         timezone: req.timezone,
         created_at: OffsetDateTime::now_utc(),
     };
-    get_store(&state)?.create(&schedule)
+    get_store(&state)?
+        .create(&schedule)
         .await
         .map_err(ApiError::internal)?;
     info!(schedule_id = %schedule.id, "work schedule created");
@@ -187,7 +197,8 @@ pub async fn list_work_schedules(
     Query(query): Query<ListWorkSchedulesQuery>,
 ) -> Result<Json<Vec<WorkSchedule>>, ApiError> {
     crate::auth::require_operator(auth.identity())?;
-    let schedules = get_store(&state)?.list(query.agent_id.as_ref(), query.status)
+    let schedules = get_store(&state)?
+        .list(query.agent_id.as_ref(), query.status)
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(schedules))
@@ -200,7 +211,8 @@ pub async fn get_work_schedule(
     Path(id): Path<String>,
 ) -> Result<Json<WorkSchedule>, ApiError> {
     crate::auth::require_operator(auth.identity())?;
-    let schedule = get_store(&state)?.get(&id)
+    let schedule = get_store(&state)?
+        .get(&id)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("work schedule not found"))?;
@@ -221,25 +233,48 @@ pub async fn update_work_schedule(
             "timezone scheduling is not yet supported; use UTC cron expressions",
         ));
     }
-    let mut existing = get_store(&state)?.get(&id)
+    let mut existing = get_store(&state)?
+        .get(&id)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("work schedule not found"))?;
 
-    if let Some(name) = req.name { existing.name = name; }
-    if let Some(start_cron) = req.start_cron { existing.start_cron = start_cron; }
-    if let Some(end_cron) = req.end_cron { existing.end_cron = end_cron; }
-    if let Some(pre) = req.pre_warn_minutes { existing.pre_warn_minutes = pre; }
-    if let Some(fin) = req.final_warn_minutes { existing.final_warn_minutes = fin; }
-    if let Some(prompt) = req.wake_prompt { existing.wake_prompt = prompt; }
-    let was_active = get_store(&state)?.get(&id).await.ok().flatten()
+    if let Some(name) = req.name {
+        existing.name = name;
+    }
+    if let Some(start_cron) = req.start_cron {
+        existing.start_cron = start_cron;
+    }
+    if let Some(end_cron) = req.end_cron {
+        existing.end_cron = end_cron;
+    }
+    if let Some(pre) = req.pre_warn_minutes {
+        existing.pre_warn_minutes = pre;
+    }
+    if let Some(fin) = req.final_warn_minutes {
+        existing.final_warn_minutes = fin;
+    }
+    if let Some(prompt) = req.wake_prompt {
+        existing.wake_prompt = prompt;
+    }
+    let was_active = get_store(&state)?
+        .get(&id)
+        .await
+        .ok()
+        .flatten()
         .map(|s| s.status == WorkScheduleStatus::Active)
         .unwrap_or(false);
 
-    if let Some(status) = req.status { existing.status = status; }
+    if let Some(status) = req.status {
+        existing.status = status;
+    }
 
-    validate_schedule(&existing.start_cron, &existing.end_cron,
-        existing.pre_warn_minutes, existing.final_warn_minutes)?;
+    validate_schedule(
+        &existing.start_cron,
+        &existing.end_cron,
+        existing.pre_warn_minutes,
+        existing.final_warn_minutes,
+    )?;
 
     // If the schedule was Active and is now Paused, reset the agent to
     // OnDuty so messages are not buffered indefinitely. NOTE: this assumes
@@ -247,12 +282,15 @@ pub async fn update_work_schedule(
     // detection is not yet implemented).
     let now_paused = was_active && existing.status == WorkScheduleStatus::Paused;
     if now_paused {
-        state.duty.set(existing.agent_id.clone(), crate::duty::DutyStatus::OnDuty);
+        state
+            .duty
+            .set(existing.agent_id.clone(), crate::duty::DutyStatus::OnDuty);
         info!(schedule_id = %id, agent = %existing.agent_id,
               "schedule paused, duty reset to on-duty");
     }
 
-    let updated = get_store(&state)?.update(&existing)
+    let updated = get_store(&state)?
+        .update(&existing)
         .await
         .map_err(ApiError::internal)?;
     if !updated {
@@ -270,10 +308,12 @@ pub async fn delete_work_schedule(
 ) -> Result<StatusCode, ApiError> {
     crate::auth::require_operator(auth.identity())?;
     // Look up the schedule before deleting to get the agent_id.
-    let schedule = get_store(&state)?.get(&id)
+    let schedule = get_store(&state)?
+        .get(&id)
         .await
         .map_err(ApiError::internal)?;
-    let deleted = get_store(&state)?.delete(&id)
+    let deleted = get_store(&state)?
+        .delete(&id)
         .await
         .map_err(ApiError::internal)?;
     if !deleted {
@@ -283,7 +323,9 @@ pub async fn delete_work_schedule(
     // assumption as the pause path above.
     if let Some(sched) = schedule {
         if sched.status == WorkScheduleStatus::Active {
-            state.duty.set(sched.agent_id.clone(), crate::duty::DutyStatus::OnDuty);
+            state
+                .duty
+                .set(sched.agent_id.clone(), crate::duty::DutyStatus::OnDuty);
             info!(schedule_id = %id, agent = %sched.agent_id,
                   "schedule deleted, duty reset to on-duty");
         }
@@ -326,7 +368,9 @@ mod route_tests {
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(create_req("agent-1")),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.0, StatusCode::CREATED);
         let id = resp.1.id.clone();
 
@@ -334,7 +378,9 @@ mod route_tests {
             State(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Path(id.clone()),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(got.0.name, "Day shift");
     }
 
@@ -345,18 +391,27 @@ mod route_tests {
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(create_req("agent-1")),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         create_work_schedule(
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(create_req("agent-2")),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let resp = list_work_schedules(
             State(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Query(ListWorkSchedulesQuery { agent_id: None, status: None }),
-        ).await.unwrap();
+            Query(ListWorkSchedulesQuery {
+                agent_id: None,
+                status: None,
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.0.len(), 2);
     }
 
@@ -367,7 +422,9 @@ mod route_tests {
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(create_req("agent-1")),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let id = resp.1.id.clone();
 
         let updated = update_work_schedule(
@@ -376,11 +433,17 @@ mod route_tests {
             Path(id.clone()),
             Json(UpdateWorkScheduleRequest {
                 name: Some("Night shift".into()),
-                start_cron: None, end_cron: None,
-                pre_warn_minutes: None, final_warn_minutes: None,
-                wake_prompt: None, status: None, timezone: None,
+                start_cron: None,
+                end_cron: None,
+                pre_warn_minutes: None,
+                final_warn_minutes: None,
+                wake_prompt: None,
+                status: None,
+                timezone: None,
             }),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(updated.0.name, "Night shift");
     }
 
@@ -391,21 +454,27 @@ mod route_tests {
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(create_req("agent-1")),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let id = resp.1.id.clone();
 
         let status = delete_work_schedule(
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Path(id),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(status, StatusCode::NO_CONTENT);
 
         let err = get_work_schedule(
             State(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Path(resp.1.id.clone()),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.status, 404);
     }
 
@@ -418,7 +487,9 @@ mod route_tests {
             State(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(req),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.status, 400);
     }
 
@@ -429,7 +500,9 @@ mod route_tests {
             State(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Path("nonexistent".into()),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.status, 404);
     }
 
@@ -442,7 +515,9 @@ mod route_tests {
             State(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(req),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.status, 400);
         assert!(err.message.contains("never fire"));
     }
@@ -456,7 +531,9 @@ mod route_tests {
             State(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(req),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.status, 400);
         assert!(err.message.contains("timezone"));
     }
@@ -468,19 +545,27 @@ mod route_tests {
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(create_req("agent-1")),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let id = created.1.id.clone();
         let err = update_work_schedule(
             State(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Path(id),
             Json(UpdateWorkScheduleRequest {
-                name: None, start_cron: None, end_cron: None,
-                pre_warn_minutes: None, final_warn_minutes: None,
-                wake_prompt: None, status: None,
+                name: None,
+                start_cron: None,
+                end_cron: None,
+                pre_warn_minutes: None,
+                final_warn_minutes: None,
+                wake_prompt: None,
+                status: None,
                 timezone: Some(Some("America/New_York".into())),
             }),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.status, 400);
         assert!(err.message.contains("timezone"));
     }
@@ -493,10 +578,14 @@ mod route_tests {
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(create_req("agent-pause")),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let id = created.1.id.clone();
         // Simulate the engine setting the agent off-duty.
-        state.duty.set(agent.clone(), crate::duty::DutyStatus::OffDuty);
+        state
+            .duty
+            .set(agent.clone(), crate::duty::DutyStatus::OffDuty);
         assert!(state.duty.is_off_duty(&agent));
         // Pause the schedule.
         update_work_schedule(
@@ -504,13 +593,18 @@ mod route_tests {
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Path(id),
             Json(UpdateWorkScheduleRequest {
-                name: None, start_cron: None, end_cron: None,
-                pre_warn_minutes: None, final_warn_minutes: None,
+                name: None,
+                start_cron: None,
+                end_cron: None,
+                pre_warn_minutes: None,
+                final_warn_minutes: None,
                 wake_prompt: None,
                 status: Some(WorkScheduleStatus::Paused),
                 timezone: None,
             }),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(state.duty.get(&agent), crate::duty::DutyStatus::OnDuty);
     }
 
@@ -522,17 +616,23 @@ mod route_tests {
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Json(create_req("agent-del")),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let id = created.1.id.clone();
         // Simulate the engine setting the agent off-duty.
-        state.duty.set(agent.clone(), crate::duty::DutyStatus::OffDuty);
+        state
+            .duty
+            .set(agent.clone(), crate::duty::DutyStatus::OffDuty);
         assert!(state.duty.is_off_duty(&agent));
         // Delete the schedule.
         delete_work_schedule(
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
             Path(id),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(state.duty.get(&agent), crate::duty::DutyStatus::OnDuty);
     }
 }

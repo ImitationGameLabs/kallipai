@@ -1,3 +1,7 @@
+//! The agent-management HTTP face: handlers for creating, listing,
+//! interrupting, and removing agents — thin shells over `crate::lifecycle`
+//! (where the spawn domain now lives) and the registry. `permissions` stays
+//! here as the permission-endpoint domain.
 use std::time::Duration;
 
 use axum::Json;
@@ -24,18 +28,6 @@ use super::ListAgentsResponse;
 use crate::state::{AgentState, AgentSummary, SharedState};
 use crate::token::AGENT;
 
-mod spawn;
-pub(crate) use spawn::{Materialize, SpawnArgs, abort_agent, spawn_agent};
-mod identity;
-#[cfg(test)]
-pub(crate) use identity::{compose_system_prompt, meta_skill_content};
-pub(crate) use identity::{inject_identity_env, resolve_root_agent};
-mod workspace;
-#[cfg(test)]
-pub(crate) use workspace::{EstablishLockFailure, establish_lock_api_error};
-pub(crate) use workspace::{
-    WorkspaceAcquireFailure, establish_workspace_lock, try_acquire_workspace_lock,
-};
 /// `POST /agents` — spawn a **subagent** under an existing supervisor.
 ///
 /// The tagma's single root agent is tagma-managed (eagerly created at startup
@@ -143,7 +135,7 @@ pub async fn create_agent(
         exec
     };
 
-    let id = Materialize {
+    let id = crate::lifecycle::Materialize {
         state: &state,
         id,
         token,
@@ -158,7 +150,7 @@ pub async fn create_agent(
 }
 
 /// Ensure the tagma's single root agent exists. Called once at startup, after
-/// [`restore_agents`](super::restore::restore_agents) and before the router
+/// [`restore_agents`](crate::lifecycle::restore_agents) and before the router
 /// accepts connections, so the root is always present for clients. Idempotent:
 /// if restore already brought the root back (the common case), this is a no-op.
 ///
@@ -185,7 +177,7 @@ pub async fn ensure_root_agent(state: &SharedState) -> anyhow::Result<()> {
     // the `?` in `main.rs`.
     persistence::ensure_workspace_disjoint(&config.workspace_root)
         .map_err(|e| anyhow::anyhow!("root workspace overlaps the data tree: {e}"))?;
-    let created = Materialize {
+    let created = crate::lifecycle::Materialize {
         state,
         id,
         token,

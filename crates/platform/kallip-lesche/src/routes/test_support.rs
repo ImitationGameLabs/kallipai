@@ -79,7 +79,7 @@ pub async fn seed_room(
         membership_epoch: Set(1),
         name: Set(String::new()),
         description: Set(String::new()),
-        visibility: Set(kallip_agora_common::rooms::Visibility::Private
+        visibility: Set(kallip_lesche_common::rooms::Visibility::Private
             .as_str()
             .to_string()),
     }

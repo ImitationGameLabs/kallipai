@@ -8,9 +8,9 @@
 //! `String` before it reaches the prompt channel), so they live in the tagma,
 //! not in `kallip-common`.
 
-use kallip_agora_common::ids::RoomId;
 use kallip_common::agentid::AgentId;
 use kallip_lesche_common::message::Participant;
+use kallip_lesche_common::rooms::RoomId;
 
 /// Sanitize a [`Participant`]'s handle. The agent handle is tagma-controlled
 /// (not advisory) but sanitizing is harmless and keeps one rule. Used at ingest

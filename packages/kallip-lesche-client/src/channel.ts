@@ -138,7 +138,7 @@ export class RelayChannel {
    * wrong sequence, neither of which the app can recover. */
   enqueue(envelope: Envelope): void {
     if (this.closed) return;
-    if (envelope.conversation_id !== this.conversationId) return;
+    if (envelope.channel_id !== this.conversationId) return;
     const ciphertext = decodeB64(envelope.ciphertext);
     const plaintext = aeadDecrypt(
       this.sessionKey,
@@ -276,7 +276,7 @@ export class RelayChannel {
     );
     const sender: Participant = this.localParticipant;
     const envelope: Envelope = {
-      conversation_id: this.conversationId,
+      channel_id: this.conversationId,
       sender,
       sequence_n,
       trace_id: crypto.randomUUID(),

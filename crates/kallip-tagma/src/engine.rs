@@ -280,7 +280,9 @@ async fn execute_start(state: &SharedState, cs: &CycleState) {
     };
     match notify {
         Some(n) => n.notify_one(),
-        None => warn!(agent = %cs.agent_id, "agent not live for schedule start; message buffered to inbox"),
+        None => {
+            warn!(agent = %cs.agent_id, "agent not live for schedule start; message buffered to inbox")
+        }
     }
 }
 
@@ -291,9 +293,7 @@ async fn execute_pre_warn(state: &SharedState, cs: &CycleState) {
         cs.pre_warn_minutes
     );
     info!(agent = %cs.agent_id, "schedule: pre-warn ({} min)", cs.pre_warn_minutes);
-    if let Err(e) =
-        crate::routes::enqueue_prompt(state, &cs.agent_id, msg, "system").await
-    {
+    if let Err(e) = crate::delivery::enqueue_prompt(state, &cs.agent_id, msg, "system").await {
         warn!(agent = %cs.agent_id, error = %e, "schedule: failed to enqueue pre-warn");
     }
 }
@@ -305,9 +305,7 @@ async fn execute_final_warn(state: &SharedState, cs: &CycleState) {
         cs.final_warn_minutes
     );
     info!(agent = %cs.agent_id, "schedule: final-warn ({} min)", cs.final_warn_minutes);
-    if let Err(e) =
-        crate::routes::enqueue_prompt(state, &cs.agent_id, msg, "system").await
-    {
+    if let Err(e) = crate::delivery::enqueue_prompt(state, &cs.agent_id, msg, "system").await {
         warn!(agent = %cs.agent_id, error = %e, "schedule: failed to enqueue final-warn");
     }
 }
@@ -479,7 +477,9 @@ async fn recompute(
             }
         }
 
-        let cs = cycles.get_mut(id).expect("cycle inserted or continued above");
+        let cs = cycles
+            .get_mut(id)
+            .expect("cycle inserted or continued above");
 
         // Detect schedule edits: re-init whenever any field that shapes the
         // cycle (window crons, warn thresholds, wake prompt) no longer

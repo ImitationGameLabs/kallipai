@@ -27,7 +27,8 @@
 //! crates can name them without a second `use` path.
 
 use crate::message::Envelope;
-use kallip_agora_common::ids::{MemberId, RoomId, TagmaId};
+use crate::rooms::{MemberId, RoomId};
+use kallip_agora_common::ids::TagmaId;
 use serde::{Deserialize, Serialize};
 
 // Re-exported so downstream crates (e.g. `kallip-lesche-client`) can name the
@@ -112,7 +113,7 @@ pub enum LescheEvent {
 ///
 /// `tagma_id` is intentionally absent: the path is authoritative, and the
 /// lesche asserts it matches the authenticated tagma before rebroadcast
-/// (mirroring `post_envelope`'s `conversation_id` check). Field names mirror
+/// (mirroring `post_envelope`'s `channel_id` check). Field names mirror
 /// the [`LescheEvent::TagmaStatus`] variant; keep them in sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagmaStatusPayload {

@@ -24,7 +24,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use super::agent::{SpawnArgs, spawn_agent};
+use crate::lifecycle::{SpawnArgs, spawn_agent};
 use crate::state::{AgentEntry, AgentIdentity, FaultedEntry, RegistryEntry, SharedState};
 use crate::token::AGENT;
 
@@ -269,7 +269,12 @@ async fn restore_one(
             "agent depth exceeds tier count; clamping to the lowest tier"
         );
     }
-    let tier = shared_state.profiles.load().registry.select_profile(depth).clone();
+    let tier = shared_state
+        .profiles
+        .load()
+        .registry
+        .select_profile(depth)
+        .clone();
 
     let store = Arc::new(tokio::sync::Mutex::new(restored.store));
     let approvals = Arc::new(tokio::sync::Mutex::new(restored.approvals));
@@ -298,7 +303,7 @@ async fn restore_one(
     // Faulted. The helper has already restored the dirlock on any error; we
     // just bail so the caller registers this agent Faulted.
     let mut established =
-        super::agent::establish_workspace_lock(&shared_state, &p.agent_id, &config, &chain_ids)
+        crate::lifecycle::establish_workspace_lock(&shared_state, &p.agent_id, &config, &chain_ids)
             .map_err(|e| anyhow::anyhow!("agent {}: {e}; skipping restore", p.agent_id))?;
 
     let (agent, identity) = spawn_agent(SpawnArgs {
@@ -388,7 +393,7 @@ fn faulted_from_meta(
 /// **Singleton root:** the tagma owns exactly one root. If the data dir holds
 /// more than one root, restore fails fast (the operator must remove the extras);
 /// otherwise the lone root is re-registered via `register_root`. After restore,
-/// [`ensure_root_agent`](super::agent::ensure_root_agent) creates the root if the
+/// [`ensure_root_agent`](crate::routes::agent::ensure_root_agent) creates the root if the
 /// data dir was empty.
 ///
 /// **Exempt from resource limits:** `max_agents` and `max_subagents` are not

@@ -9,9 +9,9 @@ use crate::db::{TxnError, flatten_txn, map_db_err};
 use crate::state::SharedConvState;
 use axum::Json;
 use axum::extract::State;
-use kallip_agora_common::ids::{ParticipantId, ParticipantKind, RoomId};
-use kallip_agora_common::rooms::Visibility;
+use kallip_agora_common::ids::{ParticipantId, ParticipantKind};
 use kallip_common::protocol::ApiError;
+use kallip_lesche_common::rooms::{RoomId, Visibility};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
     TransactionTrait,

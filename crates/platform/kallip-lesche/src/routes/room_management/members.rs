@@ -37,9 +37,9 @@ use crate::state::SharedConvState;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use kallip_agora_common::ids::{ParticipantId, ParticipantKind, RoomId, TagmaId, UserId};
-use kallip_agora_common::rooms::Visibility;
+use kallip_agora_common::ids::{ParticipantId, ParticipantKind, TagmaId, UserId};
 use kallip_common::protocol::ApiError;
+use kallip_lesche_common::rooms::{RoomId, Visibility};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QuerySelect,
     TransactionTrait,

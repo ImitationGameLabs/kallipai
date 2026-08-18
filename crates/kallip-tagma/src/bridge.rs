@@ -5,10 +5,10 @@ use kallip_common::agentid::AgentId;
 use kallip_common::approval::ApprovalStatus;
 use kallip_common::protocol::{AgentState, SseEvent};
 use kallip_runtime::event::AgentEvent;
+use time::OffsetDateTime;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use time::OffsetDateTime;
 
 use crate::state::{AgentRegistry, SharedState};
 
@@ -76,72 +76,68 @@ pub async fn bridge_task(
                         let mut deferred: Option<(&'static str, String, IdleNotice)> = None;
                         match &other {
                             AgentEvent::Busy => state.store(AgentState::BUSY, Ordering::Relaxed),
-                            AgentEvent::Error(msg) => {
-                                // Fatal LLM/runtime error. `error!`: the round terminally
-                                // failed (no retry). This is the sole observability channel
-                                // for a headless/subagent run, where the SSE event below has
-                                // no subscriber and is dropped silently.
-                                error!(id = %agent_id, "agent round ended in error: {msg}");
-                                let notice = mark_idle_and_snapshot(
-                                    &shared_state, &agent_id, &state, &activity,
-                                ).await;
-                                deferred = Some((
-                                    "Subagent Error",
-                                    format!("hit a fatal error and parked: {msg}"),
-                                    notice,
-                                ));
-                            }
-                            AgentEvent::FailoverChainExhausted { reason, detail } => {
-                                error!(id = %agent_id, "failover chain exhausted: {detail}");
-                                let notice = mark_idle_and_snapshot(
-                                    &shared_state, &agent_id, &state, &activity,
-                                ).await;
-                                deferred = Some((
-                                    "Subagent Error",
-                                    format!(
-                                        "exhausted its model failover chain and parked ({reason}: {detail})"
-                                    ),
-                                    notice,
-                                ));
-                            }
-                            AgentEvent::Idle => {
+                            ev if ev.is_terminal() => {
+                                // Fatal-error observability BEFORE the idle mark:
+                                // for a headless/subagent run the SSE broadcast
+                                // below has no subscriber and is dropped
+                                // silently — this log is the sole channel.
+                                match ev {
+                                    AgentEvent::Error(msg) => {
+                                        error!(id = %agent_id, "agent round ended in error: {msg}");
+                                    }
+                                    AgentEvent::FailoverChainExhausted { detail, .. } => {
+                                        error!(id = %agent_id, "failover chain exhausted: {detail}");
+                                    }
+                                    _ => {
+                                        // Only Error/FCE log today; Idle is
+                                        // silent by design. A future error-class
+                                        // terminal variant belongs in an arm
+                                        // above, not silently falling through.
+                                    }
+                                }
                                 // The idle mark happens BEFORE the superior is
                                 // notified: the superior may act immediately,
                                 // and a BUSY read in that window would
-                                // contradict the message. A subagent going
-                                // idle is actionable information for its
-                                // superior; root agents have no superior, so
-                                // delivery no-ops.
+                                // contradict the message.
                                 let notice = mark_idle_and_snapshot(
                                     &shared_state, &agent_id, &state, &activity,
                                 ).await;
-                                deferred = Some((
-                                    "Subagent Idle",
-                                    "is now idle.".to_string(),
-                                    notice,
-                                ));
-                            }
-                            AgentEvent::MaxRoundsExceeded => {
-                                let notice = mark_idle_and_snapshot(
-                                    &shared_state, &agent_id, &state, &activity,
-                                ).await;
-                                deferred = Some((
-                                    "Subagent Error",
-                                    "hit the per-request tool-round limit and parked.".to_string(),
-                                    notice,
-                                ));
-                            }
-                            // Cancelled / Interrupted are operator-initiated and
-                            // TokenBudgetExceeded is a tagma-global event the
-                            // operator already observes: no superior
-                            // notification, but the idle mark is still
-                            // linearized with everyone else's snapshot.
-                            AgentEvent::Cancelled
-                            | AgentEvent::Interrupted
-                            | AgentEvent::TokenBudgetExceeded { .. } => {
-                                mark_idle_and_snapshot(
-                                    &shared_state, &agent_id, &state, &activity,
-                                ).await;
+                                deferred = match ev {
+                                    AgentEvent::Error(msg) => Some((
+                                        "Subagent Error",
+                                        format!("hit a fatal error and parked: {msg}"),
+                                        notice,
+                                    )),
+                                    AgentEvent::FailoverChainExhausted { reason, detail } => Some((
+                                        "Subagent Error",
+                                        format!(
+                                            "exhausted its model failover chain and parked ({reason}: {detail})"
+                                        ),
+                                        notice,
+                                    )),
+                                    AgentEvent::Idle => {
+                                        // A subagent going idle is actionable
+                                        // information for its superior; root
+                                        // agents have no superior, so delivery
+                                        // no-ops.
+                                        Some((
+                                            "Subagent Idle",
+                                            "is now idle.".to_string(),
+                                            notice,
+                                        ))
+                                    }
+                                    AgentEvent::MaxRoundsExceeded => Some((
+                                        "Subagent Error",
+                                        "hit the per-request tool-round limit and parked.".to_string(),
+                                        notice,
+                                    )),
+                                    // Cancelled / Interrupted are operator-initiated and
+                                    // TokenBudgetExceeded is a tagma-global event the
+                                    // operator already observes: no superior
+                                    // notification, but the idle mark above is still
+                                    // linearized with everyone else's snapshot.
+                                    _ => None,
+                                };
                             }
                             _ => {}
                         }
@@ -294,7 +290,6 @@ async fn route_to_superior(
     deliver_to_superior(shared_state, &target, agent_id, notification).await;
 }
 
-
 /// A resolved, live delivery target for a subagent's direct superior.
 struct SuperiorTarget {
     superior_id: AgentId,
@@ -377,7 +372,12 @@ struct IdleNotice {
 
 impl IdleNotice {
     fn none() -> Self {
-        Self { target: None, role: String::new(), is_last: false, live_subordinates: 0 }
+        Self {
+            target: None,
+            role: String::new(),
+            is_last: false,
+            live_subordinates: 0,
+        }
     }
 }
 
@@ -415,15 +415,26 @@ fn snapshot_from(registry: &AgentRegistry, agent_id: &AgentId) -> IdleNotice {
     };
     let role = entry.identity().config.role.clone();
     let Some(superior_id) = entry.identity().config.created_by.clone() else {
-        return IdleNotice { target: None, role, is_last: false, live_subordinates: 0 };
+        return IdleNotice {
+            target: None,
+            role,
+            is_last: false,
+            live_subordinates: 0,
+        };
     };
     let Some(superior_entry) = registry.get(&superior_id) else {
         warn!(id = %agent_id, superior = %superior_id, "superior not found in registry");
-        return IdleNotice { role, ..IdleNotice::none() };
+        return IdleNotice {
+            role,
+            ..IdleNotice::none()
+        };
     };
     let Some(superior_live) = superior_entry.as_live() else {
         warn!(id = %agent_id, superior = %superior_id, "superior faulted; cannot deliver");
-        return IdleNotice { role, ..IdleNotice::none() };
+        return IdleNotice {
+            role,
+            ..IdleNotice::none()
+        };
     };
     let target = SuperiorTarget {
         notify: superior_live.agent.notify.clone(),
@@ -432,8 +443,12 @@ fn snapshot_from(registry: &AgentRegistry, agent_id: &AgentId) -> IdleNotice {
     let mut live_subordinates = 0usize;
     let mut all_idle = true;
     for cid in &superior_live.subagent_ids {
-        let Some(child) = registry.get(cid) else { continue };
-        let Some(child_live) = child.as_live() else { continue };
+        let Some(child) = registry.get(cid) else {
+            continue;
+        };
+        let Some(child_live) = child.as_live() else {
+            continue;
+        };
         live_subordinates += 1;
         if child_live.agent.state.load(Ordering::Relaxed) != AgentState::IDLE {
             all_idle = false;
@@ -465,8 +480,7 @@ async fn deliver_idle_notice(
     } else {
         format!(" (role: {})", notice.role)
     };
-    let mut body =
-        format!("[{tag}] Subordinate agent {agent_id}{role_suffix} {detail}");
+    let mut body = format!("[{tag}] Subordinate agent {agent_id}{role_suffix} {detail}");
     if notice.is_last {
         body.push_str(&format!(
             " It is the last to go idle — all {} live subordinates of the superior are now idle.",

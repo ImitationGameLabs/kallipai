@@ -11,8 +11,9 @@
 
 use std::collections::HashMap;
 
-use kallip_agora_common::ids::{MemberId, ParticipantId, RoomId};
+use kallip_agora_common::ids::ParticipantId;
 use kallip_lesche_common::event::LescheEvent;
+use kallip_lesche_common::rooms::{MemberId, RoomId};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::db::entity::room_members;

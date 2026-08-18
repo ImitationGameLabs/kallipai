@@ -13,24 +13,13 @@ impl App {
     /// by the time this returns; a `true` only defers the *draw* to the frame
     /// cap, so the final state is always correct.
     pub fn handle_sse_event(&mut self, event: SseEvent) -> bool {
-        // A "boundary" marks a point where the tagma can interject a queued
-        // prompt: a `ToolCall` (the assistant committed tool calls, ending this
-        // streamed message) or a terminal event. The tagma's
+        // A "boundary" is where the tagma can interject a queued prompt —
+        // classified on the wire type (`is_boundary`; see its docs for the
+        // variant rationale). The local consequence is timing:
         // `drain_interjections` runs at the top of the next round iteration
-        // (after the current tool batch), so flushing here lands the prompt in
-        // time. Transient `Failover`/`Retrying` are within-stream retries, not
-        // message boundaries.
-        let is_boundary = matches!(
-            event,
-            SseEvent::ToolCall { .. }
-                | SseEvent::Idle
-                | SseEvent::Cancelled
-                | SseEvent::Interrupted
-                | SseEvent::Error { .. }
-                | SseEvent::MaxRoundsExceeded
-                | SseEvent::FailoverChainExhausted { .. }
-                | SseEvent::TokenBudgetExceeded { .. }
-        );
+        // (after the current tool batch), so the queued-prompt flush must
+        // land on the boundary event itself.
+        let is_boundary = event.is_boundary();
         let mut is_delta = false;
         match event {
             SseEvent::Reasoning { content } => {

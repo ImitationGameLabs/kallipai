@@ -6,7 +6,7 @@
 
 use crate::event::AuthoredEvent;
 use kallip_agora_common::bytes::Ciphertext;
-use kallip_agora_common::ids::{ConversationId, TraceId};
+use kallip_agora_common::ids::{ChannelId, TraceId};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use time::OffsetDateTime;
@@ -18,9 +18,20 @@ pub use kallip_agora_common::participant::Participant;
 
 /// The unit the agora forwards between endpoints. Carries routing metadata +
 /// AEAD ciphertext; the agora reads only the metadata.
+///
+/// `channel_id` is the routing target: which channel this envelope is
+/// addressed to. One field, two value domains -- a multi-member room
+/// ([`crate::rooms::RoomId`], a v4 UUID) or the bilateral 1:1 conversation
+/// (`ConversationId`, a v5 UUID derived per tagma). The UUID version
+/// nibble keeps the two spaces disjoint, so a room envelope can never be
+/// mistaken for a 1:1 conversation and vice versa; the relay dispatches on
+/// its joined-rooms membership rather than a tag field. Serialized as
+/// `channel_id`; `conversation_id` remains readable as a serde alias for
+/// one rolling-deploy window (removal tracked in the debt ledger).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
-    pub conversation_id: ConversationId,
+    #[serde(rename = "channel_id", alias = "conversation_id")]
+    pub channel_id: ChannelId,
     pub sender: Participant,
     /// Per-conversation, per-sender monotonic counter from 0. Doubles as the
     /// AEAD nonce counter (direction-tagged) and as the agora's idempotency key.
@@ -272,7 +283,7 @@ mod tests {
     #[test]
     fn envelope_round_trips() {
         let env = Envelope {
-            conversation_id: ConversationId::from("c1".to_string()),
+            channel_id: ChannelId::from("c1".to_string()),
             sender: Participant {
                 id: ParticipantId::for_user(&UserId::from("u1".to_string())),
                 kind: ParticipantKind::Human,
@@ -288,6 +299,43 @@ mod tests {
         let back: Envelope = serde_json::from_str(&json).unwrap();
         assert_eq!(back.sequence_n, 3);
         assert_eq!(back.ciphertext.0, vec![1, 2, 3]);
+    }
+    #[test]
+    fn envelope_channel_id_alias_reads_old_wire_name() {
+        // A pre-rename peer (or an in-flight envelope during a rolling deploy)
+        // writes the routing target as `conversation_id`; the serde alias
+        // keeps those payloads readable while every local write emits
+        // `channel_id` only.
+        let env = Envelope {
+            channel_id: ChannelId::from("c1".to_string()),
+            sender: Participant {
+                id: ParticipantId::for_user(&UserId::from("u1".to_string())),
+                kind: ParticipantKind::Human,
+                handle: "Alice".into(),
+                tagma_id: None,
+            },
+            sequence_n: 3,
+            trace_id: TraceId::from("t1".to_string()),
+            timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+            ciphertext: Ciphertext(vec![1, 2, 3]),
+        };
+        // Serialize, then hand-rewrite the key to the OLD wire name to model
+        // a peer that has not shipped the rename.
+        let mut old = serde_json::to_value(&env).unwrap();
+        let v = old.as_object_mut().unwrap().remove("channel_id").unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .insert("conversation_id".into(), v);
+        // The alias reads the old name; the field carries the same target.
+        let back: Envelope = serde_json::from_value(old).unwrap();
+        assert_eq!(back.channel_id, env.channel_id);
+        // Local writes emit the new name only -- the old name never appears.
+        let out = serde_json::to_value(&env).unwrap();
+        assert!(out.get("channel_id").is_some());
+        assert!(out.get("conversation_id").is_none());
+        // And the new name round-trips identically.
+        let again: Envelope = serde_json::from_value(out).unwrap();
+        assert_eq!(again.channel_id, env.channel_id);
     }
 
     #[test]

@@ -147,10 +147,10 @@ pub struct ClearResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::extract::Path;
     use crate::auth::{AuthIdentity, Identity};
     use crate::inbox::{BufferedEvent, InboxStore};
     use crate::test_helpers::*;
+    use axum::extract::Path;
     use kallip_common::agentid::AgentId;
     use time::OffsetDateTime;
 

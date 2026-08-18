@@ -424,7 +424,7 @@ class ChannelsStore {
    *  that owns it, by pushing it onto the underlying RelayChannel's inbound
    *  queue. Unknown ids are dropped. */
   deliver(envelope: Envelope): void {
-    const conv = this.conversations.get(envelope.conversation_id);
+    const conv = this.conversations.get(envelope.channel_id);
     if (conv?.kind !== "relay") return;
     (conv as RelayConversation).relayTransport.relayChannel.enqueue(envelope);
   }

@@ -13,7 +13,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use kallip_agora_common::bytes::Ed25519PublicKey;
 use kallip_agora_common::ids::{ParticipantId, ParticipantKind, TagmaId, UserId};
-use kallip_agora_common::rooms::{RoomMemberProfile, RoomRosterView, Visibility};
+use kallip_lesche_common::rooms::{RoomMemberProfile, RoomRosterView, Visibility};
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter};
 use time::OffsetDateTime;
 

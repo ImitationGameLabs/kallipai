@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::auth::AuthIdentity;
+use crate::probe::mask_key;
 use crate::state::SharedState;
 
 /// GET /profiles — return the current profile configuration.
@@ -195,23 +196,6 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
         }
     }
     Ok(ProfileConfig { tiers, endpoints })
-}
-
-/// Mask an API key for wire responses: `first4********last4`, a fixed run of
-/// eight stars when the key is too short to expose anything — the star count
-/// never leaks the key's length.
-pub(crate) fn mask_key(key: &str) -> String {
-    const STARS: &str = "********";
-    let chars: Vec<char> = key.chars().collect();
-    match chars.len() {
-        0 => String::new(),
-        1..=8 => STARS.to_string(),
-        _ => {
-            let head: String = chars[..4].iter().collect();
-            let tail: String = chars[chars.len() - 4..].iter().collect();
-            format!("{head}{STARS}{tail}")
-        }
-    }
 }
 
 /// Serialize a config with every endpoint's `api_key` replaced by its masked form —

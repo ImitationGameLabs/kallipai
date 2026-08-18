@@ -8,9 +8,9 @@ use crate::db::TxnError;
 use crate::db::entity::{room_members, rooms};
 use crate::fan::deliver_membership_changed;
 use crate::state::SharedConvState;
-use kallip_agora_common::ids::{MemberId, ParticipantKind, RoomId, UserId};
-use kallip_agora_common::participant::RoomMember;
+use kallip_agora_common::ids::{ParticipantKind, UserId};
 use kallip_common::protocol::ApiError;
+use kallip_lesche_common::rooms::{MemberId, RoomId, RoomMember};
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
 /// Hard cap on members per room. Deliberately small: a room is a

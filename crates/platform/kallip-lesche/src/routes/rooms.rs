@@ -19,10 +19,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use kallip_agora_common::bytes::Ciphertext;
-use kallip_agora_common::ids::{MemberId, ParticipantKind, RoomId};
+use kallip_agora_common::ids::ParticipantKind;
 use kallip_agora_common::principal::Principal;
 use kallip_common::protocol::ApiError;
 use kallip_lesche_common::message::{Envelope, Participant};
+use kallip_lesche_common::rooms::{MemberId, RoomId};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -39,7 +40,7 @@ use crate::state::{AgentProfile, SharedConvState};
 /// cheap defense-in-depth against any future id-collision and keeps the single
 /// AuthZ gate uniform across callers.
 fn is_member(
-    membership: &kallip_agora_common::control_plane::RoomMembership,
+    membership: &kallip_lesche_common::rooms::RoomMembership,
     mid: &MemberId,
     kind: ParticipantKind,
 ) -> bool {
@@ -65,9 +66,9 @@ async fn post_room_envelope(
     let room = RoomId::from(room_id);
     // The path is authoritative: a body claiming a different room would
     // otherwise be trusted downstream.
-    if env.conversation_id.as_ref() != room.as_ref() {
+    if env.channel_id.as_ref() != room.as_ref() {
         return Err(ApiError::bad_request(
-            "envelope conversation_id does not match the path",
+            "envelope channel_id does not match the path",
         ));
     }
 

@@ -379,7 +379,7 @@ class RoomConversationsStore {
   }
 
   /** Build a room envelope carrying `payload` (the base64 plaintext). The
-   * `conversation_id` IS the room id (the lesche route path is authoritative;
+   * `channel_id` IS the room id (the lesche route path is authoritative;
    * this must match it); `sequence_n` is 0 (the rooms route ignores it);
    * `trace_id`/`timestamp` are required-shape but not load-bearing for rooms.
    * `sender.id` MUST be the participant id -- the lesche's envelope route
@@ -393,7 +393,7 @@ class RoomConversationsStore {
     if (!participantId) throw new Error("no signed-in user");
     const user = agoraSession.user;
     return {
-      conversation_id: roomId,
+      channel_id: roomId,
       sender: {
         id: participantId,
         kind: "human",

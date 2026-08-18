@@ -294,3 +294,75 @@ fn policy_preset_from_env_ask_all_no_longer_valid() {
         let _ = policy_preset_from_env();
     });
 }
+
+#[test]
+fn retry_policy_env_unset_mirrors_retry_policy_default() {
+    // The env-unset production path and RetryPolicy::default must agree on every field,
+    // so the documented defaults hold no matter which side built the config. retry.rs
+    // pins the values from the other side; this is the drift guard for load().
+    temp_env::with_vars_unset(
+        [
+            "KALLIP_MAX_RETRIES",
+            "KALLIP_RETRY_BASE_DELAY_SECS",
+            "KALLIP_RETRY_MAX_DELAY_SECS",
+            "KALLIP_RETRY_TIMEOUT_SECS",
+        ],
+        || {
+            let cfg = AgentConfig::load(None, Vec::new(), None).expect("load with defaults");
+            let default = RetryPolicy::default();
+            assert_eq!(cfg.retry_policy.max_retries, default.max_retries);
+            assert_eq!(cfg.retry_policy.base_delay, default.base_delay);
+            assert_eq!(cfg.retry_policy.max_delay, default.max_delay);
+            assert_eq!(cfg.retry_policy.retry_timeout, default.retry_timeout);
+        },
+    );
+}
+
+#[test]
+fn retry_knob_bounds_accept_exact_limits() {
+    // The bounds are inclusive: the exact limit must load, pinning the parsed
+    // values (so an off-by-one in the comparison cannot pass unnoticed).
+    temp_env::with_vars(
+        [
+            ("KALLIP_MAX_RETRIES", Some("1000")),
+            ("KALLIP_RETRY_BASE_DELAY_SECS", Some("3600")),
+            ("KALLIP_RETRY_MAX_DELAY_SECS", Some("3600")),
+            ("KALLIP_RETRY_TIMEOUT_SECS", Some("86400")),
+        ],
+        || {
+            let cfg = AgentConfig::load(None, Vec::new(), None).expect("exact limits load");
+            assert_eq!(cfg.retry_policy.max_retries, 1000);
+            assert_eq!(
+                cfg.retry_policy.base_delay,
+                std::time::Duration::from_secs(3600)
+            );
+            assert_eq!(
+                cfg.retry_policy.max_delay,
+                std::time::Duration::from_secs(3600)
+            );
+            assert_eq!(
+                cfg.retry_policy.retry_timeout,
+                std::time::Duration::from_secs(86400)
+            );
+        },
+    );
+}
+
+/// One past each bound must be a fatal misconfiguration, not a slow panic
+/// (Instant overflow) or a silent wrap (u32::MAX retries -> zero attempts).
+#[test]
+fn retry_knob_bounds_reject_overflow() {
+    for (key, value) in [
+        ("KALLIP_MAX_RETRIES", "1001"),
+        ("KALLIP_RETRY_BASE_DELAY_SECS", "3601"),
+        ("KALLIP_RETRY_MAX_DELAY_SECS", "3601"),
+        ("KALLIP_RETRY_TIMEOUT_SECS", "86401"),
+    ] {
+        temp_env::with_vars([(key, Some(value))], || {
+            assert!(
+                AgentConfig::load(None, Vec::new(), None).is_err(),
+                "{key}={value} must be rejected"
+            );
+        });
+    }
+}

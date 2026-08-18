@@ -15,10 +15,11 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use kallip_agora_common::bytes::Ciphertext;
-use kallip_agora_common::ids::{ConversationId, RoomId, TraceId};
+use kallip_agora_common::ids::{ChannelId, TraceId};
 use kallip_common::message::DeliveryResponse;
 use kallip_common::protocol::ApiError;
 use kallip_lesche_common::message::{Envelope, RoomMessage};
+use kallip_lesche_common::rooms::RoomId;
 use serde::Deserialize;
 use time::OffsetDateTime;
 
@@ -247,10 +248,10 @@ async fn send_room_message(
     // route, so the payload here is the plaintext itself.
     let plain = serde_json::to_vec(&RoomMessage { text })
         .map_err(|e| ApiError::bad_gateway(format!("encode room message: {e:#}")))?;
-    // post_room_envelope overwrites conversation_id from `room`, so the value
+    // post_room_envelope overwrites channel_id from `room`, so the value
     // set here is irrelevant; mirror the room id for clarity.
     let envelope = Envelope {
-        conversation_id: ConversationId::from(room.as_ref().to_string()),
+        channel_id: ChannelId::from(room.as_ref().to_string()),
         sender,
         // sequence_n is bilateral-replay-only (the AEAD nonce counter + the
         // agora idempotency key); the rooms route does not consult it. A

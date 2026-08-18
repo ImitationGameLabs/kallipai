@@ -1,27 +1,113 @@
-//! In-process management-op dispatch: route a TagmaControl::Manage to the
-//! matching tagma route handler and emit the ManageResult.
+//! In-process management-op dispatch: route a TagmaControl::Manage through
+//! the management-plane subset of the tagma router and emit the ManageResult.
 //!
-//! Mirrors how dispatch::execute_op calls routes::deliver_message with
-//! Identity::Operator -- the relay IS the trusted operator-equivalent. Every
-//! handler is called directly in-process; no HTTP loopback, no token, no SSRF.
-//! The bilateral E2E conversation is the authorization boundary (same as
-//! SendMessage). The single caller is the manage dispatch arm in
-//! bilateral::handle_user_op; handle_manage is pub(super).
+//! The subset reuses the same axum Router DSL as [`crate::routes::router`],
+//! so route syntax cannot fork between the two tables; the management plane
+//! deliberately exposes only the operator surface (no per-agent inbox,
+//! dirlock, approval, or agent-creation routes over the relay). The relay IS
+//! the trusted operator-equivalent (same as dispatch::execute_op's
+//! `Identity::Operator`); it injects that identity via request extensions,
+//! and no HTTP loopback, token, or SSRF is involved. The single caller is the
+//! manage dispatch arm in bilateral::handle_user_op; handle_manage is
+//! pub(super).
 
-use std::panic::AssertUnwindSafe;
-use futures_util::FutureExt;
-use axum::body::to_bytes;
-use axum::extract::{Path, Query, State};
-use axum::response::IntoResponse;
-use kallip_common::agentid::AgentId;
-use kallip_common::protocol::{ListAgentsQuery, TokenBudgetUpdateRequest};
-use kallip_lesche_common::message::TagmaReply;
-use tracing::{error, warn};
+use super::RelayHandle;
 use crate::auth::AuthIdentity;
 use crate::routes::{agent, budget, context, profile_probe, profiles};
+use crate::state::SharedState;
 use crate::work_schedule;
-use super::RelayHandle;
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::extract::{Request, State};
+use axum::http::{Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use futures_util::FutureExt;
+use kallip_common::protocol::ListAgentsQuery;
+use kallip_lesche_common::message::TagmaReply;
+use std::panic::AssertUnwindSafe;
+use std::str::FromStr;
+use tower::ServiceExt;
+use tracing::{error, warn};
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// The management-plane route table: the same handlers and DSL as
+/// [`crate::routes::router`], restricted to the deliberate operator subset.
+fn manage_router() -> Router<SharedState> {
+    use axum::routing::{delete, get, post, put};
+    Router::new()
+        .route(
+            "/budget",
+            get(budget::get_budget).post(budget::update_budget),
+        )
+        .route("/agents", get(list_agents_lenient))
+        .route("/agents/{id}", delete(agent::remove_agent))
+        .route("/agents/{id}/status", get(context::agent_status))
+        .route("/agents/{id}/interrupt", post(agent::interrupt_agent))
+        .route("/agents/{id}/duty", put(agent::update_duty))
+        .route("/agents/{id}/metadata", put(agent::update_metadata))
+        .route(
+            "/profiles",
+            get(profiles::get_profiles).put(profiles::put_profiles),
+        )
+        .route("/profiles/probe", post(profile_probe::probe_profiles))
+        .route("/profiles/apply", post(profiles::apply_profiles))
+        .route(
+            "/work-schedules",
+            get(list_work_schedules_lenient).post(work_schedule::create_work_schedule),
+        )
+        .route(
+            "/work-schedules/{id}",
+            put(work_schedule::update_work_schedule).delete(work_schedule::delete_work_schedule),
+        )
+        .fallback(manage_fallback)
+}
+
+/// `list_agents` with the manage plane's historical query semantics: a
+/// missing or unparsable query string yields the default struct (axum's
+/// `Query` extractor would reject with 400 instead).
+async fn list_agents_lenient(
+    State(state): State<SharedState>,
+    auth: AuthIdentity,
+    uri: Uri,
+) -> Response {
+    let q: ListAgentsQuery =
+        serde_urlencoded::from_str(uri.query().unwrap_or("")).unwrap_or_default();
+    agent::list_agents(State(state), auth, axum::extract::Query(q))
+        .await
+        .into_response()
+}
+
+/// `list_work_schedules` with the same lenient-query contract as above.
+async fn list_work_schedules_lenient(
+    State(state): State<SharedState>,
+    auth: AuthIdentity,
+    uri: Uri,
+) -> Response {
+    let q: work_schedule::ListWorkSchedulesQuery =
+        serde_urlencoded::from_str(uri.query().unwrap_or("")).unwrap_or_default();
+    work_schedule::list_work_schedules(State(state), auth, axum::extract::Query(q))
+        .await
+        .into_response()
+}
+
+/// Keep the old string-router catch-all 404 body verbatim.
+async fn manage_fallback() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(serde_json::json!({"error":{"message":"unknown management route"}})),
+    )
+        .into_response()
+}
+
+/// The same 404 shape, as a reply for malformed methods/URIs that cannot
+/// reach the router.
+fn not_found_reply() -> TagmaReply {
+    TagmaReply::ManageResult {
+        req_id: 0,
+        status: 404,
+        body: serde_json::json!({"error":{"message":"unknown management route"}}),
+    }
+}
 
 impl RelayHandle {
     pub(super) async fn handle_manage(
@@ -33,13 +119,15 @@ impl RelayHandle {
         body: serde_json::Value,
     ) {
         let result = AssertUnwindSafe(self.dispatch_manage(method, path, body))
-            .catch_unwind().await;
+            .catch_unwind()
+            .await;
         let reply = match result {
             Ok(resp) => stamp_req_id(resp, req_id),
             Err(_) => {
                 error!(req_id, "manage dispatch panicked; emitting 502");
                 TagmaReply::ManageResult {
-                    req_id, status: 502,
+                    req_id,
+                    status: 502,
                     body: serde_json::json!({"error":{"message":"relay manage panicked"}}),
                 }
             }
@@ -50,151 +138,56 @@ impl RelayHandle {
     }
 
     async fn dispatch_manage(
-        &self, method: &str, path: &str, body: serde_json::Value,
+        &self,
+        method: &str,
+        path: &str,
+        body: serde_json::Value,
     ) -> TagmaReply {
         let Some(state) = self.inner.state.upgrade() else {
             return TagmaReply::ManageResult {
-                req_id: 0, status: 503,
+                req_id: 0,
+                status: 503,
                 body: serde_json::json!({"error":{"message":"tagma shutting down"}}),
             };
         };
-        // Split path and query string: online paths may carry `?key=val`.
-        let (path_part, query_str) = match path.find('?') {
-            Some(pos) => (&path[..pos], Some(&path[pos + 1..])),
-            None => (path, None),
+        // Reuse the real router: the management-plane table above is the same
+        // axum DSL as routes::router, so the two cannot drift into different
+        // syntaxes. Malformed methods/URIs land in the same 404 shape the old
+        // string-match catch-all produced.
+        let Ok(method) = Method::from_str(&method.to_ascii_uppercase()) else {
+            return not_found_reply();
         };
-        let segs: Vec<&str> = path_part.trim_start_matches('/').split('/').collect();
-        let m = method.to_ascii_uppercase();
-        let response = match (m.as_str(), segs.as_slice()) {
-
-            ("GET", ["budget"]) => budget::get_budget(
-                State(state.clone()), AuthIdentity::operator()).await.into_response(),
-            ("POST", ["budget"]) => {
-                let req = match serde_json::from_value::<TokenBudgetUpdateRequest>(body) {
-                    Ok(r) => r, Err(e) => return bad_request(e),
-                };
-                budget::update_budget(
-                    State(state.clone()), AuthIdentity::operator(), axum::Json(req))
-                    .await.into_response()
-            }
-            ("GET", ["agents"]) => {
-                let q = parse_query::<ListAgentsQuery>(query_str);
-                agent::list_agents(
-                    State(state.clone()), AuthIdentity::operator(), Query(q))
-                    .await.into_response()
-            }
-            ("GET", ["agents", id, "status"]) => {
-                let id = parse_agent_id(id);
-                context::agent_status(
-                    State(state.clone()), AuthIdentity::operator(), Path(id))
-                    .await.into_response()
-            }
-            ("POST", ["agents", id, "interrupt"]) => {
-                let id = parse_agent_id(id);
-                agent::interrupt_agent(
-                    State(state.clone()), AuthIdentity::operator(), Path(id))
-                    .await.into_response()
-            }
-            ("DELETE", ["agents", id]) => {
-                let id = parse_agent_id(id);
-                agent::remove_agent(
-                    State(state.clone()), AuthIdentity::operator(), Path(id))
-                    .await.into_response()
-            }
-            ("PUT", ["agents", id, "duty"]) => {
-                let id = parse_agent_id(id);
-                let req = match serde_json::from_value::<agent::UpdateDutyRequest>(body) {
-                    Ok(r) => r, Err(e) => return bad_request(e),
-                };
-                agent::update_duty(
-                    State(state.clone()), AuthIdentity::operator(),
-                    Path(id), axum::Json(req)).await.into_response()
-            }
-            ("PUT", ["agents", id, "metadata"]) => {
-                let id = parse_agent_id(id);
-                let req = match serde_json::from_value::<
-                    kallip_common::protocol::UpdateAgentMetadataRequest>(body)
-                { Ok(r) => r, Err(e) => return bad_request(e) };
-                agent::update_metadata(
-                    State(state.clone()), AuthIdentity::operator(),
-                    Path(id), axum::Json(req)).await.into_response()
-            }
-            ("GET", ["profiles"]) => profiles::get_profiles(
-                State(state.clone()), AuthIdentity::operator()).await.into_response(),
-            ("PUT", ["profiles"]) => {
-                let req = match serde_json::from_value::<
-                    crate::routes::profiles::ProfileConfigWire>(body)
-                { Ok(r) => r, Err(e) => return bad_request(e) };
-                profiles::put_profiles(
-                    State(state.clone()), AuthIdentity::operator(), axum::Json(req))
-                    .await.into_response()
-            }
-            ("POST", ["profiles", "probe"]) => {
-                let req = match serde_json::from_value::<
-                    crate::routes::profile_probe::ProbeRequest>(body)
-                { Ok(r) => r, Err(e) => return bad_request(e) };
-                profile_probe::probe_profiles(
-                    State(state.clone()), AuthIdentity::operator(), axum::Json(req))
-                    .await.into_response()
-            }
-            ("POST", ["profiles", "apply"]) => profiles::apply_profiles(
-                State(state.clone()), AuthIdentity::operator()).await.into_response(),
-            ("GET", ["work-schedules"]) => {
-                let q = parse_query::<work_schedule::ListWorkSchedulesQuery>(query_str);
-                work_schedule::list_work_schedules(
-                    State(state.clone()), AuthIdentity::operator(), Query(q))
-                    .await.into_response()
-            }
-            ("POST", ["work-schedules"]) => {
-                let req = match serde_json::from_value::<
-                    work_schedule::CreateWorkScheduleRequest>(body)
-                { Ok(r) => r, Err(e) => return bad_request(e) };
-                work_schedule::create_work_schedule(
-                    State(state.clone()), AuthIdentity::operator(), axum::Json(req))
-                    .await.into_response()
-            }
-            ("PUT", ["work-schedules", id]) => {
-                let req = match serde_json::from_value::<
-                    work_schedule::UpdateWorkScheduleRequest>(body)
-                { Ok(r) => r, Err(e) => return bad_request(e) };
-                work_schedule::update_work_schedule(
-                    State(state.clone()), AuthIdentity::operator(),
-                    Path(id.to_string()), axum::Json(req)).await.into_response()
-            }
-            ("DELETE", ["work-schedules", id]) => work_schedule::delete_work_schedule(
-                State(state.clone()), AuthIdentity::operator(), Path(id.to_string()))
-                .await.into_response(),
-            _ => return TagmaReply::ManageResult {
-                req_id: 0, status: 404,
-                body: serde_json::json!({"error":{"message":"unknown management route"}}),
-            },
+        let Ok(uri) = Uri::from_str(path) else {
+            return not_found_reply();
+        };
+        let mut request = match Request::builder()
+            .method(method)
+            .uri(uri)
+            // The handlers' Json extractors require a JSON content type; the
+            // relay always carries a JSON body.
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+        {
+            Ok(request) => request,
+            // Unreachable: method and URI parsed successfully above.
+            Err(_) => return not_found_reply(),
+        };
+        // The relay is the trusted operator for management ops (the same
+        // trust execute_op grants deliver_message); say so through the
+        // standard extractor instead of hand-passing the argument per arm.
+        request.extensions_mut().insert(AuthIdentity::operator());
+        let response = match manage_router().with_state(state).oneshot(request).await {
+            Ok(response) => response,
+            Err(infallible) => match infallible {},
         };
         extract_response(response).await
     }
 }
 
-fn parse_agent_id(s: &str) -> AgentId {
-    // AgentId's FromStr is infallible (wraps any string), so this never fails.
-    s.parse().unwrap()
-}
-
-fn bad_request(e: serde_json::Error) -> TagmaReply {
-    TagmaReply::ManageResult {
-        req_id: 0, status: 400,
-        body: serde_json::json!({"error":{"message": format!("invalid request body: {e}")}}),
-    }
-}
-
-/// Parse an optional query string into a typed query struct.
-/// Returns the struct's default on parse failure or missing string.
-fn parse_query<T: serde::de::DeserializeOwned + Default>(query_str: Option<&str>) -> T {
-    query_str
-        .and_then(|q| serde_urlencoded::from_str(q).ok())
-        .unwrap_or_default()
-}
-
 fn stamp_req_id(mut reply: TagmaReply, req_id: u64) -> TagmaReply {
-    if let TagmaReply::ManageResult { req_id: r, .. } = &mut reply { *r = req_id; }
+    if let TagmaReply::ManageResult { req_id: r, .. } = &mut reply {
+        *r = req_id;
+    }
     reply
 }
 
@@ -206,7 +199,8 @@ async fn extract_response(response: axum::response::Response) -> TagmaReply {
         Err(e) => {
             warn!("manage response body extraction failed: {e}");
             return TagmaReply::ManageResult {
-                req_id: 0, status: 502,
+                req_id: 0,
+                status: 502,
                 body: serde_json::json!({"error":{"message":"response body too large"}}),
             };
         }
@@ -216,84 +210,114 @@ async fn extract_response(response: axum::response::Response) -> TagmaReply {
     } else {
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
-    TagmaReply::ManageResult { req_id: 0, status, body: body_value }
+    TagmaReply::ManageResult {
+        req_id: 0,
+        status,
+        body: body_value,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kallip_common::protocol::ListAgentsQuery;
-    use crate::work_schedule::WorkScheduleStatus;
+    use crate::test_helpers::make_state;
 
-    #[test]
-    fn parse_query_none_returns_default() {
-        let q: ListAgentsQuery = parse_query(None);
-        assert!(q.created_by.is_none());
+    async fn manage_get(state: &SharedState, uri: &str) -> Response {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .extension(AuthIdentity::operator())
+            .body(Body::empty())
+            .expect("static parts");
+        manage_router()
+            .with_state(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|infallible| match infallible {})
     }
 
-    #[test]
-    fn parse_query_empty_returns_default() {
-        let q: ListAgentsQuery = parse_query(Some(""));
-        assert!(q.created_by.is_none());
+    #[tokio::test]
+    async fn manage_router_serves_known_route() {
+        let state = make_state();
+        let response = manage_get(&state, "/budget").await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
-    #[test]
-    fn parse_query_parses_created_by() {
-        let q: ListAgentsQuery = parse_query(Some("created_by=agent-1"));
-        assert_eq!(q.created_by.unwrap().as_ref(), "agent-1");
+    #[tokio::test]
+    async fn manage_router_unknown_route_keeps_404_shape() {
+        // A real tagma route that the management plane deliberately does NOT
+        // expose (per-agent inbox): the subset boundary answers 404 with the
+        // historical body shape.
+        let state = make_state();
+        let response =
+            manage_get(&state, "/agents/00000000-0000-0000-0000-000000000000/inbox").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
+            .await
+            .expect("small body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(body["error"]["message"], "unknown management route");
     }
 
-    #[test]
-    fn parse_query_work_schedules_status() {
-        let q: work_schedule::ListWorkSchedulesQuery =
-            parse_query(Some("status=active"));
-        assert_eq!(q.status, Some(WorkScheduleStatus::Active));
+    #[tokio::test]
+    async fn manage_router_exposes_operator_subset_only() {
+        // Real tagma routes the management plane deliberately does NOT relay:
+        // agent creation, approvals, dirlocks, and per-agent inbox/
+        // exec-policy/permissions surfaces. Each must 404 — the subset
+        // boundary is a contract, not an accident of the route table.
+        let state = make_state();
+        let id = "00000000-0000-0000-0000-000000000000";
+        let agent_scoped = [
+            format!("/agents/{id}/permissions"),
+            format!("/agents/{id}/exec-policy"),
+            format!("/agents/{id}/inbox"),
+            format!("/agents/{id}/inbox/summary"),
+        ];
+        let flat = [
+            "/dirlocks",
+            "/approvals",
+            "/approvals/00000000-0000-0000-0000-000000000000",
+        ];
+        for uri in agent_scoped
+            .iter()
+            .map(String::as_str)
+            .chain(flat.iter().copied())
+        {
+            let response = manage_get(&state, uri).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "uri: {uri}");
+        }
     }
 
-    #[test]
-    fn parse_query_work_schedules_agent_id() {
-        let q: work_schedule::ListWorkSchedulesQuery =
-            parse_query(Some("agent_id=agent-xyz"));
-        assert_eq!(q.agent_id.unwrap().as_ref(), "agent-xyz");
+    #[tokio::test]
+    async fn manage_router_query_is_lenient() {
+        // The manage plane's historical query semantics: missing, empty, or
+        // unparsable query strings yield the default struct (200), never a 400.
+        let state = make_state();
+        for uri in ["/agents", "/agents?", "/agents?bogus=%zz"] {
+            let response = manage_get(&state, uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "uri: {uri}");
+        }
+        let response = manage_get(&state, "/agents?created_by=agent-1").await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
-
-    #[test]
-    fn path_split_strips_query_string() {
-        let path = "/agents?created_by=foo";
-        let (path_part, query_str) = match path.find('?') {
-            Some(pos) => (&path[..pos], Some(&path[pos + 1..])),
-            None => (path, None),
-        };
-        assert_eq!(path_part, "/agents");
-        assert_eq!(query_str, Some("created_by=foo"));
-        let segs: Vec<&str> = path_part.trim_start_matches('/').split('/').collect();
-        assert_eq!(segs, vec!["agents"]);
-    }
-
-    #[test]
-    fn path_split_no_query() {
-        let path = "/budget";
-        let (path_part, query_str) = match path.find('?') {
-            Some(pos) => (&path[..pos], Some(&path[pos + 1..])),
-            None => (path, None),
-        };
-        assert_eq!(path_part, "/budget");
-        assert!(query_str.is_none());
-        let segs: Vec<&str> = path_part.trim_start_matches('/').split('/').collect();
-        assert_eq!(segs, vec!["budget"]);
-    }
-
-    #[test]
-    fn path_split_nested_with_query() {
-        let path = "/work-schedules?status=active&agent_id=x";
-        let (path_part, query_str) = match path.find('?') {
-            Some(pos) => (&path[..pos], Some(&path[pos + 1..])),
-            None => (path, None),
-        };
-        assert_eq!(path_part, "/work-schedules");
-        let segs: Vec<&str> = path_part.trim_start_matches('/').split('/').collect();
-        assert_eq!(segs, vec!["work-schedules"]);
-        let q: work_schedule::ListWorkSchedulesQuery = parse_query(query_str);
-        assert_eq!(q.status, Some(WorkScheduleStatus::Active));
+    #[tokio::test]
+    async fn manage_router_wrong_method_is_405() {
+        // A registered path hit with a method the manage plane does not
+        // mount (DELETE /budget) answers axum's 405 where the old string
+        // table returned its uniform 404 — unreachable through the relay's
+        // fixed op set, and the more correct status.
+        let state = make_state();
+        let request = Request::builder()
+            .method(Method::DELETE)
+            .uri("/budget")
+            .extension(AuthIdentity::operator())
+            .body(Body::empty())
+            .expect("static parts");
+        let response = manage_router()
+            .with_state(state)
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|infallible| match infallible {});
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 }

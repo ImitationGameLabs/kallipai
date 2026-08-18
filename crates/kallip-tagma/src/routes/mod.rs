@@ -1,22 +1,17 @@
 pub(crate) mod agent;
 pub(crate) mod budget;
 mod dirlock;
-mod restore;
 pub(crate) use agent::ensure_root_agent;
-pub use restore::restore_agents;
 #[cfg(test)]
 pub(crate) mod approval;
 #[cfg(not(test))]
 mod approval;
 pub(crate) mod context;
-mod message;
-pub(crate) mod profiles;
-pub(crate) mod profile_probe;
-/// The in-process message-delivery seam shared by the `send_message` route and
-/// the relay's `execute_op`, plus its room inbound counterpart.
-pub(crate) use message::{deliver_inbound_room_message, deliver_message, enqueue_prompt};
-mod lesche;
 mod inbox;
+mod lesche;
+mod message;
+pub(crate) mod profile_probe;
+pub(crate) mod profiles;
 
 use axum::Router;
 use kallip_common::protocol::{ListAgentsResponse, ListApprovalsQuery, MessageRequest};
@@ -109,10 +104,7 @@ pub fn router() -> Router<SharedState> {
             "/agents/{id}/activity",
             axum::routing::put(agent::update_activity),
         )
-        .route(
-            "/agents/{id}/duty",
-            axum::routing::put(agent::update_duty),
-        )
+        .route("/agents/{id}/duty", axum::routing::put(agent::update_duty))
         .route(
             "/agents/{id}/inbox",
             axum::routing::get(inbox::list_inbox).delete(inbox::clear_inbox),

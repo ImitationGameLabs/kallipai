@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use kallip_agora_common::control_plane::{
     ControlPlane, ControlPlaneError, TagmaProfile, UserIdentity,
 };
-use kallip_agora_common::ids::{MemberId, ParticipantKind, TagmaId, UserId};
+use kallip_agora_common::ids::{ParticipantKind, TagmaId, UserId};
+use kallip_lesche_common::rooms::MemberId;
 
 use crate::identity::{agent_handle, degraded_handle, human_handle};
 

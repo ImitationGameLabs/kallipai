@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use kallip_common::agentid::AgentId;
 use kallip_common::policy::{ExecPolicy, PolicyPreset};
-use kallip_common::protocol::{AgentState, SseEvent};
+use kallip_common::protocol::{AgentState, FailoverChainExhaustion, SseEvent};
 use kallip_runtime::event::AgentEvent;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -1031,4 +1031,89 @@ async fn missing_superior_yields_no_target() {
     assert!(!n.is_last);
     super::deliver_idle_notice(&state, &child, "Subagent Idle", "is now idle.", n).await;
     assert_eq!(state.inboxes.get().unwrap().len_for(&parent).await, 0);
+}
+
+/// Cross-side parity for the terminal classification: every `AgentEvent` must
+/// bridge to an SSE event carrying the same `is_terminal` verdict, and only a
+/// non-terminal event may map to `None`. The per-side exhaustive snapshots
+/// (runtime `event.rs`, common `sse.rs`) each pin only their own side — this
+/// test is the mechanical link that makes the mirror obligation real. The
+/// `len()` assert is a count nail: a new variant added without extending the
+/// table below fails here instead of silently escaping parity coverage.
+#[test]
+fn convert_event_preserves_terminal_parity() {
+    assert_eq!(all_agent_events().len(), 21);
+    for ev in all_agent_events() {
+        let debug = format!("{ev:?}");
+        let terminal = ev.is_terminal();
+        match super::convert_event(ev) {
+            Some(sse) => assert_eq!(
+                sse.is_terminal(),
+                terminal,
+                "terminal parity broken for {debug}"
+            ),
+            None => assert!(!terminal, "terminal event {debug} bridged to None"),
+        }
+    }
+}
+
+/// One instance of every `AgentEvent` variant, for the parity test above
+/// (mirrors the snapshot fixtures in runtime `event.rs` / common `sse.rs`,
+/// but as an owned Vec because `convert_event` consumes the event).
+fn all_agent_events() -> Vec<AgentEvent> {
+    vec![
+        AgentEvent::Reasoning(String::new()),
+        AgentEvent::AssistantContent(String::new()),
+        AgentEvent::AssistantContentDelta {
+            delta: String::new(),
+        },
+        AgentEvent::ReasoningDelta {
+            delta: String::new(),
+        },
+        AgentEvent::ToolCall {
+            name: String::new(),
+            args: String::new(),
+        },
+        AgentEvent::ToolResult(String::new()),
+        AgentEvent::Idle,
+        AgentEvent::MaxRoundsExceeded,
+        AgentEvent::Error(String::new()),
+        AgentEvent::Status(String::new()),
+        AgentEvent::Busy,
+        AgentEvent::ApprovalCommitted {
+            id: String::new(),
+            tool_name: String::new(),
+            arguments: serde_json::Value::Null,
+            commit_reason: String::new(),
+        },
+        AgentEvent::Retrying {
+            attempt: 0,
+            max_attempts: 0,
+            error: String::new(),
+            delay_secs: 0.0,
+        },
+        AgentEvent::StreamReset {
+            error: String::new(),
+            attempt: 0,
+            max_attempts: 0,
+            delay_secs: 0.0,
+        },
+        AgentEvent::Failover {
+            from: String::new(),
+            to: String::new(),
+            reason: String::new(),
+        },
+        AgentEvent::ApprovalRedeemed { id: String::new() },
+        AgentEvent::ApprovalCancelled { id: String::new() },
+        AgentEvent::Cancelled,
+        AgentEvent::Interrupted,
+        AgentEvent::TokenBudgetExceeded {
+            consumed: 0,
+            budget: 0,
+        },
+        AgentEvent::FailoverChainExhausted {
+            reason: FailoverChainExhaustion::NoFailoverConfigured,
+            detail: String::new(),
+        },
+    ]
 }

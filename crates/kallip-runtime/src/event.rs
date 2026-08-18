@@ -92,6 +92,172 @@ pub enum AgentEvent {
     },
 }
 
+impl AgentEvent {
+    /// Whether this event terminates the current turn: the agent goes idle
+    /// when the bridge sees it. Turn-level, not lifecycle-level — see the
+    /// wire-side mirror [`SseEvent::is_terminal`](kallip_common::protocol::SseEvent::is_terminal)
+    ///
+    /// **Mirror obligation:** this classification MUST stay in sync with
+    /// `SseEvent::is_terminal` (kallip-common) — the bridge gates its idle mark
+    /// here while downstream consumers gate on the wire side, and a divergence
+    /// between the two silently desynchronizes idle marking from what clients
+    /// see. Enforced mechanically: the per-side exhaustive snapshot (this file,
+    /// and the wire side in `protocol::sse`) pins each classification, and the
+    /// tagma bridge's `convert_event_preserves_terminal_parity` test asserts the
+    /// two sides agree for every variant.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Idle
+                | Self::MaxRoundsExceeded
+                | Self::Error(_)
+                | Self::Cancelled
+                | Self::Interrupted
+                | Self::TokenBudgetExceeded { .. }
+                | Self::FailoverChainExhausted { .. }
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exhaustive classification snapshot, mirroring the wire-side test in
+    /// `kallip_common::protocol::sse`. The `let _: () = match` arm set must cover
+    /// every variant, so adding a variant without classifying it here is a
+    /// compile error — the mirror cannot silently drift.
+    #[test]
+    fn terminal_classification_is_exhaustive_and_matches_predicate() {
+        for v in SAMPLES {
+            let terminal = v.is_terminal();
+            let _: () = match v {
+                AgentEvent::Reasoning(_)
+                | AgentEvent::AssistantContent(_)
+                | AgentEvent::AssistantContentDelta { .. }
+                | AgentEvent::ReasoningDelta { .. }
+                | AgentEvent::ToolCall { .. }
+                | AgentEvent::ToolResult(_)
+                | AgentEvent::Status(_)
+                | AgentEvent::Busy
+                | AgentEvent::ApprovalCommitted { .. }
+                | AgentEvent::ApprovalRedeemed { .. }
+                | AgentEvent::ApprovalCancelled { .. }
+                | AgentEvent::Retrying { .. }
+                | AgentEvent::StreamReset { .. }
+                | AgentEvent::Failover { .. } => {
+                    assert!(!terminal, "{v:?}");
+                }
+                AgentEvent::Idle
+                | AgentEvent::MaxRoundsExceeded
+                | AgentEvent::Error(_)
+                | AgentEvent::Cancelled
+                | AgentEvent::Interrupted
+                | AgentEvent::TokenBudgetExceeded { .. }
+                | AgentEvent::FailoverChainExhausted { .. } => {
+                    assert!(terminal, "{v:?}");
+                }
+            };
+        }
+    }
+
+    /// One instance of every variant, for the exhaustive snapshot above.
+    const SAMPLES: &[AgentEvent] = &[
+        AgentEvent::Reasoning(String::new()),
+        AgentEvent::AssistantContent(String::new()),
+        AgentEvent::AssistantContentDelta {
+            delta: String::new(),
+        },
+        AgentEvent::ReasoningDelta {
+            delta: String::new(),
+        },
+        AgentEvent::ToolCall {
+            name: String::new(),
+            args: String::new(),
+        },
+        AgentEvent::ToolResult(String::new()),
+        AgentEvent::Idle,
+        AgentEvent::MaxRoundsExceeded,
+        AgentEvent::Error(String::new()),
+        AgentEvent::Status(String::new()),
+        AgentEvent::Busy,
+        AgentEvent::ApprovalCommitted {
+            id: String::new(),
+            tool_name: String::new(),
+            arguments: serde_json::Value::Null,
+            commit_reason: String::new(),
+        },
+        AgentEvent::Retrying {
+            attempt: 0,
+            max_attempts: 0,
+            error: String::new(),
+            delay_secs: 0.0,
+        },
+        AgentEvent::StreamReset {
+            error: String::new(),
+            attempt: 0,
+            max_attempts: 0,
+            delay_secs: 0.0,
+        },
+        AgentEvent::Failover {
+            from: String::new(),
+            to: String::new(),
+            reason: String::new(),
+        },
+        AgentEvent::ApprovalRedeemed { id: String::new() },
+        AgentEvent::ApprovalCancelled { id: String::new() },
+        AgentEvent::Cancelled,
+        AgentEvent::Interrupted,
+        AgentEvent::TokenBudgetExceeded {
+            consumed: 0,
+            budget: 0,
+        },
+        AgentEvent::FailoverChainExhausted {
+            reason: FailoverChainExhaustion::NoFailoverConfigured,
+            detail: String::new(),
+        },
+    ];
+
+    /// Vocabulary snapshot: the Debug shape of every variant — variant name
+    /// plus, for struct variants, field names. Tuple-variant payloads
+    /// (Reasoning/AssistantContent/ToolResult/Error/Status carry one String)
+    /// show only the value; their field meaning is positional by definition.
+    /// AgentEvent is runtime-internal (never serialized), so this Debug pin
+    /// is the layer's shape contract: adding/renaming/removing a variant or
+    /// field reds here. Values are not pinned — fixtures reuse [`SAMPLES`]
+    /// empty/zero values; semantics live in the classification snapshot.
+    #[test]
+    fn schema_snapshot() {
+        assert_eq!(SAMPLES.len(), 21, "variant count drifted — extend SAMPLES");
+        let expected: &[&str] = &[
+            "Reasoning(\"\")",
+            "AssistantContent(\"\")",
+            "AssistantContentDelta { delta: \"\" }",
+            "ReasoningDelta { delta: \"\" }",
+            "ToolCall { name: \"\", args: \"\" }",
+            "ToolResult(\"\")",
+            "Idle",
+            "MaxRoundsExceeded",
+            "Error(\"\")",
+            "Status(\"\")",
+            "Busy",
+            "ApprovalCommitted { id: \"\", tool_name: \"\", arguments: Null, commit_reason: \"\" }",
+            "Retrying { attempt: 0, max_attempts: 0, error: \"\", delay_secs: 0.0 }",
+            "StreamReset { error: \"\", attempt: 0, max_attempts: 0, delay_secs: 0.0 }",
+            "Failover { from: \"\", to: \"\", reason: \"\" }",
+            "ApprovalRedeemed { id: \"\" }",
+            "ApprovalCancelled { id: \"\" }",
+            "Cancelled",
+            "Interrupted",
+            "TokenBudgetExceeded { consumed: 0, budget: 0 }",
+            "FailoverChainExhausted { reason: NoFailoverConfigured, detail: \"\" }",
+        ];
+        for (v, want) in SAMPLES.iter().zip(expected) {
+            assert_eq!(format!("{v:?}"), *want);
+        }
+    }
+}
+
 /// Outcome of running the agent round loop.
 #[derive(Debug)]
 pub enum AgentOutcome {

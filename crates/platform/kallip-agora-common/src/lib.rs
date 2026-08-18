@@ -10,6 +10,10 @@
 //! [`control_plane::ControlPlane`]. Lesche-specific data-plane types (envelopes,
 //! tunnel frames, the me/events SSE union, the KEX handshake) live in
 //! `kallip-lesche-common`, not here.
+//! The room-domain wire types (`RoomId`, `MemberId`, the `/v1/rooms` DTOs, the
+//! membership snapshot) live there too; this crate keeps only the
+//! platform-wide foundation identities (`ParticipantId`, `ParticipantKind`,
+//! `TagmaId`, ...).
 //!
 //! Design note: the agora deals only in routing metadata and public-key
 //! verification; the E2E payload and the crypto material ([`bytes`]) are
@@ -28,4 +32,3 @@ pub mod internal_api;
 pub mod participant;
 pub mod principal;
 pub mod proof;
-pub mod rooms;

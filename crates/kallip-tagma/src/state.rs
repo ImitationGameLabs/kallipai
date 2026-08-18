@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 pub use kallip_common::agentid::AgentId;
 use kallip_common::authtoken::TokenHash;
 use kallip_common::policy::{ExecPolicy, PolicyPreset};
@@ -15,7 +16,6 @@ use kallip_runtime::agent_task::RoundToken;
 use kallip_runtime::approval::ApprovalStore;
 use kallip_runtime::config::AgentConfig;
 use kallip_runtime::context::ContextStore;
-use arc_swap::ArcSwap;
 use kallip_runtime::profile::{ProfileConfig, ProfileRegistry};
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -36,8 +36,6 @@ pub struct ProfileBundle {
     pub registry: Arc<ProfileRegistry>,
 }
 
-
-
 /// Tagma-side cache of the rooms this tagma belongs to. Rooms are plaintext
 /// server-readable (the lesche enforces member access), so the cache is pure
 /// routing state: it tells the relay inbound fork and the agent's room
@@ -51,7 +49,7 @@ pub struct ProfileBundle {
 /// works) -- self-correcting on the next poll that warms the entry.
 #[derive(Default)]
 pub struct JoinedRooms {
-    rooms: Mutex<HashSet<kallip_agora_common::ids::RoomId>>,
+    rooms: Mutex<HashSet<kallip_lesche_common::rooms::RoomId>>,
 }
 
 impl JoinedRooms {
@@ -60,14 +58,14 @@ impl JoinedRooms {
     }
 
     /// Whether `room` is a room this tagma belongs to.
-    pub async fn is_joined(&self, room: &kallip_agora_common::ids::RoomId) -> bool {
+    pub async fn is_joined(&self, room: &kallip_lesche_common::rooms::RoomId) -> bool {
         self.rooms.lock().await.contains(room)
     }
 
     /// Replace the room set from a fresh `list_my_rooms` snapshot.
     pub async fn set_joined_rooms(
         &self,
-        rooms: impl IntoIterator<Item = kallip_agora_common::ids::RoomId>,
+        rooms: impl IntoIterator<Item = kallip_lesche_common::rooms::RoomId>,
     ) {
         let mut g = self.rooms.lock().await;
         g.clear();
@@ -75,7 +73,7 @@ impl JoinedRooms {
     }
 
     /// Snapshot of the room ids (for the agent's room-list route).
-    pub async fn joined_rooms(&self) -> HashSet<kallip_agora_common::ids::RoomId> {
+    pub async fn joined_rooms(&self) -> HashSet<kallip_lesche_common::rooms::RoomId> {
         self.rooms.lock().await.clone()
     }
 }

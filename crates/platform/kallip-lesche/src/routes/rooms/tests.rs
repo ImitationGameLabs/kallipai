@@ -6,7 +6,7 @@ use crate::auth::AuthPrincipal;
 use crate::routes::test_support::{db_state, seed_room};
 use kallip_agora_common::bytes::Ciphertext;
 use kallip_agora_common::ids::{
-    ConversationId, ParticipantId, ParticipantKind, TagmaId, TraceId, UserId,
+    ChannelId, ParticipantId, ParticipantKind, TagmaId, TraceId, UserId,
 };
 use kallip_agora_common::principal::Principal;
 use kallip_lesche_common::event::LescheEvent;
@@ -15,7 +15,7 @@ use time::OffsetDateTime;
 
 fn envelope(sender: Participant, room: &str) -> Envelope {
     Envelope {
-        conversation_id: ConversationId::from(room.to_string()),
+        channel_id: ChannelId::from(room.to_string()),
         sender,
         sequence_n: 1,
         trace_id: TraceId::from("t".to_string()),

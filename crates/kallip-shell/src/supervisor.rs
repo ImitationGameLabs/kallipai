@@ -631,13 +631,12 @@ async fn watch(args: WatchArgs) {
         }
 
         let size = match &output {
-            TaskOutput::File { path } => std::fs::metadata(path)
-                .map(|m| m.len())
-                .unwrap_or(0) as usize,
+            TaskOutput::File { path } => {
+                std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) as usize
+            }
             TaskOutput::Pipes { out, err, .. } => pipes_total(out, err.as_ref()),
         };
         bytes.store(size, Ordering::Relaxed);
-
 
         // Size watchdog: unbounded output fills the disk (the 768GB lesson).
         if size > max_bg_bytes {
@@ -724,7 +723,8 @@ fn pipes_total(
 /// would leak the running-bg tally and permanently refuse this agent's
 /// carves.
 fn lock_cap(cap: &Arc<Mutex<BoundedCapture>>) -> MutexGuard<'_, BoundedCapture> {
-    cap.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    cap.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Stall tail probe per output source: the file's last [`STALL_TAIL`]
@@ -740,7 +740,7 @@ fn tail_matches(output: &TaskOutput) -> bool {
             let tails: Vec<String> = match mode {
                 CaptureMode::Merged | CaptureMode::Stdout => vec![lock_cap(out).tail_text()],
                 CaptureMode::Stderr => vec![
-                    lock_cap(err.as_ref().expect("stderr capture exists under Stderr")).tail_text()
+                    lock_cap(err.as_ref().expect("stderr capture exists under Stderr")).tail_text(),
                 ],
                 CaptureMode::Separate => {
                     let e = err.as_ref().expect("stderr capture exists under Separate");
@@ -813,9 +813,7 @@ fn read_pipes_tail(
     let rendered = match mode {
         CaptureMode::Merged => peek(out, "output"),
         CaptureMode::Stdout => peek(out, "stdout"),
-        CaptureMode::Stderr => {
-            peek(err.expect("stderr capture exists under Stderr"), "stderr")
-        }
+        CaptureMode::Stderr => peek(err.expect("stderr capture exists under Stderr"), "stderr"),
         CaptureMode::Separate => {
             let o = peek(out, "stdout");
             let e = peek(err.expect("stderr capture exists under Separate"), "stderr");

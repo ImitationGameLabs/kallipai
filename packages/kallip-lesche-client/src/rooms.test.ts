@@ -27,7 +27,7 @@ function withFetch(
 }
 
 const ENVELOPE: Envelope = {
-  conversation_id: "room-1",
+  channel_id: "room-1",
   sender: { id: "p-alice", kind: "human", handle: "Alice" },
   sequence_n: 3,
   trace_id: "tr",

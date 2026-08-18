@@ -188,6 +188,48 @@ where
                 return RunExit::Error;
             }
         };
+        // Terminal events end this one-shot run. Classified by the wire-side
+        // predicate (single source); the match below maps each terminal
+        // variant to its RunExit and operator-facing summary. No silent `_`
+        // catch-all for terminals: a future terminal variant without a
+        // mapping fails loudly here instead of being suppressed.
+        if event.is_terminal() {
+            end_reasoning(&mut in_reasoning);
+            return match event {
+                SseEvent::Idle => {
+                    // The agent yielded control (called `break`, or was force-idled).
+                    // Terminal for this run: success.
+                    RunExit::Success
+                }
+                SseEvent::Error { message } => {
+                    eprintln!("{message}");
+                    RunExit::Error
+                }
+                SseEvent::MaxRoundsExceeded => {
+                    eprintln!("max rounds exceeded");
+                    RunExit::MaxRounds
+                }
+                SseEvent::Cancelled => {
+                    eprintln!("cancelled");
+                    RunExit::Cancelled
+                }
+                // The round was interrupted; the tagma-side agent stays alive, but this
+                // one-shot run is over. Treat like Cancelled.
+                SseEvent::Interrupted => {
+                    eprintln!("interrupted");
+                    RunExit::Cancelled
+                }
+                SseEvent::TokenBudgetExceeded { consumed, budget } => {
+                    eprintln!("token budget exceeded (consumed: {consumed}, budget: {budget})");
+                    RunExit::BudgetExceeded
+                }
+                SseEvent::FailoverChainExhausted { reason, detail } => {
+                    eprintln!("failover chain exhausted ({reason}): {detail}");
+                    RunExit::FailoverChainExhausted
+                }
+                _ => unreachable!("terminal event {event:?} has no RunExit mapping"),
+            };
+        }
         match event {
             // Reasoning is streamed (verbose) but carries no terminal signal.
             SseEvent::ReasoningDelta { delta } => {
@@ -269,46 +311,20 @@ where
                     );
                 }
             }
-            SseEvent::Idle => {
-                // The agent yielded control (called `break`, or was force-idled).
-                // Terminal for this run: success.
-                end_reasoning(&mut in_reasoning);
-                return RunExit::Success;
-            }
-            SseEvent::Error { message } => {
-                end_reasoning(&mut in_reasoning);
-                eprintln!("{message}");
-                return RunExit::Error;
-            }
-            SseEvent::MaxRoundsExceeded => {
-                end_reasoning(&mut in_reasoning);
-                eprintln!("max rounds exceeded");
-                return RunExit::MaxRounds;
-            }
-            SseEvent::Cancelled => {
-                end_reasoning(&mut in_reasoning);
-                eprintln!("cancelled");
-                return RunExit::Cancelled;
-            }
-            // The round was interrupted; the tagma-side agent stays alive, but this
-            // one-shot run is over. Treat like Cancelled.
-            SseEvent::Interrupted => {
-                end_reasoning(&mut in_reasoning);
-                eprintln!("interrupted");
-                return RunExit::Cancelled;
-            }
-            SseEvent::TokenBudgetExceeded { consumed, budget } => {
-                end_reasoning(&mut in_reasoning);
-                eprintln!("token budget exceeded (consumed: {consumed}, budget: {budget})");
-                return RunExit::BudgetExceeded;
-            }
-            SseEvent::FailoverChainExhausted { reason, detail } => {
-                end_reasoning(&mut in_reasoning);
-                eprintln!("failover chain exhausted ({reason}): {detail}");
-                return RunExit::FailoverChainExhausted;
-            }
             // Suppress state-transition/informational events.
             SseEvent::Busy | SseEvent::Status { .. } | SseEvent::ApprovalUpdated { .. } => {}
+            // Terminal variants already returned above; listed explicitly (not
+            // folded into a `_`) so adding a terminal variant without touching
+            // this match is a compile error, never a silent suppress.
+            SseEvent::Idle
+            | SseEvent::MaxRoundsExceeded
+            | SseEvent::Error { .. }
+            | SseEvent::Cancelled
+            | SseEvent::Interrupted
+            | SseEvent::TokenBudgetExceeded { .. }
+            | SseEvent::FailoverChainExhausted { .. } => {
+                unreachable!("terminal event {event:?} handled above")
+            }
         }
     }
 

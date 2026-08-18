@@ -53,9 +53,9 @@
     // rather than via a store-to-store import, keeping realtime decoupled from
     // both. Idempotent + safe to run once per mount.
     realtimeStore.setEnvelopeSink((env) => {
-      if (roomConversationsStore.get(env.conversation_id)) {
+      if (roomConversationsStore.get(env.channel_id)) {
         roomConversationsStore.deliverLive(
-          env.conversation_id,
+          env.channel_id,
           env.ciphertext,
           env.sender,
         );

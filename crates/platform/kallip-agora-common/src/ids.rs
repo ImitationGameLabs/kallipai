@@ -19,9 +19,13 @@ id_type! {
     ConversationId
 }
 id_type! {
-    /// Unique identifier for a persistent multi-member chat room. Distinct
-    /// from [`ConversationId`], the bilateral 1:1 conversation key.
-    RoomId
+    /// The envelope routing target: which channel an envelope is addressed
+    /// to. A value-domain union, not a new id space -- the inner UUID is a
+    /// [`ConversationId`] (v5, bilateral 1:1) on the conversation path or a
+    /// room id (v4, `RoomId` in `kallip_lesche_common::rooms`) on the room
+    /// path. The UUID version nibble keeps the two domains disjoint; the
+    /// relay dispatches on joined-rooms membership, not on a tag field.
+    ChannelId
 }
 id_type! {
     /// Distributed-trace identifier propagated on envelopes. The agora passes it
@@ -41,77 +45,20 @@ id_type! {
     /// agents mint a random one at enrollment. The daemon-internal `AgentId`
     /// never crosses into this type, so the agent-free boundary is preserved.
     ///
-    /// The room domain addresses its members by the related [`MemberId`] -- a
-    /// room-clothing alias over this same derivation -- so room code reads as
-    /// `member`, not as the near-synonym clash `member's ParticipantId`. The two
-    /// convert freely ([`From`]); see [`MemberId`].
+    /// The room domain addresses its members by the related `MemberId` -- a
+    /// room-clothing alias over this same derivation (the two convert freely).
+    /// `MemberId` lives in `kallip_lesche_common::rooms`, the crate that owns
+    /// the room domain.
     ParticipantId
 }
 
-/// The room-domain member identity: a [`ParticipantId`] in room clothing. Rooms
-/// address their members by this id (`RoomMember`, `room_members.member_id`, the
-/// roster, room-presence fan-out). It is the SAME derived UUID as the sender's
-/// [`ParticipantId`] -- [`MemberId::for_user`] / [`MemberId::for_tagma`] reuse the
-/// `ParticipantId` derivation byte-for-byte -- so it converts freely at the few
-/// seams where the room layer meets the shared transport identity (building the
-/// wire `Envelope.sender`, the presence-registry lookups). It exists so room code
-/// is member-native and never reads as `member's ParticipantId`.
-///
-/// Wire-transparent: `#[serde(transparent)]` over [`ParticipantId`] serializes to
-/// the same UUID string, so the SSE/HTTP shapes are unchanged.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(transparent)]
-pub struct MemberId(ParticipantId);
-
-impl MemberId {
-    /// Derive the member id for a user. Same value as [`ParticipantId::for_user`].
-    pub fn for_user(user_id: &UserId) -> Self {
-        Self(ParticipantId::for_user(user_id))
-    }
-
-    /// Derive the member id for a tagma. Same value as [`ParticipantId::for_tagma`].
-    pub fn for_tagma(tagma_id: &TagmaId) -> Self {
-        Self(ParticipantId::for_tagma(tagma_id))
-    }
-}
-
-impl From<ParticipantId> for MemberId {
-    fn from(pid: ParticipantId) -> Self {
-        Self(pid)
-    }
-}
-
-impl From<MemberId> for ParticipantId {
-    fn from(mid: MemberId) -> Self {
-        mid.0
-    }
-}
-
-impl From<String> for MemberId {
-    fn from(s: String) -> Self {
-        Self(ParticipantId::from(s))
-    }
-}
-
-impl AsRef<str> for MemberId {
-    fn as_ref(&self) -> &str {
-        self.0.as_ref()
-    }
-}
-
-impl std::fmt::Display for MemberId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-/// Which kind of room participant an identity is. `Human` is a signed-in user
-/// (WebAuthn); `Agent` is an automated participant -- a platform-native tagma or
-/// a future external agent. The daemon-internal agent/team distinction never
-/// appears here: this is the room-layer kind only. Wire labels are
-/// `"human"` / `"agent"`.
+/// Which kind of cross-transport participant an identity is: `Human` is a
+/// signed-in user (WebAuthn); `Agent` is an automated participant -- a
+/// platform-native tagma or a future external agent. Shared by the bilateral
+/// conversation path ([`crate::participant::Participant`]), the auth
+/// principal, and the room domain (`kallip_lesche_common::rooms`), which is
+/// why it lives in this foundation crate. The daemon-internal agent/team
+/// distinction never appears here. Wire labels are `"human"` / `"agent"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParticipantKind {
@@ -197,6 +144,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn channel_id_serializes_transparently() {
+        // ChannelId is a value-domain union (conversation UUID v5 / room
+        // UUID v4), not a new id space: the wire form must stay the bare
+        // string, so both domains ride it unchanged.
+        let v5 = ConversationId::for_tagma(&TagmaId::from("tagma-abc".to_string()));
+        let channel = ChannelId::from(v5.to_string());
+        assert_eq!(
+            serde_json::to_string(&channel).unwrap(),
+            format!("\"{v5}\"")
+        );
+        assert_eq!(channel.to_string(), v5.to_string());
+    }
+
+    #[test]
     fn for_tagma_is_deterministic_and_invariant() {
         let t = TagmaId::from("tagma-abc".to_string());
         // Same input -> same id.
@@ -236,31 +197,5 @@ mod tests {
             .as_ref()
             .parse::<Uuid>()
             .expect("derived participant id is a UUID");
-    }
-
-    #[test]
-    fn member_id_matches_participant_id_derivation_and_round_trips() {
-        let u = UserId::from("user-1".to_string());
-        let t = TagmaId::from("tagma-1".to_string());
-        // Same derivation, byte-for-byte.
-        assert_eq!(
-            MemberId::for_user(&u).as_ref(),
-            ParticipantId::for_user(&u).as_ref()
-        );
-        assert_eq!(
-            MemberId::for_tagma(&t).as_ref(),
-            ParticipantId::for_tagma(&t).as_ref()
-        );
-        // Bidirectional From is lossless.
-        let pid = ParticipantId::for_user(&u);
-        let mid: MemberId = pid.clone().into();
-        assert_eq!(mid.as_ref(), pid.as_ref());
-        let back: ParticipantId = mid.into();
-        assert_eq!(back, pid);
-        // From<String> (sea-orm column reads) matches.
-        assert_eq!(
-            MemberId::from(pid.as_ref().to_string()).as_ref(),
-            pid.as_ref()
-        );
     }
 }

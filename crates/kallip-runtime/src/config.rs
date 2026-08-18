@@ -36,8 +36,27 @@ const DEFAULT_MAX_TRANSIENT_RETRIES: u32 = 3;
 const DEFAULT_SUMMARY_MAX_TOKENS: u32 = 1_200;
 const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 8_192;
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
-const DEFAULT_MAX_RETRIES: u32 = 3;
+const DEFAULT_MAX_RETRIES: u32 = 10;
 const DEFAULT_RETRY_BASE_DELAY_SECS: u64 = 1;
+const DEFAULT_RETRY_MAX_DELAY_SECS: u64 = 60;
+const DEFAULT_RETRY_TIMEOUT_SECS: u64 = 300;
+/// Upper bound for `KALLIP_MAX_RETRIES` (default is 10). Closes the overflow in
+/// retry.rs's `saturating_sub(prior) + 1`: at `u32::MAX` the release build wraps
+/// to zero attempts — a silent zero-send inversion. 1000 retries at the 1s
+/// floor delay is already 16+ minutes of pure waiting, beyond any operational
+/// scenario, with ample headroom over the default.
+const MAX_RETRIES_LIMIT: u32 = 1_000;
+/// Upper bound for the two delay knobs (base default 1s, cap default 60s).
+/// The base delay's jitter computes `as_nanos() as u64`; at 3600s the value
+/// is 3.6e12 ns — well under u64::MAX (~1.8e19), so the u128->u64 cast is
+/// exact; combined with the existing >0 bail, the jitter's modulo divisor
+/// is never zero. A single backoff over an hour under the 24h total window
+/// is a unit error, not a scenario.
+const RETRY_DELAY_SECS_LIMIT: u64 = 3_600;
+/// Upper bound for `KALLIP_RETRY_TIMEOUT_SECS` (default 300). The deadline is
+/// built as `Instant::now() + Duration`; an extreme value panics on addition.
+/// 24h covers leave-it-overnight operations.
+const RETRY_TIMEOUT_SECS_LIMIT: u64 = 86_400;
 const DEFAULT_PINNED_BUDGET_RATIO: f64 = 0.25;
 const DEFAULT_CONTEXT_THRESHOLDS: &[u8] = &[50, 60, 70, 80];
 const DEFAULT_TOKEN_BUDGET_WARNINGS: &[u8] = &[80, 95];
@@ -391,17 +410,40 @@ impl AgentConfig {
         let token_budget_warnings = parse_env_list::<u8>("KALLIP_TOKEN_BUDGET_WARNINGS")?
             .unwrap_or_else(|| DEFAULT_TOKEN_BUDGET_WARNINGS.to_vec());
         let max_retries = parse_env::<u32>("KALLIP_MAX_RETRIES")?.unwrap_or(DEFAULT_MAX_RETRIES);
+        if max_retries > MAX_RETRIES_LIMIT {
+            bail!("KALLIP_MAX_RETRIES must be at most {MAX_RETRIES_LIMIT}");
+        }
         let retry_base_delay_secs = parse_env::<u64>("KALLIP_RETRY_BASE_DELAY_SECS")?
             .unwrap_or(DEFAULT_RETRY_BASE_DELAY_SECS);
         if retry_base_delay_secs == 0 {
             bail!("KALLIP_RETRY_BASE_DELAY_SECS must be greater than zero");
         }
-        // max_delay and retry_timeout use defaults (30s / 120s) — intentionally
-        // not exposed as env vars since they rarely need tuning.
+        if retry_base_delay_secs > RETRY_DELAY_SECS_LIMIT {
+            bail!("KALLIP_RETRY_BASE_DELAY_SECS must be at most {RETRY_DELAY_SECS_LIMIT}");
+        }
+        let retry_max_delay_secs = parse_env::<u64>("KALLIP_RETRY_MAX_DELAY_SECS")?
+            .unwrap_or(DEFAULT_RETRY_MAX_DELAY_SECS);
+        if retry_max_delay_secs == 0 {
+            bail!("KALLIP_RETRY_MAX_DELAY_SECS must be greater than zero");
+        }
+        if retry_max_delay_secs > RETRY_DELAY_SECS_LIMIT {
+            bail!("KALLIP_RETRY_MAX_DELAY_SECS must be at most {RETRY_DELAY_SECS_LIMIT}");
+        }
+        let retry_timeout_secs =
+            parse_env::<u64>("KALLIP_RETRY_TIMEOUT_SECS")?.unwrap_or(DEFAULT_RETRY_TIMEOUT_SECS);
+        if retry_timeout_secs == 0 {
+            bail!("KALLIP_RETRY_TIMEOUT_SECS must be greater than zero");
+        }
+        if retry_timeout_secs > RETRY_TIMEOUT_SECS_LIMIT {
+            bail!("KALLIP_RETRY_TIMEOUT_SECS must be at most {RETRY_TIMEOUT_SECS_LIMIT}");
+        }
+        // All four retry knobs are env-tunable: sustained rate-limit parking (429 retries
+        // while queued) proved operators need to reshape the retry window without a rebuild.
         let retry_policy = RetryPolicy {
             max_retries,
             base_delay: std::time::Duration::from_secs(retry_base_delay_secs),
-            ..RetryPolicy::default()
+            max_delay: std::time::Duration::from_secs(retry_max_delay_secs),
+            retry_timeout: std::time::Duration::from_secs(retry_timeout_secs),
         };
 
         let workspace_root = workspace_root.canonicalize().with_context(|| {

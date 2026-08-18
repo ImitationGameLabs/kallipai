@@ -11,10 +11,12 @@ use crate::member_identity::{MemberRef, degraded, resolve_handles};
 use crate::state::SharedConvState;
 use axum::Json;
 use axum::extract::{Path, State};
-use kallip_agora_common::ids::{MemberId, ParticipantKind, RoomId, TagmaId};
+use kallip_agora_common::ids::{ParticipantKind, TagmaId};
 use kallip_agora_common::principal::require_tagma;
-use kallip_agora_common::rooms::{RoomMemberProfile, RoomRosterView, TagmaRoomView, Visibility};
 use kallip_common::protocol::ApiError;
+use kallip_lesche_common::rooms::{
+    MemberId, RoomId, RoomMemberProfile, RoomRosterView, TagmaRoomView, Visibility,
+};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, TransactionTrait,
 };

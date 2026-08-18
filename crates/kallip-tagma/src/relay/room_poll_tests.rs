@@ -4,7 +4,7 @@
 
 use super::*;
 use axum::{Json, Router, extract::State, routing::get};
-use kallip_agora_common::rooms::{TagmaRoomView, Visibility};
+use kallip_lesche_common::rooms::{TagmaRoomView, Visibility};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 

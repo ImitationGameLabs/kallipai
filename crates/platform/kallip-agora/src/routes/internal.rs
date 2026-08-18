@@ -14,12 +14,11 @@ use axum::routing::post;
 
 use kallip_agora_common::control_plane::ControlPlane;
 use kallip_agora_common::internal_api::{
-    TagmaProfileResponse, TagmaProfilesRequest, TagmaProfilesResponse, TunnelProofTsRequest,
-    TunnelProofTsResponse, UserIdentitiesRequest, UserIdentitiesResponse,
-    UserIdentityByUsernameRequest, UserIdentityResponse, VerifyBearerRequest, VerifyBearerResponse,
-    VerifySessionRequest, VerifySessionResponse, WirePrincipal,
+    TagmaProfilesRequest, TagmaProfilesResponse, TunnelProofTsRequest, TunnelProofTsResponse,
+    UserIdentitiesRequest, UserIdentitiesResponse, UserIdentityByUsernameRequest,
+    UserIdentityResponse, VerifyBearerRequest, VerifyBearerResponse, VerifySessionRequest,
+    VerifySessionResponse, WirePrincipal,
 };
-use kallip_agora_common::principal::Principal;
 
 use crate::control_plane::DbControlPlane;
 use crate::state::SharedState;
@@ -64,11 +63,9 @@ async fn verify_session(
     axum::Json(req): axum::Json<VerifySessionRequest>,
 ) -> Result<axum::Json<VerifySessionResponse>, HandlerError> {
     match control(&state).verify_session(&req.cookie).await {
-        Ok(Some(session)) => Ok(axum::Json(VerifySessionResponse {
-            user_id: session.user_id,
-            username: session.username,
-            display_name: session.display_name,
-        })),
+        // The trait type IS the wire body (VerifySessionResponse aliases
+        // it); pass the session through untouched.
+        Ok(Some(session)) => Ok(axum::Json(session)),
         Ok(None) => Err(NOT_FOUND),
         Err(e) => Err(backend(e)),
     }
@@ -88,13 +85,11 @@ async fn verify_bearer(
     // `verify_bearer` can only resolve Admin or Tagma by construction (the
     // deputy guard). A `User` here is unreachable; surface it as a loud 500
     // rather than a silent 404 so a regression is not mistaken for a miss.
-    let principal = match principal {
-        Principal::Admin => WirePrincipal::Admin,
-        Principal::Tagma(tagma_id) => WirePrincipal::Tagma { tagma_id },
-        Principal::User(_) => {
-            return Err(backend("unexpected User principal from verify_bearer"));
-        }
-    };
+    let principal = WirePrincipal::try_from(principal).map_err(|rejected| {
+        backend(format!(
+            "unexpected {rejected:?} principal from verify_bearer"
+        ))
+    })?;
     Ok(axum::Json(VerifyBearerResponse { principal }))
 }
 
@@ -106,22 +101,9 @@ async fn tagma_profiles(
         .tagma_profiles(&req.tagma_ids)
         .await
         .map_err(backend)?;
-    Ok(axum::Json(TagmaProfilesResponse {
-        profiles: profiles
-            .into_iter()
-            .map(|p| TagmaProfileResponse {
-                tagma_id: p.tagma_id,
-                pinned_public_key: p.pinned_public_key,
-                owner_user_id: p.owner_user_id,
-                label: p.label,
-                owner_username: p.owner_username,
-                owner_display_name: p.owner_display_name,
-                enrolled: p.enrolled,
-                revoked: p.revoked,
-                owner_disabled: p.owner_disabled,
-            })
-            .collect(),
-    }))
+    // The trait type IS the wire entry (TagmaProfileResponse aliases it),
+    // so the registry rows pass through untouched.
+    Ok(axum::Json(TagmaProfilesResponse { profiles }))
 }
 
 async fn user_identities(
@@ -132,17 +114,8 @@ async fn user_identities(
         .user_identities(&req.user_ids)
         .await
         .map_err(backend)?;
-    Ok(axum::Json(UserIdentitiesResponse {
-        users: users
-            .into_iter()
-            .map(|u| UserIdentityResponse {
-                user_id: u.user_id,
-                username: u.username,
-                display_name: u.display_name,
-                disabled: u.disabled,
-            })
-            .collect(),
-    }))
+    // The trait type IS the wire entry (UserIdentityResponse aliases it).
+    Ok(axum::Json(UserIdentitiesResponse { users }))
 }
 
 async fn user_identity_by_username(
@@ -156,12 +129,7 @@ async fn user_identity_by_username(
         .user_identity_by_username(&req.username)
         .await
     {
-        Ok(Some(u)) => Ok(axum::Json(UserIdentityResponse {
-            user_id: u.user_id,
-            username: u.username,
-            display_name: u.display_name,
-            disabled: u.disabled,
-        })),
+        Ok(Some(u)) => Ok(axum::Json(u)),
         Ok(None) => Err(NOT_FOUND),
         Err(e) => Err(backend(e)),
     }

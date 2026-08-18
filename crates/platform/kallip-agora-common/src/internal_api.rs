@@ -10,9 +10,9 @@
 //! are carried as HTTP `404`, not as a body variant, so the client maps status
 //! directly to `Option::None` without parsing a sentinel.
 
+use crate::principal::Principal;
 use serde::{Deserialize, Serialize};
 
-use crate::bytes::Ed25519PublicKey;
 use crate::ids::{TagmaId, UserId};
 
 // --- verify-session ---
@@ -25,13 +25,9 @@ pub struct VerifySessionRequest {
 
 /// `200` body: the session's owning user plus the authoritative display
 /// identity. (`404` = no body, maps to `None`.) The display is resolved here,
-/// once per connection-open, rather than via a per-message call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifySessionResponse {
-    pub user_id: UserId,
-    pub username: String,
-    pub display_name: Option<String>,
-}
+/// once per connection-open, rather than via a per-message call. An alias
+/// of the trait-side [`crate::control_plane::VerifiedSession`].
+pub type VerifySessionResponse = crate::control_plane::VerifiedSession;
 
 // --- verify-bearer ---
 
@@ -52,6 +48,33 @@ pub enum WirePrincipal {
     Tagma { tagma_id: TagmaId },
 }
 
+/// Project a [`Principal`] onto the wire. The single centralization of the
+/// bearer-path mapping; `User` -- cookie-sourced by construction -- is handed
+/// back in the `Err` so the caller can fail loudly (500) instead of silently
+/// minting a wire form the contract forbids.
+impl TryFrom<Principal> for WirePrincipal {
+    type Error = Principal;
+
+    fn try_from(principal: Principal) -> Result<Self, Self::Error> {
+        match principal {
+            Principal::Admin => Ok(WirePrincipal::Admin),
+            Principal::Tagma(tagma_id) => Ok(WirePrincipal::Tagma { tagma_id }),
+            Principal::User(_) => Err(principal),
+        }
+    }
+}
+
+/// Lift a [`WirePrincipal`] back into a [`Principal`]. Total (no variant is
+/// rejected): the wire enum is exactly the bearer-reachable subset.
+impl From<WirePrincipal> for Principal {
+    fn from(wire: WirePrincipal) -> Self {
+        match wire {
+            WirePrincipal::Admin => Principal::Admin,
+            WirePrincipal::Tagma { tagma_id } => Principal::Tagma(tagma_id),
+        }
+    }
+}
+
 /// `200` body: the resolved principal. (`404` = no body, maps to `None`.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyBearerResponse {
@@ -68,20 +91,9 @@ pub struct TagmaProfilesRequest {
 
 /// One tagma's facts in [`TagmaProfilesResponse`]. UNFILTERED: carries the raw
 /// identity + usability state (`enrolled`/`revoked`/`owner_disabled`/key) so the
-/// relay, not the registry, derives authorization. The wire shape of
+/// relay, not the registry, derives authorization. An alias of the trait-side
 /// [`crate::control_plane::TagmaProfile`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TagmaProfileResponse {
-    pub tagma_id: TagmaId,
-    pub pinned_public_key: Option<Ed25519PublicKey>,
-    pub owner_user_id: UserId,
-    pub label: Option<String>,
-    pub owner_username: String,
-    pub owner_display_name: Option<String>,
-    pub enrolled: bool,
-    pub revoked: bool,
-    pub owner_disabled: bool,
-}
+pub type TagmaProfileResponse = crate::control_plane::TagmaProfile;
 
 /// `200` body: one entry per existing input id (unknown ids omitted). Always
 /// `200` (never `404`) -- absence is expressed by omission, so the relay maps
@@ -100,14 +112,9 @@ pub struct UserIdentitiesRequest {
 }
 
 /// One user's facts in [`UserIdentitiesResponse`]. UNFILTERED: carries the raw
-/// `disabled` state so the relay derives the invite gate locally.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserIdentityResponse {
-    pub user_id: UserId,
-    pub username: String,
-    pub display_name: Option<String>,
-    pub disabled: bool,
-}
+/// `disabled` state so the relay derives the invite gate locally. An alias of
+/// the trait-side [`crate::control_plane::UserIdentity`].
+pub type UserIdentityResponse = crate::control_plane::UserIdentity;
 
 /// `200` body: one entry per existing input user (unknown ids omitted). Always
 /// `200` (never `404`).
@@ -152,6 +159,7 @@ mod tests {
     //! test failure before the two services drift in prod.
 
     use super::*;
+    use crate::bytes::Ed25519PublicKey;
 
     #[test]
     fn verify_session_round_trips() {
@@ -173,6 +181,31 @@ mod tests {
         assert_eq!(back.user_id, resp.user_id);
         assert_eq!(back.username, "alice");
         assert_eq!(back.display_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn verified_session_serializes_the_wire_key_set() {
+        // VerifiedSession (aliased as VerifySessionResponse) owns the wire
+        // shape; pin the 3 contract keys so a field add/drop/rename
+        // surfaces here instead of drifting between the services.
+        let session = VerifySessionResponse {
+            user_id: UserId::from("u1".to_string()),
+            username: "alice".to_string(),
+            display_name: None,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let obj: std::collections::BTreeSet<_> = serde_json::from_str::<serde_json::Value>(&json)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let expected: std::collections::BTreeSet<_> = ["user_id", "username", "display_name"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(obj, expected);
     }
 
     #[test]
@@ -199,6 +232,29 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn principal_round_trips_through_the_wire_projection() {
+        // Admin/Tagma project onto the wire and lift back losslessly --
+        // the TryFrom/From pair is the only mapping site (debt-#4).
+        let wire = WirePrincipal::try_from(Principal::Admin).unwrap();
+        assert!(matches!(Principal::from(wire), Principal::Admin));
+
+        let tagma_id = TagmaId::from("t1".to_string());
+        let wire = WirePrincipal::try_from(Principal::Tagma(tagma_id.clone())).unwrap();
+        assert!(matches!(Principal::from(wire), Principal::Tagma(id) if id == tagma_id));
+    }
+
+    #[test]
+    fn user_principal_is_rejected_on_the_wire() {
+        // THE invariant: a User is cookie-sourced and can never ride the
+        // bearer path. The projection hands the principal back (Err) so the
+        // caller 500s loudly -- a silent drop or a minted wire form would
+        // break the deputy guard.
+        let rejected = WirePrincipal::try_from(Principal::User(UserId::from("u1".to_string())))
+            .expect_err("User must not project onto the wire");
+        assert!(matches!(rejected, Principal::User(id) if id == UserId::from("u1".to_string())));
     }
 
     #[test]
@@ -256,6 +312,42 @@ mod tests {
     }
 
     #[test]
+    fn tagma_profile_serializes_the_wire_key_set() {
+        // TagmaProfile (aliased as TagmaProfileResponse) owns the wire shape
+        // now; pin the 9 contract keys so a future field add/drop/rename
+        // surfaces here instead of drifting silently between the services.
+        let profile = TagmaProfileResponse {
+            tagma_id: TagmaId::from("t1".to_string()),
+            pinned_public_key: None,
+            owner_user_id: UserId::from("owner".to_string()),
+            label: None,
+            owner_username: "alice".to_string(),
+            owner_display_name: None,
+            enrolled: true,
+            revoked: false,
+            owner_disabled: false,
+        };
+        let json = serde_json::to_string(&profile).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = v.as_object().unwrap();
+        let expected = [
+            "tagma_id",
+            "pinned_public_key",
+            "owner_user_id",
+            "label",
+            "owner_username",
+            "owner_display_name",
+            "enrolled",
+            "revoked",
+            "owner_disabled",
+        ];
+        assert_eq!(obj.len(), expected.len());
+        for key in expected {
+            assert!(obj.contains_key(key), "missing wire key {key}");
+        }
+    }
+
+    #[test]
     fn user_identities_round_trips() {
         let req = UserIdentitiesRequest {
             user_ids: vec![UserId::from("u1".to_string())],
@@ -307,6 +399,33 @@ mod tests {
         assert_eq!(back.username, "alice");
         assert!(back.display_name.is_none());
         assert!(!back.disabled);
+    }
+
+    #[test]
+    fn user_identity_serializes_the_wire_key_set() {
+        // UserIdentity (aliased as UserIdentityResponse) owns the wire shape
+        // for BOTH reads (bulk + by-username); pin the 4 contract keys so a
+        // field change surfaces here instead of drifting between services.
+        let identity = UserIdentityResponse {
+            user_id: UserId::from("u1".to_string()),
+            username: "alice".to_string(),
+            display_name: None,
+            disabled: false,
+        };
+        let json = serde_json::to_string(&identity).unwrap();
+        let obj: std::collections::BTreeSet<_> = serde_json::from_str::<serde_json::Value>(&json)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let expected: std::collections::BTreeSet<_> =
+            ["user_id", "username", "display_name", "disabled"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        assert_eq!(obj, expected);
     }
 
     #[test]

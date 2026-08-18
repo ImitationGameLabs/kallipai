@@ -14,9 +14,8 @@
 
 use std::collections::HashMap;
 
-use kallip_agora_common::control_plane::RoomMembership;
-use kallip_agora_common::ids::{MemberId, ParticipantKind};
-use kallip_agora_common::participant::RoomMember;
+use kallip_agora_common::ids::ParticipantKind;
+use kallip_lesche_common::rooms::{MemberId, RoomMember, RoomMembership};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait,
     QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,

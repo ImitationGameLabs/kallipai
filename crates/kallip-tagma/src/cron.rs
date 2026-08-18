@@ -47,7 +47,14 @@ impl CronExpr {
         let dom = parse_field(parts[2], 1, 31, "day-of-month")?;
         let month = parse_field(parts[3], 1, 12, "month")?;
         let dow = parse_field(parts[4], 0, 6, "day-of-week")?;
-        Ok(Self { minute, hour, dom, month, dow, source: expr.to_string() })
+        Ok(Self {
+            minute,
+            hour,
+            dom,
+            month,
+            dow,
+            source: expr.to_string(),
+        })
     }
 
     /// Compute the next fire time strictly after `after`.
@@ -62,7 +69,11 @@ impl CronExpr {
         let limit = after + time::Duration::days(366 * 5);
         loop {
             if candidate > limit {
-                bail!("no fire time for cron '{}' within 5 years of {}", self.source, after);
+                bail!(
+                    "no fire time for cron '{}' within 5 years of {}",
+                    self.source,
+                    after
+                );
             }
             // Check month first — if wrong, jump to the first of the next month.
             if !bit(self.month, candidate.month() as u8 as u64) {
@@ -76,8 +87,7 @@ impl CronExpr {
             }
             // Check hour — if wrong, advance one hour (resetting minute/second)
             if !bit(self.hour, candidate.hour() as u64) {
-                candidate = candidate
-                    .replace_minute(0).unwrap_or(candidate);
+                candidate = candidate.replace_minute(0).unwrap_or(candidate);
                 candidate = candidate + time::Duration::hours(1);
                 continue;
             }
@@ -101,11 +111,12 @@ impl CronExpr {
             dom_match && dow_match
         }
     }
-
 }
 
 impl fmt::Display for CronExpr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str(&self.source) }
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&self.source)
+    }
 }
 
 impl fmt::Debug for CronExpr {
@@ -161,7 +172,9 @@ fn parse_part(part: &str, lo: u8, hi: u8, name: &str) -> Result<u64> {
             let step: u8 = part[pos + 1..]
                 .parse()
                 .map_err(|_| anyhow::anyhow!("invalid step in cron {name} field: '{part}'"))?;
-            if step == 0 { bail!("cron {name} field step must be > 0: '{part}'"); }
+            if step == 0 {
+                bail!("cron {name} field step must be > 0: '{part}'");
+            }
             (&part[..pos], Some(step))
         }
         None => (part, None),
@@ -171,7 +184,9 @@ fn parse_part(part: &str, lo: u8, hi: u8, name: &str) -> Result<u64> {
     } else if let Some(pos) = range_str.find('-') {
         let s = parse_value(&range_str[..pos], lo, hi, name)?;
         let e = parse_value(&range_str[pos + 1..], lo, hi, name)?;
-        if s > e { bail!("cron {name} field range start > end: '{range_str}'"); }
+        if s > e {
+            bail!("cron {name} field range start > end: '{range_str}'");
+        }
         (s, e)
     } else {
         let v = parse_value(range_str, lo, hi, name)?;
@@ -183,9 +198,14 @@ fn parse_part(part: &str, lo: u8, hi: u8, name: &str) -> Result<u64> {
     let mut cur = start;
     while cur <= end {
         mask |= 1 << cur;
-        cur = match cur.checked_add(step) { Some(v) => v, None => break };
+        cur = match cur.checked_add(step) {
+            Some(v) => v,
+            None => break,
+        };
     }
-    if mask == 0 { bail!("cron {name} field component '{part}' produced no values"); }
+    if mask == 0 {
+        bail!("cron {name} field component '{part}' produced no values");
+    }
     Ok(mask)
 }
 
@@ -193,7 +213,9 @@ fn parse_value(s: &str, lo: u8, hi: u8, name: &str) -> Result<u8> {
     let v: u8 = s
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid value '{s}' in cron {name} field"))?;
-    if v < lo || v > hi { bail!("cron {name} field value {v} out of range [{lo}, {hi}]"); }
+    if v < lo || v > hi {
+        bail!("cron {name} field value {v} out of range [{lo}, {hi}]");
+    }
     Ok(v)
 }
 
@@ -213,11 +235,12 @@ fn weekday_to_cron_dow(wd: time::Weekday) -> u64 {
 
 fn round_up_to_next_minute(dt: OffsetDateTime) -> OffsetDateTime {
     let truncated = dt
-        .replace_second(0).unwrap_or(dt)
-        .replace_millisecond(0).unwrap_or(dt);
+        .replace_second(0)
+        .unwrap_or(dt)
+        .replace_millisecond(0)
+        .unwrap_or(dt);
     truncated + time::Duration::minutes(1)
 }
-
 
 /// Jump to 00:00 of the first day of the next month.
 ///
@@ -281,23 +304,35 @@ mod tests {
     fn step_every_2_hours() {
         let expr = CronExpr::parse("0 */2 * * *").unwrap();
         let after = datetime!(2024-01-15 01:00 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-01-15 02:00 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-01-15 02:00 UTC)
+        );
     }
 
     #[test]
     fn list_field() {
         let expr = CronExpr::parse("0 1,3,5 * * *").unwrap();
         let after = datetime!(2024-01-15 00:00 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-01-15 01:00 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-01-15 01:00 UTC)
+        );
         let after = datetime!(2024-01-15 01:00 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-01-15 03:00 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-01-15 03:00 UTC)
+        );
     }
 
     #[test]
     fn range_with_step() {
         let expr = CronExpr::parse("0 9-17/2 * * 1-5").unwrap();
         let after = datetime!(2024-01-15 08:00 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-01-15 09:00 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-01-15 09:00 UTC)
+        );
     }
 
     #[test]
@@ -305,35 +340,50 @@ mod tests {
         // "0 9 * * 1-5" = 09:00 Monday-Friday; Friday 17:00 -> Monday 09:00
         let expr = CronExpr::parse("0 9 * * 1-5").unwrap();
         let friday_evening = datetime!(2024-01-12 17:00 UTC);
-        assert_eq!(expr.next_after(friday_evening).unwrap(), datetime!(2024-01-15 09:00 UTC));
+        assert_eq!(
+            expr.next_after(friday_evening).unwrap(),
+            datetime!(2024-01-15 09:00 UTC)
+        );
     }
 
     #[test]
     fn next_after_every_minute() {
         let expr = CronExpr::parse("* * * * *").unwrap();
         let after = datetime!(2024-01-15 12:30:45 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-01-15 12:31 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-01-15 12:31 UTC)
+        );
     }
 
     #[test]
     fn next_after_specific_minute() {
         let expr = CronExpr::parse("30 * * * *").unwrap();
         let after = datetime!(2024-01-15 12:00 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-01-15 12:30 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-01-15 12:30 UTC)
+        );
     }
 
     #[test]
     fn next_after_advances_to_next_day() {
         let expr = CronExpr::parse("0 9 * * *").unwrap();
         let after = datetime!(2024-01-15 09:30 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-01-16 09:00 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-01-16 09:00 UTC)
+        );
     }
 
     #[test]
     fn next_after_specific_month() {
         let expr = CronExpr::parse("0 0 1 6 *").unwrap();
         let after = datetime!(2024-01-15 12:00 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-06-01 00:00 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-06-01 00:00 UTC)
+        );
     }
 
     #[test]
@@ -341,10 +391,16 @@ mod tests {
         // "0 0 15 * 1" = midnight on the 15th OR every Monday.
         let expr = CronExpr::parse("0 0 15 * 1").unwrap();
         let after = datetime!(2024-01-14 00:00 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-01-15 00:00 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-01-15 00:00 UTC)
+        );
         // Jan 15 is Monday. Next fire: Jan 22 (Monday), since dom=15 doesn't match.
         let next = expr.next_after(after).unwrap();
-        assert_eq!(expr.next_after(next).unwrap(), datetime!(2024-01-22 00:00 UTC));
+        assert_eq!(
+            expr.next_after(next).unwrap(),
+            datetime!(2024-01-22 00:00 UTC)
+        );
     }
 
     #[test]
@@ -358,17 +414,26 @@ mod tests {
     fn february_29_leap_year() {
         let expr = CronExpr::parse("0 0 29 2 *").unwrap();
         let after = datetime!(2024-01-01 00:00 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-02-29 00:00 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-02-29 00:00 UTC)
+        );
         // From Mar 2024, next is 2028 (2025/2026/2027 are not leap years).
         let after = datetime!(2024-03-01 00:00 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2028-02-29 00:00 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2028-02-29 00:00 UTC)
+        );
     }
 
     #[test]
     fn second_precision_ignored() {
         let expr = CronExpr::parse("* * * * *").unwrap();
         let after = datetime!(2024-01-15 09:00:30 UTC);
-        assert_eq!(expr.next_after(after).unwrap(), datetime!(2024-01-15 09:01 UTC));
+        assert_eq!(
+            expr.next_after(after).unwrap(),
+            datetime!(2024-01-15 09:01 UTC)
+        );
     }
 
     #[test]
