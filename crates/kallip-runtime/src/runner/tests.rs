@@ -1088,3 +1088,78 @@ async fn budget_probe_rearms_waiting_with_zero_llm_calls() {
         "an exceeded budget must block before any LLM call ({requests} requests)"
     );
 }
+
+/// Regression for the budget-skip branch: a wait fuse that elapses while
+/// the budget is still exceeded must NOT inject the elapsed-turn message
+/// (the gate would block it again — pure context noise). Driven by
+/// manually expiring the fuse so the 600s probe cadence need not pass.
+#[tokio::test]
+async fn budget_probe_fuse_fire_skips_injection() {
+    let server = MockServer::start().await;
+    mount_ok_stream(&server, "ok").await;
+
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let mut ctx = ctx_from_source(
+        vec![profile("p1", "ep1", 500_000)],
+        wiremock_source(map),
+        fast_policy(),
+    )
+    .await;
+    ctx.token_budget.set_remaining(0);
+    let store = ctx.store.clone();
+    let wait_notify = ctx.wait_notify.clone();
+    let wait_until = ctx.wait_until.clone();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let handle = tokio::spawn(crate::agent_task::agent_task(ctx, None, prompt_rx, tx));
+    ptx.send("go".into()).await.unwrap();
+
+    // Initial round: gate blocks, fuse armed (600s cadence).
+    let mut blocked = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && blocked < 1 {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+            Ok(Some(AgentEvent::TokenBudgetExceeded { .. })) => blocked += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(blocked, 1, "the initial round must hit the budget gate");
+
+    // Expire the fuse by hand and ring the doorbell: this is exactly the
+    // state the spawned 600s sleep would produce.
+    *wait_until.lock().unwrap() = Some(tokio::time::Instant::now());
+    wait_notify.notify_one();
+
+    let mut second_block = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && !second_block {
+        match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+            Ok(Some(AgentEvent::TokenBudgetExceeded { .. })) => second_block = true,
+            _ => {}
+        }
+    }
+    handle.abort();
+    assert!(
+        second_block,
+        "the expired probe fuse must re-check the gate (second block observed)"
+    );
+    let guard = store.lock().await;
+    let injected = guard
+        .turns()
+        .iter()
+        .flat_map(|t| t.messages.clone())
+        .any(|m| {
+            m.content()
+                .map(|c| c.contains("wait timer elapsed"))
+                .unwrap_or(false)
+        });
+    drop(guard);
+    assert!(
+        !injected,
+        "a budget-probe wake must not inject the elapsed turn (noise the gate would re-block)"
+    );
+    let requests = server.received_requests().await.unwrap().len();
+    assert_eq!(requests, 0, "the probe path must stay LLM-free");
+}

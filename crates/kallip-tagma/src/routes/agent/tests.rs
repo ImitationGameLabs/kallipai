@@ -766,6 +766,44 @@ async fn remove_rejects_busy_but_allows_waiting_retrying() {
     }
 }
 
+/// Interrupting a waiting/retrying agent (parked in the outer loop, no
+/// round token) enqueues an interrupt turn — the kick pattern — instead of
+/// being a silent no-op; the prompt arm drops both fuses on wake.
+#[tokio::test]
+async fn interrupt_waiting_enqueues_turn_not_noop() {
+    let state = make_state();
+    let root = AgentId::random();
+    let child = AgentId::random();
+    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(4);
+    {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &root);
+        add_sub(&mut reg, &child, &root);
+        let live = reg.get_mut(&child).unwrap().as_live_mut().unwrap();
+        live.agent.state.store(
+            crate::state::AgentState::WAITING,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        live.agent.prompt_tx = prompt_tx;
+    }
+    let status = interrupt_agent(
+        State(state),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(child),
+    )
+    .await
+    .expect("interrupt on a waiting agent is accepted");
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    let turn = tokio::time::timeout(std::time::Duration::from_millis(500), prompt_rx.recv())
+        .await
+        .expect("interrupt turn must be enqueued")
+        .expect("prompt channel open");
+    assert!(
+        turn.contains("[system]") && turn.contains("interrupted"),
+        "the interrupt turn must tell the agent it was interrupted: {turn}"
+    );
+}
+
 /// The wake endpoint rejects non-parked agents (409) — a kick on an agent
 /// that is running/waiting/retrying/idle is meaningless.
 #[tokio::test]

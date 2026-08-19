@@ -546,7 +546,7 @@ pub async fn interrupt_agent(
     // Clone the shared slot Arc under the registry read-lock, then release it before
     // touching the inner std Mutex — so the async registry guard is never held across the
     // (sync) round-cancel lock.
-    let round_cancel = {
+    let (round_cancel, parked_interrupt) = {
         let registry = state.registry.read().await;
         registry.require_superior(auth.identity(), &id)?;
         let Some(entry) = registry.get(&id) else {
@@ -555,7 +555,18 @@ pub async fn interrupt_agent(
         let live = entry
             .as_live()
             .ok_or_else(|| ApiError::conflict("agent is faulted; nothing to interrupt"))?;
-        live.agent.round_cancel.clone()
+        (
+            live.agent.round_cancel.clone(),
+            // Waiting/retrying park in the outer loop with no round token
+            // to cancel — a bare interrupt would be a silent no-op. Enqueue
+            // an interrupt turn instead (the kick pattern): the prompt arm
+            // clears both fuses and the agent decides how to land.
+            matches!(
+                live.agent.get_state(),
+                AgentState::Waiting | AgentState::Retrying
+            )
+            .then(|| live.agent.prompt_tx.clone()),
+        )
     };
     if let Some(round) = round_cancel
         .lock()
@@ -563,6 +574,13 @@ pub async fn interrupt_agent(
         .clone()
     {
         round.cancel();
+    }
+    if let Some(prompt_tx) = parked_interrupt
+        && prompt_tx
+            .try_send("[system] you were interrupted while parked in the outer loop (waiting or retrying). The wait/retry fuse was dropped; finish with break, or continue if the interruption was unintended.".to_string())
+            .is_err()
+    {
+        return Err(ApiError::conflict("agent prompt queue is full"));
     }
     Ok(StatusCode::ACCEPTED)
 }
