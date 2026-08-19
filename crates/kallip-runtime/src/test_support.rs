@@ -17,7 +17,7 @@ use crate::agent_task::AgentContext;
 use crate::approval::ApprovalStore;
 use crate::config::{AgentConfig, PermissionProfile};
 use crate::context::{ContextStore, ContextSummarizer};
-use crate::failover::FailoverState;
+use crate::failover::{FailoverState, ProfileSnapshot};
 use crate::policy::{AgentPolicy, AuthorizedToolExecutor};
 use crate::profile::{BackendSource, Profile, ProfileRegistry, Tier};
 use crate::retry::RetryPolicy;
@@ -95,7 +95,8 @@ pub(crate) async fn ctx_from_source(
     config.retry_policy = retry_policy;
     let tier = Tier { profiles };
     let registry = Arc::new(ProfileRegistry::new(vec![tier.clone()], source).unwrap());
-    let failover = FailoverState::new(tier, registry, Some("sys".into()));
+    let snapshot = Arc::new(std::sync::Mutex::new(ProfileSnapshot::default()));
+    let failover = FailoverState::new(tier, registry, Some("sys".into()), snapshot);
     let client = failover
         .build_client(failover.current_profile())
         .expect("active profile is buildable");

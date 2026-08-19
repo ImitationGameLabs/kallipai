@@ -27,9 +27,10 @@ pub mod token_budget;
 pub(crate) mod tool_execution;
 pub mod tools;
 
-// Re-exported so the tagma (another crate) can construct `AgentContext.failover`. The state's
-// accessors stay `pub(crate)` — only the runtime reads them.
-pub use failover::{FailoverState, ProfileReset};
+// Re-exported so the tagma (another crate) can construct `AgentContext.failover` and share
+// its profile-snapshot cell. The failover-chain accessors stay `pub(crate)` — only the
+// runtime reads them; `profile_snapshot` is `pub` (in-crate tests; mirrors the tagma's read).
+pub use failover::{FailoverState, ProfileReset, ProfileSnapshot};
 
 // Re-exported shell tool-name constants so downstream crates (e.g. the tagma's
 // approval gate) can refer to them without taking a direct `kallip-shell` dep.

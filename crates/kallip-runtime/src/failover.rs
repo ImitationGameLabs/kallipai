@@ -5,7 +5,9 @@
 //! [`ProfileRegistry`] (used to rebuild the client on advance), the system prompt applied to
 //! every client built for this agent, and a sticky `profile_idx`. `profile_idx` is private and
 //! mutated only by [`FailoverState::advance_to`], making the forward-only invariant structural
-//! rather than conventional.
+//! rather than conventional. The state also mirrors the active profile's identity into a
+//! [`ProfileSnapshot`] cell shared with the tagma, so status surfaces can show the profile
+//! the client is actually using (which drifts from the spawn-time active after an advance).
 //!
 //! The advance *transition* itself — advancing on a `Failover` outcome, swapping the client,
 //! re-applying the window, compacting — lives in `crate::acquisition::advance_failover`, not here:
@@ -13,7 +15,7 @@
 //! This module owns the state and the accessors that DRY the chain indexing; the acquisition
 //! module owns the driving.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use just_llm_client::types::chat::ChatMessage;
@@ -37,6 +39,11 @@ pub struct FailoverState {
     /// Index into `tier.profiles` of the currently active profile. Private — advanced only via
     /// [`advance_to`](Self::advance_to).
     profile_idx: usize,
+    /// Mirror of the active profile's identity, written by the three methods that establish
+    /// the active profile ([`new`](Self::new), [`advance_to`](Self::advance_to),
+    /// [`reset_and_rebuild`](Self::reset_and_rebuild)) and read by the tagma through its own
+    /// `Arc` handle for status surfaces. The runtime never reads it outside tests.
+    snapshot: Arc<Mutex<ProfileSnapshot>>,
 }
 
 /// Pending profile-reset payload: the tagma's apply handler writes this into a
@@ -51,14 +58,25 @@ pub struct ProfileReset {
 }
 
 impl FailoverState {
-    /// Construct at the head of the chain (`profile_idx = 0`).
-    pub fn new(tier: Tier, registry: Arc<ProfileRegistry>, system_prompt: Option<String>) -> Self {
-        Self {
+    /// Construct at the head of the chain (`profile_idx = 0`). `snapshot` is the cell the
+    /// tagma created (it keeps a clone of the `Arc` to read for status surfaces); it is
+    /// seeded with the tier's active profile here — the same derivation every later write
+    /// uses — so the cell never shows a placeholder once the agent is observable.
+    pub fn new(
+        tier: Tier,
+        registry: Arc<ProfileRegistry>,
+        system_prompt: Option<String>,
+        snapshot: Arc<Mutex<ProfileSnapshot>>,
+    ) -> Self {
+        let state = Self {
             tier,
             registry,
             system_prompt,
             profile_idx: 0,
-        }
+            snapshot,
+        };
+        state.write_snapshot(state.tier.active_profile());
+        state
     }
 
     /// The currently active profile (`tier.profiles[profile_idx]`).
@@ -83,6 +101,14 @@ impl FailoverState {
     pub(crate) fn profile_idx(&self) -> usize {
         self.profile_idx
     }
+    /// Clone the mirrored active-profile identity. Poison-tolerant (`into_inner`), matching
+    /// the tagma-side read pattern — a panic elsewhere in a cell holder must not brick reads.
+    pub fn profile_snapshot(&self) -> ProfileSnapshot {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 
     /// Total profiles in the tier (chain length). Used to distinguish the single-profile
     /// (`NoFailoverConfigured`) from multi-profile-tail (`AllBackupsExhausted`) exhaustion case.
@@ -102,6 +128,16 @@ impl FailoverState {
             .build_client(profile, self.system_prompt.clone())
     }
 
+    /// Mirror `profile`'s identity into the shared cell. Private — only the active-profile
+    /// writers call it. Poison-tolerant (`into_inner`): the store is a single assignment,
+    /// so a poisoned lock (a panic while holding the cell) discards nothing.
+    fn write_snapshot(&self, profile: &Profile) {
+        *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = ProfileSnapshot {
+            profile_id: profile.id.clone(),
+            model: profile.model.clone(),
+        };
+    }
+
     /// Advance to `idx`. **The only mutator of `profile_idx`.** Forward-only — `debug_assert!`,
     /// not a release panic: this guards an internal invariant of a rare error path, and a release
     /// panic would turn a recoverable misconfiguration into a process crash. The test suite
@@ -113,11 +149,12 @@ impl FailoverState {
             self.profile_idx
         );
         self.profile_idx = idx;
+        self.write_snapshot(&self.tier.profiles[idx]);
     }
     /// Rebuild this failover state against a new registry and tier (used by the
     /// online profile-apply path). Builds the client for the new tier's active
     /// profile first (fail-fast on a misconfigured endpoint), then commits the
-    /// tier, registry, and resets `profile_idx` to 0. Returns the new
+    /// tier, registry, resets `profile_idx` to 0, and rewrites the shared profile snapshot.
     /// [`ChatClient`] so the caller can swap `ctx.client`. On error, nothing is
     /// mutated — the agent continues on its prior config.
     ///
@@ -134,8 +171,19 @@ impl FailoverState {
         self.tier = tier;
         self.registry = registry;
         self.profile_idx = 0;
+        self.write_snapshot(self.tier.active_profile());
         Ok(client)
     }
+}
+/// The active profile's identity, mirrored into [`FailoverState`]'s shared cell for the
+/// tagma's status surfaces: the registry profile id plus the concrete model string sent
+/// to the backend. Lets an operator see which model the client is actually using, which
+/// differs from the spawn-time active after a within-tier failover advance or an online
+/// profile apply.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProfileSnapshot {
+    pub profile_id: String,
+    pub model: String,
 }
 
 /// Outcome of one within-tier failover advance attempt (see `crate::acquisition::advance_failover`).
@@ -189,3 +237,6 @@ impl std::fmt::Debug for FailoverOutcome {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
