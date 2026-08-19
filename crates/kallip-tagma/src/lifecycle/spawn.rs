@@ -224,6 +224,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         token_budget: token_budget.clone(),
         pending_profile_reset: pending_profile_reset.clone(),
         message_puller,
+        persist_failures: Default::default(),
     };
 
     let agent_handle = tokio::spawn(agent_task::agent_task(

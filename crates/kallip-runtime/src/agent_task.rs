@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
@@ -18,6 +19,10 @@ use crate::history::{HistoryWriter, RecordKind};
 use crate::policy::AuthorizedToolExecutor;
 use crate::runner;
 use just_llm_client::types::chat::ChatMessage;
+
+/// Consecutive context-persist failures before the streak escalates from a
+/// per-failure warning to an "agent is losing its window" error.
+const PERSIST_FAILURES_WARN_AFTER: u32 = 3;
 
 /// A cancellation token scoped to a single round, always a child of the agent's lifecycle
 /// token ([`AgentContext::cancel`]). Cancelled by `interrupt_agent` to abort the current
@@ -165,10 +170,18 @@ pub struct AgentContext {
     /// undelivered direct messages on a notify wake without depending on the
     /// tagma crate. `None` for test contexts and agents without an inbox.
     pub message_puller: Option<Arc<dyn MessagePuller>>,
+    /// Consecutive context-persist failures. A single miss is a logged
+    /// error; a streak means the agent is silently losing its context
+    /// window (every persist rewrites it), so the third consecutive miss
+    /// escalates to an explicit data-loss warning. Any success clears the
+    /// streak.
+    pub persist_failures: AtomicU32,
 }
 
 impl AgentContext {
     /// Persist context and approval state to disk. Logs warnings on failure.
+    ///
+    /// Context-persist failures are counted; see `persist_failures`.
     pub async fn persist(&self) {
         let Some(ref dir) = self.agent_dir else {
             return;
@@ -177,7 +190,15 @@ impl AgentContext {
         {
             let guard = self.store.lock().await;
             if let Err(e) = crate::persistence::persist_context(&guard, dir) {
-                tracing::error!("context persist failed: {e:#}");
+                let streak = self.persist_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                tracing::error!("context persist failed ({streak} in a row): {e:#}");
+                if streak == PERSIST_FAILURES_WARN_AFTER {
+                    tracing::error!(
+                        "agent has lost {streak} consecutive persists; its context window is no longer being saved — check disk space and permissions"
+                    );
+                }
+            } else {
+                self.persist_failures.store(0, Ordering::Relaxed);
             }
         }
         {
@@ -725,6 +746,34 @@ fn transient_retry_due(ctx: &AgentContext) -> bool {
 mod tests {
     use super::*;
 
+    /// The persist-failure streak: each failed context persist counts, the
+    /// warning threshold is hit on the third consecutive miss, and any
+    /// success clears the streak. An agent_dir pointing at a regular file
+    /// forces the write failure (root-proof).
+    #[tokio::test]
+    async fn persist_failure_streak_counts_and_resets() {
+        let mut ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+        // agent_dir pointing at a regular file: every temp-file creation
+        // inside it fails (ENOTDIR), which works even when tests run as
+        // root (where directory permissions would not).
+        let dir = tempfile::TempDir::new().unwrap();
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, "file").unwrap();
+        ctx.agent_dir = Some(not_a_dir);
+
+        for expected in 1..=PERSIST_FAILURES_WARN_AFTER {
+            ctx.persist().await;
+            assert_eq!(ctx.persist_failures.load(Ordering::Relaxed), expected);
+        }
+
+        ctx.agent_dir = Some(dir.path().to_path_buf());
+        ctx.persist().await;
+        assert_eq!(ctx.persist_failures.load(Ordering::Relaxed), 0);
+    }
     /// The core inference: a round-token cancel is classified as an interrupt (keep
     /// living) unless the lifecycle token was also cancelled — which also verifies
     /// the parent→child propagation that makes the classification work.
