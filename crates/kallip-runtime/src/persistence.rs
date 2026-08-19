@@ -1,11 +1,12 @@
 //! Agent persistence: atomic JSON serialization to disk.
 //!
 //! Writes context and approval state to per-agent directories.
-//! All writes use atomic rename (temp file + rename) to prevent corruption
-//! on crash. On tagma restart, [`scan_agents`] scans for agents
+//! All writes use atomic rename (temp file + rename) with data and directory
+//! fsync to prevent corruption on crash. On tagma restart, [`scan_agents`] scans for agents
 //! that can be recovered.
 
 use std::fs;
+use std::io::Write as _;
 
 use std::path::{Path, PathBuf};
 
@@ -277,13 +278,32 @@ pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Atomically write content to a file via temp file + rename.
+/// Atomically and durably write content to a file via temp file + rename.
+
+/// Durability closes the power-loss window the plain rename left open: the temp
+/// file is `sync_data`d before the rename so a crash never promotes a half-
+/// written file, and the parent directory is synced after the rename so the
+/// rename itself survives power loss (many filesystems journal directory
+/// entries lazily — without the dir fsync a crash can leave the target
+/// missing or zero-length). A dir-sync failure is logged and downgraded to a
+/// warning: by then the rename has already landed, so propagating an error
+/// would overstate the damage. Neither sync path is unit-testable; this is
+/// verified by walkthrough (design doc §7, context-persistence).
 pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let parent = path.parent().context("path has no parent")?;
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     let temp_path = parent.join(format!(".{file_name}.tmp"));
-    std::fs::write(&temp_path, content)?;
-    std::fs::rename(&temp_path, path)?;
+
+    let mut file = fs::File::create(&temp_path)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_data()?;
+    drop(file);
+
+    fs::rename(&temp_path, path)?;
+
+    if let Err(e) = fs::File::open(parent).and_then(|dir| dir.sync_all()) {
+        tracing::warn!("directory fsync failed for {}: {e}", parent.display());
+    }
     Ok(())
 }
 
