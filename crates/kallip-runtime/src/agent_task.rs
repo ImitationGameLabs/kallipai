@@ -176,9 +176,7 @@ impl AgentContext {
 
         {
             let guard = self.store.lock().await;
-            if let Ok(json) = serde_json::to_string(&*guard)
-                && let Err(e) = crate::persistence::persist_context(&json, dir)
-            {
+            if let Err(e) = crate::persistence::persist_context(&guard, dir) {
                 tracing::error!("context persist failed: {e:#}");
             }
         }

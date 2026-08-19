@@ -307,9 +307,44 @@ pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// Serialize and write context store to context.json.
-pub fn persist_context(json: &str, dir: &Path) -> Result<()> {
-    atomic_write(&dir.join("context.json"), json)
+/// Project the context store and write it as `manifest.json` + `pins.json`.
+
+/// Split persistence (see `context::manifest`): the store is no longer
+/// serialized whole, so a per-turn persist writes kilobytes instead of the
+/// full 100KB+ window. Each document goes out durably with the previous
+/// version kept as `.bak` — the first fallback if a parse ever fails.
+pub fn persist_context(store: &ContextStore, dir: &Path) -> Result<()> {
+    let manifest =
+        serde_json::to_string(&store.to_manifest_doc()).context("serializing manifest.json")?;
+    let pins = serde_json::to_string(&store.to_pins_doc()).context("serializing pins.json")?;
+    write_with_backup(&dir.join("manifest.json"), &manifest)?;
+    write_with_backup(&dir.join("pins.json"), &pins)?;
+    Ok(())
+}
+
+/// Durable write that keeps the previous version as `<name>.bak`.
+
+/// A failed backup copy is logged and tolerated: the fresh write is atomic
+/// and durable on its own, and proceeding beats refusing to persist. A
+/// missing previous file (first write) simply skips the backup.
+fn write_with_backup(path: &Path, content: &str) -> Result<()> {
+    if path.exists() {
+        let bak = backup_path(path);
+        if let Err(e) = fs::copy(path, &bak) {
+            tracing::warn!("backup copy for {} failed: {e}", path.display());
+        }
+    }
+    atomic_write(path, content)
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    name.push_str(".bak");
+    path.with_file_name(name)
 }
 
 /// Serialize and write approval store to approvals.json.
@@ -575,9 +610,62 @@ const RESTART_MESSAGE: &str = concat!(
 mod tests {
     use super::*;
 
+    use crate::context::AgenticContext as _;
     use crate::history::{HistoryWriter, RecordKind};
     use serial_test::serial;
     use tempfile::TempDir;
+
+    // --- split persistence (manifest/pins) ---
+
+    #[test]
+    fn persist_writes_manifest_and_pins_with_backup() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::new();
+        store.pin("note", ChatMessage::assistant("keep")).unwrap();
+        store.push_turn(vec![ChatMessage::user("hello")]);
+        let first_ids = store.to_manifest_doc().conversation_turn_ids.clone();
+
+        persist_context(&store, dir.path()).unwrap();
+        let manifest_v1 = std::fs::read_to_string(dir.path().join("manifest.json")).unwrap();
+        assert!(dir.path().join("pins.json").exists());
+        assert!(
+            !dir.path().join("manifest.json.bak").exists(),
+            "no backup on first write"
+        );
+
+        // Second turn changes the manifest; the backup keeps version 1.
+        store.push_turn(vec![ChatMessage::user("more")]);
+        persist_context(&store, dir.path()).unwrap();
+        let manifest_v2 = std::fs::read_to_string(dir.path().join("manifest.json")).unwrap();
+        let bak = std::fs::read_to_string(dir.path().join("manifest.json.bak")).unwrap();
+        assert_eq!(bak, manifest_v1);
+        assert_ne!(manifest_v2, manifest_v1);
+
+        let doc: crate::context::manifest::ManifestDoc =
+            serde_json::from_str(&manifest_v2).unwrap();
+        assert_eq!(doc.conversation_turn_ids.len(), first_ids.len() + 1);
+        assert!(
+            !dir.path().join("context.json").exists(),
+            "legacy file not written"
+        );
+    }
+
+    #[test]
+    fn persist_excludes_injected_turns_from_manifest() {
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::new();
+        let kept = store.push_turn(vec![ChatMessage::user("kept")]).0;
+        let injected = store
+            .push_turn(vec![ChatMessage::user("[system] restart")])
+            .0;
+        store.register_injected_turn(injected);
+
+        persist_context(&store, dir.path()).unwrap();
+        let manifest = std::fs::read_to_string(dir.path().join("manifest.json")).unwrap();
+        let doc: crate::context::manifest::ManifestDoc = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(doc.conversation_turn_ids, vec![kept.0]);
+        assert_eq!(doc.next_turn_id, injected.0 + 1);
+    }
 
     #[test]
     fn agent_meta_round_trips() {

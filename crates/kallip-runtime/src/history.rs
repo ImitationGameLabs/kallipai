@@ -8,11 +8,11 @@ use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::context::{Turn, TurnId, TurnKind};
 use anyhow::Result;
 use just_llm_client::types::chat::ChatMessage;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use crate::context::{Turn, TurnId, TurnKind};
 
 // ---------------------------------------------------------------------------
 // Record types
@@ -232,7 +232,13 @@ pub(crate) fn hydrate_turns(agent_dir: &Path, ids: &[u64]) -> (Vec<Turn>, Hydrat
     let mut missing_ids: Vec<u64> = wanted.into_iter().collect();
     missing_ids.sort_unstable();
     turns.sort_by_key(|t| t.id.0);
-    (turns, HydrationReport { bad_lines, missing_ids })
+    (
+        turns,
+        HydrationReport {
+            bad_lines,
+            missing_ids,
+        },
+    )
 }
 
 /// Highest turn ID ever recorded in the history log (`0` when none).
@@ -258,7 +264,6 @@ pub(crate) fn max_turn_id(agent_dir: &Path) -> u64 {
     }
     0
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -429,8 +434,11 @@ mod tests {
     fn write_day(dir: &std::path::Path, date: &str, lines: &[String]) {
         let history_dir = dir.join("history");
         std::fs::create_dir_all(&history_dir).unwrap();
-        std::fs::write(history_dir.join(format!("{date}.ndjson")), lines.join("\n") + "\n")
-            .unwrap();
+        std::fs::write(
+            history_dir.join(format!("{date}.ndjson")),
+            lines.join("\n") + "\n",
+        )
+        .unwrap();
     }
 
     fn turn_line(id: Option<u64>, text: &str) -> String {
@@ -468,7 +476,11 @@ mod tests {
         write_day(
             dir.path(),
             "2026-08-19",
-            &[system_line(), turn_line(Some(5), "kept-new"), turn_line(Some(4), "kept-mid")],
+            &[
+                system_line(),
+                turn_line(Some(5), "kept-new"),
+                turn_line(Some(4), "kept-mid"),
+            ],
         );
 
         let (turns, report) = hydrate_turns(dir.path(), &[2, 4, 5]);
@@ -486,12 +498,19 @@ mod tests {
         write_day(
             dir.path(),
             "2026-08-19",
-            &[turn_line(Some(7), "good"), "{not json".to_string(), turn_line(Some(8), "after-bad")],
+            &[
+                turn_line(Some(7), "good"),
+                "{not json".to_string(),
+                turn_line(Some(8), "after-bad"),
+            ],
         );
         // A corrupt line mid-file is skipped; parsing continues past it.
 
         let (turns, report) = hydrate_turns(dir.path(), &[7, 8, 9]);
-        assert_eq!(report.bad_lines, 1, "the malformed line is skipped, counted");
+        assert_eq!(
+            report.bad_lines, 1,
+            "the malformed line is skipped, counted"
+        );
         assert_eq!(report.missing_ids, vec![9]);
         assert_eq!(turns.len(), 2, "records around the bad line still hydrate");
         assert_eq!(turns[1].id.0, 8);

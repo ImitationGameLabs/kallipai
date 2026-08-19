@@ -14,7 +14,7 @@
 mod compact;
 mod compose;
 mod estimate;
-mod manifest;
+pub(crate) mod manifest;
 mod store;
 mod summarize;
 mod tokens;
