@@ -344,6 +344,26 @@ fn backup_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Read-and-parse a split-persistence document, falling back to its `.bak`
+/// when the primary is unreadable or corrupt. `Ok((doc, true))` means the
+/// backup won. The `Err` carries the backup's failure, chained after the
+/// primary's — the backup error is the actionable one (both are bad).
+fn load_with_backup<T: serde::de::DeserializeOwned>(path: &Path) -> Result<(T, bool)> {
+    let read = |p: &Path| {
+        fs::read_to_string(p)
+            .with_context(|| format!("reading {}", p.display()))
+            .and_then(|json| {
+                serde_json::from_str(&json).with_context(|| format!("parsing {}", p.display()))
+            })
+    };
+    match read(path) {
+        Ok(doc) => Ok((doc, false)),
+        Err(primary) => read(&backup_path(path))
+            .map(|doc| (doc, true))
+            .map_err(|backup| backup.context(format!("primary also failed: {primary:#}"))),
+    }
+}
+
 /// Serialize and write approval store to approvals.json.
 pub fn persist_approvals(json: &str, dir: &Path) -> Result<()> {
     atomic_write(&dir.join("approvals.json"), json)
@@ -471,6 +491,11 @@ pub enum DegradationKind {
     UnansweredToolCalls,
     /// Tool results in a restored turn answering no call in that turn.
     OrphanToolResults,
+    /// manifest.json and its backup both unreadable; window rebuilt from the
+    /// history tail within a capped budget, leading damaged turns dropped.
+    TailRecovery,
+    /// pins.json and its backup both unreadable; booted with empty pins.
+    PinsLost,
 }
 
 /// Scan the agents directory and return agents eligible for restore.
@@ -557,10 +582,16 @@ fn check_meta(dir: &Path) -> Result<AgentMeta> {
 /// through the legacy `context.json` path — which then migrates in place to
 /// the split format. Either way the on-load migrations, token re-estimation,
 /// and restart-message injection still run. Non-fatal damage is collected in
-/// `degraded` rather than failing the restore.
-pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> {
+/// `degraded` rather than failing the restore. `tail_budget` caps the
+/// conversation window rebuilt from the history tail when manifest.json and
+/// its backup are both unreadable (see [`DegradationKind::TailRecovery`]).
+pub fn restore_agent(
+    agent_id: &AgentId,
+    dir: &Path,
+    tail_budget: usize,
+) -> Result<RestorableAgent> {
     let mut degraded = Vec::new();
-    let mut store = load_store(dir, &mut degraded)?;
+    let mut store = load_store(dir, tail_budget, &mut degraded)?;
 
     let approvals: ApprovalStore = match fs::read_to_string(dir.join("approvals.json")) {
         Ok(json) => serde_json::from_str(&json).context("parsing approvals.json")?,
@@ -662,7 +693,11 @@ fn check_tool_pairing(store: &ContextStore, degraded: &mut Vec<Degradation>) {
 /// `context.json` (migration interrupted before the rename) is finished off.
 /// Only `context.json` → legacy format: load it, strip restart notices, and
 /// migrate to the split format in place. Neither → fresh store.
-fn load_store(dir: &Path, degraded: &mut Vec<Degradation>) -> Result<ContextStore> {
+fn load_store(
+    dir: &Path,
+    tail_budget: usize,
+    degraded: &mut Vec<Degradation>,
+) -> Result<ContextStore> {
     let manifest_path = dir.join("manifest.json");
     let legacy_path = dir.join("context.json");
 
@@ -673,14 +708,19 @@ fn load_store(dir: &Path, degraded: &mut Vec<Degradation>) -> Result<ContextStor
             tracing::warn!("finishing legacy rename failed: {e:#}");
         }
 
-        let manifest: crate::context::manifest::ManifestDoc = serde_json::from_str(
-            &fs::read_to_string(&manifest_path).context("reading manifest.json")?,
-        )
-        .context("parsing manifest.json")?;
-        let pins: crate::context::manifest::PinsDoc = serde_json::from_str(
-            &fs::read_to_string(dir.join("pins.json")).context("reading pins.json")?,
-        )
-        .context("parsing pins.json")?;
+        let manifest =
+            match load_with_backup::<crate::context::manifest::ManifestDoc>(&manifest_path) {
+                Ok((doc, false)) => doc,
+                Ok((doc, true)) => {
+                    tracing::warn!("manifest.json unreadable, recovered from backup");
+                    doc
+                }
+                // Both wrecked: rebuild the window from the history tail instead
+                // of faulting the agent (the manifest alone is not worth a
+                // Faulted — history and pins survive independently).
+                Err(e) => return Ok(rebuild_window_from_tail(dir, tail_budget, degraded, e)),
+            };
+        let pins = load_pins(dir, degraded);
 
         let (convo, report) = crate::history::hydrate_turns(dir, &manifest.conversation_turn_ids);
         if report.bad_lines > 0 {
@@ -712,6 +752,80 @@ fn load_store(dir: &Path, degraded: &mut Vec<Degradation>) -> Result<ContextStor
     }
 
     Ok(ContextStore::new())
+}
+
+/// Load pins.json through its backup chain, degrading to empty pins
+/// (recorded) when both are unreadable. Pins are re-creatable by re-pinning,
+/// so a wrecked pins file boots the agent rather than faulting it.
+fn load_pins(dir: &Path, degraded: &mut Vec<Degradation>) -> crate::context::manifest::PinsDoc {
+    match load_with_backup::<crate::context::manifest::PinsDoc>(&dir.join("pins.json")) {
+        Ok((doc, false)) => doc,
+        Ok((doc, true)) => {
+            tracing::warn!("pins.json unreadable, recovered from backup");
+            doc
+        }
+        Err(e) => {
+            degraded.push(Degradation {
+                kind: DegradationKind::PinsLost,
+                detail: format!(
+                    "pins.json and its backup are unreadable ({e:#}); booted with empty pins"
+                ),
+            });
+            crate::context::manifest::PinsDoc {
+                version: crate::context::manifest::FORMAT_VERSION,
+                pins: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Last-resort window rebuild when manifest.json and its backup are both
+/// unreadable: pins keep their own file (and backup chain), the conversation
+/// window is rehydrated from the newest history turns that fit `tail_budget`,
+/// and `next_turn_id` is rescanned from history (`max + 1`) — reusing an ID
+/// would silently alias history records and manifest references with
+/// different content. Leading turns with pairing damage are dropped up to
+/// the first clean boundary: a dangling call or orphan result at the window
+/// head is a guaranteed provider rejection on the next round. Usage counters
+/// and the retry log lived only in the manifest and are lost (reset to zero,
+/// recorded).
+fn rebuild_window_from_tail(
+    dir: &Path,
+    tail_budget: usize,
+    degraded: &mut Vec<Degradation>,
+    manifest_err: anyhow::Error,
+) -> ContextStore {
+    let pins = load_pins(dir, degraded);
+    let mut turns = crate::history::tail_turns_within_budget(dir, tail_budget);
+    let tail_len = turns.len();
+    let damaged_leading = turns
+        .iter()
+        .take_while(|t| pairing_damaged(&t.messages))
+        .count();
+    turns.drain(..damaged_leading);
+    let next_turn_id = crate::history::max_turn_id(dir) + 1;
+    degraded.push(Degradation {
+        kind: DegradationKind::TailRecovery,
+        detail: format!(
+            "manifest.json and its backup are unreadable ({manifest_err:#}); rebuilt the window from the history tail: kept {} of {tail_len} turns within a {tail_budget}-token budget (dropped {damaged_leading} pairing-damaged leading turns); next_turn_id rescanned to {next_turn_id}; cumulative usage and retry log lost (reset)",
+            turns.len()
+        ),
+    });
+    let manifest = crate::context::manifest::ManifestDoc {
+        version: crate::context::manifest::FORMAT_VERSION,
+        conversation_turn_ids: turns.iter().map(|t| t.id.0).collect(),
+        cumulative_usage: Default::default(),
+        next_turn_id,
+        retry_log: Vec::new(),
+    };
+    ContextStore::from_persisted(&pins, turns, &manifest)
+}
+
+/// Whether a turn's messages violate tool-call/result pairing in either
+/// direction (`tool_execution::unanswered_call_ids` and its mirror).
+fn pairing_damaged(messages: &[ChatMessage]) -> bool {
+    !crate::tool_execution::unanswered_call_ids(messages).is_empty()
+        || !crate::tool_execution::orphan_result_ids(messages).is_empty()
 }
 
 fn legacy_archive_path(dir: &Path) -> PathBuf {
@@ -775,6 +889,11 @@ mod tests {
     use crate::history::{HistoryWriter, RecordKind};
     use serial_test::serial;
     use tempfile::TempDir;
+
+    /// Tail budget for restores that should not truncate: every fixture's
+    /// history is far below this. Truncation itself is tested with explicit
+    /// budgets.
+    const NO_TRUNCATION: usize = 65_536;
 
     // --- split persistence (manifest/pins) ---
 
@@ -898,7 +1017,8 @@ mod tests {
         write_legacy(&dir, &store, true, &convo);
         let legacy_next = store.to_manifest_doc().next_turn_id;
 
-        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
 
         // Split files exist; the legacy file is archived, not deleted.
         assert!(dir.path().join("manifest.json").exists());
@@ -932,7 +1052,8 @@ mod tests {
         )
         .unwrap();
 
-        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
 
         // The dispatcher saw no manifest → full legacy migration re-ran.
         assert!(
@@ -962,7 +1083,8 @@ mod tests {
         )
         .unwrap();
 
-        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
 
         // Split path taken; the interrupted rename is finished here.
         assert!(dir.path().join("context.legacy.json").exists());
@@ -985,7 +1107,8 @@ mod tests {
             .collect();
         let legacy_next = store.to_manifest_doc().next_turn_id;
 
-        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
 
         let turns = restored.store.turns();
         assert_eq!(
@@ -1002,7 +1125,8 @@ mod tests {
         assert_eq!(restored.store.retry_log.len(), 1);
         assert_eq!(restored.store.retry_log[0].error, "legacy");
         // A second restore rehydrates from the split files, not the archive.
-        let again = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+        let again =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
         let ids2: Vec<u64> = again
             .store
             .turns()
@@ -1026,14 +1150,16 @@ mod tests {
         // History records only the first turn; the second goes missing.
         write_legacy(&dir, &store, true, &convo[..1]);
 
-        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
 
         // The first restore migrates: the full legacy window is in memory,
         // so nothing is degraded yet. The gap surfaces on the next restore,
         // which hydrates from the split files.
         assert!(restored.degraded.is_empty());
 
-        let degraded = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+        let degraded =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
 
         assert_eq!(degraded.degraded.len(), 1);
         assert_eq!(
@@ -1073,7 +1199,8 @@ mod tests {
             .unwrap();
         persist_context(&store, dir.path()).unwrap();
 
-        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
 
         let kinds: Vec<DegradationKind> = restored.degraded.iter().map(|d| d.kind).collect();
         assert!(kinds.contains(&DegradationKind::UnansweredToolCalls));
@@ -1083,6 +1210,202 @@ mod tests {
         assert_eq!(turns.front().unwrap().messages, damaged);
     }
 
+    // --- degradation chain: backup fallback + tail recovery ---
+
+    /// A split-format directory with real damage to inflict: a pin, three
+    /// conversation turns (the newest pairing-damaged on demand), usage and
+    /// retry-log state that only the manifest carries, and matching history.
+    fn wreckable_dir(oldest_damaged: bool) -> (TempDir, ContextStore) {
+        use just_llm_client::types::chat::{ChatToolCall, FunctionCall, ToolType};
+        let call = |id: &str, name: &str| ChatToolCall {
+            id: id.to_owned(),
+            kind: ToolType::Function,
+            function: FunctionCall {
+                name: name.to_owned(),
+                arguments: "{}".to_owned(),
+            },
+        };
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::new();
+        store.pin("note", ChatMessage::assistant("pinned")).unwrap();
+        let histories: [Vec<ChatMessage>; 3] = [
+            if oldest_damaged {
+                vec![
+                    ChatMessage::tool_result("orphan", "ghost"),
+                    ChatMessage::assistant("reply-a"),
+                ]
+            } else {
+                vec![
+                    ChatMessage::user("ask-a"),
+                    ChatMessage::assistant("reply-a"),
+                ]
+            },
+            vec![
+                ChatMessage::user("ask-b"),
+                ChatMessage::assistant("reply-b"),
+            ],
+            vec![
+                ChatMessage::assistant_tool_calls(vec![call("c1", "read")]),
+                ChatMessage::tool_result("ok", "c1"),
+            ],
+        ];
+        let history = HistoryWriter::new(dir.path().to_path_buf());
+        for msgs in histories {
+            let (id, _) = store.push_turn(msgs.clone());
+            history
+                .append(Some(id.0), &msgs, 8, RecordKind::Turn, None)
+                .unwrap();
+        }
+        store.accumulate_usage(&crate::test_support::usage(1000));
+        store.retry_log.push(kallip_common::retry::RetryRecord {
+            timestamp: 9,
+            round: 0,
+            attempt: 1,
+            max_attempts: 3,
+            error: "wreck".into(),
+            delay_secs: 1.0,
+            endpoint: None,
+        });
+        persist_context(&store, dir.path()).unwrap();
+        // A second persist leaves the first manifest as the .bak; the churn
+        // turn also reaches history, so the rescan below sees it.
+        let churn = vec![ChatMessage::user("churn")];
+        let (churn_id, _) = store.push_turn(churn.clone());
+        let history = HistoryWriter::new(dir.path().to_path_buf());
+        history
+            .append(Some(churn_id.0), &churn, 8, RecordKind::Turn, None)
+            .unwrap();
+        persist_context(&store, dir.path()).unwrap();
+        (dir, store)
+    }
+
+    /// manifest.json corrupt but the backup intact: the backup wins, the
+    /// store rehydrates normally, and nothing is degraded.
+    #[test]
+    fn corrupt_manifest_falls_back_to_backup() {
+        let (dir, _store) = wreckable_dir(false);
+        std::fs::write(dir.path().join("manifest.json"), "{wreck").unwrap();
+
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+
+        assert!(restored.degraded.is_empty(), "backup recovery is silent");
+        let turns = restored.store.turns();
+        assert_eq!(turns.len(), 5, "pin + 3 hydrated + restart notice");
+        assert!(
+            restored
+                .store
+                .usage_snapshot()
+                .cumulative_usage
+                .prompt_tokens
+                > 0
+        );
+        assert_eq!(restored.store.retry_log.len(), 1);
+    }
+
+    /// manifest.json and .bak both corrupt: the window rebuilds from the
+    /// history tail within the budget, manifest-only state (usage, retry
+    /// log) is lost and recorded, and `next_turn_id` is rescanned from
+    /// history so no ID is ever reused.
+    #[test]
+    fn double_corrupt_manifest_rebuilds_from_tail() {
+        let (dir, store) = wreckable_dir(false);
+        std::fs::write(dir.path().join("manifest.json"), "{wreck").unwrap();
+        std::fs::write(dir.path().join("manifest.json.bak"), "{wreck").unwrap();
+
+        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path(), 24).unwrap();
+
+        let tail: Vec<DegradationKind> = restored.degraded.iter().map(|d| d.kind).collect();
+        assert_eq!(tail, vec![DegradationKind::TailRecovery]);
+        let turns = restored.store.turns();
+        // 24-token budget: the three newest turns (churn, tool round, ask-b)
+        // fit exactly; ask-a would cross — and the restart notice is added after.
+        assert_eq!(turns.len(), 5, "pin + 3 tail turns + restart notice");
+        let ids: Vec<u64> = turns.iter().skip(1).take(3).map(|t| t.id.0).collect();
+        assert_eq!(ids, vec![2, 3, 4], "newest three, ascending, ask-a dropped");
+        assert_eq!(
+            restored
+                .store
+                .usage_snapshot()
+                .cumulative_usage
+                .prompt_tokens,
+            0
+        );
+        assert!(restored.store.retry_log.is_empty());
+
+        // Rescanned next_turn_id: history max is the churn turn's ID, and
+        // the manifest rewrite references only kept turns — no collision.
+        let history_max = store.to_manifest_doc().next_turn_id - 1;
+        let mut live = restored.store;
+        let fresh = vec![ChatMessage::user("after wreck")];
+        let (fresh_id, _) = live.push_turn(fresh.clone());
+        // The agent task records every turn to history before persisting;
+        // mirror that so the rehydrate below finds the fresh turn.
+        HistoryWriter::new(dir.path().to_path_buf())
+            .append(Some(fresh_id.0), &fresh, 8, RecordKind::Turn, None)
+            .unwrap();
+        // The restart notice (pushed by restore) took history_max + 1; the
+        // first fresh turn is one past that — neither reuses a historical ID.
+        assert_eq!(
+            fresh_id.0,
+            history_max + 2,
+            "rescanned from history, never reused"
+        );
+        persist_context(&live, dir.path()).unwrap();
+        let again =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+        assert!(
+            again.degraded.is_empty(),
+            "wrecked files were rewritten clean"
+        );
+    }
+
+    /// A pairing-damaged turn at the truncation boundary is dropped (up to
+    /// the first clean turn), and the drop count is recorded — a dangling
+    /// call or orphan result at the window head would be rejected by the
+    /// provider on the next round.
+    #[test]
+    fn tail_recovery_drops_damaged_leading_turns() {
+        let (dir, _store) = wreckable_dir(true);
+        std::fs::write(dir.path().join("manifest.json"), "{wreck").unwrap();
+        std::fs::write(dir.path().join("manifest.json.bak"), "{wreck").unwrap();
+
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+
+        assert_eq!(restored.degraded[0].kind, DegradationKind::TailRecovery);
+        assert!(restored.degraded[0].detail.contains("dropped 1"));
+        let turns = restored.store.turns();
+        assert_eq!(turns.len(), 5, "pin + 3 clean turns + restart notice");
+        assert_eq!(turns.get(1).unwrap().messages[0].content(), Some("ask-b"));
+    }
+
+    /// pins.json corrupt falls back to its backup; both corrupt boots with
+    /// empty pins, recorded as a degradation.
+    #[test]
+    fn corrupt_pins_falls_back_then_boots_empty() {
+        let (dir, _store) = wreckable_dir(false);
+
+        // Backup intact: silent recovery, pin still there.
+        std::fs::write(dir.path().join("pins.json"), "{wreck").unwrap();
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+        assert!(restored.degraded.is_empty());
+        assert_eq!(
+            restored.store.turns().front().unwrap().label(),
+            Some("note")
+        );
+
+        // Both wrecked: empty pins, recorded, conversation window intact.
+        std::fs::write(dir.path().join("pins.json.bak"), "{wreck").unwrap();
+        let degraded =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+        assert_eq!(degraded.degraded.len(), 1);
+        assert_eq!(degraded.degraded[0].kind, DegradationKind::PinsLost);
+        let turns = degraded.store.turns();
+        assert!(turns.front().unwrap().label().is_none(), "no pin layer");
+        assert_eq!(turns.len(), 5, "4 hydrated turns + restart notice");
+    }
     /// Manual migration drill against a copy of a real agent directory:
     /// `KALLIP_MIGRATION_DRILL_DIR=<agent dir> cargo test -p kallip-runtime
     /// real_dir_migration_drill -- --ignored --nocapture`. Verifies the
@@ -1103,7 +1426,7 @@ mod tests {
                 .into_owned(),
         );
 
-        let first = restore_agent(&id, tmp.path()).unwrap();
+        let first = restore_agent(&id, tmp.path(), NO_TRUNCATION).unwrap();
         println!(
             "first restore (migration): {} degradation(s)",
             first.degraded.len()
@@ -1112,7 +1435,7 @@ mod tests {
             println!("  {:?}: {}", d.kind, d.detail);
         }
 
-        let second = restore_agent(&id, tmp.path()).unwrap();
+        let second = restore_agent(&id, tmp.path(), NO_TRUNCATION).unwrap();
         println!(
             "second restore (rehydrate): {} degradation(s)",
             second.degraded.len()

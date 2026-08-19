@@ -303,6 +303,16 @@ impl AgentConfig {
         (self.effective_budget() as f64 * self.pinned_budget_ratio) as usize
     }
 
+    /// Tail-recovery budget: the token slice a manifest-loss rebuild may spend
+    /// rehydrating conversation turns from the history tail (see
+    /// `persistence::rebuild_window_from_tail`). A quarter of the effective
+    /// budget — small enough to leave room for pins, fresh turns, and output
+    /// within the window; large enough that a degraded agent still boots with
+    /// recent context.
+    pub fn tail_recovery_budget(&self) -> usize {
+        self.effective_budget() / 4
+    }
+
     /// Override `max_tool_rounds` with a per-request value.
     ///
     /// Takes precedence over both the default and the env var.

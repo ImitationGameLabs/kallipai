@@ -206,7 +206,11 @@ async fn restore_one(
     shared_state: SharedState,
     index: &RestoreIndex,
 ) -> anyhow::Result<(AgentId, AgentEntry)> {
-    let restored = persistence::restore_agent(&p.agent_id, &p.agent_dir)?;
+    let mut config = AgentConfig::load(None, vec![], Some(p.meta.workspace_root.clone()))?;
+    // Config first: the tail-recovery budget derives from it (window size / 4)
+    // and feeds the manifest-loss rebuild inside restore_agent.
+    let restored =
+        persistence::restore_agent(&p.agent_id, &p.agent_dir, config.tail_recovery_budget())?;
 
     // Surface non-fatal restore damage (missing history turns, skipped
     // corrupt lines) as structured warnings; a degraded agent still boots.
@@ -214,7 +218,6 @@ async fn restore_one(
         tracing::warn!(id = %p.agent_id, kind = ?d.kind, "agent restored degraded: {}", d.detail);
     }
 
-    let mut config = AgentConfig::load(None, vec![], Some(p.meta.workspace_root.clone()))?;
     config.agent_id = Some(p.agent_id.clone());
     config.created_by = p.meta.created_by.clone();
     config.role = p.meta.role.clone();

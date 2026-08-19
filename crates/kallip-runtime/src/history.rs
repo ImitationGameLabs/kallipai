@@ -265,6 +265,48 @@ pub(crate) fn max_turn_id(agent_dir: &Path) -> u64 {
     0
 }
 
+/// Newest turns whose cached estimates fit `budget` tokens, ascending.
+///
+/// The manifest-loss rebuild window: scans day files (and lines within
+/// them) newest-first, accumulating `estimated_tokens` until a turn would
+/// cross the budget, which excludes it — so the kept window never exceeds
+/// the budget and a budget of ~0 degenerates to an empty window (pins and
+/// fresh turns still boot). Unparseable lines are skipped: this path only
+/// runs on an already-wrecked directory, where the tail rebuild itself is
+/// the recorded degradation.
+pub(crate) fn tail_turns_within_budget(agent_dir: &Path, budget: usize) -> Vec<Turn> {
+    let mut turns = Vec::new();
+    let mut used = 0usize;
+    'files: for path in history_files(agent_dir).into_iter().rev() {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines().rev() {
+            let Ok(rec) = serde_json::from_str::<HistoryRecord>(line) else {
+                continue;
+            };
+            if rec.kind != RecordKind::Turn {
+                continue;
+            }
+            let Some(id) = rec.turn_id else {
+                continue;
+            };
+            if used + rec.estimated_tokens > budget {
+                break 'files;
+            }
+            used += rec.estimated_tokens;
+            turns.push(Turn {
+                id: TurnId(id),
+                messages: rec.messages,
+                estimated_tokens: rec.estimated_tokens,
+                kind: TurnKind::Conversation,
+            });
+        }
+    }
+    turns.reverse();
+    turns
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -465,6 +507,18 @@ mod tests {
         .unwrap()
     }
 
+    fn turn_line_sized(id: Option<u64>, text: &str, tokens: usize) -> String {
+        serde_json::to_string(&HistoryRecord {
+            datetime: OffsetDateTime::now_utc(),
+            turn_id: id,
+            messages: vec![ChatMessage::user(text)],
+            estimated_tokens: tokens,
+            kind: RecordKind::Turn,
+            event: None,
+        })
+        .unwrap()
+    }
+
     #[test]
     fn hydrate_spans_daily_files_skips_system_and_sorts_ascending() {
         let dir = tmp_agent_dir();
@@ -536,5 +590,59 @@ mod tests {
         // No history at all.
         let dir3 = tmp_agent_dir();
         assert_eq!(max_turn_id(dir3.path()), 0);
+    }
+
+    /// The tail window keeps the newest turns that fit the budget, spans
+    /// day files, skips system records, and excludes a turn that would
+    /// cross the line.
+    #[test]
+    fn tail_window_fits_budget_newest_first() {
+        let dir = tmp_agent_dir();
+        write_day(
+            dir.path(),
+            "2026-08-18",
+            &[
+                turn_line_sized(Some(1), "old", 8),
+                turn_line_sized(Some(2), "mid", 8),
+            ],
+        );
+        write_day(
+            dir.path(),
+            "2026-08-19",
+            &[
+                turn_line_sized(Some(3), "new-a", 8),
+                turn_line_sized(Some(4), "new-b", 30),
+            ],
+        );
+        // The 30-token newest turn fits only a generous budget.
+        let ids = |ts: Vec<Turn>| ts.iter().map(|t| t.id.0).collect::<Vec<_>>();
+        assert_eq!(
+            ids(tail_turns_within_budget(dir.path(), 20)),
+            Vec::<u64>::new()
+        );
+        assert_eq!(
+            ids(tail_turns_within_budget(dir.path(), 37)),
+            vec![4],
+            "30-token newest fits, the next 8-token turn would cross"
+        );
+        assert_eq!(
+            ids(tail_turns_within_budget(dir.path(), 54)),
+            vec![1, 2, 3, 4],
+            "spans days, ascending"
+        );
+    }
+
+    /// Budget ~0 keeps the old c8 degenerate: an empty conversation window
+    /// rather than an over-budget one.
+    #[test]
+    fn tail_window_zero_budget_is_empty() {
+        let dir = tmp_agent_dir();
+        write_day(
+            dir.path(),
+            "2026-08-19",
+            &[turn_line(Some(9), "whatever"), system_line()],
+        );
+        assert!(tail_turns_within_budget(dir.path(), 0).is_empty());
+        assert!(tail_turns_within_budget(dir.path(), 8).len() == 1);
     }
 }
