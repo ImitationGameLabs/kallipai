@@ -4,7 +4,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use kallip_common::agentid::AgentId;
 use kallip_common::policy::ExecPolicy;
-use kallip_common::protocol::{AgentPermissionsResponse, AgentStatusResponse, ApiError};
+use kallip_common::protocol::{
+    ActiveProfile, AgentPermissionsResponse, AgentStatusResponse, ApiError,
+};
 use kallip_runtime::context::AgenticContext;
 use kallip_runtime::persistence;
 use kallip_runtime::policy::classifier;
@@ -25,8 +27,9 @@ pub async fn agent_status(
     let live = entry
         .as_live()
         .ok_or_else(|| ApiError::conflict("agent is faulted; no status"))?;
-    // Take the brief std activity snapshot before the async store lock — no nesting.
+    // Take the brief std snapshots before the async store lock — no nesting.
     let activity = live.agent.activity_snapshot();
+    let profile_snap = live.agent.active_profile_snapshot();
     let store = live.agent.store.lock().await;
     let context = store.usage_snapshot();
     let recent_retries = store
@@ -46,6 +49,10 @@ pub async fn agent_status(
         activity,
         parked_reason: live.agent.parked_reason_snapshot(),
         retrying: live.agent.retrying_snapshot(),
+        profile: Some(ActiveProfile {
+            profile_id: profile_snap.profile_id,
+            model: profile_snap.model,
+        }),
     }))
 }
 
@@ -185,4 +192,49 @@ pub async fn update_exec_policy(
         .unwrap_or_else(|e| e.into_inner()) = new_policy;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::{AuthIdentity, Identity};
+    use crate::test_helpers::{add_root, make_state};
+
+    /// The status surface must carry the runtime-active profile from the
+    /// shared cell: seed the cell directly (only the runtime's FailoverState
+    /// writes it) and assert the wire shape end-to-end through the handler.
+    #[tokio::test]
+    async fn status_carries_runtime_active_profile() {
+        let state = make_state();
+        let id = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &id);
+        }
+        {
+            let reg = state.registry.read().await;
+            let live = reg.get(&id).unwrap().as_live().unwrap();
+            *live.agent.profile_snapshot.lock().unwrap() = kallip_runtime::ProfileSnapshot {
+                profile_id: "tier1-deepseek".into(),
+                model: "deepseek-chat".into(),
+            };
+        }
+        let resp = agent_status(
+            State(state),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(id),
+        )
+        .await
+        .unwrap();
+        let body = axum::body::to_bytes(
+            axum::response::IntoResponse::into_response(resp).into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+        let status: AgentStatusResponse = serde_json::from_slice(&body).unwrap();
+        let profile = status.profile.expect("profile present");
+        assert_eq!(profile.profile_id, "tier1-deepseek");
+        assert_eq!(profile.model, "deepseek-chat");
+    }
 }

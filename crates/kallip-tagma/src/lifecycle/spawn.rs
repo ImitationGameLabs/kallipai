@@ -185,6 +185,12 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     let token_budget = args.shared_state.token_budget.clone();
 
     let pending_profile_reset = Arc::new(std::sync::Mutex::new(None));
+    // The active-profile snapshot cell: created here so both holders share
+    // one Arc — the runtime's FailoverState writes it (spawn seeds the
+    // active profile), the tagma's Agent reads it for status surfaces.
+    let profile_snapshot: Arc<std::sync::Mutex<kallip_runtime::ProfileSnapshot>> = Arc::new(
+        std::sync::Mutex::new(kallip_runtime::ProfileSnapshot::default()),
+    );
 
     let bundle = args.shared_state.profiles.load();
     // Create the inbox message puller for this agent. None if the inbox store
@@ -203,6 +209,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
             args.tier,
             bundle.registry.clone(),
             Some(system_prompt),
+            profile_snapshot.clone(),
         ),
         store: args.store.clone(),
         approvals: args.approvals.clone(),
@@ -270,6 +277,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
             exec_policy: args.exec_policy,
             exec_gate,
             pending_profile_reset,
+            profile_snapshot,
             parked,
             retrying,
         },

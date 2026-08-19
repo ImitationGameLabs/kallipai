@@ -2,11 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::sse::{FailoverChainExhaustion, TransientRetryInfo};
 use crate::agentid::AgentId;
 use crate::context::ContextUsage;
 use crate::policy::PolicyPreset;
 use crate::retry::RetryRecord;
-use super::sse::{FailoverChainExhaustion, TransientRetryInfo};
 
 /// Agent lifecycle state exposed via the status endpoint.
 ///
@@ -266,6 +266,20 @@ pub struct UpdateActivityRequest {
     pub activity: String,
 }
 
+/// The model profile an agent's client is currently using: the registry profile
+/// id plus the concrete model string sent to the backend. This is the *runtime*
+/// active profile — it drifts from the spawn-time active after a within-tier
+/// failover advance or an online profile apply, which is exactly when an
+/// operator needs to see it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveProfile {
+    pub profile_id: String,
+    /// For env-configured single-profile agents this is the raw
+    /// `KALLIP_LLM_MODEL` value, so an env-only setup still shows a
+    /// meaningful model string.
+    pub model: String,
+}
+
 /// Combined agent status: lifecycle state + context usage + recent retry history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStatusResponse {
@@ -285,6 +299,11 @@ pub struct AgentStatusResponse {
     /// Present only when `state == Retrying` — see [`AgentSummary::retrying`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrying: Option<TransientRetryInfo>,
+    /// The model profile the agent's client is currently using; see
+    /// [`ActiveProfile`]. Absent only on responses from tagma versions that
+    /// predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ActiveProfile>,
 }
 
 /// Request body for sending a message to an agent.

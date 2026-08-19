@@ -268,6 +268,11 @@ pub struct Agent {
     /// FCE-with-retry terminal event; cleared on any other terminal. Shared
     /// with the bridge; read by the status surfaces as the `retrying` field.
     pub retrying: Arc<std::sync::Mutex<Option<TransientRetryInfo>>>,
+    /// Active-profile snapshot, shared (same `Arc`) with the runtime's
+    /// [`kallip_runtime::FailoverState`]: the runtime's active-profile writers
+    /// (spawn, failover advance, profile apply) keep it current; the tagma only
+    /// reads it, for the status surfaces.
+    pub profile_snapshot: Arc<std::sync::Mutex<kallip_runtime::ProfileSnapshot>>,
 }
 
 impl Agent {
@@ -304,6 +309,13 @@ impl Agent {
     /// chain-transient backoff is armed).
     pub fn retrying_snapshot(&self) -> Option<TransientRetryInfo> {
         *self.retrying.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Snapshot the runtime-active profile for wire surfaces.
+    pub fn active_profile_snapshot(&self) -> kallip_runtime::ProfileSnapshot {
+        self.profile_snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Await both background tasks, bounded by `timeout`; force-abort on overrun.

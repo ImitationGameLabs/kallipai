@@ -126,6 +126,9 @@ fn make_entry_inner(
             exec_policy: Arc::new(std::sync::RwLock::new(exec_policy)),
             exec_gate: kallip_runtime::ExecGate::new(),
             pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
+            profile_snapshot: Arc::new(std::sync::Mutex::new(
+                kallip_runtime::ProfileSnapshot::default(),
+            )),
         },
         subagent_ids: vec![],
     };

@@ -12,11 +12,10 @@ pub mod sse;
 // Re-export all public types for convenience.
 // Downstream `use kallip_common::protocol::*` continues to work unchanged.
 pub use agent::{
-    AgentPermissionsResponse, AgentState, AgentStatusResponse, AgentSummary, CreateAgentRequest,
-    CreateAgentResponse, DELEGATION_CARVE_OUT, DELEGATION_FULL_HANDOFF, DutyStatus,
-    ListAgentsQuery, ListAgentsResponse, MaxToolRounds, MessageRequest, MessageResponse,
-    ParkedReason,
-    UpdateActivityRequest, UpdateAgentMetadataRequest,
+    ActiveProfile, AgentPermissionsResponse, AgentState, AgentStatusResponse, AgentSummary,
+    CreateAgentRequest, CreateAgentResponse, DELEGATION_CARVE_OUT, DELEGATION_FULL_HANDOFF,
+    DutyStatus, ListAgentsQuery, ListAgentsResponse, MaxToolRounds, MessageRequest,
+    MessageResponse, ParkedReason, UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 pub use approval::{
     ApprovalDecisionBody, ApprovalEntry, ListApprovalsQuery, ListApprovalsResponse,
