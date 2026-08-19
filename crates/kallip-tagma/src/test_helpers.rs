@@ -118,6 +118,8 @@ fn make_entry_inner(
             notify: Arc::new(tokio::sync::Notify::new()),
             state: Arc::new(AtomicU8::new(AgentState::IDLE)),
             activity: Arc::new(std::sync::Mutex::new(String::new())),
+            parked: Arc::new(std::sync::Mutex::new(None)),
+            retrying: Arc::new(std::sync::Mutex::new(None)),
             auth_token_hash: TokenHash::of(&auth_token),
             env: std::collections::HashMap::new(),
             preset,

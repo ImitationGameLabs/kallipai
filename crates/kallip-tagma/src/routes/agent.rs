@@ -439,13 +439,21 @@ pub async fn remove_agent(
         let Some(entry) = registry.get(&id) else {
             return Err(ApiError::not_found("agent not found"));
         };
-        // Live agents must be idle and have no subagents. Faulted agents have no
-        // task to be busy, so the idle check is skipped; the no-subagents check
-        // still applies (remove children first).
+        // Live agents must be in a quiescent state (idle or parked) and have no
+        // subagents. Parked agents are removable by design: the operator kicks
+        // (re-prompts) or removes them; mid-lifecycle states (busy / waiting /
+        // retrying) must be interrupted first. Faulted agents have no task to be
+        // busy, so the state check is skipped; the no-subagents check still
+        // applies (remove children first).
         if let Some(live) = entry.as_live()
-            && live.agent.get_state() != AgentState::Idle
+            && matches!(
+                live.agent.get_state(),
+                AgentState::Busy | AgentState::Waiting | AgentState::Retrying
+            )
         {
-            return Err(ApiError::conflict("agent is busy, interrupt it first"));
+            return Err(ApiError::conflict(
+                "agent is busy, waiting, or retrying — interrupt it first (parked agents are removable)",
+            ));
         }
         if !entry.subagent_ids().is_empty() {
             return Err(ApiError::conflict(
@@ -561,6 +569,72 @@ pub async fn interrupt_agent(
         round.cancel();
     }
     Ok(StatusCode::ACCEPTED)
+}
+
+/// Kick a parked agent awake (design D2/D7): enqueue a `[system]` turn stating
+/// why and how long ago it parked, and let the agent itself decide whether to
+/// retry, adjust, or report. Only meaningful while PARKED — the kick re-enters
+/// the outer loop's prompt arm, which owns the Parked→Running transition (the
+/// bridge's Busy event then clears the parked payload).
+pub async fn wake_agent(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+) -> Result<StatusCode, ApiError> {
+    let (prompt_tx, kick_text) = {
+        let registry = state.registry.read().await;
+        registry.require_superior(auth.identity(), &id)?;
+        let Some(entry) = registry.get(&id) else {
+            return Err(ApiError::not_found("agent not found"));
+        };
+        let live = entry
+            .as_live()
+            .ok_or_else(|| ApiError::conflict("agent is faulted; nothing to wake"))?;
+        if live.agent.get_state() != AgentState::Parked {
+            return Err(ApiError::conflict(
+                "agent is not parked; only parked agents can be kicked awake",
+            ));
+        }
+        let (reason, parked_at) = {
+            let cell = live
+                .agent
+                .parked
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // The bridge writes the PARKED mark and this payload together
+            // under one lock, so a Some mark with a None payload means an
+            // invariant was violated upstream — refuse rather than kick
+            // with a fabricated reason.
+            let Some(snapshot) = cell.as_ref() else {
+                return Err(ApiError::internal("parked state without a parked reason"));
+            };
+            (snapshot.reason.clone(), snapshot.at)
+        };
+        let duration = format_parked_duration(parked_at.elapsed());
+        (
+            live.agent.prompt_tx.clone(),
+            format!("[system] you were parked {duration} ago: {reason}. Decide whether to retry, adjust, or report."),
+        )
+    };
+    // Try-send, not send: a parked agent that is somehow not draining its
+    // prompt queue should surface as a conflict, not hang the HTTP response.
+    prompt_tx
+        .try_send(kick_text)
+        .map_err(|_| ApiError::conflict("agent prompt queue is full"))?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Coarse human-readable duration for the kick turn ("45s", "3m 12s",
+/// "2h 5m") — the operator reads this in the agent's transcript.
+fn format_parked_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
 }
 
 mod permissions;

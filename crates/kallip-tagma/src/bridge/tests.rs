@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use kallip_common::agentid::AgentId;
 use kallip_common::policy::{ExecPolicy, PolicyPreset};
-use kallip_common::protocol::{AgentState, FailoverChainExhaustion, SseEvent};
+use kallip_common::protocol::{AgentState, FailoverChainExhaustion, SseEvent, TransientRetryInfo};
 use kallip_runtime::event::AgentEvent;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -19,6 +19,37 @@ async fn recv_notification(rx: &mut tokio::sync::mpsc::Receiver<String>) -> Stri
         Ok(None) => panic!("prompt channel closed unexpectedly"),
         Err(_) => panic!("timed out waiting for notification"),
     }
+}
+
+/// Spawn `bridge_task` with fresh parked/retrying cells — the standard C3
+/// call shape. Returns the cells so tests can assert terminal payloads.
+fn spawn_bridge(
+    agent_id: AgentId,
+    agent_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
+    events_tx: broadcast::Sender<SseEvent>,
+    cancel: CancellationToken,
+    state: Arc<AtomicU8>,
+    activity: Arc<std::sync::Mutex<String>>,
+    shared: crate::state::SharedState,
+) -> (
+    tokio::task::JoinHandle<()>,
+    Arc<std::sync::Mutex<Option<crate::state::ParkedSnapshot>>>,
+    Arc<std::sync::Mutex<Option<TransientRetryInfo>>>,
+) {
+    let parked = Arc::new(std::sync::Mutex::new(None));
+    let retrying = Arc::new(std::sync::Mutex::new(None));
+    let handle = tokio::spawn(super::bridge_task(
+        agent_id,
+        agent_rx,
+        events_tx,
+        cancel,
+        state,
+        activity,
+        parked.clone(),
+        retrying.clone(),
+        shared,
+    ));
+    (handle, parked, retrying)
 }
 
 // -- Lifecycle: exit on channel close (primary) and on cancel (forced) --
@@ -45,6 +76,8 @@ async fn bridge_exits_when_agent_channel_closes() {
         cancel,
         state.clone(),
         Arc::new(std::sync::Mutex::new(String::new())),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         make_state(),
     ));
 
@@ -78,6 +111,8 @@ async fn bridge_clears_activity_on_terminal_event() {
         cancel,
         state.clone(),
         activity.clone(),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         make_state(),
     ));
 
@@ -113,6 +148,8 @@ async fn bridge_exits_on_cancel() {
         cancel.clone(),
         state.clone(),
         Arc::new(std::sync::Mutex::new(String::new())),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         make_state(),
     ));
 
@@ -145,6 +182,8 @@ async fn bridge_delivers_terminal_cancelled_before_exit() {
         cancel,
         state.clone(),
         Arc::new(std::sync::Mutex::new(String::new())),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         make_state(),
     ));
 
@@ -183,6 +222,8 @@ async fn bridge_interrupted_keeps_looping() {
         cancel,
         state.clone(),
         Arc::new(std::sync::Mutex::new(String::new())),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         make_state(),
     ));
 
@@ -556,6 +597,8 @@ async fn bridge_dispatches_idle_to_superior() {
         cancel,
         atomic_state.clone(),
         activity.clone(),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         state.clone(),
     ));
 
@@ -634,6 +677,8 @@ async fn bridge_idle_dispatch_off_duty_superior_not_woken() {
         cancel,
         Arc::new(AtomicU8::new(AgentState::BUSY)),
         Arc::new(std::sync::Mutex::new(String::new())),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         state.clone(),
     ));
 
@@ -697,6 +742,8 @@ async fn bridge_dispatches_error_to_superior() {
         cancel,
         Arc::new(AtomicU8::new(AgentState::BUSY)),
         Arc::new(std::sync::Mutex::new(String::new())),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         state.clone(),
     ));
 
@@ -762,6 +809,8 @@ async fn bridge_dispatches_failover_exhausted_to_superior() {
         cancel,
         Arc::new(AtomicU8::new(AgentState::BUSY)),
         Arc::new(std::sync::Mutex::new(String::new())),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         state.clone(),
     ));
 
@@ -830,6 +879,8 @@ async fn bridge_dispatches_max_rounds_to_superior() {
         cancel,
         Arc::new(AtomicU8::new(AgentState::BUSY)),
         Arc::new(std::sync::Mutex::new(String::new())),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         state.clone(),
     ));
 
@@ -889,6 +940,8 @@ async fn bridge_interrupted_does_not_notify_superior() {
         cancel,
         atomic_state.clone(),
         Arc::new(std::sync::Mutex::new(String::new())),
+        Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::Mutex::new(None)),
         state.clone(),
     ));
 
@@ -953,11 +1006,16 @@ async fn last_idle_annotation_on_final_sibling() {
         let reg = state.registry.read().await;
         reg.get(&c2).unwrap().as_live().unwrap().agent.state.clone()
     };
-    let n2 = super::mark_idle_and_snapshot(
+    let n2 = super::mark_and_snapshot(
         &state,
         &c2,
         &c2_atomic,
         &std::sync::Mutex::new(String::new()),
+        &std::sync::Mutex::new(None),
+        &std::sync::Mutex::new(None),
+        AgentState::IDLE,
+        None,
+        None,
     )
     .await;
     assert!(n2.is_last, "c2 is the last to go idle");
@@ -999,11 +1057,16 @@ async fn faulted_sibling_excluded_from_wait_set() {
         let reg = state.registry.read().await;
         reg.get(&c1).unwrap().as_live().unwrap().agent.state.clone()
     };
-    let n = super::mark_idle_and_snapshot(
+    let n = super::mark_and_snapshot(
         &state,
         &c1,
         &c1_atomic,
         &std::sync::Mutex::new(String::new()),
+        &std::sync::Mutex::new(None),
+        &std::sync::Mutex::new(None),
+        AgentState::IDLE,
+        None,
+        None,
     )
     .await;
     assert_eq!(n.live_subordinates, 1, "faulted sibling not counted");
@@ -1118,4 +1181,364 @@ fn all_agent_events() -> Vec<AgentEvent> {
             transient_retry: None,
         },
     ]
+}
+
+// -- C3: terminal-state triage (Waiting / Retrying / Parked payloads) --
+
+/// A Waiting terminal event marks the agent WAITING (not idle) and notifies
+/// the superior with the timer length — the notification is the operator's
+/// only signal that a subagent parked itself on break(wait).
+#[tokio::test]
+async fn bridge_waiting_marks_waiting_and_notifies() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let parent = AgentId::random();
+    let child = AgentId::random();
+
+    let (parent_entry, _prompt_rx) = make_entry_with_policy_rx(
+        None,
+        format!("agent-{parent}"),
+        PolicyPreset::Default,
+        ExecPolicy::default(),
+    );
+    {
+        let mut reg = state.registry.write().await;
+        reg.register(parent.clone(), RegistryEntry::Live(parent_entry));
+        add_sub(&mut reg, &child, &parent);
+    }
+
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+    let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+    let atomic_state = Arc::new(AtomicU8::new(AgentState::BUSY));
+    let activity = Arc::new(std::sync::Mutex::new("round".to_owned()));
+    let (_bridge, parked, retrying) = spawn_bridge(
+        child.clone(),
+        agent_rx,
+        events_tx,
+        CancellationToken::new(),
+        atomic_state.clone(),
+        activity.clone(),
+        state.clone(),
+    );
+
+    agent_tx
+        .send(AgentEvent::Waiting { timeout_secs: 600 })
+        .await
+        .unwrap();
+
+    let mut settled = false;
+    for _ in 0..40 {
+        if atomic_state.load(Ordering::Relaxed) == AgentState::WAITING
+            && parked.lock().unwrap().is_none()
+            && retrying.lock().unwrap().is_none()
+            && state.inboxes.get().unwrap().len_for(&parent).await == 1
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(settled, "waiting dispatch must mark WAITING and inbox the notification");
+    let msg = state
+        .inboxes
+        .get()
+        .unwrap()
+        .pull_undelivered(&parent)
+        .await
+        .unwrap();
+    assert!(
+        msg.contains("[Subagent Waiting]") && msg.contains("timer 600s"),
+        "waiting notice must carry the tag and timer length: {msg}"
+    );
+    drop(agent_tx);
+}
+
+/// An FCE carrying a transient retry marks RETRYING (not PARKED), mirrors
+/// the retry plan into the retrying cell, and notifies nobody — a retry in
+/// flight is not operator-actionable (design §5 asymmetry).
+#[tokio::test]
+async fn bridge_fce_with_retry_marks_retrying_no_notice() {
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+    let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+    let state = Arc::new(AtomicU8::new(AgentState::BUSY));
+    let activity = Arc::new(std::sync::Mutex::new("round".to_owned()));
+    let (_bridge, parked, retrying) = spawn_bridge(
+        AgentId::random(),
+        agent_rx,
+        events_tx,
+        CancellationToken::new(),
+        state.clone(),
+        activity.clone(),
+        make_state(),
+    );
+
+    agent_tx
+        .send(AgentEvent::FailoverChainExhausted {
+            reason: FailoverChainExhaustion::AllBackupsExhausted,
+            detail: "all models down".to_string(),
+            transient_retry: Some(TransientRetryInfo {
+                attempt: 1,
+                max_attempts: 3,
+                retry_in_secs: 2.0,
+            }),
+        })
+        .await
+        .unwrap();
+
+    let mut settled = false;
+    for _ in 0..40 {
+        let cell = retrying.lock().unwrap().clone();
+        if state.load(Ordering::Relaxed) == AgentState::RETRYING
+            && parked.lock().unwrap().is_none()
+            && matches!(&cell, Some(info) if info.attempt == 1 && info.max_attempts == 3)
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(settled, "armed FCE must mark RETRYING with the retry plan mirrored");
+    drop(agent_tx);
+}
+
+/// An FCE with no retry armed parks the agent and mirrors the chain reason
+/// into the parked cell — the kick turn (wake endpoint) reads this back.
+#[tokio::test]
+async fn bridge_fce_without_retry_marks_parked() {
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+    let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+    let state = Arc::new(AtomicU8::new(AgentState::BUSY));
+    let activity = Arc::new(std::sync::Mutex::new("round".to_owned()));
+    let (_bridge, parked, retrying) = spawn_bridge(
+        AgentId::random(),
+        agent_rx,
+        events_tx,
+        CancellationToken::new(),
+        state.clone(),
+        activity.clone(),
+        make_state(),
+    );
+
+    agent_tx
+        .send(AgentEvent::FailoverChainExhausted {
+            reason: FailoverChainExhaustion::NoFailoverConfigured,
+            detail: "no backups in profile".to_string(),
+            transient_retry: None,
+        })
+        .await
+        .unwrap();
+
+    let mut settled = false;
+    for _ in 0..40 {
+        let cell = parked.lock().unwrap().clone();
+        if state.load(Ordering::Relaxed) == AgentState::PARKED
+            && retrying.lock().unwrap().is_none()
+            && matches!(
+                &cell,
+                Some(crate::state::ParkedSnapshot {
+                    reason: kallip_common::protocol::ParkedReason::FailoverChainExhausted { .. },
+                    ..
+                })
+            )
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(settled, "unarmed FCE must park with the chain reason in the cell");
+    drop(agent_tx);
+}
+
+/// A fatal Error parks with FatalError{message} in the cell.
+#[tokio::test]
+async fn bridge_error_parks_with_fatal_reason() {
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+    let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+    let state = Arc::new(AtomicU8::new(AgentState::BUSY));
+    let activity = Arc::new(std::sync::Mutex::new("round".to_owned()));
+    let (_bridge, parked, retrying) = spawn_bridge(
+        AgentId::random(),
+        agent_rx,
+        events_tx,
+        CancellationToken::new(),
+        state.clone(),
+        activity.clone(),
+        make_state(),
+    );
+
+    agent_tx.send(AgentEvent::Error("boom".to_string())).await.unwrap();
+
+    let mut settled = false;
+    for _ in 0..40 {
+        let cell = parked.lock().unwrap().clone();
+        if state.load(Ordering::Relaxed) == AgentState::PARKED
+            && retrying.lock().unwrap().is_none()
+            && matches!(
+                &cell,
+                Some(crate::state::ParkedSnapshot {
+                    reason: kallip_common::protocol::ParkedReason::FatalError { message },
+                    ..
+                }) if message == "boom"
+            )
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(settled, "fatal error must park with the message mirrored");
+    drop(agent_tx);
+}
+
+/// TokenBudgetExceeded keeps the agent WAITING (design D6 case b: the
+/// runtime re-armed a wait timer as a zero-cost budget probe) — no park.
+#[tokio::test]
+async fn bridge_token_budget_marks_waiting() {
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+    let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+    let state = Arc::new(AtomicU8::new(AgentState::BUSY));
+    let activity = Arc::new(std::sync::Mutex::new("round".to_owned()));
+    let (_bridge, parked, retrying) = spawn_bridge(
+        AgentId::random(),
+        agent_rx,
+        events_tx,
+        CancellationToken::new(),
+        state.clone(),
+        activity.clone(),
+        make_state(),
+    );
+
+    agent_tx
+        .send(AgentEvent::TokenBudgetExceeded { consumed: 100, budget: 90 })
+        .await
+        .unwrap();
+
+    let mut settled = false;
+    for _ in 0..40 {
+        if state.load(Ordering::Relaxed) == AgentState::WAITING
+            && parked.lock().unwrap().is_none()
+            && retrying.lock().unwrap().is_none()
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(settled, "budget exhaustion must leave the agent WAITING, not parked");
+    drop(agent_tx);
+}
+
+/// The final FCE after the last allowed retry parks as TransientRetryExhausted.
+/// The distinguishing evidence is the retrying cell the previous armed FCE
+/// wrote (attempt == max), which the unarmed FCE consumes: covered in C5's
+/// arm-exhaustion sequence; here the unarmed-FCE-with-spent-cell single hop.
+#[tokio::test]
+async fn bridge_fce_after_spent_budget_parks_retry_exhausted() {
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+    let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+    let state = Arc::new(AtomicU8::new(AgentState::BUSY));
+    let activity = Arc::new(std::sync::Mutex::new(String::new()));
+    let (_bridge, parked, retrying) = spawn_bridge(
+        AgentId::random(),
+        agent_rx,
+        events_tx,
+        CancellationToken::new(),
+        state.clone(),
+        activity.clone(),
+        make_state(),
+    );
+
+    // Previous armed retry wrote its plan: attempt 3 of 3.
+    *retrying.lock().unwrap() = Some(TransientRetryInfo {
+        attempt: 3,
+        max_attempts: 3,
+        retry_in_secs: 0.0,
+    });
+    agent_tx
+        .send(AgentEvent::FailoverChainExhausted {
+            reason: FailoverChainExhaustion::AllBackupsExhausted,
+            detail: "still down".to_string(),
+            transient_retry: None,
+        })
+        .await
+        .unwrap();
+
+    let mut settled = false;
+    for _ in 0..40 {
+        let cell = parked.lock().unwrap().clone();
+        if state.load(Ordering::Relaxed) == AgentState::PARKED
+            && retrying.lock().unwrap().is_none()
+            && matches!(
+                &cell,
+                Some(crate::state::ParkedSnapshot {
+                    reason: kallip_common::protocol::ParkedReason::TransientRetryExhausted,
+                    ..
+                })
+            )
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(settled, "spent budget + unarmed FCE must park as retry-exhausted");
+    drop(agent_tx);
+}
+
+/// Layer-1 overlay: an in-request Retrying event shows RETRYING while the
+/// turn is open, and the next ordinary event returns the agent to BUSY —
+/// the overlay must not leak past the turn that raised it.
+#[tokio::test]
+async fn bridge_layer1_retrying_overlay_lifecycle() {
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+    let (events_tx, _events_rx) = broadcast::channel::<SseEvent>(16);
+    let state = Arc::new(AtomicU8::new(AgentState::BUSY));
+    let activity = Arc::new(std::sync::Mutex::new(String::new()));
+    let (_bridge, parked, retrying) = spawn_bridge(
+        AgentId::random(),
+        agent_rx,
+        events_tx,
+        CancellationToken::new(),
+        state.clone(),
+        activity.clone(),
+        make_state(),
+    );
+
+    agent_tx
+        .send(AgentEvent::Retrying {
+            attempt: 1,
+            max_attempts: 2,
+            error: "conn reset".to_string(),
+            delay_secs: 1.0,
+        })
+        .await
+        .unwrap();
+    let mut overlaid = false;
+    for _ in 0..40 {
+        if state.load(Ordering::Relaxed) == AgentState::RETRYING
+            && parked.lock().unwrap().is_none()
+            && retrying.lock().unwrap().is_none()
+        {
+            overlaid = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(overlaid, "in-request retry must overlay RETRYING without payloads");
+
+    agent_tx
+        .send(AgentEvent::AssistantContentDelta { delta: "ok".to_string() })
+        .await
+        .unwrap();
+    let mut recovered = false;
+    for _ in 0..40 {
+        if state.load(Ordering::Relaxed) == AgentState::BUSY {
+            recovered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(recovered, "the next in-flight event must end the overlay and return to BUSY");
+    drop(agent_tx);
 }

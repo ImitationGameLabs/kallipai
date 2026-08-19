@@ -1,16 +1,17 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use kallip_common::agentid::AgentId;
 use kallip_common::approval::ApprovalStatus;
-use kallip_common::protocol::{AgentState, SseEvent};
+use kallip_common::protocol::{AgentState, ParkedReason, SseEvent, TransientRetryInfo};
 use kallip_runtime::event::AgentEvent;
 use time::OffsetDateTime;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::state::{AgentRegistry, SharedState};
+use crate::state::{AgentRegistry, ParkedSnapshot, SharedState};
 
 /// Route one agent's runtime events to SSE subscribers (and approval requests
 /// to the agent's superior).
@@ -44,6 +45,8 @@ pub async fn bridge_task(
     cancel: CancellationToken,
     state: Arc<std::sync::atomic::AtomicU8>,
     activity: Arc<std::sync::Mutex<String>>,
+    parked: Arc<std::sync::Mutex<Option<ParkedSnapshot>>>,
+    retrying: Arc<std::sync::Mutex<Option<TransientRetryInfo>>>,
     shared_state: SharedState,
 ) {
     loop {
@@ -66,18 +69,38 @@ pub async fn bridge_task(
                         }).ok();
                     }
                     other => {
-                        // Terminal events share one idle path: mark idle
-                        // linearized with the all-subordinates snapshot
-                        // (`mark_idle_and_snapshot`), then decide per event
+                        // Terminal events share one state-dispatch path: the
+                        // terminal triage below maps the event to a post-turn
+                        // state (idle / waiting / parked / retrying), the mark
+                        // is linearized with the all-subordinates snapshot
+                        // (`mark_and_snapshot`), then the per-event decision on
                         // whether the superior gets a notification —
                         // delivered AFTER the SSE broadcast below, so
                         // subscribers never wait on the superior's inbox
                         // write.
                         let mut deferred: Option<(&'static str, String, IdleNotice)> = None;
                         match &other {
-                            AgentEvent::Busy => state.store(AgentState::BUSY, Ordering::Relaxed),
+                            AgentEvent::Busy => {
+                                // A new round: BUSY plus dropping the parked
+                                // payload — the turn is alive, so no park
+                                // reason from a previous turn can still be
+                                // current. The retrying cell survives on
+                                // purpose: the terminal triage reads it to tell
+                                // a spent retry budget (last armed attempt ==
+                                // max) from a chain with retries disabled.
+                                state.store(AgentState::BUSY, Ordering::Relaxed);
+                                *parked.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                            }
+                            AgentEvent::Retrying { .. } | AgentEvent::StreamReset { .. } => {
+                                // Layer-1 overlay: an in-request backoff or
+                                // stream reset shows RETRYING while the turn
+                                // is still open; this is display state, not a
+                                // terminal transition. Any other in-flight
+                                // event below ends the overlay.
+                                state.store(AgentState::RETRYING, Ordering::Relaxed);
+                            }
                             ev if ev.is_terminal() => {
-                                // Fatal-error observability BEFORE the idle mark:
+                                // Fatal-error observability BEFORE the state mark:
                                 // for a headless/subagent run the SSE broadcast
                                 // below has no subscriber and is dropped
                                 // silently — this log is the sole channel.
@@ -95,12 +118,74 @@ pub async fn bridge_task(
                                         // above, not silently falling through.
                                     }
                                 }
-                                // The idle mark happens BEFORE the superior is
-                                // notified: the superior may act immediately,
-                                // and a BUSY read in that window would
-                                // contradict the message.
-                                let notice = mark_idle_and_snapshot(
+                                // Layer-2 triage: map the terminal event to the
+                                // post-turn state plus the parked/retrying cell
+                                // payloads. The state mark happens BEFORE the
+                                // superior is notified: the superior may act
+                                // immediately, and a BUSY read in that window
+                                // would contradict the message.
+                                let (new_state, parked_reason, retry_info) = match ev {
+                                    AgentEvent::Idle
+                                    | AgentEvent::Cancelled
+                                    | AgentEvent::Interrupted => (AgentState::IDLE, None, None),
+                                    AgentEvent::Waiting { .. } => (AgentState::WAITING, None, None),
+                                    // The budget gate re-arms a waiting timer
+                                    // runtime-side (design D6, case b): the agent
+                                    // stays WAITING for the zero-cost recovery
+                                    // probe, not parked.
+                                    AgentEvent::TokenBudgetExceeded { .. } => {
+                                        (AgentState::WAITING, None, None)
+                                    }
+                                    AgentEvent::Error(msg) => (
+                                        AgentState::PARKED,
+                                        Some(ParkedReason::FatalError { message: msg.clone() }),
+                                        None,
+                                    ),
+                                    AgentEvent::MaxRoundsExceeded => (
+                                        AgentState::PARKED,
+                                        Some(ParkedReason::MaxRoundsExceeded),
+                                        None,
+                                    ),
+                                    AgentEvent::FailoverChainExhausted {
+                                        reason,
+                                        detail,
+                                        transient_retry,
+                                    } => match transient_retry {
+                                        Some(info) => {
+                                            (AgentState::RETRYING, None, Some(info.clone()))
+                                        }
+                                        None => {
+                                            // No retry armed: park. Exhaustion
+                                            // (the final FCE after the last
+                                            // allowed retry) is told apart from
+                                            // a chain with retries disabled by
+                                            // the cell the last armed retry
+                                            // wrote: attempt == max_attempts.
+                                            let spent = {
+                                                let cell = retrying
+                                                    .lock()
+                                                    .unwrap_or_else(|e| e.into_inner());
+                                                matches!(&*cell, Some(info)
+                                                    if info.attempt >= info.max_attempts)
+                                            };
+                                            let parked_reason = if spent {
+                                                ParkedReason::TransientRetryExhausted
+                                            } else {
+                                                ParkedReason::FailoverChainExhausted {
+                                                    reason: reason.clone(),
+                                                    detail: detail.clone(),
+                                                }
+                                            };
+                                            (AgentState::PARKED, Some(parked_reason), None)
+                                        }
+                                    },
+                                    _ => unreachable!(
+                                        "is_terminal() variant missing in terminal triage"
+                                    ),
+                                };
+                                let notice = mark_and_snapshot(
                                     &shared_state, &agent_id, &state, &activity,
+                                    &parked, &retrying, new_state, parked_reason, retry_info,
                                 ).await;
                                 deferred = match ev {
                                     AgentEvent::Error(msg) => Some((
@@ -108,6 +193,13 @@ pub async fn bridge_task(
                                         format!("hit a fatal error and parked: {msg}"),
                                         notice,
                                     )),
+                                    // A retrying FCE is not operator-actionable:
+                                    // no notice, by design (the terminal-signal
+                                    // asymmetry is deliberate — see design §5).
+                                    AgentEvent::FailoverChainExhausted {
+                                        transient_retry: Some(_),
+                                        ..
+                                    } => None,
                                     AgentEvent::FailoverChainExhausted { reason, detail, .. } => Some((
                                         "Subagent Error",
                                         format!(
@@ -126,20 +218,35 @@ pub async fn bridge_task(
                                             notice,
                                         ))
                                     }
+                                    AgentEvent::Waiting { timeout_secs } => Some((
+                                        "Subagent Waiting",
+                                        format!("is waiting (timer {timeout_secs}s)."),
+                                        notice,
+                                    )),
                                     AgentEvent::MaxRoundsExceeded => Some((
                                         "Subagent Error",
                                         "hit the per-request tool-round limit and parked.".to_string(),
                                         notice,
                                     )),
-                                    // Cancelled / Interrupted are operator-initiated and
-                                    // TokenBudgetExceeded is a tagma-global event the
-                                    // operator already observes: no superior
-                                    // notification, but the idle mark above is still
-                                    // linearized with everyone else's snapshot.
+                                    // Cancelled / Interrupted are operator-initiated;
+                                    // TokenBudgetExceeded re-arms a wait the operator
+                                    // already observes: no superior notification, but
+                                    // the state mark above is still linearized with
+                                    // everyone else's snapshot.
                                     _ => None,
                                 };
                             }
-                            _ => {}
+                            _ => {
+                                // The first non-retry event ends the layer-1
+                                // overlay: the turn is progressing again. A
+                                // streaming round likewise invalidates any
+                                // parked payload (the retrying cell stays —
+                                // see the Busy arm).
+                                if state.load(Ordering::Relaxed) == AgentState::RETRYING {
+                                    state.store(AgentState::BUSY, Ordering::Relaxed);
+                                }
+                                *parked.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                            }
                         }
                         // Best-effort broadcast: with no SSE subscriber the
                         // send errors, which is the normal steady state for a
@@ -157,7 +264,7 @@ pub async fn bridge_task(
                     }
                 },
                 None => {
-                    mark_idle(&state, &activity);
+                    mark_idle(&state, &activity, &parked, &retrying);
                     info!("bridge task: agent channel closed, exiting");
                     break;
                 }
@@ -167,7 +274,7 @@ pub async fn bridge_task(
             // still queued before exiting. Per-agent cancellation reaches the
             // bridge via the channel-closed path above — see the lifecycle note.
             _ = cancel.cancelled() => {
-                mark_idle(&state, &activity);
+                mark_idle(&state, &activity, &parked, &retrying);
                 while let Ok(event) = agent_rx.try_recv() {
                     if let Some(sse) = convert_event(event) {
                         events_tx.send(sse).ok();
@@ -180,12 +287,22 @@ pub async fn bridge_task(
     }
 }
 
-/// Mark the agent idle: drop state to [`AgentState::IDLE`] and clear the ephemeral
-/// activity string so a stale "reading docs" doesn't persist while idle. Shared by
-/// every turn-end / terminal / shutdown path in [`bridge_task`].
-fn mark_idle(state: &std::sync::atomic::AtomicU8, activity: &std::sync::Mutex<String>) {
+/// Mark the agent gone: drop state to [`AgentState::IDLE`], clear the ephemeral
+/// activity string so a stale "reading docs" doesn't persist, and drop any
+/// parked/retrying payloads — the bridge only takes this path when the agent
+/// task itself is gone (channel closed or tagma shutdown), and a dead agent
+/// cannot be parked or retrying. Shared by the shutdown paths in
+/// [`bridge_task`]; live turn-ends go through [`mark_and_snapshot`].
+fn mark_idle(
+    state: &std::sync::atomic::AtomicU8,
+    activity: &std::sync::Mutex<String>,
+    parked: &std::sync::Mutex<Option<ParkedSnapshot>>,
+    retrying: &std::sync::Mutex<Option<TransientRetryInfo>>,
+) {
     state.store(AgentState::IDLE, Ordering::Relaxed);
     activity.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    *parked.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *retrying.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Convert a runtime [`AgentEvent`] to a wire-format [`SseEvent`].
@@ -388,18 +505,30 @@ impl IdleNotice {
     }
 }
 
-/// Mark the agent idle and snapshot the sibling states under one registry
-/// write lock. The lock is the linearization point: two subagents going
-/// idle concurrently cannot both (or neither) observe "all subordinates
-/// idle" — exactly one notification carries the last-idle annotation.
-async fn mark_idle_and_snapshot(
+/// Apply a terminal state mark and snapshot the sibling states under one
+/// registry write lock. The lock is the linearization point: two subagents
+/// ending turns concurrently cannot both (or neither) observe "all
+/// subordinates idle" — exactly one notification carries the last-idle
+/// annotation. The parked/retrying cells are written under the same lock so
+/// a status read can never observe a PARKED mark with a stale retrying
+/// payload (or vice versa).
+async fn mark_and_snapshot(
     shared_state: &SharedState,
     agent_id: &AgentId,
     state: &std::sync::atomic::AtomicU8,
     activity: &std::sync::Mutex<String>,
+    parked: &std::sync::Mutex<Option<ParkedSnapshot>>,
+    retrying: &std::sync::Mutex<Option<TransientRetryInfo>>,
+    new_state: u8,
+    parked_reason: Option<ParkedReason>,
+    retry_info: Option<TransientRetryInfo>,
 ) -> IdleNotice {
     let registry = shared_state.registry.write().await;
-    mark_idle(state, activity);
+    state.store(new_state, Ordering::Relaxed);
+    activity.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    *parked.lock().unwrap_or_else(|e| e.into_inner()) =
+        parked_reason.map(|reason| ParkedSnapshot { reason, at: Instant::now() });
+    *retrying.lock().unwrap_or_else(|e| e.into_inner()) = retry_info;
     snapshot_from(&registry, agent_id)
 }
 

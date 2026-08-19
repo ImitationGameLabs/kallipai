@@ -44,6 +44,8 @@ pub async fn agent_status(
         token_budget: snap.budget,
         token_consumed: snap.consumed,
         activity,
+        parked_reason: live.agent.parked_reason_snapshot(),
+        retrying: live.agent.retrying_snapshot(),
     }))
 }
 

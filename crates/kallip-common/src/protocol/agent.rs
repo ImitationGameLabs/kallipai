@@ -6,7 +6,7 @@ use crate::agentid::AgentId;
 use crate::context::ContextUsage;
 use crate::policy::PolicyPreset;
 use crate::retry::RetryRecord;
-use super::sse::FailoverChainExhaustion;
+use super::sse::{FailoverChainExhaustion, TransientRetryInfo};
 
 /// Agent lifecycle state exposed via the status endpoint.
 ///
@@ -217,6 +217,16 @@ pub struct AgentSummary {
     /// direct and relay paths share one conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// Present only when `state == Parked`: why the agent parked, structured
+    /// (bridge-written at the parking terminal event; cleared on any
+    /// non-parked terminal). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_reason: Option<ParkedReason>,
+    /// Present only when `state == Retrying` (chain-transient backoff armed):
+    /// the attempt counters and backoff delay, mirroring the FCE event's
+    /// `transient_retry` payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrying: Option<TransientRetryInfo>,
 }
 
 /// Response body for listing agents.
@@ -269,6 +279,12 @@ pub struct AgentStatusResponse {
     /// Ephemeral, agent-self-reported current activity. Empty when idle.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub activity: String,
+    /// Present only when `state == Parked` — see [`AgentSummary::parked_reason`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_reason: Option<ParkedReason>,
+    /// Present only when `state == Retrying` — see [`AgentSummary::retrying`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrying: Option<TransientRetryInfo>,
 }
 
 /// Request body for sending a message to an agent.

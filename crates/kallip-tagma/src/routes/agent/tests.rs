@@ -12,7 +12,8 @@ use crate::lifecycle::{
 };
 use crate::state::RegistryEntry;
 use crate::test_helpers::{
-    add_faulted_root, add_faulted_sub, add_root, make_entry, make_entry_with_rx, make_state,
+    add_faulted_root, add_faulted_sub, add_root, add_sub, make_entry, make_entry_with_rx,
+    make_state,
 };
 use axum::extract::{Path, Query, State};
 use kallip_common::protocol::ListAgentsQuery;
@@ -695,6 +696,134 @@ async fn interrupt_faulted_returns_conflict() {
     .await
     .expect_err("interrupt faulted is a conflict");
     assert_eq!(err.status, 409);
+}
+
+/// The remove gate admits parked agents (204) — parking is a removable
+/// state by design; the busy/waiting/retrying rejections are covered by
+/// `remove_rejects_busy_waiting_retrying_states` below.
+#[tokio::test]
+async fn remove_parked_agent_succeeds() {
+    let state = make_state();
+    let root = AgentId::random();
+    let parked = AgentId::random();
+    {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &root);
+        add_sub(&mut reg, &parked, &root);
+        let live = reg.get(&parked).unwrap().as_live().unwrap();
+        live.agent.state.store(crate::state::AgentState::PARKED, std::sync::atomic::Ordering::Relaxed);
+    }
+    let status = remove_agent(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(parked.clone()),
+    )
+    .await
+    .expect("parked agent is removable");
+    assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+    assert!(!state.registry.read().await.contains_key(&parked));
+}
+
+/// The remove gate rejects every mid-lifecycle state (busy / waiting /
+/// retrying) with 409 — only idle and parked are quiescent.
+#[tokio::test]
+async fn remove_rejects_busy_waiting_retrying_states() {
+    for u8_state in [
+        crate::state::AgentState::BUSY,
+        crate::state::AgentState::WAITING,
+        crate::state::AgentState::RETRYING,
+    ] {
+        let state = make_state();
+        let root = AgentId::random();
+        let child = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &root);
+            add_sub(&mut reg, &child, &root);
+            let live = reg.get(&child).unwrap().as_live().unwrap();
+            live.agent.state.store(u8_state, std::sync::atomic::Ordering::Relaxed);
+        }
+        let err = remove_agent(
+            State(state),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(child),
+        )
+        .await
+        .expect_err("mid-lifecycle state must be rejected");
+        assert_eq!(err.status, 409, "state {u8_state} must conflict");
+    }
+}
+
+/// The wake endpoint rejects non-parked agents (409) — a kick on an agent
+/// that is running/waiting/retrying/idle is meaningless.
+#[tokio::test]
+async fn wake_rejects_non_parked_states() {
+    let state = make_state();
+    let root = AgentId::random();
+    let child = AgentId::random();
+    {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &root);
+        add_sub(&mut reg, &child, &root);
+    }
+    let err = super::wake_agent(
+        State(state),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(child),
+    )
+    .await
+    .expect_err("idle agent cannot be kicked");
+    assert_eq!(err.status, 409);
+}
+
+/// The wake endpoint enqueues the kick turn: a parked agent receives the
+/// `[system]` prompt carrying the park reason and elapsed duration, and
+/// the parked payload survives until the agent's own round starts (the
+/// bridge clears it on Busy).
+#[tokio::test]
+async fn wake_parked_agent_enqueues_kick_turn() {
+    let state = make_state();
+    let root = AgentId::random();
+    let child = AgentId::random();
+    {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &root);
+        add_sub(&mut reg, &child, &root);
+        let live = reg.get(&child).unwrap().as_live().unwrap();
+        live.agent.state.store(crate::state::AgentState::PARKED, std::sync::atomic::Ordering::Relaxed);
+        *live.agent.parked.lock().unwrap() = Some(crate::state::ParkedSnapshot {
+            reason: kallip_common::protocol::ParkedReason::FatalError {
+                message: "boom".to_string(),
+            },
+            at: std::time::Instant::now(),
+        });
+    }
+    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(4);
+    {
+        let mut reg = state.registry.write().await;
+        let live = reg.get_mut(&child).unwrap().as_live_mut().unwrap();
+        live.agent.prompt_tx = prompt_tx;
+    }
+    let status = super::wake_agent(
+        State(state),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(child),
+    )
+    .await
+    .expect("parked agent is kickable");
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    let turn = tokio::time::timeout(std::time::Duration::from_millis(500), prompt_rx.recv())
+        .await
+        .expect("kick turn must be enqueued")
+        .expect("prompt channel open");
+    assert!(
+        turn.starts_with("[system] you were parked") && turn.contains("ago: fatal error: boom"),
+        "kick turn must carry the duration and reason: {turn}"
+    );
+    assert!(
+        turn.contains("Decide whether to retry, adjust, or report."),
+        "kick turn must end with the decision prompt: {turn}"
+    );
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@ use just_llm_client::types::chat::ChatMessage;
 use kallip_common::agentid::AgentId;
 use kallip_common::authtoken::{MintedToken, TokenHash};
 use kallip_common::policy::{ExecPolicy, PolicyPreset};
-use kallip_common::protocol::{ApiError, SseEvent};
+use kallip_common::protocol::{ApiError, SseEvent, TransientRetryInfo};
 use kallip_runtime::agent_task::{self, AgentContext};
 use kallip_runtime::approval::ApprovalStore;
 use kallip_runtime::config::AgentConfig;
@@ -233,6 +233,10 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         agent_tx,
     ));
     let state = Arc::new(AtomicU8::new(AgentState::IDLE));
+    let parked: Arc<std::sync::Mutex<Option<crate::state::ParkedSnapshot>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let retrying: Arc<std::sync::Mutex<Option<TransientRetryInfo>>> =
+        Arc::new(std::sync::Mutex::new(None));
     let agent_id = args.agent_id;
     let bridge_handle = tokio::spawn(bridge_task(
         agent_id.clone(),
@@ -241,6 +245,8 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         args.shutdown_cancel.clone(),
         state.clone(),
         activity.clone(),
+        parked.clone(),
+        retrying.clone(),
         args.shared_state.clone(),
     ));
 
@@ -263,6 +269,8 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
             exec_policy: args.exec_policy,
             exec_gate,
             pending_profile_reset,
+            parked,
+            retrying,
         },
         AgentIdentity {
             config: args.config,

@@ -9,6 +9,7 @@ pub use kallip_common::agentid::AgentId;
 use kallip_common::authtoken::TokenHash;
 use kallip_common::policy::{ExecPolicy, PolicyPreset};
 pub use kallip_common::protocol::AgentState;
+use kallip_common::protocol::{ParkedReason, TransientRetryInfo};
 pub use kallip_common::protocol::AgentSummary;
 use kallip_common::protocol::ApiError;
 use kallip_common::protocol::SseEvent;
@@ -205,6 +206,15 @@ pub struct FaultedEntry {
     pub reason: String,
 }
 
+/// Bridge-written parked snapshot: why the agent parked and when (the `when`
+/// backs the kick turn's "parked N ago" text and is NOT persisted — a
+/// restart degrades Parked to Idle per the design's restore semantics).
+#[derive(Debug, Clone)]
+pub struct ParkedSnapshot {
+    pub reason: ParkedReason,
+    pub at: std::time::Instant,
+}
+
 pub struct Agent {
     pub prompt_tx: mpsc::Sender<String>,
     pub events_tx: broadcast::Sender<SseEvent>,
@@ -250,12 +260,23 @@ pub struct Agent {
     /// Pending profile-reset cell shared with the agent task's `AgentContext`.
     /// The apply route writes here; the agent drains it on its next wake-up.
     pub pending_profile_reset: Arc<std::sync::Mutex<Option<kallip_runtime::ProfileReset>>>,
+    /// Parked snapshot, written by the bridge at a parking terminal event and
+    /// cleared on any non-parked terminal. Shared (same `Arc`) with the bridge
+    /// task; read by the wake route (kick turn text) and the status surfaces.
+    pub parked: Arc<std::sync::Mutex<Option<ParkedSnapshot>>>,
+    /// Armed chain-transient retry info, written by the bridge at an
+    /// FCE-with-retry terminal event; cleared on any other terminal. Shared
+    /// with the bridge; read by the status surfaces as the `retrying` field.
+    pub retrying: Arc<std::sync::Mutex<Option<TransientRetryInfo>>>,
 }
 
 impl Agent {
     pub fn get_state(&self) -> AgentState {
         match self.state.load(Ordering::Relaxed) {
             AgentState::BUSY => AgentState::Busy,
+            AgentState::WAITING => AgentState::Waiting,
+            AgentState::PARKED => AgentState::Parked,
+            AgentState::RETRYING => AgentState::Retrying,
             _ => AgentState::Idle,
         }
     }
@@ -268,6 +289,21 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Snapshot the parked reason for wire surfaces (`None` unless parked).
+    pub fn parked_reason_snapshot(&self) -> Option<ParkedReason> {
+        self.parked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|p| p.reason.clone())
+    }
+
+    /// Snapshot the armed retry info for wire surfaces (`None` unless
+    /// chain-transient backoff is armed).
+    pub fn retrying_snapshot(&self) -> Option<TransientRetryInfo> {
+        *self.retrying.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Await both background tasks, bounded by `timeout`; force-abort on overrun.
@@ -373,9 +409,17 @@ impl RegistryEntry {
     /// construction site for list / metadata responses.
     pub fn summary(&self, id: &AgentId) -> AgentSummary {
         let identity = self.identity();
-        let (activity, faulted_reason) = match self {
-            RegistryEntry::Live(e) => (e.activity_for_summary(), None),
-            RegistryEntry::Faulted(e) => (String::new(), Some(e.reason.clone())),
+        let (activity, faulted_reason, parked_reason, retrying) = match self {
+            RegistryEntry::Live(e) => {
+                let agent = &e.agent;
+                (
+                    e.activity_for_summary(),
+                    None,
+                    agent.parked_reason_snapshot(),
+                    agent.retrying_snapshot(),
+                )
+            }
+            RegistryEntry::Faulted(e) => (String::new(), Some(e.reason.clone()), None, None),
         };
         AgentSummary {
             id: id.clone(),
@@ -386,6 +430,8 @@ impl RegistryEntry {
             description: identity.config.description.clone(),
             activity,
             duty: Default::default(),
+            parked_reason,
+            retrying,
             faulted_reason,
             // Populated only by `get_root_agent` (the sole external-conversation
             // surface); absent on list/metadata summaries.
