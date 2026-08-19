@@ -215,31 +215,11 @@ mod tests {
     //! `Participant` survives the column split/reconstruct.
 
     use super::*;
-    use testcontainers_modules::postgres::Postgres;
-    use testcontainers_modules::testcontainers::{ContainerAsync, runners::AsyncRunner};
 
-    const PG_USER: &str = "postgres";
-    const PG_PASSWORD: &str = "postgres";
-    const PG_DB: &str = "postgres";
-
-    /// Provision an ephemeral Postgres, connect + migrate, and return BOTH the
-    /// container handle and the db. The container must stay alive for the
-    /// test's duration (dropping it stops/kills Postgres), so the caller binds
-    /// it to `_container`.
-    async fn fresh_db() -> (ContainerAsync<Postgres>, Db) {
-        let container = Postgres::default()
-            .with_db_name(PG_DB)
-            .with_user(PG_USER)
-            .with_password(PG_PASSWORD)
-            .start()
-            .await
-            .expect("start postgres");
-        let port = container.get_host_port_ipv4(5432).await.expect("host port");
-        let url = format!("postgres://{PG_USER}:{PG_PASSWORD}@127.0.0.1:{port}/{PG_DB}");
-        let db = crate::db::connect_and_migrate(&url)
-            .await
-            .expect("connect + migrate");
-        (container, db)
+    /// Provision a fresh, migrated database on the shared test Postgres
+    /// (see `crate::test_support::provision_test_db`).
+    async fn fresh_db() -> Db {
+        crate::test_support::provision_test_db().await
     }
 
     /// A test sender's stable identity (no display handle -- the store no longer
@@ -272,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_assigns_monotonic_seq_and_reads_back() {
-        let (_container, db) = fresh_db().await;
+        let db = fresh_db().await;
         seed_room(&db, "room-1").await;
         let (alice_pid, human) = user("alice");
         let (tagma_pid, agent_kind) = agent();
@@ -320,7 +300,7 @@ mod tests {
     /// Sequences are independent per room (each starts at 1).
     #[tokio::test]
     async fn seq_is_per_room() {
-        let (_container, db) = fresh_db().await;
+        let db = fresh_db().await;
         seed_room(&db, "room-a").await;
         seed_room(&db, "room-b").await;
         let (alice, human) = user("alice");
@@ -343,7 +323,7 @@ mod tests {
     /// the default pool size under full-suite parallel-test container load.)
     #[tokio::test]
     async fn concurrent_appends_get_distinct_seqs() {
-        let (_container, db) = fresh_db().await;
+        let db = fresh_db().await;
         seed_room(&db, "room-c").await;
         let db = std::sync::Arc::new(db);
         let (alice, human) = user("alice");
@@ -373,7 +353,7 @@ mod tests {
     /// case a find-then-insert design would get wrong.
     #[tokio::test]
     async fn concurrent_first_appends_seed_race_upserted() {
-        let (_container, db) = fresh_db().await;
+        let db = fresh_db().await;
         seed_room(&db, "room-seed").await;
         let db = std::sync::Arc::new(db);
         let (alice, human) = user("alice");
@@ -409,7 +389,7 @@ mod tests {
         // The init migration declares ON DELETE CASCADE FKs from `room_messages`
         // + `room_message_seq` to `rooms.id`. A future room-deletion route (or
         // direct maintenance) must not leave orphan ciphertext rows.
-        let (_container, db) = fresh_db().await;
+        let db = fresh_db().await;
         seed_room(&db, "room-gone").await;
         let (alice, human) = user("alice");
         append(&db, "room-gone", &alice, human, 1, b"ct-1")

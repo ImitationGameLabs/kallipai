@@ -10,8 +10,6 @@ use std::time::Duration;
 use kallip_agora_common::ids::{ParticipantId, ParticipantKind, TagmaId, UserId};
 use kallip_agora_common::principal::Principal;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set};
-use testcontainers_modules::postgres::Postgres;
-use testcontainers_modules::testcontainers::{ContainerAsync, runners::AsyncRunner};
 use time::OffsetDateTime;
 
 use crate::auth::AuthPrincipal;
@@ -28,26 +26,13 @@ pub fn as_tagma(t: &TagmaId) -> AuthPrincipal {
     AuthPrincipal(Principal::Tagma(t.clone()))
 }
 
-/// Provision an ephemeral Postgres, apply the lesche migrations, and wire a
-/// `SharedConvState` with that store + a fresh mock registry (identity oracle).
-pub async fn db_state() -> (
-    SharedConvState,
-    Arc<MockControlPlane>,
-    ContainerAsync<Postgres>,
-) {
+/// Wire a `SharedConvState` backed by a fresh database on the shared test
+/// Postgres, with a fresh mock registry (identity oracle).
+pub async fn db_state() -> (SharedConvState, Arc<MockControlPlane>) {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::ERROR)
         .try_init();
-    let container = Postgres::default()
-        .with_db_name("postgres")
-        .with_user("postgres")
-        .with_password("postgres")
-        .start()
-        .await
-        .expect("start postgres");
-    let port = container.get_host_port_ipv4(5432).await.expect("host port");
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let db = crate::db::connect_and_migrate(&url).await.expect("migrate");
+    let db = crate::test_support::provision_test_db().await;
     let control = Arc::new(MockControlPlane::new());
     let state: SharedConvState = Arc::new(ConversationsState {
         control: control.clone(),
@@ -58,7 +43,7 @@ pub async fn db_state() -> (
         db: Some(db),
         agent_profiles: crate::state::AgentProfileCache::default(),
     });
-    (state, control, container)
+    (state, control)
 }
 
 /// Seed a room row + its live membership (human users + agent tagmas) directly

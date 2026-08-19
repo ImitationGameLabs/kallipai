@@ -20,6 +20,7 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database, Dat
 use sea_orm_migration::MigratorTrait;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
+use testcontainers_modules::testcontainers::ReuseDirective;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use time::OffsetDateTime;
 use tokio::sync::OnceCell;
@@ -31,38 +32,128 @@ use crate::token::TAGMA;
 /// Process-global test Postgres: started once, the container is intentionally
 /// leaked so it outlives every test. Each [`make_state`] call carves out a
 /// unique database within it.
-static SHARED_PG: OnceCell<u16> = OnceCell::const_new();
+static SHARED_PG_PORT: OnceCell<u16> = OnceCell::const_new();
 
 /// Monotonic counter for unique per-test database names.
 static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 async fn shared_pg_port() -> &'static u16 {
-    SHARED_PG
+    SHARED_PG_PORT
         .get_or_init(|| async {
-            let image = Postgres::default()
-                .with_db_name("postgres")
-                .with_user("postgres")
-                .with_password("postgres")
-                .with_tag("16-alpine");
-            let container = image.start().await.expect("start postgres");
-            let port = container.get_host_port_ipv4(5432).await.expect("host port");
-            // Leak the container so it stays up for the whole test process.
-            std::mem::forget(container);
-            port
+            // Same request as kallip-lesche's test_support (name + tag +
+            // credentials) so both binaries reuse ONE container; bump the
+            // tag => pick a new name or `docker rm -f` the old container.
+            let make_request = || {
+                Postgres::default()
+                    .with_db_name("postgres")
+                    .with_user("postgres")
+                    .with_password("postgres")
+                    .with_tag("16-alpine")
+                    .with_container_name("kallipai-testcontainers-pg-16alpine")
+                    .with_reuse(ReuseDirective::Always)
+            };
+            // Seatbelt for the rare cold start: an ephemeral outbound source
+            // port can snatch RootlessKit's picked port. Steady state reuses
+            // the running container and never reaches this error path. The
+            // retry matches on the error's display string -- fragile, but
+            // test-only and the cheapest signal for this docker error chain.
+            for attempt in 0..4 {
+                match make_request().start().await {
+                    Ok(container) => {
+                        let port = container.get_host_port_ipv4(5432).await.expect("host port");
+                        sweep_dead_test_dbs(port).await;
+                        // Leak the container so it stays up for the whole test process.
+                        std::mem::forget(container);
+                        return port;
+                    }
+                    Err(e) if attempt < 3 && e.to_string().contains("address already in use") => {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                    Err(e) => panic!("start postgres: {e}"),
+                }
+            }
+            unreachable!("retry loop always returns or panics")
         })
         .await
 }
 
+/// Best-effort cleanup, once per process, of test databases left dead by
+/// earlier runs (the reusable container never drops them). Sweeps BOTH
+/// crates' prefixes: the shared container's hygiene must not depend on
+/// which crate is running. Twin of kallip-lesche's
+/// test_support::sweep_dead_test_dbs.
+async fn sweep_dead_test_dbs(port: u16) {
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    // Hygiene, not a correctness path: on any failure just leave the dead
+    // databases to accumulate, exactly as before this sweep existed.
+    let root = match Database::connect(&url).await {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("dead-db sweep: connect failed: {e}");
+            return;
+        }
+    };
+    // Zero-connection criterion. Known boundary, unreachable under cargo
+    // test's serialized binaries: a concurrently cold-started sibling's
+    // just-created, not-yet-connected database could be swept -- same
+    // class as the container name-conflict note. This process's own
+    // databases appear only after the sweep and hold connections once
+    // live, so only dead databases ever match.
+    // DROP DATABASE cannot run inside a transaction block, so a DO-block
+    // sweep silently drops nothing; select candidates first, then issue
+    // one autocommit DROP per database, each failure swallowed.
+    let candidates = match root
+        .query_all(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT datname FROM pg_database d \
+             WHERE d.datname ~ '^(lesche|agora)_test_' \
+             AND NOT EXISTS \
+             (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)"
+                .to_owned(),
+        ))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("dead-db sweep: list failed: {e}");
+            return;
+        }
+    };
+    for name in candidates
+        .iter()
+        .filter_map(|row| row.try_get::<String>("", "datname").ok())
+    {
+        let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+        let drop = format!("DROP DATABASE IF EXISTS {quoted}");
+        if let Err(e) = root
+            .execute(Statement::from_string(DatabaseBackend::Postgres, drop))
+            .await
+        {
+            eprintln!("dead-db sweep: drop {name} failed: {e}");
+        }
+    }
+}
+
 /// Connect to a fresh, isolated database within the shared Postgres and run
-/// migrations. Parallel-safe: each call gets a unique database name.
-async fn setup_test_db() -> Db {
+/// migrations. Parallel-safe: each call carves out a database named after
+/// the process and a per-process counter, and defensively drops a stale
+/// same-named database first (pid reuse). Dead databases disappear with the
+/// container (`docker rm -f kallipai-testcontainers-pg-16alpine`); no other cleanup
+/// exists by design.
+pub(crate) async fn setup_test_db() -> Db {
     let port = *shared_pg_port().await;
     let n = DB_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let db_name = format!("agora_test_{n}");
+    let db_name = format!("agora_test_{}_{n}", std::process::id());
     let root_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let root = Database::connect(&root_url)
         .await
         .expect("connect to postgres maintenance db");
+    root.execute(Statement::from_string(
+        DatabaseBackend::Postgres,
+        format!("DROP DATABASE IF EXISTS \"{db_name}\""),
+    ))
+    .await
+    .expect("drop stale test database");
     root.execute(Statement::from_string(
         DatabaseBackend::Postgres,
         format!("CREATE DATABASE \"{db_name}\""),

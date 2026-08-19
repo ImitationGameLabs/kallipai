@@ -177,35 +177,17 @@ fn jitter_up_to(bound: Duration) -> Duration {
 mod tests {
     use sea_orm::ActiveValue::Set;
     use sea_orm::{ActiveModelTrait, EntityTrait};
-    use testcontainers_modules::postgres::Postgres;
-    use testcontainers_modules::testcontainers::ImageExt;
-    use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
     use super::*;
 
-    // The default testcontainers Postgres image uses superuser `postgres` with
-    // password `postgres` and database `postgres`.
-    const PG_USER: &str = "postgres";
-    const PG_PASSWORD: &str = "postgres";
-    const PG_DB: &str = "postgres";
-
-    /// Provision one ephemeral Postgres, connect+migrate, then round-trip a
-    /// `tagmata` row (after seeding its owning `users` row, required by the
+    /// Round-trip a `tagmata` row on the shared test Postgres (each run gets a
+    /// fresh migrated database via `setup_test_db`), after seeding its owning
     /// `tagmata.owner_user_id -> users(id)` FK). Proves the substrate end-to-end
     /// (migrations apply, the entity/BYTEA/TIMESTAMPTZ mapping works, the
     /// connection is usable, the FK graph is sound). Needs Docker at test time.
     #[tokio::test]
     async fn connect_migrate_and_roundtrip_tagma() {
-        let image = Postgres::default()
-            .with_db_name(PG_DB)
-            .with_user(PG_USER)
-            .with_password(PG_PASSWORD)
-            .with_tag("16-alpine");
-        let container = image.start().await.expect("start postgres");
-        let port = container.get_host_port_ipv4(5432).await.expect("host port");
-        let url = format!("postgres://{PG_USER}:{PG_PASSWORD}@127.0.0.1:{port}/{PG_DB}");
-
-        let db = connect_and_migrate(&url).await.expect("connect + migrate");
+        let db = crate::test_helpers::setup_test_db().await;
 
         let created_at = time::OffsetDateTime::now_utc();
         // The `tagmata.owner_user_id -> users(id)` FK requires the owner to

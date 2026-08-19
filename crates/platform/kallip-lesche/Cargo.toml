@@ -40,5 +40,5 @@ sea-orm-migration = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 wiremock = { workspace = true }
-testcontainers = { workspace = true }
+testcontainers = { workspace = true, features = ["reusable-containers"] }
 testcontainers-modules = { workspace = true }

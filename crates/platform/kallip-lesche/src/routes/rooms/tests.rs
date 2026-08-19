@@ -81,7 +81,7 @@ fn opt_user(s: &str) -> OptUserDisplay {
 
 #[tokio::test]
 async fn member_envelope_is_fanned_to_other_members() {
-    let (state, _control, _container) = db_state().await;
+    let (state, _control) = db_state().await;
     let alice = uid("alice");
     let bob = uid("bob");
     let t1 = TagmaId::from("t1".to_string());
@@ -128,7 +128,7 @@ async fn member_envelope_is_fanned_to_other_members() {
 
 #[tokio::test]
 async fn agent_envelope_is_stamped_with_stable_owner_handle() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = uid("alice");
     let t1 = TagmaId::from("t1".to_string());
     // Enroll t1 so its identity (owner username) resolves at send time. The
@@ -186,7 +186,7 @@ async fn agent_envelope_is_stamped_with_stable_owner_handle() {
 /// the tagma-supplied handle, and the send still succeeds (no 500).
 #[tokio::test]
 async fn agent_envelope_degrades_to_prefix_when_not_usable() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = uid("alice");
     let revoked = TagmaId::from("rev".to_string());
     control.enroll_tagma(
@@ -241,7 +241,7 @@ async fn agent_envelope_degrades_to_prefix_when_not_usable() {
 
 #[tokio::test]
 async fn non_member_sender_is_404() {
-    let (state, _control, _container) = db_state().await;
+    let (state, _control) = db_state().await;
     let alice = uid("alice");
     let t1 = TagmaId::from("t1".to_string());
     seed_room(state.db.as_ref().unwrap(), "room-1", &alice, &[], &[&t1]).await;
@@ -265,7 +265,7 @@ async fn non_member_sender_is_404() {
 /// never a 403 that would confirm the room is real.
 #[tokio::test]
 async fn non_member_spoofed_sender_is_404_not_403() {
-    let (state, _control, _container) = db_state().await;
+    let (state, _control) = db_state().await;
     let alice = uid("alice");
     let t1 = TagmaId::from("t1".to_string());
     seed_room(state.db.as_ref().unwrap(), "room-1", &alice, &[], &[&t1]).await;
@@ -289,7 +289,7 @@ async fn non_member_spoofed_sender_is_404_not_403() {
 /// above still passes.
 #[tokio::test]
 async fn member_spoofing_another_member_is_403() {
-    let (state, _control, _container) = db_state().await;
+    let (state, _control) = db_state().await;
     let alice = uid("alice");
     let bob = uid("bob");
     seed_room(state.db.as_ref().unwrap(), "room-1", &alice, &[&bob], &[]).await;
@@ -309,7 +309,7 @@ async fn member_spoofing_another_member_is_403() {
 
 #[tokio::test]
 async fn unknown_room_is_404() {
-    let (state, _control, _container) = db_state().await;
+    let (state, _control) = db_state().await;
     let env = envelope(human("Alice", "alice"), "ghost");
     let err = post_room_envelope(
         State(state),
@@ -325,7 +325,7 @@ async fn unknown_room_is_404() {
 
 #[tokio::test]
 async fn history_member_empty_and_non_member_is_404() {
-    let (state, _control, _container) = db_state().await;
+    let (state, _control) = db_state().await;
     let alice = uid("alice");
     seed_room(state.db.as_ref().unwrap(), "room-1", &alice, &[], &[]).await;
     // Member: 200 with empty history.
@@ -394,7 +394,7 @@ async fn remove_member(
 /// `@username` / `<prefix>@owner` forms are derived at read.
 #[tokio::test]
 async fn history_resolves_sender_handles_from_registry() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = uid("alice");
     let t1 = TagmaId::from("t1".to_string());
     // Enrolling t1 owned by alice also seeds alice's user identity
@@ -461,7 +461,7 @@ async fn history_resolves_sender_handles_from_registry() {
 /// `@owner` handle via the audit rather than degrading to a bare prefix.
 #[tokio::test]
 async fn history_resolves_a_departed_sender_via_revocations() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = uid("alice");
     let bob = uid("bob");
     // Seed bob's identity so the registry resolves him to "@bob" after he

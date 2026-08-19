@@ -119,7 +119,7 @@ async fn invite_err(
 
 #[tokio::test]
 async fn create_room_rejects_empty_name() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
 
@@ -146,7 +146,7 @@ async fn create_room_rejects_empty_name() {
 
 #[tokio::test]
 async fn create_room_lists_creator_as_member() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
 
@@ -168,7 +168,7 @@ async fn create_room_lists_creator_as_member() {
 
 #[tokio::test]
 async fn invite_accept_adds_member_and_bumps_epoch() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     control.seed_user(alice.clone());
@@ -214,7 +214,7 @@ async fn invite_accept_adds_member_and_bumps_epoch() {
 async fn invite_unknown_invitee_is_404() {
     // The handle resolve (registry facts) rejects a nonexistent invitee before
     // any row is written.
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     // bob is NOT seeded -> handle resolves to None -> invitee rejected.
@@ -239,7 +239,7 @@ async fn invite_unknown_invitee_is_404() {
 /// placeholder is `@username`.
 #[tokio::test]
 async fn invite_accepts_at_prefixed_handle() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let bob = UserId::from("bob".to_string());
@@ -270,7 +270,7 @@ async fn invite_accepts_at_prefixed_handle() {
 /// id): bob sees the invite from alice as `invited_by: "@alice"`.
 #[tokio::test]
 async fn list_my_invites_resolves_inviter_handle() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let bob = UserId::from("bob".to_string());
@@ -301,7 +301,7 @@ async fn list_my_invites_resolves_inviter_handle() {
 /// 404 as an unknown handle -- the existence-oracle invariant.
 #[tokio::test]
 async fn invite_malformed_handle_is_404() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
 
@@ -322,7 +322,7 @@ async fn invite_malformed_handle_is_404() {
 
 #[tokio::test]
 async fn add_tagma_attests_enrollment_and_bumps_epoch() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let tagma = TagmaId::from("tagma-1".to_string());
@@ -349,7 +349,7 @@ async fn add_tagma_attests_enrollment_and_bumps_epoch() {
 
 #[tokio::test]
 async fn add_unenrolled_tagma_is_404() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     // tagma is NOT seeded -> tagma_profile returns None -> not room-joinable.
@@ -373,7 +373,7 @@ async fn add_unenrolled_tagma_is_404() {
 /// `tagma_enrolled`): an enrolled tagma whose owner is disabled is rejected.
 #[tokio::test]
 async fn add_tagma_rejects_owner_disabled_tagma() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     control.disable_user(&alice);
@@ -401,7 +401,7 @@ async fn add_tagma_rejects_owner_disabled_tagma() {
 /// *why*.
 #[tokio::test]
 async fn add_tagma_oracle_body_is_uniform_across_failure_modes() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let owner = UserId::from("owner".to_string());
@@ -429,7 +429,7 @@ async fn add_tagma_oracle_body_is_uniform_across_failure_modes() {
 /// rejected with the same 404 as an unknown one.
 #[tokio::test]
 async fn invite_rejects_disabled_invitee() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let bob = UserId::from("bob".to_string());
@@ -454,7 +454,7 @@ async fn invite_rejects_disabled_invitee() {
 /// disabled invitee produce the byte-identical 404 body (no leak of *why*).
 #[tokio::test]
 async fn invite_oracle_body_is_uniform_across_failure_modes() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let ghost = UserId::from("ghost".to_string()); // not seeded
@@ -482,7 +482,7 @@ fn profile_for<'a>(roster: &'a RoomRosterView, pid: &ParticipantId) -> &'a RoomM
 /// `display_name` + `@username`.
 #[tokio::test]
 async fn roster_resolves_member_display_names() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user_with(alice.clone(), "alice", Some("Alice"));
     let bob = UserId::from("bob".to_string());
@@ -531,7 +531,7 @@ async fn roster_resolves_member_display_names() {
 /// seeded) degrades to a prefix-only handle with no label.
 #[tokio::test]
 async fn roster_degrades_to_prefix_for_unresolved_members() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user_with(alice.clone(), "alice", None);
     let ghost_tagma = TagmaId::from("ghost-t".to_string()); // never enrolled
@@ -565,7 +565,7 @@ async fn roster_degrades_to_prefix_for_unresolved_members() {
 /// revoked tagma that is still a room member shows its label + handle.
 #[tokio::test]
 async fn roster_shows_label_for_revoked_tagma_member() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user_with(alice.clone(), "alice", None);
     let tagma = TagmaId::from("tagma-1".to_string());
@@ -597,7 +597,7 @@ async fn roster_shows_label_for_revoked_tagma_member() {
 /// disabled human that is still a room member shows their display name + handle.
 #[tokio::test]
 async fn roster_shows_name_for_disabled_human_member() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user_with(alice.clone(), "alice", None);
     let bob = UserId::from("bob".to_string());
@@ -617,7 +617,7 @@ async fn roster_shows_name_for_disabled_human_member() {
 
 #[tokio::test]
 async fn creator_removes_other_member_hard_deletes_and_audits() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     control.seed_user(alice.clone());
@@ -670,7 +670,7 @@ async fn creator_removes_other_member_hard_deletes_and_audits() {
 
 #[tokio::test]
 async fn roster_member_sees_room_non_member_is_404() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let carol = UserId::from("carol".to_string());
     control.seed_user(alice.clone());
@@ -695,7 +695,7 @@ async fn roster_member_sees_room_non_member_is_404() {
 
 #[tokio::test]
 async fn tagma_discovery_lists_own_rooms_and_elects_creator() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let tagma = TagmaId::from("tagma-1".to_string());
@@ -750,7 +750,7 @@ async fn tagma_discovery_lists_own_rooms_and_elects_creator() {
 /// `is_creator` election (it is the only agent).
 #[tokio::test]
 async fn list_my_tagma_rooms_owner_sees_joined_rooms() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let tagma = TagmaId::from("tagma-1".to_string());
@@ -786,7 +786,7 @@ async fn list_my_tagma_rooms_owner_sees_joined_rooms() {
 /// unknown tagma) both collapse to the byte-identical "unknown tagma" 404.
 #[tokio::test]
 async fn list_my_tagma_rooms_non_owner_and_unknown_are_404() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     control.seed_user(alice.clone());
@@ -810,7 +810,7 @@ async fn list_my_tagma_rooms_non_owner_and_unknown_are_404() {
 async fn duplicate_pending_invite_is_409() {
     // A second live invite for the same (room, invitee) hits the row-locked
     // prior -> 409 (the same status the partial-unique-index race maps to).
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     control.seed_user(alice.clone());
@@ -843,7 +843,7 @@ async fn duplicate_pending_invite_is_409() {
 
 #[tokio::test]
 async fn double_accept_is_409() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     control.seed_user(alice.clone());
@@ -878,7 +878,7 @@ async fn double_accept_is_409() {
 
 #[tokio::test]
 async fn accept_by_non_invitee_is_404() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     let carol = UserId::from("carol".to_string());
@@ -911,7 +911,7 @@ async fn accept_by_non_invitee_is_404() {
 
 #[tokio::test]
 async fn invite_by_non_member_is_404() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     control.seed_user(alice.clone());
@@ -934,7 +934,7 @@ async fn invite_by_non_member_is_404() {
 
 #[tokio::test]
 async fn creator_removes_tagma_they_do_not_own_hard_deletes_and_audits() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let owner = UserId::from("owner".to_string());
     control.seed_user(alice.clone());
@@ -986,7 +986,7 @@ async fn creator_removes_tagma_they_do_not_own_hard_deletes_and_audits() {
 /// member; he removes his own row by his derived participant id.
 #[tokio::test]
 async fn any_member_can_leave_self() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     control.seed_user(alice.clone());
@@ -1033,7 +1033,7 @@ async fn any_member_can_leave_self() {
 /// create. owner is invited into alice's room and owns the tagma alice added.
 #[tokio::test]
 async fn owner_removes_own_tagma_without_being_creator() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let owner = UserId::from("owner".to_string());
     control.seed_user(alice.clone());
@@ -1094,7 +1094,7 @@ async fn owner_removes_own_tagma_without_being_creator() {
 /// `require_member_locked` used to forbid; the new authz admits it.
 #[tokio::test]
 async fn non_member_owner_removes_own_tagma_succeeds() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let owner = UserId::from("owner".to_string());
     control.seed_user(alice.clone());
@@ -1138,7 +1138,7 @@ async fn non_member_owner_removes_own_tagma_succeeds() {
 /// revoked tagma out of a room. Locks the design against a future "simplify".
 #[tokio::test]
 async fn owner_removes_revoked_own_tagma_succeeds() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let owner = UserId::from("owner".to_string());
     control.seed_user(alice.clone());
@@ -1183,7 +1183,7 @@ async fn owner_removes_revoked_own_tagma_succeeds() {
 /// 404 body (no leak of room / target / reason).
 #[tokio::test]
 async fn remove_member_oracle_body_is_uniform_across_failure_modes() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     let carol = UserId::from("carol".to_string());
@@ -1255,7 +1255,7 @@ async fn remove_member_oracle_body_is_uniform_across_failure_modes() {
 async fn new_room_defaults_to_private() {
     // A default-visibility create (private) round-trips through list_rooms + the
     // persisted row.
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
 
@@ -1280,7 +1280,7 @@ async fn new_room_defaults_to_private() {
 async fn public_room_is_listed_in_discovery_private_is_not() {
     // Only public rooms surface in the open-access discovery list; a private
     // room (even one the caller owns) never appears there.
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     control.seed_user(alice.clone());
@@ -1302,7 +1302,7 @@ async fn public_room_is_listed_in_discovery_private_is_not() {
 
 #[tokio::test]
 async fn join_public_room_adds_member_and_bumps_epoch() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     control.seed_user(alice.clone());
@@ -1340,7 +1340,7 @@ async fn join_public_room_adds_member_and_bumps_epoch() {
 #[tokio::test]
 async fn join_public_room_is_idempotent() {
     // A second join by an already-member is a no-op: no second epoch bump.
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
 
@@ -1369,7 +1369,7 @@ async fn join_private_room_is_indistinguishable_from_unknown() {
     // A private room must be entered via the invite flow, but /join collapses
     // that refusal to the SAME 404 an unknown room returns -- distinguishing them
     // would leak room existence to a non-member probing ids (existence-oracle).
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let bob = UserId::from("bob".to_string());
     control.seed_user(alice.clone());
@@ -1399,7 +1399,7 @@ async fn list_rooms_is_newest_joined_first() {
     // must then come back newest-first (the second `rooms::find().is_in` fetch
     // returns rows in DB/heap order, so ordering must be re-applied from the
     // membership query).
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let db = state.db.as_ref().expect("db present");
@@ -1478,7 +1478,7 @@ async fn seed_extra_members(
 
 #[tokio::test]
 async fn add_tagma_below_cap_succeeds() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let tagma = TagmaId::from("tagma-1".to_string());
@@ -1511,7 +1511,7 @@ async fn add_tagma_below_cap_succeeds() {
 
 #[tokio::test]
 async fn add_tagma_at_cap_is_409() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let tagma = TagmaId::from("tagma-1".to_string());
@@ -1546,7 +1546,7 @@ async fn add_tagma_at_cap_is_409() {
 async fn add_tagma_idempotent_at_cap_is_noop() {
     // Re-adding a tagma already in the room is a no-op even at the cap: the cap
     // check runs only for a genuinely new member.
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let tagma = TagmaId::from("tagma-1".to_string());
@@ -1575,7 +1575,7 @@ async fn add_tagma_idempotent_at_cap_is_noop() {
 
 #[tokio::test]
 async fn join_public_room_at_cap_is_409() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     control.seed_user(alice.clone());
     let late = UserId::from("late".to_string());
@@ -1604,7 +1604,7 @@ async fn join_public_room_at_cap_is_409() {
 
 #[tokio::test]
 async fn accept_invite_at_cap_blocks_new_member() {
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let carol = UserId::from("carol".to_string());
     control.seed_user(alice.clone());
@@ -1643,7 +1643,7 @@ async fn accept_invite_at_cap_blocks_new_member() {
 async fn accept_invite_at_cap_lets_existing_member_re_accept() {
     // An already-member re-accepting their invite is a no-op member write (the
     // invite is still stamped) and must not hit the cap even in a full room.
-    let (state, control, _container) = db_state().await;
+    let (state, control) = db_state().await;
     let alice = UserId::from("alice".to_string());
     let carol = UserId::from("carol".to_string());
     control.seed_user(alice.clone());

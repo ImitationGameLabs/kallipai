@@ -143,7 +143,7 @@ mod tests {
 
     #[tokio::test]
     async fn fan_delivers_to_live_human_roommate() {
-        let (state, _control, _container) = db_state().await;
+        let (state, _control) = db_state().await;
         let alice = UserId::from("alice".to_string());
         let bob = UserId::from("bob".to_string());
         let t1 = TagmaId::from("t1".to_string());
@@ -179,7 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn fan_skips_the_transitioning_participant_itself() {
-        let (state, _control, _container) = db_state().await;
+        let (state, _control) = db_state().await;
         let alice = UserId::from("alice".to_string());
         let t1 = TagmaId::from("t1".to_string());
         seed_room(
@@ -204,7 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn fan_covers_every_room_the_participant_shares() {
-        let (state, _control, _container) = db_state().await;
+        let (state, _control) = db_state().await;
         let alice = UserId::from("alice".to_string());
         let bob = UserId::from("bob".to_string());
         let t1 = TagmaId::from("t1".to_string());
@@ -248,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn fan_delivers_offline_to_live_human_roommate() {
-        let (state, _control, _container) = db_state().await;
+        let (state, _control) = db_state().await;
         let alice = UserId::from("alice".to_string());
         let bob = UserId::from("bob".to_string());
         let t1 = TagmaId::from("t1".to_string());
@@ -283,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn fan_does_not_address_agent_roommates() {
-        let (state, _control, _container) = db_state().await;
+        let (state, _control) = db_state().await;
         let alice = UserId::from("alice".to_string());
         let t1 = TagmaId::from("t1".to_string()); // the transitioning tagma
         let t2 = TagmaId::from("t2".to_string()); // an agent roommate (receiver candidate)

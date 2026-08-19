@@ -36,7 +36,7 @@ sha2 = { workspace = true }
 reqwest = { workspace = true, features = ["form"] }
 
 [dev-dependencies]
-testcontainers = { workspace = true }
+testcontainers = { workspace = true, features = ["reusable-containers"] }
 testcontainers-modules = { workspace = true }
 tower = { workspace = true }
 http-body-util = { workspace = true }
