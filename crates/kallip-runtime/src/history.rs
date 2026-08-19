@@ -184,13 +184,19 @@ fn history_files(agent_dir: &Path) -> Vec<PathBuf> {
 
 /// Hydrate the conversation turns for `ids` from the history log.
 ///
-/// Scans per-day files **newest-first** — the live window's turns are always
-/// the most recent, so the wanted IDs live in the tail files and the scan
-/// stops after one or two of them (`wanted` empty → stop). Unparseable
-/// lines are skipped and counted: a torn tail or corrupt line must not
-/// abort a restore. System records never match (they carry no turn ID and
-/// are filtered by kind). Returns the turns in ascending ID order, matching
-/// the manifest's `conversation_turn_ids`.
+/// Scans per-day files **newest-first**, and lines within a file newest-first
+/// too — the live window's turns are always the most recent, so the wanted
+/// IDs live in the tail and the scan stops after one or two files
+/// (`wanted` empty → stop). Unparseable lines are skipped and counted: a
+/// torn tail or corrupt line must not abort a restore. System records
+/// never match (they carry no turn ID and are filtered by kind). Returns
+/// the turns in ascending ID order, matching the manifest's
+/// `conversation_turn_ids`.
+///
+/// A turn ID appearing in more than one record resolves to the newest:
+/// the first match wins and `wanted` never re-admits the ID. Offline
+/// repair relies on this — it appends corrected messages under the
+/// same turn ID instead of rewriting the damaged record.
 pub(crate) fn hydrate_turns(agent_dir: &Path, ids: &[u64]) -> (Vec<Turn>, HydrationReport) {
     let mut wanted: HashSet<u64> = ids.iter().copied().collect();
     let mut turns = Vec::new();
@@ -200,7 +206,7 @@ pub(crate) fn hydrate_turns(agent_dir: &Path, ids: &[u64]) -> (Vec<Turn>, Hydrat
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        for line in content.lines() {
+        for line in content.lines().rev() {
             if line.is_empty() {
                 continue;
             }
@@ -274,9 +280,14 @@ pub(crate) fn max_turn_id(agent_dir: &Path) -> u64 {
 /// fresh turns still boot). Unparseable lines are skipped: this path only
 /// runs on an already-wrecked directory, where the tail rebuild itself is
 /// the recorded degradation.
+///
+/// A turn ID already collected is skipped: repair appends the corrected
+/// messages under the same ID, and the older duplicate must neither
+/// double-count the budget nor enter the window twice.
 pub(crate) fn tail_turns_within_budget(agent_dir: &Path, budget: usize) -> Vec<Turn> {
     let mut turns = Vec::new();
     let mut used = 0usize;
+    let mut seen: HashSet<u64> = HashSet::new();
     'files: for path in history_files(agent_dir).into_iter().rev() {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
@@ -291,6 +302,11 @@ pub(crate) fn tail_turns_within_budget(agent_dir: &Path, budget: usize) -> Vec<T
             let Some(id) = rec.turn_id else {
                 continue;
             };
+            // Older duplicate of a repaired turn: the newest record
+            // already won above — count it once, not twice.
+            if !seen.insert(id) {
+                continue;
+            }
             if used + rec.estimated_tokens > budget {
                 break 'files;
             }
@@ -569,6 +585,21 @@ mod tests {
         assert_eq!(turns.len(), 2, "records around the bad line still hydrate");
         assert_eq!(turns[1].id.0, 8);
     }
+    /// The same turn ID in two day files resolves to the newest record —
+    /// the shape offline repair produces when it appends corrected
+    /// messages under the damaged turn's ID.
+    #[test]
+    fn hydrate_same_turn_id_resolves_to_newest_record() {
+        let dir = tmp_agent_dir();
+        write_day(dir.path(), "2026-08-18", &[turn_line(Some(3), "damaged")]);
+        write_day(dir.path(), "2026-08-19", &[turn_line(Some(3), "repaired")]);
+
+        let (turns, report) = hydrate_turns(dir.path(), &[3]);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].messages[0].content(), Some("repaired"));
+        assert!(report.missing_ids.is_empty());
+        assert_eq!(report.bad_lines, 0);
+    }
 
     #[test]
     fn max_turn_id_finds_newest_turn_record() {
@@ -644,5 +675,28 @@ mod tests {
         );
         assert!(tail_turns_within_budget(dir.path(), 0).is_empty());
         assert!(tail_turns_within_budget(dir.path(), 8).len() == 1);
+    }
+
+    /// A repaired turn's older duplicate counts once: no double budget,
+    /// no duplicate window entry. Same-day shape — repair appends to the
+    /// file the damaged record lives in.
+    #[test]
+    fn tail_rebuild_counts_a_repaired_turn_once() {
+        let dir = tmp_agent_dir();
+        write_day(
+            dir.path(),
+            "2026-08-19",
+            &[
+                turn_line_sized(Some(2), "before", 8),
+                turn_line_sized(Some(3), "damaged", 8),
+                turn_line_sized(Some(3), "repaired", 8),
+            ],
+        );
+
+        // Budget 16 fits both turns only if the duplicate is skipped.
+        let turns = tail_turns_within_budget(dir.path(), 16);
+        let ids: Vec<u64> = turns.iter().map(|t| t.id.0).collect();
+        assert_eq!(ids, vec![2, 3]);
+        assert_eq!(turns[1].messages[0].content(), Some("repaired"));
     }
 }

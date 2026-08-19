@@ -657,9 +657,9 @@ pub fn restore_agent(
 /// as degradations — at most one finding per turn per direction, naming the
 /// turn and the offending ids. Report-only by design: a dangling call would
 /// be rejected by the provider on the next round (which is what the warning
-/// buys time to notice), and the explicit repair operation — not restore —
-/// is what rewrites history to fix it. Pinned turns carry no tool traffic,
-/// so they pass through clean.
+/// buys time to notice), and the explicit repair operation —
+/// [`repair_agent_context`], not restore — is what rewrites history to
+/// fix it. Pinned turns carry no tool traffic, so they pass through clean.
 fn check_tool_pairing(store: &ContextStore, degraded: &mut Vec<Degradation>) {
     for turn in store.turns() {
         let unanswered = crate::tool_execution::unanswered_call_ids(&turn.messages);
@@ -684,6 +684,107 @@ fn check_tool_pairing(store: &ContextStore, degraded: &mut Vec<Degradation>) {
             });
         }
     }
+}
+
+/// One turn's pairing damage and the fix applied to it.
+#[derive(Debug, Clone)]
+pub struct RepairAction {
+    /// The damaged turn's ID — the repaired history record keeps it.
+    pub turn_id: u64,
+    /// Dangling tool-call ids that got a synthesized not-executed result.
+    pub unanswered_calls: Vec<String>,
+    /// Orphan tool-result ids whose messages were removed.
+    pub orphan_results: Vec<String>,
+}
+
+/// Outcome of a [`repair_agent_context`] pass.
+#[derive(Debug)]
+pub struct RepairReport {
+    /// Damage absorbed while loading (backup fallback, tail recovery, …):
+    /// repair rides the normal degradation chain, so the report doubles as
+    /// a health check.
+    pub degraded: Vec<Degradation>,
+    /// The repairs applied — or, in a dry run, the repairs that would be.
+    pub actions: Vec<RepairAction>,
+}
+
+/// Repair tool-call/result pairing damage in an agent's persisted context.
+///
+/// Every conversation turn violating the pairing invariant — dangling calls
+/// (answered with a synthesized not-executed error, the honest outcome for
+/// a call that never ran) or orphan results (removed) — is fixed in memory,
+/// and the repaired messages are appended to today's history file under the
+/// same turn ID. Both history readers scan newest-first, so the appended
+/// record wins over the damaged one, the log stays append-only, and the
+/// manifest needs no write: turn IDs are unchanged, and split persistence
+/// keeps message content only in history.
+///
+/// `execute: false` is a dry run — `actions` lists what would be done and
+/// nothing is written. Loading still goes through the normal chain, so a
+/// legacy directory is migrated as a side effect of being inspected.
+///
+/// Idempotent: a repaired record is itself clean, so a second pass finds
+/// nothing to append.
+pub fn repair_agent_context(
+    agent_dir: &Path,
+    tail_budget: usize,
+    execute: bool,
+) -> Result<RepairReport> {
+    let mut degraded = Vec::new();
+    let mut store = load_store(agent_dir, tail_budget, &mut degraded)?;
+    let history = crate::history::HistoryWriter::new(agent_dir.to_owned());
+    let mut actions = Vec::new();
+
+    for turn in store.turns_mut() {
+        // Pinned turns carry no tool traffic (see `check_tool_pairing`).
+        if turn.is_pinned() {
+            continue;
+        }
+        let unanswered = crate::tool_execution::unanswered_call_ids(&turn.messages);
+        let orphan = crate::tool_execution::orphan_result_ids(&turn.messages);
+        if unanswered.is_empty() && orphan.is_empty() {
+            continue;
+        }
+        actions.push(RepairAction {
+            turn_id: turn.id.0,
+            unanswered_calls: unanswered.iter().map(|(id, _)| id.clone()).collect(),
+            orphan_results: orphan.clone(),
+        });
+        if !execute {
+            continue;
+        }
+
+        // Synthesis mirrors `tool_execution::synthesize_unanswered_results`
+        // minus the live-loop specifics: no park target is recorded for a
+        // dangling `break`, so every dangling call — `break` included — gets
+        // the honest not-executed error.
+        for (id, name) in unanswered {
+            let content = crate::policy::error_result(
+                &name,
+                "not executed: no result was ever recorded for this call (offline repair)"
+                    .to_owned(),
+            );
+            turn.messages.push(ChatMessage::tool_result(content, id));
+        }
+        let orphan_ids: Vec<&str> = orphan.iter().map(String::as_str).collect();
+        turn.messages.retain(|m| {
+            m.tool_call_id()
+                .is_none_or(|rid| !orphan_ids.contains(&rid))
+        });
+
+        turn.estimated_tokens = crate::context::Turn::estimate_tokens(&turn.messages);
+        history
+            .append(
+                Some(turn.id.0),
+                &turn.messages,
+                turn.estimated_tokens,
+                crate::history::RecordKind::Turn,
+                None,
+            )
+            .with_context(|| format!("appending repaired turn {} to history", turn.id.0))?;
+    }
+
+    Ok(RepairReport { degraded, actions })
 }
 
 /// Load the context store in the format the directory holds.
@@ -1174,8 +1275,9 @@ mod tests {
     /// declared-but-unanswered call and a result answering nothing each
     /// produce their own degradation, and the persisted messages come back
     /// untouched.
-    #[test]
-    fn pairing_damage_degrades_instead_of_repairing() {
+    /// A persisted 400-bug-shaped turn: `c2` declared but never answered,
+    /// `c9` answering nothing — both pairing directions damaged at once.
+    fn pairing_damaged_dir() -> (TempDir, Vec<ChatMessage>, u64) {
         use just_llm_client::types::chat::{ChatToolCall, FunctionCall, ToolType};
         let call = |id: &str, name: &str| ChatToolCall {
             id: id.to_owned(),
@@ -1198,6 +1300,23 @@ mod tests {
             .append(Some(turn_id.0), &damaged, 8, RecordKind::Turn, None)
             .unwrap();
         persist_context(&store, dir.path()).unwrap();
+        (dir, damaged, turn_id.0)
+    }
+
+    /// Total non-empty lines across the agent's history files — the
+    /// dry-run/idempotency "nothing was appended" oracle.
+    fn history_line_count(dir: &Path) -> usize {
+        fs::read_dir(dir.join("history"))
+            .unwrap()
+            .map(|entry| {
+                let content = fs::read_to_string(entry.unwrap().path()).unwrap();
+                content.lines().filter(|l| !l.is_empty()).count()
+            })
+            .sum()
+    }
+    #[test]
+    fn pairing_damage_degrades_instead_of_repairing() {
+        let (dir, damaged, _turn_id) = pairing_damaged_dir();
 
         let restored =
             restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
@@ -1208,6 +1327,87 @@ mod tests {
         // Report-only: the hydrated turn is byte-for-byte what history holds.
         let turns = restored.store.turns();
         assert_eq!(turns.front().unwrap().messages, damaged);
+    }
+
+    /// Repair fixes both damage directions and lands in history: a fresh
+    /// restore hydrates the repaired record (newest wins) with zero
+    /// pairing findings.
+    #[test]
+    fn repair_agent_context_fixes_pairing_damage() {
+        let (dir, _damaged, turn_id) = pairing_damaged_dir();
+
+        let report = repair_agent_context(dir.path(), NO_TRUNCATION, true).unwrap();
+        assert_eq!(report.actions.len(), 1);
+        let action = &report.actions[0];
+        assert_eq!(action.turn_id, turn_id);
+        assert_eq!(action.unanswered_calls, vec!["c2"]);
+        assert_eq!(action.orphan_results, vec!["c9"]);
+
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+        let kinds: Vec<DegradationKind> = restored.degraded.iter().map(|d| d.kind).collect();
+        assert!(!kinds.contains(&DegradationKind::UnansweredToolCalls));
+        assert!(!kinds.contains(&DegradationKind::OrphanToolResults));
+
+        // c2 answered with a not-executed error, c9's orphan result
+        // removed, c1's real result kept.
+        let turn = restored
+            .store
+            .turns()
+            .iter()
+            .find(|t| t.id.0 == turn_id)
+            .unwrap();
+        let ids: Vec<&str> = turn
+            .messages
+            .iter()
+            .filter_map(|m| m.tool_call_id())
+            .collect();
+        assert_eq!(ids, vec!["c1", "c2"]);
+        let c2 = turn
+            .messages
+            .iter()
+            .find(|m| m.tool_call_id() == Some("c2"))
+            .unwrap();
+        assert!(c2.content().unwrap().contains("not executed"));
+    }
+
+    /// Dry run reports the same actions and writes nothing: no history
+    /// record, no manifest churn, damage still present on the next restore.
+    #[test]
+    fn repair_agent_context_dry_run_writes_nothing() {
+        let (dir, _damaged, _turn_id) = pairing_damaged_dir();
+        let manifest_before = fs::read(dir.path().join("manifest.json")).unwrap();
+        let lines_before = history_line_count(dir.path());
+
+        let report = repair_agent_context(dir.path(), NO_TRUNCATION, false).unwrap();
+        assert_eq!(report.actions.len(), 1);
+
+        assert_eq!(history_line_count(dir.path()), lines_before);
+        assert_eq!(
+            fs::read(dir.path().join("manifest.json")).unwrap(),
+            manifest_before
+        );
+
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+        let kinds: Vec<DegradationKind> = restored.degraded.iter().map(|d| d.kind).collect();
+        assert!(kinds.contains(&DegradationKind::UnansweredToolCalls));
+        assert!(kinds.contains(&DegradationKind::OrphanToolResults));
+    }
+
+    /// A repaired record is clean: a second pass plans nothing and
+    /// appends nothing.
+    #[test]
+    fn repair_agent_context_is_idempotent() {
+        let (dir, _damaged, _turn_id) = pairing_damaged_dir();
+
+        let first = repair_agent_context(dir.path(), NO_TRUNCATION, true).unwrap();
+        assert_eq!(first.actions.len(), 1);
+        let lines_after_first = history_line_count(dir.path());
+
+        let second = repair_agent_context(dir.path(), NO_TRUNCATION, true).unwrap();
+        assert!(second.actions.is_empty());
+        assert_eq!(history_line_count(dir.path()), lines_after_first);
     }
 
     // --- degradation chain: backup fallback + tail recovery ---

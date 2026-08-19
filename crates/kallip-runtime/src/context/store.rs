@@ -436,6 +436,13 @@ impl ContextStore {
     pub fn turns(&self) -> &VecDeque<Turn> {
         &self.turns
     }
+    /// Mutable access to all turns. Restore never rewrites hydrated
+    /// messages; this exists for the offline repair path
+    /// (`persistence::repair_agent_context`), which fixes pairing damage
+    /// in memory before appending the repaired record to history.
+    pub(crate) fn turns_mut(&mut self) -> &mut VecDeque<Turn> {
+        &mut self.turns
+    }
 
     /// Total number of turns stored (pinned + conversation).
     pub fn turn_count(&self) -> usize {
