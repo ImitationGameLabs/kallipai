@@ -329,8 +329,15 @@ pub async fn agent_task(
                 if wait_timer_due(&ctx) {
                     let armed_secs = ctx.wait_armed_secs;
                     clear_wait_timer(&ctx);
-                    ctx.record_turn(vec![ChatMessage::user(&wait_elapsed_text(armed_secs))])
-                        .await;
+                    // A budget-probe wake (the fuse the budget gate itself
+                    // re-armed) skips the injection: the round gate still
+                    // blocks, so the [system] turn could never reach a
+                    // model — it would only accumulate context noise on
+                    // every probe cycle. Real wait wakes inject as usual.
+                    if !ctx.token_budget.is_exceeded() {
+                        ctx.record_turn(vec![ChatMessage::user(&wait_elapsed_text(armed_secs))])
+                            .await;
+                    }
                     if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
                         break;
                     }
@@ -829,5 +836,87 @@ mod tests {
         handle.abort();
 
         assert!(found.unwrap_or(false), "inbox message should drive a round");
+    }
+
+    /// Guard-authority twin for the retry arm (the wait twin is above): a
+    /// stored permit is inert once the retry deadline was cleared — a sleep
+    /// that fired after an external wake won the race cannot fire a turn.
+    /// Together with the wait twin this pins both directions of the
+    /// design's silent-retry-loss suspicion: permits are doorbells only,
+    /// the deadline check is the sole authority.
+    #[tokio::test]
+    async fn stale_retry_permit_is_inert_after_clear() {
+        let mut ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+        ctx.transient_fails = 1;
+        let (_deadline, _) = schedule_transient_retry(&ctx);
+        assert!(!transient_retry_due(&ctx), "freshly armed backoff is not yet due");
+        ctx.retry_notify.notify_one(); // stale permit: sleep fired after the clear
+        clear_transient_retry(&ctx);
+        assert!(!transient_retry_due(&ctx), "stale permit must be inert");
+    }
+
+    /// Five-wake-set pin (design §9 v2-⑤): an approval decision (approve/
+    /// deny) wakes the parked agent through the shared notify arm and the
+    /// notification reaches the next round's context — no prompt needed.
+    /// (Inbox: `notify_pull_drives_round` above; prompt: every full-loop
+    /// test; duty: `update_duty_on_notifies_agent` at the tagma layer;
+    /// profile reset: `apply_pending_profile_reset`'s tagma tests.)
+    #[tokio::test]
+    async fn approval_decision_wakes_agent_and_drives_round() {
+        let mut ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+
+        // Commit + deny one approval so a notification is pending.
+        let id = {
+            let mut q = ctx.approvals.lock().await;
+            let id = q.enqueue("bash_exec", "{}", None);
+            q.commit(&id, "test justification").unwrap();
+            q.deny(&id, "test deny").unwrap();
+            assert!(q.has_notifications());
+            id
+        };
+
+        let notify = ctx.notify.clone();
+        let cancel = ctx.cancel.clone();
+        let store = ctx.store.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+        let (_ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+        let handle = tokio::spawn(agent_task(ctx, None, prompt_rx, tx));
+
+        notify.notify_one();
+
+        // The notification is injected as a user turn before any network
+        // call (same ordering as the inbox twin).
+        let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let guard = store.lock().await;
+                let has = guard.turns().iter().flat_map(|t| &t.messages).any(|m| {
+                    m.content()
+                        .map(|t| t.contains(&format!("Approval {id} has been denied")))
+                        .unwrap_or(false)
+                });
+                drop(guard);
+                if has {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+
+        cancel.cancel();
+        let _ = rx.recv().await;
+        handle.abort();
+        assert!(
+            found.unwrap_or(false),
+            "an approval decision must wake the agent and reach the round context"
+        );
     }
 }
