@@ -177,11 +177,18 @@ The core loop (`run_agent_rounds` in `kallip-runtime`) iterates up to
 
 A bare assistant response (no tool calls, no `break`) does **not** end the run:
 the harness records it, injects a heartbeat prompt, and re-enters the loop. Only
-`break` parks the agent (emitting an `Idle` event) — so the agent decides when to
-yield. A no-progress guardrail (`max_heartbeat_rounds`, default 3) force-idles
-after a bounded storm of bare responses. `FailoverChainExhausted` parks with a
-timed retry (bounded by `max_transient_retries`); permanent errors, budget
-exhaustion, and max-rounds park and surface to the operator. Messages to the
+`break` yields — and it comes in two modes: `break(wait)` parks the agent with a
+wake timer (emitting a `Waiting` event; the timer expiring or any external event
+resumes it), while `break(idle)` parks for good (emitting an `Idle` event; only a
+new prompt resumes it) — so the agent decides when and how to yield. A
+no-progress guardrail (`max_heartbeat_rounds`, default 3) force-idles
+after a bounded storm of bare responses. Failures map onto the lifecycle as
+follows: `FailoverChainExhausted` with a transient retry armed enters a retrying
+backoff (bounded by `max_transient_retries`; the timer re-runs the original
+prompt, and exhausting the budget parks with `TransientRetryExhausted`);
+permanent errors and max-rounds park the agent with a reason surfaced to the
+operator (a parked agent is kickable via the wake endpoint); budget exhaustion
+re-arms the wait timer as a zero-cost recovery probe. Messages to the
 user are decoupled from all of this: the agent addresses the user by running the
 `kallip lesche send` CLI through `bash_exec`, not by ending a turn.
 

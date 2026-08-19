@@ -43,6 +43,7 @@ the full authorization matrix, see [auth.md](auth.md).
 | `GET`    | `/agents/root`                    | Fetch the tagma-managed root agent         | any                          |
 | `DELETE` | `/agents/{id}`                    | Stop and remove an agent (never the root)  | operator / superior          |
 | `POST`   | `/agents/{id}/interrupt`          | Interrupt current agent operation          | operator / superior          |
+| `POST`   | `/agents/{id}/wake`               | Kick a parked agent awake                  | operator / superior          |
 | `POST`   | `/agents/{id}/message`            | Send a user message (inbound)              | any (peer-to-peer)           |
 | `POST`   | `/agents/{id}/lesche/messages`    | Deliver an agent-authored message (root)   | self (root agent)            |
 | `GET`    | `/agents/{id}/events`             | Internal event stream (SSE, rich vocab)    | any                          |
@@ -184,11 +185,13 @@ Auth: any authenticated identity. Response contains no secrets. See [auth.md](au
     {
       "id": "AgentId",
       "workspace_root": "string",
-      "state": "idle | busy",
+      "state": "idle | busy | waiting | parked | retrying | faulted",
       "created_by": "AgentId | null",
       "role": "string — short display label (omitted when empty)",
       "description": "string — longer prose (omitted when empty)",
-      "activity": "string — agent self-reported current activity (omitted when empty / idle)"
+      "activity": "string — agent self-reported current activity (omitted when empty / idle)",
+      "parked_reason": "object — why the agent parked (present only in state parked)",
+      "retrying": "object — the armed transient-retry plan (present only in state retrying)"
     }
   ]
 }
@@ -238,6 +241,25 @@ Status: `202 Accepted`
 | ---- | ---------------------------------- |
 | 403  | Not a superior of the target agent |
 | 404  | Agent not found                    |
+
+
+### `POST /agents/{id}/wake` — Wake parked agent
+
+Kicks a parked agent awake: enqueues a `[system]` turn telling the agent why and
+how long ago it parked — "you were parked 3m 12s ago: fatal error: boom. Decide
+whether to retry, adjust, or report." — and the agent's next round decides what
+to do. Only meaningful while the agent is parked.
+
+Auth: operator or superior. See [auth.md](auth.md).
+
+Status: `202 Accepted`
+
+| Code | Condition                                        |
+| ---- | ------------------------------------------------ |
+| 403  | Not a superior of the target agent               |
+| 404  | Agent not found                                  |
+| 409  | Agent is not parked, or is faulted               |
+| 500  | Parked state without a parked reason (invariant) |
 
 ### `POST /agents/{id}/message` — Send message
 
@@ -383,7 +405,9 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 ```json
 {
-  "state": "idle | busy",
+  "state": "idle | busy | waiting | parked | retrying | faulted",
+  "parked_reason": "object — why the agent parked (present only in state parked)",
+  "retrying": { "attempt": 2, "max_attempts": 3, "retry_in_secs": 5.0 },
   "context": {
     "pinned_items": [["label", 123]],
     "turn_count": 10,
@@ -493,11 +517,13 @@ The updated [`AgentSummary`](#get-agents--list-agents):
 {
   "id": "AgentId",
   "workspace_root": "string",
-  "state": "idle | busy",
+  "state": "idle | busy | waiting | parked | retrying | faulted",
   "created_by": "AgentId | null",
   "role": "string",
   "description": "string",
   "activity": "string"
+  "parked_reason": "object — present only in state parked",
+  "retrying": "object — present only in state retrying"
 }
 ```
 
@@ -765,17 +791,22 @@ data: {"type":"assistantContentDelta","delta":"Hello, "}
 ### Round-outcome events
 
 These signal the end of the current assistant turn. Except for `cancelled`, the agent
-**stays alive** and returns to idle — more events will follow on the next prompt. Only
-`cancelled` (a lifecycle cancel from remove / tagma shutdown) ends the stream.
+**stays alive** — more events will follow after the next wake. The post-turn state
+varies: `idle`/`interrupted` return to idle, `waiting` parks on a wake timer,
+`tokenBudgetExceeded` re-arms the wait timer as a recovery probe, an armed
+`failoverChainExhausted` enters a retrying backoff, and the unarmed/error/max-rounds
+outcomes park the agent (kickable via `POST /agents/{id}/wake`). Only `cancelled`
+(a lifecycle cancel from remove / tagma shutdown) ends the stream.
 
 | `type`                   | Fields                                                                                                                               | Description                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `finished`               | `content: string`                                                                                                                    | Agent completed the turn successfully                                                                                                                                                                                                                                                                                                             |
-| `maxRoundsExceeded`      | _(none)_                                                                                                                             | Hit the max tool rounds limit for this turn                                                                                                                                                                                                                                                                                                       |
-| `error`                  | `message: string`                                                                                                                    | Turn failed with an error; agent stays alive                                                                                                                                                                                                                                                                                                      |
-| `failoverChainExhausted` | `reason: "noFailoverConfigured" \| "allBackupsExhausted" \| "allCandidatesUnbuildable" \| "allCandidatesInfeasible", detail: string` | Within-tier failover chain exhausted — every profile in the tier is unavailable; `reason` distinguishes the cause (`allCandidatesInfeasible` = every candidate's declared window violated the budget shape — tune `SUMMARY_MAX_TOKENS` / `PINNED_BUDGET_RATIO` or raise the window), `detail` is the original trigger. Agent stays alive and idle |
+| `idle`                   | _(none)_                                                                                                                              | Agent completed the turn and returned to idle (a `finished`-style content event is `assistantContent`)                                                                                              |
+| `maxRoundsExceeded`      | _(none)_                                                                                                                             | Hit the max tool rounds limit for this turn; the agent parks                                                                                                                                              |
+| `error`                  | `message: string`                                                                                                                    | Turn failed with a fatal error; the agent parks (kickable via `POST /agents/{id}/wake`)                                                                                                                   |
+| `failoverChainExhausted` | `reason: "noFailoverConfigured" \| "allBackupsExhausted" \| "allCandidatesUnbuildable" \| "allCandidatesInfeasible", detail: string, transient_retry: { attempt, max_attempts, retry_in_secs }` | Within-tier failover chain exhausted — every profile in the tier is unavailable; `reason` distinguishes the cause (`allCandidatesInfeasible` = every candidate's declared window violated the budget shape — tune `SUMMARY_MAX_TOKENS` / `PINNED_BUDGET_RATIO` or raise the window), `detail` is the original trigger. With `transient_retry` present the agent enters a retrying backoff (the timer re-runs the original prompt); absent, it parks |
+| `waiting`                | `timeout_secs: u64`                                                                                                                  | Turn ended on `break(wait)`; the agent parks on a wake timer — the timer expiring or any external event resumes it                                                                                         |
 | `interrupted`            | _(none)_                                                                                                                             | Round aborted via interrupt; agent stays alive and idle                                                                                                                                                                                                                                                                                           |
-| `tokenBudgetExceeded`    | `consumed: u64, budget: u64`                                                                                                         | Token budget hit; agent stays idle until the budget is raised                                                                                                                                                                                                                                                                                     |
+| `tokenBudgetExceeded`    | `consumed: u64, budget: u64`                                                                                                         | Token budget hit; the agent parks on a re-armed wait timer as a zero-cost recovery probe (waiting, not idle) until the budget is raised                                                                                                 |
 | `cancelled`              | _(none)_                                                                                                                             | Lifecycle cancel (remove / shutdown) — agent stops, stream ends                                                                                                                                                                                                                                                                                   |
 
 ### State and notifications

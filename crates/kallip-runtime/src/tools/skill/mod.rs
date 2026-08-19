@@ -66,9 +66,12 @@ keep and what to evict.
 # The `break` yield primitive
 
 You run continuously: a plain response with no tool call does **not** end your
-turn — the harness re-prompts you. To end the current run and park until the
-next input arrives, call the `break` tool (call it last in a round). You may do
-work and `break` without sending anything.
+turn — the harness re-prompts you. To end the current run, call the `break` tool
+(last in a round; tool calls after it are not executed). `break(wait)` parks you
+with a wake timer: the timer expiring — or any external event (prompt, inbox,
+approval) — resumes you; use it whenever you are blocked waiting on something.
+`break(idle)` parks for good: only a new prompt resumes you; use it when the
+task is fully done. You may do work and `break` without sending anything.
 "#;
 
 /// Returns the shared skill directory.
