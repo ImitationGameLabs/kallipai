@@ -360,3 +360,60 @@ fn replace_pin_updates_in_place_keeps_position() {
     assert!(!store.turns()[2].is_pinned());
     assert_invariant(&store);
 }
+
+#[test]
+fn manifest_projection_splits_pinned_conversation_and_injected() {
+    let mut store = new_store();
+    store
+        .pin("context_summary", ChatMessage::assistant("sum"))
+        .unwrap();
+    let a = store.push_turn(vec![ChatMessage::user("a")]).0;
+    let b = store.push_turn(vec![ChatMessage::user("b")]).0;
+
+    // Simulate a restore-injected restart notice: consumes an ID, lands in
+    // the conversation suffix, but is registered as injected.
+    let injected = store
+        .push_turn(vec![ChatMessage::user("[system] restart")])
+        .0;
+    store.register_injected_turn(injected);
+
+    let doc = store.to_manifest_doc();
+    assert_eq!(doc.version, 1);
+    assert_eq!(doc.conversation_turn_ids, vec![a.0, b.0]);
+    assert_eq!(doc.next_turn_id, injected.0 + 1);
+    assert!(doc.retry_log.is_empty());
+
+    let pins = store.to_pins_doc();
+    assert_eq!(pins.pins.len(), 1);
+    assert_eq!(pins.pins[0].label, "context_summary");
+    assert_eq!(pins.pins[0].message.content(), Some("sum"));
+    assert_invariant(&store);
+}
+
+#[test]
+fn manifest_projection_carries_state_history_cannot_rebuild() {
+    let mut store = new_store();
+    store.accumulate_usage_no_anchor(&just_llm_client::types::chat::Usage {
+        prompt_tokens: 100,
+        completion_tokens: 40,
+        prompt_cache_hit_tokens: None,
+        prompt_cache_miss_tokens: None,
+        completion_tokens_details: None,
+        total_tokens: 140,
+    });
+    store.retry_log.push(kallip_common::retry::RetryRecord {
+        timestamp: 5,
+        round: 1,
+        attempt: 1,
+        max_attempts: 3,
+        error: "rate limited".into(),
+        delay_secs: 2.0,
+        endpoint: None,
+    });
+
+    let doc = store.to_manifest_doc();
+    assert_eq!(doc.cumulative_usage.prompt_tokens, 100);
+    assert_eq!(doc.cumulative_usage.completion_tokens, 40);
+    assert_eq!(doc.retry_log.len(), 1);
+    assert_eq!(doc.retry_log[0].error, "rate limited");
+}

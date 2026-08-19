@@ -1,6 +1,6 @@
 //! Single source of truth for all context data in an agent.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 
 use anyhow::{Result, bail};
@@ -9,6 +9,7 @@ use kallip_common::context::{ContextUsage, CumulativeUsage};
 
 use kallip_common::retry::RetryRecord;
 
+use super::manifest::{FORMAT_VERSION, ManifestDoc, PinRecord, PinsDoc};
 use super::tokens::estimate_message_tokens;
 use super::turn::{Turn, TurnId, TurnKind};
 
@@ -142,6 +143,14 @@ pub struct ContextStore {
     /// Highest token-budget warning threshold already fired. Not persisted.
     #[serde(skip)]
     highest_budget_warned_pct: Option<u8>,
+    /// Turn IDs injected by restore (restart notices) rather than recorded
+    /// through `record_turn`. A restart notice is an on-the-spot prompt: it
+    /// is meaningless across restarts (the next restore injects a fresh
+    /// one), and it has no history record to hydrate from. The manifest
+    /// projection skips these IDs; the assigned numbers are still consumed,
+    /// so `next_turn_id` stays monotonic.
+    #[serde(skip)]
+    injected_turn_ids: HashSet<u64>,
 }
 
 impl AgenticContext for ContextStore {
@@ -327,6 +336,7 @@ impl ContextStore {
             pinned_token_budget: 0,
             highest_warned_pct: None,
             highest_budget_warned_pct: None,
+            injected_turn_ids: HashSet::new(),
         }
     }
 
@@ -528,6 +538,48 @@ impl ContextStore {
     /// Record that a token-budget warning has been fired at the given threshold.
     pub fn mark_budget_warned(&mut self, pct: u8) {
         self.highest_budget_warned_pct = Some(self.highest_budget_warned_pct.unwrap_or(0).max(pct));
+    }
+    /// Record an injected turn's ID so the manifest projection skips it.
+    /// Called by restore when it pushes a restart notice outside
+    /// `record_turn`.
+    pub fn register_injected_turn(&mut self, id: TurnId) {
+        self.injected_turn_ids.insert(id.0);
+    }
+
+    /// Project the persistable state onto the manifest document: the live
+    /// conversation window as turn IDs (pinned and injected turns excluded),
+    /// plus the small state history cannot rebuild. See `context::manifest`.
+    pub(crate) fn to_manifest_doc(&self) -> ManifestDoc {
+        ManifestDoc {
+            version: FORMAT_VERSION,
+            conversation_turn_ids: self
+                .turns
+                .iter()
+                .filter(|t| !t.is_pinned() && !self.injected_turn_ids.contains(&t.id.0))
+                .map(|t| t.id.0)
+                .collect(),
+            cumulative_usage: self.cumulative_usage,
+            next_turn_id: self.next_turn_id,
+            retry_log: self.retry_log.clone(),
+        }
+    }
+
+    /// Project the pinned layer onto the pins document, in composition order.
+    /// Pinned turns are single-message by construction (`pin`/`replace_pin`
+    /// store exactly one message).
+    pub(crate) fn to_pins_doc(&self) -> PinsDoc {
+        PinsDoc {
+            version: FORMAT_VERSION,
+            pins: self
+                .pinned_turns()
+                .map(|t| PinRecord {
+                    id: t.id.0,
+                    label: t.label().expect("pinned turn has a label").to_owned(),
+                    message: t.messages[0].clone(),
+                    estimated_tokens: t.estimated_tokens,
+                })
+                .collect(),
+        }
     }
 }
 

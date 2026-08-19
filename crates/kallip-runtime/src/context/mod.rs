@@ -14,6 +14,7 @@
 mod compact;
 mod compose;
 mod estimate;
+mod manifest;
 mod store;
 mod summarize;
 mod tokens;
