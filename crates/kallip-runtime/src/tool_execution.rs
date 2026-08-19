@@ -222,6 +222,49 @@ pub(crate) async fn execute_tool_calls(
     ToolExecResult::Messages(turn_messages)
 }
 
+/// Tool calls declared in these messages that no tool result in the same
+/// slice answers — `(id, tool name)` pairs, in declaration order.
+///
+/// This is the pairing invariant every recorded turn must satisfy: each id
+/// an assistant message declares via `tool_calls` has a `ToolResult` message
+/// with that `tool_call_id` somewhere in the slice. Scans all messages
+/// rather than trusting the assistant-first round shape, so it doubles as a
+/// damage probe over persisted turns (restore-time pairing validation).
+pub(crate) fn unanswered_call_ids(messages: &[ChatMessage]) -> Vec<(String, String)> {
+    let declared: Vec<(String, String)> = messages
+        .iter()
+        .filter_map(|msg| msg.tool_calls())
+        .flatten()
+        .map(|c| (c.id.clone(), c.function.name.clone()))
+        .collect();
+    let answered: Vec<&str> = messages
+        .iter()
+        .filter_map(|msg| msg.tool_call_id())
+        .collect();
+    declared
+        .into_iter()
+        .filter(|(id, _)| !answered.contains(&id.as_str()))
+        .collect()
+}
+
+/// Tool results in these messages whose `tool_call_id` no declared call in
+/// the same slice matches — the mirror damage of [`unanswered_call_ids`],
+/// in message order.
+pub(crate) fn orphan_result_ids(messages: &[ChatMessage]) -> Vec<String> {
+    let declared: Vec<&str> = messages
+        .iter()
+        .filter_map(|msg| msg.tool_calls())
+        .flatten()
+        .map(|c| c.id.as_str())
+        .collect();
+    messages
+        .iter()
+        .filter_map(|msg| msg.tool_call_id())
+        .filter(|rid| !declared.contains(rid))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Fill in a tool result for every `tool_calls` id in the round's assistant
 /// message that has no matching `ToolResult` in the same turn.
 ///
@@ -239,30 +282,11 @@ pub(crate) fn synthesize_unanswered_results(
     turn_messages: &mut Vec<ChatMessage>,
     until: BreakUntil,
 ) {
-    // Snapshot the declared calls (id + tool name) off the assistant message
-    // before the mutable borrow below.
-    let Some(declared) = turn_messages
-        .first()
-        .and_then(|msg| msg.tool_calls())
-        .map(|calls| {
-            calls
-                .iter()
-                .map(|c| (c.id.clone(), c.function.name.clone()))
-                .collect::<Vec<_>>()
-        })
-    else {
-        return;
-    };
+    // Snapshot the declared-but-unanswered calls before the mutable push
+    // below.
+    let unanswered = unanswered_call_ids(turn_messages);
 
-    for (id, name) in declared {
-        let answered = turn_messages
-            .iter()
-            .skip(1)
-            .filter_map(|msg| msg.tool_call_id())
-            .any(|answered_id| answered_id == id.as_str());
-        if answered {
-            continue;
-        }
+    for (id, name) in unanswered {
         let content = if name == "break" {
             break_ack(until)
         } else {
@@ -375,5 +399,46 @@ mod tests {
         let wait = break_ack(BreakUntil::Wait { timeout_secs: 30 });
         assert!(wait.contains(r#""until":"wait""#), "{wait}");
         assert!(wait.contains(r#""timeout_secs":30"#), "{wait}");
+    }
+    use just_llm_client::types::chat::{ChatToolCall, FunctionCall, ToolType};
+    fn call(id: &str, name: &str) -> ChatToolCall {
+        ChatToolCall {
+            id: id.to_owned(),
+            kind: ToolType::Function,
+            function: FunctionCall {
+                name: name.to_owned(),
+                arguments: "{}".to_owned(),
+            },
+        }
+    }
+
+    /// The pairing probes agree on a well-formed round (all calls answered,
+    /// no orphans) and each flags its own damage class: a declared call with
+    /// no result, and a result answering nothing in the slice.
+    #[test]
+    fn pairing_probes_flag_both_damage_directions() {
+        let clean = vec![
+            ChatMessage::assistant_tool_calls(vec![call("c1", "read"), call("c2", "edit")]),
+            ChatMessage::tool_result("ok", "c1"),
+            ChatMessage::tool_result("ok", "c2"),
+        ];
+        assert!(unanswered_call_ids(&clean).is_empty());
+        assert!(orphan_result_ids(&clean).is_empty());
+
+        let damaged = vec![
+            ChatMessage::assistant_tool_calls(vec![call("c1", "read"), call("c2", "edit")]),
+            ChatMessage::tool_result("ok", "c1"),
+            ChatMessage::tool_result("ghost", "c9"),
+        ];
+        assert_eq!(
+            unanswered_call_ids(&damaged),
+            vec![("c2".into(), "edit".into())]
+        );
+        assert_eq!(orphan_result_ids(&damaged), vec!["c9".to_owned()]);
+
+        // No tool traffic at all: both probes quiet.
+        let plain = vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")];
+        assert!(unanswered_call_ids(&plain).is_empty());
+        assert!(orphan_result_ids(&plain).is_empty());
     }
 }

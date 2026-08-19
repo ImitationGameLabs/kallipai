@@ -467,6 +467,10 @@ pub enum DegradationKind {
     MissingHistoryTurns,
     /// History lines that failed to parse and were skipped.
     BadHistoryLines,
+    /// Tool calls in a restored turn with no matching tool result.
+    UnansweredToolCalls,
+    /// Tool results in a restored turn answering no call in that turn.
+    OrphanToolResults,
 }
 
 /// Scan the agents directory and return agents eligible for restore.
@@ -563,10 +567,6 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
         Err(_) => ApprovalStore::new(),
     };
 
-    // Tool-call/result pairing is guaranteed at record time
-    // (`tool_execution::synthesize_unanswered_results`); restore intentionally does not
-    // auto-repair legacy orphan tool calls -- a stuck agent is cleaned manually.
-    //
     // Fold the legacy `pinned` vec (pre-unification format) into pinned turns at the front of
     // `turns`. No-op for new-format stores.
     store.migrate_legacy_pinned();
@@ -574,6 +574,12 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
     // Migrate legacy summary field to a pinned turn.
     store.migrate_legacy_summary();
 
+    // Tool-call/result pairing is guaranteed at record time
+    // (`tool_execution::synthesize_unanswered_results`); damage persisted before that
+    // guarantee (or written by hand) surfaces here as degradations. Report-only:
+    // repairing is a separate explicit operation, never something a restore does
+    // silently.
+    check_tool_pairing(&store, &mut degraded);
     // Recompute every cached token estimate via the current estimator, so persisted estimates
     // (possibly from a prior estimator version, e.g. the old char/4 heuristic or stale legacy
     // pins) are brought up to date. Idempotent.
@@ -614,6 +620,39 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
         approvals,
         degraded,
     })
+}
+
+/// Validate tool-call/result pairing across every turn and record violations
+/// as degradations — at most one finding per turn per direction, naming the
+/// turn and the offending ids. Report-only by design: a dangling call would
+/// be rejected by the provider on the next round (which is what the warning
+/// buys time to notice), and the explicit repair operation — not restore —
+/// is what rewrites history to fix it. Pinned turns carry no tool traffic,
+/// so they pass through clean.
+fn check_tool_pairing(store: &ContextStore, degraded: &mut Vec<Degradation>) {
+    for turn in store.turns() {
+        let unanswered = crate::tool_execution::unanswered_call_ids(&turn.messages);
+        if !unanswered.is_empty() {
+            let ids: Vec<&str> = unanswered.iter().map(|(id, _)| id.as_str()).collect();
+            degraded.push(Degradation {
+                kind: DegradationKind::UnansweredToolCalls,
+                detail: format!(
+                    "turn {} declares tool calls with no result: {ids:?}",
+                    turn.id.0
+                ),
+            });
+        }
+        let orphan = crate::tool_execution::orphan_result_ids(&turn.messages);
+        if !orphan.is_empty() {
+            degraded.push(Degradation {
+                kind: DegradationKind::OrphanToolResults,
+                detail: format!(
+                    "turn {} carries tool results answering no call: {orphan:?}",
+                    turn.id.0
+                ),
+            });
+        }
+    }
 }
 
 /// Load the context store in the format the directory holds.
@@ -1003,6 +1042,45 @@ mod tests {
         );
         let turns = degraded.store.turns();
         assert_eq!(turns.len(), 3, "pin + one hydratable turn + restart notice");
+    }
+
+    /// Pairing damage in a hydrated turn is reported, not repaired: a
+    /// declared-but-unanswered call and a result answering nothing each
+    /// produce their own degradation, and the persisted messages come back
+    /// untouched.
+    #[test]
+    fn pairing_damage_degrades_instead_of_repairing() {
+        use just_llm_client::types::chat::{ChatToolCall, FunctionCall, ToolType};
+        let call = |id: &str, name: &str| ChatToolCall {
+            id: id.to_owned(),
+            kind: ToolType::Function,
+            function: FunctionCall {
+                name: name.to_owned(),
+                arguments: "{}".to_owned(),
+            },
+        };
+        let dir = TempDir::new().unwrap();
+        let mut store = ContextStore::new();
+        let damaged = vec![
+            ChatMessage::assistant_tool_calls(vec![call("c1", "read"), call("c2", "edit")]),
+            ChatMessage::tool_result("ok", "c1"),
+            ChatMessage::tool_result("ghost", "c9"),
+        ];
+        let (turn_id, _) = store.push_turn(damaged.clone());
+        let history = HistoryWriter::new(dir.path().to_path_buf());
+        history
+            .append(Some(turn_id.0), &damaged, 8, RecordKind::Turn, None)
+            .unwrap();
+        persist_context(&store, dir.path()).unwrap();
+
+        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+
+        let kinds: Vec<DegradationKind> = restored.degraded.iter().map(|d| d.kind).collect();
+        assert!(kinds.contains(&DegradationKind::UnansweredToolCalls));
+        assert!(kinds.contains(&DegradationKind::OrphanToolResults));
+        // Report-only: the hydrated turn is byte-for-byte what history holds.
+        let turns = restored.store.turns();
+        assert_eq!(turns.front().unwrap().messages, damaged);
     }
 
     /// Manual migration drill against a copy of a real agent directory:
