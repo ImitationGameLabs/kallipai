@@ -88,8 +88,9 @@ pub async fn bridge_task(
                                 // purpose: the terminal triage reads it to tell
                                 // a spent retry budget (last armed attempt ==
                                 // max) from a chain with retries disabled.
+                                let mut cell = parked.lock().unwrap_or_else(|e| e.into_inner());
                                 state.store(AgentState::BUSY, Ordering::Relaxed);
-                                *parked.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                                *cell = None;
                             }
                             AgentEvent::Retrying { .. } | AgentEvent::StreamReset { .. } => {
                                 // Layer-1 overlay: an in-request backoff or
@@ -527,7 +528,10 @@ async fn mark_and_snapshot(
     state.store(new_state, Ordering::Relaxed);
     activity.lock().unwrap_or_else(|e| e.into_inner()).clear();
     *parked.lock().unwrap_or_else(|e| e.into_inner()) =
-        parked_reason.map(|reason| ParkedSnapshot { reason, at: Instant::now() });
+        parked_reason.map(|reason| ParkedSnapshot {
+            reason,
+            at: Instant::now(),
+        });
     *retrying.lock().unwrap_or_else(|e| e.into_inner()) = retry_info;
     snapshot_from(&registry, agent_id)
 }

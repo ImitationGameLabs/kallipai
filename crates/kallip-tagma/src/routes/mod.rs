@@ -84,10 +84,7 @@ pub fn router() -> Router<SharedState> {
             "/agents/{id}/interrupt",
             axum::routing::post(agent::interrupt_agent),
         )
-        .route(
-            "/agents/{id}/wake",
-            axum::routing::post(agent::wake_agent),
-        )
+        .route("/agents/{id}/wake", axum::routing::post(agent::wake_agent))
         .route(
             "/agents/{id}/status",
             axum::routing::get(context::agent_status),

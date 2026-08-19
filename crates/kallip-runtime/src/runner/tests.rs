@@ -17,9 +17,9 @@ use crate::agent_task::{RoundToken, run_and_report};
 use crate::failover::FailoverOutcome;
 use crate::policy::ToolCallOutcome;
 use crate::profile::BackendSource;
+use crate::runner::BreakUntil;
 use crate::test_support::{MapSource, ctx_from_source, make_ctx, profile};
 use crate::tool_execution::{run_tool_bounded, synthesize_unanswered_results};
-use crate::runner::BreakUntil;
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
 
 fn no_cancel() -> CancellationToken {
@@ -624,7 +624,9 @@ async fn break_wait_parks_waiting_with_armed_timer() {
         events.push(ev);
     }
     assert!(
-        events.iter().any(|ev| matches!(ev, AgentEvent::Waiting { timeout_secs: 600 })),
+        events
+            .iter()
+            .any(|ev| matches!(ev, AgentEvent::Waiting { timeout_secs: 600 })),
         "expected a Waiting(600s) terminal event, got {events:?}"
     );
     assert!(
@@ -668,7 +670,9 @@ async fn break_idle_parks_idle_without_timer() {
         "expected Idle terminal event, got {events:?}"
     );
     assert!(
-        !events.iter().any(|ev| matches!(ev, AgentEvent::Waiting { .. })),
+        !events
+            .iter()
+            .any(|ev| matches!(ev, AgentEvent::Waiting { .. })),
         "break(idle) must not emit Waiting: {events:?}"
     );
     assert_eq!(
@@ -723,7 +727,10 @@ async fn wait_timer_elapse_injects_system_turn_and_reruns() {
     // A real round ran on the injected turn: the model answered (the mock
     // saw a second request), and the answer parks Waiting again.
     let requests = server.received_requests().await.unwrap().len();
-    assert!(requests >= 2, "no round ran after the injection ({requests} requests)");
+    assert!(
+        requests >= 2,
+        "no round ran after the injection ({requests} requests)"
+    );
 }
 
 #[tokio::test]
@@ -925,7 +932,9 @@ async fn transient_retry_exhaustion_parks_without_arming() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while std::time::Instant::now() < deadline && !(armed && exhausted) {
         match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
-            Ok(Some(AgentEvent::FailoverChainExhausted { transient_retry, .. })) => {
+            Ok(Some(AgentEvent::FailoverChainExhausted {
+                transient_retry, ..
+            })) => {
                 if transient_retry.is_some() {
                     armed = true;
                 } else {
@@ -992,7 +1001,10 @@ async fn transient_retry_reruns_original_prompt_without_injection() {
         }
     }
     handle.abort();
-    assert!(recovered, "the armed retry must re-run and finish the round");
+    assert!(
+        recovered,
+        "the armed retry must re-run and finish the round"
+    );
     let failures = server.received_requests().await.unwrap().len();
     assert_eq!(failures, 2, "one failed call plus one clean re-run");
 
@@ -1003,11 +1015,7 @@ async fn transient_retry_reruns_original_prompt_without_injection() {
         .turns()
         .iter()
         .flat_map(|t| t.messages.clone())
-        .any(|m| {
-            m.content()
-                .map(|c| c.contains("[system]"))
-                .unwrap_or(false)
-        });
+        .any(|m| m.content().map(|c| c.contains("[system]")).unwrap_or(false));
     drop(guard);
     assert!(
         !injected,

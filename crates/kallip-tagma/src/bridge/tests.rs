@@ -1238,7 +1238,10 @@ async fn bridge_waiting_marks_waiting_and_notifies() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(settled, "waiting dispatch must mark WAITING and inbox the notification");
+    assert!(
+        settled,
+        "waiting dispatch must mark WAITING and inbox the notification"
+    );
     let msg = state
         .inboxes
         .get()
@@ -1297,7 +1300,10 @@ async fn bridge_fce_with_retry_marks_retrying_no_notice() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(settled, "armed FCE must mark RETRYING with the retry plan mirrored");
+    assert!(
+        settled,
+        "armed FCE must mark RETRYING with the retry plan mirrored"
+    );
     drop(agent_tx);
 }
 
@@ -1346,7 +1352,10 @@ async fn bridge_fce_without_retry_marks_parked() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(settled, "unarmed FCE must park with the chain reason in the cell");
+    assert!(
+        settled,
+        "unarmed FCE must park with the chain reason in the cell"
+    );
     drop(agent_tx);
 }
 
@@ -1367,7 +1376,10 @@ async fn bridge_error_parks_with_fatal_reason() {
         make_state(),
     );
 
-    agent_tx.send(AgentEvent::Error("boom".to_string())).await.unwrap();
+    agent_tx
+        .send(AgentEvent::Error("boom".to_string()))
+        .await
+        .unwrap();
 
     let mut settled = false;
     for _ in 0..40 {
@@ -1410,7 +1422,10 @@ async fn bridge_token_budget_marks_waiting() {
     );
 
     agent_tx
-        .send(AgentEvent::TokenBudgetExceeded { consumed: 100, budget: 90 })
+        .send(AgentEvent::TokenBudgetExceeded {
+            consumed: 100,
+            budget: 90,
+        })
         .await
         .unwrap();
 
@@ -1425,7 +1440,10 @@ async fn bridge_token_budget_marks_waiting() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(settled, "budget exhaustion must leave the agent WAITING, not parked");
+    assert!(
+        settled,
+        "budget exhaustion must leave the agent WAITING, not parked"
+    );
     drop(agent_tx);
 }
 
@@ -1482,7 +1500,10 @@ async fn bridge_fce_after_spent_budget_parks_retry_exhausted() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(settled, "spent budget + unarmed FCE must park as retry-exhausted");
+    assert!(
+        settled,
+        "spent budget + unarmed FCE must park as retry-exhausted"
+    );
     drop(agent_tx);
 }
 
@@ -1525,10 +1546,15 @@ async fn bridge_layer1_retrying_overlay_lifecycle() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(overlaid, "in-request retry must overlay RETRYING without payloads");
+    assert!(
+        overlaid,
+        "in-request retry must overlay RETRYING without payloads"
+    );
 
     agent_tx
-        .send(AgentEvent::AssistantContentDelta { delta: "ok".to_string() })
+        .send(AgentEvent::AssistantContentDelta {
+            delta: "ok".to_string(),
+        })
         .await
         .unwrap();
     let mut recovered = false;
@@ -1539,6 +1565,9 @@ async fn bridge_layer1_retrying_overlay_lifecycle() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(recovered, "the next in-flight event must end the overlay and return to BUSY");
+    assert!(
+        recovered,
+        "the next in-flight event must end the overlay and return to BUSY"
+    );
     drop(agent_tx);
 }

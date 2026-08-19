@@ -14,9 +14,9 @@ use tokio_util::sync::CancellationToken;
 use crate::acquisition::StreamConsumed;
 use crate::agent_task::AgentContext;
 use crate::event::AgentEvent;
+use crate::policy::{ToolCallOutcome, error_result, skipped_tool_result, timed_out_tool_result};
 use crate::runner::BreakUntil;
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
-use crate::policy::{ToolCallOutcome, error_result, skipped_tool_result, timed_out_tool_result};
 use just_llm_client::types::chat::{ChatMessage, ToolCallsMessage};
 
 // ---------------------------------------------------------------------------
@@ -316,8 +316,7 @@ fn parse_break_args(raw: &str) -> BreakUntil {
 fn break_ack(until: BreakUntil) -> String {
     match until {
         BreakUntil::Idle => {
-            r#"{"ok":true,"tool_name":"break","result":{"parked":true,"until":"idle"}}"#
-                .to_owned()
+            r#"{"ok":true,"tool_name":"break","result":{"parked":true,"until":"idle"}}"#.to_owned()
         }
         BreakUntil::Wait { timeout_secs } => format!(
             r#"{{"ok":true,"tool_name":"break","result":{{"parked":true,"until":"wait","timeout_secs":{timeout_secs}}}}}"#
@@ -337,10 +336,7 @@ mod tests {
         let cases: &[(&str, BreakUntil)] = &[
             ("{}", BreakUntil::Wait { timeout_secs: 600 }),
             ("not json", BreakUntil::Wait { timeout_secs: 600 }),
-            (
-                r#"{"until":"idle"}"#,
-                BreakUntil::Idle,
-            ),
+            (r#"{"until":"idle"}"#, BreakUntil::Idle),
             (
                 r#"{"until":"wait"}"#,
                 BreakUntil::Wait { timeout_secs: 600 },

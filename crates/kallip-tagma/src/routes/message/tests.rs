@@ -173,7 +173,10 @@ async fn send_message_to_parked_returns_conflict_with_wake_hint() {
         add_root(&mut reg, &root);
         add_sub(&mut reg, &parked, &root);
         let live = reg.get(&parked).unwrap().as_live().unwrap();
-        live.agent.state.store(crate::state::AgentState::PARKED, std::sync::atomic::Ordering::Relaxed);
+        live.agent.state.store(
+            crate::state::AgentState::PARKED,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     let err = send_message(
         State(state.clone()),

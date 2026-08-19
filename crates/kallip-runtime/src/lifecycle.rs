@@ -31,11 +31,16 @@ pub enum LifecycleState {
     /// `run_and_report` is in flight (the outer loop does not hold this).
     Running,
     /// The agent parked itself with `break(wait)`; `until` is the armed fuse.
-    Waiting { until: Instant },
+    Waiting {
+        until: Instant,
+    },
     Idle,
     /// A failure path parked the agent awaiting operator action (kick or
     /// remove); `at` supports "parked N ago" in kick turns and status.
-    Parked { reason: ParkedReason, at: Instant },
+    Parked {
+        reason: ParkedReason,
+        at: Instant,
+    },
     /// Chain-transient backoff: a terminal FCE armed a delayed retry of the
     /// original prompt (timer fire re-runs it, no agent participation).
     Retrying {
@@ -70,7 +75,9 @@ impl LifecycleState {
                 next,
                 Self::Idle | Self::Waiting { .. } | Self::Parked { .. } | Self::Retrying { .. }
             ),
-            Self::Waiting { .. } => matches!(next, Self::Running | Self::Waiting { .. } | Self::Idle),
+            Self::Waiting { .. } => {
+                matches!(next, Self::Running | Self::Waiting { .. } | Self::Idle)
+            }
             Self::Parked { .. } => matches!(next, Self::Running | Self::Idle),
             Self::Retrying { .. } => {
                 matches!(next, Self::Running | Self::Retrying { .. } | Self::Idle)

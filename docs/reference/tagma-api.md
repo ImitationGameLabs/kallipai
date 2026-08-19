@@ -206,8 +206,9 @@ Status: `200 OK`
 
 ### `DELETE /agents/{id}` — Remove agent
 
-Stops and removes an agent instance. The agent must be idle and have no active
-subagents.
+Stops and removes an agent instance. Any state except busy is removable (the
+lifecycle cancel is honored everywhere, including waiting/retrying outer-loop
+parks); the agent must have no active subagents.
 
 Removal **archives** the agent: its directory is moved to `archived/<id>/`
 (history, cumulative usage, and all persisted state preserved) rather than

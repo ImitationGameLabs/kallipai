@@ -621,10 +621,7 @@ pub async fn run_and_report(
                         },
                         at: std::time::Instant::now(),
                     });
-                agent_tx
-                    .send(AgentEvent::Error(rendered))
-                    .await
-                    .ok();
+                agent_tx.send(AgentEvent::Error(rendered)).await.ok();
                 return false;
             }
         }
@@ -711,8 +708,8 @@ fn wait_timer_due(ctx: &AgentContext) -> bool {
 /// (keep waiting, finish, or work) — the timer never auto-runs work.
 fn wait_elapsed_text(armed_secs: u64) -> String {
     format!(
-        "[system] wait timer elapsed (armed {armed_secs}s). Continue waiting with break(wait), \
-         finish with break(idle), or work."
+        "[system] wait timer elapsed (armed {armed_secs}s). Continue waiting with break({{\"until\":\"wait\"}}), \
+         finish with break({{\"until\":\"idle\"}}), or work."
     )
 }
 
@@ -782,7 +779,10 @@ mod tests {
         let first = ctx.wait_until.lock().unwrap().unwrap();
         arm_wait_timer(&mut ctx, 0); // zero-delay fuse: due immediately
         let second = ctx.wait_until.lock().unwrap().unwrap();
-        assert!(second < first, "re-arm must replace, not min/max, the deadline");
+        assert!(
+            second < first,
+            "re-arm must replace, not min/max, the deadline"
+        );
         assert_eq!(ctx.wait_armed_secs, 0);
         assert!(wait_timer_due(&ctx));
     }
@@ -867,7 +867,10 @@ mod tests {
         .await;
         ctx.transient_fails = 1;
         let (_deadline, _) = schedule_transient_retry(&ctx);
-        assert!(!transient_retry_due(&ctx), "freshly armed backoff is not yet due");
+        assert!(
+            !transient_retry_due(&ctx),
+            "freshly armed backoff is not yet due"
+        );
         ctx.retry_notify.notify_one(); // stale permit: sleep fired after the clear
         clear_transient_retry(&ctx);
         assert!(!transient_retry_due(&ctx), "stale permit must be inert");
@@ -980,15 +983,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         let guard = store.lock().await;
-        let ran = guard
-            .turns()
-            .iter()
-            .flat_map(|t| &t.messages)
-            .any(|m| {
-                m.content()
-                    .map(|t| t.contains("message while parked"))
-                    .unwrap_or(false)
-            });
+        let ran = guard.turns().iter().flat_map(|t| &t.messages).any(|m| {
+            m.content()
+                .map(|t| t.contains("message while parked"))
+                .unwrap_or(false)
+        });
         drop(guard);
 
         cancel.cancel();

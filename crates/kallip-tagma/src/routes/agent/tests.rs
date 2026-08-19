@@ -711,7 +711,10 @@ async fn remove_parked_agent_succeeds() {
         add_root(&mut reg, &root);
         add_sub(&mut reg, &parked, &root);
         let live = reg.get(&parked).unwrap().as_live().unwrap();
-        live.agent.state.store(crate::state::AgentState::PARKED, std::sync::atomic::Ordering::Relaxed);
+        live.agent.state.store(
+            crate::state::AgentState::PARKED,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     let status = remove_agent(
         State(state.clone()),
@@ -724,14 +727,15 @@ async fn remove_parked_agent_succeeds() {
     assert!(!state.registry.read().await.contains_key(&parked));
 }
 
-/// The remove gate rejects every mid-lifecycle state (busy / waiting /
-/// retrying) with 409 — only idle and parked are quiescent.
+/// The remove gate rejects only busy (interrupt aborts that round);
+/// waiting/retrying park in the outer loop where the lifecycle cancel is
+/// honored, so removal is their deterministic exit, not a dead end.
 #[tokio::test]
-async fn remove_rejects_busy_waiting_retrying_states() {
-    for u8_state in [
-        crate::state::AgentState::BUSY,
-        crate::state::AgentState::WAITING,
-        crate::state::AgentState::RETRYING,
+async fn remove_rejects_busy_but_allows_waiting_retrying() {
+    for (u8_state, expect_conflict) in [
+        (crate::state::AgentState::BUSY, true),
+        (crate::state::AgentState::WAITING, false),
+        (crate::state::AgentState::RETRYING, false),
     ] {
         let state = make_state();
         let root = AgentId::random();
@@ -741,16 +745,24 @@ async fn remove_rejects_busy_waiting_retrying_states() {
             add_root(&mut reg, &root);
             add_sub(&mut reg, &child, &root);
             let live = reg.get(&child).unwrap().as_live().unwrap();
-            live.agent.state.store(u8_state, std::sync::atomic::Ordering::Relaxed);
+            live.agent
+                .state
+                .store(u8_state, std::sync::atomic::Ordering::Relaxed);
         }
-        let err = remove_agent(
-            State(state),
+        let result = remove_agent(
+            State(state.clone()),
             AuthIdentity::test_new(Identity::Operator),
-            Path(child),
+            Path(child.clone()),
         )
-        .await
-        .expect_err("mid-lifecycle state must be rejected");
-        assert_eq!(err.status, 409, "state {u8_state} must conflict");
+        .await;
+        if expect_conflict {
+            let err = result.expect_err("busy must be rejected");
+            assert_eq!(err.status, 409, "state {u8_state} must conflict");
+        } else {
+            let status = result.expect("outer-loop states are removable");
+            assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+            assert!(!state.registry.read().await.contains_key(&child));
+        }
     }
 }
 
@@ -790,7 +802,10 @@ async fn wake_parked_agent_enqueues_kick_turn() {
         add_root(&mut reg, &root);
         add_sub(&mut reg, &child, &root);
         let live = reg.get(&child).unwrap().as_live().unwrap();
-        live.agent.state.store(crate::state::AgentState::PARKED, std::sync::atomic::Ordering::Relaxed);
+        live.agent.state.store(
+            crate::state::AgentState::PARKED,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         *live.agent.parked.lock().unwrap() = Some(crate::state::ParkedSnapshot {
             reason: kallip_common::protocol::ParkedReason::FatalError {
                 message: "boom".to_string(),

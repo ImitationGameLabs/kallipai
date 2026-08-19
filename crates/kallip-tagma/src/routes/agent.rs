@@ -439,21 +439,17 @@ pub async fn remove_agent(
         let Some(entry) = registry.get(&id) else {
             return Err(ApiError::not_found("agent not found"));
         };
-        // Live agents must be in a quiescent state (idle or parked) and have no
-        // subagents. Parked agents are removable by design: the operator kicks
-        // (re-prompts) or removes them; mid-lifecycle states (busy / waiting /
-        // retrying) must be interrupted first. Faulted agents have no task to be
-        // busy, so the state check is skipped; the no-subagents check still
-        // applies (remove children first).
+        // Live agents must be quiescent-ish and have no subagents: busy is
+        // the only rejected state (interrupt aborts the in-flight round;
+        // removal then succeeds). Waiting/retrying park in the outer loop
+        // with no round token to interrupt, so removal — whose lifecycle
+        // cancel is honored in every state — is their deterministic exit,
+        // not a dead-end 409 pointing at a no-op interrupt. Faulted agents
+        // skip the state check; the no-subagents check still applies.
         if let Some(live) = entry.as_live()
-            && matches!(
-                live.agent.get_state(),
-                AgentState::Busy | AgentState::Waiting | AgentState::Retrying
-            )
+            && live.agent.get_state() == AgentState::Busy
         {
-            return Err(ApiError::conflict(
-                "agent is busy, waiting, or retrying — interrupt it first (parked agents are removable)",
-            ));
+            return Err(ApiError::conflict("agent is busy, interrupt it first"));
         }
         if !entry.subagent_ids().is_empty() {
             return Err(ApiError::conflict(
@@ -596,15 +592,18 @@ pub async fn wake_agent(
             ));
         }
         let (reason, parked_at) = {
-            let cell = live
-                .agent
-                .parked
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            // The bridge writes the PARKED mark and this payload together
-            // under one lock, so a Some mark with a None payload means an
-            // invariant was violated upstream — refuse rather than kick
-            // with a fabricated reason.
+            let cell = live.agent.parked.lock().unwrap_or_else(|e| e.into_inner());
+            // Re-check under the lock: the outer Parked read races the
+            // bridge's Busy path (state mark + payload clear under this
+            // same lock). A state that moved on is an ordinary race, not
+            // an error; a still-Parked mark with no payload is the real
+            // invariant break — refuse rather than kick with a
+            // fabricated reason.
+            if live.agent.get_state() != AgentState::Parked {
+                return Err(ApiError::conflict(
+                    "agent is not parked; only parked agents can be kicked awake",
+                ));
+            }
             let Some(snapshot) = cell.as_ref() else {
                 return Err(ApiError::internal("parked state without a parked reason"));
             };
@@ -613,7 +612,9 @@ pub async fn wake_agent(
         let duration = format_parked_duration(parked_at.elapsed());
         (
             live.agent.prompt_tx.clone(),
-            format!("[system] you were parked {duration} ago: {reason}. Decide whether to retry, adjust, or report."),
+            format!(
+                "[system] you were parked {duration} ago: {reason}. Decide whether to retry, adjust, or report."
+            ),
         )
     };
     // Try-send, not send: a parked agent that is somehow not draining its
