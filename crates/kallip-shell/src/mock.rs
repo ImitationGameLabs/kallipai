@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::backend::{CaptureMode, ShellBackend, ShellOutput};
+use crate::backend::{BashExecOutput, CaptureMode, ShellBackend};
 use crate::error::ShellError;
 use crate::supervisor::{BgReadOutput, TaskState};
 
@@ -84,17 +84,17 @@ impl ShellBackend for MockShellBackend {
         command: &str,
         _timeout: Duration,
         capture: CaptureMode,
-    ) -> Result<ShellOutput, ShellError> {
+    ) -> Result<BashExecOutput, ShellError> {
         self.commands.push(command.to_owned());
 
         if self.should_timeout {
             self.should_timeout = false;
             let id = self.next_bg.fetch_add(1, Ordering::Relaxed).to_string();
             self.background.insert(id.clone(), command.to_owned());
-            return Ok(ShellOutput {
+            return Ok(BashExecOutput {
                 exit_code: None,
                 timed_out: true,
-                cwd: self.cwd.clone(),
+                cwd: self.cwd.to_string_lossy().into_owned(),
                 task_id: Some(id),
                 ..Default::default()
             });
@@ -106,18 +106,18 @@ impl ShellBackend for MockShellBackend {
         // exec's text.
         let blob = self.outputs.pop_front().unwrap_or_default();
         let exit_code = self.exit_codes.pop_front().flatten();
-        let (merged, stdout, stderr) = match capture {
+        let (output, stdout, stderr) = match capture {
             CaptureMode::Merged => (Some(blob), None, None),
             CaptureMode::Separate | CaptureMode::Stdout => (None, Some(blob), None),
             CaptureMode::Stderr => (None, None, Some(blob)),
         };
-        Ok(ShellOutput {
-            merged,
+        Ok(BashExecOutput {
+            output,
             stdout,
             stderr,
             exit_code,
             timed_out: false,
-            cwd: self.cwd.clone(),
+            cwd: self.cwd.to_string_lossy().into_owned(),
             ..Default::default()
         })
     }
@@ -169,7 +169,7 @@ mod tests {
             .exec("echo hello", Duration::from_secs(1), CaptureMode::Merged)
             .await
             .unwrap();
-        assert_eq!(out.merged.as_deref(), Some("hello"));
+        assert_eq!(out.output.as_deref(), Some("hello"));
         assert!(out.stdout.is_none() && out.stderr.is_none());
         assert_eq!(out.exit_code, Some(0));
         assert!(!out.timed_out);

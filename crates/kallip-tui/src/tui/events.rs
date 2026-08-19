@@ -51,7 +51,7 @@ impl App {
                 // stdout marker ({"kallip.lesche.message":{"text":...}}); render
                 // that as the actual assistant chat line. Any other tool result
                 // renders verbatim.
-                if let Some(message) = parse_message_marker(&result) {
+                if let Some(message) = kallip_common::message::find_lesche_message(&result) {
                     self.chat_lines.push(ChatLine::Assistant(message));
                 } else {
                     self.chat_lines.push(ChatLine::ToolResult(result));
@@ -215,61 +215,6 @@ impl App {
     }
 }
 
-/// The stable stdout marker the `kallip lesche send` CLI prints, recognized in
-/// any `ToolResult` so the TUI renders the agent's deliberate message as an
-/// assistant chat line. Keyed by the marker prefix (not the tool name) so the
-/// call survives shell wrappers, aliases, and arg-shape variation. Returns the
-/// message text on a match, `None` for any other tool result.
-///
-/// The CLI always emits exactly one JSON line of this shape as its stdout; the
-/// envelope wrapper around it (the executor's `{"ok":true,"tool_name":...,
-/// "result":<output>}`) is parsed best-effort — the marker is matched anywhere in
-/// the result string so a wrapper that embeds the CLI's stdout verbatim still
-/// recognizes it.
-fn parse_message_marker(result: &str) -> Option<String> {
-    // The marker object embeds the key "kallip.lesche.message"; find it anywhere
-    // in the result, then parse the enclosing {...} object (robust to the
-    // executor's wrapper and to shell wrappers around the CLI call).
-    const MARKER: &str = r#""kallip.lesche.message""#;
-    let idx = result.find(MARKER)?;
-    let start = result[..idx].rfind('{')?;
-    // Walk braces from `start` to the matching close, tolerating nested
-    // objects and strings, then parse and extract `.["kallip.lesche.message"].text`.
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut escape = false;
-    for (i, ch) in result[start..].char_indices() {
-        if in_str {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == '"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_str = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    let obj: serde_json::Value =
-                        serde_json::from_str(&result[start..start + i + 1]).ok()?;
-                    return obj
-                        .get("kallip.lesche.message")
-                        .and_then(|m| m.get("text"))
-                        .and_then(|t| t.as_str())
-                        .map(String::from);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,18 +235,6 @@ mod tests {
         app.handle_sse_event(event);
         assert!(app.outbox.is_none(), "unexpected flush");
         assert_eq!(app.pending, vec!["queued".to_string()]);
-    }
-
-    /// The agent-message echo must never parse as a lesche marker, even
-    /// when the sent text is pathologically the marker key itself: the
-    /// needle stage hits (the key appears as a JSON value), but the brace
-    /// walk yields the `kallip.message.sent` object, which has no
-    /// `kallip.lesche.message` key — so no user chat line renders.
-    #[test]
-    fn message_sent_echo_is_not_a_lesche_marker() {
-        let echo =
-            kallip_common::message::message_sent_line("id-1", "kallip.lesche.message", 0, None);
-        assert!(parse_message_marker(&echo).is_none());
     }
 
     #[test]

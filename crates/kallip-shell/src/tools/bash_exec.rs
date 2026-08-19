@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::backend::{CaptureMode, DEFAULT_TIMEOUT_SECS, ShellBackend};
+use crate::backend::{BashExecOutput, CaptureMode, DEFAULT_TIMEOUT_SECS, ShellBackend};
 
 /// Arguments accepted by [`BashExec`].
 #[derive(Debug, Deserialize, Serialize)]
@@ -37,47 +37,6 @@ pub struct BashExecArgs {
 /// bash_exec; only a round cancel could recover. 24h is far beyond any
 /// legitimate foreground wait.
 const MAX_TIMEOUT_SECS: u64 = 86400;
-
-/// Result returned by [`BashExec`]. Exactly the output field(s) for the
-/// requested [`CaptureMode`] are present (the others are omitted on the wire):
-/// `merged` -> `output`; `separate` -> `stdout` + `stderr`; `stdout` ->
-/// `stdout`; `stderr` -> `stderr`.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct BashExecOutput {
-    /// Merged stdout+stderr. Holds the full output when it fit, or a head +
-    /// "[... N bytes omitted ...]" + tail view (banner-prefixed) when it was
-    /// clipped. Present under `capture: "merged"`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
-    /// Captured stdout, head+tail on clip (banner-prefixed). Present under
-    /// `capture: "separate"` or `"stdout"`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stdout: Option<String>,
-    /// Captured stderr, head+tail on clip (banner-prefixed). Present under
-    /// `capture: "separate"` or `"stderr"`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stderr: Option<String>,
-    /// Exit code, or `null` on signal death. `null` while a timed-out
-    /// command keeps running as a background task (`task_id` is set — poll
-    /// bash_background_read for the eventual code).
-    pub exit_code: Option<i32>,
-    /// Whether the command exceeded its timeout. When `true`, the command
-    /// was converted to a still-running background task (`task_id` set),
-    /// unless a concurrent workspace change refused the conversion and the
-    /// command was killed.
-    pub timed_out: bool,
-    /// Whether at least one returned stream was clipped. Under `separate` this
-    /// is the OR of both streams ("at least one"); the authoritative per-stream
-    /// signal is the banner in the clipped stream's text.
-    pub truncated: bool,
-    /// Working directory after the command (read fresh from `pwd`).
-    pub cwd: String,
-    /// Set for `background: true`, and when a timed-out command was
-    /// converted to a still-running background task — same id space, same
-    /// bash_background_read / bash_background_kill surface.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<String>,
-}
 
 /// Tool that executes commands against a [`ShellBackend`].
 pub struct BashExec<B: ShellBackend> {
@@ -176,17 +135,7 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
                 task_id: Some(task_id),
             }
         } else {
-            let result = backend.exec(&args.command, timeout, args.capture).await?;
-            BashExecOutput {
-                output: result.merged,
-                stdout: result.stdout,
-                stderr: result.stderr,
-                exit_code: result.exit_code,
-                timed_out: result.timed_out,
-                truncated: result.truncated,
-                cwd: result.cwd.to_string_lossy().into_owned(),
-                task_id: result.task_id,
-            }
+            backend.exec(&args.command, timeout, args.capture).await?
         };
 
         Ok(serde_json::to_string(&output)?)

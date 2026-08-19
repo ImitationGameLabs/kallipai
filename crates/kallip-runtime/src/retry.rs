@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn default_policy_pins_max_retries_at_ten() {
         // Nail the documented default (docs/reference/env.md, .env.example) so the two
-        // code sites (here and config::DEFAULT_MAX_RETRIES) cannot drift from it silently.
+        // code sites (here and config::defaults::DEFAULT_MAX_RETRIES) cannot drift from it silently.
         // Timing fields stay un-pinned here: the full-field mirror test in config/tests.rs
         // guards those against two-sided drift.
         assert_eq!(RetryPolicy::default().max_retries, 10);

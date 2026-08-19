@@ -6,6 +6,8 @@ use ratatui::widgets::{
     Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 
+use kallip_common::toolresult::ToolResultEnvelope;
+
 use super::wrap::word_wrap_line_count;
 use super::{App, AppMode, ApprovalPhase, CachedEntry, ChatLine};
 
@@ -735,31 +737,29 @@ fn format_tool_args(args: &str, max_lines: usize) -> Vec<Line<'static>> {
     }
 }
 
-/// Header label for a tool result, derived from the result envelope.
+/// Header label for a tool result, derived from the result envelope
+/// ([`ToolResultEnvelope`]).
 ///
-/// Recognized envelopes (from `policy/executor.rs` / `approval.rs`):
-/// - success `{"ok":true,"tool_name":...,"result":...}`     -> `▌result · {tool_name}`
-/// - error   `{"ok":false,"tool_name":...,"error":...}`     -> `▌result · {tool_name} (failed)`
-/// - deferred `{"ok":true,"pending_approval":true,...}`     -> `▌result · {tool_name} (pending)`
+/// - success ("ok":true)                 -> `▌result · {tool_name}`
+/// - error   ("ok":false)                -> `▌result · {tool_name} (failed)`
+/// - deferred ("pending_approval":true) -> `▌result · {tool_name} (pending)`
 ///
 /// Anything else (e.g. the timeout string) -> `▌result`.
 fn tool_result_header_label(result: &str) -> String {
-    let obj = match serde_json::from_str::<serde_json::Value>(result).ok() {
-        Some(serde_json::Value::Object(obj)) => obj,
-        _ => return "\u{258C}result".to_owned(),
+    let Ok(e) = serde_json::from_str::<ToolResultEnvelope>(result) else {
+        return "\u{258C}result".to_owned();
     };
-    let tool_name = obj.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-    let suffix = if obj.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+    let suffix = if !e.ok {
         " (failed)"
-    } else if obj.get("pending_approval").and_then(|v| v.as_bool()) == Some(true) {
+    } else if e.pending_approval == Some(true) {
         " (pending)"
     } else {
         ""
     };
-    if tool_name.is_empty() {
+    if e.tool_name.is_empty() {
         "\u{258C}result".to_owned()
     } else {
-        format!("\u{258C}result \u{00B7} {tool_name}{suffix}")
+        format!("\u{258C}result \u{00B7} {}{suffix}", e.tool_name)
     }
 }
 
@@ -771,21 +771,14 @@ fn tool_result_header_label(result: &str) -> String {
 /// multi-line content like `stdout` is expanded into real line breaks. Non-envelope
 /// input (the timeout string, non-JSON output) falls back to indented pretty-lines.
 fn format_tool_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
-    let obj = match serde_json::from_str::<serde_json::Value>(result).ok() {
-        Some(serde_json::Value::Object(obj)) => obj,
-        _ => {
-            return indented_pretty_lines(
-                result,
-                max_lines,
-                Style::default().dim().fg(Color::Cyan),
-            );
-        }
+    let Ok(e) = serde_json::from_str::<ToolResultEnvelope>(result) else {
+        return indented_pretty_lines(result, max_lines, Style::default().dim().fg(Color::Cyan));
     };
 
     // Error envelope: surface the message, bounded + per-line capped like every
     // other body path (a giant stack trace must not blow past MAX_TOOL_RESULT_LINES).
-    if obj.get("ok").and_then(|v| v.as_bool()) == Some(false)
-        && let Some(err) = obj.get("error").and_then(|v| v.as_str())
+    if !e.ok
+        && let Some(err) = e.error.as_deref()
     {
         let capped: Vec<String> = err
             .lines()
@@ -800,22 +793,23 @@ fn format_tool_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
 
     // Success / deferred: render the payload as key/value. Pick the inner `result`
     // when it is structured; otherwise kv-render the envelope minus bookkeeping keys
-    // (`ok` / `tool_name`, already consumed by `tool_result_header_label`). The clone
-    // is fine — envelopes are small and this runs once per cache miss.
-    match obj.get("result") {
+    // (`ok` / `tool_name`, already consumed by `tool_result_header_label`).
+    match e.result {
         Some(serde_json::Value::Object(inner)) => {
-            format_kv_lines(inner, max_lines, TOOL_ALERT_KEYS)
+            format_kv_lines(&inner, max_lines, TOOL_ALERT_KEYS)
         }
         Some(other) => {
-            let raw = serde_json::to_string(other).unwrap_or_else(|_| other.to_string());
+            let raw = serde_json::to_string(&other).unwrap_or_else(|_| other.to_string());
             indented_pretty_lines(&raw, max_lines, Style::default().dim().fg(Color::Cyan))
         }
         None => {
-            let filtered: serde_json::Map<String, serde_json::Value> = obj
-                .iter()
-                .filter(|(k, _)| !matches!(k.as_str(), "ok" | "tool_name"))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            // `rest` already excludes the modeled keys; put `pending_approval`
+            // first so deferred bodies keep their historical field order.
+            let mut filtered = serde_json::Map::new();
+            if let Some(p) = e.pending_approval {
+                filtered.insert("pending_approval".to_owned(), serde_json::Value::Bool(p));
+            }
+            filtered.extend(e.rest);
             format_kv_lines(&filtered, max_lines, TOOL_ALERT_KEYS)
         }
     }

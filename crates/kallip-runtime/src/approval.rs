@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub use kallip_common::approval::{ApprovalStatus, ToolCallContent};
+use kallip_common::toolresult::ToolResultEnvelope;
 use time::OffsetDateTime;
 
 /// A tool action pending approval.
@@ -326,12 +327,19 @@ pub fn approval_result_json(id: &str, tool_name: &str, reason: Option<&str>) -> 
             or approval_cancel to abandon it."
             .to_owned(),
     };
-    serde_json::to_string(&ApprovalDeferredResponse {
+    let mut rest = serde_json::Map::new();
+    rest.insert("id".to_owned(), serde_json::Value::String(id.to_owned()));
+    rest.insert(
+        "next_steps".to_owned(),
+        serde_json::Value::String(next_steps),
+    );
+    serde_json::to_string(&ToolResultEnvelope {
         ok: true,
-        pending_approval: true,
         tool_name: tool_name.to_owned(),
-        id: id.to_owned(),
-        next_steps,
+        result: None,
+        error: None,
+        pending_approval: Some(true),
+        rest,
     })
     .unwrap_or_else(|_| r#"{"ok":true,"pending_approval":true}"#.to_owned())
 }
@@ -353,15 +361,6 @@ pub(super) fn format_approval_notifications(notifications: &[ApprovalNotificatio
         }
     }
     format!("[system]\n{}", parts.join("\n"))
-}
-
-#[derive(Serialize)]
-struct ApprovalDeferredResponse {
-    ok: bool,
-    pending_approval: bool,
-    tool_name: String,
-    id: String,
-    next_steps: String,
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::backend::ShellBackend;
+use crate::supervisor::TaskState;
 
 /// Default number of recent lines to return.
 const DEFAULT_LINES: usize = 200;
@@ -31,8 +32,8 @@ pub struct BgReadOutput {
     pub task_id: String,
     /// Recent output (tail).
     pub output: String,
-    /// Task state: `"running"` / `"exited"` / `"killed"`.
-    pub state: String,
+    /// Task state, serialized as `"running"` / `"exited"` / `"killed"`.
+    pub state: TaskState,
     /// Exit code once exited, else null.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
@@ -94,11 +95,51 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BgRead<B> {
         let output = BgReadOutput {
             task_id: args.task_id,
             output: result.output,
-            state: result.state.as_str().to_owned(),
+            state: result.state,
             exit_code: result.exit_code,
             stalled: result.stalled,
             bytes: result.bytes,
         };
         Ok(serde_json::to_string(&output)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wire contract for `state` is a bare lowercase string; pin all
+    /// three variants so the String -> TaskState switch stays
+    /// byte-identical on the wire.
+    #[test]
+    fn task_state_serializes_as_lowercase_wire_string() {
+        assert_eq!(
+            serde_json::to_string(&TaskState::Running).unwrap(),
+            "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskState::Exited).unwrap(),
+            "\"exited\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskState::Killed).unwrap(),
+            "\"killed\""
+        );
+    }
+
+    #[test]
+    fn bg_read_output_serializes_state_as_plain_string() {
+        let out = BgReadOutput {
+            task_id: "t-1".into(),
+            output: "tail".into(),
+            state: TaskState::Exited,
+            exit_code: Some(0),
+            stalled: false,
+            bytes: 4,
+        };
+        let wire = serde_json::to_value(&out).unwrap();
+        assert_eq!(wire["state"], "exited");
+        assert_eq!(wire["task_id"], "t-1");
+        assert_eq!(wire["exit_code"], 0);
     }
 }

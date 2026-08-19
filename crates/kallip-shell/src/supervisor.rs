@@ -46,8 +46,9 @@ const STATE_RUNNING: u8 = 0;
 const STATE_EXITED: u8 = 1;
 const STATE_KILLED: u8 = 2;
 
-/// Visible task state (serialized for the LLM as a string).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Visible task state (serialized for the LLM as a lowercase string).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TaskState {
     Running,
     Exited,

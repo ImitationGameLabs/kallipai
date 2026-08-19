@@ -62,7 +62,7 @@ use std::sync::Arc;
 use just_llm_client::tools::LlmTool;
 use tokio::sync::Mutex;
 
-pub use backend::{CaptureMode, ProcessBackend, ShellBackend, ShellOutput};
+pub use backend::{CaptureMode, ProcessBackend, ShellBackend};
 pub use builder::ShellBuilder;
 pub use error::ShellError;
 pub use gate::{ExecGate, ExecGateFailure, ExecReadGuard, ExecWriteGuard};

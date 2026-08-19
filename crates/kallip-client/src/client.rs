@@ -1,32 +1,17 @@
 use std::sync::Arc;
 
-/// Result of a directory lock acquire attempt.
-#[derive(Debug, serde::Deserialize)]
-pub struct DirLockAcquireResponse {
-    pub acquired: bool,
-    pub already_held: bool,
-    /// Present only when acquisition failed (busy) — the holder's agent id.
-    pub holder: Option<String>,
-}
-
-/// Result of a "who holds this dir" query.
-#[derive(Debug, serde::Deserialize)]
-pub struct DirLockWhoResponse {
-    pub holder: Option<String>,
-}
-
 use anyhow::{Context, Result};
-use just_llm_client::JsonEventStream;
-use kallip_common::agentid::AgentId;
-use kallip_common::protocol::{ApiError, SseEvent};
+use kallip_common::protocol::ApiError;
 
-use crate::types::{ListApprovalsParams, MessageRequest};
-use crate::{
-    AgentPermissionsResponse, AgentStatusResponse, AgentSummary, ApprovalDecisionBody,
-    ApprovalEntry, CreateAgentRequest, CreateAgentResponse, ExecPolicy, ListAgentsResponse,
-    ListApprovalsResponse, TokenBudgetResponse, TokenBudgetUpdateRequest, UpdateActivityRequest,
-    UpdateAgentMetadataRequest,
-};
+mod agents;
+mod approvals;
+mod budget;
+mod dirlock;
+mod inbox;
+mod lesche;
+mod status;
+
+pub use dirlock::{DirLockAcquireResponse, DirLockWhoResponse};
 
 struct Inner {
     base_url: String,
@@ -110,17 +95,8 @@ impl TagmaClient {
         response: reqwest::Response,
         context_msg: &'static str,
     ) -> Result<T> {
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let message = serde_json::from_str::<Envelope>(&body)
-                .map(|e| e.error.message)
-                .unwrap_or(body);
-            return Err(ApiError {
-                status: status.as_u16(),
-                message,
-            }
-            .into());
+        if !response.status().is_success() {
+            return Err(error_from_response(response).await);
         }
         response.json().await.context(context_msg)
     }
@@ -128,656 +104,10 @@ impl TagmaClient {
     /// Send request, parse structured JSON error on non-2xx, return raw
     /// response (for SSE streams that need the body as-is).
     async fn ensure_success(&self, response: reqwest::Response) -> Result<reqwest::Response> {
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let message = serde_json::from_str::<Envelope>(&body)
-                .map(|e| e.error.message)
-                .unwrap_or(body);
-            return Err(ApiError {
-                status: status.as_u16(),
-                message,
-            }
-            .into());
+        if !response.status().is_success() {
+            return Err(error_from_response(response).await);
         }
         Ok(response)
-    }
-
-    // -- Agent lifecycle ------------------------------------------------------
-
-    /// Spawn a new agent instance on the tagma.
-    pub async fn spawn(&self, req: CreateAgentRequest) -> Result<AgentId> {
-        let resp: CreateAgentResponse = self
-            .handle_response(
-                self.with_auth(self.inner.http.post(self.url("/agents")).json(&req))
-                    .send()
-                    .await
-                    .context("failed to connect to tagma")?,
-                "failed to parse response",
-            )
-            .await?;
-        Ok(resp.id)
-    }
-
-    /// Send a message to an agent. Returns queue depth feedback.
-    ///
-    /// - `queue_depth == 0`: agent will process the message immediately.
-    /// - `queue_depth > 0`: message is queued behind existing messages (warning included).
-    /// - Returns an error on 503 if the message queue is full.
-    pub async fn post_message(
-        &self,
-        id: &AgentId,
-        text: &str,
-    ) -> Result<crate::types::MessageResponse> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .post(self.url(&format!("/agents/{id}/message")))
-                    .json(&MessageRequest {
-                        text: text.to_owned(),
-                    }),
-            )
-            .send()
-            .await
-            .context("failed to send message")?,
-            "failed to parse message response",
-        )
-        .await
-    }
-
-    /// Deliver a message to the user via the tagma's relay (`POST
-    /// /agents/{id}/lesche/messages`). The agent's `kallip lesche send`
-    /// subcommand calls this; the tagma posts an `AssistantContent` envelope.
-    /// Returns the tagma's delivery verdict.
-    ///
-    /// `room` is the optional room id (a reply into a multi-member room);
-    /// `None` is the bilateral 1:1 send (no room target).
-    pub async fn post_message_delivery(
-        &self,
-        id: &AgentId,
-        text: &str,
-        room: Option<&str>,
-    ) -> Result<crate::types::LescheMessageResponse> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .post(self.url(&format!("/agents/{id}/lesche/messages")))
-                    .json(&crate::types::LescheMessageRequest {
-                        text: text.to_owned(),
-                        room: room.map(str::to_owned),
-                    }),
-            )
-            .send()
-            .await
-            .context("failed to send message")?,
-            "failed to parse message response",
-        )
-        .await
-    }
-
-    /// List the rooms this tagma has joined (`GET /agents/{id}/lesche/rooms`).
-    /// The agent's `kallip lesche rooms` subcommand calls this.
-    pub async fn list_joined_rooms(&self, id: &AgentId) -> Result<Vec<String>> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/lesche/rooms"))),
-            )
-            .send()
-            .await
-            .context("failed to list rooms")?,
-            "failed to parse rooms response",
-        )
-        .await
-    }
-
-    /// Read a room's history (`GET
-    /// /agents/{id}/lesche/rooms/{room}/messages`), as a readable text block the
-    /// tagma renders server-side. The agent's `kallip lesche read --room`
-    /// subcommand calls this. Returns the raw text body (the tagma route renders
-    /// one bracketed block per message), NOT JSON.
-    pub async fn read_room_messages(
-        &self,
-        id: &AgentId,
-        room: &str,
-        after_seq: Option<i64>,
-        limit: Option<u64>,
-    ) -> Result<String> {
-        let mut query = Vec::new();
-        if let Some(a) = after_seq {
-            query.push(("after_seq", a.to_string()));
-        }
-        if let Some(l) = limit {
-            query.push(("limit", l.to_string()));
-        }
-        let response = self
-            .with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/lesche/rooms/{room}/messages")))
-                    .query(&query),
-            )
-            .send()
-            .await
-            .context("failed to read room history")?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let message = serde_json::from_str::<Envelope>(&body)
-                .map(|e| e.error.message)
-                .unwrap_or(body);
-            return Err(ApiError {
-                status: status.as_u16(),
-                message,
-            }
-            .into());
-        }
-        response
-            .text()
-            .await
-            .context("failed to read room history body")
-    }
-
-    /// Fetch the tagma's single root agent. The tagma eagerly creates one
-    /// root at startup (see `ensure_root_agent`), so this always succeeds once
-    /// the tagma is accepting connections.
-    pub async fn get_root_agent(&self) -> Result<AgentSummary> {
-        self.handle_response(
-            self.with_auth(self.inner.http.get(self.url("/agents/root")))
-                .send()
-                .await
-                .context("failed to connect to tagma")?,
-            "failed to parse response",
-        )
-        .await
-    }
-
-    /// List agent instances. Pass `created_by = Some(sup)` to list only a
-    /// superior's direct subagents; `None` lists all agents.
-    pub async fn list_agents(&self, created_by: Option<&AgentId>) -> Result<Vec<AgentSummary>> {
-        let mut req = self.with_auth(self.inner.http.get(self.url("/agents")));
-        if let Some(sup) = created_by {
-            req = req.query(&[("created_by", sup.to_string())]);
-        }
-        let resp: ListAgentsResponse = self
-            .handle_response(
-                req.send().await.context("failed to connect to tagma")?,
-                "failed to parse response",
-            )
-            .await?;
-        Ok(resp.agents)
-    }
-
-    /// Update an agent's `role` and/or `description`. Caller must be the agent's
-    /// direct supervisor (or operator). `None` fields are left unchanged.
-    pub async fn update_agent_metadata(
-        &self,
-        id: &AgentId,
-        body: UpdateAgentMetadataRequest,
-    ) -> Result<AgentSummary> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .put(self.url(&format!("/agents/{id}/metadata")))
-                    .json(&body),
-            )
-            .send()
-            .await
-            .context("failed to connect to tagma")?,
-            "failed to parse response",
-        )
-        .await
-    }
-
-    /// Report an agent's current activity. Caller must be the agent itself (or
-    /// operator) — activity is self-reported. An empty `activity` clears it.
-    pub async fn update_activity(&self, id: &AgentId, body: UpdateActivityRequest) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(
-                self.inner
-                    .http
-                    .put(self.url(&format!("/agents/{id}/activity")))
-                    .json(&body),
-            )
-            .send()
-            .await
-            .context("failed to connect to tagma")?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Remove an agent instance.
-    /// Requires superior-level auth if the tagma enforces it.
-    pub async fn remove_agent(&self, id: &AgentId) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(self.inner.http.delete(self.url(&format!("/agents/{id}"))))
-                .send()
-                .await
-                .context("failed to connect to tagma")?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Interrupt the current agent operation gracefully.
-    /// Requires superior-level auth if the tagma enforces it.
-    pub async fn interrupt_agent(&self, id: &AgentId) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(
-                self.inner
-                    .http
-                    .post(self.url(&format!("/agents/{id}/interrupt"))),
-            )
-            .send()
-            .await
-            .context("failed to connect to tagma")?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Get a raw SSE event stream for the given agent.
-    pub async fn event_stream(&self, id: &AgentId) -> Result<JsonEventStream<SseEvent>> {
-        let response = self
-            .ensure_success(
-                self.with_auth(
-                    self.inner
-                        .http
-                        .get(self.url(&format!("/agents/{id}/events"))),
-                )
-                .send()
-                .await
-                .context("failed to subscribe to agent events")?,
-            )
-            .await?;
-        JsonEventStream::from_response(response).context("failed to parse SSE stream")
-    }
-
-    // -- Approvals ------------------------------------------------------------
-
-    /// Send a decision (approve/deny) for an approval.
-    pub async fn respond_approval(
-        &self,
-        approval_id: &str,
-        decision: &str,
-        reason: Option<&str>,
-    ) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(
-                self.inner
-                    .http
-                    .post(self.url(&format!("/approvals/{approval_id}")))
-                    .json(&ApprovalDecisionBody {
-                        decision: decision.to_owned(),
-                        reason: reason.map(|s| s.to_owned()),
-                    }),
-            )
-            .send()
-            .await
-            .context("failed to connect to tagma")?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// List approvals with optional filtering and pagination.
-    pub async fn list_approvals(
-        &self,
-        params: &ListApprovalsParams,
-    ) -> Result<ListApprovalsResponse> {
-        let req = self.inner.http.get(self.url("/approvals")).query(params);
-        self.handle_response(
-            self.with_auth(req)
-                .send()
-                .await
-                .context("failed to connect to tagma")?,
-            "failed to parse response",
-        )
-        .await
-    }
-
-    /// Get a single approval by id.
-    pub async fn get_approval(&self, id: &str) -> Result<ApprovalEntry> {
-        let req = self.inner.http.get(self.url(&format!("/approvals/{id}")));
-        self.handle_response(
-            self.with_auth(req)
-                .send()
-                .await
-                .context("failed to connect to tagma")?,
-            "failed to parse response",
-        )
-        .await
-    }
-
-    // -- Agent status / permissions / policy ----------------------------------
-
-    /// Get agent status including context usage and retry history.
-    pub async fn agent_status(&self, id: &AgentId) -> Result<AgentStatusResponse> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/status"))),
-            )
-            .send()
-            .await
-            .context("failed to get agent status")?,
-            "failed to parse status response",
-        )
-        .await
-    }
-
-    /// Verify the caller's bearer matches the named agent id: `Ok(())` on match
-    /// (tagma returns `204`), propagates `ApiError` (`401`) on mismatch. Lets a
-    /// trusted peer service (e.g. `kallip-cron`) confirm an `(agent_id, token)`
-    /// pair a client presented, without that service holding the agent-token
-    /// index itself. Carries its own short timeout — verification must not hang
-    /// the caller on a wedged tagma (unlike SSE, this is a one-shot request).
-    pub async fn verify_agent(&self, id: &AgentId) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/verify")))
-                    .timeout(std::time::Duration::from_secs(5)),
-            )
-            .send()
-            .await
-            .context("failed to verify agent")?,
-        )
-        .await
-        .map(drop)
-    }
-
-    /// Get agent permission profile and tool policy rules.
-    pub async fn agent_permissions(&self, id: &AgentId) -> Result<AgentPermissionsResponse> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/permissions"))),
-            )
-            .send()
-            .await
-            .context("failed to get agent permissions")?,
-            "failed to parse permissions response",
-        )
-        .await
-    }
-
-    /// Get the `bash_exec` command-policy overrides for an agent.
-    pub async fn get_exec_policy(&self, id: &AgentId) -> Result<ExecPolicy> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/exec-policy"))),
-            )
-            .send()
-            .await
-            .context("failed to get agent exec policy")?,
-            "failed to parse exec policy response",
-        )
-        .await
-    }
-
-    /// Update the `bash_exec` command-policy overrides for an agent.
-    pub async fn update_exec_policy(&self, id: &AgentId, policy: &ExecPolicy) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(
-                self.inner
-                    .http
-                    .put(self.url(&format!("/agents/{id}/exec-policy")))
-                    .json(policy),
-            )
-            .send()
-            .await
-            .context("failed to update agent exec policy")?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    // -- Directory write-locks -------------------------------------------------
-
-    /// Acquire the write-lock on `path` for agent `id`. Bounded by `timeout_secs`
-    /// (default server-side); on conflict the server returns the holder via an
-    /// `ApiError` (conflict).
-    pub async fn dirlock_acquire(
-        &self,
-        id: &AgentId,
-        path: &str,
-        timeout_secs: Option<u64>,
-    ) -> Result<DirLockAcquireResponse> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .post(self.url(&format!("/agents/{id}/dirlocks")))
-                    .json(&serde_json::json!({ "path": path, "timeout_secs": timeout_secs })),
-            )
-            .send()
-            .await
-            .context("failed to acquire directory lock")?,
-            "failed to parse acquire response",
-        )
-        .await
-    }
-
-    /// Release the write-lock on `path` for agent `id`. Idempotent.
-    pub async fn dirlock_release(&self, id: &AgentId, path: &str) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(
-                self.inner
-                    .http
-                    .delete(self.url(&format!("/agents/{id}/dirlocks")))
-                    .json(&serde_json::json!({ "path": path })),
-            )
-            .send()
-            .await
-            .context("failed to release directory lock")?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// List the canonical directories agent `id` currently holds write-locks on.
-    pub async fn dirlock_status(&self, id: &AgentId) -> Result<Vec<String>> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/dirlocks"))),
-            )
-            .send()
-            .await
-            .context("failed to get directory lock status")?,
-            "failed to parse lock status response",
-        )
-        .await
-    }
-
-    /// Who holds the write-lock on `dir`, if anyone.
-    pub async fn dirlock_who(&self, dir: &str) -> Result<Option<String>> {
-        let resp: DirLockWhoResponse = self
-            .handle_response(
-                self.with_auth(
-                    self.inner
-                        .http
-                        .get(self.url("/dirlocks"))
-                        .query(&[("dir", dir)]),
-                )
-                .send()
-                .await
-                .context("failed to query directory lock holder")?,
-                "failed to parse lock holder response",
-            )
-            .await?;
-        Ok(resp.holder)
-    }
-
-    // -----------------------------------------------------------------------
-    // Token budget
-    // -----------------------------------------------------------------------
-
-    /// Get the tagma-wide token budget status.
-    pub async fn get_token_budget(&self) -> Result<TokenBudgetResponse> {
-        self.handle_response(
-            self.with_auth(self.inner.http.get(self.url("/budget")))
-                .send()
-                .await
-                .context("failed to get token budget")?,
-            "failed to parse budget response",
-        )
-        .await
-    }
-
-    /// Adjust the tagma-wide token budget by a signed delta.
-    ///
-    /// Positive delta increases, negative delta decreases.
-    pub async fn adjust_token_budget(&self, delta: i64) -> Result<TokenBudgetResponse> {
-        self.handle_response(
-            self.with_auth(self.inner.http.post(self.url("/budget")).json(
-                &TokenBudgetUpdateRequest {
-                    set_remaining: None,
-                    delta: Some(delta),
-                },
-            ))
-            .send()
-            .await
-            .context("failed to adjust token budget")?,
-            "failed to parse budget response",
-        )
-        .await
-    }
-
-    /// Set the remaining tagma-wide token budget.
-    ///
-    /// The tagma computes `new_total = consumed + value`. Use `value == 0`
-    /// to pause all agents (remaining = 0 triggers immediate budget exceeded).
-    pub async fn set_token_budget(&self, value: u64) -> Result<TokenBudgetResponse> {
-        self.handle_response(
-            self.with_auth(self.inner.http.post(self.url("/budget")).json(
-                &TokenBudgetUpdateRequest {
-                    set_remaining: Some(value),
-                    delta: None,
-                },
-            ))
-            .send()
-            .await
-            .context("failed to set token budget")?,
-            "failed to parse budget response",
-        )
-        .await
-    }
-
-    // -- Inbox -----------------------------------------------------------------
-
-    /// List messages in an agent's inbox (`GET /agents/{id}/inbox`).
-    pub async fn inbox_list(
-        &self,
-        id: &AgentId,
-        status: Option<&str>,
-        limit: Option<u32>,
-    ) -> Result<Vec<crate::InboxEntry>> {
-        let mut req = self
-            .inner
-            .http
-            .get(self.url(&format!("/agents/{id}/inbox")));
-        if let Some(s) = status {
-            req = req.query(&[("status", s)]);
-        }
-        if let Some(n) = limit {
-            req = req.query(&[("limit", n)]);
-        }
-        self.handle_response(
-            self.with_auth(req)
-                .send()
-                .await
-                .context("failed to list inbox")?,
-            "failed to parse inbox list response",
-        )
-        .await
-    }
-
-    /// Read a single inbox message, marking it as read
-    /// (`GET /agents/{id}/inbox/{msg_id}`).
-    pub async fn inbox_read(&self, id: &AgentId, msg_id: i64) -> Result<crate::InboxEntry> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/inbox/{msg_id}"))),
-            )
-            .send()
-            .await
-            .context("failed to read inbox message")?,
-            "failed to parse inbox entry",
-        )
-        .await
-    }
-
-    /// Get inbox summary counts (`GET /agents/{id}/inbox/summary`).
-    pub async fn inbox_summary(&self, id: &AgentId) -> Result<crate::InboxSummary> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/inbox/summary"))),
-            )
-            .send()
-            .await
-            .context("failed to get inbox summary")?,
-            "failed to parse inbox summary",
-        )
-        .await
-    }
-
-    /// Mark an inbox message as done (`PUT /agents/{id}/inbox/{msg_id}`).
-    pub async fn inbox_mark_done(&self, id: &AgentId, msg_id: i64) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(
-                self.inner
-                    .http
-                    .put(self.url(&format!("/agents/{id}/inbox/{msg_id}"))),
-            )
-            .send()
-            .await
-            .context("failed to mark inbox message done")?,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Clear inbox messages (`DELETE /agents/{id}/inbox`).
-    /// When `all` is false (default), only done messages are removed.
-    pub async fn inbox_clear(&self, id: &AgentId, all: bool) -> Result<usize> {
-        #[derive(serde::Deserialize)]
-        struct ClearResponse {
-            cleared: usize,
-        }
-        let mut req = self
-            .inner
-            .http
-            .delete(self.url(&format!("/agents/{id}/inbox")));
-        if all {
-            req = req.query(&[("all", "true")]);
-        }
-        let resp: ClearResponse = self
-            .handle_response(
-                self.with_auth(req)
-                    .send()
-                    .await
-                    .context("failed to clear inbox")?,
-                "failed to parse clear response",
-            )
-            .await?;
-        Ok(resp.cleared)
     }
 }
 
@@ -882,4 +212,151 @@ struct Envelope {
 #[derive(serde::Deserialize)]
 struct Body {
     message: String,
+}
+
+/// Turn a non-2xx response into an `ApiError`, preferring the structured
+/// `{"error":{"message":"..."}}` body when it parses.
+async fn error_from_response(response: reqwest::Response) -> anyhow::Error {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let message = serde_json::from_str::<Envelope>(&body)
+        .map(|e| e.error.message)
+        .unwrap_or(body);
+    ApiError {
+        status: status.as_u16(),
+        message,
+    }
+    .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn client_for(server: &MockServer) -> TagmaClient {
+        TagmaClient::builder(&server.uri()).build().unwrap()
+    }
+
+    fn as_api_error(err: &anyhow::Error) -> &ApiError {
+        err.downcast_ref::<ApiError>()
+            .expect("downcasts to ApiError")
+    }
+
+    async fn send(client: &TagmaClient, path: &str) -> reqwest::Response {
+        client
+            .inner
+            .http
+            .get(client.url(path))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn handle_response_extracts_envelope_message_from_error_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/probe"))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_string(r#"{"error":{"message":"boom"}}"#),
+            )
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        let response = send(&client, "/probe").await;
+        let err = client
+            .handle_response::<serde_json::Value>(response, "probe context")
+            .await
+            .expect_err("503");
+        let api = as_api_error(&err);
+        assert_eq!(api.status, 503);
+        assert_eq!(api.message, "boom");
+    }
+
+    #[tokio::test]
+    async fn handle_response_falls_back_to_raw_body_when_not_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/probe"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("gateway exploded"))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        let response = send(&client, "/probe").await;
+        let err = client
+            .handle_response::<serde_json::Value>(response, "probe context")
+            .await
+            .expect_err("500");
+        let api = as_api_error(&err);
+        assert_eq!(api.status, 500);
+        assert_eq!(api.message, "gateway exploded");
+    }
+
+    #[tokio::test]
+    async fn handle_response_deserializes_success_body() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({ "ok": true });
+        Mock::given(method("GET"))
+            .and(path("/probe"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        let response = send(&client, "/probe").await;
+        let value = client
+            .handle_response::<serde_json::Value>(response, "probe context")
+            .await
+            .expect("success body parses");
+        assert_eq!(value["ok"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn ensure_success_extracts_envelope_message_from_error_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/probe"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string(r#"{"error":{"message":"bad token"}}"#),
+            )
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        let response = send(&client, "/probe").await;
+        let err = client.ensure_success(response).await.expect_err("401");
+        let api = as_api_error(&err);
+        assert_eq!(api.status, 401);
+        assert_eq!(api.message, "bad token");
+    }
+
+    #[tokio::test]
+    async fn ensure_success_falls_back_to_raw_body_when_not_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/probe"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("gateway exploded"))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        let response = send(&client, "/probe").await;
+        let err = client.ensure_success(response).await.expect_err("500");
+        let api = as_api_error(&err);
+        assert_eq!(api.status, 500);
+        assert_eq!(api.message, "gateway exploded");
+    }
+
+    #[tokio::test]
+    async fn ensure_success_passes_success_response_through() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/probe"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("stream body"))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        let response = send(&client, "/probe").await;
+        let response = client.ensure_success(response).await.expect("2xx passes");
+        assert_eq!(response.status().as_u16(), 200);
+    }
 }

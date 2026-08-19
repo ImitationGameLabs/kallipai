@@ -8,7 +8,8 @@ mod bash_exec;
 mod bg_kill;
 mod bg_read;
 
-pub use bash_exec::{BashExec, BashExecArgs, BashExecOutput};
+pub use crate::backend::BashExecOutput;
+pub use bash_exec::{BashExec, BashExecArgs};
 pub use bg_kill::{BgKill, BgKillArgs, BgKillOutput};
 pub use bg_read::{BgRead, BgReadArgs, BgReadOutput};
 

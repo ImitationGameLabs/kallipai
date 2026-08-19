@@ -261,7 +261,7 @@ fn guest_hide_holes() -> Vec<PathBuf> {
 /// event, it must call `break` to park until the next input arrives.
 ///
 /// The runtime treats `break` as a control-flow signal, not a normal tool: it
-/// short-circuits the round loop (see `runner::execute_tool_calls`) and produces
+/// short-circuits the round loop (see `tool_execution::execute_tool_calls`) and produces
 /// no persisted tool result. Tool calls issued in the same round **before**
 /// `break` still execute and are recorded; calls **after** `break` are abandoned
 /// (mirroring the existing stop-on-non-success rule), so the agent should call

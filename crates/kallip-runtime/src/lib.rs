@@ -1,5 +1,7 @@
+pub(crate) mod acquisition;
 pub mod agent_task;
 pub mod approval;
+pub(crate) mod budget_gate;
 pub mod config;
 pub mod context;
 pub mod dirlock;
@@ -17,6 +19,7 @@ mod stream_accumulator;
 #[cfg(test)]
 mod test_support;
 pub mod token_budget;
+pub(crate) mod tool_execution;
 pub mod tools;
 
 // Re-exported so the tagma (another crate) can construct `AgentContext.failover`. The state's

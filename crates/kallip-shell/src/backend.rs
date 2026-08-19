@@ -98,44 +98,49 @@ pub enum CaptureMode {
     Stderr,
 }
 
-/// Result of a command execution. Exactly the [`CaptureMode`]'s output fields
-/// are `Some` (`Merged` -> `merged`; `Separate` -> `stdout` + `stderr`; `Stdout` ->
-/// `stdout`; `Stderr` -> `stderr`); the rest are `None`, so the tool layer can
-/// omitempty-tag them and the caller sees only what it asked for. A clipped
-/// stream carries a one-line banner naming the spill file holding its full
-/// output. The streams carry only the command's own output: cwd recovery is
-/// off-band (a private fd), so nothing is stripped.
-#[derive(Debug, Clone, Default)]
-pub struct ShellOutput {
-    /// Merged stdout+stderr, possibly clipped (head+tail with a middle-omitted
-    /// marker) and banner-prefixed on clip. `Some` only under
-    /// [`CaptureMode::Merged`].
-    pub merged: Option<String>,
-    /// Captured stdout, possibly clipped + banner-prefixed on clip. `Some` under
-    /// [`CaptureMode::Separate`] or [`CaptureMode::Stdout`].
+/// Result of a command execution: the wire shape the `bash_exec` tool
+/// serializes to the LLM and the in-memory shape [`ShellBackend::exec`]
+/// returns. Exactly the output field(s) for the requested [`CaptureMode`]
+/// are `Some` (the others are omitted on the wire): `Merged` -> `output`;
+/// `Separate` -> `stdout` + `stderr`; `Stdout` -> `stdout`; `Stderr` ->
+/// `stderr`. A clipped stream carries a one-line banner naming the spill
+/// file holding its full output. The streams carry only the command's own
+/// output: cwd recovery is off-band (a private fd), so nothing is
+/// stripped.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct BashExecOutput {
+    /// Merged stdout+stderr. Holds the full output when it fit, or a head +
+    /// "[... N bytes omitted ...]" + tail view (banner-prefixed) when it was
+    /// clipped. Present under `capture: "merged"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Captured stdout, head+tail on clip (banner-prefixed). Present under
+    /// `capture: "separate"` or `"stdout"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
-    /// Captured stderr, possibly clipped + banner-prefixed on clip. `Some` under
-    /// [`CaptureMode::Separate`] or [`CaptureMode::Stderr`].
+    /// Captured stderr, head+tail on clip (banner-prefixed). Present under
+    /// `capture: "separate"` or `"stderr"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
-    /// Process exit code, or `None` on signal death. `None` while a
-    /// timed-out command keeps running as a background task (`task_id` is
-    /// set — poll the task for the eventual code).
+    /// Exit code, or `null` on signal death. `null` while a timed-out
+    /// command keeps running as a background task (`task_id` is set — poll
+    /// bash_background_read for the eventual code).
     pub exit_code: Option<i32>,
     /// Whether the command exceeded its timeout. When `true`, the command
-    /// was converted to a background task (`task_id` set) — unless a
-    /// concurrent workspace carve refused the conversion, in which case it
-    /// was killed.
+    /// was converted to a still-running background task (`task_id` set),
+    /// unless a concurrent workspace change refused the conversion and the
+    /// command was killed.
     pub timed_out: bool,
-    /// Whether a returned stream was clipped (exceeded the byte budget). Only
-    /// the stream(s) the mode returns are considered; clipping a discarded
-    /// stream is not reported.
+    /// Whether at least one returned stream was clipped. Under `separate` this
+    /// is the OR of both streams ("at least one"); the authoritative per-stream
+    /// signal is the banner in the clipped stream's text.
     pub truncated: bool,
-    /// The working directory after the command (read fresh from the cwd fd
-    /// channel).
-    pub cwd: PathBuf,
-    /// Set when a timeout converted this exec into a background task;
-    /// poll `read_background` / `kill_background` with it. `None` for
-    /// every completed command (and for refused conversions).
+    /// Working directory after the command (read fresh from `pwd`).
+    pub cwd: String,
+    /// Set for `background: true`, and when a timed-out command was
+    /// converted to a still-running background task — same id space, same
+    /// bash_background_read / bash_background_kill surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
 }
 
@@ -155,7 +160,7 @@ pub trait ShellBackend: Send + Sync {
         command: &str,
         timeout: Duration,
         capture: CaptureMode,
-    ) -> Result<ShellOutput, ShellError>;
+    ) -> Result<BashExecOutput, ShellError>;
     /// The current (sticky) working directory.
     fn cwd(&self) -> &Path;
     /// Spawn `command` as a background task; returns its id.
@@ -188,7 +193,7 @@ impl ShellBackend for ProcessBackend {
         command: &str,
         timeout_dur: Duration,
         capture: CaptureMode,
-    ) -> Result<ShellOutput, ShellError> {
+    ) -> Result<BashExecOutput, ShellError> {
         // Resolve an existing spawn cwd; fall back if the cached one was deleted.
         let spawn_cwd =
             std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.config.fallback_cwd.clone());
@@ -380,16 +385,16 @@ impl ShellBackend for ProcessBackend {
 
                 // Surface only the field(s) the capture mode returns,
                 // banner-prefixed on clip (see `stream_fields`).
-                let (merged, stdout, stderr, truncated) =
+                let (output, stdout, stderr, truncated) =
                     stream_fields(capture, &out_cap, &err_cap);
-                Ok(ShellOutput {
-                    merged,
+                Ok(BashExecOutput {
+                    output,
                     stdout,
                     stderr,
                     exit_code,
                     timed_out: false,
                     truncated,
-                    cwd: new_cwd,
+                    cwd: new_cwd.to_string_lossy().into_owned(),
                     task_id: None,
                 })
             }
@@ -441,10 +446,10 @@ impl ShellBackend for ProcessBackend {
                         kill_guard.disarm();
                         let out_peek = peek_cap(&out_cap);
                         let err_peek = peek_cap(&err_cap);
-                        let (merged, stdout, stderr, truncated) =
+                        let (output, stdout, stderr, truncated) =
                             stream_fields(capture, &out_peek, &err_peek);
-                        Ok(ShellOutput {
-                            merged,
+                        Ok(BashExecOutput {
+                            output,
                             stdout,
                             stderr,
                             // No exit yet: the command is still running
@@ -452,7 +457,7 @@ impl ShellBackend for ProcessBackend {
                             exit_code: None,
                             timed_out: true,
                             truncated,
-                            cwd: self.cwd.clone(),
+                            cwd: self.cwd.to_string_lossy().into_owned(),
                             task_id: Some(task_id),
                         })
                     }
@@ -492,14 +497,14 @@ impl ShellBackend for ProcessBackend {
                                     carve-out landed while it ran]\n";
                         let (merged, stdout, stderr, truncated) =
                             stream_fields(capture, &out_cap, &err_cap);
-                        Ok(ShellOutput {
-                            merged: merged.map(|m| format!("{note}{m}")),
+                        Ok(BashExecOutput {
+                            output: merged.map(|m| format!("{note}{m}")),
                             stdout: stdout.map(|s| format!("{note}{s}")),
                             stderr: stderr.map(|s| format!("{note}{s}")),
                             exit_code: None,
                             timed_out: true,
                             truncated,
-                            cwd: new_cwd,
+                            cwd: new_cwd.to_string_lossy().into_owned(),
                             task_id: None,
                         })
                     }

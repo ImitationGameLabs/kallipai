@@ -297,7 +297,7 @@ impl AgenticContext for ContextStore {
                     // content to pin -- skip it so `assistant` resolves to a
                     // real reply. Tool results always carry content (their
                     // body), so this prunes only assistant dispatch headers
-                    // produced by the runner's execute_tool_calls.
+                    // produced by tool-call execution.
                     && (role != "assistant" || m.content().is_some())
             })
             .cloned()
@@ -493,7 +493,7 @@ impl ContextStore {
     }
 
     /// Set the pinned token budget. Called at agent setup and re-synced on within-tier failover
-    /// (see `runner::reapply_window`).
+    /// (see `acquisition::reapply_window`).
     pub fn set_pinned_budget(&mut self, budget: usize) {
         self.pinned_token_budget = budget;
     }

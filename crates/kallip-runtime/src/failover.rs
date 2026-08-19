@@ -8,10 +8,10 @@
 //! rather than conventional.
 //!
 //! The advance *transition* itself — advancing on a `Failover` outcome, swapping the client,
-//! re-applying the window, compacting — lives in `crate::runner::advance_failover`, not here:
+//! re-applying the window, compacting — lives in `crate::acquisition::advance_failover`, not here:
 //! it spills across the agent context (client/window/store) and so cannot be a pure self-method.
-//! This module owns the state and the accessors that DRY the chain indexing; the runner owns the
-//! choreography.
+//! This module owns the state and the accessors that DRY the chain indexing; the acquisition
+//! module owns the driving.
 
 use std::sync::Arc;
 
@@ -138,11 +138,11 @@ impl FailoverState {
     }
 }
 
-/// Outcome of one within-tier failover advance attempt (see `crate::runner::advance_failover`).
+/// Outcome of one within-tier failover advance attempt (see `crate::acquisition::advance_failover`).
 ///
 /// `messages` is returned on [`Advanced`](Self::Advanced) — recomputed if compaction ran, else
-/// unchanged — so the round loop can rebind its local without `advance_failover` taking it by
-/// `&mut`.
+/// unchanged — so the acquisition loop can rebind its local without `advance_failover` taking
+/// it by `&mut`.
 ///
 /// `Debug` is manual because [`Advanced`](Self::Advanced) carries `Vec<ChatMessage>` and
 /// [`ChainExhausted`](Self::ChainExhausted) carries `anyhow::Error` (neither critical for the

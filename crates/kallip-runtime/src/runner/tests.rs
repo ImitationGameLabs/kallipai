@@ -2,15 +2,23 @@ use super::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use just_llm_client::LlmBackend;
+use just_llm_client::{
+    LlmBackend,
+    types::chat::{ChatToolCall, ToolCallsMessage},
+};
+use kallip_common::protocol::FailoverChainExhaustion;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
 
+use crate::acquisition::advance_failover;
 use crate::agent_task::{RoundToken, run_and_report};
+use crate::failover::FailoverOutcome;
+use crate::policy::ToolCallOutcome;
 use crate::profile::BackendSource;
 use crate::test_support::{MapSource, ctx_from_source, make_ctx, profile};
+use crate::tool_execution::{run_tool_bounded, synthesize_unanswered_results};
 
 fn no_cancel() -> CancellationToken {
     CancellationToken::new()

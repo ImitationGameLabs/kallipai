@@ -5,273 +5,25 @@ use anyhow::{Context, Result, bail};
 use crate::env_util::{DEFAULT_CONTEXT_WINDOW_TOKENS, parse_env, parse_env_list};
 use crate::retry::RetryPolicy;
 use kallip_common::AgentId;
-use kallip_common::policy::PolicyPreset;
 
-const DEFAULT_SYSTEM_PROMPT: &str = concat!(
-    "# Posture\n\n",
-    "Keep answers concise. Prefer the least risky tool that accomplishes the task; ",
-    "each tool's own description explains its usage.\n\n",
-    "# Tool and round model\n\n",
-    "Some tool actions are asynchronous — a backgrounded task or a deferred ",
-    "(pending-approval) action completes later and surfaces a notice in context; ",
-    "read the notice and follow its instruction. Tool calls within one round run ",
-    "in order; if a call does not succeed cleanly (non-zero exit, denied, timed ",
-    "out, or deferred pending approval) the remaining calls in that round are ",
-    "skipped and returned as errors — re-issue them after reviewing what happened.",
-);
-/// Effectively unlimited — the real safety net is the tagma-wide token budget.
-/// Individual rounds are bounded by LLM response length; the loop as a whole is
-/// bounded by token consumption. This constant only serves as a last-resort
-/// guard against a degenerate "tool calls with no progress" loop.
-const DEFAULT_MAX_TOOL_ROUNDS: usize = usize::MAX;
-/// Default cap on consecutive heartbeat rounds (bare-assistant re-loops) before
-/// the harness force-idles the agent. Bounds "self-monologue" token burn; the
-/// tagma-wide token budget remains the overall hard ceiling. Three is a firm
-/// nudge: one accidental bare response, a reminder, then a stop.
-const DEFAULT_MAX_HEARTBEAT_ROUNDS: u32 = 3;
-/// Default cap on consecutive transient (failover-chain-exhausted) parks that get
-/// a timed retry. After this (or the `retry_timeout` wall clock), the agent hard-
-/// parks and surfaces to the operator instead of re-hammering a downed provider.
-const DEFAULT_MAX_TRANSIENT_RETRIES: u32 = 3;
-const DEFAULT_SUMMARY_MAX_TOKENS: u32 = 1_200;
-const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 8_192;
-const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
-const DEFAULT_MAX_RETRIES: u32 = 10;
-const DEFAULT_RETRY_BASE_DELAY_SECS: u64 = 1;
-const DEFAULT_RETRY_MAX_DELAY_SECS: u64 = 60;
-const DEFAULT_RETRY_TIMEOUT_SECS: u64 = 300;
-/// Upper bound for `KALLIP_MAX_RETRIES` (default is 10). Closes the overflow in
-/// retry.rs's `saturating_sub(prior) + 1`: at `u32::MAX` the release build wraps
-/// to zero attempts — a silent zero-send inversion. 1000 retries at the 1s
-/// floor delay is already 16+ minutes of pure waiting, beyond any operational
-/// scenario, with ample headroom over the default.
-const MAX_RETRIES_LIMIT: u32 = 1_000;
-/// Upper bound for the two delay knobs (base default 1s, cap default 60s).
-/// The base delay's jitter computes `as_nanos() as u64`; at 3600s the value
-/// is 3.6e12 ns — well under u64::MAX (~1.8e19), so the u128->u64 cast is
-/// exact; combined with the existing >0 bail, the jitter's modulo divisor
-/// is never zero. A single backoff over an hour under the 24h total window
-/// is a unit error, not a scenario.
-const RETRY_DELAY_SECS_LIMIT: u64 = 3_600;
-/// Upper bound for `KALLIP_RETRY_TIMEOUT_SECS` (default 300). The deadline is
-/// built as `Instant::now() + Duration`; an extreme value panics on addition.
-/// 24h covers leave-it-overnight operations.
-const RETRY_TIMEOUT_SECS_LIMIT: u64 = 86_400;
-const DEFAULT_PINNED_BUDGET_RATIO: f64 = 0.25;
-const DEFAULT_CONTEXT_THRESHOLDS: &[u8] = &[50, 60, 70, 80];
-const DEFAULT_TOKEN_BUDGET_WARNINGS: &[u8] = &[80, 95];
-
-/// Resolve the tagma-global `bash_exec` classify preset from
-/// `KALLIP_POLICY_PRESET`.
-///
-/// Unset or empty → [`PolicyPreset::Default`] (strict). Accepts `default`, `auto`,
-/// and `allow-all`. An unrecognized value is a fatal misconfiguration (the preset
-/// is structural to the sandbox), so it panics — matching the env-knob convention
-/// of [`permission_class_from_env`]. Only read once at tagma startup; the preset
-/// is immutable for the tagma's lifetime.
-pub fn policy_preset_from_env() -> PolicyPreset {
-    let Ok(raw) = std::env::var("KALLIP_POLICY_PRESET") else {
-        return PolicyPreset::Default;
-    };
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return PolicyPreset::Default;
-    }
-    raw.parse::<PolicyPreset>().unwrap_or_else(|e| {
-        panic!("KALLIP_POLICY_PRESET: {e}");
-    })
-}
-
+mod defaults;
+use defaults::{
+    DEFAULT_CONTEXT_THRESHOLDS, DEFAULT_MAX_HEARTBEAT_ROUNDS, DEFAULT_MAX_RETRIES,
+    DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_MAX_TRANSIENT_RETRIES, DEFAULT_OUTPUT_RESERVE_TOKENS,
+    DEFAULT_PINNED_BUDGET_RATIO, DEFAULT_RETRY_BASE_DELAY_SECS, DEFAULT_RETRY_MAX_DELAY_SECS,
+    DEFAULT_RETRY_TIMEOUT_SECS, DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_TOKEN_BUDGET_WARNINGS, DEFAULT_TOOL_TIMEOUT_SECS, MAX_RETRIES_LIMIT,
+    RETRY_DELAY_SECS_LIMIT, RETRY_TIMEOUT_SECS_LIMIT,
+};
 mod exec_hooks;
 pub use exec_hooks::load_exec_hook_rules;
-/// Resolve the root agent's permission class from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`.
-///
-/// Root-only test knob, parallel to [`policy_preset_from_env`]: read in the
-/// tagma's root-create branch, never on the subagent or restore paths
-/// (subagents derive their class from `ceiling_for_tier`; restore uses the
-/// persisted `meta.json`). Accepts lowercase `"normal"` / `"guest"` — the env-var
-/// convention, distinct from the PascalCase serde form persisted in `meta.json`.
-/// Panics on an invalid value, matching [`policy_preset_from_env`]'s misconfig behavior.
-pub fn permission_class_from_env() -> PermissionClass {
-    let Ok(raw) = std::env::var("KALLIP_ROOT_AGENT_PERMISSION_CLASS") else {
-        return PermissionClass::default();
-    };
-    // Trim here, not inside FromStr: the wire/env convention trims surrounding
-    // whitespace, but FromStr stays trim-free so the tagma rejects untrimmed
-    // client input verbatim.
-    let raw = raw.trim();
-    match raw.parse::<PermissionClass>() {
-        Ok(class) => class,
-        Err(_) => panic!(
-            "KALLIP_ROOT_AGENT_PERMISSION_CLASS: invalid permission class '{raw}' (expected normal or guest)"
-        ),
-    }
-}
-
-/// Hard-coded maximum delegation depth for top-level agents.
-///
-/// Not configurable — hard-coding avoids the complexity of persisting and
-/// re-validating a dynamic value across restarts. The depth is recomputed
-/// from the `created_by` chain on restore (depth = Self - chain length),
-/// eliminating any attack surface from tampered `meta.json`. A future
-/// increase to this constant will cover all reasonable delegation needs
-/// once the chain-walking restore path is sufficiently tested.
-pub const DEFAULT_MAX_DEPTH: u8 = 3;
-
-/// FS-access permission class — the static baseline axis of the agent sandbox
-/// (`.draft/design/agent-sandbox.md` §2.3).
-///
-/// Independent of model tier: tier only sets the *ceiling* via
-/// [`PermissionClass::ceiling_for_tier`]. `Ord` is derived (`Guest < Normal`) so the
-/// ceiling invariants `granted <= ceiling(tier)` and `ceiling(child) <=
-/// ceiling(parent)` are plain comparisons. Persisted on `AgentMeta` and
-/// re-validated on restore (a safety invariant, unlike display fields).
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum PermissionClass {
-    /// Guest: readonly — workspace RO, secret zero-access, no home write.
-    Guest,
-    /// Normal: home broad-write + workspace write. Default for root agents.
-    #[default]
-    Normal,
-}
-
-/// How a subagent relates to its supervisor's workspace write-lock.
-///
-/// Serialized `snake_case` for both the wire (`CreateAgentRequest`) and the
-/// persisted (`AgentMeta`) form. This intentionally diverges from
-/// [`PermissionClass`], which keeps a PascalCase persisted form distinct from its
-/// lowercase wire/env spelling: `DelegationMode` is newer and has no env-var
-/// spelling, so one shared lowercase form is simpler.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DelegationMode {
-    /// The subagent scopes into a proper subdirectory of the supervisor's
-    /// workspace (the default). The supervisor keeps its root write-lock; the
-    /// subdirectory becomes a readonly hole to the supervisor via the delegation
-    /// carve-out.
-    #[default]
-    CarveOut,
-    /// The subagent takes the supervisor's *entire* workspace: the supervisor's
-    /// root write-lock is transferred to the child at spawn and transferred back
-    /// on removal, so the supervisor's next shell loses workspace write until the
-    /// child is gone.
-    ///
-    /// Exclusive: a supervisor with a `FullHandoff` child may have no other
-    /// child (CarveOut or FullHandoff). Enforced at spawn; a legacy/corrupt
-    /// on-disk tree that violates it may either fault on restore (one
-    /// interleaving) or silently overlap (the other) -- normal operation never
-    /// produces such a tree, so this is a defense note, not a live concern.
-    ///
-    /// Reactivation: while a `FullHandoff` child is Live the workspace write-lock
-    /// is reassigned to the child, so `release_all(supervisor)` is a no-op and
-    /// the supervisor's reactivation `try_acquire_workspace_lock` returns
-    /// `Busy { holder: child }`. The supervisor therefore cannot reactivate
-    /// (restart its task) until the child is removed -- the supervisor genuinely
-    /// cannot write its workspace while the child holds the lock.
-    FullHandoff,
-}
-
-impl std::str::FromStr for DelegationMode {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            kallip_common::protocol::DELEGATION_CARVE_OUT => Ok(Self::CarveOut),
-            kallip_common::protocol::DELEGATION_FULL_HANDOFF => Ok(Self::FullHandoff),
-            other => Err(format!(
-                "unknown delegation_mode '{other}' (expected '{}' or '{}')",
-                kallip_common::protocol::DELEGATION_CARVE_OUT,
-                kallip_common::protocol::DELEGATION_FULL_HANDOFF
-            )),
-        }
-    }
-}
-
-impl std::fmt::Display for DelegationMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CarveOut => f.write_str(kallip_common::protocol::DELEGATION_CARVE_OUT),
-            Self::FullHandoff => f.write_str(kallip_common::protocol::DELEGATION_FULL_HANDOFF),
-        }
-    }
-}
-
-impl PermissionClass {
-    /// Ceiling table: depth 0/1 -> Normal, depth 2/3 -> Guest (§2.3). Depths
-    /// beyond the table clamp to the last entry (Guest), mirroring
-    /// `ProfileRegistry::select_profile`.
-    /// NOTE: depth monotonicity does NOT imply ceiling monotonicity (the 0/1 and
-    /// 2/3 plateaus), so `ceiling(child) <= ceiling(parent)` must be enforced
-    /// explicitly at spawn/restore — not derived from depth.
-    pub fn ceiling_for_tier(depth: usize) -> Self {
-        const CEILINGS: [PermissionClass; (DEFAULT_MAX_DEPTH as usize) + 1] = [
-            PermissionClass::Normal, // depth 0 (root)
-            PermissionClass::Normal, // depth 1
-            PermissionClass::Guest,  // depth 2
-            PermissionClass::Guest,  // depth 3
-        ];
-        CEILINGS[depth.min(CEILINGS.len() - 1)]
-    }
-}
-
-/// Error returned when a [`PermissionClass`] cannot be parsed from its lowercase
-/// wire/env spelling. Surfaced by the tagma as a `400 Bad Request` body, so the
-/// message stays client-readable and stable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsePermissionClassError(pub String);
-
-impl std::fmt::Display for ParsePermissionClassError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "invalid permission class '{}' (expected \"normal\" or \"guest\")",
-            self.0
-        )
-    }
-}
-
-impl std::error::Error for ParsePermissionClassError {}
-
-/// Lowercase wire/env spelling: `"normal"` / `"guest"`. This is the inverse of
-/// [`PermissionClass`]'s [`std::fmt::Display`] and matches the
-/// `KALLIP_ROOT_AGENT_PERMISSION_CLASS` env-var convention — distinct from the
-/// PascalCase serde form persisted in `meta.json`. Parsing is intentionally
-/// trim-free; callers decide whether to trim surrounding whitespace.
-impl std::str::FromStr for PermissionClass {
-    type Err = ParsePermissionClassError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "normal" => Ok(PermissionClass::Normal),
-            "guest" => Ok(PermissionClass::Guest),
-            other => Err(ParsePermissionClassError(other.to_owned())),
-        }
-    }
-}
-
-/// Lowercase wire/env spelling (`"normal"` / `"guest"`), the inverse of
-/// [`std::str::FromStr`]. Used by the permissions endpoint and by client-facing
-/// error messages so they stay consistent with the wire form (rather than the
-/// PascalCase `Debug`/serde form).
-impl std::fmt::Display for PermissionClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PermissionClass::Guest => f.write_str("guest"),
-            PermissionClass::Normal => f.write_str("normal"),
-        }
-    }
-}
-
+mod env;
+pub use env::{permission_class_from_env, policy_preset_from_env};
+mod permissions;
+pub use permissions::{
+    DEFAULT_MAX_DEPTH, DelegationMode, ParsePermissionClassError, PermissionClass,
+    PermissionProfile,
+};
 /// Runtime configuration for `kallip`.
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -565,13 +317,13 @@ impl AgentConfig {
     /// invariants. The single installer: every window — including the implicit env profile's
     /// (`profile::from_env` reads `KALLIP_CONTEXT_WINDOW_TOKENS` into `max_context_window`) —
     /// flows through here at spawn, and within-tier failover re-applies the advanced profile's
-    /// window via `runner::reapply_window`. `context_window_tokens` is thus a derived snapshot of
+    /// window via `acquisition::reapply_window`. `context_window_tokens` is thus a derived snapshot of
     /// the active profile's declared window, not an independent config knob.
     ///
     /// Validates **before** mutating: on an invariant violation the field is left untouched and
     /// `Err` is returned, so a caller that treats the failure as "keep the prior window" gets
     /// exactly that. Failover pre-checks with `try_context_window` instead and *skips* an
-    /// infeasible candidate before committing the advance (see `runner::advance_failover`).
+    /// infeasible candidate before committing the advance (see `acquisition::advance_failover`).
     pub fn set_context_window(&mut self, tokens: usize) -> Result<()> {
         self.try_context_window(tokens)?;
         self.context_window_tokens = tokens;
@@ -597,7 +349,7 @@ impl AgentConfig {
 /// (env values) and [`AgentConfig::set_context_window`] (profile override) so the two paths
 /// cannot drift. `pinned_budget` is recomputed locally here because `ContextStore`'s
 /// `set_pinned_budget` runs later and independently (at spawn via the tagma, and on within-tier
-/// failover via `runner::reapply_window`).
+/// failover via `acquisition::reapply_window`).
 fn check_context_budget(
     context_window_tokens: usize,
     output_reserve_tokens: usize,
@@ -623,40 +375,6 @@ fn check_context_budget(
         );
     }
     Ok(())
-}
-
-/// Permission profile controlling agent delegation capabilities.
-#[derive(Clone, Debug)]
-pub struct PermissionProfile {
-    /// Remaining delegation levels. Decremented for each subagent.
-    pub max_depth: u8,
-    /// Workspace boundary. Subagents must operate within their supervisor's workspace.
-    pub workspace_root: PathBuf,
-}
-
-impl PermissionProfile {
-    pub fn new(workspace_root: PathBuf) -> Self {
-        Self {
-            max_depth: DEFAULT_MAX_DEPTH,
-            workspace_root,
-        }
-    }
-
-    /// Create a profile for a subagent with decremented depth.
-    pub fn subagent(workspace_root: PathBuf, supervisor_depth: u8) -> Self {
-        Self {
-            max_depth: supervisor_depth.saturating_sub(1),
-            workspace_root,
-        }
-    }
-
-    /// Delegation depth as a tier-selection index: root (`max_depth == DEFAULT_MAX_DEPTH`) → 0,
-    /// each delegation level decrements. Single source of truth for the depth formula used by
-    /// tier selection. This consumes `max_depth` (set at spawn or recomputed from the chain on
-    /// restore); it does not participate in setting it.
-    pub fn depth(&self) -> usize {
-        DEFAULT_MAX_DEPTH.saturating_sub(self.max_depth) as usize
-    }
 }
 
 #[cfg(test)]

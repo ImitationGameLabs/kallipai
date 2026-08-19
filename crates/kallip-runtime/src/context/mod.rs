@@ -4,8 +4,9 @@
 //! - [`compose_context`] — assembles turns into `Vec<ChatMessage>` (pinned entries first)
 //! - [`ContextSummarizer`] — LLM-powered summarization of old turns
 //! - `estimate_context_tokens` / `check_progressive_warnings` / `check_token_budget_warnings` /
-//!   `summarize_and_evict` — the round loop's crate-private context-budget layer: estimation,
-//!   warning injection, and bounded compaction, all reading `ContextStore`'s anchor API.
+//!   `summarize_and_evict` — the crate-private context-budget layer behind the round loop and
+//!   its budget gates: estimation, warning injection, and bounded compaction, all reading
+//!   `ContextStore`'s anchor API.
 //!
 //! Pinned persistent context (summaries, skills, notes) is stored as `TurnKind::Pinned` turns
 //! ahead of conversation turns, so one collection composes in priority order.

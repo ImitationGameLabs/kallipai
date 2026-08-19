@@ -492,7 +492,7 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
     };
 
     // Tool-call/result pairing is guaranteed at record time
-    // (`runner::synthesize_unanswered_results`); restore intentionally does not
+    // (`tool_execution::synthesize_unanswered_results`); restore intentionally does not
     // auto-repair legacy orphan tool calls -- a stuck agent is cleaned manually.
     //
     // Fold the legacy `pinned` vec (pre-unification format) into pinned turns at the front of

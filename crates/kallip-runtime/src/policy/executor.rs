@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use just_llm_client::{ToolDispatcher, types::chat::ToolDefinition};
+use kallip_common::toolresult::ToolResultEnvelope;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 
 use super::AgentPolicy;
@@ -249,19 +250,25 @@ fn parse_commit_args(args_json: &str) -> Result<(String, String)> {
 
 fn success_result(tool_name: &str, output: String) -> String {
     let parsed = serde_json::from_str::<Value>(&output).unwrap_or(Value::String(output));
-    serde_json::to_string(&ToolResultResponse {
+    serde_json::to_string(&ToolResultEnvelope {
         ok: true,
         tool_name: tool_name.to_owned(),
-        result: parsed,
+        result: Some(parsed),
+        error: None,
+        pending_approval: None,
+        rest: Map::new(),
     })
     .unwrap_or_else(|e| error_result(tool_name, e.to_string()))
 }
 
 pub(crate) fn error_result(tool_name: &str, error: String) -> String {
-    serde_json::to_string(&ToolErrorResponse {
+    serde_json::to_string(&ToolResultEnvelope {
         ok: false,
         tool_name: tool_name.to_owned(),
-        error,
+        result: None,
+        error: Some(error),
+        pending_approval: None,
+        rest: Map::new(),
     })
     .unwrap_or_else(|_| r#"{"ok":false,"error":"serialization failed"}"#.to_owned())
 }
@@ -288,35 +295,31 @@ pub(crate) fn timed_out_tool_result(tool_name: &str, secs: u64) -> String {
 /// exit-code rule, the background `task_id` carve-out) lives here, not in the
 /// runner.
 fn classify_outcome(envelope: String) -> ToolCallOutcome {
-    let Ok(v) = serde_json::from_str::<Value>(&envelope) else {
+    let Ok(e) = serde_json::from_str::<ToolResultEnvelope>(&envelope) else {
         // Unparseable envelope (should not happen): don't second-guess success.
         return ToolCallOutcome::Success(envelope);
     };
-    if v.get("pending_approval").and_then(|b| b.as_bool()) == Some(true) {
+    if e.pending_approval == Some(true) {
         return ToolCallOutcome::Deferred(envelope);
     }
-    if v.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+    if !e.ok {
         return ToolCallOutcome::Failed(envelope);
     }
     // ok:true. A bash_exec foreground result is only a clean success at exit 0;
     // background spawns (task_id present) succeed regardless of exit_code.
     // Note: approval_redeem re-runs the stored call under its own tool_name, so
     // this also classifies a redeemed bash_exec by its inner exit code.
-    if v.get("tool_name").and_then(|s| s.as_str()) == Some("bash_exec")
-        && bash_foreground_failed(&v)
-    {
+    if e.tool_name == "bash_exec" && e.result.as_ref().is_some_and(bash_foreground_failed) {
         return ToolCallOutcome::Failed(envelope);
     }
     ToolCallOutcome::Success(envelope)
 }
 
-/// `true` iff this is a foreground bash_exec result that did not exit 0
+/// `true` iff this is a foreground bash result that did not exit 0
 /// (non-zero exit, or null exit_code = signal death). Background spawns
-/// (`task_id` present) are NOT foreground failures.
-fn bash_foreground_failed(v: &Value) -> bool {
-    let Some(result) = v.get("result") else {
-        return false;
-    };
+/// (`task_id` present) are NOT foreground failures. Takes the envelope's
+/// `result` payload directly.
+fn bash_foreground_failed(result: &Value) -> bool {
     if result.get("task_id").and_then(|t| t.as_str()).is_some() {
         return false; // background spawn
     }
@@ -326,20 +329,6 @@ fn bash_foreground_failed(v: &Value) -> bool {
 }
 
 // -- Typed response structs --
-
-#[derive(Serialize)]
-struct ToolResultResponse {
-    ok: bool,
-    tool_name: String,
-    result: Value,
-}
-
-#[derive(Serialize)]
-struct ToolErrorResponse {
-    ok: bool,
-    tool_name: String,
-    error: String,
-}
 
 #[derive(Serialize)]
 struct ApprovalListResponse {

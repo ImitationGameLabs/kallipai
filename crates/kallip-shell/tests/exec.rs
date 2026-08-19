@@ -29,9 +29,13 @@ async fn cd_is_reflected_in_reported_cwd() {
         .exec("pwd", Duration::from_secs(10), CaptureMode::Merged)
         .await
         .unwrap();
-    assert_eq!(out.cwd, target, "cwd must reflect the cd");
     assert_eq!(
-        out.merged.as_deref().unwrap().trim(),
+        out.cwd,
+        target.display().to_string(),
+        "cwd must reflect the cd"
+    );
+    assert_eq!(
+        out.output.as_deref().unwrap().trim(),
         target.to_string_lossy()
     );
 }

@@ -29,7 +29,7 @@ async fn exec_captures_stdout_and_exit_code() {
         .await
         .unwrap();
     assert_eq!(out.exit_code, Some(7));
-    assert!(out.merged.as_deref().unwrap().contains("hello"));
+    assert!(out.output.as_deref().unwrap().contains("hello"));
     assert!(out.stdout.is_none() && out.stderr.is_none());
     assert!(!out.timed_out);
 }
@@ -48,11 +48,17 @@ async fn exec_cd_persists_across_calls() {
         .await
         .unwrap();
     // cwd is read fresh from the private fd channel after the cd -> sticky.
-    assert_eq!(out.cwd, std::fs::canonicalize(&target).unwrap());
-    assert!(out.merged.as_deref().unwrap().trim() == out.cwd.to_string_lossy());
+    assert_eq!(
+        out.cwd,
+        std::fs::canonicalize(&target)
+            .unwrap()
+            .display()
+            .to_string()
+    );
+    assert!(out.output.as_deref().unwrap().trim() == out.cwd);
     // The cwd marker rides a separate fd, not the output stream, so the
     // merged text is pure command output.
-    assert!(!out.merged.as_deref().unwrap().contains("__ja_pwd"));
+    assert!(!out.output.as_deref().unwrap().contains("__ja_pwd"));
 }
 
 #[tokio::test]
@@ -130,7 +136,7 @@ async fn converted_task_output_keeps_growing() {
         .await
         .unwrap();
     let id = out.task_id.expect("converted");
-    assert!(out.merged.as_deref().unwrap().contains("one"));
+    assert!(out.output.as_deref().unwrap().contains("one"));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let read = backend.read_background(&id, 4096).await.unwrap();
@@ -160,7 +166,11 @@ async fn exec_timeout_conversion_does_not_advance_cwd() {
         .await
         .unwrap();
     let id = out.task_id.expect("converted");
-    assert_eq!(out.cwd, before, "conversion freezes the sticky cwd");
+    assert_eq!(
+        out.cwd,
+        before.display().to_string(),
+        "conversion freezes the sticky cwd"
+    );
     assert_eq!(backend.cwd(), before);
     backend.kill_background(&id).await.unwrap();
 }
@@ -417,14 +427,14 @@ async fn carve_landing_after_fork_refuses_the_conversion() {
         out.task_id.is_none(),
         "the conversion must be refused after a carve landed"
     );
-    let text = out.merged.as_deref().unwrap_or("");
+    let text = out.output.as_deref().unwrap_or("");
     assert!(
         text.contains("could not be converted"),
         "envelope explains the refusal: {text}"
     );
     // The refusal runs the old kill semantics, which still probe the
     // cwd via the SIGTERM trap: the post-command directory is reported.
-    assert_eq!(out.cwd, std::path::PathBuf::from("/tmp"));
+    assert_eq!(out.cwd, "/tmp");
     // Nothing was registered, so the tally stays at zero.
     assert_eq!(gate.running_bg(), 0);
 }
@@ -452,7 +462,7 @@ async fn overflow_before_conversion_keeps_banner_and_cleans_spill() {
         .await
         .unwrap();
     let id = out.task_id.expect("converted");
-    let text = out.merged.as_deref().unwrap();
+    let text = out.output.as_deref().unwrap();
     assert!(
         text.contains("was clipped"),
         "banner present in the conversion envelope: {text}"
@@ -644,13 +654,13 @@ async fn exit_n_traps_and_reports_cwd() {
         .await
         .unwrap();
     assert_eq!(out.exit_code, Some(42));
-    assert_eq!(out.cwd, dir_b);
+    assert_eq!(out.cwd, dir_b.display().to_string());
     // Sticky cwd persists to the next call.
     let out = backend
         .exec("pwd", Duration::from_secs(10), CaptureMode::Merged)
         .await
         .unwrap();
-    assert_eq!(out.cwd, dir_b);
+    assert_eq!(out.cwd, dir_b.display().to_string());
 }
 
 /// If a command removes its own cwd, the marker's payload targets a gone
@@ -671,9 +681,9 @@ async fn deleted_cwd_falls_back() {
         .await
         .unwrap();
     assert!(
-        out.cwd.exists(),
+        std::path::Path::new(&out.cwd).exists(),
         "cwd should fall back to an existing dir, not the deleted one; got {}",
-        out.cwd.display()
+        out.cwd
     );
 }
 
@@ -696,11 +706,12 @@ async fn exec_with_merged_stderr_recovers_cwd() {
         .unwrap();
     assert_eq!(out.exit_code, Some(0));
     assert_eq!(
-        out.cwd, target,
+        out.cwd,
+        target.display().to_string(),
         "cwd must still recover even when the command merges its own streams"
     );
     // Only `merged` is populated; stdout/stderr are None under Merged.
-    let merged = out.merged.as_deref().unwrap();
+    let merged = out.output.as_deref().unwrap();
     assert!(out.stdout.is_none() && out.stderr.is_none());
     // The command's own output survives; no marker bytes leak.
     assert!(merged.contains("merged"), "merged: {merged}");
@@ -722,7 +733,7 @@ async fn color_vars_suppress_in_foreground() {
         .await
         .unwrap();
     assert_eq!(out.exit_code, Some(0));
-    assert_eq!(out.merged.as_deref().unwrap().trim(), "dumb/1/0\nempty");
+    assert_eq!(out.output.as_deref().unwrap().trim(), "dumb/1/0\nempty");
 }
 
 /// Foreground `exec` writes nothing under the spawn cwd, and an under-budget
@@ -756,7 +767,7 @@ async fn exec_leaves_no_scratch_in_cwd() {
     );
     // Under budget: no spill file, no clip, no marker.
     assert!(!out.truncated);
-    assert!(!out.merged.as_deref().unwrap().contains("bytes omitted"));
+    assert!(!out.output.as_deref().unwrap().contains("bytes omitted"));
     assert!(
         spill_files(scratch.path()).is_empty(),
         "under-budget exec wrote a spill file"
@@ -800,7 +811,7 @@ async fn builder_env_reaches_exec() {
         .await
         .unwrap();
     assert_eq!(out.exit_code, Some(0));
-    assert_eq!(out.merged.as_deref().unwrap().trim(), "ok");
+    assert_eq!(out.output.as_deref().unwrap().trim(), "ok");
 }
 
 // -- CaptureMode coverage -------------------------------------------------
@@ -819,7 +830,7 @@ async fn exec_merged_interleaves_streams() {
         )
         .await
         .unwrap();
-    let merged = out.merged.as_deref().unwrap();
+    let merged = out.output.as_deref().unwrap();
     assert!(merged.contains("out"), "merged: {merged}");
     assert!(merged.contains("err"), "merged: {merged}");
     assert!(out.stdout.is_none() && out.stderr.is_none());
@@ -843,7 +854,7 @@ async fn exec_separate_keeps_streams_apart() {
     let stderr = out.stderr.as_deref().unwrap();
     assert!(stdout.contains("out") && !stdout.contains("err"));
     assert!(stderr.contains("err") && !stderr.contains("out"));
-    assert!(out.merged.is_none());
+    assert!(out.output.is_none());
 }
 
 /// `Stdout` returns only stdout but still recovers the cwd: the marker rides
@@ -863,9 +874,10 @@ async fn exec_stdout_mode_recovers_cwd() {
         .await
         .unwrap();
     assert_eq!(out.stdout.as_deref().unwrap().trim(), "hi");
-    assert!(out.stderr.is_none() && out.merged.is_none());
+    assert!(out.stderr.is_none() && out.output.is_none());
     assert_eq!(
-        out.cwd, target,
+        out.cwd,
+        target.display().to_string(),
         "Stdout mode must still recover cwd via the fd channel"
     );
 }
@@ -890,8 +902,8 @@ async fn exec_stderr_mode_with_command_merge() {
     // The command's `exec 2>&1` pointed fd 2 at fd 1, so the stderr capture
     // saw nothing: stderr is empty.
     assert_eq!(out.stderr.as_deref().unwrap(), "");
-    assert!(out.stdout.is_none() && out.merged.is_none());
-    assert_eq!(out.cwd, target);
+    assert!(out.stdout.is_none() && out.output.is_none());
+    assert_eq!(out.cwd, target.display().to_string());
 }
 
 /// `Merged` overflow clips the single combined capture to a head+tail view,
@@ -918,7 +930,7 @@ async fn exec_merged_truncation_single_stream() {
         .await
         .unwrap();
     assert!(out.truncated, "merged stream should be clipped");
-    let merged = out.merged.as_deref().unwrap();
+    let merged = out.output.as_deref().unwrap();
     assert!(
         merged.contains("bytes omitted"),
         "head+tail view has the middle-omitted marker: {merged}"
@@ -1104,7 +1116,7 @@ async fn spill_refuses_symlinked_spill_dir() {
     // Overflow happened but the spill poisoned: no recovery banner.
     assert!(out.truncated, "stream should still be clipped in-memory");
     assert!(
-        !out.merged
+        !out.output
             .as_deref()
             .unwrap()
             .contains("read the full output with"),
@@ -1126,7 +1138,10 @@ async fn sigkill_before_trap_falls_back() {
         .exec("kill -9 $$", Duration::from_secs(10), CaptureMode::Merged)
         .await
         .unwrap();
-    assert!(out.cwd.exists(), "cwd must fall back to an existing dir");
+    assert!(
+        std::path::Path::new(&out.cwd).exists(),
+        "cwd must fall back to an existing dir"
+    );
 }
 
 /// A second landlocked `bash` can `cat` a spill file the tagma parent
@@ -1162,7 +1177,7 @@ async fn spilled_file_is_readable_by_landlocked_cat() {
         )
         .await
         .unwrap();
-    let merged = first.merged.as_deref().unwrap();
+    let merged = first.output.as_deref().unwrap();
     let path = merged
         .lines()
         .next()
@@ -1180,7 +1195,7 @@ async fn spilled_file_is_readable_by_landlocked_cat() {
         )
         .await
         .unwrap();
-    let reread = second.merged.as_deref().unwrap();
+    let reread = second.output.as_deref().unwrap();
     assert!(
         reread.contains("HEAD"),
         "landlocked cat read the spill back"

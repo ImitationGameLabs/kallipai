@@ -1,3 +1,9 @@
+//! Exec-hook rules for the policy classifier's hook phase.
+//!
+//! Owns the `exec_hooks.toml` surface: operator-declared overrides layered
+//! over the builtin preset rules, loaded once at tagma startup.
+//! [`load_exec_hook_rules`] is the sole public entry; the builtin/merge/parse
+//! helpers and the serde shims stay private. Re-exported by `crate::config`.
 use crate::policy::classifier::hooks::WRITE_REDIRECT_KEY;
 use crate::policy::{HookPhase, HookRule, Trigger};
 use kallip_shell::tools::names;
