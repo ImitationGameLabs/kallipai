@@ -25,6 +25,7 @@
     manage_agent_workspace,
     manage_agent_description,
     manage_agent_context_usage,
+    manage_agent_model,
     manage_agent_cumulative_label,
     manage_agent_turns,
     manage_agent_pinned_items,
@@ -240,6 +241,17 @@
         <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
           {manage_agent_context_usage()}
         </h2>
+        {#if status.profile}
+          <div class="text-sm">
+            <span class="opacity-60 text-xs uppercase tracking-wide"
+              >{manage_agent_model()}</span
+            >
+            <span class="font-medium ml-2">{status.profile.model}</span>
+            <span class="opacity-60 text-xs font-mono ml-2"
+              >{status.profile.profile_id}</span
+            >
+          </div>
+        {/if}
         <BudgetBar
           consumed={cumulativeTokens}
           budget={status.token_budget}

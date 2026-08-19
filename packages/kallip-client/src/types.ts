@@ -108,6 +108,12 @@ export interface RetryRecord {
   readonly endpoint: string | null;
 }
 
+/** Runtime-active model profile (`AgentStatusResponse.profile`): the id of the
+ * registry profile in use plus the concrete model string the client sends. */
+export interface ActiveProfile {
+  readonly profile_id: string;
+  readonly model: string;
+}
 /** `GET /agents/{id}/status` response. token_budget/token_consumed are tagma-wide. */
 export interface AgentStatusResponse {
   readonly state: "idle" | "busy" | "faulted";
@@ -116,6 +122,8 @@ export interface AgentStatusResponse {
   readonly token_budget: number;
   readonly token_consumed: number;
   readonly activity: string;
+  /** Omitted only by a tagma that predates the field. */
+  readonly profile?: ActiveProfile;
 }
 
 /** `PUT /agents/{id}/metadata` request body. */

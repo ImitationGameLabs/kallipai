@@ -14,6 +14,7 @@
   "manage_agent_workspace": "Workspace",
   "manage_agent_description": "Description",
   "manage_agent_context_usage": "Context Usage",
+  "manage_agent_model": "Model",
   "manage_agent_cumulative_label": "Cumulative usage vs tagma-wide budget",
   "manage_agent_turns": "Turns",
   "manage_agent_pinned_items": "Pinned items",
