@@ -14,6 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::acquisition::StreamConsumed;
 use crate::agent_task::AgentContext;
 use crate::event::AgentEvent;
+use crate::runner::BreakUntil;
+use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
 use crate::policy::{ToolCallOutcome, error_result, skipped_tool_result, timed_out_tool_result};
 use just_llm_client::types::chat::{ChatMessage, ToolCallsMessage};
 
@@ -28,10 +30,11 @@ pub(crate) enum ToolExecResult {
     /// The agent called `break`. Carries the turn messages accumulated from the
     /// calls *before* `break` (the assistant tool-call message + any prior results)
     /// so the caller records them — `break` must not drop real work done earlier in
-    /// the round. `break`'s own result (and that of any call emitted after it, which
-    /// the round loop never reaches) is synthesized by `synthesize_unanswered_results`
+    /// the round — plus the parsed park target (`until`/`timeout_secs` args).
+    /// `break`'s own result (and that of any call emitted after it, which the
+    /// round loop never reaches) is synthesized by `synthesize_unanswered_results`
     /// so the recorded turn stays protocol-valid; the SSE ack still fires for UI.
-    Break(Vec<ChatMessage>),
+    Break(Vec<ChatMessage>, BreakUntil),
     /// Cancelled mid-execution; partial results are dropped (mirrors the original early-return).
     Cancelled,
 }
@@ -117,15 +120,16 @@ pub(crate) async fn execute_tool_calls(
         // fills those in (break -> its real success ack; trailing calls -> a
         // not-executed error). The SSE ack below still fires for UI symmetry.
         if call.function.name == "break" {
+            let until = parse_break_args(&call.function.arguments);
             tx.send(AgentEvent::ToolCall {
                 name: "break".into(),
                 args: call.function.arguments.clone(),
             })
             .await
             .ok();
-            tx.send(AgentEvent::ToolResult(break_ack())).await.ok();
-            synthesize_unanswered_results(&mut turn_messages);
-            return ToolExecResult::Break(turn_messages);
+            tx.send(AgentEvent::ToolResult(break_ack(until))).await.ok();
+            synthesize_unanswered_results(&mut turn_messages, until);
+            return ToolExecResult::Break(turn_messages, until);
         }
 
         let result = if let Some((prior_name, reason)) = &skip {
@@ -207,7 +211,14 @@ pub(crate) async fn execute_tool_calls(
     // Defensive: the loop above answers every call it iterates, so this is a
     // no-op on the Messages path. Kept as a safety net so no recorded turn can
     // ever carry an un-answered `tool_calls` id regardless of future changes.
-    synthesize_unanswered_results(&mut turn_messages);
+    // (Defensive path: no `break` ran here, so the target is unreachable —
+    // the defaults only exist to satisfy the signature.)
+    synthesize_unanswered_results(
+        &mut turn_messages,
+        BreakUntil::Wait {
+            timeout_secs: DEFAULT_BREAK_TIMEOUT_SECS,
+        },
+    );
     ToolExecResult::Messages(turn_messages)
 }
 
@@ -224,7 +235,10 @@ pub(crate) async fn execute_tool_calls(
 /// Synthesis is honest about what happened: `break` parked (its real success ack),
 /// and any other unanswered call never ran (a not-executed error). Idempotent — a
 /// turn whose ids are all answered is untouched.
-pub(crate) fn synthesize_unanswered_results(turn_messages: &mut Vec<ChatMessage>) {
+pub(crate) fn synthesize_unanswered_results(
+    turn_messages: &mut Vec<ChatMessage>,
+    until: BreakUntil,
+) {
     // Snapshot the declared calls (id + tool name) off the assistant message
     // before the mutable borrow below.
     let Some(declared) = turn_messages
@@ -250,7 +264,7 @@ pub(crate) fn synthesize_unanswered_results(turn_messages: &mut Vec<ChatMessage>
             continue;
         }
         let content = if name == "break" {
-            break_ack()
+            break_ack(until)
         } else {
             error_result(
                 &name,
@@ -262,10 +276,108 @@ pub(crate) fn synthesize_unanswered_results(turn_messages: &mut Vec<ChatMessage>
     }
 }
 
+/// Parse the `break` tool's arguments into the park target. Lenient by design:
+/// `break` is control flow, and refusing to break because of a malformed
+/// argument would trap a finished agent in the round loop — the wrong failure
+/// side. Anything unrecognized falls back to the defaults (`wait`,
+/// `DEFAULT_BREAK_TIMEOUT_SECS`), so a typo'd `until` parks the agent with the
+/// timer fuse instead of not parking at all.
+fn parse_break_args(raw: &str) -> BreakUntil {
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return BreakUntil::Wait {
+            timeout_secs: DEFAULT_BREAK_TIMEOUT_SECS,
+        };
+    };
+    let until = match args.get("until").and_then(|v| v.as_str()) {
+        Some("idle") => BreakUntil::Idle,
+        _ => BreakUntil::Wait {
+            timeout_secs: DEFAULT_BREAK_TIMEOUT_SECS,
+        },
+    };
+    match until {
+        BreakUntil::Idle => BreakUntil::Idle,
+        BreakUntil::Wait { .. } => {
+            let timeout_secs = args
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .filter(|&t| t >= 1)
+                .unwrap_or(DEFAULT_BREAK_TIMEOUT_SECS);
+            BreakUntil::Wait { timeout_secs }
+        }
+    }
+}
+
 /// Normal success result for the `break` control-flow tool: the agent parked.
-/// Emitted as an SSE event for UI symmetry and persisted as the tool result for
-/// the `break` call (via [`synthesize_unanswered_results`]) so the recorded turn
-/// stays protocol-valid.
-fn break_ack() -> String {
-    r#"{"ok":true,"tool_name":"break","result":{"parked":true}}"#.to_owned()
+/// Echoes the effective park target (what the runtime will actually do, i.e.
+/// defaults already applied) so the model sees the resolved semantics —
+/// emitted as an SSE event for UI symmetry and persisted as the tool result
+/// for the `break` call (via [`synthesize_unanswered_results`]) so the
+/// recorded turn stays protocol-valid.
+fn break_ack(until: BreakUntil) -> String {
+    match until {
+        BreakUntil::Idle => {
+            r#"{"ok":true,"tool_name":"break","result":{"parked":true,"until":"idle"}}"#
+                .to_owned()
+        }
+        BreakUntil::Wait { timeout_secs } => format!(
+            r#"{{"ok":true,"tool_name":"break","result":{{"parked":true,"until":"wait","timeout_secs":{timeout_secs}}}}}"#
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `break` argument contract: defaults (`{}` → wait/600), explicit
+    /// values pass through, and anything malformed or unrecognized falls back
+    /// to the wait defaults — refusing to break would trap a finished agent.
+    #[test]
+    fn parse_break_args_contract() {
+        let cases: &[(&str, BreakUntil)] = &[
+            ("{}", BreakUntil::Wait { timeout_secs: 600 }),
+            ("not json", BreakUntil::Wait { timeout_secs: 600 }),
+            (
+                r#"{"until":"idle"}"#,
+                BreakUntil::Idle,
+            ),
+            (
+                r#"{"until":"wait"}"#,
+                BreakUntil::Wait { timeout_secs: 600 },
+            ),
+            (
+                r#"{"until":"typo"}"#,
+                BreakUntil::Wait { timeout_secs: 600 },
+            ),
+            (
+                r#"{"until":"wait","timeout_secs":30}"#,
+                BreakUntil::Wait { timeout_secs: 30 },
+            ),
+            (
+                r#"{"until":"wait","timeout_secs":0}"#,
+                BreakUntil::Wait { timeout_secs: 600 },
+            ),
+            (
+                r#"{"until":"wait","timeout_secs":"soon"}"#,
+                BreakUntil::Wait { timeout_secs: 600 },
+            ),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(parse_break_args(raw), *want, "args: {raw}");
+        }
+    }
+
+    /// The ack echoes the *resolved* target so the model sees the effective
+    /// semantics (defaults applied), on both the SSE event and the persisted
+    /// tool result.
+    #[test]
+    fn break_ack_echoes_resolved_target() {
+        let idle = break_ack(BreakUntil::Idle);
+        assert!(idle.contains(r#""until":"idle""#), "{idle}");
+        assert!(!idle.contains("timeout_secs"), "{idle}");
+
+        let wait = break_ack(BreakUntil::Wait { timeout_secs: 30 });
+        assert!(wait.contains(r#""until":"wait""#), "{wait}");
+        assert!(wait.contains(r#""timeout_secs":30"#), "{wait}");
+    }
 }

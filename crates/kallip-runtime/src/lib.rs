@@ -10,6 +10,10 @@ pub mod event;
 mod failover;
 pub mod history;
 pub(crate) mod lifecycle;
+
+// Re-exported so the tagma can seed the initial state on `AgentContext`
+// construction (spawn/restore); all transitions stay runtime-internal.
+pub use lifecycle::LifecycleState;
 pub(crate) mod llm_error;
 pub mod persistence;
 pub mod policy;

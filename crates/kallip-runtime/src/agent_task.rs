@@ -7,6 +7,9 @@ use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{AgentEvent, AgentOutcome};
+use crate::lifecycle::LifecycleState;
+use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
+use kallip_common::protocol::{ParkedReason, TransientRetryInfo};
 
 use crate::approval::ApprovalStore;
 use crate::config::AgentConfig;
@@ -127,6 +130,27 @@ pub struct AgentContext {
     /// outcome. Hard-parks (surfaces to the operator) once it exceeds
     /// `config.max_transient_retries`.
     pub transient_fails: u32,
+    /// Authoritative lifecycle state (the design's C4 shape: the outer loop keeps
+    /// a single `select!` whose per-state arm differences are guards; this enum
+    /// owns the state itself, replacing the scattered wait/park Option-fields).
+    /// Written only via `LifecycleState::transition`, which asserts the
+    /// legal-edge table in debug builds. `Running` is held only inside
+    /// `run_and_report`.
+    pub lifecycle: std::sync::Mutex<LifecycleState>,
+    /// The armed wait-timer deadline (`break(wait)` or a budget-blocked
+    /// re-arm), or `None`. Mirrors `retry_at`'s authority pattern: the wait
+    /// select arm honors a stored permit only when this is `Some(t)` with
+    /// `t <= now`, then clears it; every other wake clears it too, so a
+    /// stale stored permit cannot fire a spurious turn.
+    pub wait_until: Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
+    /// Wake signal for the wait timer. Separate from `notify` for the same
+    /// reason as `retry_notify` (each signal's guard stays the sole
+    /// authority for its wake). Driven by a best-effort, cancel-aware
+    /// spawned sleep.
+    pub wait_notify: Arc<Notify>,
+    /// The `timeout_secs` the wait timer was last armed with (for the
+    /// elapsed-turn text). Meaningful only while `wait_until` is armed.
+    pub wait_armed_secs: u64,
     /// Tagma-wide token budget shared by all agents.
     /// Cloned from `AppState` — same underlying Arc counters across all agents.
     pub token_budget: crate::token_budget::TokenBudget,
@@ -228,6 +252,7 @@ pub async fn agent_task(
                 match input {
                     Some(text) => {
                         clear_transient_retry(&ctx);
+                        clear_wait_timer(&ctx);
                         ctx.record_turn(vec![ChatMessage::user(&text)]).await;
                         if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
                             break;
@@ -278,6 +303,7 @@ pub async fn agent_task(
 
                 if should_run {
                     clear_transient_retry(&ctx);
+                    clear_wait_timer(&ctx);
                     if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
                         break;
                     }
@@ -290,6 +316,21 @@ pub async fn agent_task(
             _ = ctx.retry_notify.notified() => {
                 if transient_retry_due(&ctx) {
                     clear_transient_retry(&ctx);
+                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
+                        break;
+                    }
+                }
+            }
+            // Wait timer: the fuse from `break(wait)` (or a budget-blocked
+            // re-arm) elapsed. Guard-authoritative, mirroring the retry arm.
+            // Unlike Retrying's automatic re-run, the wake is an injected
+            // [system] turn — the agent decides what to do next.
+            _ = ctx.wait_notify.notified() => {
+                if wait_timer_due(&ctx) {
+                    let armed_secs = ctx.wait_armed_secs;
+                    clear_wait_timer(&ctx);
+                    ctx.record_turn(vec![ChatMessage::user(&wait_elapsed_text(armed_secs))])
+                        .await;
                     if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
                         break;
                     }
@@ -358,6 +399,12 @@ pub async fn run_and_report(
 ) -> bool {
     // Drain any pending profile reset before starting the round loop.
     apply_pending_profile_reset(ctx);
+    // Every entry here is from a non-Running state by construction (the outer
+    // loop parks between runs); the transition table asserts exactly that.
+    ctx.lifecycle
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .transition(LifecycleState::Running);
     let mut no_progress: u32 = 0;
     loop {
         let round = RoundToken::new(&ctx.cancel);
@@ -373,11 +420,33 @@ pub async fn run_and_report(
         *ctx.round_cancel.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
         match result {
-            Ok(runner::RoundOutcome::Break) => {
-                // Deliberate yield: park as Idle. Any tool calls preceding `break`
-                // were already recorded inside the round loop.
+            Ok(runner::RoundOutcome::Break(until)) => {
+                // Deliberate yield: park as Idle (`until:"idle"`) or Waiting
+                // (armed wake timer, the default). Any tool calls preceding
+                // `break` were already recorded inside the round loop.
                 ctx.transient_fails = 0;
-                agent_tx.send(AgentEvent::Idle).await.ok();
+                match until {
+                    runner::BreakUntil::Idle => {
+                        ctx.lifecycle
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .transition(LifecycleState::Idle);
+                        agent_tx.send(AgentEvent::Idle).await.ok();
+                    }
+                    runner::BreakUntil::Wait { timeout_secs } => {
+                        let deadline = arm_wait_timer(ctx, timeout_secs);
+                        ctx.lifecycle
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .transition(LifecycleState::Waiting {
+                                until: deadline.into_std(),
+                            });
+                        agent_tx
+                            .send(AgentEvent::Waiting { timeout_secs })
+                            .await
+                            .ok();
+                    }
+                }
                 return false;
             }
             Ok(runner::RoundOutcome::BareAssistant { content }) => {
@@ -387,6 +456,10 @@ pub async fn run_and_report(
                 no_progress += 1;
                 if no_progress > ctx.config.max_heartbeat_rounds {
                     // Self-monologue guardrail: force-idle instead of looping forever.
+                    ctx.lifecycle
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .transition(LifecycleState::Idle);
                     agent_tx.send(AgentEvent::Idle).await.ok();
                     return false;
                 }
@@ -410,6 +483,10 @@ pub async fn run_and_report(
                     // Only the round token was cancelled (interrupt) → keep living.
                     CancelKind::Interrupt => {
                         agent_tx.send(AgentEvent::Interrupted).await.ok();
+                        ctx.lifecycle
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .transition(LifecycleState::Idle);
                         return false;
                     }
                 }
@@ -419,17 +496,47 @@ pub async fn run_and_report(
                 detail,
                 ..
             })) => {
-                // Transient: the whole chain is down. Schedule a timed retry (bounded
-                // by `max_transient_retries`) and park; the outer loop's retry arm
-                // re-enters after the backoff. On the last attempt, hard-park and
-                // surface so the operator can reconfigure failover.
+                // Transient: the whole chain is down. Schedule a timed retry
+                // (bounded by `max_transient_retries`); the outer loop's retry
+                // arm re-enters after the backoff. On the last attempt,
+                // hard-park and surface so the operator can reconfigure
+                // failover. The arming rides the terminal event's payload so
+                // the bridge can mark RETRYING (not PARKED) without flicker.
                 ctx.transient_fails = ctx.transient_fails.saturating_add(1);
+                let armed = ctx.transient_fails <= ctx.config.max_transient_retries;
+                let retry_deadline = armed.then(|| schedule_transient_retry(ctx));
                 agent_tx
-                    .send(AgentEvent::FailoverChainExhausted { reason, detail, transient_retry: None })
+                    .send(AgentEvent::FailoverChainExhausted {
+                        reason,
+                        detail,
+                        transient_retry: retry_deadline.map(|(_, delay_secs)| TransientRetryInfo {
+                            attempt: ctx.transient_fails,
+                            max_attempts: ctx.config.max_transient_retries,
+                            retry_in_secs: delay_secs,
+                        }),
+                    })
                     .await
                     .ok();
-                if ctx.transient_fails <= ctx.config.max_transient_retries {
-                    schedule_transient_retry(ctx);
+                match retry_deadline {
+                    Some((deadline, _)) => {
+                        ctx.lifecycle
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .transition(LifecycleState::Retrying {
+                                attempt: ctx.transient_fails,
+                                max_attempts: ctx.config.max_transient_retries,
+                                retry_at: deadline.into_std(),
+                            });
+                    }
+                    None => {
+                        ctx.lifecycle
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .transition(LifecycleState::Parked {
+                                reason: ParkedReason::TransientRetryExhausted,
+                                at: std::time::Instant::now(),
+                            });
+                    }
                 }
                 return false;
             }
@@ -437,17 +544,35 @@ pub async fn run_and_report(
                 consumed,
                 budget,
             })) => {
-                // Non-fatal: the task stays alive. The next round re-checks the budget
-                // and succeeds once the operator raises it.
+                // Non-fatal: the task stays alive — and per the design's
+                // budget-probe decision it stays *Waiting* with a re-armed
+                // timer rather than parking: the next timer wake re-checks
+                // the budget before any LLM call (the round gate runs
+                // first), so the armed fuse doubles as a zero-cost
+                // budget-recovery probe.
                 ctx.transient_fails = 0;
                 agent_tx
                     .send(AgentEvent::TokenBudgetExceeded { consumed, budget })
                     .await
                     .ok();
+                let deadline = arm_wait_timer(ctx, DEFAULT_BREAK_TIMEOUT_SECS);
+                ctx.lifecycle
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .transition(LifecycleState::Waiting {
+                        until: deadline.into_std(),
+                    });
                 return false;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::MaxRoundsExceeded)) => {
                 ctx.transient_fails = 0;
+                ctx.lifecycle
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .transition(LifecycleState::Parked {
+                        reason: ParkedReason::MaxRoundsExceeded,
+                        at: std::time::Instant::now(),
+                    });
                 agent_tx.send(AgentEvent::MaxRoundsExceeded).await.ok();
                 return false;
             }
@@ -455,16 +580,28 @@ pub async fn run_and_report(
                 // Not produced by the round loop today (only Break/BareAssistant/Park
                 // are); parked here for exhaustiveness and forward-compat.
                 ctx.transient_fails = 0;
+                ctx.lifecycle
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .transition(LifecycleState::Idle);
                 agent_tx.send(AgentEvent::Idle).await.ok();
                 return false;
             }
             Err(e) => {
                 // Permanent (Fatal) error — park and surface; the operator acts.
                 ctx.transient_fails = 0;
+                let rendered = crate::llm_error::render_error(e.as_ref());
+                ctx.lifecycle
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .transition(LifecycleState::Parked {
+                        reason: ParkedReason::FatalError {
+                            message: rendered.clone(),
+                        },
+                        at: std::time::Instant::now(),
+                    });
                 agent_tx
-                    .send(AgentEvent::Error(crate::llm_error::render_error(
-                        e.as_ref(),
-                    )))
+                    .send(AgentEvent::Error(rendered))
                     .await
                     .ok();
                 return false;
@@ -477,13 +614,18 @@ pub async fn run_and_report(
 /// agent to either make progress, reply, or call `break`. Persisted like an
 /// approval notification (bounded by the no-progress guardrail).
 const HEARTBEAT_TEXT: &str = "[system] You produced a response with no tool action and did not \
-call `break`. If you are done or blocked, call `break`. Otherwise continue your work.";
+call `break`. If you are done, call `break` with `{\"until\":\"idle\"}`; if you are blocked \
+waiting on something, call `break` (the default parks you with a wake timer). Otherwise \
+continue your work.";
 
 /// Arm a timed retry for the transient (failover-chain-exhausted) path: back off
-/// and notify `retry_at` after the delay. The spawned sleep is best-effort and
-/// cancel-aware — the outer-loop guard is authoritative, so a wake that fires after
-/// a hard-park or a different-arm win is a no-op (the guard re-checks `retry_at`).
-fn schedule_transient_retry(ctx: &AgentContext) {
+/// and notify `retry_at` after the delay. Returns the armed `(deadline, delay)`
+/// so the caller can ride the same numbers on the terminal event's
+/// `transient_retry` payload and the lifecycle state. The spawned sleep is
+/// best-effort and cancel-aware — the outer-loop guard is authoritative, so a
+/// wake that fires after a hard-park or a different-arm win is a no-op (the
+/// guard re-checks `retry_at`).
+fn schedule_transient_retry(ctx: &AgentContext) -> (tokio::time::Instant, f64) {
     // `transient_fails` was just incremented (1-based); backoff uses a 0-based index.
     let attempt = ctx.transient_fails.saturating_sub(1);
     let delay = crate::retry::backoff_delay(&ctx.config.retry_policy, attempt);
@@ -497,6 +639,7 @@ fn schedule_transient_retry(ctx: &AgentContext) {
             _ = cancel.cancelled() => {}
         }
     });
+    (deadline, delay.as_secs_f64())
 }
 
 /// Clear an armed transient-retry deadline. Called on every non-retry wake so a
@@ -504,6 +647,52 @@ fn schedule_transient_retry(ctx: &AgentContext) {
 /// cannot trigger a spurious round via the retry arm's guard.
 fn clear_transient_retry(ctx: &AgentContext) {
     *ctx.retry_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Arm the wait timer (`break(wait)` or a budget-blocked re-arm): park with a
+/// fuse that wakes the outer loop. Mirrors `schedule_transient_retry`'s
+/// best-effort, cancel-aware spawn; the `wait_notify` arm's due guard is
+/// authoritative. Returns the armed deadline.
+fn arm_wait_timer(ctx: &mut AgentContext, timeout_secs: u64) -> tokio::time::Instant {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    *ctx.wait_until.lock().unwrap_or_else(|e| e.into_inner()) = Some(deadline);
+    ctx.wait_armed_secs = timeout_secs;
+    let notify = ctx.wait_notify.clone();
+    let cancel = ctx.cancel.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => notify.notify_one(),
+            _ = cancel.cancelled() => {}
+        }
+    });
+    deadline
+}
+
+/// Clear an armed wait timer. Called on every non-wait wake so a stale stored
+/// permit cannot fire a spurious turn via the wait arm's guard (same
+/// discipline as `clear_transient_retry`).
+fn clear_wait_timer(ctx: &AgentContext) {
+    *ctx.wait_until.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Whether the wait timer is genuinely due right now. The wait select arm's
+/// authority: a stored permit is only honored when the armed deadline has
+/// passed.
+fn wait_timer_due(ctx: &AgentContext) -> bool {
+    ctx.wait_until
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|t| t <= tokio::time::Instant::now())
+        .unwrap_or(false)
+}
+
+/// The `[system]` turn injected when the wait timer elapses: the agent decides
+/// (keep waiting, finish, or work) — the timer never auto-runs work.
+fn wait_elapsed_text(armed_secs: u64) -> String {
+    format!(
+        "[system] wait timer elapsed (armed {armed_secs}s). Continue waiting with break(wait), \
+         finish with break(idle), or work."
+    )
 }
 
 /// Whether a transient retry is genuinely due right now. The retry select arm's
@@ -539,6 +728,42 @@ mod tests {
         lifecycle.cancel();
         assert!(round.handle().is_cancelled());
         assert_eq!(CancelKind::classify(&lifecycle), CancelKind::Lifecycle);
+    }
+
+    /// Guard-authority pin: a stored wait permit is inert once the timer was
+    /// cleared (an external event won the race) — `wait_timer_due` is the
+    /// wait arm's sole authority, so the stale permit cannot fire a turn.
+    #[tokio::test]
+    async fn stale_wait_permit_is_inert_after_clear() {
+        let mut ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+        arm_wait_timer(&mut ctx, 600);
+        assert!(!wait_timer_due(&ctx), "freshly armed fuse is not yet due");
+        ctx.wait_notify.notify_one(); // stale permit: timer fires after the clear
+        clear_wait_timer(&ctx);
+        assert!(!wait_timer_due(&ctx), "stale permit must be inert");
+    }
+
+    /// Re-arming replaces the fuse: the second `break(wait)` wins (latest
+    /// deadline + its own armed-secs), mirroring the transient-retry
+    /// overwrite semantics.
+    #[tokio::test]
+    async fn rearming_wait_replaces_deadline_and_secs() {
+        let mut ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+        arm_wait_timer(&mut ctx, 600);
+        let first = ctx.wait_until.lock().unwrap().unwrap();
+        arm_wait_timer(&mut ctx, 0); // zero-delay fuse: due immediately
+        let second = ctx.wait_until.lock().unwrap().unwrap();
+        assert!(second < first, "re-arm must replace, not min/max, the deadline");
+        assert_eq!(ctx.wait_armed_secs, 0);
+        assert!(wait_timer_due(&ctx));
     }
 
     /// Integration test: a MessagePuller returning a message drives the notify

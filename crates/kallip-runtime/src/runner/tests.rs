@@ -19,6 +19,8 @@ use crate::policy::ToolCallOutcome;
 use crate::profile::BackendSource;
 use crate::test_support::{MapSource, ctx_from_source, make_ctx, profile};
 use crate::tool_execution::{run_tool_bounded, synthesize_unanswered_results};
+use crate::runner::BreakUntil;
+use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
 
 fn no_cancel() -> CancellationToken {
     CancellationToken::new()
@@ -61,7 +63,12 @@ fn synthesize_answers_break_and_trailing_calls() {
         ("c1", "break"),
         ("c2", "bash_exec"),
     ])];
-    synthesize_unanswered_results(&mut msgs);
+    synthesize_unanswered_results(
+        &mut msgs,
+        BreakUntil::Wait {
+            timeout_secs: DEFAULT_BREAK_TIMEOUT_SECS,
+        },
+    );
     assert_eq!(result_ids(&msgs), vec!["c1", "c2"]);
     assert!(
         msgs[1].content().unwrap().contains("parked"),
@@ -82,7 +89,12 @@ fn synthesize_preserves_existing_results() {
         assistant_tool_calls(&[("c1", "bash_exec"), ("c2", "break")]),
         ChatMessage::tool_result("done", "c1"),
     ];
-    synthesize_unanswered_results(&mut msgs);
+    synthesize_unanswered_results(
+        &mut msgs,
+        BreakUntil::Wait {
+            timeout_secs: DEFAULT_BREAK_TIMEOUT_SECS,
+        },
+    );
     assert_eq!(result_ids(&msgs), vec!["c1", "c2"]);
     assert_eq!(msgs[1].content().unwrap(), "done");
     assert!(msgs[2].content().unwrap().contains("parked"));
@@ -94,11 +106,21 @@ fn synthesize_is_noop_on_complete_turn_and_idempotent() {
         assistant_tool_calls(&[("c1", "bash_exec")]),
         ChatMessage::tool_result("done", "c1"),
     ];
-    synthesize_unanswered_results(&mut msgs);
+    synthesize_unanswered_results(
+        &mut msgs,
+        BreakUntil::Wait {
+            timeout_secs: DEFAULT_BREAK_TIMEOUT_SECS,
+        },
+    );
     assert_eq!(msgs.len(), 2, "a fully-answered turn is untouched");
     // Running again over the completed turn must not duplicate anything.
     let before = msgs.clone();
-    synthesize_unanswered_results(&mut msgs);
+    synthesize_unanswered_results(
+        &mut msgs,
+        BreakUntil::Wait {
+            timeout_secs: DEFAULT_BREAK_TIMEOUT_SECS,
+        },
+    );
     assert_eq!(result_ids(&msgs), result_ids(&before));
     assert_eq!(msgs.len(), before.len());
 }
@@ -119,7 +141,12 @@ fn synthesize_keeps_assistant_content_and_reasoning_intact() {
         }],
         reasoning_content: Some("done thinking".into()),
     })];
-    synthesize_unanswered_results(&mut msgs);
+    synthesize_unanswered_results(
+        &mut msgs,
+        BreakUntil::Wait {
+            timeout_secs: DEFAULT_BREAK_TIMEOUT_SECS,
+        },
+    );
     assert_eq!(msgs[0].content(), Some("parking now"));
     assert_eq!(msgs[0].reasoning_content(), Some("done thinking"));
     assert_eq!(msgs[1].tool_call_id(), Some("c1"));
@@ -379,6 +406,28 @@ async fn mount_break_stream(server: &MockServer) {
         .await;
 }
 
+/// Mount a 200 streaming response that emits a single `break` tool call with
+/// the given raw `arguments` JSON (no content). Drives the `break(wait)` /
+/// `break(idle)` park-target paths.
+async fn mount_break_args_stream(server: &MockServer, args: &str) {
+    // `arguments` is a JSON string inside the SSE JSON — its quotes must be
+    // escaped, or the tool call fails to parse and no `break` happens.
+    let escaped = args.replace('"', "\\\"");
+    // Same body as `mount_break_stream` with the arguments swapped in via
+    // replace (not format!) so the JSON braces need no doubling.
+    let body = "data: {\"id\":\"s\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"break\",\"arguments\":\"@ARGS@\"}}]}}]}\n\ndata: [DONE]\n"
+        .replace("@ARGS@", &escaped);
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(body.into_bytes(), "text/event-stream"),
+        )
+        .mount(server)
+        .await;
+}
+
 /// A `MapSource` mapping endpoint id → wiremock backend.
 fn wiremock_source(map: HashMap<String, Arc<dyn LlmBackend>>) -> Arc<dyn BackendSource> {
     Arc::new(MapSource(map))
@@ -547,9 +596,134 @@ async fn break_tool_call_yields_break_outcome() {
 
     let (outcome, _events) = run_rounds(&mut ctx).await;
     assert!(
-        matches!(outcome, Ok(RoundOutcome::Break)),
+        matches!(outcome, Ok(RoundOutcome::Break(_))),
         "expected RoundOutcome::Break, got {outcome:?}"
     );
+}
+
+/// `break()` with no args is `break(wait)` with the default fuse: the turn
+/// parks as *Waiting* — a Waiting terminal event, the lifecycle state
+/// carrying the armed deadline, and an actually-armed timer.
+#[tokio::test]
+async fn break_wait_parks_waiting_with_armed_timer() {
+    let server = MockServer::start().await;
+    mount_break_stream(&server).await; // break with `{}` → default wait
+
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let profiles = vec![profile("p1", "ep1", 500_000)];
+    let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx).await;
+    assert!(!terminated);
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    assert!(
+        events.iter().any(|ev| matches!(ev, AgentEvent::Waiting { timeout_secs: 600 })),
+        "expected a Waiting(600s) terminal event, got {events:?}"
+    );
+    assert!(
+        !events.iter().any(|ev| matches!(ev, AgentEvent::Idle)),
+        "break(wait) must not emit Idle: {events:?}"
+    );
+    match &*ctx.lifecycle.lock().unwrap() {
+        crate::lifecycle::LifecycleState::Waiting { .. } => {}
+        other => panic!("expected lifecycle Waiting, got {other:?}"),
+    }
+    assert!(
+        ctx.wait_until.lock().unwrap().is_some(),
+        "the wait timer must be armed"
+    );
+    assert_eq!(ctx.wait_armed_secs, 600);
+}
+
+/// `break(until:"idle")` parks as Idle for good: the Idle terminal event,
+/// lifecycle Idle, and no armed timer.
+#[tokio::test]
+async fn break_idle_parks_idle_without_timer() {
+    let server = MockServer::start().await;
+    mount_break_args_stream(&server, "{\"until\":\"idle\"}").await;
+
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let profiles = vec![profile("p1", "ep1", 500_000)];
+    let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx).await;
+    assert!(!terminated);
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    assert!(
+        events.iter().any(|ev| matches!(ev, AgentEvent::Idle)),
+        "expected Idle terminal event, got {events:?}"
+    );
+    assert!(
+        !events.iter().any(|ev| matches!(ev, AgentEvent::Waiting { .. })),
+        "break(idle) must not emit Waiting: {events:?}"
+    );
+    assert_eq!(
+        *ctx.lifecycle.lock().unwrap(),
+        crate::lifecycle::LifecycleState::Idle
+    );
+    assert!(ctx.wait_until.lock().unwrap().is_none());
+}
+
+/// Full-loop pin: `break(wait)` with a 1s fuse parks Waiting; when the fuse
+/// elapses, the outer loop injects the `[system] wait timer elapsed` turn
+/// and a real round runs on it (the model re-answers — here by parking
+/// again). The timer never auto-runs work: the injected turn is the only
+/// thing between elapse and the model.
+#[tokio::test]
+async fn wait_timer_elapse_injects_system_turn_and_reruns() {
+    let server = MockServer::start().await;
+    mount_break_args_stream(&server, "{\"timeout_secs\":1}").await;
+
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let profiles = vec![profile("p1", "ep1", 500_000)];
+    let ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+    let store = ctx.store.clone();
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    tokio::spawn(crate::agent_task::agent_task(ctx, None, prompt_rx, tx));
+
+    // Drive one round; it ends in break(wait, 1s).
+    ptx.send("go".into()).await.unwrap();
+
+    // Poll until the elapsed-turn lands in the store (real 1s fuse).
+    let injected = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let guard = store.lock().await;
+            let found = guard.turns().iter().flat_map(|t| &t.messages).any(|m| {
+                m.content()
+                    .map(|t| t.contains("wait timer elapsed (armed 1s)"))
+                    .unwrap_or(false)
+            });
+            drop(guard);
+            if found {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(injected.is_ok(), "the elapsed [system] turn never landed");
+
+    // A real round ran on the injected turn: the model answered (the mock
+    // saw a second request), and the answer parks Waiting again.
+    let requests = server.received_requests().await.unwrap().len();
+    assert!(requests >= 2, "no round ran after the injection ({requests} requests)");
 }
 
 #[tokio::test]

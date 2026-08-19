@@ -251,6 +251,11 @@ fn guest_hide_holes() -> Vec<PathBuf> {
 // Control tool definitions (handled by the runner/executor, not the dispatcher)
 // ---------------------------------------------------------------------------
 
+/// Default `break(wait)` fuse: 10 minutes. Sized to the typical arrival scale
+/// of external events (approvals, messages, retries) — long enough that a
+/// spurious wake is rare, short enough that a forgotten wait self-surfaces.
+pub const DEFAULT_BREAK_TIMEOUT_SECS: u64 = 600;
+
 /// The `break` tool — the agent's explicit "yield control" primitive.
 ///
 /// Calling `break` is the *only* way the agent reaches the idle/parked state on
@@ -272,15 +277,31 @@ pub fn break_definition() -> ToolDefinition {
         function: FunctionDefinition {
             name: "break".into(),
             description: Some(
-                "Yield control and park until the next input arrives. This is the ONLY way to \
+                "Yield control until the next input arrives. This is the ONLY way to \
                  end the current run: a plain response with no tool call does not stop the loop, \
-                 it triggers a heartbeat continuation. Call `break` when you have finished the \
-                 request (delivering any message to the user first) or when you are blocked waiting \
-                 on something. Call it LAST in a round — any tool calls after `break` in the same \
-                 round are not executed."
+                 it triggers a heartbeat continuation. When blocked waiting on something, call \
+                 break with until:\"wait\" (the default): you park with a wake timer whose \
+                 expiry — or any external event — wakes you to continue. When fully done, call \
+                 break with until:\"idle\". Call it LAST in a round — any tool calls after \
+                 break in the same round are not executed."
                     .into(),
             ),
-            parameters: Some(json!({"type":"object","properties":{}})),
+            parameters: Some(json!({
+                "type": "object",
+                "properties": {
+                    "until": {
+                        "type": "string",
+                        "enum": ["wait", "idle"],
+                        "description": "wait (default): park with a wake timer; the timer expiring or any external event wakes you. idle: park for good; only a new prompt wakes you."
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Wake-timer fuse for until:wait (default 600)."
+                    }
+                },
+                "additionalProperties": false
+            })),
             strict: None,
         },
     }

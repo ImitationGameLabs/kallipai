@@ -26,14 +26,23 @@ use just_llm_client::types::chat::ChatMessage;
 // Round-loop control-flow signals
 // ---------------------------------------------------------------------------
 
+/// Where a `break` parks the agent (the `break` tool's `until` parameter).
+/// `Wait` arms the wake timer (default); `Idle` finishes for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BreakUntil {
+    Idle,
+    Wait { timeout_secs: u64 },
+}
+
 /// Outcome of one invocation of the round loop. The outer state machine in
 /// `agent_task::run_and_report` decides what to do next — this only reports what
 /// happened in this round.
 #[derive(Debug)]
 pub(crate) enum RoundOutcome {
     /// The agent called `break`. The turn (including any tool calls preceding
-    /// `break`) is already recorded inside the loop; the task should park as Idle.
-    Break,
+    /// `break`) is already recorded inside the loop; the task parks as Idle
+    /// (`until: "idle"`) or Waiting (armed wake timer, the default).
+    Break(BreakUntil),
     /// A bare assistant response — content but no tool calls and no `break`. This
     /// no longer terminates the run: the outer loop injects a heartbeat prompt and
     /// re-loops, or force-idles via the no-progress guardrail. The assistant turn
@@ -140,12 +149,12 @@ pub(crate) async fn run_agent_rounds(
             .await
         {
             ToolExecResult::Cancelled => return Ok(RoundOutcome::Park(AgentOutcome::Cancelled)),
-            ToolExecResult::Break(msgs) => {
+            ToolExecResult::Break(msgs, until) => {
                 // `break` parks as Idle, but the calls preceding it in this round
                 // still produced real work — record it before yielding.
                 ctx.record_turn(msgs).await;
                 ctx.persist().await;
-                return Ok(RoundOutcome::Break);
+                return Ok(RoundOutcome::Break(until));
             }
             ToolExecResult::Messages(msgs) => msgs,
         };

@@ -27,7 +27,7 @@ use kallip_common::protocol::ParkedReason;
 /// before `run_and_report` is entered; the outer loop never observes it while
 /// parked on its `select!`.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum LifecycleState {
+pub enum LifecycleState {
     /// `run_and_report` is in flight (the outer loop does not hold this).
     Running,
     /// The agent parked itself with `break(wait)`; `until` is the armed fuse.
@@ -63,7 +63,7 @@ impl LifecycleState {
     ///
     /// Birth (→`Idle`) is construction, not a transition; cancel/remove
     /// terminates the task without calling this.
-    pub(crate) fn transition(&mut self, next: LifecycleState) {
+    pub fn transition(&mut self, next: LifecycleState) {
         let legal = match self {
             Self::Idle => matches!(next, Self::Running),
             Self::Running => matches!(
