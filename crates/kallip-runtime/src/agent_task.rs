@@ -284,6 +284,20 @@ pub async fn agent_task(
                     apply_pending_profile_reset(&mut ctx);
                 }
 
+                // Parked guard (design guard matrix: notify events buffer,
+                // they do not wake a parked agent). The wake endpoint's kick
+                // is the sole exit from Parked; an ordinary message must not
+                // run a round the agent never consented to (it would also
+                // bypass the kick turn that tells the agent why it parked).
+                // The reset cell was applied above — memory-only, no round
+                // runs — so a later kick runs on the fresh client.
+                if matches!(
+                    *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()),
+                    LifecycleState::Parked { .. }
+                ) {
+                    continue;
+                }
+
                 let mut should_run = false;
 
                 // Pull undelivered inbox messages (after reset so the round
@@ -917,6 +931,72 @@ mod tests {
         assert!(
             found.unwrap_or(false),
             "an approval decision must wake the agent and reach the round context"
+        );
+    }
+
+    /// Guard-matrix pin: notify events must NOT wake a parked agent — the
+    /// wake endpoint's kick is the sole exit from Parked. An ordinary
+    /// message arriving while parked stays buffered; no round runs.
+    #[tokio::test]
+    async fn notify_does_not_wake_parked_agent() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct StubPuller(Arc<AtomicBool>);
+        #[async_trait::async_trait]
+        impl MessagePuller for StubPuller {
+            async fn pull_undelivered(&self) -> Option<String> {
+                if self.0.swap(false, Ordering::SeqCst) {
+                    Some("message while parked".to_string())
+                } else {
+                    None
+                }
+            }
+        }
+
+        let mut ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+        *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()) = LifecycleState::Parked {
+            reason: ParkedReason::FatalError {
+                message: "test park".to_string(),
+            },
+            at: std::time::Instant::now(),
+        };
+        let flag = Arc::new(AtomicBool::new(true));
+        ctx.message_puller = Some(Arc::new(StubPuller(flag.clone())));
+
+        let notify = ctx.notify.clone();
+        let cancel = ctx.cancel.clone();
+        let store = ctx.store.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+        let (_ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+        let handle = tokio::spawn(agent_task(ctx, None, prompt_rx, tx));
+
+        notify.notify_one();
+        // Give the (wrong) wake a clear window to misbehave, then assert
+        // nothing ran.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let guard = store.lock().await;
+        let ran = guard
+            .turns()
+            .iter()
+            .flat_map(|t| &t.messages)
+            .any(|m| {
+                m.content()
+                    .map(|t| t.contains("message while parked"))
+                    .unwrap_or(false)
+            });
+        drop(guard);
+
+        cancel.cancel();
+        let _ = rx.recv().await;
+        handle.abort();
+        assert!(
+            !ran,
+            "a notify wake must not run a round while parked (the kick is the sole exit)"
         );
     }
 }

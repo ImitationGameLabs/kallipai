@@ -1,7 +1,9 @@
 use super::*;
 use crate::auth::{AuthIdentity, Identity};
 use crate::state::{AgentId, RegistryEntry};
-use crate::test_helpers::{add_faulted_root, install_inbox_store, make_entry_with_rx, make_state};
+use crate::test_helpers::{
+    add_faulted_root, add_root, add_sub, install_inbox_store, make_entry_with_rx, make_state,
+};
 use axum::Json;
 use axum::extract::{Path, State};
 use kallip_common::protocol::MessageRequest;
@@ -155,6 +157,40 @@ async fn send_message_to_faulted_returns_conflict() {
         err.message
     );
     assert!(err.message.contains("missing workspace"), "{}", err.message);
+}
+
+/// Messaging a parked agent returns 409 naming the wake endpoint — the
+/// silent-unreachable UX gap (a buffered message would never wake a parked
+/// agent; only the kick does).
+#[tokio::test]
+async fn send_message_to_parked_returns_conflict_with_wake_hint() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let root = AgentId::random();
+    let parked = AgentId::random();
+    {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &root);
+        add_sub(&mut reg, &parked, &root);
+        let live = reg.get(&parked).unwrap().as_live().unwrap();
+        live.agent.state.store(crate::state::AgentState::PARKED, std::sync::atomic::Ordering::Relaxed);
+    }
+    let err = send_message(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(parked),
+        Json(MessageRequest { text: "hi".into() }),
+    )
+    .await
+    .expect_err("parked agent rejects ordinary messages");
+    assert_eq!(err.status, 409);
+    assert!(
+        err.message.contains("parked") && err.message.contains("/wake"),
+        "message must name the parked state and the wake exit: {}",
+        err.message
+    );
+    // The refusal happens before the inbox push: nothing is buffered.
+    assert_eq!(state.inboxes.get().unwrap().len_for(&root).await, 0);
 }
 
 // -- Duty gate: off-duty messages buffer to inbox --

@@ -137,6 +137,24 @@ pub(crate) async fn enqueue_prompt(
     envelope: String,
     source: &str,
 ) -> Result<MessageResponse, ApiError> {
+    // Parked gate (before the inbox push): a parked agent is in a failed
+    // terminal state and the guard matrix buffers notify wakes, so an
+    // ordinary message would sit undelivered until an unrelated wake — and
+    // rot entirely if the operator removes the agent instead. Refuse with
+    // the way out: the wake endpoint's kick turn is the designed exit
+    // from Parked. Not-found/faulted fall through to their existing
+    // branches below.
+    {
+        let registry = state.registry.read().await;
+        if let Some(entry) = registry.get(id)
+            && let Some(live) = entry.as_live()
+            && live.agent.get_state() == crate::state::AgentState::Parked
+        {
+            return Err(ApiError::conflict(format!(
+                "agent is parked; use POST /agents/{id}/wake to kick it awake"
+            )));
+        }
+    }
     // Push the full message body to the inbox — always. The inbox is the
     // universal message store; the agent pulls undelivered direct messages on
     // wake via the MessagePuller trait.
