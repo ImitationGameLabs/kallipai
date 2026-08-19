@@ -502,6 +502,33 @@ impl ContextStore {
         }
     }
 
+    /// Rebuild a store from its split-persistence projection: pinned records
+    /// (composition order), hydrated conversation turns, and the manifest's
+    /// small state. Inverse of `to_manifest_doc`/`to_pins_doc`.
+    ///
+    /// `next_turn_id` takes the manifest value but never drops below one past
+    /// the highest rehydrated ID — a stale manifest must not cause ID reuse.
+    pub(crate) fn from_persisted(pins: &PinsDoc, convo: Vec<Turn>, manifest: &ManifestDoc) -> Self {
+        let mut store = Self::new();
+        for p in &pins.pins {
+            store.turns.push_back(Turn {
+                id: TurnId(p.id),
+                messages: vec![p.message.clone()],
+                estimated_tokens: p.estimated_tokens,
+                kind: TurnKind::Pinned {
+                    label: p.label.clone(),
+                },
+            });
+        }
+        for t in convo {
+            store.turns.push_back(t);
+        }
+        let max_id = store.turns.back().map(|t| t.id.0 + 1).unwrap_or(0);
+        store.next_turn_id = manifest.next_turn_id.max(max_id);
+        store.cumulative_usage = manifest.cumulative_usage;
+        store.retry_log = manifest.retry_log.clone();
+        store
+    }
     /// Set the pinned token budget. Called at agent setup and re-synced on within-tier failover
     /// (see `acquisition::reapply_window`).
     pub fn set_pinned_budget(&mut self, budget: usize) {

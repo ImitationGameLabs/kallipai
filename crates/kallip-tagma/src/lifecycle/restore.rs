@@ -208,6 +208,12 @@ async fn restore_one(
 ) -> anyhow::Result<(AgentId, AgentEntry)> {
     let restored = persistence::restore_agent(&p.agent_id, &p.agent_dir)?;
 
+    // Surface non-fatal restore damage (missing history turns, skipped
+    // corrupt lines) as structured warnings; a degraded agent still boots.
+    for d in &restored.degraded {
+        tracing::warn!(id = %p.agent_id, kind = ?d.kind, "agent restored degraded: {}", d.detail);
+    }
+
     let mut config = AgentConfig::load(None, vec![], Some(p.meta.workspace_root.clone()))?;
     config.agent_id = Some(p.agent_id.clone());
     config.created_by = p.meta.created_by.clone();

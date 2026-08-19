@@ -279,7 +279,6 @@ pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Atomically and durably write content to a file via temp file + rename.
-
 /// Durability closes the power-loss window the plain rename left open: the temp
 /// file is `sync_data`d before the rename so a crash never promotes a half-
 /// written file, and the parent directory is synced after the rename so the
@@ -308,7 +307,6 @@ pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
 }
 
 /// Project the context store and write it as `manifest.json` + `pins.json`.
-
 /// Split persistence (see `context::manifest`): the store is no longer
 /// serialized whole, so a per-turn persist writes kilobytes instead of the
 /// full 100KB+ window. Each document goes out durably with the previous
@@ -323,7 +321,6 @@ pub fn persist_context(store: &ContextStore, dir: &Path) -> Result<()> {
 }
 
 /// Durable write that keeps the previous version as `<name>.bak`.
-
 /// A failed backup copy is logged and tolerated: the fresh write is atomic
 /// and durable on its own, and proceeding beats refusing to persist. A
 /// missing previous file (first write) simply skips the backup.
@@ -451,6 +448,25 @@ pub struct RestorableAgent {
     pub agent_dir: PathBuf,
     pub store: ContextStore,
     pub approvals: ApprovalStore,
+    /// Non-fatal damage absorbed during restore (missing turns, skipped
+    /// corrupt lines). Empty on a clean restore. Consumed by the caller for
+    /// structured warning logs.
+    pub degraded: Vec<Degradation>,
+}
+
+/// One non-fatal damage event absorbed during restore.
+#[derive(Debug, Clone)]
+pub struct Degradation {
+    pub kind: DegradationKind,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DegradationKind {
+    /// History records missing for manifest-referenced turn IDs.
+    MissingHistoryTurns,
+    /// History lines that failed to parse and were skipped.
+    BadHistoryLines,
 }
 
 /// Scan the agents directory and return agents eligible for restore.
@@ -532,14 +548,15 @@ fn check_meta(dir: &Path) -> Result<AgentMeta> {
 }
 
 /// Deserialize a single agent from its directory.
-///
-/// Reads context.json and approvals.json, runs the on-load migrations (legacy
-/// pinned/summary shapes, token re-estimation), and injects the restart message.
+/// Loads the context via split persistence when `manifest.json` is present
+/// (hydrating the conversation window from history by turn ID), otherwise
+/// through the legacy `context.json` path — which then migrates in place to
+/// the split format. Either way the on-load migrations, token re-estimation,
+/// and restart-message injection still run. Non-fatal damage is collected in
+/// `degraded` rather than failing the restore.
 pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> {
-    let mut store: ContextStore = match fs::read_to_string(dir.join("context.json")) {
-        Ok(json) => serde_json::from_str(&json).context("parsing context.json")?,
-        Err(_) => ContextStore::new(),
-    };
+    let mut degraded = Vec::new();
+    let mut store = load_store(dir, &mut degraded)?;
 
     let approvals: ApprovalStore = match fs::read_to_string(dir.join("approvals.json")) {
         Ok(json) => serde_json::from_str(&json).context("parsing approvals.json")?,
@@ -570,7 +587,10 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
     store.mark_needs_full_estimate();
 
     let restart_msgs = vec![ChatMessage::user(RESTART_MESSAGE)];
-    let (_, estimated_tokens) = store.push_turn(restart_msgs.clone());
+    let (restart_id, estimated_tokens) = store.push_turn(restart_msgs.clone());
+    // The restart notice is an on-the-spot prompt with no history record;
+    // keep its ID out of the manifest projection (see `injected_turn_ids`).
+    store.register_injected_turn(restart_id);
 
     // Record agent restore event in history.
     // Uses direct HistoryWriter (no AgentContext exists at restore time).
@@ -592,7 +612,109 @@ pub fn restore_agent(agent_id: &AgentId, dir: &Path) -> Result<RestorableAgent> 
         agent_dir: dir.to_owned(),
         store,
         approvals,
+        degraded,
     })
+}
+
+/// Load the context store in the format the directory holds.
+///
+/// `manifest.json` present → split format: parse both documents and hydrate
+/// the conversation window from history by turn ID. A leftover
+/// `context.json` (migration interrupted before the rename) is finished off.
+/// Only `context.json` → legacy format: load it, strip restart notices, and
+/// migrate to the split format in place. Neither → fresh store.
+fn load_store(dir: &Path, degraded: &mut Vec<Degradation>) -> Result<ContextStore> {
+    let manifest_path = dir.join("manifest.json");
+    let legacy_path = dir.join("context.json");
+
+    if manifest_path.exists() {
+        if legacy_path.exists()
+            && let Err(e) = fs::rename(&legacy_path, &legacy_archive_path(dir))
+        {
+            tracing::warn!("finishing legacy rename failed: {e:#}");
+        }
+
+        let manifest: crate::context::manifest::ManifestDoc = serde_json::from_str(
+            &fs::read_to_string(&manifest_path).context("reading manifest.json")?,
+        )
+        .context("parsing manifest.json")?;
+        let pins: crate::context::manifest::PinsDoc = serde_json::from_str(
+            &fs::read_to_string(dir.join("pins.json")).context("reading pins.json")?,
+        )
+        .context("parsing pins.json")?;
+
+        let (convo, report) = crate::history::hydrate_turns(dir, &manifest.conversation_turn_ids);
+        if report.bad_lines > 0 {
+            degraded.push(Degradation {
+                kind: DegradationKind::BadHistoryLines,
+                detail: format!(
+                    "{} history lines failed to parse and were skipped",
+                    report.bad_lines
+                ),
+            });
+        }
+        if !report.missing_ids.is_empty() {
+            degraded.push(Degradation {
+                kind: DegradationKind::MissingHistoryTurns,
+                detail: format!("no history record for turns {:?}", report.missing_ids),
+            });
+        }
+        return Ok(ContextStore::from_persisted(&pins, convo, &manifest));
+    }
+
+    if legacy_path.exists() {
+        let mut store: ContextStore = serde_json::from_str(
+            &fs::read_to_string(&legacy_path).context("reading context.json")?,
+        )
+        .context("parsing context.json")?;
+        strip_restart_turns(&mut store);
+        migrate_legacy_to_split(dir, &store)?;
+        return Ok(store);
+    }
+
+    Ok(ContextStore::new())
+}
+
+fn legacy_archive_path(dir: &Path) -> PathBuf {
+    dir.join("context.legacy.json")
+}
+
+/// Remove prior restart notices from a legacy store before migration: they
+/// are on-the-spot prompts, meaningless across restarts, and have no
+/// history record to hydrate from. Matched by content against the current
+/// message; wording drift in an older notice leaves the turn in place, where
+/// the missing-ID degradation absorbs it.
+fn strip_restart_turns(store: &mut ContextStore) {
+    let restart_positions: Vec<usize> = store
+        .turns()
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
+            !t.is_pinned()
+                && t.messages.len() == 1
+                && t.messages[0].content() == Some(RESTART_MESSAGE)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    for i in restart_positions.into_iter().rev() {
+        store.drain_turns(i..i + 1);
+    }
+}
+
+/// Migrate a legacy store to split persistence, in an order that leaves no
+/// losing intermediate state: pins first, manifest second, legacy rename
+/// last. `manifest.json` present is the completed-migration marker, so a
+/// crash after pins but before manifest re-runs this whole path from the
+/// intact `context.json`; a crash after manifest but before the rename takes
+/// the split path on restart and the dispatcher finishes the rename.
+fn migrate_legacy_to_split(dir: &Path, store: &ContextStore) -> Result<()> {
+    let pins = serde_json::to_string(&store.to_pins_doc()).context("serializing pins.json")?;
+    let manifest =
+        serde_json::to_string(&store.to_manifest_doc()).context("serializing manifest.json")?;
+    write_with_backup(&dir.join("pins.json"), &pins)?;
+    write_with_backup(&dir.join("manifest.json"), &manifest)?;
+    fs::rename(dir.join("context.json"), legacy_archive_path(dir))?;
+    Ok(())
 }
 
 const RESTART_MESSAGE: &str = concat!(
@@ -665,6 +787,275 @@ mod tests {
         let doc: crate::context::manifest::ManifestDoc = serde_json::from_str(&manifest).unwrap();
         assert_eq!(doc.conversation_turn_ids, vec![kept.0]);
         assert_eq!(doc.next_turn_id, injected.0 + 1);
+    }
+
+    // --- restore: migration + hydration ---
+
+    /// A legacy agent directory: whole-store `context.json` plus matching
+    /// history records for the conversation turns.
+    fn legacy_fixture() -> (ContextStore, Vec<ChatMessage>) {
+        let mut store = ContextStore::new();
+        store
+            .pin("note", ChatMessage::assistant("pinned note"))
+            .unwrap();
+        store.push_turn(vec![ChatMessage::user("first question")]);
+        store.push_turn(vec![ChatMessage::assistant("first answer")]);
+        store.retry_log.push(kallip_common::retry::RetryRecord {
+            timestamp: 9,
+            round: 0,
+            attempt: 1,
+            max_attempts: 3,
+            error: "legacy".into(),
+            delay_secs: 1.0,
+            endpoint: None,
+        });
+        // Expected conversation window, in order, for history.
+        let convo = vec![
+            ChatMessage::user("first question"),
+            ChatMessage::assistant("first answer"),
+        ];
+        (store, convo)
+    }
+
+    fn write_legacy(
+        dir: &TempDir,
+        store: &ContextStore,
+        with_history: bool,
+        convo: &[ChatMessage],
+    ) {
+        std::fs::write(
+            dir.path().join("context.json"),
+            serde_json::to_string(store).unwrap(),
+        )
+        .unwrap();
+        if with_history {
+            let history = HistoryWriter::new(dir.path().to_path_buf());
+            let ids: Vec<u64> = store
+                .turns()
+                .iter()
+                .filter(|t| !t.is_pinned())
+                .map(|t| t.id.0)
+                .collect();
+            for (id, msg) in ids.iter().zip(convo) {
+                history
+                    .append(
+                        Some(*id),
+                        std::slice::from_ref(msg),
+                        8,
+                        RecordKind::Turn,
+                        None,
+                    )
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn migrate_writes_split_files_renames_legacy_and_strips_restart_turns() {
+        let dir = TempDir::new().unwrap();
+        let (mut store, convo) = legacy_fixture();
+        // A restart notice from a previous restore lives in the legacy store.
+        store.push_turn(vec![ChatMessage::user(RESTART_MESSAGE)]);
+        write_legacy(&dir, &store, true, &convo);
+        let legacy_next = store.to_manifest_doc().next_turn_id;
+
+        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+
+        // Split files exist; the legacy file is archived, not deleted.
+        assert!(dir.path().join("manifest.json").exists());
+        assert!(dir.path().join("pins.json").exists());
+        assert!(dir.path().join("context.legacy.json").exists());
+        assert!(!dir.path().join("context.json").exists());
+
+        let manifest = std::fs::read_to_string(dir.path().join("manifest.json")).unwrap();
+        let doc: crate::context::manifest::ManifestDoc = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(
+            doc.conversation_turn_ids,
+            vec![1, 2],
+            "restart notice excluded"
+        );
+        assert_eq!(doc.next_turn_id, legacy_next);
+        assert!(
+            restored.degraded.is_empty(),
+            "clean migration degrades nothing"
+        );
+    }
+
+    #[test]
+    fn migration_interrupted_after_pins_reruns_legacy_path_idempotently() {
+        let dir = TempDir::new().unwrap();
+        let (store, convo) = legacy_fixture();
+        write_legacy(&dir, &store, true, &convo);
+        // Simulate a crash after pins.json but before manifest.json.
+        std::fs::write(
+            dir.path().join("pins.json"),
+            serde_json::to_string(&store.to_pins_doc()).unwrap(),
+        )
+        .unwrap();
+
+        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+
+        // The dispatcher saw no manifest → full legacy migration re-ran.
+        assert!(
+            dir.path().join("manifest.json").exists(),
+            "migration completed"
+        );
+        assert!(dir.path().join("context.legacy.json").exists());
+        assert!(!dir.path().join("context.json").exists());
+        assert!(restored.degraded.is_empty());
+    }
+
+    #[test]
+    fn migration_interrupted_before_rename_takes_split_path_losing_nothing() {
+        let dir = TempDir::new().unwrap();
+        let (store, convo) = legacy_fixture();
+        write_legacy(&dir, &store, true, &convo);
+        // Simulate a crash after both split writes but before the rename:
+        // manifest exists, context.json still in place.
+        std::fs::write(
+            dir.path().join("pins.json"),
+            serde_json::to_string(&store.to_pins_doc()).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("manifest.json"),
+            serde_json::to_string(&store.to_manifest_doc()).unwrap(),
+        )
+        .unwrap();
+
+        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+
+        // Split path taken; the interrupted rename is finished here.
+        assert!(dir.path().join("context.legacy.json").exists());
+        assert!(!dir.path().join("context.json").exists());
+        let window = restored.store.turns();
+        assert_eq!(window.len(), 4, "pin + 2 hydrated + fresh restart notice");
+        assert!(restored.degraded.is_empty());
+    }
+
+    #[test]
+    fn legacy_restore_hydrates_equivalent_store() {
+        let dir = TempDir::new().unwrap();
+        let (store, convo) = legacy_fixture();
+        write_legacy(&dir, &store, true, &convo);
+        let legacy_ids: Vec<u64> = store
+            .turns()
+            .iter()
+            .filter(|t| !t.is_pinned())
+            .map(|t| t.id.0)
+            .collect();
+        let legacy_next = store.to_manifest_doc().next_turn_id;
+
+        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+
+        let turns = restored.store.turns();
+        assert_eq!(
+            turns.front().unwrap().label(),
+            Some("note"),
+            "pinned layer rebuilt first"
+        );
+        let hydrated: Vec<u64> = turns.iter().skip(1).take(2).map(|t| t.id.0).collect();
+        assert_eq!(hydrated, legacy_ids, "conversation window identical by ID");
+        assert_eq!(
+            turns.get(1).unwrap().messages[0].content(),
+            Some("first question")
+        );
+        assert_eq!(restored.store.retry_log.len(), 1);
+        assert_eq!(restored.store.retry_log[0].error, "legacy");
+        // A second restore rehydrates from the split files, not the archive.
+        let again = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+        let ids2: Vec<u64> = again
+            .store
+            .turns()
+            .iter()
+            .skip(1)
+            .take(2)
+            .map(|t| t.id.0)
+            .collect();
+        assert_eq!(ids2, legacy_ids);
+        assert_eq!(again.store.retry_log.len(), 1);
+        assert!(again.degraded.is_empty());
+        // The rehydrated store assigns the next ID from the manifest, not below
+        // any historical ID.
+        assert_eq!(again.store.turns().back().unwrap().id.0, legacy_next);
+    }
+
+    #[test]
+    fn missing_history_records_degrade_instead_of_failing() {
+        let dir = TempDir::new().unwrap();
+        let (store, convo) = legacy_fixture();
+        // History records only the first turn; the second goes missing.
+        write_legacy(&dir, &store, true, &convo[..1]);
+
+        let restored = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+
+        // The first restore migrates: the full legacy window is in memory,
+        // so nothing is degraded yet. The gap surfaces on the next restore,
+        // which hydrates from the split files.
+        assert!(restored.degraded.is_empty());
+
+        let degraded = restore_agent(&AgentId::from("a".to_owned()), dir.path()).unwrap();
+
+        assert_eq!(degraded.degraded.len(), 1);
+        assert_eq!(
+            degraded.degraded[0].kind,
+            DegradationKind::MissingHistoryTurns
+        );
+        let turns = degraded.store.turns();
+        assert_eq!(turns.len(), 3, "pin + one hydratable turn + restart notice");
+    }
+
+    /// Manual migration drill against a copy of a real agent directory:
+    /// `KALLIP_MIGRATION_DRILL_DIR=<agent dir> cargo test -p kallip-runtime
+    /// real_dir_migration_drill -- --ignored --nocapture`. Verifies the
+    /// production-shape directory migrates, rehydrates losslessly, and
+    /// prints the size split. Never touches the source directory.
+    #[test]
+    #[ignore = "manual drill: set KALLIP_MIGRATION_DRILL_DIR"]
+    fn real_dir_migration_drill() {
+        let src = std::env::var("KALLIP_MIGRATION_DRILL_DIR")
+            .expect("set KALLIP_MIGRATION_DRILL_DIR to a real agent directory");
+        let tmp = TempDir::new().unwrap();
+        copy_dir_all(std::path::Path::new(&src), tmp.path()).unwrap();
+        let id = AgentId::from(
+            std::path::Path::new(&src)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+
+        let first = restore_agent(&id, tmp.path()).unwrap();
+        println!(
+            "first restore (migration): {} degradation(s)",
+            first.degraded.len()
+        );
+        for d in &first.degraded {
+            println!("  {:?}: {}", d.kind, d.detail);
+        }
+
+        let second = restore_agent(&id, tmp.path()).unwrap();
+        println!(
+            "second restore (rehydrate): {} degradation(s)",
+            second.degraded.len()
+        );
+        for d in &second.degraded {
+            println!("  {:?}: {}", d.kind, d.detail);
+        }
+        assert_eq!(second.store.turn_count(), first.store.turn_count());
+        assert_eq!(second.store.retry_log.len(), first.store.retry_log.len());
+
+        let size = |name: &str| {
+            std::fs::metadata(tmp.path().join(name))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
+        println!(
+            "legacy context.json: {} bytes -> manifest.json: {} + pins.json: {} (per-turn writes)",
+            size("context.legacy.json"),
+            size("manifest.json"),
+            size("pins.json"),
+        );
     }
 
     #[test]
