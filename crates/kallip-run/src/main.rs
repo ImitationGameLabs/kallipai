@@ -201,6 +201,13 @@ where
                     // Terminal for this run: success.
                     RunExit::Success
                 }
+                SseEvent::Waiting { timeout_secs } => {
+                    // The agent wait-parked itself with an armed timer. Terminal
+                    // for this one-shot run (Success — the yield was deliberate);
+                    // the live agent wakes later, outside this stream.
+                    eprintln!("agent is waiting (timer {timeout_secs}s)");
+                    RunExit::Success
+                }
                 SseEvent::Error { message } => {
                     eprintln!("{message}");
                     RunExit::Error
@@ -223,7 +230,7 @@ where
                     eprintln!("token budget exceeded (consumed: {consumed}, budget: {budget})");
                     RunExit::BudgetExceeded
                 }
-                SseEvent::FailoverChainExhausted { reason, detail } => {
+                SseEvent::FailoverChainExhausted { reason, detail, .. } => {
                     eprintln!("failover chain exhausted ({reason}): {detail}");
                     RunExit::FailoverChainExhausted
                 }
@@ -318,6 +325,7 @@ where
             // this match is a compile error, never a silent suppress.
             SseEvent::Idle
             | SseEvent::MaxRoundsExceeded
+                | SseEvent::Waiting { .. }
             | SseEvent::Error { .. }
             | SseEvent::Cancelled
             | SseEvent::Interrupted
@@ -412,6 +420,7 @@ mod tests {
                 SseEvent::FailoverChainExhausted {
                     reason: FailoverChainExhaustion::NoFailoverConfigured,
                     detail: String::new(),
+                    transient_retry: None,
                 },
                 RunExit::FailoverChainExhausted,
             ),

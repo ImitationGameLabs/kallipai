@@ -769,6 +769,7 @@ async fn bridge_dispatches_failover_exhausted_to_superior() {
         .send(AgentEvent::FailoverChainExhausted {
             reason: kallip_common::protocol::FailoverChainExhaustion::NoFailoverConfigured,
             detail: "all tiers unhealthy".into(),
+            transient_retry: None,
         })
         .await
         .unwrap();
@@ -1114,6 +1115,7 @@ fn all_agent_events() -> Vec<AgentEvent> {
         AgentEvent::FailoverChainExhausted {
             reason: FailoverChainExhaustion::NoFailoverConfigured,
             detail: String::new(),
+            transient_retry: None,
         },
     ]
 }

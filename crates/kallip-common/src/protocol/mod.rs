@@ -15,6 +15,7 @@ pub use agent::{
     AgentPermissionsResponse, AgentState, AgentStatusResponse, AgentSummary, CreateAgentRequest,
     CreateAgentResponse, DELEGATION_CARVE_OUT, DELEGATION_FULL_HANDOFF, DutyStatus,
     ListAgentsQuery, ListAgentsResponse, MaxToolRounds, MessageRequest, MessageResponse,
+    ParkedReason,
     UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 pub use approval::{
@@ -25,4 +26,4 @@ pub use error::ApiError;
 pub use external::{AuthoredEvent, SignalEvent};
 pub use inbox::{InboxEntry, InboxListQuery, InboxSummary};
 pub use skill::{SkillMeta, parse_frontmatter, parse_frontmatter_description};
-pub use sse::{FailoverChainExhaustion, SseEvent};
+pub use sse::{FailoverChainExhaustion, SseEvent, TransientRetryInfo};

@@ -9,6 +9,7 @@ mod env_util;
 pub mod event;
 mod failover;
 pub mod history;
+pub(crate) mod lifecycle;
 pub(crate) mod llm_error;
 pub mod persistence;
 pub mod policy;

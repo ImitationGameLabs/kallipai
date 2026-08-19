@@ -108,7 +108,7 @@ pub async fn bridge_task(
                                         format!("hit a fatal error and parked: {msg}"),
                                         notice,
                                     )),
-                                    AgentEvent::FailoverChainExhausted { reason, detail } => Some((
+                                    AgentEvent::FailoverChainExhausted { reason, detail, .. } => Some((
                                         "Subagent Error",
                                         format!(
                                             "exhausted its model failover chain and parked ({reason}: {detail})"
@@ -211,6 +211,7 @@ fn convert_event(event: AgentEvent) -> Option<SseEvent> {
         AgentEvent::ToolCall { name, args } => Some(SseEvent::ToolCall { name, args }),
         AgentEvent::ToolResult(result) => Some(SseEvent::ToolResult { result }),
         AgentEvent::Idle => Some(SseEvent::Idle),
+        AgentEvent::Waiting { timeout_secs } => Some(SseEvent::Waiting { timeout_secs }),
         AgentEvent::MaxRoundsExceeded => Some(SseEvent::MaxRoundsExceeded),
         AgentEvent::Error(msg) => Some(SseEvent::Error { message: msg }),
         AgentEvent::Status(msg) => Some(SseEvent::Status { message: msg }),
@@ -238,9 +239,15 @@ fn convert_event(event: AgentEvent) -> Option<SseEvent> {
             delay_secs,
         }),
         AgentEvent::Failover { from, to, reason } => Some(SseEvent::Failover { from, to, reason }),
-        AgentEvent::FailoverChainExhausted { reason, detail } => {
-            Some(SseEvent::FailoverChainExhausted { reason, detail })
-        }
+        AgentEvent::FailoverChainExhausted {
+            reason,
+            detail,
+            transient_retry,
+        } => Some(SseEvent::FailoverChainExhausted {
+            reason,
+            detail,
+            transient_retry,
+        }),
         AgentEvent::Cancelled => Some(SseEvent::Cancelled),
         AgentEvent::Interrupted => Some(SseEvent::Interrupted),
         AgentEvent::TokenBudgetExceeded { consumed, budget } => {

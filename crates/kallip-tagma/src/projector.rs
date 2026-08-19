@@ -45,7 +45,7 @@ pub(crate) fn project_external(sse: &SseEvent) -> (Option<AuthoredEvent>, Option
             })
         }
         SseEvent::MaxRoundsExceeded => Some(SignalEvent::MaxRoundsExceeded),
-        SseEvent::FailoverChainExhausted { reason, detail } => {
+        SseEvent::FailoverChainExhausted { reason, detail, .. } => {
             Some(SignalEvent::FailoverChainExhausted {
                 reason: *reason,
                 detail: detail.clone(),
@@ -133,6 +133,7 @@ mod tests {
             let (a, s) = project_external(&SseEvent::FailoverChainExhausted {
                 reason: FailoverChainExhaustion::NoFailoverConfigured,
                 detail: "d".into(),
+                transient_retry: None,
             });
             assert!(a.is_none());
             match s {

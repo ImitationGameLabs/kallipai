@@ -417,6 +417,7 @@ pub async fn run_and_report(
             Ok(runner::RoundOutcome::Park(AgentOutcome::FailoverChainExhausted {
                 reason,
                 detail,
+                ..
             })) => {
                 // Transient: the whole chain is down. Schedule a timed retry (bounded
                 // by `max_transient_retries`) and park; the outer loop's retry arm
@@ -424,7 +425,7 @@ pub async fn run_and_report(
                 // surface so the operator can reconfigure failover.
                 ctx.transient_fails = ctx.transient_fails.saturating_add(1);
                 agent_tx
-                    .send(AgentEvent::FailoverChainExhausted { reason, detail })
+                    .send(AgentEvent::FailoverChainExhausted { reason, detail, transient_retry: None })
                     .await
                     .ok();
                 if ctx.transient_fails <= ctx.config.max_transient_retries {

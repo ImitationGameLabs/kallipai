@@ -5,7 +5,7 @@
 //! bridge converts them to the SSE wire-format events defined in
 //! `kallip_common::protocol::SseEvent`.
 
-use kallip_common::protocol::FailoverChainExhaustion;
+use kallip_common::protocol::{FailoverChainExhaustion, TransientRetryInfo};
 
 /// Events emitted by the agent runner during execution.
 ///
@@ -32,6 +32,15 @@ pub enum AgentEvent {
     /// final assistant message, so this event carries no text — it is a pure
     /// status transition (the task parks, awaiting external input).
     Idle,
+    /// The agent deliberately parked itself waiting (via `break(wait)`) with an armed
+    /// timer. Terminal for the turn like [`Idle`](Self::Idle), but the task stays
+    /// alive with unfinished business: the outer loop wakes it on the timer (an
+    /// injected `[system]` turn -- the agent then decides) or on any external
+    /// event; `break(idle)` finishes. Mirrors
+    /// [`SseEvent::Waiting`](kallip_common::protocol::SseEvent::Waiting).
+    Waiting {
+        timeout_secs: u64,
+    },
     MaxRoundsExceeded,
     Error(String),
     Status(String),
@@ -89,6 +98,7 @@ pub enum AgentEvent {
     FailoverChainExhausted {
         reason: FailoverChainExhaustion,
         detail: String,
+        transient_retry: Option<TransientRetryInfo>,
     },
 }
 
@@ -109,6 +119,7 @@ impl AgentEvent {
         matches!(
             self,
             Self::Idle
+                | Self::Waiting { .. }
                 | Self::MaxRoundsExceeded
                 | Self::Error(_)
                 | Self::Cancelled
@@ -149,6 +160,7 @@ mod tests {
                     assert!(!terminal, "{v:?}");
                 }
                 AgentEvent::Idle
+                | AgentEvent::Waiting { .. }
                 | AgentEvent::MaxRoundsExceeded
                 | AgentEvent::Error(_)
                 | AgentEvent::Cancelled
@@ -177,6 +189,7 @@ mod tests {
         },
         AgentEvent::ToolResult(String::new()),
         AgentEvent::Idle,
+        AgentEvent::Waiting { timeout_secs: 0 },
         AgentEvent::MaxRoundsExceeded,
         AgentEvent::Error(String::new()),
         AgentEvent::Status(String::new()),
@@ -215,6 +228,7 @@ mod tests {
         AgentEvent::FailoverChainExhausted {
             reason: FailoverChainExhaustion::NoFailoverConfigured,
             detail: String::new(),
+            transient_retry: None,
         },
     ];
 
@@ -228,7 +242,7 @@ mod tests {
     /// empty/zero values; semantics live in the classification snapshot.
     #[test]
     fn schema_snapshot() {
-        assert_eq!(SAMPLES.len(), 21, "variant count drifted — extend SAMPLES");
+        assert_eq!(SAMPLES.len(), 22, "variant count drifted — extend SAMPLES");
         let expected: &[&str] = &[
             "Reasoning(\"\")",
             "AssistantContent(\"\")",
@@ -237,6 +251,7 @@ mod tests {
             "ToolCall { name: \"\", args: \"\" }",
             "ToolResult(\"\")",
             "Idle",
+            "Waiting { timeout_secs: 0 }",
             "MaxRoundsExceeded",
             "Error(\"\")",
             "Status(\"\")",
@@ -250,7 +265,7 @@ mod tests {
             "Cancelled",
             "Interrupted",
             "TokenBudgetExceeded { consumed: 0, budget: 0 }",
-            "FailoverChainExhausted { reason: NoFailoverConfigured, detail: \"\" }",
+            "FailoverChainExhausted { reason: NoFailoverConfigured, detail: \"\", transient_retry: None }",
         ];
         for (v, want) in SAMPLES.iter().zip(expected) {
             assert_eq!(format!("{v:?}"), *want);

@@ -6,26 +6,41 @@ use crate::agentid::AgentId;
 use crate::context::ContextUsage;
 use crate::policy::PolicyPreset;
 use crate::retry::RetryRecord;
+use super::sse::FailoverChainExhaustion;
 
 /// Agent lifecycle state exposed via the status endpoint.
 ///
-/// `Idle`/`Busy` are stored on the live agent as an `AtomicU8` (see `IDLE`/`BUSY`
-/// constants) and flipped only by the bridge task. `Faulted` is **wire/display-only**:
-/// it reports an entry that could not be brought up (e.g. restore failure) and so has no
-/// running task. It is never stored atomically and never written by a bridge -- the
-/// `RegistryEntry` enum distinguishes it structurally -- which is why there is no
-/// `FAULTED: u8` constant.
+/// `Idle`/`Busy`/`Waiting`/`Parked`/`Retrying` are stored on the live agent as an
+/// `AtomicU8` (see the constants) and flipped only by the bridge task.
+/// `Faulted` is **wire/display-only**: it reports an entry that could not be brought
+/// up (e.g. restore failure) and so has no running task. It is never stored
+/// atomically and never written by a bridge -- the `RegistryEntry` enum
+/// distinguishes it structurally -- which is why there is no `FAULTED: u8`
+/// constant.
+///
+/// `Retrying` covers chain-transient backoff (a terminal
+/// [`SseEvent::FailoverChainExhausted`](super::SseEvent::FailoverChainExhausted)
+/// armed a delayed retry) and doubles as the display value for in-request
+/// backoff (the non-terminal `retrying`/`streamReset` events): the latter is a
+/// bridge-side overlay while the true stored state is `Busy`, not a distinct
+/// stored state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     Idle,
     Busy,
+    Waiting,
+    Parked,
+    Retrying,
     Faulted,
 }
 
 impl AgentState {
     pub const IDLE: u8 = 0;
     pub const BUSY: u8 = 1;
+    pub const WAITING: u8 = 2;
+    pub const PARKED: u8 = 3;
+    pub const RETRYING: u8 = 4;
 }
 
 impl std::fmt::Display for AgentState {
@@ -33,8 +48,53 @@ impl std::fmt::Display for AgentState {
         f.write_str(match self {
             AgentState::Idle => "idle",
             AgentState::Busy => "busy",
+            AgentState::Waiting => "waiting",
+            AgentState::Parked => "parked",
+            AgentState::Retrying => "retrying",
             AgentState::Faulted => "faulted",
         })
+    }
+}
+
+/// Why an agent is [`AgentState::Parked`] — structured, not free text, so the UI
+/// can render and filter by cause (the failover-case lesson: surface the real
+/// state, never derive it). Written by the bridge at the parking terminal event,
+/// mirrored into status responses alongside `parked_at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ParkedReason {
+    /// Failover chain exhausted with no transient retry armed (or retries already
+    /// spent): re-prompting needs operator action (reconfigure failover, or kick).
+    FailoverChainExhausted {
+        reason: FailoverChainExhaustion,
+        detail: String,
+    },
+    /// Undifferentiated fatal turn error.
+    FatalError {
+        message: String,
+    },
+    TokenBudgetExceeded {
+        consumed: u64,
+        budget: u64,
+    },
+    MaxRoundsExceeded,
+    /// Chain-transient retries spent their attempt budget; the final FCE parked the
+    /// agent instead of re-arming another backoff.
+    TransientRetryExhausted,
+}
+
+impl std::fmt::Display for ParkedReason {
+    /// Operator-readable prose, shared by the park-kick turn text and TUI rendering.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FailoverChainExhausted { reason, .. } => {
+                write!(f, "failover chain exhausted ({reason})")
+            }
+            Self::FatalError { message } => write!(f, "fatal error: {message}"),
+            Self::TokenBudgetExceeded { .. } => f.write_str("token budget exceeded"),
+            Self::MaxRoundsExceeded => f.write_str("max rounds exceeded"),
+            Self::TransientRetryExhausted => f.write_str("transient retries exhausted"),
+        }
     }
 }
 

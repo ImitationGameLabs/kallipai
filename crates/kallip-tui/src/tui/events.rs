@@ -69,6 +69,19 @@ impl App {
                 self.agent_busy = false;
                 self.auto_scroll = true;
             }
+            SseEvent::Waiting { timeout_secs } => {
+                // The agent wait-parked itself with an armed timer — like Idle
+                // it ends the turn, but with unfinished business: note the wait
+                // instead of looking fully idle.
+                self.finalize_streaming();
+                self.streaming_content = false;
+                self.streaming_reasoning = false;
+                self.agent_busy = false;
+                self.chat_lines.push(ChatLine::Status(format!(
+                    "agent is waiting (timer {timeout_secs}s)"
+                )));
+                self.auto_scroll = true;
+            }
             SseEvent::MaxRoundsExceeded => {
                 self.chat_lines
                     .push(ChatLine::Error("max rounds exceeded".into()));
@@ -120,7 +133,7 @@ impl App {
                     .push(ChatLine::Failover { from, to, reason });
                 self.auto_scroll = true;
             }
-            SseEvent::FailoverChainExhausted { reason, detail } => {
+            SseEvent::FailoverChainExhausted { reason, detail, .. } => {
                 self.finalize_streaming();
                 self.chat_lines.push(ChatLine::FailoverExhausted {
                     reason: reason.to_string(),

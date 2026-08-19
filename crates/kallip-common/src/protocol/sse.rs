@@ -58,6 +58,21 @@ impl std::fmt::Display for FailoverChainExhaustion {
     }
 }
 
+/// Chain-transient retry arming carried by
+/// [`SseEvent::FailoverChainExhausted`] when the runtime armed a delayed retry
+/// (the attempt budget is not yet spent) instead of parking the agent for good;
+/// the status surface mirrors the same shape as its `retrying` field.
+/// `retry_in_secs` is the armed backoff delay -- a relative duration, not an
+/// absolute timestamp, so the payload stays valid whenever it is read. `None`
+/// on the event keeps the pre-retry wire shape (see
+/// `fce_transient_retry_roundtrip_and_legacy_shape`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TransientRetryInfo {
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub retry_in_secs: f64,
+}
+
 /// Wire-format event for SSE transport (tagma to client).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -88,6 +103,15 @@ pub enum SseEvent {
     /// final assistant message. This event
     /// is a pure status transition — the task parks, awaiting external input.
     Idle,
+    /// The agent deliberately parked itself waiting (via `break(wait)`) with an
+    /// armed timer. Terminal for the turn like [`Idle`](Self::Idle), but the agent
+    /// has unfinished business: it wakes on the timer (an injected `[system]`
+    /// turn -- the agent then decides what to do) or on any external event, and
+    /// `break(idle)` finishes. Contrast the runtime-driven
+    /// [`Retrying`](Self::Retrying) backoff, which is non-terminal.
+    Waiting {
+        timeout_secs: u64,
+    },
     MaxRoundsExceeded,
     Error {
         message: String,
@@ -142,6 +166,8 @@ pub enum SseEvent {
     FailoverChainExhausted {
         reason: FailoverChainExhaustion,
         detail: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transient_retry: Option<TransientRetryInfo>,
     },
 }
 impl SseEvent {
@@ -157,6 +183,7 @@ impl SseEvent {
         matches!(
             self,
             Self::Idle
+                | Self::Waiting { .. }
                 | Self::MaxRoundsExceeded
                 | Self::Error { .. }
                 | Self::Cancelled
@@ -219,6 +246,7 @@ mod tests {
                 }
                 // Turn-terminal: boundary too (is_boundary = terminal ∪ ToolCall).
                 SseEvent::Idle
+                | SseEvent::Waiting { .. }
                 | SseEvent::MaxRoundsExceeded
                 | SseEvent::Error { .. }
                 | SseEvent::Cancelled
@@ -253,6 +281,7 @@ mod tests {
             result: String::new(),
         },
         SseEvent::Idle,
+        SseEvent::Waiting { timeout_secs: 0 },
         SseEvent::MaxRoundsExceeded,
         SseEvent::Error {
             message: String::new(),
@@ -291,6 +320,7 @@ mod tests {
         SseEvent::FailoverChainExhausted {
             reason: FailoverChainExhaustion::NoFailoverConfigured,
             detail: String::new(),
+            transient_retry: None,
         },
     ];
 
@@ -310,6 +340,7 @@ mod tests {
             ("toolCall", &["args", "name"]),
             ("toolResult", &["result"]),
             ("idle", &[]),
+            ("waiting", &["timeout_secs"]),
             ("maxRoundsExceeded", &[]),
             ("error", &["message"]),
             ("status", &["message"]),
@@ -351,6 +382,53 @@ mod tests {
             let mut want: Vec<&str> = fields.to_vec();
             want.sort_unstable();
             assert_eq!(actual, want, "{v:?}: field-name set drifted");
+        }
+    }
+
+    /// `transient_retry` rides the FCE payload only when a retry is armed:
+    /// `None` omits the field entirely (the pre-retry wire shape -- payloads
+    /// written before the field existed deserialize unchanged), `Some` adds it.
+    /// Pinning both directions keeps old clients and old fixtures valid while
+    /// making the armed shape a stable contract.
+    #[test]
+    fn fce_transient_retry_roundtrip_and_legacy_shape() {
+        let armed = SseEvent::FailoverChainExhausted {
+            reason: FailoverChainExhaustion::AllBackupsExhausted,
+            detail: "provider 5xx".into(),
+            transient_retry: Some(TransientRetryInfo {
+                attempt: 1,
+                max_attempts: 3,
+                retry_in_secs: 2.5,
+            }),
+        };
+        let json = serde_json::to_value(&armed).expect("serializes");
+        assert_eq!(
+            json["transient_retry"],
+            serde_json::json!({"attempt": 1, "max_attempts": 3, "retry_in_secs": 2.5})
+        );
+        let back: SseEvent = serde_json::from_value(json).expect("roundtrips");
+        match back {
+            SseEvent::FailoverChainExhausted {
+                transient_retry: Some(info),
+                ..
+            } => assert_eq!(
+                (info.attempt, info.max_attempts, info.retry_in_secs),
+                (1, 3, 2.5)
+            ),
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let legacy = serde_json::json!({
+            "type": "failoverChainExhausted",
+            "reason": "allBackupsExhausted",
+            "detail": "provider 5xx",
+        });
+        match serde_json::from_value::<SseEvent>(legacy).expect("legacy shape deserializes") {
+            SseEvent::FailoverChainExhausted {
+                transient_retry: None,
+                ..
+            } => {}
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 
