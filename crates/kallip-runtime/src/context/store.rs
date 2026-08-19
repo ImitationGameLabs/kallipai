@@ -70,6 +70,11 @@ pub trait AgenticContext: Send + Sync {
     /// the accessor resolves to the last assistant message that has text
     /// content. Tool results always carry content and are never pruned.
     /// Returns `None` when no qualifying conversation message exists.
+    /// Resolve a recorded tool call by id — `(function name, raw arguments
+    /// JSON)` — scanning conversation (non-pinned) turns newest-first.
+    /// Pinned turns are skipped: calls are recorded in the round that
+    /// produced them, never in pinned copies.
+    fn tool_call_info(&self, call_id: &str) -> Option<(String, String)>;
     fn last_conversation_message_by_role(&self, role: &str) -> Option<ChatMessage>;
 }
 
@@ -310,6 +315,18 @@ impl AgenticContext for ContextStore {
                     && (role != "assistant" || m.content().is_some())
             })
             .cloned()
+    }
+
+    fn tool_call_info(&self, call_id: &str) -> Option<(String, String)> {
+        self.turns
+            .iter()
+            .rev()
+            .filter(|t| !t.is_pinned())
+            .flat_map(|t| t.messages.iter().rev())
+            .filter_map(|m| m.tool_calls())
+            .flatten()
+            .find(|c| c.id == call_id)
+            .map(|c| (c.function.name.clone(), c.function.arguments.clone()))
     }
 }
 

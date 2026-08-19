@@ -43,7 +43,7 @@ or fewer levels in one batch. The list is read straight from the files, so it
 can never drift from what is on disk.
 
 If your context does not already contain that index, run the command now and
-pin its output with `context_pin_last` (kind `tool-result`, label
+pin its output with `context_pin_last` (label
 `skill:index`) — do not start work blind to what notes exist. Pin it in the
 turn AFTER you read it (the current turn's tool result is not pinnable until
 the turn ends). Once pinned it stays across turns — pins are not evicted, so
