@@ -182,6 +182,13 @@ fn history_files(agent_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Whether the agent has any history files at all — used by restore to
+/// distinguish "nothing was ever persisted" from "the split documents
+/// went missing but the history tail can rebuild the window".
+pub(crate) fn has_history(agent_dir: &Path) -> bool {
+    !history_files(agent_dir).is_empty()
+}
+
 /// Hydrate the conversation turns for `ids` from the history log.
 ///
 /// Scans per-day files **newest-first**, and lines within a file newest-first

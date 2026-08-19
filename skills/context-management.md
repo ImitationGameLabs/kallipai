@@ -12,7 +12,7 @@ Your context window is finite. Unlike traditional agents where compaction is a h
 - `context_status` — check pinned items, turn count, remaining tokens
 - `context_pin` / `context_unpin` — pin/unpin labeled content (survives eviction)
 - `context_evict` — evict all turns, replacing them with a summary you write
-- `context_pin_last` — pin a message already in your context by reference (a file you just read, a command output, your own last reply). Read the file first in a prior turn, then pin its tool result here (label: `skill:<name>`)
+- `context_pin_last` — pin your most recent tool result by reference (a file you just read, a command output). Read the file first in a prior turn, then pin its tool result here (label: `skill:<name>`); for content you compose yourself use `context_pin`
 
 ## Check Before You Act
 

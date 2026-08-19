@@ -37,6 +37,15 @@ static SHARED_PG_PORT: OnceCell<u16> = OnceCell::const_new();
 /// Monotonic counter for unique per-test database names.
 static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Cold-start errors worth a retry: the bind failure when an ephemeral
+/// outbound source port snatches RootlessKit's picked port ("address
+/// already in use"), and docker's 409 when a concurrently cold-started
+/// sibling binary won the shared-container create ("is already in use
+/// by container"). String matching is fragile, but test-only and the
+/// cheapest signal for this docker error chain.
+fn retryable_start_error(e: &str) -> bool {
+    e.contains("already in use")
+}
 async fn shared_pg_port() -> &'static u16 {
     SHARED_PG_PORT
         .get_or_init(|| async {
@@ -52,11 +61,11 @@ async fn shared_pg_port() -> &'static u16 {
                     .with_container_name("kallipai-testcontainers-pg-16alpine")
                     .with_reuse(ReuseDirective::Always)
             };
-            // Seatbelt for the rare cold start: an ephemeral outbound source
-            // port can snatch RootlessKit's picked port. Steady state reuses
-            // the running container and never reaches this error path. The
-            // retry matches on the error's display string -- fragile, but
-            // test-only and the cheapest signal for this docker error chain.
+            // Seatbelt for the rare cold start: an ephemeral outbound
+            // source port can snatch RootlessKit's picked port, or a
+            // sibling test binary cold-starting at the same moment wins
+            // the shared-container create and this one gets a docker 409
+            // name conflict. Steady state never reaches this error path.
             for attempt in 0..4 {
                 match make_request().start().await {
                     Ok(container) => {
@@ -66,7 +75,7 @@ async fn shared_pg_port() -> &'static u16 {
                         std::mem::forget(container);
                         return port;
                     }
-                    Err(e) if attempt < 3 && e.to_string().contains("address already in use") => {
+                    Err(e) if attempt < 3 && retryable_start_error(&e.to_string()) => {
                         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     }
                     Err(e) => panic!("start postgres: {e}"),
@@ -75,6 +84,24 @@ async fn shared_pg_port() -> &'static u16 {
             unreachable!("retry loop always returns or panics")
         })
         .await
+}
+/// A test database is owned by the process whose pid is encoded in its
+/// name (`{lesche|agora}_test_{pid}_{n}`). The zero-connection SQL
+/// prefilter cannot distinguish "dead" from "just created, not yet
+/// connected", so a candidate is dropped only when its owner process no
+/// longer exists (`/proc/{pid}`). Unparseable names are never dropped:
+/// failing to prove the owner dead means leaving the database alone.
+fn owner_dead(db_name: &str) -> bool {
+    let rest = db_name
+        .strip_prefix("agora_test_")
+        .or_else(|| db_name.strip_prefix("lesche_test_"));
+    let Some(pid) = rest
+        .and_then(|r| r.split_once('_'))
+        .and_then(|(pid, _)| pid.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    !std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
 /// Best-effort cleanup, once per process, of test databases left dead by
@@ -93,12 +120,12 @@ async fn sweep_dead_test_dbs(port: u16) {
             return;
         }
     };
-    // Zero-connection criterion. Known boundary, unreachable under cargo
-    // test's serialized binaries: a concurrently cold-started sibling's
-    // just-created, not-yet-connected database could be swept -- same
-    // class as the container name-conflict note. This process's own
-    // databases appear only after the sweep and hold connections once
-    // live, so only dead databases ever match.
+    // Zero-connection SQL prefilter plus an owner-liveness gate before
+    // each DROP: zero connections alone cannot tell a dead database from
+    // a concurrently cold-started sibling's just-created, not-yet-
+    // connected one (see `owner_dead`). This process's own databases
+    // appear only after the sweep, so only dead-owner databases drop.
+
     // DROP DATABASE cannot run inside a transaction block, so a DO-block
     // sweep silently drops nothing; select candidates first, then issue
     // one autocommit DROP per database, each failure swallowed.
@@ -123,6 +150,9 @@ async fn sweep_dead_test_dbs(port: u16) {
         .iter()
         .filter_map(|row| row.try_get::<String>("", "datname").ok())
     {
+        if !owner_dead(&name) {
+            continue;
+        }
         let quoted = format!("\"{}\"", name.replace('"', "\"\""));
         let drop = format!("DROP DATABASE IF EXISTS {quoted}");
         if let Err(e) = root
@@ -391,4 +421,31 @@ pub async fn seed_passkey(state: &SharedState, user_id: &UserId, cred_id: Vec<u8
     .await
     .expect("insert passkey");
     id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retryable_start_error_matches_both_cold_start_conflicts() {
+        assert!(retryable_start_error(
+            "Bind for 127.0.0.1:5432 failed: port is already allocated: address already in use",
+        ));
+        assert!(retryable_start_error(
+            "Conflict. The container name \"kallipai-testcontainers-pg-16alpine\" is already in use by container 4f0c",
+        ));
+        assert!(!retryable_start_error("pull access denied"));
+    }
+
+    #[test]
+    fn owner_dead_requires_a_dead_encoded_pid() {
+        // This process is alive, so its own databases are never swept.
+        assert!(!owner_dead(&format!("agora_test_{}_0", std::process::id())));
+        // 4e9 is far beyond Linux pid_max: no such process exists.
+        assert!(owner_dead("agora_test_4000000000_0"));
+        assert!(owner_dead("lesche_test_4000000000_0"));
+        assert!(!owner_dead("agora_test_4000000000"));
+        assert!(!owner_dead("other_test_4000000000_0"));
+    }
 }

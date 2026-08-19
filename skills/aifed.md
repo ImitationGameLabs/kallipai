@@ -30,7 +30,7 @@ aifed --skill > /tmp/aifed-skill.md
 ```
 
 Then read the file (e.g. `cat /tmp/aifed-skill.md`), and in the next turn pin
-the result with `context_pin_last` (kind `tool-result`, label
+the result with `context_pin_last` (label
 `skill:aifed-reference`).
 
 When the editing-heavy work is done, `context_unpin skill:aifed-reference` to free context space.

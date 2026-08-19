@@ -119,9 +119,11 @@ impl LlmTool for ContextPinLastTool {
 /// payload. `call` is the `(name, arguments)` of the pairing call, present
 /// while the round that produced the result is still in the window.
 ///
-/// Never fails: every step degrades — an unparseable envelope pins the full
-/// body, a missing `result.output` falls back to the whole content, and a
-/// missing pairing call degrades the header to `command unavailable`.
+/// Never fails: every step degrades. A bare-string result is the payload
+/// itself; an object result uses its `output` string, or the serialized
+/// result when there is none; with no envelope or no result field the
+/// full body stands in. A missing pairing call degrades the header to
+/// `command unavailable`.
 fn reference_card(message: &ChatMessage, call: Option<&(String, String)>) -> String {
     let content = message.content().unwrap_or_default();
     let envelope = serde_json::from_str::<ToolResultEnvelope>(content).ok();
@@ -133,12 +135,16 @@ fn reference_card(message: &ChatMessage, call: Option<&(String, String)>) -> Str
         Some((_, args)) => truncate_chars(args.lines().next().unwrap_or(""), CARD_COMMAND_CHARS),
         None => "command unavailable".to_owned(),
     };
-    let payload = envelope
-        .as_ref()
-        .and_then(|e| e.result.as_ref())
-        .and_then(|r| r.get("output"))
-        .and_then(Value::as_str)
-        .unwrap_or(content);
+    let payload = match envelope.as_ref().and_then(|e| e.result.as_ref()) {
+        Some(Value::String(s)) => s.clone(),
+        Some(r @ Value::Object(_)) => r
+            .get("output")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| r.to_string()),
+        Some(r) => r.to_string(),
+        None => content.to_owned(),
+    };
     format!("[pinned tool result · {tool} · {command}]\n\n{payload}")
 }
 
@@ -230,19 +236,28 @@ mod tests {
         assert!(cmd.ends_with('…'));
     }
 
-    /// Every payload fallback pins the full body rather than failing: not
-    /// JSON, an envelope without result.output, and a non-string output all
-    /// degrade to the whole content.
+    /// Every result shape yields the most useful self-contained payload:
+    /// a bare string is used as-is, an object's `output` string when
+    /// present, anything else serializes the result value, and with no
+    /// envelope at all the full body stands in.
     #[test]
-    fn reference_card_falls_back_to_full_content() {
-        let plain = ChatMessage::tool_result("plain text", "c1");
-        let card = reference_card(&plain, None);
-        assert!(card.starts_with("[pinned tool result · unknown tool · command unavailable]"));
-        assert!(card.ends_with("plain text"));
-
-        let no_output = ChatMessage::tool_result(envelope("t", None), "c1");
-        let card = reference_card(&no_output, None);
-        assert!(card.contains(envelope("t", None).as_str()));
+    fn payload_extraction_covers_every_result_shape() {
+        let raw = serde_json::to_string(&ToolResultEnvelope {
+            ok: true,
+            tool_name: "t".into(),
+            result: Some(json!("plain body")),
+            error: None,
+            pending_approval: None,
+            rest: serde_json::Map::new(),
+        })
+        .unwrap();
+        let msg = ChatMessage::tool_result(raw, "c1");
+        let card = reference_card(&msg, None);
+        assert!(card.starts_with("[pinned tool result · t · command unavailable]"));
+        assert!(
+            card.ends_with("plain body"),
+            "bare string is the payload: {card}"
+        );
 
         let raw = serde_json::to_string(&ToolResultEnvelope {
             ok: true,
@@ -253,9 +268,53 @@ mod tests {
             rest: serde_json::Map::new(),
         })
         .unwrap();
-        let msg = ChatMessage::tool_result(raw.clone(), "c1");
+        let msg = ChatMessage::tool_result(raw, "c1");
         let card = reference_card(&msg, None);
-        assert!(card.contains(raw.as_str()));
+        assert!(
+            card.ends_with("{\"output\":42}"),
+            "non-string output pins the serialized result: {card}"
+        );
+
+        let plain = ChatMessage::tool_result("plain text", "c1");
+        let card = reference_card(&plain, None);
+        assert!(card.starts_with("[pinned tool result · unknown tool · command unavailable]"));
+        assert!(card.ends_with("plain text"));
+
+        let no_output = ChatMessage::tool_result(envelope("t", None), "c1");
+        let card = reference_card(&no_output, None);
+        assert!(card.contains(envelope("t", None).as_str()));
+    }
+
+    /// The pinned item is a plain user message — no tool protocol fields
+    /// survive. If this regresses to pinning the tool message itself, its
+    /// dangling tool_call_id would orphan as soon as the pairing call
+    /// leaves the window (the exact bug this tool's redesign removed).
+    #[tokio::test]
+    async fn pinned_card_is_a_plain_user_message() {
+        let mut ctx = ContextStore::new();
+        ctx.push_turn(vec![
+            dispatch("c1", "read_file", "{\"path\":\"a.txt\"}"),
+            ChatMessage::tool_result(envelope("read_file", Some("BODY")), "c1"),
+        ]);
+        let store = std::sync::Arc::new(tokio::sync::Mutex::new(ctx));
+        let tool = ContextPinLastTool::new(store.clone());
+        run(&tool, &json!({ "label": "card" })).await.unwrap();
+
+        let guard = store.lock().await;
+        let pinned = guard
+            .turns()
+            .iter()
+            .find(|t| t.is_pinned() && t.label() == Some("card"))
+            .expect("pinned turn exists");
+        let msg = &pinned.messages[0];
+        assert_eq!(msg.role(), "user");
+        assert_eq!(msg.tool_call_id(), None);
+        assert!(msg.tool_calls().is_none_or(|c| c.is_empty()));
+        assert!(
+            msg.content()
+                .unwrap_or_default()
+                .starts_with("[pinned tool result · ")
+        );
     }
 
     #[tokio::test]

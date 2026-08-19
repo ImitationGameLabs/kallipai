@@ -23,7 +23,7 @@ Navigate top-down, never blind-scan:
 - **Index the root.** `kallip skill index <skills-path>` → see the root-level skills and the top-level categories.
 - **Index the category.** `kallip skill index <skills-path>/<category>` → see the skills in that category (skip this for a root-level skill).
 - **Confirm.** `kallip skill meta <skills-path>/<id>` → check the description matches (`<id>` is the path relative to skills root: `aifed` or `agent/kallip`).
-- **Load.** Read the skill file, then in the next turn pin it with `context_pin_last` (kind `tool-result`, label: `skill:<name>`).
+- **Load.** Read the skill file, then in the next turn pin it with `context_pin_last` (label: `skill:<name>`).
 
 Each index answers one question: _"this directory covers what, and how do I pick?"_ Two index runs max to locate any skill.
 

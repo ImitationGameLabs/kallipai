@@ -54,7 +54,7 @@ agent-browser skills get core --full > /tmp/agent-browser-skill.md
 ```
 
 Then read the file, and in the next turn pin the result with
-`context_pin_last` (kind `tool-result`, label
+`context_pin_last` (label
 `skill:agent-browser-core`). When the browser work is done,
 `context_unpin skill:agent-browser-core` to free context space.
 

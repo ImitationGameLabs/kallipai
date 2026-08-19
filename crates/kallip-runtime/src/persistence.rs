@@ -491,10 +491,12 @@ pub enum DegradationKind {
     UnansweredToolCalls,
     /// Tool results in a restored turn answering no call in that turn.
     OrphanToolResults,
-    /// manifest.json and its backup both unreadable; window rebuilt from the
-    /// history tail within a capped budget, leading damaged turns dropped.
+    /// manifest.json and its backup both unreadable or missing; window
+    /// rebuilt from the history tail within a capped budget, leading
+    /// damaged turns dropped.
     TailRecovery,
-    /// pins.json and its backup both unreadable; booted with empty pins.
+    /// pins.json and its backup both unreadable or missing; booted with
+    /// empty pins.
     PinsLost,
 }
 
@@ -591,7 +593,7 @@ pub fn restore_agent(
     tail_budget: usize,
 ) -> Result<RestorableAgent> {
     let mut degraded = Vec::new();
-    let mut store = load_store(dir, tail_budget, &mut degraded)?;
+    let (mut store, migrate_pending) = load_store(dir, tail_budget, &mut degraded)?;
 
     let approvals: ApprovalStore = match fs::read_to_string(dir.join("approvals.json")) {
         Ok(json) => serde_json::from_str(&json).context("parsing approvals.json")?,
@@ -622,6 +624,13 @@ pub fn restore_agent(
     // cross-version anchor. (migrate/pin/unpin above also set the flag; this is the canonical
     // restore statement and covers the clean-restore case.) See ContextStore::needs_full_estimate.
     store.mark_needs_full_estimate();
+    // Deferred legacy→split migration: load_store only reads the legacy
+    // document. Writing the split files here, after the folds above, is
+    // what makes them carry the folded pins and summary instead of the
+    // raw legacy shape.
+    if migrate_pending {
+        migrate_legacy_to_split(dir, &store)?;
+    }
 
     let restart_msgs = vec![ChatMessage::user(RESTART_MESSAGE)];
     let (restart_id, estimated_tokens) = store.push_turn(restart_msgs.clone());
@@ -719,9 +728,9 @@ pub struct RepairReport {
 /// manifest needs no write: turn IDs are unchanged, and split persistence
 /// keeps message content only in history.
 ///
-/// `execute: false` is a dry run — `actions` lists what would be done and
-/// nothing is written. Loading still goes through the normal chain, so a
-/// legacy directory is migrated as a side effect of being inspected.
+/// `execute: false` is a dry run — `actions` lists what would be done
+/// and nothing is written, not even the deferred legacy→split migration,
+/// which only a restore completes (see the comment at `load_store`).
 ///
 /// Idempotent: a repaired record is itself clean, so a second pass finds
 /// nothing to append.
@@ -731,7 +740,9 @@ pub fn repair_agent_context(
     execute: bool,
 ) -> Result<RepairReport> {
     let mut degraded = Vec::new();
-    let mut store = load_store(agent_dir, tail_budget, &mut degraded)?;
+    // Repair never persists the store, so a legacy directory's deferred
+    // migration stays pending for the next restore to finish.
+    let (mut store, _migrate_pending) = load_store(agent_dir, tail_budget, &mut degraded)?;
     let history = crate::history::HistoryWriter::new(agent_dir.to_owned());
     let mut actions = Vec::new();
 
@@ -789,20 +800,23 @@ pub fn repair_agent_context(
 
 /// Load the context store in the format the directory holds.
 ///
-/// `manifest.json` present → split format: parse both documents and hydrate
-/// the conversation window from history by turn ID. A leftover
-/// `context.json` (migration interrupted before the rename) is finished off.
-/// Only `context.json` → legacy format: load it, strip restart notices, and
-/// migrate to the split format in place. Neither → fresh store.
+/// `manifest.json` (or its backup) present → split format: parse both
+/// documents and hydrate the conversation window from history by turn
+/// ID. A leftover `context.json` (migration interrupted before the
+/// rename) is finished off. Only `context.json` → legacy format: load
+/// it and strip restart notices; the split documents are written by
+/// the caller after its transformations (the flag in the return says
+/// when). Neither split document but history exists → the window is
+/// rebuilt from the history tail. Nothing at all → fresh store.
 fn load_store(
     dir: &Path,
     tail_budget: usize,
     degraded: &mut Vec<Degradation>,
-) -> Result<ContextStore> {
+) -> Result<(ContextStore, bool)> {
     let manifest_path = dir.join("manifest.json");
     let legacy_path = dir.join("context.json");
 
-    if manifest_path.exists() {
+    if manifest_path.exists() || backup_path(&manifest_path).exists() {
         if legacy_path.exists()
             && let Err(e) = fs::rename(&legacy_path, &legacy_archive_path(dir))
         {
@@ -813,13 +827,18 @@ fn load_store(
             match load_with_backup::<crate::context::manifest::ManifestDoc>(&manifest_path) {
                 Ok((doc, false)) => doc,
                 Ok((doc, true)) => {
-                    tracing::warn!("manifest.json unreadable, recovered from backup");
+                    tracing::warn!("manifest.json unreadable or missing, recovered from backup");
                     doc
                 }
                 // Both wrecked: rebuild the window from the history tail instead
                 // of faulting the agent (the manifest alone is not worth a
                 // Faulted — history and pins survive independently).
-                Err(e) => return Ok(rebuild_window_from_tail(dir, tail_budget, degraded, e)),
+                Err(e) => {
+                    return Ok((
+                        rebuild_window_from_tail(dir, tail_budget, degraded, e),
+                        false,
+                    ));
+                }
             };
         let pins = load_pins(dir, degraded);
 
@@ -839,7 +858,7 @@ fn load_store(
                 detail: format!("no history record for turns {:?}", report.missing_ids),
             });
         }
-        return Ok(ContextStore::from_persisted(&pins, convo, &manifest));
+        return Ok((ContextStore::from_persisted(&pins, convo, &manifest), false));
     }
 
     if legacy_path.exists() {
@@ -848,11 +867,26 @@ fn load_store(
         )
         .context("parsing context.json")?;
         strip_restart_turns(&mut store);
-        migrate_legacy_to_split(dir, &store)?;
-        return Ok(store);
+        // Deferred migration: the caller writes the split documents after
+        // its folds; writing here would persist the raw legacy shape.
+        return Ok((store, true));
     }
 
-    Ok(ContextStore::new())
+    // Neither split document: with no history this is a fresh directory;
+    // with history the manifest went missing, and a fresh store would
+    // renumber turn IDs from zero, aliasing every history record.
+    if crate::history::has_history(dir) {
+        return Ok((
+            rebuild_window_from_tail(
+                dir,
+                tail_budget,
+                degraded,
+                anyhow::anyhow!("manifest.json and its backup are missing"),
+            ),
+            false,
+        ));
+    }
+    Ok((ContextStore::new(), false))
 }
 
 /// Load pins.json through its backup chain, degrading to empty pins
@@ -862,14 +896,14 @@ fn load_pins(dir: &Path, degraded: &mut Vec<Degradation>) -> crate::context::man
     match load_with_backup::<crate::context::manifest::PinsDoc>(&dir.join("pins.json")) {
         Ok((doc, false)) => doc,
         Ok((doc, true)) => {
-            tracing::warn!("pins.json unreadable, recovered from backup");
+            tracing::warn!("pins.json unreadable or missing, recovered from backup");
             doc
         }
         Err(e) => {
             degraded.push(Degradation {
                 kind: DegradationKind::PinsLost,
                 detail: format!(
-                    "pins.json and its backup are unreadable ({e:#}); booted with empty pins"
+                    "pins.json and its backup are unreadable or missing ({e:#}); booted with empty pins"
                 ),
             });
             crate::context::manifest::PinsDoc {
@@ -908,7 +942,7 @@ fn rebuild_window_from_tail(
     degraded.push(Degradation {
         kind: DegradationKind::TailRecovery,
         detail: format!(
-            "manifest.json and its backup are unreadable ({manifest_err:#}); rebuilt the window from the history tail: kept {} of {tail_len} turns within a {tail_budget}-token budget (dropped {damaged_leading} pairing-damaged leading turns); next_turn_id rescanned to {next_turn_id}; cumulative usage and retry log lost (reset)",
+            "manifest.json and its backup are unreadable or missing ({manifest_err:#}); rebuilt the window from the history tail: kept {} of {tail_len} turns within a {tail_budget}-token budget (dropped {damaged_leading} pairing-damaged leading turns); next_turn_id rescanned to {next_turn_id}; cumulative usage and retry log lost (reset)",
             turns.len()
         ),
     });
@@ -1244,6 +1278,47 @@ mod tests {
         assert_eq!(again.store.turns().back().unwrap().id.0, legacy_next);
     }
 
+    /// The legacy→split write happens after restore's folds, so pins.json
+    /// carries the folded legacy state (the summary pin here) rather than
+    /// the raw legacy shape — a crash between load and write leaves
+    /// context.json intact for the next attempt.
+    #[test]
+    fn migration_writes_split_documents_after_restore_folds() {
+        let dir = TempDir::new().unwrap();
+        let (store, convo) = legacy_fixture();
+        write_legacy(&dir, &store, true, &convo);
+        // Inject the legacy `summary` field: restore folds it into a pinned
+        // turn after load, so the split documents must carry the fold.
+        let mut doc = serde_json::to_value(&store).unwrap();
+        doc["summary"] = serde_json::json!("condensed history");
+        std::fs::write(dir.path().join("context.json"), doc.to_string()).unwrap();
+
+        restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+
+        let pins = std::fs::read_to_string(dir.path().join("pins.json")).unwrap();
+        assert!(
+            pins.contains("condensed history"),
+            "pins.json carries the folded summary: {pins}"
+        );
+        assert!(
+            !dir.path().join("context.json").exists(),
+            "archived only after the split documents landed"
+        );
+    }
+
+    /// Inspecting (or repairing) a legacy directory writes nothing: the
+    /// deferred migration is completed only by a restore.
+    #[test]
+    fn repair_dry_run_leaves_legacy_directory_untouched() {
+        let dir = TempDir::new().unwrap();
+        let (store, convo) = legacy_fixture();
+        write_legacy(&dir, &store, true, &convo);
+
+        repair_agent_context(dir.path(), NO_TRUNCATION, false).unwrap();
+
+        assert!(!dir.path().join("manifest.json").exists());
+        assert!(dir.path().join("context.json").exists());
+    }
     #[test]
     fn missing_history_records_degrade_instead_of_failing() {
         let dir = TempDir::new().unwrap();
@@ -1503,6 +1578,60 @@ mod tests {
         assert_eq!(restored.store.retry_log.len(), 1);
     }
 
+    /// manifest.json deleted but its backup intact: the backup feeds the
+    /// restore (previously the existence gate skipped the whole chain),
+    /// and the primary is rewritten by the next persist, not by the load.
+    #[test]
+    fn missing_manifest_falls_back_to_backup() {
+        let (dir, _store) = wreckable_dir(false);
+        std::fs::remove_file(dir.path().join("manifest.json")).unwrap();
+
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+
+        assert!(restored.degraded.is_empty(), "backup recovery is silent");
+        assert_eq!(
+            restored.store.turns().len(),
+            5,
+            "pin + 3 hydrated + restart notice"
+        );
+        assert!(
+            !dir.path().join("manifest.json").exists(),
+            "rewrite happens at persist, not during restore"
+        );
+    }
+
+    /// manifest.json and its backup deleted while history survives: the
+    /// window rebuilds from the tail instead of booting a silently empty
+    /// store that would renumber turn IDs from zero and alias history.
+    #[test]
+    fn missing_manifest_and_backup_rebuild_from_tail() {
+        let (dir, store) = wreckable_dir(false);
+        std::fs::remove_file(dir.path().join("manifest.json")).unwrap();
+        std::fs::remove_file(dir.path().join("manifest.json.bak")).unwrap();
+
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+
+        let kinds: Vec<DegradationKind> = restored.degraded.iter().map(|d| d.kind).collect();
+        assert_eq!(kinds, vec![DegradationKind::TailRecovery]);
+        assert!(
+            restored.degraded[0].detail.contains("missing"),
+            "detail names the missing-documents case: {}",
+            restored.degraded[0].detail
+        );
+        assert_eq!(
+            restored.store.turns().len(),
+            6,
+            "pin + 4 tail turns + restart notice (full budget keeps all)"
+        );
+        // Rescanned from history: the restart notice took history max + 1,
+        // the first fresh turn one past that — no ID is reused.
+        let history_max = store.to_manifest_doc().next_turn_id - 1;
+        let mut live = restored.store;
+        let (fresh_id, _) = live.push_turn(vec![ChatMessage::user("after loss")]);
+        assert_eq!(fresh_id.0, history_max + 2, "rescanned past history max");
+    }
     /// manifest.json and .bak both corrupt: the window rebuilds from the
     /// history tail within the budget, manifest-only state (usage, retry
     /// log) is lost and recorded, and `next_turn_id` is rescanned from

@@ -28,7 +28,7 @@ For multi-command work, pin the reference so it stays available across turns:
 kallip --reference > /tmp/kallip-ref.md
 ```
 
-Read it, then in the next turn `context_pin_last` (kind `tool-result`, label
+Read it, then in the next turn `context_pin_last` (label
 `kallip:reference`). `context_unpin kallip:reference` when the work is done.
 
 ## Semantics to remember
