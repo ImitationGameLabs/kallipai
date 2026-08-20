@@ -449,6 +449,12 @@ const SYNONYMS: string[][] = [
     "manage_profiles_max_context_placeholder",
     "manage_profiles_max_context_label",
   ],
+  ["manage_agent_provider", "manage_profiles_tier_dialog_provider_label"],
+  ["manage_agent_tier", "manage_profiles_tier"],
+  [
+    "manage_agent_model",
+    "manage_profiles_tier_dialog_model_label",
+  ],
 ];
 
 Deno.test("catalog: same-value keys are all deliberate synonyms", () => {
