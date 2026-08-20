@@ -75,6 +75,7 @@
   "manage_profiles_parking_dialog_model_label": "模型",
   "manage_profiles_parking_dialog_max_context_label": "最大上下文",
   "manage_profiles_parking_dialog_id_duplicate": "该 ID 已被顺位或停放区中的配置使用",
+  "manage_profiles_parking_dialog_invalid_window": "请输入正整数（token 数）。",
   "manage_profiles_heading_desc_l1": "四层模型：模型提供商为全局池，顺位负责轮换，停放区持有轮换外的可拖动配置卡片",
   "manage_profiles_heading_desc_l2": "测试模型提供商=连通性",
   "manage_profiles_heading_desc_l3": "测试配置=一次最小真实推理",

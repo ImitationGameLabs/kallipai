@@ -29,6 +29,7 @@
     manage_profiles_parking_dialog_edit_title,
     manage_profiles_parking_dialog_endpoint_label,
     manage_profiles_parking_dialog_id_duplicate,
+    manage_profiles_parking_dialog_invalid_window,
     manage_profiles_parking_dialog_id_label,
     manage_profiles_parking_dialog_max_context_label,
     manage_profiles_parking_dialog_model_label,
@@ -207,7 +208,7 @@
             />
             {#if !validWindow}
               <span class="text-xs text-error-500 dark:text-error-400"
-                >{manage_profiles_max_context_placeholder()}</span
+                >{manage_profiles_parking_dialog_invalid_window()}</span
               >
             {/if}
           </label>

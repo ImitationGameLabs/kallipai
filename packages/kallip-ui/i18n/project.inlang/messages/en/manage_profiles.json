@@ -75,6 +75,7 @@
   "manage_profiles_parking_dialog_model_label": "Model",
   "manage_profiles_parking_dialog_max_context_label": "Max context",
   "manage_profiles_parking_dialog_id_duplicate": "This id is already used by a profile in a tier or in parking",
+  "manage_profiles_parking_dialog_invalid_window": "Enter a positive whole number of tokens.",
   "manage_profiles_heading_desc_l1": "Four layers: providers form a global pool; tiers rotate; parking holds draggable profile cards out of rotation",
   "manage_profiles_heading_desc_l2": "Provider Test = connectivity",
   "manage_profiles_heading_desc_l3": "Profile Test = one minimal real inference",

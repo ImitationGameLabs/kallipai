@@ -821,6 +821,7 @@
                 ondragend={() => {
                   drag = null;
                   dragOverTier = -1;
+                  dragOverParking = false;
                 }}
               >
                 <div class="flex items-center justify-between gap-2">

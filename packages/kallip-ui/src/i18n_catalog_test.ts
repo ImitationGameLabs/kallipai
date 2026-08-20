@@ -422,10 +422,11 @@ Deno.test("catalog: _one/_other appear only as complete plural pairs", () => {
   }
 });
 
-// Same-value keys are allowed only as deliberate synonyms (nav labels that
-// may drift from page headings on purpose). Checked against the EN catalog
-// only: zh translations collide far more often (34 groups today) and those
-// collisions are accepted as translation coincidence, not guarded.
+// Same-value keys are allowed only as deliberate synonyms — nav labels
+// that may drift from page headings on purpose, and field labels shared
+// across dialogs. Checked against the EN catalog only: zh translations
+// collide far more often and those collisions are accepted as
+// translation coincidence, not guarded.
 const SYNONYMS: string[][] = [
   ["settings_heading", "rooms_menu_settings"],
   ["connection_connecting", "shell_connecting"],
