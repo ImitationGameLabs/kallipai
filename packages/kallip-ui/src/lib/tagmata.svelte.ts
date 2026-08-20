@@ -24,9 +24,16 @@ import {
 export type TagmaPresence = "checking" | "online" | "offline";
 
 /** A tagma agent's lifecycle state. Mirrors the tagma's `AgentState` wire enum
- * (`idle` / `busy` / `faulted`); `faulted` is also reported for the root during
- * the transient zero-root recovery window. */
-export type TagmaAgentState = "idle" | "busy" | "faulted";
+ * in full (all six values reach the SSE snapshot; `waiting`/`parked`/
+ * `retrying` included); `faulted` is also reported for the root during the
+ * transient zero-root recovery window. */
+export type TagmaAgentState =
+  | "idle"
+  | "busy"
+  | "waiting"
+  | "retrying"
+  | "parked"
+  | "faulted";
 
 /** A tagma's live runtime snapshot, fed by the `tagma_status` SSE event. The
  * root agent (the conversation peer) is reported separately from subagents
@@ -134,10 +141,9 @@ export function formatTagmaStatusLine(s: TagmaStatusSummary): string {
   // when it is busy.
   const total = 1 + s.subagentsTotal;
   const active = (s.rootState === "busy" ? 1 : 0) + s.subagentsActive;
-  const agents =
-    total === 1
-      ? shell_status_agents_one({ count: active, total })
-      : shell_status_agents_other({ count: active, total });
+  const agents = total === 1
+    ? shell_status_agents_one({ count: active, total })
+    : shell_status_agents_other({ count: active, total });
   const tokens = shell_status_tokens({
     consumed: formatTokenCount(s.tokenConsumed),
     total: formatTokenCount(s.tokenBudget),

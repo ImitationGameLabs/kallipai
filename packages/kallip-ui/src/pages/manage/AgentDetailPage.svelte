@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { AgentStatusResponse, ProfileConfig } from "@kallipai/kallip-client";
+  import { agentStateLabel } from "../../lib/agentState.ts";
   import { CalendarClock, Clock } from "@lucide/svelte";
   import { MoreVertical, Pencil, Trash } from "@lucide/svelte";
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
@@ -27,9 +28,6 @@
     manage_agent_identity_actions_aria,
     manage_agent_duty_onduty,
     manage_agent_duty_offduty,
-    agent_state_idle,
-    agent_state_busy,
-    agent_state_faulted,
     manage_agent_created_by,
     manage_agent_workspace,
     manage_agent_description,
@@ -207,11 +205,7 @@
           <h1 class="text-xl font-semibold truncate min-w-0">{agent.role || "—"}</h1>
           <StateDot state={agent.state} />
           <span class="font-medium"
-            >{agent.state === "idle"
-              ? agent_state_idle()
-              : agent.state === "busy"
-                ? agent_state_busy()
-                : agent_state_faulted()}</span
+            >{agentStateLabel(agent.state)}</span
           >
           {#if agent.activity}
             <span class="opacity-60 text-sm">· {agent.activity}</span>

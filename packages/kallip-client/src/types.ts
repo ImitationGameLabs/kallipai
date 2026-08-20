@@ -4,6 +4,44 @@
 // STANDARD base64 (padded, +//).
 
 import type { HistoryEntry } from "@kallipai/kallip-common";
+/** Agent lifecycle state, serialized snake_case by the tagma's `AgentState`
+ * enum. All six values reach every state-bearing surface (agent list
+ * summaries, status responses, the realtime `tagma_status` snapshot), so
+ * front-end unions copy this list rather than narrowing it. */
+export type AgentState =
+  | "idle"
+  | "busy"
+  | "waiting"
+  | "retrying"
+  | "parked"
+  | "faulted";
+
+/** Why a parked agent parked: the tagma's `ParkedReason`, externally
+ * tagged with camelCase variant keys; unit variants arrive as `null`. */
+export type WireParkedReason =
+  | {
+    readonly failoverChainExhausted: {
+      readonly reason: string;
+      readonly detail: string;
+    };
+  }
+  | { readonly fatalError: { readonly message: string } }
+  | {
+    readonly tokenBudgetExceeded: {
+      readonly consumed: number;
+      readonly budget: number;
+    };
+  }
+  | { readonly maxRoundsExceeded: null }
+  | { readonly transientRetryExhausted: null };
+
+/** Armed chain-transient retry counters (`retrying` on summaries and
+ * status responses). `retry_in_secs` is the relative backoff delay. */
+export interface WireTransientRetryInfo {
+  readonly attempt: number;
+  readonly max_attempts: number;
+  readonly retry_in_secs: number;
+}
 
 /** `GET /agents/root` -- the tagma's single root agent (always present after
  * startup). `id` binds the transport; `conversation_id` (present only on the
@@ -12,12 +50,17 @@ import type { HistoryEntry } from "@kallipai/kallip-common";
 export interface WireAgentSummary {
   readonly id: string;
   readonly workspace_root?: string;
-  readonly state: "idle" | "busy" | "faulted";
+  readonly state: AgentState;
   readonly created_by?: string;
   readonly role: string;
   readonly description?: string;
   readonly activity?: string;
   readonly faulted_reason?: string | null;
+  /** Present only when `state == "parked"`: why the agent parked (absent
+   * otherwise; serde skips `None`). */
+  readonly parked_reason?: WireParkedReason | null;
+  /** Present only when `state == "retrying"`: armed backoff counters. */
+  readonly retrying?: WireTransientRetryInfo | null;
   readonly conversation_id?: string;
 }
 
@@ -66,13 +109,17 @@ export interface BudgetUpdateRequest {
 export interface WireAgentManagementSummary {
   readonly id: string;
   readonly workspace_root: string;
-  readonly state: "idle" | "busy" | "faulted";
+  readonly state: AgentState;
   readonly created_by: string | null;
   readonly role: string;
   readonly description: string;
   readonly activity: string;
   readonly duty: "onduty" | "offduty";
   readonly faulted_reason: string | null;
+  /** Present only when `state == "parked"`: why (see `WireParkedReason`). */
+  readonly parked_reason?: WireParkedReason | null;
+  /** Present only when `state == "retrying"`: armed backoff counters. */
+  readonly retrying?: WireTransientRetryInfo | null;
   readonly conversation_id: string | null;
 }
 
@@ -124,12 +171,16 @@ export interface ActiveProfile {
 }
 /** `GET /agents/{id}/status` response. token_budget/token_consumed are tagma-wide. */
 export interface AgentStatusResponse {
-  readonly state: "idle" | "busy" | "faulted";
+  readonly state: AgentState;
   readonly context: ContextUsage;
   readonly recent_retries: readonly RetryRecord[];
   readonly token_budget: number;
   readonly token_consumed: number;
   readonly activity: string;
+  /** Present only when `state == "parked"`: why (see `WireParkedReason`). */
+  readonly parked_reason?: WireParkedReason | null;
+  /** Present only when `state == "retrying"`: armed backoff counters. */
+  readonly retrying?: WireTransientRetryInfo | null;
   /** Omitted only by a tagma that predates the field. */
   readonly profile?: ActiveProfile;
 }

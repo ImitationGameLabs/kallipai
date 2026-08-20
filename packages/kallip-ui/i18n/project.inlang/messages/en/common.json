@@ -31,6 +31,9 @@
   "agent_state_idle": "Idle",
   "agent_state_busy": "Busy",
   "agent_state_faulted": "Faulted",
+  "agent_state_waiting": "Waiting",
+  "agent_state_retrying": "Retrying",
+  "agent_state_parked": "Parked",
   "common_create": "Create",
   "common_edit": "Edit"
 }

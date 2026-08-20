@@ -28,7 +28,13 @@ import { AsyncQueue, type IncomingFrame, type Transport } from "./transport.ts";
  * metadata; the status header renders it. The transcript is driven by signals,
  * not by these snapshots. */
 export interface DirectStatusPayload {
-  readonly root_state: "idle" | "busy" | "faulted";
+  readonly root_state:
+    | "idle"
+    | "busy"
+    | "waiting"
+    | "retrying"
+    | "parked"
+    | "faulted";
   readonly subagents_total: number;
   readonly subagents_active: number;
   readonly token_budget: number;

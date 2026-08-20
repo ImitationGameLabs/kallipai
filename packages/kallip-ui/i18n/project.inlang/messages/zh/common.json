@@ -28,9 +28,12 @@
   "common_copy": "复制",
   "common_close": "关闭",
   "common_clear": "清除",
-  "agent_state_idle": "空闲",
-  "agent_state_busy": "忙碌",
-  "agent_state_faulted": "故障",
+  "agent_state_idle": "空闲中",
+  "agent_state_busy": "繁忙中",
+  "agent_state_faulted": "已崩溃",
+  "agent_state_waiting": "等待中",
+  "agent_state_retrying": "重试中",
+  "agent_state_parked": "已停滞",
   "common_create": "创建",
   "common_edit": "编辑"
 }

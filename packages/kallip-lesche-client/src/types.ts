@@ -228,7 +228,13 @@ export type LescheEvent =
   | {
       readonly type: "tagma_status";
       readonly tagma_id: string;
-      readonly root_state: "idle" | "busy" | "faulted";
+      readonly root_state:
+        | "idle"
+        | "busy"
+        | "waiting"
+        | "retrying"
+        | "parked"
+        | "faulted";
       readonly subagents_total: number;
       readonly subagents_active: number;
       readonly token_budget: number;

@@ -1,19 +1,20 @@
 <script lang="ts">
-  // Colored state indicator dot.
-  // green: idle, blue: busy, red: faulted.
+  // State indicator glyph: shape + color carry the state, never color alone
+  // (◌ idle / ● busy / ● waiting pulsing / ● retrying / ▲ parked / ✕
+  // faulted). Same shared table as the status card rows, so every surface
+  // renders identical marks.
 
-  let { state }: { state: "idle" | "busy" | "faulted" } = $props();
+  import {
+    agentStateGlyph,
+    type AgentLifecycleState,
+  } from "../../lib/agentState.ts";
 
-  const dotClass = $derived(
-    state === "idle"
-      ? "bg-success-500"
-      : state === "busy"
-        ? "bg-info-500"
-        : "bg-error-500",
-  );
+  let { state }: { state: AgentLifecycleState } = $props();
+
+  const glyph = $derived(agentStateGlyph(state));
 </script>
 
 <span
-  class="size-2 rounded-full shrink-0 {dotClass}"
+  class="text-sm leading-none shrink-0 {glyph.className}"
   aria-hidden="true"
-></span>
+>{glyph.char}</span>

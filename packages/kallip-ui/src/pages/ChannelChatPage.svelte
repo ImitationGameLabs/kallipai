@@ -11,6 +11,9 @@
   import { createComposer } from "../lib/composer.svelte.ts";
   import { bindDraft } from "../lib/session/drafts.svelte.ts";
   import { RelayConversation } from "../lib/session/conversation.svelte.ts";
+  import { statusCardStore } from "../lib/session/statusCard.svelte.ts";
+  import { OnlineBackend } from "../lib/manage/backend.ts";
+  import { managementBackend } from "../lib/manage/client.ts";
   import { convDraftKey, tagmaDraftKey } from "../lib/session/drafts.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { navigate } from "../lib/shell/port.ts";
@@ -39,7 +42,7 @@
     // pump, shared by both transports).
     canSubmit: () => conv?.status === "open",
   });
- 
+
   // Draft storage: tagma chats key on the tagma id -- stable across re-KEX
   // and shared by both entries into this page (the sidebar /chat/t/{tagmaId}
   // route and a /chat/{conversationId} deep link resolve to the same
@@ -52,6 +55,48 @@
       : convDraftKey(conversationId),
   );
   bindDraft(composer, () => draftKey);
+
+  // TEMP layout experiment (operator-directed): runtime switch between the
+  // status area as a top bar (current design) and a right sidebar, so the
+  // operator can compare both on the live UI. The WANTED placement lives
+  // here (session-level, not persisted, default top); the EFFECTIVE
+  // placement additionally requires lg+ (64rem -- Tailwind's default lg,
+  // the project sets no custom screens), because the sidebar needs desktop
+  // width. Below lg the page stays on the top bar regardless of the
+  // toggle; the matchMedia listener re-evaluates on resizes and its
+  // removal in the $effect cleanup prevents a leak on unmount.
+  let sideWanted = $state(false);
+  const lgQuery = matchMedia("(min-width: 64rem)");
+  // Seed from the query's current state: a "change" event only fires on
+  // transitions, never for the state at subscribe time.
+  let lgMatches = $state(lgQuery.matches);
+  $effect(() => {
+    const onChange = (event: MediaQueryListEvent) =>
+      (lgMatches = event.matches);
+    lgQuery.addEventListener("change", onChange);
+    return () => lgQuery.removeEventListener("change", onChange);
+  });
+  const sideLayout = $derived(sideWanted && lgMatches);
+
+  // Feed the status-card rows from whichever backend this conversation
+  // implies: the relay channel when online, the direct tagma when local.
+  // $effect cleanup detaches on unmount or conversation switch, stopping
+  // both poll cadences.
+  $effect(() => {
+    if (!conv) return;
+    try {
+      if (conv instanceof RelayConversation) {
+        statusCardStore.attach(
+          new OnlineBackend(conv.relayTransport.relayChannel),
+        );
+      } else {
+        statusCardStore.attach(managementBackend());
+      }
+    } catch {
+      /* no backend for this conversation: the bar stays row-less */
+    }
+    return () => statusCardStore.detach();
+  });
 
   const disabled = $derived(!conv || conv.status !== "open");
   const pendingCount = $derived(conv?.pending.length ?? 0);
@@ -89,27 +134,40 @@
     </div>
   {/if}
 {:else}
-  <div class="flex flex-col h-full">
-    <TagmaStatusHeader status={conv.statusSnapshot} />
-    <ConversationView
-      lines={conv.transcript.lines}
-      status={conv.transcript.status}
-      error={conv.transcript.error}
-      {composer}
-      {disabled}
-      {pendingCount}
-    >
-      {#snippet notice()}
-        {#if conv.status === "offline"}
-          <p class="text-xs text-error-500 dark:text-error-400 text-center">
-            {#if isLocal}
-              {chat_notice_local()}
-            {:else}
-              {chat_notice_offline()}
-            {/if}
-          </p>
-        {/if}
-      {/snippet}
-    </ConversationView>
+  <div class={sideLayout ? "flex flex-row h-full" : "flex flex-col h-full"}>
+    <TagmaStatusHeader
+      status={conv.statusSnapshot}
+      agentRows={{
+        rootRow: statusCardStore.rootRow,
+        subRows: statusCardStore.subRows,
+      }}
+      {sideLayout}
+      onToggleSide={() => (sideWanted = !sideWanted)}
+    />
+    <!-- The wrapper gives the transcript a flex child whose width can be
+         zeroed (min-w-0) in the sidebar state; in the top-bar state it is
+         a no-op flex column. -->
+    <div class="flex-1 min-h-0 flex flex-col {sideLayout ? 'min-w-0' : ''}">
+      <ConversationView
+        lines={conv.transcript.lines}
+        status={conv.transcript.status}
+        error={conv.transcript.error}
+        {composer}
+        {disabled}
+        {pendingCount}
+      >
+        {#snippet notice()}
+          {#if conv.status === "offline"}
+            <p class="text-xs text-error-500 dark:text-error-400 text-center">
+              {#if isLocal}
+                {chat_notice_local()}
+              {:else}
+                {chat_notice_offline()}
+              {/if}
+            </p>
+          {/if}
+        {/snippet}
+      </ConversationView>
+    </div>
   </div>
 {/if}
