@@ -163,6 +163,21 @@ pub async fn create_work_schedule(
             "timezone scheduling is not yet supported; use UTC cron expressions",
         ));
     }
+    // Schedules are tagma-wide since the schedule redo: only the root agent
+    // may carry one (it delegates to subagents when woken). The structural
+    // predicate -- created_by == None, via root_agent() -- survives role and
+    // id edits that a literal-role check would not.
+    let is_root_target = {
+        let registry = state.registry.read().await;
+        registry
+            .root_agent()
+            .is_some_and(|(root_id, _)| root_id == &req.agent_id)
+    };
+    if !is_root_target {
+        return Err(ApiError::bad_request(
+            "schedules apply to the whole tagma (root agent)",
+        ));
+    }
     validate_schedule(
         &req.start_cron,
         &req.end_cron,
@@ -337,13 +352,21 @@ pub async fn delete_work_schedule(
 #[cfg(test)]
 mod route_tests {
     use super::*;
-    use crate::test_helpers::make_state;
+    use crate::state::RegistryEntry;
+    use crate::test_helpers::{add_root, add_sub, make_faulted_entry, make_state};
 
-    /// Create a test state with the work-schedule store installed.
+    /// Create a test state with the work-schedule store installed and a live
+    /// root agent registered as `agent-1` (created_by = None), so the create
+    /// guard's structural predicate resolves. Tests that need other registry
+    /// shapes register additional or replacement entries themselves.
     async fn make_ws_state() -> SharedState {
         let state = make_state();
         let store = WorkScheduleStore::open_in_memory().await;
         state.work_schedules.set(store).ok();
+        let root: AgentId = "agent-1".parse().unwrap();
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &root);
+        drop(reg);
         state
     }
 
@@ -359,6 +382,101 @@ mod route_tests {
             status: WorkScheduleStatus::Active,
             timezone: None,
         }
+    }
+
+    #[tokio::test]
+    async fn create_non_root_rejected() {
+        let state = make_ws_state().await;
+        let root: AgentId = "agent-1".parse().unwrap();
+        let sub: AgentId = "sub-1".parse().unwrap();
+        let mut reg = state.registry.write().await;
+        add_sub(&mut reg, &sub, &root);
+        drop(reg);
+        let err = create_work_schedule(
+            State(state),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            Json(create_req("sub-1")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert!(err.message.contains("root agent"));
+    }
+
+    #[tokio::test]
+    async fn create_unknown_agent_rejected() {
+        let state = make_ws_state().await;
+        let err = create_work_schedule(
+            State(state),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            Json(create_req("nobody")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert!(err.message.contains("root agent"));
+    }
+
+    #[tokio::test]
+    async fn create_faulted_root_accepted() {
+        // root_agent() must resolve a faulted root too: the schedule engine
+        // runs independently of the root agent's task liveness.
+        let state = make_ws_state().await;
+        let root: AgentId = "agent-1".parse().unwrap();
+        let mut reg = state.registry.write().await;
+        reg.register(
+            root.clone(),
+            RegistryEntry::Faulted(make_faulted_entry(None, "crash during test")),
+        );
+        drop(reg);
+        let created = create_work_schedule(
+            State(state),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            Json(create_req("agent-1")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.1.agent_id, "agent-1".parse::<AgentId>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn update_legacy_schedule_unaffected() {
+        // Legacy per-agent rows predate the root-only guard; updating them
+        // (name, cron, pause) must keep working -- update never carries an
+        // agent_id, so the guard cannot bite on this path.
+        let state = make_ws_state().await;
+        let legacy = WorkSchedule {
+            id: "legacy-1".into(),
+            name: "Night shift".into(),
+            agent_id: "sub-1".parse().unwrap(),
+            start_cron: "0 22 * * *".into(),
+            end_cron: "0 6 * * *".into(),
+            pre_warn_minutes: 10,
+            final_warn_minutes: 5,
+            wake_prompt: "Good night.".into(),
+            status: WorkScheduleStatus::Active,
+            timezone: None,
+            created_at: OffsetDateTime::now_utc(),
+        };
+        get_store(&state).unwrap().create(&legacy).await.unwrap();
+        let updated = update_work_schedule(
+            State(state),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            Path("legacy-1".into()),
+            Json(UpdateWorkScheduleRequest {
+                name: Some("Night shift v2".into()),
+                start_cron: None,
+                end_cron: None,
+                pre_warn_minutes: None,
+                final_warn_minutes: None,
+                wake_prompt: None,
+                status: None,
+                timezone: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.0.name, "Night shift v2");
     }
 
     #[tokio::test]
@@ -397,7 +515,7 @@ mod route_tests {
         create_work_schedule(
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-2")),
+            Json(create_req("agent-1")),
         )
         .await
         .unwrap();
@@ -573,11 +691,11 @@ mod route_tests {
     #[tokio::test]
     async fn pause_resets_duty_to_on_duty() {
         let state = make_ws_state().await;
-        let agent: AgentId = "agent-pause".parse().unwrap();
+        let agent: AgentId = "agent-1".parse().unwrap();
         let created = create_work_schedule(
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-pause")),
+            Json(create_req("agent-1")),
         )
         .await
         .unwrap();
@@ -611,11 +729,11 @@ mod route_tests {
     #[tokio::test]
     async fn delete_resets_duty_to_on_duty() {
         let state = make_ws_state().await;
-        let agent: AgentId = "agent-del".parse().unwrap();
+        let agent: AgentId = "agent-1".parse().unwrap();
         let created = create_work_schedule(
             State(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-del")),
+            Json(create_req("agent-1")),
         )
         .await
         .unwrap();
