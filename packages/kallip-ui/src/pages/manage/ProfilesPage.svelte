@@ -1,8 +1,9 @@
 <script lang="ts">
-  // Profiles manage page — card-based three-layer view (provider cards in a
-  // global pool, tier containers holding profile cards), matching the wire
-  // shape 1:1. Read-mostly: editing goes through the Provider/Tier dialogs;
-  // profile cards drag between tiers (HTML5 DnD updating the draft).
+  // Profiles manage page — card-based layered view (provider cards in a
+  // global pool, tier containers holding profile cards, a parking area for
+  // profiles out of rotation), matching the wire shape 1:1. Read-mostly:
+  // editing goes through the Provider/Tier/Parking dialogs; profile cards
+  // drag between tiers and parking (HTML5 DnD updating the draft).
   //
   // Probe results route inline to the card that triggered them: the page
   // accumulates providerReports/profileReports maps keyed by id, because the
@@ -20,10 +21,15 @@
   } from "@lucide/svelte";
   import ProviderDialog from "../../components/manage/ProviderDialog.svelte";
   import TierDialog from "../../components/manage/TierDialog.svelte";
+  import ParkingDialog from "../../components/manage/ParkingDialog.svelte";
   import {
     moveProfile,
+    moveFromParking,
+    moveToParking,
     replaceTierProfiles,
+    replaceParkingProfiles,
     singleProfileProbeRequest,
+    singleParkingProfileProbeRequest,
     upsertProvider,
   } from "../../lib/manage/compute.ts";
   import type {
@@ -55,6 +61,10 @@
     manage_profiles_heading_desc_l2,
     manage_profiles_heading_desc_l3,
     manage_profiles_max_context_label,
+    manage_profiles_parking,
+    manage_profiles_parking_add,
+    manage_profiles_parking_desc_l1,
+    manage_profiles_parking_desc_l2,
     manage_profiles_probe_models_one,
     manage_profiles_probe_models_other,
     manage_profiles_probe_request_failed,
@@ -193,22 +203,32 @@
     profileReports.clear();
   }
 
-  // --- drag & drop (profile cards between tiers) ---
+  // --- drag & drop (profile cards between tiers and the parking area) ---
 
   interface DragPayload {
+    area: "tier" | "parking";
     fromTier: number;
     fromIdx: number;
   }
 
   let drag = $state<DragPayload | null>(null);
   let dragOverTier = $state(-1);
+  let dragOverParking = $state(false);
 
-  function onDrop(toTier: number): void {
+  function onDropTier(toTier: number): void {
     const d = drag;
     drag = null;
     dragOverTier = -1;
+    dragOverParking = false;
     const draft = profilesStore.draft;
     if (!d || !draft) return;
+    if (d.area === "parking") {
+      // parking → tier: the p:-keyed report is area-scoped, clear it.
+      const id = draft.parking?.[d.fromIdx]?.id;
+      if (id) profileReports.delete(`p:${id}`);
+      profilesStore.draft = moveFromParking(draft, d.fromIdx, toTier);
+      return;
+    }
     if (d.fromTier !== toTier) {
       // Cross-tier: the key is tier-scoped, so clear the stale source entry
       // (same-tier keeps its key — the report survives the reorder).
@@ -216,6 +236,20 @@
       if (id) clearProfileResult(d.fromTier, id);
     }
     profilesStore.draft = moveProfile(draft, d.fromTier, d.fromIdx, toTier);
+  }
+
+  function onDropParking(): void {
+    const d = drag;
+    drag = null;
+    dragOverTier = -1;
+    dragOverParking = false;
+    const draft = profilesStore.draft;
+    if (!d || !draft || d.area !== "tier") return;
+    // tier → parking: clear the tier-scoped source entry; the card will
+    // re-key its report as p:<id> on the next parking Test.
+    const id = draft.tiers[d.fromTier]?.profiles[d.fromIdx]?.id;
+    if (id) clearProfileResult(d.fromTier, id);
+    profilesStore.draft = moveToParking(draft, d.fromTier, d.fromIdx);
   }
 
   // --- dialogs ---
@@ -292,6 +326,105 @@
     tierDialog.open = false;
   }
 
+  // Parking dialog: single-profile form (see ParkingDialog). idx indexes the
+  // draft's parked list in edit mode.
+  let parkingDialog = $state<{
+    open: boolean;
+    mode: "new" | "edit";
+    idx: number;
+  }>({ open: false, mode: "new", idx: 0 });
+  // Latest in-form probe result, rendered inside the dialog.
+  let parkingProbeReport = $state<{
+    status: string;
+    detail: string | null;
+  } | null>(null);
+
+  function openParkingNew() {
+    parkingProbeReport = null;
+    parkingDialog = { open: true, mode: "new", idx: 0 };
+  }
+
+  function openParkingEdit(idx: number) {
+    parkingProbeReport = null;
+    parkingDialog = { open: true, mode: "edit", idx };
+  }
+
+  function onParkingSave(values: {
+    id: string;
+    endpoint: string;
+    model: string;
+    max_context_window: number;
+  }) {
+    const draft = profilesStore.draft;
+    if (!draft) return;
+    const list = [...(draft.parking ?? [])];
+    if (parkingDialog.mode === "new") list.push(values);
+    else list[parkingDialog.idx] = values;
+    profilesStore.draft = replaceParkingProfiles(draft, list);
+    parkingDialog.open = false;
+  }
+
+  function onParkingRemove() {
+    const draft = profilesStore.draft;
+    if (draft && parkingDialog.mode === "edit") {
+      const id = draft.parking?.[parkingDialog.idx]?.id;
+      profilesStore.draft = replaceParkingProfiles(
+        draft,
+        (draft.parking ?? []).filter((_, i) => i !== parkingDialog.idx),
+      );
+      if (id) profileReports.delete(`p:${id}`);
+    }
+    parkingDialog.open = false;
+  }
+
+  /** Probe the dialog's current form values without touching the draft:
+   * stage them into a throwaway copy and reuse the parked-profile request
+   * builder (committed config passed for the masked-key rule). */
+  async function onParkingTest(values: {
+    id: string;
+    endpoint: string;
+    model: string;
+    max_context_window: number;
+  }) {
+    const draft = profilesStore.draft;
+    if (!draft) return;
+    const staged = replaceParkingProfiles(draft, [
+      ...(draft.parking ?? []),
+      values,
+    ]);
+    const body = singleParkingProfileProbeRequest(
+      profilesStore.config,
+      staged,
+      (staged.parking?.length ?? 1) - 1,
+    );
+    if (!body) return;
+    const resp = await profilesStore.probeRaw(body);
+    if (!resp) return;
+    mergeProviderScope(resp);
+    const p = resp.tiers[0]?.profiles[0];
+    if (p) parkingProbeReport = { status: p.status, detail: p.detail ?? null };
+  }
+
+  /** Kebab Test on a parked card: same request shape, from the draft. */
+  async function onTestParking(idx: number) {
+    const draft = profilesStore.draft;
+    if (!draft) return;
+    const body = singleParkingProfileProbeRequest(
+      profilesStore.config,
+      draft,
+      idx,
+    );
+    if (!body) return;
+    const resp = await profilesStore.probeRaw(body);
+    if (!resp) return;
+    mergeProviderScope(resp);
+    const p = resp.tiers[0]?.profiles[0];
+    if (p) {
+      const id = draft.parking?.[idx]?.id ?? p.profile_id;
+      profileReports.set(`p:${id}`, p);
+    }
+  }
+
   // --- display helpers ---
 
   function probeStatusLabel(s: ProfileProbeStatus): string {
@@ -326,6 +459,16 @@
   const providerIds = $derived(
     Object.keys(profilesStore.draft?.endpoints ?? {}),
   );
+
+  /** Every profile id visible in the draft — tiers ∪ parking (the parking
+   * dialog's new-mode duplicate check; advisory only, PUT is authoritative). */
+  const occupiedIds = $derived.by(() => {
+    const draft = profilesStore.draft;
+    const ids = (draft?.tiers ?? []).flatMap((t) =>
+      t.profiles.map((p) => p.id),
+    );
+    return [...ids, ...(draft?.parking ?? []).map((p) => p.id)];
+  });
 </script>
 
 <svelte:head><title>{manage_profiles_title()}</title></svelte:head>
@@ -537,7 +680,7 @@
               (dragOverTier = tierIdx === dragOverTier ? -1 : dragOverTier)}
             ondrop={(e) => {
               e.preventDefault();
-              onDrop(tierIdx);
+              onDropTier(tierIdx);
             }}
           >
             <div class="flex items-center justify-between gap-2">
@@ -602,7 +745,11 @@
                 class="card preset-filled-surface-100-900 p-3 space-y-1 cursor-grab"
                 draggable="true"
                 ondragstart={(e) => {
-                  drag = { fromTier: tierIdx, fromIdx: profileIdx };
+                  drag = {
+                    area: "tier",
+                    fromTier: tierIdx,
+                    fromIdx: profileIdx,
+                  };
                   // Firefox only starts a drag session if dataTransfer gets data.
                   if (e.dataTransfer) {
                     e.dataTransfer.setData("text/plain", profile.id);
@@ -733,6 +880,138 @@
           </span>
         </button>
       </section>
+
+      <!-- Parking: profiles held out of rotation. Same card language as the
+           tiers above, but the container stays dashed (not a rotation slot)
+           and its add button opens the single-profile ParkingDialog. -->
+      <section class="space-y-3">
+        <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+          {manage_profiles_parking()}
+        </h2>
+        <div class="text-xs opacity-60 mt-1 space-y-0.5">
+          <p>{manage_profiles_parking_desc_l1()}</p>
+          <p>{manage_profiles_parking_desc_l2()}</p>
+        </div>
+        <div
+          role="list"
+          class="card preset-tonal-surface border-2 border-dashed border-surface-400 p-4 space-y-3 {dragOverParking
+            ? 'outline-2 outline-dashed outline-primary-500'
+            : ''}"
+          ondragover={(e) => {
+            e.preventDefault();
+            dragOverParking = true;
+          }}
+          ondragleave={() => (dragOverParking = false)}
+          ondrop={(e) => {
+            e.preventDefault();
+            onDropParking();
+          }}
+        >
+          {#each profilesStore.draft.parking ?? [] as profile, idx (idx)}
+            {@const report = profileReports.get(`p:${profile.id}`)}
+            <div
+              role="listitem"
+              class="card preset-filled-surface-100-900 p-3 space-y-1 cursor-grab"
+              draggable="true"
+              ondragstart={(e) => {
+                drag = { area: "parking", fromTier: -1, fromIdx: idx };
+                if (e.dataTransfer) {
+                  e.dataTransfer.setData("text/plain", profile.id);
+                  e.dataTransfer.effectAllowed = "move";
+                }
+              }}
+              ondragend={() => {
+                drag = null;
+                dragOverTier = -1;
+                dragOverParking = false;
+              }}
+            >
+              <div class="flex items-center justify-between gap-2">
+                <span class="font-mono text-sm">{profile.id}</span>
+                <Menu
+                  positioning={{ placement: "bottom-end" }}
+                  onSelect={(e) => {
+                    if (e.value === "test") onTestParking(idx);
+                    else if (e.value === "edit") openParkingEdit(idx);
+                  }}
+                >
+                  <Menu.Trigger
+                    class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+                    aria-label={manage_profiles_profile_actions_aria()}
+                    disabled={profilesStore.isProbing}
+                  >
+                    <MoreVertical class="size-4" />
+                  </Menu.Trigger>
+                  <Portal>
+                    <Menu.Positioner>
+                      <Menu.Content
+                        class="card preset-tonal-surface p-1 min-w-[8rem]"
+                      >
+                        <Menu.Item
+                          value="test"
+                          class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+                        >
+                          <FlaskConical class="size-4" />
+                          {manage_profiles_test()}
+                        </Menu.Item>
+                        <Menu.Item
+                          value="edit"
+                          class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+                        >
+                          <Pencil class="size-4" />
+                          {common_edit()}
+                        </Menu.Item>
+                      </Menu.Content>
+                    </Menu.Positioner>
+                  </Portal>
+                </Menu>
+              </div>
+              <dl class="text-xs space-y-0.5">
+                <div class="flex gap-2">
+                  <dt class="opacity-60">
+                    {manage_profiles_profile_provider_label()}:
+                  </dt>
+                  <dd class="font-mono">{profile.endpoint}</dd>
+                </div>
+                <div class="flex gap-2">
+                  <dt class="opacity-60">
+                    {manage_profiles_profile_model_label()}:
+                  </dt>
+                  <dd class="font-mono">{profile.model}</dd>
+                </div>
+                <div class="flex gap-2">
+                  <dt class="opacity-60">
+                    {manage_profiles_max_context_label()}:
+                  </dt>
+                  <dd class="font-mono">{profile.max_context_window}</dd>
+                </div>
+              </dl>
+              {#if report}
+                <div class="text-xs">
+                  <span class={probeStatusColor[report.status]}>
+                    {probeStatusLabel(report.status)}
+                  </span>
+                  {#if report.detail}
+                    <span class="opacity-60 ml-2 font-mono break-all">
+                      {report.detail}
+                    </span>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/each}
+          <button
+            type="button"
+            class="card preset-tonal-surface border-2 border-dashed border-surface-400 p-4 flex items-center justify-center gap-2 min-h-24 w-full hover:preset-filled-surface-100-900 transition cursor-pointer"
+            onclick={openParkingNew}
+          >
+            <Plus class="size-6 opacity-70" />
+            <span class="text-sm opacity-70">
+              {manage_profiles_parking_add()}
+            </span>
+          </button>
+        </div>
+      </section>
     {/if}
   </div>
 </div>
@@ -775,4 +1054,17 @@
   {providerIds}
   onSave={onTierSave}
   onCancel={() => (tierDialog.open = false)}
+/>
+
+<ParkingDialog
+  open={parkingDialog.open}
+  mode={parkingDialog.mode}
+  profile={profilesStore.draft?.parking?.[parkingDialog.idx] ?? null}
+  {providerIds}
+  {occupiedIds}
+  probeReport={parkingProbeReport}
+  onSave={onParkingSave}
+  onCancel={() => (parkingDialog.open = false)}
+  onTest={onParkingTest}
+  onRemove={parkingDialog.mode === "edit" ? onParkingRemove : null}
 />
