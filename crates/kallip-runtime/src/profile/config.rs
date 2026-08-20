@@ -27,6 +27,12 @@ pub struct ProfileConfig {
     pub tiers: Vec<Tier>,
     /// Named provider instances keyed by [`Provider::id`].
     pub endpoints: HashMap<String, Provider>,
+    /// Profiles parked out of rotation: draft space the runtime never
+    /// reads (selection is tiers-only), kept so a parked profile survives
+    /// without a tier. Empty on old configs (serde default) and absent from
+    /// the serialized file when empty (old-file shape unchanged).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parking: Vec<Profile>,
 }
 
 /// Load profile configuration: from `KALLIP_PROFILES_FILE` (or a default path) if present,
@@ -82,6 +88,7 @@ pub fn from_env() -> Result<ProfileConfig> {
             profiles: vec![profile],
         }],
         endpoints,
+        parking: vec![],
     })
 }
 
@@ -117,7 +124,11 @@ fn load_file(path: &Path) -> Result<ProfileConfig> {
     // carry their id inline); no pass-through mirror types needed.
     let tiers = file.tiers;
 
-    Ok(ProfileConfig { tiers, endpoints })
+    Ok(ProfileConfig {
+        tiers,
+        endpoints,
+        parking: file.parking,
+    })
 }
 
 /// Resolve the config file path: explicit env, else a default under `$XDG_CONFIG_HOME`.
@@ -245,8 +256,11 @@ fn env_str(name: &str) -> Result<String> {
     std::env::var(name).with_context(|| format!("{name} must be set"))
 }
 
-/// Validate the parsed file: non-empty `api_key`, unique profile ids. Profile→endpoint
-/// references and backend coverage are validated when the tagma constructs `ProfileRegistry`.
+/// Validate the parsed file: non-empty `api_key`, unique profile ids across
+/// tiers ∪ parking (both hold the same id namespace — a duplicate would break
+/// the wire-boundary invariant on the next PUT). Profile→endpoint references and
+/// backend coverage are validated when the tagma constructs `ProfileRegistry`
+/// (tiers only — parked profiles may dangle by design).
 fn validate(file: &ConfigFile) -> Result<()> {
     for (id, body) in &file.endpoints {
         if body.api_key.trim().is_empty() {
@@ -261,6 +275,11 @@ fn validate(file: &ConfigFile) -> Result<()> {
             }
         }
     }
+    for p in &file.parking {
+        if !seen.insert(p.id.as_str()) {
+            bail!("duplicate profile id '{}'", p.id);
+        }
+    }
     Ok(())
 }
 
@@ -272,6 +291,8 @@ struct ConfigFile {
     endpoints: HashMap<String, ProviderEntry>,
     #[serde(default)]
     tiers: Vec<Tier>,
+    #[serde(default)]
+    parking: Vec<Profile>,
 }
 
 #[derive(Deserialize)]
@@ -303,6 +324,7 @@ mod tests {
             let p = &cfg.tiers[0].profiles[0];
             assert_eq!(p.model, "deepseek-test");
             assert_eq!(p.max_context_window, 200_000); // implicit env profile derives the window from the env var
+            assert!(cfg.parking.is_empty()); // env path has no draft space
         });
     }
 
@@ -420,6 +442,13 @@ api_key = "fake"
                 ],
             }],
             endpoints,
+            // A parked profile rides along (out of rotation, may dangle).
+            parking: vec![Profile {
+                id: "spare".into(),
+                endpoint: "oa".into(),
+                model: "gpt-4-mini".into(),
+                max_context_window: 128_000,
+            }],
         };
 
         // Serialize to TOML
@@ -440,5 +469,84 @@ api_key = "fake"
             file.endpoints["oa"].base_url.as_deref(),
             Some("https://api.example.com")
         );
+        assert_eq!(file.parking.len(), 1);
+        assert_eq!(file.parking[0].id, "spare");
+    }
+
+    #[test]
+    fn save_empty_parking_writes_no_key() {
+        use super::{Profile, Provider, Tier};
+        use std::collections::HashMap;
+
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "ds".into(),
+            Provider {
+                id: "ds".into(),
+                family: "deepseek".into(),
+                api_key: "k".into(),
+                base_url: None,
+            },
+        );
+        let cfg = ProfileConfig {
+            tiers: vec![Tier {
+                profiles: vec![Profile {
+                    id: "pro".into(),
+                    endpoint: "ds".into(),
+                    model: "m".into(),
+                    max_context_window: 1000,
+                }],
+            }],
+            endpoints,
+            parking: vec![],
+        };
+        let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(
+            !toml_str.contains("parking"),
+            "empty parking must not write a key (old-file shape), got: {toml_str}"
+        );
+    }
+
+    #[test]
+    fn parse_old_toml_without_parking_loads_empty() {
+        let toml = r#"
+[endpoints.ds]
+family = "deepseek"
+api_key = "fake"
+[[tiers]]
+
+  [[tiers.profiles]]
+  id = "pro"
+  endpoint = "ds"
+  model = "deepseek-pro"
+  max_context_window = 500000
+"#;
+        let file: ConfigFile = toml::from_str(toml).unwrap();
+        validate(&file).unwrap();
+        assert!(file.parking.is_empty());
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_id_between_tier_and_parking() {
+        let toml = r#"
+[endpoints.ds]
+family = "deepseek"
+api_key = "fake"
+[[tiers]]
+
+  [[tiers.profiles]]
+  id = "dup"
+  endpoint = "ds"
+  model = "m"
+  max_context_window = 1000
+
+[[parking]]
+id = "dup"
+endpoint = "ds"
+model = "m2"
+max_context_window = 1000
+"#;
+        let file: ConfigFile = toml::from_str(toml).unwrap();
+        assert!(validate(&file).is_err());
     }
 }

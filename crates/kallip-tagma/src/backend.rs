@@ -221,6 +221,7 @@ mod tests {
                 }],
             }],
             endpoints,
+            parking: vec![],
         }
     }
 
@@ -308,6 +309,7 @@ mod tests {
                 }],
             }],
             endpoints,
+            parking: vec![],
         };
         let err = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT)
             .err()

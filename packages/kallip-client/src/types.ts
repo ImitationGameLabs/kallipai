@@ -20,18 +20,18 @@ export type AgentState =
  * tagged with camelCase variant keys; unit variants arrive as `null`. */
 export type WireParkedReason =
   | {
-    readonly failoverChainExhausted: {
-      readonly reason: string;
-      readonly detail: string;
-    };
-  }
+      readonly failoverChainExhausted: {
+        readonly reason: string;
+        readonly detail: string;
+      };
+    }
   | { readonly fatalError: { readonly message: string } }
   | {
-    readonly tokenBudgetExceeded: {
-      readonly consumed: number;
-      readonly budget: number;
-    };
-  }
+      readonly tokenBudgetExceeded: {
+        readonly consumed: number;
+        readonly budget: number;
+      };
+    }
   | { readonly maxRoundsExceeded: null }
   | { readonly transientRetryExhausted: null };
 
@@ -229,6 +229,11 @@ export interface ProfileTier {
 export interface ProfileConfig {
   readonly tiers: readonly ProfileTier[];
   readonly endpoints: Readonly<Record<string, ProfileProvider>>;
+  /** Profiles parked out of rotation (draft space, absent = empty).
+   * GET omits the key when empty; on PUT an absent key keeps the live
+   * parking (tri-state — see the Rust merge), while the UI always sends it.
+   */
+  readonly parking?: readonly ProfileModel[];
 }
 
 /** `POST /profiles/apply` response. */

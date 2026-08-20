@@ -213,6 +213,68 @@ export function moveProfile(
   return { ...without, tiers };
 }
 
+/** The parked list with `undefined` normalized back to absent when empty,
+ * so a draft that parks and unparks everything compares equal (isDirty)
+ * to a committed config that never carried the key.
+ */
+function withParking(
+  config: ProfileConfig,
+  parking: readonly ProfileModel[],
+): ProfileConfig {
+  return parking.length > 0 ? { ...config, parking } : omitParking(config);
+}
+
+/** A copy of the config with the `parking` key removed (absent = empty).
+ * `structuredClone`-safe and JSON.stringify-friendly: an undefined-valued
+ * optional property is dropped, matching the GET shape.
+ */
+function omitParking(config: ProfileConfig): ProfileConfig {
+  const { parking: _unused, ...rest } = config;
+  return rest;
+}
+
+/** Move a tier profile into the parking area (drag-and-drop draft update).
+ * The profile lands at the end of the parked list. Invalid coordinates leave
+ * the config unchanged.
+ */
+export function moveToParking(
+  config: ProfileConfig,
+  fromTier: number,
+  fromIdx: number,
+): ProfileConfig {
+  const profile = config.tiers[fromTier]?.profiles[fromIdx];
+  if (!profile) return config;
+  const without = removeProfile(config, fromTier, fromIdx);
+  return withParking(without, [...(without.parking ?? []), profile]);
+}
+
+/** Move a parked profile back into the tier at toTier (drag-and-drop draft
+ * update). The profile lands at the end of the target tier. Invalid
+ * coordinates leave the config unchanged.
+ */
+export function moveFromParking(
+  config: ProfileConfig,
+  fromIdx: number,
+  toTier: number,
+): ProfileConfig {
+  const profile = config.parking?.[fromIdx];
+  if (!profile || toTier < 0 || toTier >= config.tiers.length) return config;
+  const rest = (config.parking ?? []).filter((_, i) => i !== fromIdx);
+  const tiers = config.tiers.map((t, i) =>
+    i === toTier ? { profiles: [...t.profiles, profile] } : t,
+  );
+  return withParking({ ...config, tiers }, rest);
+}
+
+/** Replace the parked list wholesale (the parking dialog Save path).
+ * An empty list normalizes to the absent key (draft-equality rule above).
+ */
+export function replaceParkingProfiles(
+  config: ProfileConfig,
+  profiles: readonly ProfileModel[],
+): ProfileConfig {
+  return withParking(config, [...profiles]);
+}
 /** Structural equality check (used for isDirty). */
 export function profileConfigEqual(
   a: ProfileConfig,
@@ -246,7 +308,10 @@ export function profileConfigToWire(draft: ProfileConfig): ProfileConfig {
       { ...ep, api_key: ep.api_key === "" ? null : ep.api_key },
     ]),
   );
-  return { ...draft, endpoints };
+  // Always send the parking key: an explicit empty list is the only way to
+  // clear the parked area (the server keeps live parking when the key is
+  // absent, so an omitted key would silently mean "keep").
+  return { ...draft, endpoints, parking: draft.parking ?? [] };
 }
 
 /**
@@ -318,6 +383,50 @@ export function singleProfileProbeRequest(
   profileIdx: number,
 ): ProfileProbeRequest | null {
   const profile = draft.tiers[tierIdx]?.profiles[profileIdx];
+  if (!profile) return null;
+  const ep = draft.endpoints[profile.endpoint];
+  const endpoints = ep
+    ? [
+        {
+          id: ep.id,
+          family: ep.family,
+          base_url: ep.base_url,
+          api_key: probeWireKey(
+            ep.api_key,
+            committed?.endpoints[ep.id]?.api_key,
+          ),
+        },
+      ]
+    : [];
+  return {
+    endpoints,
+    tiers: [
+      {
+        profiles: [
+          {
+            id: profile.id,
+            endpoint: profile.endpoint,
+            model: profile.model,
+          },
+        ],
+      },
+    ],
+  };
+}
+/**
+ * Build a single-profile probe request for a parked profile (the parking
+ * card Test button): same shape as the tier variant — the profile rides in
+ * a one-profile "tier", its provider inline under the shared key rule. A
+ * dangling provider reference still probes (server verdict: invalid_config),
+ * and an undefined parked list (GET omitted the key) is simply out of range.
+ * Null when idx is out of range.
+ */
+export function singleParkingProfileProbeRequest(
+  committed: ProfileConfig | null,
+  draft: ProfileConfig,
+  idx: number,
+): ProfileProbeRequest | null {
+  const profile = draft.parking?.[idx];
   if (!profile) return null;
   const ep = draft.endpoints[profile.endpoint];
   const endpoints = ep

@@ -17,15 +17,19 @@ import {
   cronHasFiveFields,
   etaMinutes,
   isBudgetPaused,
+  moveFromParking,
   moveProfile,
+  moveToParking,
   profileConfigEqual,
   profileConfigToWire,
   removeProvider,
   removeTier,
   removeProfile,
   replaceTierProfiles,
+  replaceParkingProfiles,
   singleProviderProbeRequest,
   singleProfileProbeRequest,
+  singleParkingProfileProbeRequest,
   upsertProvider,
   validateWarnMinutes,
 } from "./compute.ts";
@@ -626,3 +630,142 @@ Deno.test(
     );
   },
 );
+// --- parking (draft space out of rotation) ---
+
+function parkedConfig(): ProfileConfig {
+  return {
+    ...multiTierConfig(),
+    parking: [
+      {
+        id: "spare",
+        endpoint: "main",
+        model: "parked-m",
+        max_context_window: 8,
+      },
+    ],
+  };
+}
+
+Deno.test("moveToParking: appends the tier profile to the parked list", () => {
+  const r = moveToParking(multiTierConfig(), 0, 0);
+  assertEquals(r.tiers[0].profiles.length, 0);
+  assertEquals(r.parking?.length, 1);
+  assertEquals(r.parking?.[0].id, "p1");
+});
+
+Deno.test("moveToParking: appends after existing parked profiles", () => {
+  const r = moveToParking(parkedConfig(), 1, 0); // p2 from tier 1
+  assertEquals(
+    r.parking?.map((p) => p.id),
+    ["spare", "p2"],
+  );
+});
+
+Deno.test(
+  "moveToParking: invalid coordinates leave the config unchanged",
+  () => {
+    const c = parkedConfig();
+    assertEquals(moveToParking(c, 9, 0), c);
+    assertEquals(moveToParking(c, 0, 9), c);
+  },
+);
+
+Deno.test(
+  "moveFromParking: lands the parked profile at the target tier end",
+  () => {
+    const r = moveFromParking(parkedConfig(), 0, 0);
+    assertEquals(r.parking, undefined); // empty list normalizes to the absent key
+    assertEquals(
+      r.tiers[0].profiles[r.tiers[0].profiles.length - 1].id,
+      "spare",
+    );
+  },
+);
+
+Deno.test(
+  "moveFromParking: invalid coordinates leave the config unchanged",
+  () => {
+    const c = parkedConfig();
+    assertEquals(moveFromParking(c, 0, 9), c); // tier out of range
+    assertEquals(moveFromParking(c, 9, 0), c); // parked index out of range
+    // A config that never carried the key (GET omitted it) is a no-op too.
+    assertEquals(moveFromParking(multiTierConfig(), 0, 0), multiTierConfig());
+  },
+);
+
+Deno.test("park then unpark everything compares equal to the original", () => {
+  const c = multiTierConfig();
+  const parked = moveToParking(c, 0, 0);
+  const back = moveFromParking(parked, 0, 0);
+  assertEquals(profileConfigEqual(c, back), true);
+});
+
+Deno.test(
+  "replaceParkingProfiles: replaces wholesale; empty normalizes absent",
+  () => {
+    const c = parkedConfig();
+    const r = replaceParkingProfiles(c, [
+      { id: "n1", endpoint: "main", model: "m", max_context_window: 1 },
+      { id: "n2", endpoint: "main", model: "m", max_context_window: 2 },
+    ]);
+    assertEquals(
+      r.parking?.map((p) => p.id),
+      ["n1", "n2"],
+    );
+    const cleared = replaceParkingProfiles(r, []);
+    assertEquals(cleared.parking, undefined);
+  },
+);
+
+Deno.test("profileConfigToWire: always sends the parking key", () => {
+  // Absent in the draft (never parked) → explicit empty list on the wire;
+  // absent on the wire would mean "keep live" server-side.
+  const wire = profileConfigToWire(multiTierConfig());
+  assertEquals(wire.parking, []);
+  const parkedWire = profileConfigToWire(parkedConfig());
+  assertEquals(
+    parkedWire.parking?.map((p) => p.id),
+    ["spare"],
+  );
+});
+
+Deno.test(
+  "singleParkingProfileProbeRequest: provider inline, masked key → null",
+  () => {
+    const req = singleParkingProfileProbeRequest(
+      draftConfig(maskedKey),
+      parkedConfig(),
+      0,
+    );
+    assertEquals(req!.endpoints.length, 1);
+    assertEquals(req!.endpoints[0].id, "main");
+    assertEquals(req!.endpoints[0].api_key, null);
+    assertEquals(req!.tiers[0].profiles[0].id, "spare");
+  },
+);
+
+Deno.test(
+  "singleParkingProfileProbeRequest: dangling endpoint still probes",
+  () => {
+    const dangling = replaceParkingProfiles(multiTierConfig(), [
+      {
+        id: "ghost-ep",
+        endpoint: "nowhere",
+        model: "m",
+        max_context_window: 1,
+      },
+    ]);
+    const req = singleParkingProfileProbeRequest(null, dangling, 0);
+    assertEquals(req!.endpoints, []); // no provider rides along; server reports invalid_config
+    assertEquals(req!.tiers[0].profiles[0].id, "ghost-ep");
+  },
+);
+
+Deno.test("singleParkingProfileProbeRequest: out of range returns null", () => {
+  assertEquals(singleParkingProfileProbeRequest(null, parkedConfig(), 3), null);
+  // A draft whose parking key was never present is out of range too.
+  assertEquals(
+    singleParkingProfileProbeRequest(null, multiTierConfig(), 0),
+    null,
+  );
+});

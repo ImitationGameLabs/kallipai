@@ -253,6 +253,7 @@ pub fn make_profile_bundle() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundl
             }],
         }],
         endpoints,
+        parking: vec![],
     };
     let source = crate::backend::build_backends(
         &cfg,

@@ -114,6 +114,11 @@ struct TierWire {
 pub(crate) struct ProfileConfigWire {
     tiers: Vec<TierWire>,
     endpoints: HashMap<String, ProviderPatch>,
+    /// Tri-state like the endpoint fields: an absent key keeps the live
+    /// parking (an old client PUTting its full config cannot clear it);
+    /// a present list replaces it.
+    #[serde(default)]
+    parking: Option<Vec<ProfileWire>>,
 }
 
 /// Resolve the wire tri-state `api_key` and `base_url` fields against the live
@@ -181,6 +186,23 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                 .collect(),
         })
         .collect();
+    // Resolve the final parking first: absent key keeps the live list (the
+    // tri-state rule), a present list replaces it wholesale. The seen-set
+    // below scans tiers ∪ this final parking, so a tier referencing an id
+    // that only exists in the kept live parking is caught at the wire
+    // boundary, not on the next startup's file validate().
+    let parking: Vec<Profile> = match wire.parking {
+        None => live.parking.clone(),
+        Some(list) => list
+            .into_iter()
+            .map(|p| Profile {
+                id: p.id,
+                endpoint: p.endpoint,
+                model: p.model,
+                max_context_window: p.max_context_window,
+            })
+            .collect(),
+    };
     // Cross-tier duplicate profile ids pass registry validation but the stricter
     // load-time validate() bails on them — a config the tagma could no longer
     // start from. Reject here so the wire boundary matches the file boundary.
@@ -195,7 +217,19 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
             }
         }
     }
-    Ok(ProfileConfig { tiers, endpoints })
+    for p in &parking {
+        if !seen.insert(p.id.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "duplicate profile id '{}'",
+                p.id
+            )));
+        }
+    }
+    Ok(ProfileConfig {
+        tiers,
+        parking,
+        endpoints,
+    })
 }
 
 /// Serialize a config with every endpoint's `api_key` replaced by its masked form —
@@ -326,6 +360,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn merge_wire_absent_parking_keeps_live() {
+        let merged = merge_wire(
+            &live_config(),
+            wire(serde_json::Value::Null, serde_json::Value::Null),
+        )
+        .unwrap();
+        assert_eq!(merged.parking.len(), 1);
+        assert_eq!(merged.parking[0].id, "parked");
+    }
+
+    #[test]
+    fn merge_wire_parking_list_replaces() {
+        let mut w = wire(serde_json::Value::Null, serde_json::Value::Null);
+        w.parking = Some(vec![ProfileWire {
+            id: "new".into(),
+            endpoint: "main".into(),
+            model: "m2".into(),
+            max_context_window: 8,
+        }]);
+        let merged = merge_wire(&live_config(), w).unwrap();
+        assert_eq!(merged.parking.len(), 1);
+        assert_eq!(merged.parking[0].id, "new");
+
+        // An explicitly empty list clears (absent ≠ empty on this field).
+        let mut w = wire(serde_json::Value::Null, serde_json::Value::Null);
+        w.parking = Some(vec![]);
+        let merged = merge_wire(&live_config(), w).unwrap();
+        assert!(merged.parking.is_empty());
+    }
+
+    #[test]
+    fn merge_wire_rejects_tier_id_colliding_with_kept_live_parking() {
+        // The tier references an id that only exists in the kept live parking;
+        // the seen set must scan the final parking, not just the wire.
+        let w: ProfileConfigWire = serde_json::from_value(serde_json::json!({
+            "endpoints": { "main": { "id": "main", "family": "deepseek", "api_key": null, "base_url": null } },
+            "tiers": [
+                { "profiles": [ { "id": "parked", "endpoint": "main", "model": "m", "max_context_window": 8 } ] }
+            ]
+        }))
+        .unwrap();
+        let err = merge_wire(&live_config(), w).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate profile id 'parked'"),
+            "got: {err}"
+        );
+    }
+
     fn live_config() -> ProfileConfig {
         ProfileConfig {
             tiers: vec![],
@@ -338,6 +421,13 @@ mod tests {
                     base_url: Some("https://live.example/v1".into()),
                 },
             )]),
+            // Live draft space: one parked profile (dangling-free but out of rotation).
+            parking: vec![Profile {
+                id: "parked".into(),
+                endpoint: "main".into(),
+                model: "pm".into(),
+                max_context_window: 64_000,
+            }],
         }
     }
 
