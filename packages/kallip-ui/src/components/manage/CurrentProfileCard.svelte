@@ -38,8 +38,7 @@
       <span class="opacity-60 text-xs uppercase tracking-wide block"
         >{manage_agent_tier()}</span
       >
-      <!-- Wire is 0-based; display is the natural operator-facing ordinal. -->
-      <span class="font-medium">{profile.tier_index + 1}</span>
+      <span class="font-mono">#{profile.tier_index}</span>
     </div>
   </div>
 </section>

@@ -112,7 +112,7 @@ export interface RetryRecord {
  * registry profile in use, its provider endpoint, its tier position, and the
  * concrete model string the client sends. */
 export interface ActiveProfile {
-  /** Positional tier index in the registry (0-based; UI adds 1). */
+  /** Positional tier index in the registry (0-based). */
   readonly tier_index: number;
   readonly profile_id: string;
   /** The endpoint (provider) id this profile connects through. */

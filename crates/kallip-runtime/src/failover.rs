@@ -197,7 +197,7 @@ impl FailoverState {
 /// profile apply.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfileSnapshot {
-    /// Positional tier index (0-based in the registry; display layers add 1).
+    /// Positional tier index (0-based in the registry).
     pub tier_index: usize,
     pub profile_id: String,
     /// The endpoint (provider) id this profile connects through.

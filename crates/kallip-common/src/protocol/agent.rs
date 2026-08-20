@@ -273,7 +273,7 @@ pub struct UpdateActivityRequest {
 /// apply, which is exactly when an operator needs to see it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveProfile {
-    /// Positional tier index in the registry (0-based; display layers add 1).
+    /// Positional tier index in the registry (0-based).
     pub tier_index: usize,
     pub profile_id: String,
     /// The endpoint (provider) id this profile connects through.
