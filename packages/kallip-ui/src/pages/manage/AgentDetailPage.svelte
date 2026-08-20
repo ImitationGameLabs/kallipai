@@ -1,5 +1,8 @@
 <script lang="ts">
-  import type { AgentStatusResponse, ProfileConfig } from "@kallipai/kallip-client";
+  import type {
+    AgentStatusResponse,
+    ProfileConfig,
+  } from "@kallipai/kallip-client";
   import { agentStateLabel } from "../../lib/agentState.ts";
   import { CalendarClock, Clock } from "@lucide/svelte";
   import { MoreVertical, Pencil, Trash } from "@lucide/svelte";
@@ -25,8 +28,12 @@
     manage_agent_back,
     manage_agent_role,
     manage_agent_duty,
+    manage_agent_duty_team,
     manage_agent_identity_actions_aria,
     manage_agent_duty_onduty,
+    manage_agent_duty_team_onduty,
+    manage_agent_duty_team_offduty,
+    manage_agent_duty_team_note,
     manage_agent_duty_offduty,
     manage_agent_created_by,
     manage_agent_workspace,
@@ -92,9 +99,12 @@
     // Fetched directly (not via profilesStore) on purpose: the store's
     // refresh() clobbers its draft, which would discard unsaved edits
     // made on the profiles page.
-    managementBackend().getProfiles().then((cfg) => {
-      profileConfig = cfg;
-    }).catch(() => {});
+    managementBackend()
+      .getProfiles()
+      .then((cfg) => {
+        profileConfig = cfg;
+      })
+      .catch(() => {});
     fetchStatus();
     agentsStore.refresh();
     pollHandle = setInterval(fetchStatus, 5000);
@@ -111,7 +121,7 @@
   const windowTokens = $derived(
     status
       ? status.context.turn_tokens +
-        status.context.pinned_items.reduce((sum, [, n]) => sum + n, 0)
+          status.context.pinned_items.reduce((sum, [, n]) => sum + n, 0)
       : 0,
   );
   const contextWindow = $derived.by(() => {
@@ -179,9 +189,7 @@
   }
 
   async function onSaveIdentity(role: string, description: string) {
-    await agentsStore
-      .updateMetadata(id, { role, description })
-      .catch(() => {});
+    await agentsStore.updateMetadata(id, { role, description }).catch(() => {});
     showIdentityDialog = false;
   }
   async function onConfirmRemove() {
@@ -191,7 +199,9 @@
   }
 </script>
 
-<svelte:head><title>{manage_agent_title({ id: agent?.role || id })}</title></svelte:head>
+<svelte:head
+  ><title>{manage_agent_title({ id: agent?.role || id })}</title></svelte:head
+>
 
 <div class="h-full overflow-y-auto">
   <div class="p-6 max-w-2xl space-y-6">
@@ -199,14 +209,15 @@
       <div class="flex items-center gap-3">
         <a
           href={`${basePath}/agents`}
-          class="btn btn-sm preset-outlined-surface-500">{manage_agent_back()}</a
+          class="btn btn-sm preset-outlined-surface-500"
+          >{manage_agent_back()}</a
         >
         {#if agent}
-          <h1 class="text-xl font-semibold truncate min-w-0">{agent.role || "—"}</h1>
+          <h1 class="text-xl font-semibold truncate min-w-0">
+            {agent.role || "—"}
+          </h1>
           <StateDot state={agent.state} />
-          <span class="font-medium"
-            >{agentStateLabel(agent.state)}</span
-          >
+          <span class="font-medium">{agentStateLabel(agent.state)}</span>
           {#if agent.activity}
             <span class="opacity-60 text-sm">· {agent.activity}</span>
           {/if}
@@ -216,7 +227,9 @@
       </div>
       {#if agent}
         <div class="flex items-start gap-1 mt-1 group">
-          <p class="font-mono text-xs opacity-60 break-all select-text min-w-0">{id}</p>
+          <p class="font-mono text-xs opacity-60 break-all select-text min-w-0">
+            {id}
+          </p>
           <CopyButton getText={() => id} />
         </div>
       {/if}
@@ -275,19 +288,30 @@
           </div>
           <div>
             <span class="opacity-60 text-xs uppercase tracking-wide block"
-              >{manage_agent_duty()}</span
+              >{agent.created_by === null
+                ? manage_agent_duty_team()
+                : manage_agent_duty()}</span
             >
             <span
               >{agent.duty === "onduty"
-                ? manage_agent_duty_onduty()
-                : manage_agent_duty_offduty()}</span
+                ? agent.created_by === null
+                  ? manage_agent_duty_team_onduty()
+                  : manage_agent_duty_onduty()
+                : agent.created_by === null
+                  ? manage_agent_duty_team_offduty()
+                  : manage_agent_duty_offduty()}</span
             >
+            {#if agent.created_by === null}
+              <p class="opacity-50 text-xs">{manage_agent_duty_team_note()}</p>
+            {/if}
           </div>
           <div>
             <span class="opacity-60 text-xs uppercase tracking-wide block"
               >{manage_agent_created_by()}</span
             >
-            <span class="font-mono text-xs" title={agent.created_by ?? "root"}>{agent.created_by ?? "root"}</span>
+            <span class="font-mono text-xs" title={agent.created_by ?? "root"}
+              >{agent.created_by ?? "root"}</span
+            >
           </div>
           <div>
             <span class="opacity-60 text-xs uppercase tracking-wide block"
@@ -295,8 +319,7 @@
             >
             <span
               class="font-mono text-xs truncate block"
-              title={agent.workspace_root}
-              >{agent.workspace_root}</span
+              title={agent.workspace_root}>{agent.workspace_root}</span
             >
           </div>
         </div>
@@ -340,27 +363,28 @@
             >
           </div>
           <div>
-            <span class="opacity-60 text-xs">{manage_agent_pinned_items()}</span><span
-              class="font-medium ml-2"
+            <span class="opacity-60 text-xs">{manage_agent_pinned_items()}</span
+            ><span class="font-medium ml-2"
               >{status.context.pinned_items.length}</span
             >
           </div>
           <div>
-            <span class="opacity-60 text-xs">{manage_agent_turn_tokens()}</span><span
-              class="font-medium ml-2"
+            <span class="opacity-60 text-xs">{manage_agent_turn_tokens()}</span
+            ><span class="font-medium ml-2"
               >{formatTokenCount(status.context.turn_tokens)}</span
             >
           </div>
           <div>
-            <span class="opacity-60 text-xs">{manage_agent_last_prompt()}</span><span
-              class="font-medium ml-2"
+            <span class="opacity-60 text-xs">{manage_agent_last_prompt()}</span
+            ><span class="font-medium ml-2"
               >{status.context.last_prompt_tokens
                 ? formatTokenCount(status.context.last_prompt_tokens)
                 : "—"}</span
             >
           </div>
           <div>
-            <span class="opacity-60 text-xs">{manage_agent_cumulative_in()}</span
+            <span class="opacity-60 text-xs"
+              >{manage_agent_cumulative_in()}</span
             ><span class="font-medium ml-2"
               >{formatTokenCount(
                 status.context.cumulative_usage.prompt_tokens,
@@ -368,7 +392,8 @@
             >
           </div>
           <div>
-            <span class="opacity-60 text-xs">{manage_agent_cumulative_out()}</span
+            <span class="opacity-60 text-xs"
+              >{manage_agent_cumulative_out()}</span
             ><span class="font-medium ml-2"
               >{formatTokenCount(
                 status.context.cumulative_usage.completion_tokens,
@@ -394,7 +419,8 @@
                 ? manage_agent_retry_show_absolute()
                 : manage_agent_retry_show_relative()}
               onclick={() =>
-                retryMode = retryMode === "relative" ? "absolute" : "relative"}
+                (retryMode =
+                  retryMode === "relative" ? "absolute" : "relative")}
               class="rounded p-1.5 text-surface-500 dark:text-surface-400 hover:bg-surface-200-800 transition"
             >
               {#if retryMode === "relative"}
@@ -404,9 +430,7 @@
               {/if}
             </button>
           </div>
-          {#each (showAllRetries
-              ? status.recent_retries
-              : status.recent_retries.slice(0, 3)) as r}
+          {#each showAllRetries ? status.recent_retries : status.recent_retries.slice(0, 3) as r}
             <div class="text-xs opacity-70">
               {retryMode === "relative"
                 ? fmtRelativeRetry(r)
@@ -422,8 +446,8 @@
               {showAllRetries
                 ? manage_agent_retry_show_less()
                 : manage_agent_retry_show_all({
-                  count: status.recent_retries.length,
-                })}
+                    count: status.recent_retries.length,
+                  })}
             </button>
           {/if}
         </section>
@@ -461,11 +485,11 @@
   onConfirm={onConfirmRemove}
   onCancel={() => (showRemoveDialog = false)}
 />
-  <AgentIdentityDialog
-    open={showIdentityDialog}
-    role={agent?.role ?? ""}
-    description={agent?.description ?? ""}
-    busy={agentsStore.isInFlight(id)}
-    onSave={onSaveIdentity}
-    onCancel={() => (showIdentityDialog = false)}
-  />
+<AgentIdentityDialog
+  open={showIdentityDialog}
+  role={agent?.role ?? ""}
+  description={agent?.description ?? ""}
+  busy={agentsStore.isInFlight(id)}
+  onSave={onSaveIdentity}
+  onCancel={() => (showIdentityDialog = false)}
+/>

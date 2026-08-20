@@ -10,8 +10,8 @@
     manage_agents_title,
     manage_agents_heading,
     manage_agents_empty,
-    manage_agent_duty_onduty,
-    manage_agent_duty_offduty,
+    manage_agent_duty_team_onduty,
+    manage_agent_duty_team_offduty,
     manage_agents_details,
     manage_agent_interrupt,
     manage_agent_remove_agent,
@@ -34,9 +34,12 @@
   }
 
   function dutyLabel(duty: "onduty" | "offduty"): string {
+    // The root row carries the team-wide duty state (schedule semantics);
+    // subagent rows no longer show a per-agent badge since only the root
+    // agent is ever scheduled after the schedules redo.
     return duty === "onduty"
-      ? manage_agent_duty_onduty()
-      : manage_agent_duty_offduty();
+      ? manage_agent_duty_team_onduty()
+      : manage_agent_duty_team_offduty();
   }
 
   // Root agent (created_by is null only for the tagma-managed root) sorts
@@ -83,18 +86,24 @@
             <div class="flex items-center gap-2 min-w-0">
               <StateDot state={agent.state} />
               <div class="min-w-0">
-                <div class="text-sm font-medium truncate">{agent.role || agent.id}</div>
+                <div class="text-sm font-medium truncate">
+                  {agent.role || agent.id}
+                </div>
                 {#if agent.role}
-                  <div class="font-mono text-xs opacity-60 truncate">{agent.id}</div>
+                  <div class="font-mono text-xs opacity-60 truncate">
+                    {agent.id}
+                  </div>
                 {/if}
               </div>
             </div>
             <div class="flex flex-col items-end gap-1">
-              <span
-                class="text-xs px-2 py-0.5 rounded-full preset-tonal-surface"
-              >
-                {dutyLabel(agent.duty)}
-              </span>
+              {#if agent.created_by === null}
+                <span
+                  class="text-xs px-2 py-0.5 rounded-full preset-tonal-surface"
+                >
+                  {dutyLabel(agent.duty)}
+                </span>
+              {/if}
               {#if agent.activity}
                 <span class="text-xs opacity-50 truncate max-w-32"
                   >{agent.activity}</span
@@ -123,14 +132,9 @@
                 >{manage_agent_interrupt()}</button
               >
             {/if}
-            <button
-              class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-              disabled={agentsStore.isInFlight(agent.id)}
-              onclick={() => agentsStore.toggleDuty(agent.id).catch(() => {})}
-              >{agent.duty === "onduty"
-                ? manage_agent_duty_offduty()
-                : manage_agent_duty_onduty()}</button
-            >
+            <!-- duty toggle removed from the list: the team-wide override
+                 lives on the schedules page (wake-now) and per-agent
+                 emergency toggles on the detail page -->
             <button
               class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
               onclick={() => (removeTarget = agent.id)}
