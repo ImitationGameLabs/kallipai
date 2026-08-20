@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { AgentStatusResponse } from "@kallipai/kallip-client";
+  import type { AgentStatusResponse, ProfileConfig } from "@kallipai/kallip-client";
   import { CalendarClock, Clock } from "@lucide/svelte";
   import { MoreVertical, Pencil, Trash } from "@lucide/svelte";
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
@@ -68,6 +68,7 @@
     $props();
 
   let status = $state<AgentStatusResponse | null>(null);
+  let profileConfig = $state<ProfileConfig | null>(null);
   let statusError = $state<string | null>(null);
   let isLoading = $state(false);
   let pollHandle: ReturnType<typeof setInterval> | null = null;
@@ -90,6 +91,12 @@
   }
 
   $effect(() => {
+    // Fetched directly (not via profilesStore) on purpose: the store's
+    // refresh() clobbers its draft, which would discard unsaved edits
+    // made on the profiles page.
+    managementBackend().getProfiles().then((cfg) => {
+      profileConfig = cfg;
+    }).catch(() => {});
     fetchStatus();
     agentsStore.refresh();
     pollHandle = setInterval(fetchStatus, 5000);
@@ -99,12 +106,26 @@
   });
 
   const agent = $derived(agentsStore.agents.find((a) => a.id === id));
-  const cumulativeTokens = $derived(
+  // Window occupancy approximation: conversation + pinned turns. This
+  // understates what the runtime actually composes (its request estimate
+  // also covers the system prompt and tools); cumulative counters are
+  // lifetime totals -- useless against a window.
+  const windowTokens = $derived(
     status
-      ? status.context.cumulative_usage.prompt_tokens +
-          status.context.cumulative_usage.completion_tokens
+      ? status.context.turn_tokens +
+        status.context.pinned_items.reduce((sum, [, n]) => sum + n, 0)
       : 0,
   );
+  const contextWindow = $derived.by(() => {
+    const pid = status?.profile?.profile_id;
+    if (!pid || !profileConfig) return null;
+    for (const tier of profileConfig.tiers) {
+      for (const p of tier.profiles) {
+        if (p.id === pid) return p.max_context_window;
+      }
+    }
+    return null;
+  });
 
   interface RetryEntry {
     timestamp: number;
@@ -302,17 +323,22 @@
         <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
           {manage_agent_context_usage()}
         </h2>
-        <BudgetBar
-          consumed={cumulativeTokens}
-          budget={status.token_budget}
-          label={manage_agent_context_label()}
-        />
-        <p class="text-xs opacity-70">
-          {manage_agent_context_tokens({
-            consumed: formatTokenCount(cumulativeTokens),
-            budget: formatTokenCount(status.token_budget),
-          })}
-        </p>
+        {#if contextWindow}
+          <BudgetBar
+            consumed={windowTokens}
+            budget={contextWindow}
+            label={manage_agent_context_label()}
+          />
+          <p class="text-xs opacity-70">
+            {manage_agent_context_tokens({
+              consumed: formatTokenCount(windowTokens),
+              budget: formatTokenCount(contextWindow),
+            })}
+          </p>
+        {:else}
+          <!-- window size unknown (profile gone or config not loaded):
+            a bar against a wrong denominator lies, so hide the pair -->
+        {/if}
         <div class="grid grid-cols-2 gap-3 text-sm">
           <div>
             <span class="opacity-60 text-xs">{manage_agent_turns()}</span><span

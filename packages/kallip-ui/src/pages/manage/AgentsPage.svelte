@@ -83,9 +83,9 @@
             <div class="flex items-center gap-2 min-w-0">
               <StateDot state={agent.state} />
               <div class="min-w-0">
-                <div class="font-mono text-sm truncate">{agent.id}</div>
+                <div class="text-sm font-medium truncate">{agent.role || agent.id}</div>
                 {#if agent.role}
-                  <div class="text-xs opacity-60">{agent.role}</div>
+                  <div class="font-mono text-xs opacity-60 truncate">{agent.id}</div>
                 {/if}
               </div>
             </div>
