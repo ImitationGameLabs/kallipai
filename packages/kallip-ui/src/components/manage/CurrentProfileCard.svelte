@@ -20,7 +20,7 @@
       <span class="opacity-60 text-xs uppercase tracking-wide block"
         >{manage_agent_profile()}</span
       >
-      <span class="font-mono text-xs truncate block">{profile.profile_id}</span>
+      <span class="font-mono text-xs truncate block" title={profile.profile_id}>{profile.profile_id}</span>
     </div>
     <div>
       <span class="opacity-60 text-xs uppercase tracking-wide block"
@@ -32,7 +32,7 @@
       <span class="opacity-60 text-xs uppercase tracking-wide block"
         >{manage_agent_provider()}</span
       >
-      <span class="font-mono text-xs truncate block">{profile.provider}</span>
+      <span class="font-mono text-xs truncate block" title={profile.provider}>{profile.provider}</span>
     </div>
     <div>
       <span class="opacity-60 text-xs uppercase tracking-wide block"

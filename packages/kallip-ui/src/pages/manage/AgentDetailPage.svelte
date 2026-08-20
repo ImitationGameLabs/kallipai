@@ -1,22 +1,30 @@
 <script lang="ts">
   import type { AgentStatusResponse } from "@kallipai/kallip-client";
+  import { CalendarClock, Clock } from "@lucide/svelte";
+  import { MoreVertical, Pencil, Trash } from "@lucide/svelte";
+  import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
+  import type { RetryErrorKind } from "../../lib/manage/retry.ts";
+  import { classifyRetryError, relativeTime } from "../../lib/manage/retry.ts";
   import { managementBackend } from "../../lib/manage/client.ts";
   import { agentsStore } from "../../lib/manage/agents.svelte.ts";
   import { formatTokenCount } from "../../lib/tagmata.svelte.ts";
   import { navigate } from "../../lib/shell/port.ts";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
+  import AgentIdentityDialog from "../../components/manage/AgentIdentityDialog.svelte";
+  import CopyButton from "../../components/CopyButton.svelte";
   import StateDot from "../../components/manage/StateDot.svelte";
   import BudgetBar from "../../components/manage/BudgetBar.svelte";
   import CurrentProfileCard from "../../components/manage/CurrentProfileCard.svelte";
   import { getLocale } from "../../paraglide/runtime.js";
 
   import {
-    common_save,
+    common_edit,
     common_remove,
     manage_agent_title,
     manage_agent_back,
     manage_agent_role,
     manage_agent_duty,
+    manage_agent_identity_actions_aria,
     manage_agent_duty_onduty,
     manage_agent_duty_offduty,
     agent_state_idle,
@@ -26,7 +34,8 @@
     manage_agent_workspace,
     manage_agent_description,
     manage_agent_context_usage,
-    manage_agent_cumulative_label,
+    manage_agent_context_label,
+    manage_agent_context_tokens,
     manage_agent_turns,
     manage_agent_pinned_items,
     manage_agent_turn_tokens,
@@ -37,6 +46,19 @@
     manage_agent_retry_line,
     manage_agent_retry_retried,
     manage_agent_retry_exhausted,
+    manage_agent_retry_show_relative,
+    manage_agent_retry_show_less,
+    manage_agent_retry_show_absolute,
+    manage_agent_retry_show_all,
+    manage_agent_retry_just_now,
+    manage_agent_retry_minutes_ago,
+    manage_agent_retry_hours_ago,
+    manage_agent_retry_days_ago,
+    manage_agent_retry_error_network,
+    manage_agent_retry_error_timeout,
+    manage_agent_retry_error_rate_limit,
+    manage_agent_retry_error_auth,
+    manage_agent_retry_error_unknown,
     manage_agent_toggle_duty,
     manage_agent_interrupt,
     manage_agent_remove_agent,
@@ -50,11 +72,10 @@
   let isLoading = $state(false);
   let pollHandle: ReturnType<typeof setInterval> | null = null;
 
-  let editingRole = $state(false);
-  let editingDesc = $state(false);
-  let roleDraft = $state("");
-  let descDraft = $state("");
   let showRemoveDialog = $state(false);
+  let showIdentityDialog = $state(false);
+  let retryMode = $state<"relative" | "absolute">("relative");
+  let showAllRetries = $state(false);
 
   async function fetchStatus() {
     isLoading = true;
@@ -85,29 +106,64 @@
       : 0,
   );
 
-  function fmtRetry(r: {
+  interface RetryEntry {
     timestamp: number;
     attempt: number;
     max_attempts: number;
     error: string;
-  }): string {
-    const date = new Date(r.timestamp * 1000).toLocaleString(getLocale());
-    const outcome =
-      r.attempt < r.max_attempts
-        ? manage_agent_retry_retried()
-        : manage_agent_retry_exhausted();
-    return manage_agent_retry_line({ date, error: r.error, outcome });
   }
 
-  async function onSaveRole() {
-    await agentsStore.updateMetadata(id, { role: roleDraft }).catch(() => {});
-    editingRole = false;
+  function retryOutcome(r: RetryEntry): string {
+    return r.attempt < r.max_attempts
+      ? manage_agent_retry_retried()
+      : manage_agent_retry_exhausted();
   }
-  async function onSaveDesc() {
+
+  function fmtAbsoluteRetry(r: RetryEntry): string {
+    return manage_agent_retry_line({
+      date: new Date(r.timestamp * 1000).toLocaleString(getLocale()),
+      error: r.error,
+      outcome: retryOutcome(r),
+    });
+  }
+
+  // Display labels for the classified error kinds (retry.ts owns the
+  // string->kind mapping; this maps kind->message).
+  const errorLabels: Record<RetryErrorKind, () => string> = {
+    network: manage_agent_retry_error_network,
+    timeout: manage_agent_retry_error_timeout,
+    rate_limit: manage_agent_retry_error_rate_limit,
+    auth: manage_agent_retry_error_auth,
+    unknown: manage_agent_retry_error_unknown,
+  };
+
+  function fmtRelativeRetry(r: RetryEntry): string {
+    // Date.now() is read per render: the 5s status poll re-renders the
+    // card, so the relative bucket refreshes on the data's own cadence.
+    const { kind, n } = relativeTime(
+      Math.floor(Date.now() / 1000),
+      r.timestamp,
+    );
+    const date =
+      kind === "just"
+        ? manage_agent_retry_just_now()
+        : kind === "min"
+          ? manage_agent_retry_minutes_ago({ n })
+          : kind === "hour"
+            ? manage_agent_retry_hours_ago({ n })
+            : manage_agent_retry_days_ago({ n });
+    return manage_agent_retry_line({
+      date,
+      error: errorLabels[classifyRetryError(r.error)](),
+      outcome: retryOutcome(r),
+    });
+  }
+
+  async function onSaveIdentity(role: string, description: string) {
     await agentsStore
-      .updateMetadata(id, { description: descDraft })
+      .updateMetadata(id, { role, description })
       .catch(() => {});
-    editingDesc = false;
+    showIdentityDialog = false;
   }
   async function onConfirmRemove() {
     await agentsStore.remove(id).catch(() => {});
@@ -116,7 +172,7 @@
   }
 </script>
 
-<svelte:head><title>{manage_agent_title({ id })}</title></svelte:head>
+<svelte:head><title>{manage_agent_title({ id: agent?.role || id })}</title></svelte:head>
 
 <div class="h-full overflow-y-auto">
   <div class="p-6 max-w-2xl space-y-6">
@@ -144,7 +200,10 @@
         {/if}
       </div>
       {#if agent}
-        <p class="font-mono text-xs opacity-60 break-all mt-1 select-text">{id}</p>
+        <div class="flex items-start gap-1 mt-1 group">
+          <p class="font-mono text-xs opacity-60 break-all select-text min-w-0">{id}</p>
+          <CopyButton getText={() => id} />
+        </div>
       {/if}
     </div>
 
@@ -154,36 +213,50 @@
 
     {#if agent}
       <section class="card preset-tonal-surface p-5 space-y-3">
+        <div class="flex justify-end">
+          <Menu
+            positioning={{ placement: "bottom-end" }}
+            onSelect={(e) => {
+              if (e.value === "edit") showIdentityDialog = true;
+              else if (e.value === "remove") showRemoveDialog = true;
+            }}
+          >
+            <Menu.Trigger
+              class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+              aria-label={manage_agent_identity_actions_aria()}
+            >
+              <MoreVertical class="size-4" />
+            </Menu.Trigger>
+            <Portal>
+              <Menu.Positioner>
+                <Menu.Content
+                  class="card preset-tonal-surface p-1 min-w-[8rem]"
+                >
+                  <Menu.Item
+                    value="edit"
+                    class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
+                  >
+                    <Pencil class="size-4" />
+                    {common_edit()}
+                  </Menu.Item>
+                  <Menu.Item
+                    value="remove"
+                    class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
+                  >
+                    <Trash class="size-4" />
+                    {manage_agent_remove_agent()}
+                  </Menu.Item>
+                </Menu.Content>
+              </Menu.Positioner>
+            </Portal>
+          </Menu>
+        </div>
         <div class="grid grid-cols-2 gap-3 text-sm">
           <div>
             <span class="opacity-60 text-xs uppercase tracking-wide block"
               >{manage_agent_role()}</span
             >
-            {#if editingRole}
-              <div class="flex gap-1 mt-1">
-                <input class="input flex-1" bind:value={roleDraft} />
-                <button
-                  class="btn btn-sm preset-filled-primary-500"
-                  disabled={agentsStore.isInFlight(id)}
-                  onclick={onSaveRole}>{common_save()}</button
-                >
-                <button
-                  class="btn btn-sm preset-outlined-surface-500"
-                  onclick={() => (editingRole = false)}>×</button
-                >
-              </div>
-            {:else}
-              <button
-                type="button"
-                class="cursor-pointer hover:opacity-80 text-left bg-transparent border-none p-0"
-                onclick={() => {
-                  roleDraft = agent.role;
-                  editingRole = true;
-                }}
-              >
-                {agent.role || "—"}
-              </button>
-            {/if}
+            <span>{agent.role || "—"}</span>
           </div>
           <div>
             <span class="opacity-60 text-xs uppercase tracking-wide block"
@@ -199,13 +272,15 @@
             <span class="opacity-60 text-xs uppercase tracking-wide block"
               >{manage_agent_created_by()}</span
             >
-            <span class="font-mono text-xs">{agent.created_by ?? "root"}</span>
+            <span class="font-mono text-xs" title={agent.created_by ?? "root"}>{agent.created_by ?? "root"}</span>
           </div>
           <div>
             <span class="opacity-60 text-xs uppercase tracking-wide block"
               >{manage_agent_workspace()}</span
             >
-            <span class="font-mono text-xs truncate block"
+            <span
+              class="font-mono text-xs truncate block"
+              title={agent.workspace_root}
               >{agent.workspace_root}</span
             >
           </div>
@@ -214,31 +289,7 @@
           <span class="opacity-60 text-xs uppercase tracking-wide block"
             >{manage_agent_description()}</span
           >
-          {#if editingDesc}
-            <div class="flex gap-1 mt-1">
-              <input class="input flex-1" bind:value={descDraft} />
-              <button
-                class="btn btn-sm preset-filled-primary-500"
-                disabled={agentsStore.isInFlight(id)}
-                onclick={onSaveDesc}>{common_save()}</button
-              >
-              <button
-                class="btn btn-sm preset-outlined-surface-500"
-                onclick={() => (editingDesc = false)}>×</button
-              >
-            </div>
-          {:else}
-            <button
-              type="button"
-              class="cursor-pointer hover:opacity-80 text-sm text-left bg-transparent border-none p-0"
-              onclick={() => {
-                descDraft = agent.description;
-                editingDesc = true;
-              }}
-            >
-              {agent.description || "—"}
-            </button>
-          {/if}
+          <span class="text-sm">{agent.description || "—"}</span>
         </div>
       </section>
     {/if}
@@ -254,8 +305,14 @@
         <BudgetBar
           consumed={cumulativeTokens}
           budget={status.token_budget}
-          label={manage_agent_cumulative_label()}
+          label={manage_agent_context_label()}
         />
+        <p class="text-xs opacity-70">
+          {manage_agent_context_tokens({
+            consumed: formatTokenCount(cumulativeTokens),
+            budget: formatTokenCount(status.token_budget),
+          })}
+        </p>
         <div class="grid grid-cols-2 gap-3 text-sm">
           <div>
             <span class="opacity-60 text-xs">{manage_agent_turns()}</span><span
@@ -303,12 +360,52 @@
 
       {#if status.recent_retries.length > 0}
         <section class="card preset-tonal-surface p-5 space-y-2">
-          <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-            {manage_agent_recent_retries()}
-          </h2>
-          {#each status.recent_retries as r}
-            <div class="text-xs opacity-70">{fmtRetry(r)}</div>
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+              {manage_agent_recent_retries()}
+            </h2>
+            <button
+              type="button"
+              aria-pressed={retryMode === "relative"}
+              title={retryMode === "relative"
+                ? manage_agent_retry_show_absolute()
+                : manage_agent_retry_show_relative()}
+              aria-label={retryMode === "relative"
+                ? manage_agent_retry_show_absolute()
+                : manage_agent_retry_show_relative()}
+              onclick={() =>
+                retryMode = retryMode === "relative" ? "absolute" : "relative"}
+              class="rounded p-1.5 text-surface-500 dark:text-surface-400 hover:bg-surface-200-800 transition"
+            >
+              {#if retryMode === "relative"}
+                <CalendarClock class="size-4" />
+              {:else}
+                <Clock class="size-4" />
+              {/if}
+            </button>
+          </div>
+          {#each (showAllRetries
+              ? status.recent_retries
+              : status.recent_retries.slice(0, 3)) as r}
+            <div class="text-xs opacity-70">
+              {retryMode === "relative"
+                ? fmtRelativeRetry(r)
+                : fmtAbsoluteRetry(r)}
+            </div>
           {/each}
+          {#if status.recent_retries.length > 3}
+            <button
+              type="button"
+              onclick={() => (showAllRetries = !showAllRetries)}
+              class="text-xs opacity-60 hover:opacity-100 transition"
+            >
+              {showAllRetries
+                ? manage_agent_retry_show_less()
+                : manage_agent_retry_show_all({
+                  count: status.recent_retries.length,
+                })}
+            </button>
+          {/if}
         </section>
       {/if}
     {/if}
@@ -329,11 +426,6 @@
           onclick={() => agentsStore.toggleDuty(agent.id).catch(() => {})}
           >{manage_agent_toggle_duty()}</button
         >
-        <button
-          class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
-          onclick={() => (showRemoveDialog = true)}
-          >{manage_agent_remove_agent()}</button
-        >
       </section>
     {/if}
   </div>
@@ -349,3 +441,11 @@
   onConfirm={onConfirmRemove}
   onCancel={() => (showRemoveDialog = false)}
 />
+  <AgentIdentityDialog
+    open={showIdentityDialog}
+    role={agent?.role ?? ""}
+    description={agent?.description ?? ""}
+    busy={agentsStore.isInFlight(id)}
+    onSave={onSaveIdentity}
+    onCancel={() => (showIdentityDialog = false)}
+  />
