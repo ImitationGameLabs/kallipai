@@ -120,21 +120,14 @@
 
 <div class="h-full overflow-y-auto">
   <div class="p-6 max-w-2xl space-y-6">
-    <div class="flex items-center gap-3">
-      <a
-        href={`${basePath}/agents`}
-        class="btn btn-sm preset-outlined-surface-500">{manage_agent_back()}</a
-      >
-      <h1 class="text-xl font-semibold font-mono truncate">{id}</h1>
-    </div>
-
-    {#if statusError}
-      <p class="text-error-500 dark:text-error-400 text-sm">{statusError}</p>
-    {/if}
-
-    {#if agent}
-      <section class="card preset-tonal-surface p-5 space-y-3">
-        <div class="flex items-center gap-2">
+    <div>
+      <div class="flex items-center gap-3">
+        <a
+          href={`${basePath}/agents`}
+          class="btn btn-sm preset-outlined-surface-500">{manage_agent_back()}</a
+        >
+        {#if agent}
+          <h1 class="text-xl font-semibold truncate min-w-0">{agent.role || "—"}</h1>
           <StateDot state={agent.state} />
           <span class="font-medium"
             >{agent.state === "idle"
@@ -146,7 +139,21 @@
           {#if agent.activity}
             <span class="opacity-60 text-sm">· {agent.activity}</span>
           {/if}
-        </div>
+        {:else}
+          <h1 class="text-xl font-semibold font-mono truncate min-w-0">{id}</h1>
+        {/if}
+      </div>
+      {#if agent}
+        <p class="font-mono text-xs opacity-60 break-all mt-1 select-text">{id}</p>
+      {/if}
+    </div>
+
+    {#if statusError}
+      <p class="text-error-500 dark:text-error-400 text-sm">{statusError}</p>
+    {/if}
+
+    {#if agent}
+      <section class="card preset-tonal-surface p-5 space-y-3">
         <div class="grid grid-cols-2 gap-3 text-sm">
           <div>
             <span class="opacity-60 text-xs uppercase tracking-wide block"
