@@ -26,6 +26,7 @@
   "tagma_status_waiting": "waiting…",
   "tagma_status_more": "+{count} more",
   "tagma_status_idle_hidden": "{count} idle hidden",
+  "tagma_status_layout_toggle": "Toggle status layout (top bar / right sidebar)",
   "tagma_status_collapse": "collapse",
   "tagma_rooms_title": "{name} rooms",
   "tagma_rooms_desc": "Rooms this tagma has joined. You can remove it from any of them, even a room you are not a member of.",

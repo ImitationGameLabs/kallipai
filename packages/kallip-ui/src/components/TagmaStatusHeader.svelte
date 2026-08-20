@@ -20,10 +20,10 @@
   // 400-600 keeps the seam legible in both modes (300-700 dips to ~4
   // ΔL oklab on dark); Skeleton's -contrast tokens are text-on-fill
   // tools, not this panel-on-page shade, so the pairing stays numeric.
-  // The sidebar experiment placement reuses 200-800 by the same chrome
-  // precedent, but its neighbour comparison changes (a panel on the page
-  // rather than a bar beside the navigation), so the tone there is
-  // provisional pending operator feedback.
+  // The sidebar placement reuses 200-800 by the same chrome
+  // precedent; its neighbour comparison differs from the bar's (a panel
+  // on the page beside the transcript, not a bar beside the navigation),
+  // so the shared tone is what ties the two forms to one area.
   //
   // Root state lives in the agent rows below -- its former bar segment
   // duplicated the root row (operator feedback). Pure/
@@ -34,11 +34,10 @@
   // keeps the bar's height stable until the first tick (<= STATUS_INTERVAL,
   // ~2s).
   //
-  // TEMP layout experiment (operator-directed): `sideLayout` renders the
-  // same status area as a right sidebar (aside) beside the transcript
-  // instead of the top bar, gated to lg+ by the page (matchMedia); a
-  // review toggle in the area's corner swaps placements at runtime. The
-  // losing placement is deleted with the toggle once the operator picks.
+  // `sideLayout` renders the same status area as a right sidebar (aside)
+  // beside the transcript instead of the top bar, gated to lg+ by the
+  // page (matchMedia); a toggle in the area's corner swaps placements at
+  // runtime, and the page persists the user's choice across reloads.
   //
   // Below the bar, inside the same header element, the agent-rows
   // section (TagmaAgentRows) extends the same tone: one line per agent,
@@ -54,6 +53,7 @@
     tagma_status_active_total,
     tagma_status_aria,
     tagma_status_budget,
+    tagma_status_layout_toggle,
     tagma_status_subagents,
     tagma_status_waiting,
   } from "../paraglide/messages.js";
@@ -71,10 +71,10 @@
       rootRow: StatusCardRow | null;
       subRows: readonly StatusCardRow[];
     };
-    /** TEMP layout experiment: render as a right sidebar panel instead
-     *  of the top bar (the page gates this to lg+). */
+    /** Render as a right sidebar panel instead of the top bar (the page
+     *  gates this to lg+). */
     sideLayout?: boolean;
-    /** Flips the experiment's wanted placement (state owned by the page). */
+    /** Flips the wanted placement (state owned and persisted by the page). */
     onToggleSide?: () => void;
   } = $props();
 
@@ -113,9 +113,9 @@
 {/snippet}
 
 {#snippet layoutToggle()}
-  <!-- TEMP review toggle (operator-directed layout experiment): swaps the
-       status area between top bar and right sidebar. The icon shows the
-       state a click would move TO, derived from the EFFECTIVE placement --
+  <!-- Layout toggle: swaps the status area between top bar and right
+       sidebar (the page persists the choice). The icon shows the state
+       a click would move TO, derived from the EFFECTIVE placement --
        below lg the sidebar never applies, so a dead click must not flip
        the icon -- and aria-pressed carries the current state. In the top
        bar it is absolutely positioned on the bar's right edge so the
@@ -127,8 +127,8 @@
     class="size-7 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0 {sideLayout
       ? ''
       : 'absolute right-2 top-1/2 -translate-y-1/2'}"
-    title="review: toggle status layout (top bar / right sidebar)"
-    aria-label="review: toggle status layout (top bar / right sidebar)"
+    title={tagma_status_layout_toggle()}
+    aria-label={tagma_status_layout_toggle()}
     aria-pressed={sideLayout}
   >
     {#if sideLayout}

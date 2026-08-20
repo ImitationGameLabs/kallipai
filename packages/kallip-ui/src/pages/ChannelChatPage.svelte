@@ -56,16 +56,25 @@
   );
   bindDraft(composer, () => draftKey);
 
-  // TEMP layout experiment (operator-directed): runtime switch between the
-  // status area as a top bar (current design) and a right sidebar, so the
-  // operator can compare both on the live UI. The WANTED placement lives
-  // here (session-level, not persisted, default top); the EFFECTIVE
-  // placement additionally requires lg+ (64rem -- Tailwind's default lg,
-  // the project sets no custom screens), because the sidebar needs desktop
+  // Status-area placement: the user's chosen form of the status area --
+  // top bar (default) or right sidebar -- persisted across reloads via
+  // localStorage ("statusLayout": "side"|"top"). The EFFECTIVE placement
+  // additionally requires lg+ (64rem -- Tailwind's default lg, the
+  // project sets no custom screens), because the sidebar needs desktop
   // width. Below lg the page stays on the top bar regardless of the
   // toggle; the matchMedia listener re-evaluates on resizes and its
   // removal in the $effect cleanup prevents a leak on unmount.
-  let sideWanted = $state(false);
+  // Storage may be blocked (private mode / cookies denied): the choice
+  // then defaults to the top bar, and toggling simply does not persist
+  // (the LightSwitch storage guard).
+  function readStoredSide(): boolean {
+    try {
+      return localStorage.getItem("statusLayout") === "side";
+    } catch {
+      return false;
+    }
+  }
+  let sideWanted = $state(readStoredSide());
   const lgQuery = matchMedia("(min-width: 64rem)");
   // Seed from the query's current state: a "change" event only fires on
   // transitions, never for the state at subscribe time.
@@ -142,7 +151,14 @@
         subRows: statusCardStore.subRows,
       }}
       {sideLayout}
-      onToggleSide={() => (sideWanted = !sideWanted)}
+      onToggleSide={() => {
+        sideWanted = !sideWanted;
+        try {
+          localStorage.setItem("statusLayout", sideWanted ? "side" : "top");
+        } catch {
+          /* storage blocked: the choice lives for this session only */
+        }
+      }}
     />
     <!-- The wrapper gives the transcript a flex child whose width can be
          zeroed (min-w-0) in the sidebar state; in the top-bar state it is

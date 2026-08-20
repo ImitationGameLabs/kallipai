@@ -8,8 +8,8 @@
   // root sticky so the root agent stays in view. Purely presentational:
   // the store (and its debounced row identity) lives in the page.
   //
-  // The `narrow` variant renders inside the sidebar experiment panel
-  // (TagmaStatusHeader side placement): rows go two-line so live activity
+  // The `narrow` variant renders inside the sidebar placement
+  // (TagmaStatusHeader side layout): rows go two-line so live activity
   // survives the width, and the section itself becomes the panel's scroll
   // region.
 
@@ -115,8 +115,10 @@
         : ''}"
     >
       {#if rootRow}
-        <!-- sticky bg = header bar tone (200-800); keeps scrolled
-             rows hidden beneath -->
+        <!-- sticky bg = header bar tone (200-800); keeps scrolled rows
+             hidden beneath. Unconditional in the narrow variant:
+             there the section itself is the scroll region, so root must
+             ride it; the top-bar variant scrolls only when expanded. -->
         <div
           class="flex items-center gap-2 py-1.5 {expanded || narrow
             ? 'sticky top-0 bg-surface-200-800'
