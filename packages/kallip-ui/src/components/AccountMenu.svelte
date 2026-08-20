@@ -5,6 +5,7 @@
   import { channelsStore } from "../lib/session/channels.svelte";
   import { roomsStore } from "../lib/session/rooms.svelte";
   import { roomConversationsStore } from "../lib/session/roomConversations.svelte";
+  import { chatDraftsStore } from "../lib/session/drafts.ts";
   import { configStore } from "../lib/config/config.svelte";
   import { connectDirect } from "../lib/session/connect.ts";
   import { navigate } from "../lib/shell/port.ts";
@@ -46,6 +47,10 @@
     roomsStore.reset();
     roomConversationsStore.reset();
     await agoraSession.logout();
+    // Drop any held composer drafts AFTER the logout round-trip: the page
+    // stays mounted (and typable) until the gate redirects, so an earlier
+    // reset would let a keystroke during the await re-persist the draft.
+    chatDraftsStore.reset();
   }
 
   // Offline -> online: detach the tagma and flip the active mode. The agora

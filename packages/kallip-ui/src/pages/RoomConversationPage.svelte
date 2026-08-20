@@ -20,6 +20,8 @@
     createTogglePin,
   } from "../lib/transcript.svelte.ts";
   import { createComposer } from "../lib/composer.svelte.ts";
+  import { bindDraft } from "../lib/session/drafts.svelte.ts";
+  import { roomDraftKey } from "../lib/session/drafts.ts";
   import MemberRow from "../components/rooms/MemberRow.svelte";
   import SenderIdentity from "../components/rooms/SenderIdentity.svelte";
   import { roomConversationsStore } from "../lib/session/roomConversations.svelte.ts";
@@ -121,6 +123,9 @@
     // Busy is not a gate: send renders the optimistic line at once + posts.
     canSubmit: () => conv?.status === "open",
   });
+ 
+  // Draft storage: rooms key on the room id.
+  bindDraft(composer, () => roomDraftKey(roomId));
 
   // The message wire carries the sender's kind + server-resolved stable handle
   // (the lesche derives it fresh at read time via the same resolver the roster

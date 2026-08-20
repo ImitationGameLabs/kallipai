@@ -9,6 +9,9 @@
   import ConversationView from "../components/ConversationView.svelte";
   import TagmaStatusHeader from "../components/TagmaStatusHeader.svelte";
   import { createComposer } from "../lib/composer.svelte.ts";
+  import { bindDraft } from "../lib/session/drafts.svelte.ts";
+  import { RelayConversation } from "../lib/session/conversation.svelte.ts";
+  import { convDraftKey, tagmaDraftKey } from "../lib/session/drafts.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import {
@@ -36,6 +39,19 @@
     // pump, shared by both transports).
     canSubmit: () => conv?.status === "open",
   });
+ 
+  // Draft storage: tagma chats key on the tagma id -- stable across re-KEX
+  // and shared by both entries into this page (the sidebar /chat/t/{tagmaId}
+  // route and a /chat/{conversationId} deep link resolve to the same
+  // conversation). The local chat and the brief window before `conv`
+  // resolves key on the conversation id, so no draft leaks across
+  // conversations.
+  const draftKey = $derived(
+    conv instanceof RelayConversation
+      ? tagmaDraftKey(conv.tagmaId)
+      : convDraftKey(conversationId),
+  );
+  bindDraft(composer, () => draftKey);
 
   const disabled = $derived(!conv || conv.status !== "open");
   const pendingCount = $derived(conv?.pending.length ?? 0);
