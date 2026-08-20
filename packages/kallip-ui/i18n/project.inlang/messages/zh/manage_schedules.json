@@ -29,5 +29,20 @@
   "manage_schedules_timezone": "时区（可选）",
   "manage_schedules_cron_error": "每个 cron 字段必须恰好 5 个部分",
   "manage_schedules_delete_title": "删除日程",
-  "manage_schedules_delete_desc": "这将永久删除该日程。此操作不可撤销。"
+  "manage_schedules_delete_desc": "这将永久删除该日程。此操作不可撤销。",
+  "manage_schedules_days_daily": "每天",
+  "manage_schedules_days_weekdays": "工作日",
+  "manage_schedules_days_weekend": "周末",
+  "manage_schedules_dow_0": "周日",
+  "manage_schedules_dow_1": "周一",
+  "manage_schedules_dow_2": "周二",
+  "manage_schedules_dow_3": "周三",
+  "manage_schedules_dow_4": "周四",
+  "manage_schedules_dow_5": "周五",
+  "manage_schedules_dow_6": "周六",
+  "manage_schedules_days_list": "{days}",
+  "manage_schedules_days_sep": "、",
+  "manage_schedules_summary_days_time": "{days} {range} (UTC)",
+  "manage_schedules_summary_split": "{startDays} {start} – {endDays} {end} (UTC)",
+  "manage_schedules_next_day": "至次日 {time}"
 }

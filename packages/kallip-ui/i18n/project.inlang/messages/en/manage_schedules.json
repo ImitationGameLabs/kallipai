@@ -29,5 +29,20 @@
   "manage_schedules_timezone": "Timezone (optional)",
   "manage_schedules_cron_error": "Each cron field must have exactly 5 tokens",
   "manage_schedules_delete_title": "Delete Schedule",
-  "manage_schedules_delete_desc": "This will permanently delete the work schedule. This cannot be undone."
+  "manage_schedules_delete_desc": "This will permanently delete the work schedule. This cannot be undone.",
+  "manage_schedules_days_daily": "every day",
+  "manage_schedules_days_weekdays": "weekdays",
+  "manage_schedules_days_weekend": "weekends",
+  "manage_schedules_dow_0": "Sun",
+  "manage_schedules_dow_1": "Mon",
+  "manage_schedules_dow_2": "Tue",
+  "manage_schedules_dow_3": "Wed",
+  "manage_schedules_dow_4": "Thu",
+  "manage_schedules_dow_5": "Fri",
+  "manage_schedules_dow_6": "Sat",
+  "manage_schedules_days_list": "{days}",
+  "manage_schedules_days_sep": ", ",
+  "manage_schedules_summary_days_time": "{days} {range} (UTC)",
+  "manage_schedules_summary_split": "{startDays} {start} – {endDays} {end} (UTC)",
+  "manage_schedules_next_day": "next day {time}"
 }
