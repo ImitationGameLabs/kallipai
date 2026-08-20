@@ -96,7 +96,7 @@ pub(crate) async fn ctx_from_source(
     let tier = Tier { profiles };
     let registry = Arc::new(ProfileRegistry::new(vec![tier.clone()], source).unwrap());
     let snapshot = Arc::new(std::sync::Mutex::new(ProfileSnapshot::default()));
-    let failover = FailoverState::new(tier, registry, Some("sys".into()), snapshot);
+    let failover = FailoverState::new(tier, 0, registry, Some("sys".into()), snapshot);
     let client = failover
         .build_client(failover.current_profile())
         .expect("active profile is buildable");

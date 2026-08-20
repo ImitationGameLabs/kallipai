@@ -44,16 +44,24 @@ pub struct FailoverState {
     /// [`reset_and_rebuild`](Self::reset_and_rebuild)) and read by the tagma through its own
     /// `Arc` handle for status surfaces. The runtime never reads it outside tests.
     snapshot: Arc<Mutex<ProfileSnapshot>>,
+    /// Positional index (0-based) of `tier` in the registry that resolved it — carried so
+    /// the snapshot can surface "tier N". `new`/`reset_and_rebuild` establish it; within-tier
+    /// failover (`advance_to`) never changes it.
+    tier_index: usize,
 }
 
 /// Pending profile-reset payload: the tagma's apply handler writes this into a
 /// shared cell on each live agent; the agent task drains it at the top of
 /// [`crate::agent_task::run_and_report`] and rebuilds its [`FailoverState`]
 /// against the new registry. Carries the re-derived [`Tier`] (selected by the
-/// agent's depth from the new registry) and the new [`ProfileRegistry`] Arc.
+/// agent's depth from the new registry, with its positional index for the snapshot)
+/// and the new [`ProfileRegistry`] Arc.
 #[derive(Clone)]
 pub struct ProfileReset {
     pub tier: Tier,
+    /// Positional index of `tier` in the new registry (resolved by the apply handler
+    /// alongside the tier, same clamp rule).
+    pub tier_index: usize,
     pub registry: Arc<ProfileRegistry>,
 }
 
@@ -64,18 +72,20 @@ impl FailoverState {
     /// uses — so the cell never shows a placeholder once the agent is observable.
     pub fn new(
         tier: Tier,
+        tier_index: usize,
         registry: Arc<ProfileRegistry>,
         system_prompt: Option<String>,
         snapshot: Arc<Mutex<ProfileSnapshot>>,
     ) -> Self {
         let state = Self {
             tier,
+            tier_index,
             registry,
             system_prompt,
             profile_idx: 0,
             snapshot,
         };
-        state.write_snapshot(state.tier.active_profile());
+        state.write_snapshot(state.tier_index, state.tier.active_profile());
         state
     }
 
@@ -131,9 +141,11 @@ impl FailoverState {
     /// Mirror `profile`'s identity into the shared cell. Private — only the active-profile
     /// writers call it. Poison-tolerant (`into_inner`): the store is a single assignment,
     /// so a poisoned lock (a panic while holding the cell) discards nothing.
-    fn write_snapshot(&self, profile: &Profile) {
+    fn write_snapshot(&self, tier_index: usize, profile: &Profile) {
         *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = ProfileSnapshot {
+            tier_index,
             profile_id: profile.id.clone(),
+            provider: profile.endpoint.clone(),
             model: profile.model.clone(),
         };
     }
@@ -149,7 +161,7 @@ impl FailoverState {
             self.profile_idx
         );
         self.profile_idx = idx;
-        self.write_snapshot(&self.tier.profiles[idx]);
+        self.write_snapshot(self.tier_index, &self.tier.profiles[idx]);
     }
     /// Rebuild this failover state against a new registry and tier (used by the
     /// online profile-apply path). Builds the client for the new tier's active
@@ -164,25 +176,32 @@ impl FailoverState {
     pub(crate) fn reset_and_rebuild(
         &mut self,
         tier: Tier,
+        tier_index: usize,
         registry: Arc<ProfileRegistry>,
     ) -> Result<ChatClient> {
         let profile = tier.active_profile();
         let client = registry.build_client(profile, self.system_prompt.clone())?;
         self.tier = tier;
+        self.tier_index = tier_index;
         self.registry = registry;
         self.profile_idx = 0;
-        self.write_snapshot(self.tier.active_profile());
+        self.write_snapshot(self.tier_index, self.tier.active_profile());
         Ok(client)
     }
 }
 /// The active profile's identity, mirrored into [`FailoverState`]'s shared cell for the
-/// tagma's status surfaces: the registry profile id plus the concrete model string sent
-/// to the backend. Lets an operator see which model the client is actually using, which
+/// tagma's status surfaces: the tier's positional index, the registry profile id, the
+/// provider (endpoint) id it connects through, and the concrete model string sent to the
+/// backend. Lets an operator see which model the client is actually using, which
 /// differs from the spawn-time active after a within-tier failover advance or an online
 /// profile apply.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfileSnapshot {
+    /// Positional tier index (0-based in the registry; display layers add 1).
+    pub tier_index: usize,
     pub profile_id: String,
+    /// The endpoint (provider) id this profile connects through.
+    pub provider: String,
     pub model: String,
 }
 

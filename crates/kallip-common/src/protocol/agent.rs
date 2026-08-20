@@ -266,14 +266,18 @@ pub struct UpdateActivityRequest {
     pub activity: String,
 }
 
-/// The model profile an agent's client is currently using: the registry profile
-/// id plus the concrete model string sent to the backend. This is the *runtime*
-/// active profile — it drifts from the spawn-time active after a within-tier
-/// failover advance or an online profile apply, which is exactly when an
-/// operator needs to see it.
+/// The model profile an agent's client is currently using: the tier's positional
+/// index, the registry profile id, the provider (endpoint) id, and the concrete model
+/// string sent to the backend. This is the *runtime* active profile — it drifts from
+/// the spawn-time active after a within-tier failover advance or an online profile
+/// apply, which is exactly when an operator needs to see it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveProfile {
+    /// Positional tier index in the registry (0-based; display layers add 1).
+    pub tier_index: usize,
     pub profile_id: String,
+    /// The endpoint (provider) id this profile connects through.
+    pub provider: String,
     /// For env-configured single-profile agents this is the raw
     /// `KALLIP_LLM_MODEL` value, so an env-only setup still shows a
     /// meaningful model string.

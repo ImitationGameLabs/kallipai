@@ -402,7 +402,10 @@ fn apply_pending_profile_reset(ctx: &mut AgentContext) {
         .take();
     let Some(reset) = reset else { return };
     let new_window = reset.tier.active_profile().max_context_window;
-    match ctx.failover.reset_and_rebuild(reset.tier, reset.registry) {
+    match ctx
+        .failover
+        .reset_and_rebuild(reset.tier, reset.tier_index, reset.registry)
+    {
         Ok(new_client) => {
             ctx.client = new_client;
             if let Err(e) = ctx.config.set_context_window(new_window) {

@@ -251,10 +251,11 @@ pub async fn apply_profiles(
                     return (targets, skipped);
                 };
                 let depth = live.identity.config.permissions.depth();
-                let tier = registry.select_profile(depth).clone();
+                let (tier_index, tier) = registry.select_tier(depth);
                 targets.push((
                     kallip_runtime::ProfileReset {
-                        tier,
+                        tier: tier.clone(),
+                        tier_index,
                         registry: registry.clone(),
                     },
                     live.agent.pending_profile_reset.clone(),
@@ -483,6 +484,9 @@ mod tests {
         let live = entry.as_live().unwrap();
         let cell = live.agent.pending_profile_reset.lock().unwrap();
         assert!(cell.is_some(), "pending_profile_reset should be set");
+        // make_state's bundle is single-tier, so a root agent (depth 0) resolves index 0;
+        // a multi-tier fixture asserting the clamp would be the follow-up if one lands.
+        assert_eq!(cell.as_ref().unwrap().tier_index, 0);
     }
 
     #[tokio::test]

@@ -278,12 +278,11 @@ async fn restore_one(
             "agent depth exceeds tier count; clamping to the lowest tier"
         );
     }
-    let tier = shared_state
-        .profiles
-        .load()
-        .registry
-        .select_profile(depth)
-        .clone();
+    let (tier_index, tier) = {
+        let bundle = shared_state.profiles.load();
+        let (idx, tier) = bundle.registry.select_tier(depth);
+        (idx, tier.clone())
+    };
 
     let store = Arc::new(tokio::sync::Mutex::new(restored.store));
     let approvals = Arc::new(tokio::sync::Mutex::new(restored.approvals));
@@ -333,6 +332,7 @@ async fn restore_one(
         prompt_queue_size: shared_state.prompt_queue_size,
         prompt_channel: None,
         tier,
+        tier_index,
     })
     .await?;
     // Spawn succeeded: the agent owns the workspace lock for its lifetime.

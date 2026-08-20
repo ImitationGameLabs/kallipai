@@ -60,8 +60,23 @@ impl ProfileRegistry {
     /// know whether `depth` was clamped (e.g. to warn) compare `depth` against
     /// [`tiers().len()`](Self::tiers).
     pub fn select_profile(&self, depth: usize) -> &Tier {
-        let idx = depth.min(self.tiers.len() - 1);
-        &self.tiers[idx]
+        &self.tiers[self.tier_index(depth)]
+    }
+
+    /// Same resolution as [`select_profile`](Self::select_profile), but also returns the
+    /// resolved tier's positional index (0-based) so callers that surface "tier N" can
+    /// carry the pair without re-deriving it. The pair is taken atomically at resolution
+    /// time — after a registry swap but before an apply, a live agent still holds its old
+    /// (index, tier) pair, which is what its client is actually using.
+    pub fn select_tier(&self, depth: usize) -> (usize, &Tier) {
+        let idx = self.tier_index(depth);
+        (idx, &self.tiers[idx])
+    }
+
+    /// The clamped tier index for `depth` (the single resolution rule; see
+    /// [`select_profile`](Self::select_profile)).
+    fn tier_index(&self, depth: usize) -> usize {
+        depth.min(self.tiers.len() - 1)
     }
 
     /// Build a [`ChatClient`] for a profile, looking up its provider's backend via the
@@ -160,6 +175,20 @@ mod tests {
             reg.select_profile(9).active_profile().model,
             "deepseek-flash"
         );
+    }
+    #[test]
+    fn select_tier_returns_index_matching_select_profile() {
+        let reg = two_tier_registry();
+        // The pair must agree with select_profile at every clamped depth.
+        for depth in [0, 1, 9] {
+            let (idx, tier) = reg.select_tier(depth);
+            assert_eq!(
+                tier.active_profile().model,
+                reg.select_profile(depth).active_profile().model
+            );
+            let clamped = depth.min(reg.tiers().len() - 1);
+            assert_eq!(idx, clamped);
+        }
     }
 
     #[test]

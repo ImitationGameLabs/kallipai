@@ -259,12 +259,11 @@ pub(crate) async fn enqueue_prompt(
         // Resolve the tier purely by depth (positional tiers) — reactivation re-derives the same
         // way restore does.
         let config = live.identity.config.clone();
-        let tier = state
-            .profiles
-            .load()
-            .registry
-            .select_profile(config.permissions.depth())
-            .clone();
+        let (tier_index, tier) = {
+            let bundle = state.profiles.load();
+            let (idx, tier) = bundle.registry.select_tier(config.permissions.depth());
+            (idx, tier.clone())
+        };
 
         SpawnArgs {
             agent_id: id.clone(),
@@ -289,6 +288,7 @@ pub(crate) async fn enqueue_prompt(
             prompt_queue_size: state.prompt_queue_size,
             prompt_channel: Some((live.agent.prompt_tx.clone(), prompt_rx)),
             tier,
+            tier_index,
         }
     }; // Write lock released. Concurrent requests see open channel.
 

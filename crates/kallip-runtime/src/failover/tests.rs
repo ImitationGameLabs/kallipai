@@ -19,7 +19,7 @@ fn two_profile_state() -> (FailoverState, Arc<Mutex<ProfileSnapshot>>) {
     let source = MapSource(HashMap::from([("prov-a".to_string(), ds_backend())]));
     let registry = Arc::new(ProfileRegistry::new(vec![tier.clone()], Arc::new(source)).unwrap());
     let snapshot = Arc::new(Mutex::new(ProfileSnapshot::default()));
-    let state = FailoverState::new(tier, registry, None, snapshot.clone());
+    let state = FailoverState::new(tier, 0, registry, None, snapshot.clone());
     (state, snapshot)
 }
 
@@ -27,7 +27,9 @@ fn two_profile_state() -> (FailoverState, Arc<Mutex<ProfileSnapshot>>) {
 fn new_seeds_snapshot_with_active_profile() {
     let (state, snapshot) = two_profile_state();
     let want = ProfileSnapshot {
+        tier_index: 0,
         profile_id: "p0".into(),
+        provider: "prov-a".into(),
         model: "p0-model".into(),
     };
     assert_eq!(state.profile_snapshot(), want);
@@ -40,7 +42,10 @@ fn advance_to_rewrites_snapshot() {
     let (mut state, snapshot) = two_profile_state();
     state.advance_to(1);
     let want = ProfileSnapshot {
+        // Within-tier advance never changes the tier index.
+        tier_index: 0,
         profile_id: "p1".into(),
+        provider: "prov-a".into(),
         model: "p1-model".into(),
     };
     assert_eq!(state.profile_snapshot(), want);
@@ -56,11 +61,13 @@ fn reset_and_rebuild_rewrites_snapshot_on_success() {
     };
     let source = MapSource(HashMap::from([("prov-a".to_string(), ds_backend())]));
     let registry = Arc::new(ProfileRegistry::new(vec![fresh.clone()], Arc::new(source)).unwrap());
-    state.reset_and_rebuild(fresh, registry).unwrap();
+    state.reset_and_rebuild(fresh, 1, registry).unwrap();
     assert_eq!(
         state.profile_snapshot(),
         ProfileSnapshot {
+            tier_index: 1,
             profile_id: "q0".into(),
+            provider: "prov-a".into(),
             model: "q0-model".into(),
         }
     );
@@ -78,10 +85,12 @@ fn reset_failure_leaves_snapshot_untouched() {
     let registry = Arc::new(
         ProfileRegistry::new(vec![bad.clone()], Arc::new(MapSource(HashMap::new()))).unwrap(),
     );
-    assert!(state.reset_and_rebuild(bad, registry).is_err());
+    assert!(state.reset_and_rebuild(bad, 2, registry).is_err());
     assert_eq!(
         state.profile_snapshot(),
         ProfileSnapshot {
+            tier_index: 0,
+            provider: "prov-a".into(),
             profile_id: "p1".into(),
             model: "p1-model".into(),
         }
