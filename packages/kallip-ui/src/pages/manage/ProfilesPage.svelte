@@ -412,6 +412,7 @@
     else list[parkingDialog.idx] = values;
     profilesStore.draft = replaceParkingProfiles(draft, list);
     parkingDialog.open = false;
+    void refreshParkedLive();
   }
 
   function onParkingRemove() {
