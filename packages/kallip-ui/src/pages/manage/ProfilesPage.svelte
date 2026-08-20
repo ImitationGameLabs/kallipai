@@ -9,6 +9,7 @@
   // accumulates providerReports/profileReports maps keyed by id, because the
   // store's single `probe` field is replaced wholesale on every call.
   import { profilesStore } from "../../lib/manage/profiles.svelte.ts";
+  import { managementBackend } from "../../lib/manage/client.ts";
   import { SvelteMap } from "svelte/reactivity";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
@@ -49,6 +50,8 @@
     manage_profiles_apply,
     manage_profiles_apply_all,
     manage_profiles_apply_desc,
+    manage_profiles_apply_desc_parked,
+    manage_profiles_parking_warn,
     manage_profiles_apply_title,
     manage_profiles_applied_result,
     manage_profiles_discard,
@@ -201,6 +204,7 @@
     profilesStore.reset();
     providerReports.clear();
     profileReports.clear();
+    parkedLive = null;
   }
 
   // --- drag & drop (profile cards between tiers and the parking area) ---
@@ -227,6 +231,7 @@
       const id = draft.parking?.[d.fromIdx]?.id;
       if (id) profileReports.delete(`p:${id}`);
       profilesStore.draft = moveFromParking(draft, d.fromIdx, toTier);
+      void refreshParkedLive();
       return;
     }
     if (d.fromTier !== toTier) {
@@ -250,6 +255,51 @@
     const id = draft.tiers[d.fromTier]?.profiles[d.fromIdx]?.id;
     if (id) clearProfileResult(d.fromTier, id);
     profilesStore.draft = moveToParking(draft, d.fromTier, d.fromIdx);
+    void refreshParkedLive();
+  }
+
+  // --- parked-live warn snapshot (event-driven, advisory) ---
+
+  /** Parked ids some live agent still runs, from the last snapshot.
+   * Null = no snapshot yet (or nothing parked-live); the banner and the
+   * apply-confirm extension both render from it. Refreshed by parking/
+   * unparking mutations, cleared on discard — never polled (a later
+   * always-on variant needs the list endpoint to carry the active profile
+   * id; that is a backend change, not a frontend poll). */
+  let parkedLive = $state<{ agentCount: number; profileIds: string[] } | null>(
+    null,
+  );
+
+  async function refreshParkedLive(): Promise<void> {
+    const draft = profilesStore.draft;
+    const parked = draft?.parking ?? [];
+    if (parked.length === 0) {
+      parkedLive = null;
+      return;
+    }
+    const parkedIds = new Set(parked.map((p) => p.id));
+    try {
+      const { agents } = await managementBackend().listAgents();
+      // Per-agent catch (allSettled): one 409/404 must not void the whole
+      // snapshot — the advisory layer reports what it could see.
+      const statuses = await Promise.allSettled(
+        agents.map((a) => managementBackend().getAgentStatus(a.id)),
+      );
+      let agentCount = 0;
+      const profileIds = new Set<string>();
+      for (const s of statuses) {
+        if (s.status !== "fulfilled") continue;
+        const pid = s.value.profile?.profile_id;
+        if (pid && parkedIds.has(pid)) {
+          agentCount++;
+          profileIds.add(pid);
+        }
+      }
+      parkedLive =
+        agentCount > 0 ? { agentCount, profileIds: [...profileIds] } : null;
+    } catch {
+      // Roster failure: leave the previous snapshot (advisory only).
+    }
   }
 
   // --- dialogs ---
@@ -374,6 +424,7 @@
       );
       if (id) profileReports.delete(`p:${id}`);
     }
+    void refreshParkedLive();
     parkingDialog.open = false;
   }
 
@@ -545,6 +596,17 @@
       >
         ⚠ {manage_profiles_tiers_hazard()}
       </div>
+
+      {#if parkedLive}
+        <div
+          class="card preset-tonal-surface p-3 text-xs opacity-70 border-l-4 border-l-warning-500"
+        >
+          ⚠ {manage_profiles_parking_warn({
+            count: parkedLive.agentCount,
+            ids: parkedLive.profileIds.join(", "),
+          })}
+        </div>
+      {/if}
 
       <!-- Providers: global pool of provider cards -->
       <section class="space-y-3">
@@ -1020,7 +1082,11 @@
   busy={profilesStore.isSaving}
   open={showApplyDialog}
   title={manage_profiles_apply_title()}
-  description={manage_profiles_apply_desc()}
+  description={parkedLive
+    ? `${manage_profiles_apply_desc()} ${manage_profiles_apply_desc_parked({
+        count: parkedLive.agentCount,
+      })}`
+    : manage_profiles_apply_desc()}
   confirmLabel={manage_profiles_apply()}
   tone="primary"
   onConfirm={onApply}
