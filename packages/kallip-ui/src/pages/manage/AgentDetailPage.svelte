@@ -7,6 +7,7 @@
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
   import StateDot from "../../components/manage/StateDot.svelte";
   import BudgetBar from "../../components/manage/BudgetBar.svelte";
+  import CurrentProfileCard from "../../components/manage/CurrentProfileCard.svelte";
   import { getLocale } from "../../paraglide/runtime.js";
 
   import {
@@ -25,7 +26,6 @@
     manage_agent_workspace,
     manage_agent_description,
     manage_agent_context_usage,
-    manage_agent_model,
     manage_agent_cumulative_label,
     manage_agent_turns,
     manage_agent_pinned_items,
@@ -233,18 +233,10 @@
             </button>
           {/if}
         </div>
-        {#if status?.profile}
-          <div class="text-sm">
-            <span class="opacity-60 text-xs uppercase tracking-wide"
-              >{manage_agent_model()}</span
-            >
-            <span class="font-medium ml-2">{status.profile.model}</span>
-            <span class="opacity-60 text-xs font-mono ml-2"
-              >{status.profile.profile_id}</span
-            >
-          </div>
-        {/if}
       </section>
+    {/if}
+    {#if status?.profile}
+      <CurrentProfileCard profile={status.profile} />
     {/if}
 
     {#if status}

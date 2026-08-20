@@ -109,9 +109,17 @@ export interface RetryRecord {
 }
 
 /** Runtime-active model profile (`AgentStatusResponse.profile`): the id of the
- * registry profile in use plus the concrete model string the client sends. */
+ * registry profile in use, its provider endpoint, its tier position, and the
+ * concrete model string the client sends. */
 export interface ActiveProfile {
+  /** Positional tier index in the registry (0-based; UI adds 1). */
+  readonly tier_index: number;
   readonly profile_id: string;
+  /** The endpoint (provider) id this profile connects through. */
+  readonly provider: string;
+  /** For env-configured single-profile agents this is the raw
+   * KALLIP_LLM_MODEL value, so an env-only setup still shows a
+   * meaningful model string. */
   readonly model: string;
 }
 /** `GET /agents/{id}/status` response. token_budget/token_consumed are tagma-wide. */
