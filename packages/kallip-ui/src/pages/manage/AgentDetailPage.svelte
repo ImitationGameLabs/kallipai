@@ -233,15 +233,7 @@
             </button>
           {/if}
         </div>
-      </section>
-    {/if}
-
-    {#if status}
-      <section class="card preset-tonal-surface p-5 space-y-3">
-        <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-          {manage_agent_context_usage()}
-        </h2>
-        {#if status.profile}
+        {#if status?.profile}
           <div class="text-sm">
             <span class="opacity-60 text-xs uppercase tracking-wide"
               >{manage_agent_model()}</span
@@ -252,6 +244,14 @@
             >
           </div>
         {/if}
+      </section>
+    {/if}
+
+    {#if status}
+      <section class="card preset-tonal-surface p-5 space-y-3">
+        <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+          {manage_agent_context_usage()}
+        </h2>
         <BudgetBar
           consumed={cumulativeTokens}
           budget={status.token_budget}
