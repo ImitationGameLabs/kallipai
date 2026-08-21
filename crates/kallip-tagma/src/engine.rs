@@ -255,8 +255,7 @@ async fn interrupt_round(state: &SharedState, id: &AgentId) {
 
 /// The wake prompt's built-in text, sent at every shift start; a
 /// per-schedule custom (when set) is appended after it, never replaces it.
-pub(crate) const DEFAULT_WAKE_PROMPT: &str =
-    "You are on duty — check your inbox for messages received while you were off duty.";
+pub(crate) const DEFAULT_WAKE_PROMPT: &str = "You are on duty — check your inbox for messages received while you were off duty, and resume any work left unfinished at the end of your last shift.";
 
 /// Execute the Start transition: set on-duty, push wake prompt to inbox,
 /// and notify the agent. The agent pulls ALL undelivered direct messages
