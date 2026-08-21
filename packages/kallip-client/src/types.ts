@@ -308,48 +308,55 @@ export interface ProfileProbeResponse {
 
 // Work schedules
 
-/** A work schedule definition. */
+/**
+ * Work-schedule spec: the structured form the UI edits and the evaluator
+ * consumes. All times are UTC. Minute-of-day windows are half-open
+ * [start, end); `end_minute == 1440` is a full-day window, and an end at
+ * or below the start crosses midnight, belonging to the start day.
+ */
+export type WorkScheduleSpec =
+  | {
+      readonly mode: "weekly";
+      /** Bitmask: bit 0 = Monday … bit 6 = Sunday. */
+      readonly days: number;
+      readonly start_minute: number;
+      readonly end_minute: number;
+    }
+  | {
+      readonly mode: "monthly";
+      /** Bitmask: bit 0 = the 1st … bit 30 = the 31st. */
+      readonly days: number;
+      readonly start_minute: number;
+      readonly end_minute: number;
+    }
+  | {
+      readonly mode: "interval";
+      /** Rotation period in hours; the rhythm runs across day boundaries. */
+      readonly every_hours: number;
+      readonly length_min: number;
+      /**
+       * RFC3339, minute-aligned. Re-anchored server-side whenever the
+       * rhythm (every_hours/length_min) changes; unchanged rhythms keep it.
+       */
+      readonly anchor: string;
+    };
+
+/** The tagma's single work schedule. */
 export interface WorkSchedule {
   readonly id: string;
-  readonly name: string;
-  readonly agent_id: string;
-  readonly start_cron: string;
-  readonly end_cron: string;
+  readonly spec: WorkScheduleSpec;
   readonly pre_warn_minutes: number;
   readonly final_warn_minutes: number;
   readonly wake_prompt: string;
   readonly status: "active" | "paused";
-  readonly timezone: string | null;
   readonly created_at: string;
 }
 
-/** `POST /work-schedules` request body. */
-export interface CreateWorkScheduleRequest {
-  readonly name: string;
-  readonly agent_id: string;
-  readonly start_cron: string;
-  readonly end_cron: string;
-  readonly pre_warn_minutes?: number;
-  readonly final_warn_minutes?: number;
-  readonly wake_prompt: string;
-  readonly status?: "active" | "paused";
-  readonly timezone?: string | null;
-}
-
-/** `PUT /work-schedules/{id}` request body (all fields optional). */
-export interface UpdateWorkScheduleRequest {
-  readonly name?: string;
-  readonly start_cron?: string;
-  readonly end_cron?: string;
+/** `PUT /work-schedule` request body; the first PUT creates the schedule. */
+export interface PutWorkScheduleRequest {
+  readonly spec: WorkScheduleSpec;
   readonly pre_warn_minutes?: number;
   readonly final_warn_minutes?: number;
   readonly wake_prompt?: string;
-  readonly status?: "active" | "paused";
-  readonly timezone?: string | null;
-}
-
-/** `GET /work-schedules` query params. */
-export interface ListWorkSchedulesQuery {
-  readonly agent_id?: string;
   readonly status?: "active" | "paused";
 }

@@ -18,21 +18,19 @@ import type {
   AgentStatusResponse,
   BudgetResponse,
   BudgetUpdateRequest,
-  CreateWorkScheduleRequest,
   ListAgentsManagementResponse,
   ListAgentsQuery,
-  ListWorkSchedulesQuery,
   ProfileApplyResponse,
   ProfileConfig,
   ProfileProbeRequest,
   ProfileProbeResponse,
+  PutWorkScheduleRequest,
   UpdateAgentMetadataRequest,
   UpdateDutyRequest,
-  UpdateWorkScheduleRequest,
   WorkSchedule,
 } from "@kallipai/kallip-client";
 
-/** The 15 management methods shared by both backends. */
+/** The 13 management methods shared by both backends. */
 export interface ManagementBackend {
   getBudget(): Promise<BudgetResponse>;
   updateBudget(body: BudgetUpdateRequest): Promise<BudgetResponse>;
@@ -49,13 +47,8 @@ export interface ManagementBackend {
   updateProfiles(body: ProfileConfig): Promise<ProfileConfig>;
   applyProfiles(): Promise<ProfileApplyResponse>;
   probeProfiles(body: ProfileProbeRequest): Promise<ProfileProbeResponse>;
-  listWorkSchedules(query?: ListWorkSchedulesQuery): Promise<WorkSchedule[]>;
-  createWorkSchedule(body: CreateWorkScheduleRequest): Promise<WorkSchedule>;
-  updateWorkSchedule(
-    id: string,
-    body: UpdateWorkScheduleRequest,
-  ): Promise<WorkSchedule>;
-  deleteWorkSchedule(id: string): Promise<void>;
+  getWorkSchedule(): Promise<WorkSchedule | null>;
+  putWorkSchedule(body: PutWorkScheduleRequest): Promise<WorkSchedule>;
 }
 
 // --- OfflineBackend (wraps TagmaClient) ---
@@ -100,17 +93,11 @@ export class OfflineBackend implements ManagementBackend {
   probeProfiles(body: ProfileProbeRequest) {
     return this.client.probeProfiles(body);
   }
-  listWorkSchedules(query?: ListWorkSchedulesQuery) {
-    return this.client.listWorkSchedules(query);
+  getWorkSchedule() {
+    return this.client.getWorkSchedule();
   }
-  createWorkSchedule(body: CreateWorkScheduleRequest) {
-    return this.client.createWorkSchedule(body);
-  }
-  updateWorkSchedule(id: string, body: UpdateWorkScheduleRequest) {
-    return this.client.updateWorkSchedule(id, body);
-  }
-  deleteWorkSchedule(id: string) {
-    return this.client.deleteWorkSchedule(id);
+  putWorkSchedule(body: PutWorkScheduleRequest) {
+    return this.client.putWorkSchedule(body);
   }
 }
 
@@ -130,13 +117,21 @@ function parseError(status: number, body: unknown): Error {
 export class OnlineBackend implements ManagementBackend {
   constructor(private readonly channel: RelayChannel) {}
 
-  private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async req<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
     const result = await this.channel.manage(method, path, body ?? null);
     if (result.status >= 400) throw parseError(result.status, result.body);
     return result.body as T;
   }
 
-  private async reqVoid(method: string, path: string, body?: unknown): Promise<void> {
+  private async reqVoid(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<void> {
     const result = await this.channel.manage(method, path, body ?? null);
     if (result.status >= 400) throw parseError(result.status, result.body);
   }
@@ -181,20 +176,10 @@ export class OnlineBackend implements ManagementBackend {
   probeProfiles(body: ProfileProbeRequest) {
     return this.req<ProfileProbeResponse>("POST", "/profiles/probe", body);
   }
-  listWorkSchedules(query?: ListWorkSchedulesQuery) {
-    const params = new URLSearchParams();
-    if (query?.agent_id) params.set("agent_id", query.agent_id);
-    if (query?.status) params.set("status", query.status);
-    const qs = params.toString();
-    return this.req<WorkSchedule[]>("GET", `/work-schedules${qs ? `?${qs}` : ""}`);
+  getWorkSchedule() {
+    return this.req<WorkSchedule | null>("GET", "/work-schedule");
   }
-  createWorkSchedule(body: CreateWorkScheduleRequest) {
-    return this.req<WorkSchedule>("POST", "/work-schedules", body);
-  }
-  updateWorkSchedule(id: string, body: UpdateWorkScheduleRequest) {
-    return this.req<WorkSchedule>("PUT", `/work-schedules/${id}`, body);
-  }
-  deleteWorkSchedule(id: string) {
-    return this.reqVoid("DELETE", `/work-schedules/${id}`);
+  putWorkSchedule(body: PutWorkScheduleRequest) {
+    return this.req<WorkSchedule>("PUT", "/work-schedule", body);
   }
 }

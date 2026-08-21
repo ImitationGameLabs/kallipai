@@ -1,19 +1,17 @@
-// Schedules store: work schedule CRUD with active/paused toggle.
+// Schedules store: the tagma's single work schedule (GET/PUT /work-schedule).
 
 import type {
-  CreateWorkScheduleRequest,
-  UpdateWorkScheduleRequest,
+  PutWorkScheduleRequest,
   WorkSchedule,
 } from "@kallipai/kallip-client";
 import { type ManagementBackend, managementBackend } from "./client.ts";
-import { SvelteSet } from "svelte/reactivity";
 
 class SchedulesStore {
-  schedules = $state<WorkSchedule[]>([]);
+  schedule = $state<WorkSchedule | null>(null);
   isLoading = $state(false);
   hasLoaded = $state(false);
+  isSaving = $state(false);
   error = $state<string | null>(null);
-  private inFlight = new SvelteSet<string>();
   private _backend: ManagementBackend | null = null;
 
   private get backend(): ManagementBackend {
@@ -23,36 +21,22 @@ class SchedulesStore {
 
   /** Switch backend. Resets all state. */
   switchBackend(backend: ManagementBackend): void {
-    this.schedules = [];
+    this.schedule = null;
     this.error = null;
     this.hasLoaded = false;
-    this.inFlight.clear();
     this.isLoading = false;
+    this.isSaving = false;
     this._backend = backend;
   }
 
-  isInFlight(id: string): boolean {
-    return this.inFlight.has(id);
-  }
-
-  get isCreating(): boolean {
-    return this.inFlight.has("create");
-  }
-
-  get activeCount(): number {
-    return this.schedules.filter((s) => s.status === "active").length;
-  }
-  get pausedCount(): number {
-    return this.schedules.filter((s) => s.status === "paused").length;
-  }
-
   async refresh(force = false): Promise<void> {
-    if (!force && this.inFlight.size > 0) return; // suppress poll during in-flight mutation
+    // Suppress the poll while a mutation is in flight: its response is
+    // the newer truth and would flash a stale row mid-save.
+    if (!force && (this.isLoading || this.isSaving)) return;
     this.isLoading = true;
     this.error = null;
     try {
-      const resp = await this.backend.listWorkSchedules();
-      this.schedules = [...resp];
+      this.schedule = await this.backend.getWorkSchedule();
       this.hasLoaded = true;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
@@ -61,63 +45,19 @@ class SchedulesStore {
     }
   }
 
-  async create(body: CreateWorkScheduleRequest): Promise<WorkSchedule> {
-    this.inFlight.add("create");
+  /** PUT the whole schedule; the response is the new server-side truth. */
+  async save(body: PutWorkScheduleRequest): Promise<WorkSchedule> {
+    this.isSaving = true;
     this.error = null;
     try {
-      const created = await this.backend.createWorkSchedule(body);
-      this.schedules = [...this.schedules, created];
-      return created;
+      const saved = await this.backend.putWorkSchedule(body);
+      this.schedule = saved;
+      return saved;
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
       throw e;
     } finally {
-      this.inFlight.delete("create");
-    }
-  }
-
-  async update(id: string, body: UpdateWorkScheduleRequest): Promise<void> {
-    // Optimistic: apply the change locally.
-    const snapshot = this.schedules;
-    this.inFlight.add(id);
-    if (body.status) {
-      this.schedules = this.schedules.map((s) =>
-        s.id === id ? { ...s, status: body.status! } : s,
-      );
-    }
-    try {
-      const updated = await this.backend.updateWorkSchedule(id, body);
-      this.schedules = this.schedules.map((s) =>
-        s.id === id ? updated : s,
-      );
-    } catch (e) {
-      this.schedules = snapshot;
-      this.error = e instanceof Error ? e.message : String(e);
-      throw e;
-    } finally {
-      this.inFlight.delete(id);
-    }
-  }
-
-  async toggleStatus(id: string): Promise<void> {
-    const schedule = this.schedules.find((s) => s.id === id);
-    if (!schedule) return;
-    const next = schedule.status === "active" ? "paused" : "active";
-    await this.update(id, { status: next });
-  }
-
-  async remove(id: string): Promise<void> {
-    const snapshot = this.schedules;
-    this.inFlight.add(id);
-    this.schedules = this.schedules.filter((s) => s.id !== id);
-    try {
-      await this.backend.deleteWorkSchedule(id);
-    } catch (e) {
-      this.schedules = snapshot;
-      this.error = e instanceof Error ? e.message : String(e);
-      throw e;
-    } finally {
-      this.inFlight.delete(id);
+      this.isSaving = false;
     }
   }
 }

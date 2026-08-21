@@ -6,24 +6,22 @@ import {
 } from "@kallipai/kallip-common";
 import type { AgentId } from "@kallipai/kallip-common";
 import type {
-    AgentStatusResponse,
-    BudgetResponse,
-    BudgetUpdateRequest,
-    CreateWorkScheduleRequest,
-    ExternalHistoryResponse,
-    ListAgentsManagementResponse,
-    ListAgentsQuery,
-    ListWorkSchedulesQuery,
-    MessageResponse,
-    ProfileApplyResponse,
-    ProfileConfig,
-    ProfileProbeRequest,
-    ProfileProbeResponse,
-    UpdateAgentMetadataRequest,
-    UpdateDutyRequest,
-    UpdateWorkScheduleRequest,
-    WireAgentSummary,
-    WorkSchedule,
+  AgentStatusResponse,
+  BudgetResponse,
+  BudgetUpdateRequest,
+  ExternalHistoryResponse,
+  ListAgentsManagementResponse,
+  ListAgentsQuery,
+  MessageResponse,
+  ProfileApplyResponse,
+  ProfileConfig,
+  ProfileProbeRequest,
+  ProfileProbeResponse,
+  PutWorkScheduleRequest,
+  UpdateAgentMetadataRequest,
+  UpdateDutyRequest,
+  WireAgentSummary,
+  WorkSchedule,
 } from "./types.ts";
 
 export interface TagmaClientOptions {
@@ -168,7 +166,9 @@ export class TagmaClient {
     const params = new URLSearchParams();
     if (query?.created_by) params.set("created_by", query.created_by);
     const qs = params.toString();
-    return this.json<ListAgentsManagementResponse>(`/agents${qs ? `?${qs}` : ""}`);
+    return this.json<ListAgentsManagementResponse>(
+      `/agents${qs ? `?${qs}` : ""}`,
+    );
   }
 
   /** GET /agents/{id}/status — agent context usage, retries, tagma-wide budget. */
@@ -178,12 +178,16 @@ export class TagmaClient {
 
   /** POST /agents/{id}/interrupt — cancel the agent's current round. */
   interruptAgent(id: string): Promise<void> {
-    return this.request(`/agents/${id}/interrupt`, { method: "POST" }).then(() => undefined);
+    return this.request(`/agents/${id}/interrupt`, { method: "POST" }).then(
+      () => undefined,
+    );
   }
 
   /** DELETE /agents/{id} — remove an agent (must be idle, no subagents). */
   removeAgent(id: string): Promise<void> {
-    return this.request(`/agents/${id}`, { method: "DELETE" }).then(() => undefined);
+    return this.request(`/agents/${id}`, { method: "DELETE" }).then(
+      () => undefined,
+    );
   }
 
   /** PUT /agents/{id}/duty — set on-duty/off-duty (operator-only). */
@@ -195,7 +199,10 @@ export class TagmaClient {
   }
 
   /** PUT /agents/{id}/metadata — update role and/or description. */
-  updateAgentMetadata(id: string, body: UpdateAgentMetadataRequest): Promise<void> {
+  updateAgentMetadata(
+    id: string,
+    body: UpdateAgentMetadataRequest,
+  ): Promise<void> {
     return this.json(`/agents/${id}/metadata`, {
       method: "PUT",
       body: JSON.stringify(body),
@@ -219,7 +226,9 @@ export class TagmaClient {
 
   /** POST /profiles/apply — push current registry to all live agents (operator-only). */
   applyProfiles(): Promise<ProfileApplyResponse> {
-    return this.json<ProfileApplyResponse>("/profiles/apply", { method: "POST" });
+    return this.json<ProfileApplyResponse>("/profiles/apply", {
+      method: "POST",
+    });
   }
 
   /** POST /profiles/probe — dry-run validation of a (draft) config (operator-only). */
@@ -232,38 +241,16 @@ export class TagmaClient {
 
   // --- management: work schedules ---
 
-  /** GET /work-schedules — list schedules with optional filters (operator-only). */
-  listWorkSchedules(query?: ListWorkSchedulesQuery): Promise<WorkSchedule[]> {
-    const params = new URLSearchParams();
-    if (query?.agent_id) params.set("agent_id", query.agent_id);
-    if (query?.status) params.set("status", query.status);
-    const qs = params.toString();
-    return this.json<WorkSchedule[]>(`/work-schedules${qs ? `?${qs}` : ""}`);
+  /** GET /work-schedule — the tagma's schedule, or null when unset (operator-only). */
+  getWorkSchedule(): Promise<WorkSchedule | null> {
+    return this.json<WorkSchedule | null>("/work-schedule");
   }
 
-  /** GET /work-schedules/{id} — fetch a single schedule (operator-only). */
-  getWorkSchedule(id: string): Promise<WorkSchedule> {
-    return this.json<WorkSchedule>(`/work-schedules/${id}`);
-  }
-
-  /** POST /work-schedules — create a new schedule (operator-only). */
-  createWorkSchedule(body: CreateWorkScheduleRequest): Promise<WorkSchedule> {
-    return this.json<WorkSchedule>("/work-schedules", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-  }
-
-  /** PUT /work-schedules/{id} — update fields on a schedule (operator-only). */
-  updateWorkSchedule(id: string, body: UpdateWorkScheduleRequest): Promise<WorkSchedule> {
-    return this.json<WorkSchedule>(`/work-schedules/${id}`, {
+  /** PUT /work-schedule — create or replace the tagma schedule (operator-only). */
+  putWorkSchedule(body: PutWorkScheduleRequest): Promise<WorkSchedule> {
+    return this.json<WorkSchedule>("/work-schedule", {
       method: "PUT",
       body: JSON.stringify(body),
     });
-  }
-
-  /** DELETE /work-schedules/{id} — delete a schedule (operator-only). */
-  deleteWorkSchedule(id: string): Promise<void> {
-    return this.request(`/work-schedules/${id}`, { method: "DELETE" }).then(() => undefined);
   }
 }
