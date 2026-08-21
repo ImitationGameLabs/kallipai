@@ -361,7 +361,9 @@
       mode === "weekly"
         ? {
             mode: "weekly",
-            days: 0b0001_1111,
+            // all seven days: the agent has no weekend (the explicit
+            // "weekdays" preset below covers the Mon-Fri intent)
+            days: 0b0111_1111,
             windows: [{ start_minute: 540, end_minute: 1020 }],
           }
         : mode === "monthly"
