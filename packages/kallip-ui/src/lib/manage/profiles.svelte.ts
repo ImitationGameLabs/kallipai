@@ -174,7 +174,7 @@ class ProfilesStore {
   /** Discard local changes and revert to the last committed config. */
   reset(): void {
     if (this.config) {
-      this.draft = structuredClone(this.config);
+      this.draft = $state.snapshot(this.config);
     }
   }
 
