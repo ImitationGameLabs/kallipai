@@ -308,6 +308,13 @@ export interface ProfileProbeResponse {
 
 // Work schedules
 
+/** One duty window inside a weekly/monthly spec; window semantics
+ * are documented on `WorkScheduleSpec`. */
+export interface WorkScheduleWindow {
+  readonly start_minute: number;
+  readonly end_minute: number;
+}
+
 /**
  * Work-schedule spec: the structured form the UI edits and the evaluator
  * consumes. All times are UTC. Minute-of-day windows are half-open
@@ -319,15 +326,13 @@ export type WorkScheduleSpec =
       readonly mode: "weekly";
       /** Bitmask: bit 0 = Monday … bit 6 = Sunday. */
       readonly days: number;
-      readonly start_minute: number;
-      readonly end_minute: number;
+      readonly windows: readonly WorkScheduleWindow[];
     }
   | {
       readonly mode: "monthly";
       /** Bitmask: bit 0 = the 1st … bit 30 = the 31st. */
       readonly days: number;
-      readonly start_minute: number;
-      readonly end_minute: number;
+      readonly windows: readonly WorkScheduleWindow[];
     }
   | {
       readonly mode: "interval";

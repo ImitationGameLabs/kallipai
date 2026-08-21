@@ -5,6 +5,7 @@
 import { assertEquals } from "@std/assert";
 import {
   DAY_MINUTES,
+  MAX_WINDOWS,
   hhmmToMinute,
   fromFrame,
   localOffsetMinutes,
@@ -16,7 +17,10 @@ import {
   weekdayList,
   windowStatus,
 } from "./workSchedule.ts";
-import type { WorkScheduleSpec } from "@kallipai/kallip-client";
+import type {
+  WorkScheduleSpec,
+  WorkScheduleWindow,
+} from "@kallipai/kallip-client";
 
 const utc = (y: number, mo: number, d: number, h = 0, mi = 0) =>
   new Date(Date.UTC(y, mo - 1, d, h, mi));
@@ -27,19 +31,26 @@ Deno.test("validateSpec: weekly happy path", () => {
   const spec: WorkScheduleSpec = {
     mode: "weekly",
     days: 0b0011_1111,
-    start_minute: 540,
-    end_minute: 1020,
+    windows: [{ start_minute: 540, end_minute: 1020 }],
   };
   assertEquals(validateSpec(spec), null);
 });
 
 Deno.test("validateSpec: empty day mask rejected in both modes", () => {
   assertEquals(
-    validateSpec({ mode: "weekly", days: 0, start_minute: 0, end_minute: 60 }),
+    validateSpec({
+      mode: "weekly",
+      days: 0,
+      windows: [{ start_minute: 0, end_minute: 60 }],
+    }),
     "days_empty",
   );
   assertEquals(
-    validateSpec({ mode: "monthly", days: 0, start_minute: 0, end_minute: 60 }),
+    validateSpec({
+      mode: "monthly",
+      days: 0,
+      windows: [{ start_minute: 0, end_minute: 60 }],
+    }),
     "days_empty",
   );
 });
@@ -49,8 +60,7 @@ Deno.test("validateSpec: weekly mask limited to bits 0-6", () => {
     validateSpec({
       mode: "weekly",
       days: 1 << 7,
-      start_minute: 0,
-      end_minute: 60,
+      windows: [{ start_minute: 0, end_minute: 60 }],
     }),
     "days_range",
   );
@@ -61,8 +71,7 @@ Deno.test("validateSpec: zero window never opens", () => {
     validateSpec({
       mode: "weekly",
       days: 1,
-      start_minute: 600,
-      end_minute: 600,
+      windows: [{ start_minute: 600, end_minute: 600 }],
     }),
     "zero_window",
   );
@@ -73,8 +82,7 @@ Deno.test("validateSpec: end 1440 is a legal full-day window", () => {
     validateSpec({
       mode: "weekly",
       days: 1,
-      start_minute: 0,
-      end_minute: 1440,
+      windows: [{ start_minute: 0, end_minute: 1440 }],
     }),
     null,
   );
@@ -87,8 +95,7 @@ Deno.test("validateSpec: window bounds mirror the backend", () => {
     validateSpec({
       mode: "weekly",
       days: 1,
-      start_minute: 600,
-      end_minute: 0,
+      windows: [{ start_minute: 600, end_minute: 0 }],
     }),
     "minute_range",
   );
@@ -96,8 +103,7 @@ Deno.test("validateSpec: window bounds mirror the backend", () => {
     validateSpec({
       mode: "monthly",
       days: 1,
-      start_minute: 1440,
-      end_minute: 100,
+      windows: [{ start_minute: 1440, end_minute: 100 }],
     }),
     "minute_range",
   );
@@ -186,8 +192,7 @@ Deno.test("weekly inside and half-open boundary semantics", () => {
   const spec: WorkScheduleSpec = {
     mode: "weekly",
     days: 0b0000_0001,
-    start_minute: 540,
-    end_minute: 1020,
+    windows: [{ start_minute: 540, end_minute: 1020 }],
   };
   const st = windowStatus(spec, utc(2026, 8, 10, 12))!;
   assertEquals(st.inside, true);
@@ -204,8 +209,7 @@ Deno.test("weekly overnight window belongs to its start day", () => {
   const spec: WorkScheduleSpec = {
     mode: "weekly",
     days: 0b0000_0001,
-    start_minute: 22 * 60,
-    end_minute: 6 * 60,
+    windows: [{ start_minute: 22 * 60, end_minute: 6 * 60 }],
   };
   const st = windowStatus(spec, utc(2026, 8, 11, 2))!;
   assertEquals(st.inside, true);
@@ -218,8 +222,7 @@ Deno.test("weekly overnight covers the exact midnight boundary", () => {
   const spec: WorkScheduleSpec = {
     mode: "weekly",
     days: 0b0000_0001,
-    start_minute: 22 * 60,
-    end_minute: 6 * 60,
+    windows: [{ start_minute: 22 * 60, end_minute: 6 * 60 }],
   };
   const st = windowStatus(spec, utc(2026, 8, 11, 0))!;
   assertEquals(st.inside, true);
@@ -230,8 +233,7 @@ Deno.test("weekly next start after a far gap", () => {
   const spec: WorkScheduleSpec = {
     mode: "weekly",
     days: 0b0100_0000,
-    start_minute: 600,
-    end_minute: 720,
+    windows: [{ start_minute: 600, end_minute: 720 }],
   };
   const st = windowStatus(spec, utc(2026, 8, 10, 0))!;
   assertEquals(st.inside, false);
@@ -242,8 +244,7 @@ Deno.test("weekly all days means daily", () => {
   const spec: WorkScheduleSpec = {
     mode: "weekly",
     days: 0b0111_1111,
-    start_minute: 540,
-    end_minute: 1020,
+    windows: [{ start_minute: 540, end_minute: 1020 }],
   };
   assertEquals(windowStatus(spec, utc(2026, 8, 15, 10))!.inside, true);
   assertEquals(windowStatus(spec, utc(2026, 8, 16, 10))!.inside, true);
@@ -256,8 +257,7 @@ Deno.test("monthly skips days absent from short months", () => {
   const spec: WorkScheduleSpec = {
     mode: "monthly",
     days: (1 << 29) | (1 << 30),
-    start_minute: 540,
-    end_minute: 1020,
+    windows: [{ start_minute: 540, end_minute: 1020 }],
   };
   const st = windowStatus(spec, utc(2027, 2, 15, 0))!;
   assertEquals(st.inside, false);
@@ -269,8 +269,7 @@ Deno.test("monthly feb 29 leap years", () => {
   const spec: WorkScheduleSpec = {
     mode: "monthly",
     days: 1 << 28,
-    start_minute: 0,
-    end_minute: 60,
+    windows: [{ start_minute: 0, end_minute: 60 }],
   };
   // Feb 2028 has 29 days: fires.
   assertEquals(windowStatus(spec, utc(2028, 2, 29, 0))!.inside, true);
@@ -284,8 +283,7 @@ Deno.test("monthly cross-month overnight window", () => {
   const spec: WorkScheduleSpec = {
     mode: "monthly",
     days: 1 << 30,
-    start_minute: 23 * 60,
-    end_minute: 60,
+    windows: [{ start_minute: 23 * 60, end_minute: 60 }],
   };
   const st = windowStatus(spec, utc(2026, 9, 1, 0, 30))!;
   assertEquals(st.inside, true);
@@ -296,8 +294,7 @@ Deno.test("full-day window via end_minute 1440", () => {
   const spec: WorkScheduleSpec = {
     mode: "weekly",
     days: 1,
-    start_minute: 0,
-    end_minute: DAY_MINUTES,
+    windows: [{ start_minute: 0, end_minute: DAY_MINUTES }],
   };
   assertEquals(windowStatus(spec, utc(2026, 8, 10, 0))!.inside, true);
   assertEquals(windowStatus(spec, utc(2026, 8, 10, 23, 59))!.inside, true);
@@ -309,8 +306,7 @@ Deno.test("adjacent windows merge covering end", () => {
   const spec: WorkScheduleSpec = {
     mode: "weekly",
     days: 0b0111_1111,
-    start_minute: 22 * 60,
-    end_minute: 8 * 60, // 22:00 → 08:00 already spans both
+    windows: [{ start_minute: 22 * 60, end_minute: 8 * 60 }], // overnight spans both
   };
   const st = windowStatus(spec, utc(2026, 8, 11, 5))!;
   assertEquals(st.inside, true);
@@ -402,7 +398,20 @@ function weeklySpec(
   start_minute: number,
   end_minute: number,
 ): WorkScheduleSpec {
-  return { mode: "weekly", days, start_minute, end_minute };
+  return { mode: "weekly", days, windows: [{ start_minute, end_minute }] };
+}
+function multiWindow(
+  days: number,
+  windows: [number, number][],
+): WorkScheduleSpec {
+  return {
+    mode: "weekly",
+    days,
+    windows: windows.map(([start_minute, end_minute]) => ({
+      start_minute,
+      end_minute,
+    })),
+  };
 }
 
 // Window shapes exercised per offset. "regular" stays inside a day,
@@ -424,6 +433,23 @@ function frameShapes(off: number): Array<[string, WorkScheduleSpec]> {
         (seam + 1040) % 1440,
         (seam + 1440) % 1440 || 1440,
       ),
+    ],
+    [
+      "multi",
+      {
+        mode: "weekly",
+        days: 0b0011_1111,
+        windows: [
+          {
+            start_minute: (seam + 540) % 1440,
+            end_minute: (seam + 720) % 1440 || 1440,
+          },
+          {
+            start_minute: (seam + 780) % 1440,
+            end_minute: (seam + 1020) % 1440 || 1440,
+          },
+        ],
+      },
     ],
   ];
 }
@@ -522,8 +548,7 @@ Deno.test("monthly and interval pass through untouched", () => {
   const monthly: WorkScheduleSpec = {
     mode: "monthly",
     days: 1 << 5,
-    start_minute: 600,
-    end_minute: 960,
+    windows: [{ start_minute: 600, end_minute: 960 }],
   };
   const interval: WorkScheduleSpec = {
     mode: "interval",
@@ -549,5 +574,187 @@ Deno.test(
     assertEquals(fromFrame(monday, 480), null);
     // In the UTC frame it stays representable.
     assertEquals(toFrame(monday, 0), monday);
+  },
+);
+
+// --- multi-window (mirror of the spec.rs/eval.rs suites) ---
+
+Deno.test("multiWindow helper builds a windowed spec", () => {
+  const spec = multiWindow(0b1, [
+    [9 * 60, 12 * 60],
+    [13 * 60, 17 * 60],
+  ]);
+  assertEquals(spec, {
+    mode: "weekly",
+    days: 0b1,
+    windows: [
+      { start_minute: 540, end_minute: 720 },
+      { start_minute: 780, end_minute: 1020 },
+    ],
+  });
+});
+
+Deno.test("validateSpec: disjoint same-day windows are legal", () => {
+  assertEquals(
+    validateSpec(
+      multiWindow(0b0011_1111, [
+        [540, 720],
+        [780, 1020],
+      ]),
+    ),
+    null,
+  );
+});
+
+Deno.test("validateSpec: overlapping windows rejected", () => {
+  assertEquals(
+    validateSpec(
+      multiWindow(1, [
+        [540, 720],
+        [780, 1020],
+        [600, 660],
+      ]),
+    ),
+    "windows_overlap",
+  );
+});
+
+Deno.test("validateSpec: absolute overlap rejected in either order", () => {
+  // 22:00..02:00 x 00:00..06:00 as minutes do not intersect, but on
+  // one day they share 00:00..02:00 — both array orders must catch it
+  // (the backend once missed the swapped order).
+  const earlyLate: WorkScheduleWindow[] = [
+    { start_minute: 0, end_minute: 6 * 60 },
+    { start_minute: 22 * 60, end_minute: 2 * 60 },
+  ];
+  assertEquals(
+    validateSpec({ mode: "weekly", days: 1, windows: earlyLate }),
+    "windows_overlap",
+  );
+  assertEquals(
+    validateSpec({
+      mode: "weekly",
+      days: 1,
+      windows: [...earlyLate].reverse(),
+    }),
+    "windows_overlap",
+  );
+});
+
+Deno.test("validateSpec: overnight tail reaching the next day's window", () => {
+  // 00:00..02:00 and 23:00..01:00: neither same-day nor one-direction
+  // next-day overlaps, but the 23:00 window on day d lands inside
+  // day d+1 where 00:00..02:00 lives.
+  assertEquals(
+    validateSpec(
+      multiWindow(1, [
+        [0, 2 * 60],
+        [23 * 60, 1 * 60],
+      ]),
+    ),
+    "windows_overlap",
+  );
+});
+
+Deno.test("validateSpec: empty list and cap mirror the backend", () => {
+  assertEquals(validateSpec(multiWindow(1, [])), "windows_empty");
+  const capped: [number, number][] = Array.from(
+    { length: MAX_WINDOWS + 1 },
+    (_, i) => [i * 90, i * 90 + 60],
+  );
+  assertEquals(validateSpec(multiWindow(1, capped)), "windows_cap");
+});
+
+Deno.test("multi-window day: each window fires on its own span", () => {
+  // Monday 09:00..12:00 + 13:00..17:00.
+  const spec = multiWindow(0b1, [
+    [540, 720],
+    [780, 1020],
+  ]);
+  const mid = windowStatus(spec, utc(2026, 8, 10, 12, 30))!;
+  assertEquals(mid.inside, false);
+  assertEquals(mid.nextStart.getTime(), utc(2026, 8, 10, 13).getTime());
+  assertEquals(mid.nextEnd.getTime(), utc(2026, 8, 10, 17).getTime());
+  const afternoon = windowStatus(spec, utc(2026, 8, 10, 15))!;
+  assertEquals(afternoon.inside, true);
+  assertEquals(afternoon.nextEnd.getTime(), utc(2026, 8, 10, 17).getTime());
+  assertEquals(afternoon.nextStart.getTime(), utc(2026, 8, 17, 9).getTime());
+});
+
+Deno.test(
+  "multi-window next picks the earliest across windows and days",
+  () => {
+    // Monday morning window, Tuesday evening window; ask Sunday.
+    const spec = multiWindow(0b0000_0011, [
+      [540, 600],
+      [1080, 1140],
+    ]);
+    const st = windowStatus(spec, utc(2026, 8, 9, 0))!;
+    assertEquals(st.inside, false);
+    assertEquals(st.nextStart.getTime(), utc(2026, 8, 10, 9).getTime());
+    assertEquals(st.nextEnd.getTime(), utc(2026, 8, 10, 10).getTime());
+  },
+);
+
+Deno.test("multi-window overnight tail covers the next day's start", () => {
+  // Mon+Tue 21:00..01:00 and (via separate days) Tue 00:30 is inside
+  // Monday's tail; the covering end is 01:00.
+  const spec = multiWindow(0b0000_0011, [[21 * 60, 1 * 60]]);
+  const st = windowStatus(spec, utc(2026, 8, 11, 0, 30))!;
+  assertEquals(st.inside, true);
+  assertEquals(st.nextEnd.getTime(), utc(2026, 8, 11, 1).getTime());
+});
+
+Deno.test(
+  "frame pair: mixed-carries are unrepresentable, shared carry shifts",
+  () => {
+    // Both windows cross the +8 seam (both carries = +1): the mask
+    // rotates once and each window's minutes shift independently.
+    const both = multiWindow(0b1, [
+      [16 * 60, 20 * 60],
+      [21 * 60, 23 * 60],
+    ]);
+    assertEquals(toFrame(both, 480), {
+      mode: "weekly",
+      days: 0b0000_0010,
+      windows: [
+        { start_minute: 0, end_minute: 4 * 60 },
+        { start_minute: 5 * 60, end_minute: 7 * 60 },
+      ],
+    });
+    // One window crossing and one staying put cannot share one mask.
+    const mixed = multiWindow(0b1, [
+      [16 * 60, 20 * 60],
+      [1 * 60, 3 * 60],
+    ]);
+    assertEquals(toFrame(mixed, 480), null);
+    assertEquals(fromFrame(mixed, 480), null);
+  },
+);
+
+Deno.test("frame pair: multi-window round trip at every offset", () => {
+  for (const off of OFFS) {
+    const seam = ((off % 1440) + 1440) % 1440;
+    const spec = multiWindow(0b0011_1111, [
+      [(seam + 540) % 1440, (seam + 720) % 1440 || 1440],
+      [(seam + 780) % 1440, (seam + 1020) % 1440 || 1440],
+    ]);
+    const wire = fromFrame(spec, off);
+    if (wire === null) continue; // mixed carries at this seam
+    assertEquals(toFrame(wire, off), spec, `off=${off}`);
+  }
+});
+
+Deno.test(
+  "normalization to always still requires the single-window form",
+  () => {
+    // A full-day window among others is not 24/7: two touching
+    // half-day windows on a full week stay weekly.
+    const spec = multiWindow(0b0111_1111, [
+      [0, 12 * 60],
+      [12 * 60, DAY_MINUTES],
+    ]);
+    const framed = toFrame(spec, 480);
+    assertEquals(framed === null || framed.mode === "weekly", true);
   },
 );

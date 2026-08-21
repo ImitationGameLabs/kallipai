@@ -16,6 +16,7 @@
     fromFrame,
     hhmmToMinute,
     localOffsetMinutes,
+    MAX_WINDOWS,
     minuteToHHMM,
     offsetLabel,
     toFrame,
@@ -27,13 +28,16 @@
     common_save,
     manage_profiles_discard,
     manage_schedules_always_note,
+    manage_schedules_add_window,
     manage_schedules_anchor_note,
     manage_schedules_clock_local,
     manage_schedules_clock_utc,
     manage_schedules_dst_note,
     manage_schedules_end_time,
     manage_schedules_error_days_empty,
+    manage_schedules_error_windows_empty,
     manage_schedules_error_every_hours,
+    manage_schedules_error_overlap,
     manage_schedules_error_generic,
     manage_schedules_error_length_min,
     manage_schedules_final_warn,
@@ -73,6 +77,9 @@
     manage_schedules_warn_order,
     manage_schedules_warnings,
     manage_schedules_weekly_days,
+    manage_schedules_remove_window,
+    manage_schedules_windows_cap,
+    manage_schedules_windows_label,
     manage_schedules_zero_window,
     manage_schedules_dow_1,
     manage_schedules_dow_2,
@@ -131,13 +138,13 @@
   }
 
   // The draft is fully mutable (deep Writable) — it is the editing state,
+  type MutableWindow = { start_minute: number; end_minute: number };
   type MutableSpec =
-    | { mode: "weekly"; days: number; start_minute: number; end_minute: number }
+    | { mode: "weekly"; days: number; windows: readonly MutableWindow[] }
     | {
         mode: "monthly";
         days: number;
-        start_minute: number;
-        end_minute: number;
+        windows: readonly MutableWindow[];
       }
     | {
         mode: "interval";
@@ -319,6 +326,21 @@
       days: draft.spec.days ^ (1 << (day - 1)),
     };
   }
+  function dowLabel(iso: number): string {
+    return iso === 1
+      ? manage_schedules_dow_1()
+      : iso === 2
+        ? manage_schedules_dow_2()
+        : iso === 3
+          ? manage_schedules_dow_3()
+          : iso === 4
+            ? manage_schedules_dow_4()
+            : iso === 5
+              ? manage_schedules_dow_5()
+              : iso === 6
+                ? manage_schedules_dow_6()
+                : manage_schedules_dow_7();
+  }
   function setMode(mode: WorkScheduleSpec["mode"]): void {
     if (!draft) return;
     if (draft.spec.mode === mode) return;
@@ -327,15 +349,13 @@
         ? {
             mode: "weekly",
             days: 0b0001_1111,
-            start_minute: 540,
-            end_minute: 1020,
+            windows: [{ start_minute: 540, end_minute: 1020 }],
           }
         : mode === "monthly"
           ? {
               mode: "monthly",
               days: 1 << 0,
-              start_minute: 540,
-              end_minute: 1020,
+              windows: [{ start_minute: 540, end_minute: 1020 }],
             }
           : mode === "interval"
             ? {
@@ -350,32 +370,37 @@
   const overnight = $derived(
     !!draft &&
       (draft.spec.mode === "weekly" || draft.spec.mode === "monthly") &&
-      draft.spec.end_minute <= draft.spec.start_minute,
+      draft.spec.windows.some((w) => w.end_minute <= w.start_minute),
   );
 
   const presets = [
     {
       id: "weekdays",
       label: () => manage_schedules_preset_weekdays(),
-      apply: () => ({ days: 0b0001_1111, start_minute: 540, end_minute: 1020 }),
+      apply: () => ({
+        days: 0b0001_1111,
+        windows: [{ start_minute: 540, end_minute: 1020 }],
+      }),
     },
     {
       id: "early",
       label: () => manage_schedules_preset_early(),
-      apply: () => ({ days: 0b0001_1111, start_minute: 360, end_minute: 840 }),
+      apply: () => ({
+        days: 0b0001_1111,
+        windows: [{ start_minute: 360, end_minute: 840 }],
+      }),
     },
     {
       id: "night",
       label: () => manage_schedules_preset_night(),
       apply: () => ({
         days: 0b0001_1111,
-        start_minute: 22 * 60,
-        end_minute: 6 * 60,
+        windows: [{ start_minute: 22 * 60, end_minute: 6 * 60 }],
       }),
     },
   ];
   function applyPreset(
-    apply: () => { days: number; start_minute: number; end_minute: number },
+    apply: () => { days: number; windows: MutableWindow[] },
   ): void {
     if (!draft || draft.spec.mode !== "weekly") return;
     draft.spec = { ...draft.spec, ...apply() };
@@ -405,23 +430,54 @@
     if (rootAgent) agentsStore.toggleDuty(rootAgent.id).catch(() => {});
   }
 
-  // Narrowed setters for the day-mask time inputs (the template's
+  // Narrowed setters for the per-window time inputs (the template's
   // spread would distribute over the union and confuse the checker).
-  function setStartMinute(text: string): void {
+  function setWindowStart(i: number, text: string): void {
     const spec = draft?.spec;
     if (!spec || spec.mode === "interval" || spec.mode === "always") return;
     const m = hhmmToMinute(text);
-    if (m !== null) draft!.spec = { ...spec, start_minute: m };
+    if (m !== null) {
+      const windows = spec.windows.map((w, j) =>
+        j === i ? { ...w, start_minute: m } : w,
+      );
+      draft!.spec = { ...spec, windows };
+    }
   }
-  function setEndMinute(text: string): void {
+  function setWindowEnd(i: number, text: string): void {
     const spec = draft?.spec;
     if (!spec || spec.mode === "interval" || spec.mode === "always") return;
     const m = hhmmToMinute(text);
-    if (m !== null) draft!.spec = { ...spec, end_minute: m };
+    if (m !== null) {
+      const windows = spec.windows.map((w, j) =>
+        j === i ? { ...w, end_minute: m } : w,
+      );
+      draft!.spec = { ...spec, windows };
+    }
+  }
+  function removeWindow(i: number): void {
+    const spec = draft?.spec;
+    if (!spec || spec.mode === "interval" || spec.mode === "always") return;
+    if (spec.windows.length <= 1) return;
+    draft!.spec = { ...spec, windows: spec.windows.filter((_, j) => j !== i) };
+  }
+  function addWindow(): void {
+    const spec = draft?.spec;
+    if (!spec || spec.mode === "interval" || spec.mode === "always") return;
+    if (spec.windows.length >= MAX_WINDOWS) return;
+    draft!.spec = {
+      ...spec,
+      windows: [...spec.windows, { start_minute: 540, end_minute: 1020 }],
+    };
   }
 
   function errorText(err: string | null): string {
     switch (err) {
+      case "windows_empty":
+        return manage_schedules_error_windows_empty();
+      case "windows_cap":
+        return manage_schedules_windows_cap();
+      case "windows_overlap":
+        return manage_schedules_error_overlap();
       case "days_empty":
         return manage_schedules_error_days_empty();
       case "every_hours_range":
@@ -608,27 +664,27 @@
                     aria-pressed={(draft.spec.days & (1 << (iso - 1))) !== 0}
                     onclick={() => toggleWeekday(iso)}
                   >
-                    {iso === 1
-                      ? manage_schedules_dow_1()
-                      : iso === 2
-                        ? manage_schedules_dow_2()
-                        : iso === 3
-                          ? manage_schedules_dow_3()
-                          : iso === 4
-                            ? manage_schedules_dow_4()
-                            : iso === 5
-                              ? manage_schedules_dow_5()
-                              : iso === 6
-                                ? manage_schedules_dow_6()
-                                : manage_schedules_dow_7()}
+                    {dowLabel(iso)}
                   </button>
                 {/each}
               </div>
             {:else}
-              <div class="flex flex-wrap gap-1">
+              <!-- day 1 sits under the Mon header: one leading spacer
+                   plus 31 days fills exactly four rows, no tail pad -->
+              <div class="inline-grid grid-cols-8 gap-1">
+                <span class="text-xs opacity-50 text-center" aria-hidden="true"
+                ></span>
+                {#each WEEKDAYS as iso (iso)}
+                  <span
+                    class="text-xs opacity-50 text-center"
+                    aria-hidden="true">{dowLabel(iso)}</span
+                  >
+                {/each}
                 {#each Array.from({ length: 31 }, (_, i) => i + 1) as day (day)}
                   <button
-                    class="chip size-9 {(draft.spec.days & (1 << (day - 1))) !==
+                    class="chip size-9 {day === 1 ? 'col-start-2 ' : ''}{(draft
+                      .spec.days &
+                      (1 << (day - 1))) !==
                     0
                       ? 'preset-filled-primary-500 border border-transparent'
                       : 'preset-outlined-surface-500 hover:preset-filled-surface-500'}"
@@ -645,33 +701,56 @@
             {/if}
           </div>
 
-          <div class="grid grid-cols-2 gap-4">
-            <label class="text-sm space-y-1">
-              <span class="opacity-70">
-                {manage_schedules_start_time({
-                  clock: effUtc ? "UTC" : offsetLabel(utcOffset),
-                })}
-              </span>
-              <input
-                class="input preset-tonal-surface w-full"
-                type="time"
-                value={minuteToHHMM(draft.spec.start_minute)}
-                onchange={(e) => setStartMinute(e.currentTarget.value)}
-              />
-            </label>
-            <label class="text-sm space-y-1">
-              <span class="opacity-70">
-                {manage_schedules_end_time({
-                  clock: effUtc ? "UTC" : offsetLabel(utcOffset),
-                })}
-              </span>
-              <input
-                class="input preset-tonal-surface w-full"
-                type="time"
-                value={minuteToHHMM(draft.spec.end_minute)}
-                onchange={(e) => setEndMinute(e.currentTarget.value)}
-              />
-            </label>
+          <div class="space-y-2">
+            <p class="text-xs opacity-60">
+              {manage_schedules_windows_label()}
+            </p>
+            {#each draft.spec.windows as w, i (i)}
+              <div class="flex items-end gap-2">
+                <label class="text-sm space-y-1 flex-1">
+                  <span class="opacity-70">
+                    {manage_schedules_start_time({
+                      clock: effUtc ? "UTC" : offsetLabel(utcOffset),
+                    })}
+                  </span>
+                  <input
+                    class="input preset-tonal-surface w-full"
+                    type="time"
+                    value={minuteToHHMM(w.start_minute)}
+                    onchange={(e) => setWindowStart(i, e.currentTarget.value)}
+                  />
+                </label>
+                <label class="text-sm space-y-1 flex-1">
+                  <span class="opacity-70">
+                    {manage_schedules_end_time({
+                      clock: effUtc ? "UTC" : offsetLabel(utcOffset),
+                    })}
+                  </span>
+                  <input
+                    class="input preset-tonal-surface w-full"
+                    type="time"
+                    value={minuteToHHMM(w.end_minute)}
+                    onchange={(e) => setWindowEnd(i, e.currentTarget.value)}
+                  />
+                </label>
+                <button
+                  class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+                  disabled={draft.spec.windows.length <= 1}
+                  aria-label={manage_schedules_remove_window()}
+                  title={manage_schedules_remove_window()}
+                  onclick={() => removeWindow(i)}
+                >
+                  ×
+                </button>
+              </div>
+            {/each}
+            <button
+              class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
+              disabled={draft.spec.windows.length >= MAX_WINDOWS}
+              onclick={addWindow}
+            >
+              + {manage_schedules_add_window()}
+            </button>
           </div>
           {#if overnight}
             <p class="text-xs opacity-60">{manage_schedules_overnight()}</p>

@@ -19,11 +19,15 @@
 // window merge, mirror it here — and if this port ever gains behavior
 // authority, replace both suites with a shared JSON fixture.
 
-import type { WorkScheduleSpec } from "@kallipai/kallip-client";
+import type {
+  WorkScheduleSpec,
+  WorkScheduleWindow,
+} from "@kallipai/kallip-client";
 
 export const DAY_MINUTES = 24 * 60;
 export const MAX_LENGTH_MINUTES = 7 * DAY_MINUTES;
 export const MAX_EVERY_HOURS = 23; // product decision; the backend accepts any every_hours >= 1
+export const MAX_WINDOWS = 10; // mirror of spec.rs; the wire rejects more
 
 type DayMaskSpec = Extract<WorkScheduleSpec, { mode: "weekly" | "monthly" }>;
 type IntervalSpec = Extract<WorkScheduleSpec, { mode: "interval" }>;
@@ -35,6 +39,9 @@ export type SpecError =
   | "days_range"
   | "minute_range"
   | "zero_window"
+  | "windows_empty"
+  | "windows_cap"
+  | "windows_overlap"
   | "every_hours_range"
   | "length_min_range";
 
@@ -48,7 +55,7 @@ export function validateSpec(spec: WorkScheduleSpec): SpecError | null {
       if (spec.days === 0) return "days_empty";
       const max = spec.mode === "weekly" ? 0b0111_1111 : 2 ** 31 - 1;
       if (spec.days > max) return "days_range";
-      return validateWindow(spec.start_minute, spec.end_minute);
+      return validateWindows(spec.windows);
     }
     case "interval": {
       if (
@@ -79,6 +86,40 @@ function validateWindow(start: number, end: number): SpecError | null {
   if (!Number.isInteger(end) || end < 1 || end > DAY_MINUTES)
     return "minute_range";
   if (start === end) return "zero_window";
+  return null;
+}
+
+// Mirrors spec.rs validate_windows: at least one window, at most
+// MAX_WINDOWS, each window legal, and no two overlapping on the
+// absolute timeline when laid on a common day — overnight tails
+// included, in BOTH next-day directions (whichever window the pair
+// holds first).
+function validateWindows(
+  windows: readonly WorkScheduleWindow[],
+): SpecError | null {
+  if (windows.length === 0) return "windows_empty";
+  if (windows.length > MAX_WINDOWS) return "windows_cap";
+  for (const w of windows) {
+    const err = validateWindow(w.start_minute, w.end_minute);
+    if (err !== null) return err;
+  }
+  const spans = windows.map((w) => {
+    const s = w.start_minute;
+    const e =
+      w.end_minute <= w.start_minute
+        ? w.end_minute + DAY_MINUTES
+        : w.end_minute;
+    return [s, e] as const;
+  });
+  for (let i = 0; i < spans.length; i++) {
+    for (let j = i + 1; j < spans.length; j++) {
+      const [s1, e1] = spans[i]!;
+      const [s2, e2] = spans[j]!;
+      const overlaps = (off: number) => s1 < e2 - off && s2 - off < e1;
+      if (overlaps(0) || overlaps(-1440) || overlaps(1440))
+        return "windows_overlap";
+    }
+  }
   return null;
 }
 
@@ -143,8 +184,9 @@ export function toFrame(
   if (spec.mode !== "weekly") return spec;
   if (
     spec.days === 0b0111_1111 &&
-    spec.start_minute === 0 &&
-    spec.end_minute === DAY_MINUTES
+    spec.windows.length === 1 &&
+    spec.windows[0]!.start_minute === 0 &&
+    spec.windows[0]!.end_minute === DAY_MINUTES
   ) {
     return { mode: "always" };
   }
@@ -164,17 +206,30 @@ function shiftWeekly(
   spec: Extract<WorkScheduleSpec, { mode: "weekly" }>,
   delta: number,
 ): WorkScheduleSpec | null {
-  const len = windowLength(spec.start_minute, spec.end_minute);
-  const shifted = spec.start_minute + delta;
-  const carry = Math.floor(shifted / DAY_MINUTES); // −1, 0, or +1
-  const start = ((shifted % DAY_MINUTES) + DAY_MINUTES) % DAY_MINUTES;
-  const endRaw = start + len;
-  const end = endRaw % DAY_MINUTES === 0 ? DAY_MINUTES : endRaw % DAY_MINUTES;
-  if (end === start) {
-    // Full-day window not starting at the frame's midnight: the frame
-    // model has no double-day window to express it.
-    return null;
+  // Every window shifts its minutes by delta; the day carry a window
+  // picks up rotates the mask. Windows with DIFFERENT carries cannot
+  // share one mask in the target frame (one day-set would have to
+  // rotate two ways), so the spec is unrepresentable there — the same
+  // null family as the full-day window below.
+  const windows: WorkScheduleWindow[] = [];
+  let carry: number | null = null;
+  for (const w of spec.windows) {
+    const len = windowLength(w.start_minute, w.end_minute);
+    const shifted = w.start_minute + delta;
+    const c = Math.floor(shifted / DAY_MINUTES); // −1, 0, or +1
+    const start = ((shifted % DAY_MINUTES) + DAY_MINUTES) % DAY_MINUTES;
+    const endRaw = start + len;
+    const end = endRaw % DAY_MINUTES === 0 ? DAY_MINUTES : endRaw % DAY_MINUTES;
+    if (end === start) {
+      // Full-day window not starting at the frame's midnight: the
+      // frame model has no double-day window to express it.
+      return null;
+    }
+    if (carry === null) carry = c;
+    else if (carry !== c) return null;
+    windows.push({ start_minute: start, end_minute: end });
   }
+  if (carry === null) carry = 0; // empty list: nothing rotates
   let days = 0;
   for (let bit = 0; bit < 7; bit++) {
     if ((spec.days & (1 << bit)) === 0) continue;
@@ -182,7 +237,7 @@ function shiftWeekly(
     const iso = d.getUTCDay() === 0 ? 7 : d.getUTCDay();
     days |= 1 << (iso - 1);
   }
-  return { mode: "weekly", days, start_minute: start, end_minute: end };
+  return { mode: "weekly", days, windows };
 }
 
 // --- masks ⇄ lists ---
@@ -267,10 +322,6 @@ function evalCalendar(spec: DayMaskSpec, now: Date): WindowStatus | null {
   // and belongs to the start day. Candidate days are scanned from
   // yesterday (its overnight window may still cover now) through a 70-day
   // horizon — the worst legal monthly gap (day 31 only, across February).
-  const overnight = spec.end_minute <= spec.start_minute;
-  const dayLen = overnight
-    ? DAY_MINUTES - spec.start_minute + spec.end_minute
-    : spec.end_minute - spec.start_minute;
   const dayMs = 86_400_000;
   const today = Date.UTC(
     now.getUTCFullYear(),
@@ -284,14 +335,17 @@ function evalCalendar(spec: DayMaskSpec, now: Date): WindowStatus | null {
   for (let offset = -1; offset <= 70; offset++) {
     const dayStart = today + offset * dayMs;
     if (!firesOn(spec, dayStart)) continue;
-    const ws = dayStart + spec.start_minute * 60_000;
-    const we = ws + dayLen * 60_000;
-    if (ws <= t && t < we) {
-      // Overlapping windows merge into one covering end.
-      coveringEnd = Math.max(coveringEnd ?? we, we);
-    } else if (ws > t) {
-      if (nextStart === null || ws < nextStart) nextStart = ws;
-      if (nextEnd === null || we < nextEnd) nextEnd = we;
+    for (const w of spec.windows) {
+      const len = windowLength(w.start_minute, w.end_minute);
+      const ws = dayStart + w.start_minute * 60_000;
+      const we = ws + len * 60_000;
+      if (ws <= t && t < we) {
+        // Overlapping windows merge into one covering end.
+        coveringEnd = Math.max(coveringEnd ?? we, we);
+      } else if (ws > t) {
+        if (nextStart === null || ws < nextStart) nextStart = ws;
+        if (nextEnd === null || we < nextEnd) nextEnd = we;
+      }
     }
   }
   if (coveringEnd !== null && nextStart !== null) {
