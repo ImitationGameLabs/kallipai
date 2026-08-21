@@ -10,6 +10,7 @@
   import { schedulesStore } from "../../lib/manage/schedules.svelte.ts";
   import { agentsStore } from "../../lib/manage/agents.svelte.ts";
   import type { WorkSchedule, WorkScheduleSpec } from "@kallipai/kallip-client";
+  import { TriangleAlert } from "@lucide/svelte";
   import {
     formatClock,
     formatDay,
@@ -562,7 +563,7 @@
             role="switch"
             aria-checked={draft.status === "active"}
             class="btn btn-sm {draft.status === 'active'
-              ? 'preset-filled-primary-500 border border-transparent'
+              ? 'preset-filled-primary-200-800 border border-transparent'
               : 'preset-outlined-surface-500'}"
             onclick={() =>
               (draft!.status =
@@ -588,7 +589,7 @@
         {/if}
         {#if rootOffDuty}
           <button
-            class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
+            class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-200-800"
             onclick={wakeNow}>{manage_schedules_wake_now()}</button
           >
         {/if}
@@ -600,7 +601,7 @@
         <div class="flex gap-1">
           <button
             class="btn btn-sm {effUtc
-              ? 'preset-filled-primary-500'
+              ? 'preset-filled-primary-200-800'
               : 'preset-tonal-surface'}"
             aria-pressed={effUtc}
             disabled={!canShowUtc || draft.spec.mode === "monthly"}
@@ -610,7 +611,7 @@
           </button>
           <button
             class="btn btn-sm {!effUtc
-              ? 'preset-filled-primary-500'
+              ? 'preset-filled-primary-200-800'
               : 'preset-tonal-surface'}"
             aria-pressed={!effUtc}
             disabled={!canShowLocal || draft.spec.mode === "monthly"}
@@ -633,12 +634,12 @@
       <!-- period editor -->
       <section class="card preset-tonal-surface p-4 space-y-4">
         <div class="flex gap-1" role="tablist">
-          {#each [["weekly", manage_schedules_mode_weekly()], ["monthly", manage_schedules_mode_monthly()], ["interval", manage_schedules_mode_interval()], ["always", manage_schedules_preset_allday()]] as [mode, label] (mode)}
+          {#each [["always", manage_schedules_preset_allday()], ["interval", manage_schedules_mode_interval()], ["weekly", manage_schedules_mode_weekly()], ["monthly", manage_schedules_mode_monthly()]] as [mode, label] (mode)}
             <button
               role="tab"
               aria-selected={draft.spec.mode === mode}
               class="btn btn-sm {draft.spec.mode === mode
-                ? 'preset-filled-primary-500'
+                ? 'preset-filled-primary-200-800'
                 : 'preset-tonal-surface'}"
               onclick={() => setMode(mode as WorkScheduleSpec["mode"])}
             >
@@ -659,7 +660,7 @@
                 {#each WEEKDAYS as iso (iso)}
                   <button
                     class="chip {(draft.spec.days & (1 << (iso - 1))) !== 0
-                      ? 'preset-filled-primary-500 border border-transparent'
+                      ? 'preset-filled-primary-200-800 border border-transparent'
                       : 'preset-outlined-surface-500 hover:preset-filled-surface-500'}"
                     aria-pressed={(draft.spec.days & (1 << (iso - 1))) !== 0}
                     onclick={() => toggleWeekday(iso)}
@@ -669,24 +670,12 @@
                 {/each}
               </div>
             {:else}
-              <!-- day 1 sits under the Mon header: one leading spacer
-                   plus 31 days fills exactly four rows, no tail pad -->
-              <div class="inline-grid grid-cols-8 gap-1">
-                <span class="text-xs opacity-50 text-center" aria-hidden="true"
-                ></span>
-                {#each WEEKDAYS as iso (iso)}
-                  <span
-                    class="text-xs opacity-50 text-center"
-                    aria-hidden="true">{dowLabel(iso)}</span
-                  >
-                {/each}
+              <div class="grid mx-auto w-fit grid-cols-7 gap-1">
                 {#each Array.from({ length: 31 }, (_, i) => i + 1) as day (day)}
                   <button
-                    class="chip size-9 {day === 1 ? 'col-start-2 ' : ''}{(draft
-                      .spec.days &
-                      (1 << (day - 1))) !==
+                    class="chip size-9 {(draft.spec.days & (1 << (day - 1))) !==
                     0
-                      ? 'preset-filled-primary-500 border border-transparent'
+                      ? 'preset-filled-primary-200-800 border border-transparent'
                       : 'preset-outlined-surface-500 hover:preset-filled-surface-500'}"
                     aria-pressed={(draft.spec.days & (1 << (day - 1))) !== 0}
                     onclick={() => toggleMonthDay(day)}
@@ -745,7 +734,7 @@
               </div>
             {/each}
             <button
-              class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
+              class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-200-800"
               disabled={draft.spec.windows.length >= MAX_WINDOWS}
               onclick={addWindow}
             >
@@ -818,66 +807,73 @@
           <p class="text-xs opacity-60">{manage_schedules_always_note()}</p>
         {/if}
         {#if specError && specError !== "zero_window"}
-          <p class="text-xs text-error-500 dark:text-error-400">
+          <p
+            class="text-sm text-error-500 dark:text-error-400 flex items-center gap-1"
+          >
+            <TriangleAlert class="size-4.5 shrink-0" aria-hidden="true" />
             {errorText(specError)}
           </p>
         {/if}
       </section>
 
       <!-- warnings + wake prompt -->
-      <section class="card preset-tonal-surface p-4 space-y-4">
-        <div class="grid grid-cols-2 gap-4">
-          <label class="text-sm space-y-1">
-            <span class="opacity-70">{manage_schedules_pre_warn()}</span>
-            <input
-              class="input preset-tonal-surface w-full"
-              type="number"
-              min="1"
-              bind:value={draft.pre_warn_minutes}
-            />
-          </label>
-          <label class="text-sm space-y-1">
-            <span class="opacity-70">{manage_schedules_final_warn()}</span>
-            <input
-              class="input preset-tonal-surface w-full"
-              type="number"
-              min="1"
-              bind:value={draft.final_warn_minutes}
-            />
-          </label>
-        </div>
-        {#if !warnMinutesValid}
-          <p class="text-xs text-error-500 dark:text-error-400">
-            {manage_schedules_warn_order()}
-          </p>
-        {:else if snapshot}
-          <p class="text-xs opacity-50">
-            {manage_schedules_warnings({
-              pre: draft.pre_warn_minutes,
-              final: draft.final_warn_minutes,
-            })}
-          </p>
-        {/if}
+      <!-- always has no shift boundaries, so the warn/wake config below
+           would be dead settings; hide the whole group in that mode -->
+      {#if draft.spec.mode !== "always"}
+        <section class="card preset-tonal-surface p-4 space-y-4">
+          <div class="grid grid-cols-2 gap-4">
+            <label class="text-sm space-y-1">
+              <span class="opacity-70">{manage_schedules_pre_warn()}</span>
+              <input
+                class="input preset-tonal-surface w-full"
+                type="number"
+                min="1"
+                bind:value={draft.pre_warn_minutes}
+              />
+            </label>
+            <label class="text-sm space-y-1">
+              <span class="opacity-70">{manage_schedules_final_warn()}</span>
+              <input
+                class="input preset-tonal-surface w-full"
+                type="number"
+                min="1"
+                bind:value={draft.final_warn_minutes}
+              />
+            </label>
+          </div>
+          {#if !warnMinutesValid}
+            <p class="text-xs text-error-500 dark:text-error-400">
+              {manage_schedules_warn_order()}
+            </p>
+          {:else if snapshot}
+            <p class="text-xs opacity-50">
+              {manage_schedules_warnings({
+                pre: draft.pre_warn_minutes,
+                final: draft.final_warn_minutes,
+              })}
+            </p>
+          {/if}
 
-        <div class="space-y-1">
-          <label class="text-sm opacity-70" for="wake-prompt">
-            {manage_schedules_wake_prompt()}
-          </label>
-          <textarea
-            id="wake-prompt"
-            class="textarea preset-tonal-surface w-full"
-            rows="3"
-            placeholder={manage_schedules_wake_hint()}
-            bind:value={draft.wake_prompt}></textarea>
-        </div>
-      </section>
+          <div class="space-y-1">
+            <label class="text-sm opacity-70" for="wake-prompt">
+              {manage_schedules_wake_prompt()}
+            </label>
+            <textarea
+              id="wake-prompt"
+              class="textarea preset-tonal-surface w-full"
+              rows="3"
+              placeholder={manage_schedules_wake_hint()}
+              bind:value={draft.wake_prompt}></textarea>
+          </div>
+        </section>
+      {/if}
 
       <!-- save bar -->
       {#if dirty}
         <div
-          class="flex items-center gap-3 sticky bottom-0 py-2 bg-surface-100-900 border-t border-surface-200-800"
+          class="flex items-center gap-3 sticky bottom-0 rounded-xl border border-warning-200-800 preset-tonal-warning px-4 py-3"
         >
-          <span class="chip preset-tonal-warning text-xs font-medium">
+          <span class="chip preset-outlined-warning-500 text-xs font-medium">
             <span class="size-2 rounded-full bg-warning-500" aria-hidden="true"
             ></span>
             {manage_schedules_unsaved()}</span
@@ -896,7 +892,7 @@
             {manage_profiles_discard()}
           </button>
           <button
-            class="btn btn-sm preset-filled-primary-500"
+            class="btn btn-sm preset-filled-primary-200-800"
             disabled={!canSave}
             onclick={save}
           >
