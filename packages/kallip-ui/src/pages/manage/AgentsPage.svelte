@@ -14,6 +14,7 @@
     manage_agent_duty_team_offduty,
     manage_agents_details,
     manage_agent_interrupt,
+    manage_agent_wake,
     manage_agent_remove_agent,
     manage_agent_remove_agent_desc,
   } from "../../paraglide/messages.js";
@@ -130,6 +131,14 @@
                 disabled={agentsStore.isInFlight(agent.id)}
                 onclick={() => agentsStore.interrupt(agent.id).catch(() => {})}
                 >{manage_agent_interrupt()}</button
+              >
+            {/if}
+            {#if agent.state === "parked"}
+              <button
+                class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-warning-500"
+                disabled={agentsStore.isInFlight(agent.id)}
+                onclick={() => agentsStore.wake(agent.id).catch(() => {})}
+                >{manage_agent_wake()}</button
               >
             {/if}
             <!-- duty toggle removed from the list: the team-wide override

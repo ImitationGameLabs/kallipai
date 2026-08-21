@@ -345,3 +345,186 @@ async fn duty_toggle_off_then_on() {
     assert!(msg.contains("first"));
     assert!(msg.contains("second"));
 }
+
+// -- inbound recording vs refusal: a refused message must not append a
+// transcript row (the frontend re-sends refusals), an accepted one records
+// exactly one, and an accepted-but-buffered (off-duty) one still records --
+
+use crate::external::ExternalProjector;
+use crate::relay::MessageLimits;
+use kallip_agora_common::ids::{ConversationId, TagmaId};
+use std::sync::Arc;
+use tempfile::TempDir;
+
+/// Install an external projector with a real (tempdir) history store and
+/// subscribe to its frames. Returns the db handle, the frame receiver, and
+/// the tempdir (keep it alive for the test's duration).
+async fn install_projector(
+    state: &crate::state::SharedState,
+) -> (
+    crate::relay::chat_history::Db,
+    tokio::sync::broadcast::Receiver<crate::external::ExternalFrame>,
+    TempDir,
+) {
+    let dir = TempDir::new().unwrap();
+    let db = crate::relay::chat_history::open(&dir.path().join("h.sqlite"))
+        .await
+        .unwrap();
+    let projector = ExternalProjector::new(
+        Arc::downgrade(state),
+        Some(db.clone()),
+        Some(ConversationId::for_tagma(&TagmaId::from("t".to_string()))),
+        Some(TagmaId::from("t".to_string())),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    let rx = projector.subscribe();
+    let _ = state.external.set(projector);
+    (db, rx, dir)
+}
+
+async fn operator_rows(
+    db: &crate::relay::chat_history::Db,
+) -> Vec<crate::relay::chat_history::HistoryRow> {
+    crate::relay::chat_history::read_last_n(db, None, 10)
+        .await
+        .unwrap()
+}
+
+/// A parked refusal appends nothing: no transcript row, no UserMessage
+/// frame — so a client that wakes and re-sends cannot pile up rows.
+#[tokio::test]
+async fn parked_refusal_records_no_history_row() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, mut rx, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    {
+        let mut reg = state.registry.write().await;
+        reg.register_root(root.clone(), RegistryEntry::Live(entry))
+            .unwrap();
+        let live = reg.get(&root).unwrap().as_live().unwrap();
+        live.agent.state.store(
+            crate::state::AgentState::PARKED,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    let err = send_message(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Json(MessageRequest { text: "hi".into() }),
+    )
+    .await
+    .expect_err("parked root rejects ordinary messages");
+    assert_eq!(err.status, 409);
+
+    assert!(
+        operator_rows(&db).await.is_empty(),
+        "a refused message must not append a transcript row"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "a refused message must not publish a UserMessage frame"
+    );
+}
+
+/// Refused attempts leave no rows; the accepted re-send records exactly one
+/// — the exactly-once property the frontend's wake-and-retry relies on.
+#[tokio::test]
+async fn resend_after_refusal_records_single_row() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, mut rx, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    {
+        let mut reg = state.registry.write().await;
+        reg.register_root(root.clone(), RegistryEntry::Live(entry))
+            .unwrap();
+        let live = reg.get(&root).unwrap().as_live().unwrap();
+        live.agent.state.store(
+            crate::state::AgentState::PARKED,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    for _ in 0..2 {
+        let err = send_message(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(root.clone()),
+            Json(MessageRequest { text: "hi".into() }),
+        )
+        .await
+        .expect_err("parked root rejects ordinary messages");
+        assert_eq!(err.status, 409);
+        assert!(operator_rows(&db).await.is_empty());
+    }
+
+    // Un-park (what the wake kick turn does): the next send is accepted.
+    {
+        let reg = state.registry.read().await;
+        let live = reg.get(&root).unwrap().as_live().unwrap();
+        live.agent.state.store(
+            crate::state::AgentState::IDLE,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    let resp = send_message(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Json(MessageRequest { text: "hi".into() }),
+    )
+    .await
+    .expect("idle root accepts the message");
+    assert_eq!(resp.0, StatusCode::ACCEPTED);
+
+    let rows = operator_rows(&db).await;
+    assert_eq!(rows.len(), 1, "exactly one row across refusals + accept");
+    assert!(
+        rx.try_recv().is_ok(),
+        "the accepted send publishes its UserMessage frame"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "no second frame: refusals published nothing"
+    );
+}
+
+/// An off-duty agent accepts-and-buffers; the inbound row must still be
+/// recorded (recording follows acceptance, not delivery to the agent).
+#[tokio::test]
+async fn off_duty_message_still_recorded() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _rx, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    {
+        let mut reg = state.registry.write().await;
+        reg.register_root(root.clone(), RegistryEntry::Live(entry))
+            .unwrap();
+    }
+    state
+        .duty
+        .set(root.clone(), crate::duty::DutyStatus::OffDuty);
+
+    let resp = send_message(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Json(MessageRequest {
+            text: "later".into(),
+        }),
+    )
+    .await
+    .expect("off-duty send is accepted (buffered)");
+    assert_eq!(resp.0, StatusCode::ACCEPTED);
+
+    let rows = operator_rows(&db).await;
+    assert_eq!(rows.len(), 1, "buffered-but-accepted message still records");
+}

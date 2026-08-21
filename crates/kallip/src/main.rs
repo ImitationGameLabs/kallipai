@@ -109,6 +109,12 @@ async fn main() -> Result<()> {
                     )
                     .await?;
             }
+            AgentCommand::Wake(args) => {
+                // The kick round runs asynchronously in the tagma;
+                // a clean return IS the deliverable (the agent will
+                // speak on its own stream when it wakes).
+                client.wake_agent(&args.id).await?;
+            }
         },
         Commands::Lesche(cmd) => match cmd {
             LescheCommand::Send(args) => {

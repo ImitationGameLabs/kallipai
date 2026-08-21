@@ -11,6 +11,7 @@
 // `message_accepted` ack: the user's inbound POST resolves synchronously with
 // no `history_id`, so the store renders the optimistic user line as sent once
 // the POST resolves.
+import { KallipError } from "@kallipai/kallip-common";
 
 import type { TagmaClient } from "@kallipai/kallip-client";
 import type {
@@ -70,6 +71,25 @@ function toSummary(p: DirectStatusPayload): TagmaStatusSummary {
   };
 }
 
+/** Backoff between parked-409 retries: ~7.75s total budget for the kick
+ * turn to un-park the agent (normally sub-second). */
+const PARKED_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000] as const;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** The parked rejection: a 409 whose message names the parked state. The
+ * wire carries no machine-readable code; the wording is pinned by the
+ * tagma's route tests. */
+function isParkedConflict(e: unknown): boolean {
+  return (
+    e instanceof KallipError &&
+    e.api.status === 409 &&
+    e.api.message.includes("is parked")
+  );
+}
+
 /**
  * Wraps a {@link TagmaClient} bound to the root agent and exposes the external
  * chat-room API: iterate {@link replies} / {@link signals} / {@link status}
@@ -93,6 +113,9 @@ export class DirectTransport implements Transport {
     private readonly client: TagmaClient,
     readonly agentId: string,
     readonly localSender: ConversationSender,
+    /** Backoff table for parked-409 retries (test seam; production uses
+     * the module default). */
+    private readonly retryDelays: readonly number[] = PARKED_RETRY_DELAYS_MS,
   ) {}
 
   async *replies(): AsyncGenerator<IncomingFrame> {
@@ -123,9 +146,37 @@ export class DirectTransport implements Transport {
   }
 
   async send(text: string): Promise<void> {
-    await this.client.postMessage(this.agentId, text);
+    await this.postWithWake(text);
   }
 
+  /** Post the message, auto-waking a parked agent. The parked 409
+   * arrives before the tagma pushes to the inbox (the park guard
+   * precedes the push), so the text never landed — waking and
+   * re-sending delivers it exactly once. The wake 202 only enqueues
+   * the kick turn, so the un-park is asynchronous: retry the POST
+   * with backoff, rethrowing the ORIGINAL 409 when the budget runs
+   * out (its message already names the wake endpoint). A failed
+   * wake call is swallowed — if the agent unparked anyway the first
+   * retry still delivers; otherwise the loop exhausts the same
+   * way. */
+  private async postWithWake(text: string): Promise<void> {
+    try {
+      await this.client.postMessage(this.agentId, text);
+    } catch (e) {
+      if (!isParkedConflict(e)) throw e;
+      await this.client.wakeAgent(this.agentId).catch(() => {});
+      for (const delayMs of this.retryDelays) {
+        await sleep(delayMs);
+        try {
+          await this.client.postMessage(this.agentId, text);
+          return;
+        } catch (e2) {
+          if (!isParkedConflict(e2)) throw e2;
+        }
+      }
+      throw e;
+    }
+  }
   /** Pull a cursor-driven history batch and feed it through the SAME `replyQueue`
    *  live `authored` frames use (followed by a synthesized `history_batch_end`),
    *  so the conversation's reply drain consumes live + batch frames in one

@@ -30,13 +30,14 @@ import type {
   WorkSchedule,
 } from "@kallipai/kallip-client";
 
-/** The 13 management methods shared by both backends. */
+/** The 14 management methods shared by both backends. */
 export interface ManagementBackend {
   getBudget(): Promise<BudgetResponse>;
   updateBudget(body: BudgetUpdateRequest): Promise<BudgetResponse>;
   listAgents(query?: ListAgentsQuery): Promise<ListAgentsManagementResponse>;
   getAgentStatus(id: string): Promise<AgentStatusResponse>;
   interruptAgent(id: string): Promise<void>;
+  wakeAgent(id: string): Promise<void>;
   removeAgent(id: string): Promise<void>;
   setAgentDuty(id: string, body: UpdateDutyRequest): Promise<void>;
   updateAgentMetadata(
@@ -70,6 +71,9 @@ export class OfflineBackend implements ManagementBackend {
   }
   interruptAgent(id: string) {
     return this.client.interruptAgent(id);
+  }
+  wakeAgent(id: string) {
+    return this.client.wakeAgent(id);
   }
   removeAgent(id: string) {
     return this.client.removeAgent(id);
@@ -153,6 +157,9 @@ export class OnlineBackend implements ManagementBackend {
   }
   interruptAgent(id: string) {
     return this.reqVoid("POST", `/agents/${id}/interrupt`);
+  }
+  wakeAgent(id: string) {
+    return this.reqVoid("POST", `/agents/${id}/wake`);
   }
   removeAgent(id: string) {
     return this.reqVoid("DELETE", `/agents/${id}`);

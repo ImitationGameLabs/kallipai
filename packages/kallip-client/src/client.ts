@@ -182,6 +182,14 @@ export class TagmaClient {
       () => undefined,
     );
   }
+  /** POST /agents/{id}/wake — kick a parked agent awake: enqueues a
+   * [system] turn carrying the park reason. 202 empty body; 409 if the
+   * agent is not parked. */
+  wakeAgent(id: string): Promise<void> {
+    return this.request(`/agents/${id}/wake`, { method: "POST" }).then(
+      () => undefined,
+    );
+  }
 
   /** DELETE /agents/{id} — remove an agent (must be idle, no subagents). */
   removeAgent(id: string): Promise<void> {

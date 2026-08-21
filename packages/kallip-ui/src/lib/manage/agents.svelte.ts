@@ -1,5 +1,5 @@
-// Agents store: agent roster + actions (interrupt, duty toggle, remove,
-// metadata update). No per-agent budget data (budget is tagma-wide).
+// Agents store: agent roster + actions (interrupt, wake, duty toggle,
+// remove, metadata update). No per-agent budget data (budget is tagma-wide).
 
 import type { WireAgentManagementSummary } from "@kallipai/kallip-client";
 import { SvelteSet } from "svelte/reactivity";
@@ -89,6 +89,34 @@ class AgentsStore {
     }
   }
 
+  /** Kick a parked agent awake. The wake 202 enqueues the [system] kick
+   * turn, so the agent enters a round almost immediately — flip
+   * parked → busy optimistically (clearing the parked reason) and
+   * revert on failure. */
+  async wake(id: string): Promise<void> {
+    this.inFlight.add(id);
+    this.optimisticUpdate(id, (a) =>
+      a.state === "parked"
+        ? {
+            ...a,
+            state: "busy" as const,
+            activity: "",
+            parked_reason: null,
+          }
+        : a,
+    );
+    try {
+      await this.backend.wakeAgent(id);
+      this.snapshots.delete(id);
+    } catch (e) {
+      this.revertById(id);
+      this.error = e instanceof Error ? e.message : String(e);
+      throw e;
+    } finally {
+      this.inFlight.delete(id);
+    }
+  }
+
   async toggleDuty(id: string): Promise<void> {
     const agent = this.agents.find((a) => a.id === id);
     if (!agent) return;
@@ -145,7 +173,6 @@ class AgentsStore {
   }
 
   // --- internals ---
-
 
   private optimisticUpdate(
     id: string,

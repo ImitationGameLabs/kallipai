@@ -72,16 +72,18 @@ pub async fn deliver_message(
     info!(receiver = %id, sender = ?header_sender, relation = ?relation, "delivering message");
     let envelope = format_incoming(&header_sender, relation, text);
 
-    // The external chat-room conversation is root-only. For a user->root
-    // message, record it via the external projector BEFORE enqueuing the prompt
-    // so the inbound row is durable even if the agent reply races, and so the
-    // projector's published `UserMessage` frame lets the frontend promote its
-    // optimistic line. A user-facing entry is one from the operator identity
-    // (the direct operator path with `sender = None`, or the relay path with
-    // `sender = Some(user)`); inter-agent messages carry a different relation
-    // and are skipped. The projector is the sole writer; both the direct and
-    // relay paths funnel through here. `sender` is the peer partition (`None` =
-    // operator, `Some` = relay user).
+    let response = enqueue_prompt(state, id, envelope, "operator").await?;
+    // The external chat-room conversation is root-only, and only
+    // user-facing inbounds (operator identity — `sender = None` on the
+    // direct path, `Some(user)` on the relay; inter-agent messages
+    // carry a different relation and are skipped) are recorded, via
+    // the projector — the sole writer; both the direct and relay
+    // paths funnel through here. Recording happens AFTER the enqueue
+    // accepts: a refused message (parked 409, queue-full) must not
+    // append a transcript row, or every client retry appends another
+    // (the frontend re-sends refused messages). Recording still wins
+    // the race that matters — an agent reply needs an LLM round-trip —
+    // and the crash window shrinks to the ms between accept and append.
     let is_root = {
         let registry = state.registry.read().await;
         registry
@@ -97,7 +99,7 @@ pub async fn deliver_message(
             .await;
     }
 
-    enqueue_prompt(state, id, envelope, "operator").await
+    Ok(response)
 }
 
 /// Deliver an inbound room message to the root agent's prompt channel (the

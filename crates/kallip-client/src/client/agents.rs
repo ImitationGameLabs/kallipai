@@ -154,6 +154,23 @@ impl TagmaClient {
         .await?;
         Ok(())
     }
+    /// Kick a parked agent awake: enqueues a [system] turn carrying the
+    /// park reason. The agent must be parked (409 otherwise); the kick
+    /// round itself is asynchronous — this returns on the 202.
+    pub async fn wake_agent(&self, id: &AgentId) -> Result<()> {
+        self.ensure_success(
+            self.with_auth(
+                self.inner
+                    .http
+                    .post(self.url(&format!("/agents/{id}/wake"))),
+            )
+            .send()
+            .await
+            .context("failed to connect to tagma")?,
+        )
+        .await?;
+        Ok(())
+    }
 
     /// Get a raw SSE event stream for the given agent.
     pub async fn event_stream(&self, id: &AgentId) -> Result<JsonEventStream<SseEvent>> {

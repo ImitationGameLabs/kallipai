@@ -64,6 +64,10 @@ pub enum AgentCommand {
     Status(IdArgs),
     /// Report this agent's current activity (self-only)
     Activity(ActivityArgs),
+    /// Kick a parked agent awake: enqueues a [system] turn telling it
+    /// why it parked and for how long it slept. The agent must be
+    /// parked (409 otherwise); the kick round runs asynchronously.
+    Wake(IdArgs),
 }
 
 /// Deliver messages to the user via the tagma's relay (the lesche data-plane).

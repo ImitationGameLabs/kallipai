@@ -3,6 +3,7 @@
   "manage_agent_duty_onduty": "在值",
   "manage_agent_duty_offduty": "休班",
   "manage_agent_interrupt": "中断",
+  "manage_agent_wake": "唤醒",
   "manage_agent_remove_agent": "移除智能体",
   "manage_agent_remove_agent_desc": "这将永久移除该智能体，归档其目录并释放其工作区锁。此操作不可撤销。",
   "manage_agent_remove_agent_desc_short": "这将永久移除该智能体。此操作不可撤销。",

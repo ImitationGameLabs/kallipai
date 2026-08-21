@@ -3,6 +3,7 @@
   "manage_agent_duty_onduty": "On-duty",
   "manage_agent_duty_offduty": "Off-duty",
   "manage_agent_interrupt": "Interrupt",
+  "manage_agent_wake": "Wake",
   "manage_agent_remove_agent": "Remove Agent",
   "manage_agent_remove_agent_desc": "This will permanently remove the agent, archive its directory, and release its workspace lock. This cannot be undone.",
   "manage_agent_remove_agent_desc_short": "This will permanently remove the agent. This cannot be undone.",
