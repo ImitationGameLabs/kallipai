@@ -204,14 +204,44 @@ async fn end_sets_off_duty() {
 #[tokio::test]
 async fn start_skipped_when_window_already_ended() {
     let state = make_engine_state().await;
-    // The 13:00 window ended at 13:30; recompute at 14:30 must skip the
-    // stale Start (no duty set) instead of replaying it.
-    store_active(&state, &sample(spec(1, 30, ANCHOR))).await;
+    // Wall-clock-independent: a window that ended 10 min ago (1h period,
+    // 30 min length, anchored 3h40m ago) plus a stale OffDuty cycle whose
+    // next_start fell due an hour ago. recompute must fire Start, see the
+    // moment's window already ended, and skip the side-effects.
+    let now = OffsetDateTime::now_utc();
+    let anchor = now - time::Duration::hours(3) - time::Duration::minutes(40);
+    let s = sample(spec(1, 30, anchor));
+    store_active(&state, &s).await;
     let mut cycles = std::collections::HashMap::new();
-    let now = datetime!(2026-08-21 14:30 UTC);
+    cycles.insert(
+        "ws1".to_string(),
+        CycleState {
+            spec: s.spec.clone(),
+            pre_warn_minutes: s.pre_warn_minutes as i64,
+            final_warn_minutes: s.final_warn_minutes as i64,
+            agent_id: root(),
+            wake_prompt: s.wake_prompt.clone(),
+            phase: SchedulePhase::OffDuty,
+            end_time: now - time::Duration::minutes(10),
+            next_start: now - time::Duration::hours(1),
+        },
+    );
     let _ = recompute(&state, &mut cycles).await;
     assert_eq!(state.duty.get(&root()), DutyStatus::OffDuty);
-    let _ = now;
+    // The skip recomputes next_start (to ~20 min out): a Start that never
+    // fired would leave the stale past-due value in place.
+    let cs = cycles.get("ws1").expect("cycle kept");
+    assert!(cs.next_start > now);
+    // No wake side-effect: the inbox stays empty.
+    assert!(
+        state
+            .inboxes
+            .get()
+            .expect("inbox installed")
+            .list(&root(), &crate::inbox::InboxFilter::default())
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
