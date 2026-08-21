@@ -17,7 +17,9 @@ use tokio::sync::Notify;
 use super::WorkSchedule;
 #[cfg(test)]
 use super::WorkScheduleStatus;
-use super::spec::{DAY_MINUTES, Spec};
+use super::spec::Spec;
+#[cfg(test)]
+use super::spec::Window;
 
 pub(crate) mod entities {
     pub(crate) mod work_schedule {
@@ -248,8 +250,10 @@ mod tests {
         let mut next = seed.clone();
         next.spec = Spec::Weekly {
             days: 0b0001_1111,
-            start_minute: 540,
-            end_minute: 1020,
+            windows: vec![Window {
+                start_minute: 540,
+                end_minute: 1020,
+            }],
         };
         store.update(&next).await.unwrap();
         let got = store.get_singleton().await.unwrap().unwrap();

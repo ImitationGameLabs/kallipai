@@ -253,8 +253,10 @@ mod route_tests {
         PutWorkScheduleRequest {
             spec: spec::Spec::Weekly {
                 days: 0b0001_1111,
-                start_minute: 540,
-                end_minute: 1020,
+                windows: vec![spec::Window {
+                    start_minute: 540,
+                    end_minute: 1020,
+                }],
             },
             pre_warn_minutes: 10,
             final_warn_minutes: 5,
@@ -321,8 +323,10 @@ mod route_tests {
         let mut req = put_req();
         req.spec = spec::Spec::Weekly {
             days: 0,
-            start_minute: 0,
-            end_minute: 60,
+            windows: vec![spec::Window {
+                start_minute: 0,
+                end_minute: 60,
+            }],
         };
         let err = put_work_schedule(
             ExtractState(state),
