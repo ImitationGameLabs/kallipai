@@ -28,6 +28,7 @@ use tracing::{error, info, warn};
 
 use crate::duty::DutyStatus;
 use crate::state::{AgentId, SharedState};
+use crate::work_schedule::spec::Spec;
 use crate::work_schedule::{WorkSchedule, WorkScheduleStatus};
 
 /// Tick cadence: how often the engine re-reads the wall clock and compares
@@ -141,7 +142,11 @@ fn init_cycle(schedule: &WorkSchedule, root_id: &AgentId, now: OffsetDateTime) -
         let pre_warn_time = next_end - time::Duration::minutes(pre);
         let final_warn_time = next_end - time::Duration::minutes(fin);
 
-        let phase = if now >= final_warn_time {
+        let phase = if matches!(schedule.spec, Spec::Always) {
+            // The always horizon has no warn semantics: it is a
+            // wake-loop detail, not a shift end.
+            SchedulePhase::Working
+        } else if now >= final_warn_time {
             SchedulePhase::FinalWarned
         } else if now >= pre_warn_time {
             SchedulePhase::PreWarned
@@ -189,7 +194,9 @@ fn final_warn_time(cs: &CycleState) -> OffsetDateTime {
 fn compute_transition(cs: &CycleState, now: OffsetDateTime) -> Option<Transition> {
     match cs.phase {
         SchedulePhase::OffDuty if now >= cs.next_start => Some(Transition::Start),
-        SchedulePhase::Working if now >= pre_warn_time(cs) => Some(Transition::PreWarn),
+        SchedulePhase::Working if now >= pre_warn_time(cs) && !matches!(cs.spec, Spec::Always) => {
+            Some(Transition::PreWarn)
+        }
         SchedulePhase::PreWarned if now >= final_warn_time(cs) => Some(Transition::FinalWarn),
         SchedulePhase::FinalWarned if now >= cs.end_time => Some(Transition::End),
         _ => None,

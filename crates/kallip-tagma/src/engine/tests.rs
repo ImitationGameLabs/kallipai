@@ -73,6 +73,25 @@ fn init_inside_final_warned() {
 }
 
 #[test]
+fn init_always_is_working() {
+    // The 30-day horizon is a wake-loop detail, not a shift end: no warn
+    // thresholds apply, so the phase is Working whatever `now` is.
+    let cs = init_cycle(&sample(Spec::Always), &root(), OffsetDateTime::now_utc()).expect("init");
+    assert_eq!(cs.phase, SchedulePhase::Working);
+}
+
+#[test]
+fn always_never_transitions_to_a_warn() {
+    // Marching past the stand-in horizon must not arm the warn sequence:
+    // always duty has no shift end to warn about.
+    let cs = init_cycle(&sample(Spec::Always), &root(), OffsetDateTime::now_utc()).expect("init");
+    for hours in [1, 24, 24 * 15, 24 * 31] {
+        let now = OffsetDateTime::now_utc() + time::Duration::hours(hours);
+        assert_eq!(compute_transition(&cs, now), None, "at +{hours}h");
+    }
+}
+
+#[test]
 fn transition_off_to_working() {
     let mut cs =
         init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:45 UTC)).unwrap();
