@@ -113,6 +113,7 @@
       if (reframed === null) return;
       draft.spec = reframed;
     }
+    utc = next;
     try {
       localStorage.setItem(UTC_PREF_KEY, next ? "utc" : "local");
     } catch {
@@ -505,7 +506,7 @@
             role="switch"
             aria-checked={draft.status === "active"}
             class="btn btn-sm {draft.status === 'active'
-              ? 'preset-filled-primary-500'
+              ? 'preset-filled-primary-500 border border-transparent'
               : 'preset-outlined-surface-500'}"
             onclick={() =>
               (draft!.status =
@@ -602,7 +603,7 @@
                 {#each WEEKDAYS as iso (iso)}
                   <button
                     class="chip {(draft.spec.days & (1 << (iso - 1))) !== 0
-                      ? 'preset-filled-primary-500'
+                      ? 'preset-filled-primary-500 border border-transparent'
                       : 'preset-outlined-surface-500 hover:preset-filled-surface-500'}"
                     aria-pressed={(draft.spec.days & (1 << (iso - 1))) !== 0}
                     onclick={() => toggleWeekday(iso)}
@@ -629,7 +630,7 @@
                   <button
                     class="chip size-9 {(draft.spec.days & (1 << (day - 1))) !==
                     0
-                      ? 'preset-filled-primary-500'
+                      ? 'preset-filled-primary-500 border border-transparent'
                       : 'preset-outlined-surface-500 hover:preset-filled-surface-500'}"
                     aria-pressed={(draft.spec.days & (1 << (day - 1))) !== 0}
                     onclick={() => toggleMonthDay(day)}
