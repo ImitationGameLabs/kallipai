@@ -798,8 +798,10 @@
         <div
           class="flex items-center gap-3 sticky bottom-0 py-2 bg-surface-100-900 border-t border-surface-200-800"
         >
-          <span class="chip preset-tonal-surface text-xs"
-            >{manage_schedules_unsaved()}</span
+          <span class="chip preset-tonal-warning text-xs font-medium">
+            <span class="size-2 rounded-full bg-warning-500" aria-hidden="true"
+            ></span>
+            {manage_schedules_unsaved()}</span
           >
           <div class="flex-1"></div>
           {#if wireSpec === null}
