@@ -352,7 +352,7 @@
             {roomsettings_invite_title()}
           </h2>
           <form class="flex flex-col gap-1" onsubmit={invite}>
-            <div class="flex gap-2">
+            <div class="flex flex-wrap gap-2">
               <input
                 class="input flex-1 text-sm"
                 placeholder="@username"
@@ -442,7 +442,7 @@
         </Menu>
 
         <form
-          class="flex gap-2"
+          class="flex flex-wrap gap-2"
           onsubmit={(e) => {
             e.preventDefault();
             void addTagma(manualTagmaId);

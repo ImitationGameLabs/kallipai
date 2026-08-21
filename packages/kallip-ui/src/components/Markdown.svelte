@@ -132,5 +132,14 @@
         <CopyButton class="absolute top-1 right-1" getText={() => text} />
       </div>
     {/snippet}
+    {#snippet table({ children })}
+      <!-- Wide tables scroll inside the bubble instead of stretching it
+           past the viewport; mirrors the pre's overflow-x-auto. -->
+      <div class="overflow-x-auto">
+        <table>
+          {@render children?.()}
+        </table>
+      </div>
+    {/snippet}
   </SvelteMarkdown>
 </div>

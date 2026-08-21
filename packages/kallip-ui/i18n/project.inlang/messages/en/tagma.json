@@ -19,6 +19,7 @@
   "tagma_rename_failed": "Rename failed: {error}",
   "tagma_this": "this tagma",
   "tagma_status_aria": "Tagma status",
+  "tagma_status_show_details": "Show status details",
   "tagma_status_root": "root",
   "tagma_status_subagents": "subagents",
   "tagma_status_budget": "budget",

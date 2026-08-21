@@ -48,7 +48,7 @@
     formatTokenCount,
     type TagmaStatusSummary,
   } from "../lib/tagmata.svelte.ts";
-  import { PanelRight, PanelTop } from "@lucide/svelte";
+  import { ChevronDown, ChevronUp, PanelRight, PanelTop } from "@lucide/svelte";
   import {
     tagma_status_active_total,
     tagma_status_aria,
@@ -56,6 +56,7 @@
     tagma_status_layout_toggle,
     tagma_status_subagents,
     tagma_status_waiting,
+    tagma_status_show_details,
   } from "../paraglide/messages.js";
   import TagmaAgentRows from "./TagmaAgentRows.svelte";
   import type { StatusCardRow } from "../lib/session/statusCard.svelte.ts";
@@ -77,6 +78,23 @@
     /** Flips the wanted placement (state owned and persisted by the page). */
     onToggleSide?: () => void;
   } = $props();
+
+  // Small-viewport collapse (mobile B1): below lg the top bar's two segments
+  // wrap and the agent-rows list renders unbounded -- together they eat half
+  // a 375px viewport (operator-visible failure). The whole status area then
+  // collapses to one summary line; tapping it restores the familiar bar +
+  // rows for the session. The sidebar placement is lg+ by definition, so it
+  // never collapses.
+  const lgQuery = matchMedia("(min-width: 64rem)");
+  let lgMatches = $state(lgQuery.matches);
+  $effect(() => {
+    const onChange = (event: MediaQueryListEvent) =>
+      (lgMatches = event.matches);
+    lgQuery.addEventListener("change", onChange);
+    return () => lgQuery.removeEventListener("change", onChange);
+  });
+  let expandedSmall = $state(false);
+  const collapsedSmall = $derived(!sideLayout && !lgMatches && !expandedSmall);
 
   // Budget fill width, clamped to [0, 100]. 0 budget -> 0% (avoids div-by-zero).
   const budgetPct = $derived(
@@ -124,7 +142,7 @@
   <button
     type="button"
     onclick={onToggleSide}
-    class="size-7 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0 {sideLayout
+    class="size-10 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0 {sideLayout
       ? ''
       : 'absolute right-2 top-1/2 -translate-y-1/2'}"
     title={tagma_status_layout_toggle()}
@@ -188,52 +206,112 @@
       {/if}
     </div>
   {:else}
-    <!-- Top bar placement: one centred row of the two segments. The
-         relative wrapper exists so the toggle can ride the bar's right
-         edge (full width) rather than the 56rem cluster's edge. -->
-    <div class="relative w-full">
+    {#if collapsedSmall}
+      <!-- Collapsed summary line (see the script note): liveness dot +
+           active/total + budget fill; the size-10 chevron meets T1 and
+           restores the full bar + rows. -->
       <div
-        class="mx-auto w-full max-w-[56rem] px-4 py-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 min-h-14 text-lg"
+        class="mx-auto w-full max-w-[56rem] px-4 min-h-10 flex items-center gap-3 text-base"
       >
         {#if status}
-          {@render subagentsSegment(status)}
-          <!-- Vertical rule between the two segments (aria-hidden: the
-               title attributes carry the names to screen readers). -->
-          <div
-            class="w-px self-stretch bg-surface-400-600"
+          <span
+            class="size-2 rounded-full shrink-0 {status.subagentsActive > 0
+              ? 'bg-success-500'
+              : 'bg-surface-400-600'}"
             aria-hidden="true"
-          ></div>
-          <!-- Segment 2: token budget. When the two segments no longer fit,
+          ></span>
+          <span class="tabular-nums whitespace-nowrap"
+            >{status.subagentsActive}/{status.subagentsTotal}</span
+          >
+          <span
+            class="h-1.5 w-16 shrink-0 rounded-full bg-surface-400-600 overflow-hidden"
+            aria-hidden="true"
+          >
+            <span
+              class="block h-full rounded-full bg-primary-500"
+              style="width: {budgetPct}%"
+            ></span>
+          </span>
+        {:else}
+          <span
+            class="size-2 rounded-full bg-surface-400-600 animate-pulse"
+            aria-hidden="true"
+          ></span>
+          <span class="opacity-50">{tagma_status_waiting()}</span>
+        {/if}
+        <span class="flex-1"></span>
+        <button
+          type="button"
+          onclick={() => (expandedSmall = true)}
+          class="size-10 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0"
+          aria-label={tagma_status_show_details()}
+          aria-expanded="false"
+        >
+          <ChevronDown class="size-4" aria-hidden="true" />
+        </button>
+      </div>
+    {:else}
+      <!-- Top bar placement: one centred row of the two segments. The
+         relative wrapper exists so the toggle can ride the bar's right
+         edge (full width) rather than the 56rem cluster's edge. -->
+      <div class="relative w-full">
+        <div
+          class="mx-auto w-full max-w-[56rem] px-4 py-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 min-h-14 text-lg"
+        >
+          {#if status}
+            {@render subagentsSegment(status)}
+            <!-- Vertical rule between the two segments (aria-hidden: the
+               title attributes carry the names to screen readers). -->
+            <div
+              class="w-px self-stretch bg-surface-400-600"
+              aria-hidden="true"
+            ></div>
+            <!-- Segment 2: token budget. When the two segments no longer fit,
                flex-wrap starts a second centred row (justify-center on this
                container too, not a left pin). Track is 400-600 because it
                must clear the bar's tone in both modes. -->
-          <div class="flex items-center gap-2">
-            <span class="text-base opacity-60">{tagma_status_budget()}</span>
-            <div
-              class="h-2 w-56 shrink-0 rounded-full bg-surface-400-600 overflow-hidden"
-            >
+            <div class="flex items-center gap-2">
+              <span class="text-base opacity-60">{tagma_status_budget()}</span>
               <div
-                class="h-full rounded-full bg-primary-500 transition-[width] duration-500"
-                style="width: {budgetPct}%"
-              ></div>
+                class="h-2 w-56 shrink-0 rounded-full bg-surface-400-600 overflow-hidden"
+              >
+                <div
+                  class="h-full rounded-full bg-primary-500 transition-[width] duration-500"
+                  style="width: {budgetPct}%"
+                ></div>
+              </div>
+              {@render budgetNumbers(status)}
             </div>
-            {@render budgetNumbers(status)}
-          </div>
+          {:else}
+            <!-- No snapshot yet: keep the bar's height with a muted placeholder. -->
+            <div class="flex items-center gap-1.5 text-base opacity-50">
+              <span
+                class="size-2 rounded-full bg-surface-400-600 animate-pulse"
+                aria-hidden="true"
+              ></span>
+              <span>{tagma_status_waiting()}</span>
+            </div>
+          {/if}
+        </div>
+        {#if lgMatches}
+          {@render layoutToggle()}
         {:else}
-          <!-- No snapshot yet: keep the bar's height with a muted placeholder. -->
-          <div class="flex items-center gap-1.5 text-base opacity-50">
-            <span
-              class="size-2 rounded-full bg-surface-400-600 animate-pulse"
-              aria-hidden="true"
-            ></span>
-            <span>{tagma_status_waiting()}</span>
-          </div>
+          <!-- Small expanded: the panel toggle is a dead click below lg, so
+             this slot collapses back to the summary line instead. -->
+          <button
+            type="button"
+            onclick={() => (expandedSmall = false)}
+            class="size-10 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0 absolute right-2 top-1/2 -translate-y-1/2"
+            aria-label={tagma_status_show_details()}
+            aria-expanded="true"
+          >
+            <ChevronUp class="size-4" aria-hidden="true" />
+          </button>
         {/if}
       </div>
-      {@render layoutToggle()}
-    </div>
+    {/if}
   {/if}
-  {#if agentRows}
+  {#if agentRows && !collapsedSmall}
     <TagmaAgentRows
       rootRow={agentRows.rootRow}
       subRows={agentRows.subRows}

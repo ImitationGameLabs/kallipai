@@ -19,6 +19,7 @@
   "tagma_rename_failed": "重命名失败：{error}",
   "tagma_this": "该智能体编队",
   "tagma_status_aria": "智能体编队状态",
+  "tagma_status_show_details": "展开状态详情",
   "tagma_status_root": "root",
   "tagma_status_subagents": "子智能体",
   "tagma_status_budget": "预算",

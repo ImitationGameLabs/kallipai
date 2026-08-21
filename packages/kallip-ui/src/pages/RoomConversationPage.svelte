@@ -123,7 +123,7 @@
     // Busy is not a gate: send renders the optimistic line at once + posts.
     canSubmit: () => conv?.status === "open",
   });
- 
+
   // Draft storage: rooms key on the room id.
   bindDraft(composer, () => roomDraftKey(roomId));
 
@@ -178,7 +178,7 @@
     {/if}
     <button
       type="button"
-      class="size-8 grid place-items-center rounded-base shrink-0 disabled:opacity-60 {showMembers
+      class="size-10 grid place-items-center rounded-base shrink-0 disabled:opacity-60 {showMembers
         ? 'preset-filled-surface-500'
         : 'preset-tonal-surface hover:preset-filled-surface-500'}"
       aria-label={room_toggle_members_aria()}
@@ -190,7 +190,7 @@
     </button>
     <button
       type="button"
-      class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
+      class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
       aria-label={room_settings_aria()}
       onclick={() => navigate(`/rooms/${roomId}/settings`)}
     >

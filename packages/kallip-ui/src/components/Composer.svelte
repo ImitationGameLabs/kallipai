@@ -58,7 +58,7 @@
   }
 </script>
 
-<div class="pt-3 px-3 pb-6">
+<div class="pt-3 px-3 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
   <div class="max-w-3xl mx-auto">
     <!-- Input card: one bordered frame holds the textarea + the action, so the
          textarea itself is borderless/transparent and the card outline is the
@@ -82,7 +82,7 @@
           onclick={() => void composer.submit()}
           disabled={!composer.canSend}
           aria-label={composer_send_aria()}
-          class="size-9 shrink-0 rounded-full preset-filled-primary-500 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
+          class="size-10 shrink-0 rounded-full preset-filled-primary-500 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <ArrowUp class="size-5" aria-hidden="true" />
         </button>
