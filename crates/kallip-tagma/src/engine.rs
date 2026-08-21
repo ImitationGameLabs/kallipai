@@ -90,6 +90,7 @@ struct CycleState {
     spec: crate::work_schedule::spec::Spec,
     pre_warn_minutes: i64,
     final_warn_minutes: i64,
+    final_warn_prompt: Option<String>,
     agent_id: AgentId,
     wake_prompt: String,
     /// Current phase in the cycle.
@@ -158,6 +159,7 @@ fn init_cycle(schedule: &WorkSchedule, root_id: &AgentId, now: OffsetDateTime) -
             spec: schedule.spec.clone(),
             pre_warn_minutes: pre,
             final_warn_minutes: fin,
+            final_warn_prompt: schedule.final_warn_prompt.clone(),
             agent_id: root_id.clone(),
             wake_prompt: schedule.wake_prompt.clone(),
             phase,
@@ -170,6 +172,7 @@ fn init_cycle(schedule: &WorkSchedule, root_id: &AgentId, now: OffsetDateTime) -
             spec: schedule.spec.clone(),
             pre_warn_minutes: pre,
             final_warn_minutes: fin,
+            final_warn_prompt: schedule.final_warn_prompt.clone(),
             agent_id: root_id.clone(),
             wake_prompt: schedule.wake_prompt.clone(),
             phase: SchedulePhase::OffDuty,
@@ -305,10 +308,17 @@ async fn execute_pre_warn(state: &SharedState, cs: &CycleState) {
 
 /// Execute the FinalWarn transition.
 async fn execute_final_warn(state: &SharedState, cs: &CycleState) {
-    let msg = format!(
-        "⏰ {} minutes until end of shift. Save your work now.",
-        cs.final_warn_minutes
-    );
+    // A custom prompt is a template; a leftover empty string (the stored
+    // ''-means-default form leaking through) falls back to the default.
+    let msg = match cs.final_warn_prompt.as_deref().map(str::trim) {
+        Some(custom) if !custom.is_empty() => {
+            custom.replace("{N}", &cs.final_warn_minutes.to_string())
+        }
+        _ => format!(
+            "⏰ {} minutes until end of shift. Save your work now.",
+            cs.final_warn_minutes
+        ),
+    };
     info!(agent = %cs.agent_id, "schedule: final-warn ({} min)", cs.final_warn_minutes);
     if let Err(e) = crate::delivery::enqueue_prompt(state, &cs.agent_id, msg, "system").await {
         warn!(agent = %cs.agent_id, error = %e, "schedule: failed to enqueue final-warn");
@@ -507,6 +517,7 @@ async fn recompute(
         let edited = cs.spec != schedule.spec
             || cs.pre_warn_minutes != schedule.pre_warn_minutes as i64
             || cs.final_warn_minutes != schedule.final_warn_minutes as i64
+            || cs.final_warn_prompt != schedule.final_warn_prompt
             || cs.wake_prompt != schedule.wake_prompt;
         if edited {
             if let Some(new_cs) = init_cycle(schedule, &root_id, now) {

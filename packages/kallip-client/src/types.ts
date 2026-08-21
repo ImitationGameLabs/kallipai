@@ -357,6 +357,8 @@ export interface WorkSchedule {
   readonly pre_warn_minutes: number;
   readonly final_warn_minutes: number;
   readonly wake_prompt: string;
+  /** Custom final-warn text; null keeps the built-in default. */
+  readonly final_warn_prompt: string | null;
   readonly status: "active" | "paused";
   readonly created_at: string;
 }
@@ -367,5 +369,7 @@ export interface PutWorkScheduleRequest {
   readonly pre_warn_minutes?: number;
   readonly final_warn_minutes?: number;
   readonly wake_prompt?: string;
+  /** Absent keeps the stored value; "" clears back to the default. */
+  readonly final_warn_prompt?: string;
   readonly status?: "active" | "paused";
 }

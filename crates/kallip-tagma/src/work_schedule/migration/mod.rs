@@ -7,6 +7,7 @@ pub mod m_20260821_02_native_spec;
 pub mod m_20260821_03_cleanup;
 pub mod m_20260821_04_always_seed;
 pub mod m_20260821_05_multiwindow;
+pub mod m_20260821_06_final_warn_prompt;
 
 use sea_orm_migration::prelude::*;
 
@@ -20,6 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(m_20260821_03_cleanup::Migration),
             Box::new(m_20260821_04_always_seed::Migration),
             Box::new(m_20260821_05_multiwindow::Migration),
+            Box::new(m_20260821_06_final_warn_prompt::Migration),
         ]
     }
 }

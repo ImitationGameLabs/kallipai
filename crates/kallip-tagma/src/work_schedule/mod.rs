@@ -60,6 +60,10 @@ pub struct WorkSchedule {
     pub pre_warn_minutes: u32,
     #[serde(default = "default_final_warn")]
     pub final_warn_minutes: u32,
+    /// Custom final-warn text; `None` keeps the built-in message. `{N}` in
+    /// the text expands to the minutes remaining at send time.
+    #[serde(default)]
+    pub final_warn_prompt: Option<String>,
     pub wake_prompt: String,
     #[serde(default)]
     pub status: WorkScheduleStatus,
@@ -74,6 +78,12 @@ fn default_final_warn() -> u32 {
     5
 }
 
+/// Trimmed wire form of a custom prompt; empty means the built-in default.
+fn normalize_prompt(t: String) -> Option<String> {
+    let t = t.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
 /// Request body for PUT /work-schedule. The spec is required; a
 /// status-only toggle (the UI's master switch) echoes the stored spec.
 #[derive(Debug, Deserialize)]
@@ -84,6 +94,10 @@ pub struct PutWorkScheduleRequest {
     #[serde(default = "default_final_warn")]
     pub final_warn_minutes: u32,
     pub wake_prompt: Option<String>,
+    /// `None` keeps the stored value; `Some("")` clears back to the default
+    /// (deliberately not the wake_prompt semantic — unify when its default
+    /// copy lands).
+    pub final_warn_prompt: Option<String>,
     #[serde(default)]
     pub status: WorkScheduleStatus,
 }
@@ -194,6 +208,9 @@ pub async fn put_work_schedule(
             s.pre_warn_minutes = req.pre_warn_minutes;
             s.final_warn_minutes = req.final_warn_minutes;
             s.wake_prompt = req.wake_prompt.unwrap_or(s.wake_prompt);
+            if let Some(t) = req.final_warn_prompt {
+                s.final_warn_prompt = normalize_prompt(t);
+            }
             s.status = req.status;
             (s, true)
         }
@@ -204,6 +221,7 @@ pub async fn put_work_schedule(
                 pre_warn_minutes: req.pre_warn_minutes,
                 final_warn_minutes: req.final_warn_minutes,
                 wake_prompt: req.wake_prompt.unwrap_or_default(),
+                final_warn_prompt: req.final_warn_prompt.and_then(normalize_prompt),
                 status: req.status,
                 created_at: OffsetDateTime::now_utc(),
             },
@@ -261,6 +279,7 @@ mod route_tests {
             pre_warn_minutes: 10,
             final_warn_minutes: 5,
             wake_prompt: Some("Good morning.".into()),
+            final_warn_prompt: None,
             status: WorkScheduleStatus::Active,
         }
     }
@@ -416,6 +435,7 @@ mod route_tests {
             pre_warn_minutes: row.pre_warn_minutes,
             final_warn_minutes: row.final_warn_minutes,
             wake_prompt: None,
+            final_warn_prompt: None,
             status: WorkScheduleStatus::Paused,
         };
         let saved = put_work_schedule(
@@ -470,6 +490,7 @@ mod route_tests {
                 pre_warn_minutes: row.pre_warn_minutes,
                 final_warn_minutes: row.final_warn_minutes,
                 wake_prompt: None,
+                final_warn_prompt: None,
                 status: row.status,
             }),
         )
@@ -483,5 +504,51 @@ mod route_tests {
             }
             _ => panic!("expected interval spec"),
         }
+    }
+
+    #[tokio::test]
+    async fn final_warn_prompt_set_keep_clear_round_trip() {
+        let state = make_ws_state().await;
+        let mut req = put_req();
+        req.final_warn_prompt = Some("  Wrap up, {N} min. ".into());
+        let saved = put_work_schedule(
+            ExtractState(state.clone()),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(req),
+        )
+        .await
+        .unwrap();
+        // Stored trimmed.
+        assert_eq!(
+            saved.0.final_warn_prompt.as_deref(),
+            Some("Wrap up, {N} min.")
+        );
+
+        // Absent field keeps the stored custom prompt (status-only toggle).
+        let mut toggle = put_req();
+        toggle.status = WorkScheduleStatus::Paused;
+        let saved = put_work_schedule(
+            ExtractState(state.clone()),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(toggle),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            saved.0.final_warn_prompt.as_deref(),
+            Some("Wrap up, {N} min.")
+        );
+
+        // Whitespace-only clears back to the built-in default.
+        let mut clear = put_req();
+        clear.final_warn_prompt = Some("   ".into());
+        let saved = put_work_schedule(
+            ExtractState(state),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(clear),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.0.final_warn_prompt, None);
     }
 }

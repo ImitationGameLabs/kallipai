@@ -42,6 +42,8 @@
     manage_schedules_error_generic,
     manage_schedules_error_length_min,
     manage_schedules_final_warn,
+    manage_schedules_final_warn_hint,
+    manage_schedules_final_warn_prompt,
     manage_schedules_heading,
     manage_schedules_interval_hours,
     manage_schedules_interval_length,
@@ -162,6 +164,8 @@
     pre_warn_minutes: number;
     final_warn_minutes: number;
     wake_prompt: string;
+    // "" means the built-in default (wire null).
+    final_warn_prompt: string;
     status: "active" | "paused";
   };
 
@@ -170,6 +174,7 @@
     pre_warn_minutes: 10,
     final_warn_minutes: 5,
     wake_prompt: "",
+    final_warn_prompt: "",
     status: "active",
   });
 
@@ -205,6 +210,7 @@
       pre_warn_minutes: s.pre_warn_minutes,
       final_warn_minutes: s.final_warn_minutes,
       wake_prompt: s.wake_prompt,
+      final_warn_prompt: s.final_warn_prompt ?? "",
       status: s.status,
     };
   }
@@ -230,6 +236,7 @@
       draft.pre_warn_minutes !== snapshot.pre_warn_minutes ||
       draft.final_warn_minutes !== snapshot.final_warn_minutes ||
       draft.wake_prompt !== snapshot.wake_prompt ||
+      draft.final_warn_prompt !== (snapshot.final_warn_prompt ?? "") ||
       draft.status !== snapshot.status
     );
   });
@@ -302,9 +309,13 @@
         pre_warn_minutes: draft.pre_warn_minutes,
         final_warn_minutes: draft.final_warn_minutes,
         wake_prompt: draft.wake_prompt,
+        final_warn_prompt: draft.final_warn_prompt,
         status: draft.status,
       });
       draft.spec = applyFrame(saved.spec, effOff);
+      // The server trims and normalizes the custom prompt; mirror it
+      // back or dirty stays stuck on whitespace-only differences.
+      draft.final_warn_prompt = saved.final_warn_prompt ?? "";
     } catch {
       // surfaced via store error
     }
@@ -864,6 +875,18 @@
               rows="3"
               placeholder={manage_schedules_wake_hint()}
               bind:value={draft.wake_prompt}></textarea>
+          </div>
+
+          <div class="space-y-1">
+            <label class="text-sm opacity-70" for="final-warn-prompt">
+              {manage_schedules_final_warn_prompt()}
+            </label>
+            <textarea
+              id="final-warn-prompt"
+              class="textarea preset-tonal-surface w-full"
+              rows="3"
+              placeholder={manage_schedules_final_warn_hint({ N: "{N}" })}
+              bind:value={draft.final_warn_prompt}></textarea>
           </div>
         </section>
       {/if}

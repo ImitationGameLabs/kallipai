@@ -34,6 +34,8 @@ pub(crate) mod entities {
             pub pre_warn_minutes: i64,
             pub final_warn_minutes: i64,
             #[sea_orm(column_type = "Text")]
+            pub final_warn_prompt: String,
+            #[sea_orm(column_type = "Text")]
             pub wake_prompt: String,
             pub status: String,
             pub created_at: i64,
@@ -114,6 +116,7 @@ impl WorkScheduleStore {
             )),
             pre_warn_minutes: Set(schedule.pre_warn_minutes as i64),
             final_warn_minutes: Set(schedule.final_warn_minutes as i64),
+            final_warn_prompt: Set(schedule.final_warn_prompt.clone().unwrap_or_default()),
             wake_prompt: Set(schedule.wake_prompt.clone()),
             status: Set(schedule.status.to_string()),
             created_at: Set(to_unix(schedule.created_at)),
@@ -148,6 +151,14 @@ impl WorkScheduleStore {
             .col_expr(
                 Column::FinalWarnMinutes,
                 (schedule.final_warn_minutes as i64).into(),
+            )
+            .col_expr(
+                Column::FinalWarnPrompt,
+                schedule
+                    .final_warn_prompt
+                    .clone()
+                    .unwrap_or_default()
+                    .into(),
             )
             .col_expr(Column::WakePrompt, schedule.wake_prompt.clone().into())
             .col_expr(Column::Status, schedule.status.to_string().into())
@@ -203,6 +214,8 @@ fn decode(m: entities::work_schedule::Model) -> WorkSchedule {
             }),
         pre_warn_minutes: m.pre_warn_minutes as u32,
         final_warn_minutes: m.final_warn_minutes as u32,
+        // '' is the stored form of "use the built-in default".
+        final_warn_prompt: (!m.final_warn_prompt.is_empty()).then_some(m.final_warn_prompt),
         wake_prompt: m.wake_prompt,
         status,
         created_at: from_unix(m.created_at),
@@ -270,6 +283,30 @@ mod tests {
         assert!(store.update(&s).await.unwrap());
         let got = store.get_singleton().await.unwrap().unwrap();
         assert_eq!(got.pre_warn_minutes, 15);
+    }
+
+    #[tokio::test]
+    async fn final_warn_prompt_round_trips_and_normalizes_empty() {
+        let (store, _d) = open_tmp().await;
+        let mut s = store.get_singleton().await.unwrap().expect("seeded");
+        // The migration default is '' — the stored form of the default.
+        assert_eq!(s.final_warn_prompt, None);
+        s.final_warn_prompt = Some("wrap up {N}".into());
+        assert!(store.update(&s).await.unwrap());
+        let got = store.get_singleton().await.unwrap().unwrap();
+        assert_eq!(got.final_warn_prompt.as_deref(), Some("wrap up {N}"));
+        let mut cleared = got;
+        cleared.final_warn_prompt = None;
+        assert!(store.update(&cleared).await.unwrap());
+        assert_eq!(
+            store
+                .get_singleton()
+                .await
+                .unwrap()
+                .unwrap()
+                .final_warn_prompt,
+            None
+        );
     }
 
     #[tokio::test]

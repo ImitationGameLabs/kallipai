@@ -50,6 +50,8 @@
   "manage_schedules_dst_note": "存储按 UTC 对齐；夏令时切换日，本地时刻会随之漂移一小时。",
   "manage_schedules_pre_warn": "预警提前（分钟）",
   "manage_schedules_final_warn": "最终预警提前（分钟）",
+  "manage_schedules_final_warn_hint": "最终预警时发送；留空用默认文案，{N} 会替换为剩余分钟数。",
+  "manage_schedules_final_warn_prompt": "最终预警文案",
   "manage_schedules_warn_invalid": "预警分钟数必须是有效数字",
   "manage_schedules_warn_positive": "预警分钟数必须为正数",
   "manage_schedules_warn_order": "预警提前分钟数必须不小于最终预警分钟数",

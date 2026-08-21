@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::state::AgentId;
-use crate::test_helpers::{add_root, install_inbox_store, make_state};
+use crate::test_helpers::{add_root, install_inbox_store, make_entry_with_rx, make_state};
 use crate::work_schedule::spec::Spec;
 use crate::work_schedule::{WorkSchedule, WorkScheduleStatus, WorkScheduleStore};
 use time::OffsetDateTime;
@@ -32,6 +32,7 @@ fn sample(s: Spec) -> WorkSchedule {
         spec: s,
         pre_warn_minutes: 10,
         final_warn_minutes: 5,
+        final_warn_prompt: None,
         wake_prompt: "wake up".into(),
         status: WorkScheduleStatus::Active,
         created_at: OffsetDateTime::now_utc(),
@@ -202,6 +203,68 @@ async fn end_sets_off_duty() {
 }
 
 #[tokio::test]
+async fn final_warn_custom_prompt_expands_n_and_default_falls_back() {
+    // enqueue_prompt's slow path would spawn a real agent runtime (and
+    // write a real chat-history file) when the root's prompt channel is
+    // closed; make_engine_state's add_root drops the receiver. Hold the
+    // receiver open so the notify fast path is taken instead.
+    async fn state_with_live_root() -> (SharedState, tokio::sync::mpsc::Receiver<String>) {
+        let state = make_state();
+        install_inbox_store(&state).await;
+        let store = WorkScheduleStore::open_in_memory().await;
+        state.work_schedules.set(store).ok();
+        let (entry, rx) = make_entry_with_rx(None, format!("agent-{}", root()));
+        let mut reg = state.registry.write().await;
+        reg.register(root(), crate::state::RegistryEntry::Live(entry));
+        drop(reg);
+        state.duty.set(root(), DutyStatus::OnDuty);
+        (state, rx)
+    }
+
+    async fn last_body(state: &SharedState) -> String {
+        state
+            .inboxes
+            .get()
+            .expect("inbox installed")
+            .list(&root(), &crate::inbox::InboxFilter::default())
+            .await
+            .pop()
+            .expect("one entry")
+            .body
+    }
+
+    // Custom text is a template: every {N} expands to the minutes left.
+    let (state, _rx) = state_with_live_root().await;
+    let mut cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:05 UTC),
+    )
+    .unwrap();
+    cs.final_warn_prompt = Some("wrap up now: {N} of {N} min left".into());
+    // Non-default value: the old 5-of-5 assertion passed even with the
+    // minutes hardcoded into the template.
+    cs.final_warn_minutes = 7;
+    execute_final_warn(&state, &cs).await;
+    assert_eq!(last_body(&state).await, "wrap up now: 7 of 7 min left");
+
+    // The ''-leak variant (same fallback arm as None) sends the default.
+    let (state2, _rx2) = state_with_live_root().await;
+    let mut cs2 = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:05 UTC),
+    )
+    .unwrap();
+    cs2.final_warn_prompt = Some("   ".into());
+    execute_final_warn(&state2, &cs2).await;
+    assert_eq!(
+        last_body(&state2).await,
+        "⏰ 5 minutes until end of shift. Save your work now."
+    );
+}
+
+#[tokio::test]
 async fn start_skipped_when_window_already_ended() {
     let state = make_engine_state().await;
     // Wall-clock-independent: a window that ended 10 min ago (1h period,
@@ -219,6 +282,7 @@ async fn start_skipped_when_window_already_ended() {
             spec: s.spec.clone(),
             pre_warn_minutes: s.pre_warn_minutes as i64,
             final_warn_minutes: s.final_warn_minutes as i64,
+            final_warn_prompt: None,
             agent_id: root(),
             wake_prompt: s.wake_prompt.clone(),
             phase: SchedulePhase::OffDuty,
@@ -293,6 +357,7 @@ async fn recompute_drops_paused_schedule_cycle() {
             spec: covering,
             pre_warn_minutes: 10,
             final_warn_minutes: 5,
+            final_warn_prompt: None,
             agent_id: root(),
             wake_prompt: "wake up".into(),
             phase: SchedulePhase::Working,
@@ -331,6 +396,7 @@ fn working_cycle(id: &str, end_time: OffsetDateTime) -> (String, CycleState) {
             spec: base_spec(),
             pre_warn_minutes: 10,
             final_warn_minutes: 5,
+            final_warn_prompt: None,
             agent_id: root(),
             wake_prompt: "wake up".into(),
             phase: SchedulePhase::Working,

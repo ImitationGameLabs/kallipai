@@ -50,6 +50,8 @@
   "manage_schedules_dst_note": "Stored aligned to UTC; on DST transition days the local wall time shifts by an hour.",
   "manage_schedules_pre_warn": "Pre-warn (min)",
   "manage_schedules_final_warn": "Final-warn (min)",
+  "manage_schedules_final_warn_hint": "Sent at the final warning; empty uses the default. {N} expands to the minutes left.",
+  "manage_schedules_final_warn_prompt": "Final-warn message",
   "manage_schedules_warn_invalid": "warn minutes must be valid numbers",
   "manage_schedules_warn_positive": "warn minutes must be positive",
   "manage_schedules_warn_order": "pre-warn must be >= final-warn",
