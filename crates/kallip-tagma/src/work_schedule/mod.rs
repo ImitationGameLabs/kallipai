@@ -93,10 +93,11 @@ pub struct PutWorkScheduleRequest {
     pub pre_warn_minutes: u32,
     #[serde(default = "default_final_warn")]
     pub final_warn_minutes: u32,
+    /// `None` keeps the stored value; `Some("")` stores `''` — the
+    /// built-in default at send time; non-empty is trimmed and stored.
     pub wake_prompt: Option<String>,
-    /// `None` keeps the stored value; `Some("")` clears back to the default
-    /// (deliberately not the wake_prompt semantic — unify when its default
-    /// copy lands).
+    /// `None` keeps the stored value; `Some("")` clears back to the
+    /// default; non-empty is trimmed and stored.
     pub final_warn_prompt: Option<String>,
     #[serde(default)]
     pub status: WorkScheduleStatus,
@@ -207,7 +208,9 @@ pub async fn put_work_schedule(
             s.spec = spec;
             s.pre_warn_minutes = req.pre_warn_minutes;
             s.final_warn_minutes = req.final_warn_minutes;
-            s.wake_prompt = req.wake_prompt.unwrap_or(s.wake_prompt);
+            if let Some(t) = req.wake_prompt {
+                s.wake_prompt = normalize_prompt(t).unwrap_or_default();
+            }
             if let Some(t) = req.final_warn_prompt {
                 s.final_warn_prompt = normalize_prompt(t);
             }
@@ -220,7 +223,10 @@ pub async fn put_work_schedule(
                 spec,
                 pre_warn_minutes: req.pre_warn_minutes,
                 final_warn_minutes: req.final_warn_minutes,
-                wake_prompt: req.wake_prompt.unwrap_or_default(),
+                wake_prompt: req
+                    .wake_prompt
+                    .and_then(normalize_prompt)
+                    .unwrap_or_default(),
                 final_warn_prompt: req.final_warn_prompt.and_then(normalize_prompt),
                 status: req.status,
                 created_at: OffsetDateTime::now_utc(),
@@ -550,5 +556,46 @@ mod route_tests {
         .await
         .unwrap();
         assert_eq!(saved.0.final_warn_prompt, None);
+    }
+    #[tokio::test]
+    async fn wake_prompt_set_keep_clear_round_trip() {
+        let state = make_ws_state().await;
+        // Set: trimmed and stored.
+        let mut req = put_req();
+        req.wake_prompt = Some("  Rise and shine.  ".into());
+        let saved = put_work_schedule(
+            ExtractState(state.clone()),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(req),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.0.wake_prompt, "Rise and shine.");
+
+        // Absent field keeps the stored value (status-only toggle).
+        let mut toggle = put_req();
+        toggle.status = WorkScheduleStatus::Paused;
+        toggle.wake_prompt = None;
+        let saved = put_work_schedule(
+            ExtractState(state.clone()),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(toggle),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.0.wake_prompt, "Rise and shine.");
+
+        // Whitespace-only clears back to '' — the built-in default at
+        // send time.
+        let mut clear = put_req();
+        clear.wake_prompt = Some("   ".into());
+        let saved = put_work_schedule(
+            ExtractState(state),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(clear),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.0.wake_prompt, "");
     }
 }

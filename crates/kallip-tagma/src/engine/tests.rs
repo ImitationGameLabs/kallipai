@@ -189,7 +189,28 @@ async fn start_sets_on_duty_and_pushes_wake_to_inbox() {
         .list(&root(), &crate::inbox::InboxFilter::default())
         .await;
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].body, "wake up");
+    assert_eq!(entries[0].body, format!("{DEFAULT_WAKE_PROMPT}\nwake up"));
+}
+
+#[tokio::test]
+async fn start_blank_wake_prompt_sends_the_default() {
+    let state = make_engine_state().await;
+    let mut cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:05 UTC),
+    )
+    .unwrap();
+    cs.wake_prompt = "   ".into();
+    execute_start(&state, &cs).await;
+    let entries = state
+        .inboxes
+        .get()
+        .expect("inbox installed in test state")
+        .list(&root(), &crate::inbox::InboxFilter::default())
+        .await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].body, DEFAULT_WAKE_PROMPT);
 }
 
 #[tokio::test]
@@ -246,8 +267,10 @@ async fn final_warn_custom_prompt_expands_n_and_default_falls_back() {
     // minutes hardcoded into the template.
     cs.final_warn_minutes = 7;
     execute_final_warn(&state, &cs).await;
-    assert_eq!(last_body(&state).await, "wrap up now: 7 of 7 min left");
-
+    assert_eq!(
+        last_body(&state).await,
+        "⏰ 7 minutes until end of shift. Save your work now.\nwrap up now: 7 of 7 min left"
+    );
     // The ''-leak variant (same fallback arm as None) sends the default.
     let (state2, _rx2) = state_with_live_root().await;
     let mut cs2 = init_cycle(
@@ -386,7 +409,7 @@ async fn recovery_inside_window_drives_start() {
         .list(&root(), &crate::inbox::InboxFilter::default())
         .await;
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].body, "wake up");
+    assert_eq!(entries[0].body, format!("{DEFAULT_WAKE_PROMPT}\nwake up"));
 }
 
 fn working_cycle(id: &str, end_time: OffsetDateTime) -> (String, CycleState) {

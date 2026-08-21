@@ -313,9 +313,10 @@
         status: draft.status,
       });
       draft.spec = applyFrame(saved.spec, effOff);
-      // The server trims and normalizes the custom prompt; mirror it
-      // back or dirty stays stuck on whitespace-only differences.
+      // The server trims and normalizes both custom prompts; mirror
+      // them back or dirty stays stuck on whitespace-only differences.
       draft.final_warn_prompt = saved.final_warn_prompt ?? "";
+      draft.wake_prompt = saved.wake_prompt;
     } catch {
       // surfaced via store error
     }
@@ -873,8 +874,8 @@
               id="wake-prompt"
               class="textarea preset-tonal-surface w-full"
               rows="3"
-              placeholder={manage_schedules_wake_hint()}
               bind:value={draft.wake_prompt}></textarea>
+            <p class="text-xs opacity-60">{manage_schedules_wake_hint()}</p>
           </div>
 
           <div class="space-y-1">
@@ -885,8 +886,10 @@
               id="final-warn-prompt"
               class="textarea preset-tonal-surface w-full"
               rows="3"
-              placeholder={manage_schedules_final_warn_hint({ N: "{N}" })}
               bind:value={draft.final_warn_prompt}></textarea>
+            <p class="text-xs opacity-60">
+              {manage_schedules_final_warn_hint({ N: "{N}" })}
+            </p>
           </div>
         </section>
       {/if}

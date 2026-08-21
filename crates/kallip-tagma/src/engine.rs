@@ -253,6 +253,11 @@ async fn interrupt_round(state: &SharedState, id: &AgentId) {
     }
 }
 
+/// The wake prompt's built-in text, sent at every shift start; a
+/// per-schedule custom (when set) is appended after it, never replaces it.
+pub(crate) const DEFAULT_WAKE_PROMPT: &str =
+    "You are on duty — check your inbox for messages received while you were off duty.";
+
 /// Execute the Start transition: set on-duty, push wake prompt to inbox,
 /// and notify the agent. The agent pulls ALL undelivered direct messages
 /// (buffered off-duty messages + the wake prompt) together on wake.
@@ -260,6 +265,15 @@ async fn execute_start(state: &SharedState, cs: &CycleState) {
     state.duty.set(cs.agent_id.clone(), DutyStatus::OnDuty);
     info!(agent = %cs.agent_id, "schedule: start of shift");
 
+    // The sent body is the built-in default followed by the custom text;
+    // an empty or whitespace custom means the default alone — the same
+    // append-not-replace contract as the final-warn prompt.
+    let custom = cs.wake_prompt.trim();
+    let body = if custom.is_empty() {
+        DEFAULT_WAKE_PROMPT.to_string()
+    } else {
+        format!("{DEFAULT_WAKE_PROMPT}\n{custom}")
+    };
     // Push the wake prompt to the inbox so it is pulled alongside any
     // buffered off-duty messages in one atomic pull.
     if let Some(store) = state.inboxes.get() {
@@ -269,7 +283,7 @@ async fn execute_start(state: &SharedState, cs: &CycleState) {
                 crate::inbox::BufferedEvent {
                     timestamp: time::OffsetDateTime::now_utc(),
                     source: "system".to_string(),
-                    body: cs.wake_prompt.clone(),
+                    body,
                 },
             )
             .await;
@@ -308,16 +322,20 @@ async fn execute_pre_warn(state: &SharedState, cs: &CycleState) {
 
 /// Execute the FinalWarn transition.
 async fn execute_final_warn(state: &SharedState, cs: &CycleState) {
-    // A custom prompt is a template; a leftover empty string (the stored
-    // ''-means-default form leaking through) falls back to the default.
+    // The sent body is the built-in default followed by the custom prompt:
+    // a custom is a template ({N} = minutes left), and no custom at all
+    // — or a leftover empty string, the stored ''-means-default form
+    // leaking through — means the default alone.
+    let default = format!(
+        "⏰ {} minutes until end of shift. Save your work now.",
+        cs.final_warn_minutes
+    );
     let msg = match cs.final_warn_prompt.as_deref().map(str::trim) {
-        Some(custom) if !custom.is_empty() => {
+        Some(custom) if !custom.is_empty() => format!(
+            "{default}\n{}",
             custom.replace("{N}", &cs.final_warn_minutes.to_string())
-        }
-        _ => format!(
-            "⏰ {} minutes until end of shift. Save your work now.",
-            cs.final_warn_minutes
         ),
+        _ => default,
     };
     info!(agent = %cs.agent_id, "schedule: final-warn ({} min)", cs.final_warn_minutes);
     if let Err(e) = crate::delivery::enqueue_prompt(state, &cs.agent_id, msg, "system").await {
