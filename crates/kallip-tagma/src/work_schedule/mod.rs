@@ -97,16 +97,22 @@ fn get_store(state: &SharedState) -> Result<&WorkScheduleStore, ApiError> {
 
 // --- Route handlers ---
 
-/// GET /work-schedule — the tagma's schedule, or null when unset.
+/// GET /work-schedule — the tagma's schedule. Always present: migration 04
+/// seeds the singleton row, so the "unset" state no longer exists. A
+/// missing row is invariant corruption, not a user-visible state.
 pub async fn get_work_schedule(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
-) -> Result<Json<Option<WorkSchedule>>, ApiError> {
+) -> Result<Json<WorkSchedule>, ApiError> {
     crate::auth::require_operator(auth.identity())?;
     let schedule = get_store(&state)?
         .get_singleton()
         .await
         .map_err(ApiError::internal)?;
+    let schedule = schedule.ok_or_else(|| {
+        tracing::error!("work-schedule row missing after migration 04");
+        ApiError::internal("work-schedule row missing")
+    })?;
     Ok(Json(schedule))
 }
 
@@ -216,7 +222,9 @@ pub async fn put_work_schedule(
         // Pausing releases the root from duty so messages are not
         // buffered indefinitely (mirrors the v1 pause semantics).
         if let Some((root_id, _)) = state.registry.read().await.root_agent() {
-            state.duty.set(root_id.clone(), crate::duty::DutyStatus::OnDuty);
+            state
+                .duty
+                .set(root_id.clone(), crate::duty::DutyStatus::OnDuty);
         }
         info!("work schedule paused, duty reset to on-duty");
     }
@@ -256,7 +264,7 @@ mod route_tests {
     }
 
     #[tokio::test]
-    async fn first_put_creates_then_get_round_trips() {
+    async fn first_put_replaces_seed_and_round_trips() {
         let state = make_ws_state().await;
         let saved = put_work_schedule(
             ExtractState(state.clone()),
@@ -274,12 +282,8 @@ mod route_tests {
         // The store keeps unix-second timestamps, so the sub-second part
         // of `created_at` does not survive the round trip.
         let mut expected = saved.0;
-        expected.created_at = got
-            .0
-            .as_ref()
-            .expect("schedule stored")
-            .created_at;
-        assert_eq!(got.0, Some(expected));
+        expected.created_at = got.0.created_at;
+        assert_eq!(got.0, expected);
     }
 
     #[tokio::test]
@@ -307,8 +311,7 @@ mod route_tests {
         )
         .await
         .unwrap()
-        .0
-        .unwrap();
+        .0;
         assert_eq!(got.status, WorkScheduleStatus::Paused);
     }
 
@@ -316,7 +319,11 @@ mod route_tests {
     async fn put_rejects_invalid_spec() {
         let state = make_ws_state().await;
         let mut req = put_req();
-        req.spec = spec::Spec::Weekly { days: 0, start_minute: 0, end_minute: 60 };
+        req.spec = spec::Spec::Weekly {
+            days: 0,
+            start_minute: 0,
+            end_minute: 60,
+        };
         let err = put_work_schedule(
             ExtractState(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
@@ -347,7 +354,11 @@ mod route_tests {
         let state = make_ws_state().await;
         let mut req = put_req();
         let stale = time::macros::datetime!(2020-01-01 0:00 UTC);
-        req.spec = spec::Spec::Interval { every_hours: 5, length_min: 90, anchor: stale };
+        req.spec = spec::Spec::Interval {
+            every_hours: 5,
+            length_min: 90,
+            anchor: stale,
+        };
         let saved = put_work_schedule(
             ExtractState(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
@@ -359,9 +370,11 @@ mod route_tests {
             spec::Spec::Interval { anchor, .. } => {
                 // Re-anchored to save time, keeping the requested
                 // minute-of-hour (M=0): within the hour, aligned.
-                assert!(anchor.minute() == 0
-                    && anchor.second() == 0
-                    && (anchor - OffsetDateTime::now_utc()).whole_seconds().abs() < 3600);
+                assert!(
+                    anchor.minute() == 0
+                        && anchor.second() == 0
+                        && (anchor - OffsetDateTime::now_utc()).whole_seconds().abs() < 3600
+                );
             }
             _ => panic!("expected interval spec"),
         }
@@ -462,9 +475,7 @@ mod route_tests {
             spec::Spec::Interval { anchor, .. } => {
                 assert_eq!(anchor.minute(), 37);
                 assert_eq!(anchor.second(), 0);
-                assert!(
-                    (anchor - OffsetDateTime::now_utc()).whole_seconds().abs() < 3600
-                );
+                assert!((anchor - OffsetDateTime::now_utc()).whole_seconds().abs() < 3600);
             }
             _ => panic!("expected interval spec"),
         }

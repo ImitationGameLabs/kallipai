@@ -9,7 +9,7 @@
 
 use time::{Date, Duration, OffsetDateTime, Time};
 
-use crate::work_schedule::spec::{Spec, DAY_MINUTES};
+use crate::work_schedule::spec::{DAY_MINUTES, Spec};
 
 /// Window facts at a point in time.
 ///
@@ -44,6 +44,15 @@ pub fn window_status(spec: &Spec, now: OffsetDateTime) -> Option<WindowStatus> {
             start_minute,
             end_minute,
         } => eval_calendar(None, Some(*days), *start_minute, *end_minute, now),
+
+        // 24/7: always inside. There is no natural end, so a finite
+        // horizon (30 days) stands in — the engine wakes then and simply
+        // re-evaluates to a fresh horizon, which also absorbs clock jumps.
+        Spec::Always => Some(WindowStatus {
+            inside: true,
+            next_start: now + Duration::days(30),
+            next_end: now + Duration::days(30),
+        }),
     }
 }
 
@@ -119,8 +128,7 @@ fn eval_calendar(
         if !fires {
             return None;
         }
-        let t =
-            Time::from_hms((start_minute / 60) as u8, (start_minute % 60) as u8, 0).ok()?;
+        let t = Time::from_hms((start_minute / 60) as u8, (start_minute % 60) as u8, 0).ok()?;
         Some(d.with_time(t).assume_utc())
     };
     // Earliest future window start, earliest future window end, and the
@@ -176,7 +184,11 @@ mod tests {
     #[test]
     fn weekly_inside_and_boundary_semantics() {
         // Mon 09:00-17:00, checked at Mon 12:00.
-        let spec = Spec::Weekly { days: 0b0000_0001, start_minute: 540, end_minute: 1020 };
+        let spec = Spec::Weekly {
+            days: 0b0000_0001,
+            start_minute: 540,
+            end_minute: 1020,
+        };
         let st = ws(&spec, datetime!(2026-08-24 12:00 UTC)); // Monday
         assert!(st.inside);
         assert_eq!(st.next_end, datetime!(2026-08-24 17:00 UTC));
@@ -187,9 +199,26 @@ mod tests {
     }
 
     #[test]
+    fn always_is_inside_at_every_instant() {
+        let spec = Spec::Always;
+        let st = ws(&spec, datetime!(2026-08-21 0:00 UTC));
+        assert!(st.inside);
+        // The horizon is a stand-in end, 30 days out; re-evaluation
+        // at that point yields a fresh one.
+        assert_eq!(
+            st.next_end,
+            datetime!(2026-08-21 0:00 UTC) + Duration::days(30)
+        );
+    }
+
+    #[test]
     fn weekly_overnight_belongs_to_start_day() {
         // Mon 22:00..Tue 06:00.
-        let spec = Spec::Weekly { days: 0b0000_0001, start_minute: 22 * 60, end_minute: 6 * 60 };
+        let spec = Spec::Weekly {
+            days: 0b0000_0001,
+            start_minute: 22 * 60,
+            end_minute: 6 * 60,
+        };
         assert!(ws(&spec, datetime!(2026-08-24 23:00 UTC)).inside); // Mon night
         assert!(ws(&spec, datetime!(2026-08-25 5:59 UTC)).inside); // Tue small hours
         assert!(!ws(&spec, datetime!(2026-08-25 6:00 UTC)).inside); // window closed
@@ -198,13 +227,21 @@ mod tests {
 
     #[test]
     fn weekly_overnight_covers_midnight_boundary() {
-        let spec = Spec::Weekly { days: 0b0000_0001, start_minute: 22 * 60, end_minute: 6 * 60 };
+        let spec = Spec::Weekly {
+            days: 0b0000_0001,
+            start_minute: 22 * 60,
+            end_minute: 6 * 60,
+        };
         assert!(ws(&spec, datetime!(2026-08-25 0:00 UTC)).inside); // exactly midnight
     }
 
     #[test]
     fn weekly_all_days_means_daily() {
-        let spec = Spec::Weekly { days: 0b0111_1111, start_minute: 540, end_minute: 1020 };
+        let spec = Spec::Weekly {
+            days: 0b0111_1111,
+            start_minute: 540,
+            end_minute: 1020,
+        };
         let st = ws(&spec, datetime!(2026-08-23 20:00 UTC)); // Sunday evening
         assert!(!st.inside);
         assert_eq!(st.next_start, datetime!(2026-08-24 9:00 UTC)); // Monday
@@ -213,7 +250,11 @@ mod tests {
     #[test]
     fn monthly_skips_days_absent_from_short_months() {
         // Only day 31: Feb has none, April has one.
-        let spec = Spec::Monthly { days: 1 << 30, start_minute: 540, end_minute: 1020 };
+        let spec = Spec::Monthly {
+            days: 1 << 30,
+            start_minute: 540,
+            end_minute: 1020,
+        };
         // Feb 28 2027 is a Sunday; next day-31 after that is Mar 31 2027.
         let st = ws(&spec, datetime!(2027-02-28 12:00 UTC));
         assert!(!st.inside);
@@ -226,7 +267,11 @@ mod tests {
     #[test]
     fn monthly_feb_29_leap_years() {
         // Only day 29: fires Feb 2028 (leap), skips Feb 2027.
-        let spec = Spec::Monthly { days: 1 << 28, start_minute: 0, end_minute: 60 };
+        let spec = Spec::Monthly {
+            days: 1 << 28,
+            start_minute: 0,
+            end_minute: 60,
+        };
         let st = ws(&spec, datetime!(2027-02-28 12:00 UTC));
         assert_eq!(st.next_start, datetime!(2027-03-29 0:00 UTC));
         let st = ws(&spec, datetime!(2028-02-28 12:00 UTC));
@@ -236,7 +281,11 @@ mod tests {
     #[test]
     fn monthly_cross_month_overnight_window() {
         // Jan 31 22:00..Feb 1 06:00.
-        let spec = Spec::Monthly { days: 1 << 30, start_minute: 22 * 60, end_minute: 6 * 60 };
+        let spec = Spec::Monthly {
+            days: 1 << 30,
+            start_minute: 22 * 60,
+            end_minute: 6 * 60,
+        };
         assert!(ws(&spec, datetime!(2026-01-31 23:00 UTC)).inside);
         assert!(ws(&spec, datetime!(2026-02-1 5:00 UTC)).inside);
         assert!(!ws(&spec, datetime!(2026-02-1 6:00 UTC)).inside);
@@ -244,7 +293,11 @@ mod tests {
 
     #[test]
     fn calendar_full_day_window() {
-        let spec = Spec::Weekly { days: 1, start_minute: 0, end_minute: DAY_MINUTES };
+        let spec = Spec::Weekly {
+            days: 1,
+            start_minute: 0,
+            end_minute: DAY_MINUTES,
+        };
         assert!(ws(&spec, datetime!(2026-08-24 0:00 UTC)).inside);
         assert!(ws(&spec, datetime!(2026-08-24 23:59 UTC)).inside);
         assert!(!ws(&spec, datetime!(2026-08-25 0:00 UTC)).inside); // Tue not selected
@@ -254,7 +307,11 @@ mod tests {
     fn adjacent_windows_merge_covering_end() {
         // Mon 22:00..Tue 06:00 and Tue 04:00..08:00 overlap on Tue
         // 04:00-06:00: at Tue 05:00 the covering end is Tue 08:00.
-        let spec = Spec::Weekly { days: 0b0000_0011, start_minute: 22 * 60, end_minute: 8 * 60 };
+        let spec = Spec::Weekly {
+            days: 0b0000_0011,
+            start_minute: 22 * 60,
+            end_minute: 8 * 60,
+        };
         let st = ws(&spec, datetime!(2026-08-25 5:00 UTC)); // Tue small hours
         assert!(st.inside);
         assert_eq!(st.next_end, datetime!(2026-08-25 8:00 UTC));
@@ -263,7 +320,11 @@ mod tests {
     #[test]
     fn interval_strict_rotation_across_days() {
         // Every 5h from Aug 21 00:00, 90-minute shifts.
-        let spec = Spec::Interval { every_hours: 5, length_min: 90, anchor: datetime!(2026-08-21 0:00 UTC) };
+        let spec = Spec::Interval {
+            every_hours: 5,
+            length_min: 90,
+            anchor: datetime!(2026-08-21 0:00 UTC),
+        };
         assert!(ws(&spec, datetime!(2026-08-21 1:29 UTC)).inside);
         assert!(!ws(&spec, datetime!(2026-08-21 1:30 UTC)).inside);
         // Cross-day strictness: 20:00 start is 5h after 15:00, 01:00 next
@@ -276,7 +337,11 @@ mod tests {
 
     #[test]
     fn interval_before_anchor_waits_for_first_shift() {
-        let spec = Spec::Interval { every_hours: 5, length_min: 60, anchor: datetime!(2026-08-21 0:00 UTC) };
+        let spec = Spec::Interval {
+            every_hours: 5,
+            length_min: 60,
+            anchor: datetime!(2026-08-21 0:00 UTC),
+        };
         let st = ws(&spec, datetime!(2026-08-20 12:00 UTC));
         assert!(!st.inside);
         assert_eq!(st.next_start, datetime!(2026-08-21 0:00 UTC));
@@ -285,7 +350,11 @@ mod tests {
 
     #[test]
     fn interval_anchor_edges() {
-        let spec = Spec::Interval { every_hours: 2, length_min: 60, anchor: datetime!(2026-08-21 0:00 UTC) };
+        let spec = Spec::Interval {
+            every_hours: 2,
+            length_min: 60,
+            anchor: datetime!(2026-08-21 0:00 UTC),
+        };
         // Exactly at the anchor boundary: inside (half-open start).
         let st = ws(&spec, datetime!(2026-08-21 0:00 UTC));
         assert!(st.inside);
@@ -299,7 +368,11 @@ mod tests {
     #[test]
     fn interval_length_ge_period_is_continuous_duty() {
         // 2h period, 3h length: shifts overlap — always inside.
-        let spec = Spec::Interval { every_hours: 2, length_min: 180, anchor: datetime!(2026-08-21 0:00 UTC) };
+        let spec = Spec::Interval {
+            every_hours: 2,
+            length_min: 180,
+            anchor: datetime!(2026-08-21 0:00 UTC),
+        };
         let st = ws(&spec, datetime!(2026-08-21 1:30 UTC));
         assert!(st.inside);
         // The covering window never ends; next_end reports the current
@@ -310,7 +383,11 @@ mod tests {
     #[test]
     fn weekly_next_after_far_gap() {
         // Sunday-only 09:00-10:00, checked Monday 12:00: next is 6 days out.
-        let spec = Spec::Weekly { days: 0b0100_0000, start_minute: 540, end_minute: 600 };
+        let spec = Spec::Weekly {
+            days: 0b0100_0000,
+            start_minute: 540,
+            end_minute: 600,
+        };
         let st = ws(&spec, datetime!(2026-08-24 12:00 UTC)); // Monday
         assert!(!st.inside);
         assert_eq!(st.next_start, datetime!(2026-08-30 9:00 UTC)); // Sunday

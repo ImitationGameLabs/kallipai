@@ -7,8 +7,8 @@ use crate::state::AgentId;
 use crate::test_helpers::{add_root, install_inbox_store, make_state};
 use crate::work_schedule::spec::Spec;
 use crate::work_schedule::{WorkSchedule, WorkScheduleStatus, WorkScheduleStore};
-use time::macros::datetime;
 use time::OffsetDateTime;
+use time::macros::datetime;
 
 /// Fixed reference: window = 12:00..12:30 (every 1h, 30min shifts).
 /// pre_warn = 10min -> 12:20; final_warn = 5min -> 12:25.
@@ -149,13 +149,10 @@ async fn make_engine_state() -> SharedState {
 }
 
 async fn store_active(state: &SharedState, s: &WorkSchedule) {
-    state
-        .work_schedules
-        .get()
-        .expect("store installed")
-        .create(s)
-        .await
-        .expect("create");
+    // Migration 04 seeds an always-on singleton; tests own the slot.
+    let store = state.work_schedules.get().expect("store installed");
+    store.delete_all().await.expect("clear seed");
+    store.create(s).await.expect("create");
 }
 
 #[tokio::test]

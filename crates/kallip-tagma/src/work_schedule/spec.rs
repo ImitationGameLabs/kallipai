@@ -48,6 +48,11 @@ pub enum Spec {
         #[serde(with = "time::serde::rfc3339")]
         anchor: OffsetDateTime,
     },
+
+    /// Always on duty — the 24/7 schedule as a first-class variant.
+    /// Phase-free: unlike a weekly full-day mask it carries no day or
+    /// minute fields, so it cannot drift or be misread under any clock.
+    Always,
 }
 
 impl Spec {
@@ -100,6 +105,7 @@ impl Spec {
                     return Err("anchor must be minute-aligned".into());
                 }
             }
+            Spec::Always => {}
         }
         Ok(())
     }
@@ -147,6 +153,7 @@ mod tests {
                 length_min: 90,
                 anchor: anchor(),
             },
+            Spec::Always,
         ];
         for spec in specs {
             let json = serde_json::to_string(&spec).unwrap();

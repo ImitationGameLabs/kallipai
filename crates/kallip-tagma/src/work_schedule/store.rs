@@ -14,11 +14,10 @@ use time::UtcOffset;
 use tokio::fs;
 use tokio::sync::Notify;
 
-
-use super::spec::{Spec, DAY_MINUTES};
 use super::WorkSchedule;
 #[cfg(test)]
 use super::WorkScheduleStatus;
+use super::spec::{DAY_MINUTES, Spec};
 
 pub(crate) mod entities {
     pub(crate) mod work_schedule {
@@ -108,7 +107,9 @@ impl WorkScheduleStore {
     pub async fn create(&self, schedule: &WorkSchedule) -> Result<()> {
         let model = ActiveModel {
             id: Set(schedule.id.clone()),
-            spec: Set(Some(serde_json::to_string(&schedule.spec).expect("spec serializes"))),
+            spec: Set(Some(
+                serde_json::to_string(&schedule.spec).expect("spec serializes"),
+            )),
             pre_warn_minutes: Set(schedule.pre_warn_minutes as i64),
             final_warn_minutes: Set(schedule.final_warn_minutes as i64),
             wake_prompt: Set(schedule.wake_prompt.clone()),
@@ -129,7 +130,6 @@ impl WorkScheduleStore {
             .await?
             .map(decode))
     }
-
 
     pub async fn update(&self, schedule: &WorkSchedule) -> Result<bool> {
         let result = Entity::update_many()
@@ -161,6 +161,14 @@ impl WorkScheduleStore {
         Ok(updated)
     }
 
+    #[cfg(test)]
+    /// Test-only: clear every row (undo the migration-04 seed) so tests
+    /// can own the singleton slot.
+    pub async fn delete_all(&self) -> Result<()> {
+        Entity::delete_many().exec(&self.db).await?;
+        Ok(())
+    }
+
     /// Test-only status toggle. NOTE: deliberately does NOT notify — it is
     /// unreachable in production. If ever un-gated, it MUST fire
     /// `self.engine_notify.notify_one()` like the other mutators, or the
@@ -174,7 +182,6 @@ impl WorkScheduleStore {
             .await?;
         Ok(result.rows_affected > 0)
     }
-
 }
 
 fn decode(m: entities::work_schedule::Model) -> WorkSchedule {
@@ -190,7 +197,7 @@ fn decode(m: entities::work_schedule::Model) -> WorkSchedule {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_else(|| {
                 tracing::warn!(schedule_id = %id, "corrupt spec; defaulting");
-                Spec::Weekly { days: 1, start_minute: 0, end_minute: DAY_MINUTES }
+                Spec::Always
             }),
         pre_warn_minutes: m.pre_warn_minutes as u32,
         final_warn_minutes: m.final_warn_minutes as u32,
@@ -224,39 +231,37 @@ mod tests {
         (store, dir)
     }
 
-    fn sample(id: &str) -> WorkSchedule {
-        WorkSchedule {
-            id: id.into(),
-            spec: Spec::Weekly { days: 0b0001_1111, start_minute: 540, end_minute: 1020 },
-            pre_warn_minutes: 10,
-            final_warn_minutes: 5,
-            wake_prompt: "Good morning.".into(),
-            status: WorkScheduleStatus::Active,
-            created_at: OffsetDateTime::now_utc(),
-        }
+    #[tokio::test]
+    async fn fresh_migrate_seeds_always_singleton() {
+        let (store, _d) = open_tmp().await;
+        // Migration 04 clears any rows and seeds the singleton slot with
+        // the always-on spec — the unset state no longer exists.
+        let got = store.get_singleton().await.unwrap().expect("seeded");
+        assert_eq!(got.spec, Spec::Always);
+        assert_eq!(got.status, WorkScheduleStatus::Active);
     }
 
     #[tokio::test]
-    async fn create_then_get_round_trips() {
+    async fn update_replaces_seed_spec_in_place() {
         let (store, _d) = open_tmp().await;
-        store.create(&sample("ws1")).await.unwrap();
+        let seed = store.get_singleton().await.unwrap().expect("seeded");
+        let mut next = seed.clone();
+        next.spec = Spec::Weekly {
+            days: 0b0001_1111,
+            start_minute: 540,
+            end_minute: 1020,
+        };
+        store.update(&next).await.unwrap();
         let got = store.get_singleton().await.unwrap().unwrap();
-        assert_eq!(got.spec, sample("x").spec);
+        assert_eq!(got.spec, next.spec);
+        // The singleton slot is replaced in place, not appended.
+        assert_eq!(got.id, seed.id);
     }
-
-
-    #[tokio::test]
-    async fn empty_store_returns_none() {
-        let (store, _d) = open_tmp().await;
-        assert!(store.get_singleton().await.unwrap().is_none());
-    }
-
 
     #[tokio::test]
     async fn update_changes_fields() {
         let (store, _d) = open_tmp().await;
-        let mut s = sample("ws1");
-        store.create(&s).await.unwrap();
+        let mut s = store.get_singleton().await.unwrap().expect("seeded");
         s.pre_warn_minutes = 15;
         assert!(store.update(&s).await.unwrap());
         let got = store.get_singleton().await.unwrap().unwrap();
@@ -266,10 +271,10 @@ mod tests {
     #[tokio::test]
     async fn update_status_toggles() {
         let (store, _d) = open_tmp().await;
-        store.create(&sample("ws1")).await.unwrap();
+        let id = store.get_singleton().await.unwrap().expect("seeded").id;
         assert!(
             store
-                .update_status("ws1", WorkScheduleStatus::Paused)
+                .update_status(&id, WorkScheduleStatus::Paused)
                 .await
                 .unwrap()
         );
@@ -278,5 +283,4 @@ mod tests {
             WorkScheduleStatus::Paused
         );
     }
-
 }
