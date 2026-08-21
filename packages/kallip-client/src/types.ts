@@ -339,6 +339,10 @@ export type WorkScheduleSpec =
        * rhythm (every_hours/length_min) changes; unchanged rhythms keep it.
        */
       readonly anchor: string;
+    }
+  | {
+      /** 24/7 duty: phase-free, so no clock view can misread it. */
+      readonly mode: "always";
     };
 
 /** The tagma's single work schedule. */

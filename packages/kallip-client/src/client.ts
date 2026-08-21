@@ -241,9 +241,10 @@ export class TagmaClient {
 
   // --- management: work schedules ---
 
-  /** GET /work-schedule — the tagma's schedule, or null when unset (operator-only). */
-  getWorkSchedule(): Promise<WorkSchedule | null> {
-    return this.json<WorkSchedule | null>("/work-schedule");
+  /** GET /work-schedule — the tagma's schedule; the migration seeds the
+   * row, so it always exists (operator-only). */
+  getWorkSchedule(): Promise<WorkSchedule> {
+    return this.json<WorkSchedule>("/work-schedule");
   }
 
   /** PUT /work-schedule — create or replace the tagma schedule (operator-only). */

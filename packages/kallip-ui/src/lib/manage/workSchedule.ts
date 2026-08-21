@@ -1,15 +1,18 @@
-// WorkSchedule helpers for the schedules page: spec validation, UTC ⇄ local
-// minute conversion, and a client-side port of the tagma evaluator
-// (crates/kallip-tagma/src/work_schedule/eval.rs) so the status line and
-// next-start preview agree with the backend without a round trip.
+// WorkSchedule helpers for the schedules page: spec validation, the
+// display-frame conversion pair crossed only at the store boundary, and a
+// client-side port of the tagma evaluator (eval.rs in the same module)
+// so the status line and next-start preview agree without a round trip.
 //
-// All spec times are UTC minutes-of-day. Local editing is a pure offset
-// shift of the wall clock; across a DST transition the local wall time of
-// a stored UTC minute drifts by the offset change (annotated in the UI,
-// not stored anywhere).
+// The wire spec is UTC; the page draft lives in the operator's chosen
+// display frame instead. Masks rotate with the start minute's day carry;
+// monthly stays in the UTC frame (month-day masks cannot cross month
+// borders losslessly); always/interval are phase-free or absolute and
+// pass through. Across a DST transition the local wall time of a stored
+// UTC minute drifts by the offset change (annotated in the UI, not
+// stored anywhere).
 //
-// Drift watch (correctness review 2026-08-21): this port is
-// display-only — duty follows the backend evaluator. The two
+// Drift watch (correctness review 2026-08-21): this port is display-only
+// — duty follows the backend evaluator. The two
 // implementations currently agree branch-for-branch; known divergences
 // are UI-side only (start_minute 1440, every_hours <= 23 cap, anchor
 // minute alignment). If eval.rs changes a boundary, scan length, or
@@ -37,6 +40,9 @@ export type SpecError =
 
 export function validateSpec(spec: WorkScheduleSpec): SpecError | null {
   switch (spec.mode) {
+    case "always":
+      // The unit variant has nothing to validate.
+      return null;
     case "weekly":
     case "monthly": {
       if (spec.days === 0) return "days_empty";
@@ -92,12 +98,7 @@ export function hhmmToMinute(text: string): number | null {
   return h * 60 + m;
 }
 
-// --- UTC ⇄ local minute-of-day ---
-
-/** Shift a minute-of-day by a fixed offset (positive = east of UTC). */
-export function shiftMinute(minute: number, offsetMinutes: number): number {
-  return (((minute + offsetMinutes) % DAY_MINUTES) + DAY_MINUTES) % DAY_MINUTES;
-}
+// --- display frame: offset helpers + the store-boundary conversion pair ---
 
 /** The browser's offset east of UTC right now, in minutes. */
 export function localOffsetMinutes(now = new Date()): number {
@@ -111,6 +112,77 @@ export function offsetLabel(offsetMinutes: number): string {
   const h = String(Math.floor(abs / 60)).padStart(2, "0");
   const m = String(abs % 60).padStart(2, "0");
   return `UTC${sign}${h}:${m}`;
+}
+
+// Reference Monday (2000-01-03 UTC) anchors weekday-mask rotation: bit i
+// is ISO day i+1, and the shifted start minute's day carry rotates each
+// set bit through a real epoch date instead of bare mod-7 arithmetic.
+const REF_MONDAY_MS = Date.UTC(2000, 0, 3);
+const DAY_MS = 86_400_000;
+
+/** Window length in minutes; an end at or below the start crosses midnight
+ * and belongs to the start day (start == end is the banned full-day-equal
+ * form, length 1440). */
+function windowLength(start: number, end: number): number {
+  return end > start ? end - start : DAY_MINUTES - start + end;
+}
+
+/**
+ * Convert a UTC (wire) spec into the display frame `offMin` minutes east
+ * of UTC. Monthly (month-day masks cannot cross month borders losslessly),
+ * interval (absolute quantities), and always (phase-free) pass through.
+ * Returns null when a weekly window has no exact frame equivalent — a
+ * full-day window whose start does not land on the frame's midnight. A
+ * full-week full-day weekly spec is phase-free 24/7 and normalizes to the
+ * always variant instead of shifting.
+ */
+export function toFrame(
+  spec: WorkScheduleSpec,
+  offMin: number,
+): WorkScheduleSpec | null {
+  if (spec.mode !== "weekly") return spec;
+  if (
+    spec.days === 0b0111_1111 &&
+    spec.start_minute === 0 &&
+    spec.end_minute === DAY_MINUTES
+  ) {
+    return { mode: "always" };
+  }
+  return shiftWeekly(spec, offMin);
+}
+
+/** The inverse: display frame → UTC wire spec (null on the same
+ * unrepresentable family). */
+export function fromFrame(
+  spec: WorkScheduleSpec,
+  offMin: number,
+): WorkScheduleSpec | null {
+  return toFrame(spec, -offMin);
+}
+
+function shiftWeekly(
+  spec: Extract<WorkScheduleSpec, { mode: "weekly" }>,
+  delta: number,
+): WorkScheduleSpec | null {
+  const len = windowLength(spec.start_minute, spec.end_minute);
+  const shifted = spec.start_minute + delta;
+  const carry = Math.floor(shifted / DAY_MINUTES); // −1, 0, or +1
+  const start = ((shifted % DAY_MINUTES) + DAY_MINUTES) % DAY_MINUTES;
+  const endRaw = start + len;
+  const end = endRaw % DAY_MINUTES === 0 ? DAY_MINUTES : endRaw % DAY_MINUTES;
+  if (end === start) {
+    // Full-day window not starting at the frame's midnight: the frame
+    // model has no double-day window to express it.
+    return null;
+  }
+  let days = 0;
+  for (let bit = 0; bit < 7; bit++) {
+    if ((spec.days & (1 << bit)) === 0) continue;
+    const d = new Date(REF_MONDAY_MS + (bit + carry) * DAY_MS);
+    const iso = d.getUTCDay() === 0 ? 7 : d.getUTCDay();
+    days |= 1 << (iso - 1);
+  }
+  return { mode: "weekly", days, start_minute: start, end_minute: end };
 }
 
 // --- masks ⇄ lists ---
@@ -147,6 +219,12 @@ export function windowStatus(
     case "weekly":
     case "monthly":
       return evalCalendar(spec, now);
+    case "always": {
+      // Mirrors eval.rs: no natural end, so a finite 30-day horizon
+      // stands in — the engine wakes then and re-evaluates.
+      const standIn = new Date(now.getTime() + 30 * DAY_MS);
+      return { inside: true, nextStart: standIn, nextEnd: standIn };
+    }
   }
 }
 

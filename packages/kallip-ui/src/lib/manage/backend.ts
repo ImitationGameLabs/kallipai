@@ -47,7 +47,7 @@ export interface ManagementBackend {
   updateProfiles(body: ProfileConfig): Promise<ProfileConfig>;
   applyProfiles(): Promise<ProfileApplyResponse>;
   probeProfiles(body: ProfileProbeRequest): Promise<ProfileProbeResponse>;
-  getWorkSchedule(): Promise<WorkSchedule | null>;
+  getWorkSchedule(): Promise<WorkSchedule>;
   putWorkSchedule(body: PutWorkScheduleRequest): Promise<WorkSchedule>;
 }
 
@@ -177,7 +177,7 @@ export class OnlineBackend implements ManagementBackend {
     return this.req<ProfileProbeResponse>("POST", "/profiles/probe", body);
   }
   getWorkSchedule() {
-    return this.req<WorkSchedule | null>("GET", "/work-schedule");
+    return this.req<WorkSchedule>("GET", "/work-schedule");
   }
   putWorkSchedule(body: PutWorkScheduleRequest) {
     return this.req<WorkSchedule>("PUT", "/work-schedule", body);

@@ -3,21 +3,22 @@
   // edited inline (no dialog, no list, no cron strings). The page keeps a
   // draft of the whole schedule, tracks dirtiness against the server
   // snapshot, and saves explicitly; the master switch is part of the same
-  // draft. Times are stored UTC and edited in the operator's chosen clock
-  // (a pure offset shift — across DST the local wall time drifts, noted
-  // in the UI, nothing tz-ish is stored).
+  // draft. The wire spec is UTC; the draft lives in the operator's chosen
+  // display clock, and the toFrame/fromFrame pair at the load/save
+  // boundary is the only crossing (monthly stays in the UTC frame; 24/7
+  // is the always variant).
   import { schedulesStore } from "../../lib/manage/schedules.svelte.ts";
   import { agentsStore } from "../../lib/manage/agents.svelte.ts";
   import type { WorkSchedule, WorkScheduleSpec } from "@kallipai/kallip-client";
   import {
-    DAY_MINUTES,
     formatClock,
     formatDay,
+    fromFrame,
     hhmmToMinute,
     localOffsetMinutes,
     minuteToHHMM,
     offsetLabel,
-    shiftMinute,
+    toFrame,
     validateSpec,
     windowStatus,
   } from "../../lib/manage/workSchedule.ts";
@@ -25,6 +26,7 @@
   import {
     common_save,
     manage_profiles_discard,
+    manage_schedules_always_note,
     manage_schedules_anchor_note,
     manage_schedules_clock_local,
     manage_schedules_clock_utc,
@@ -44,6 +46,7 @@
     manage_schedules_mode_interval,
     manage_schedules_mode_monthly,
     manage_schedules_mode_weekly,
+    manage_schedules_monthly_utc_note,
     manage_schedules_next_start,
     manage_schedules_overnight,
     manage_schedules_pre_warn,
@@ -54,12 +57,15 @@
     manage_schedules_preset_weekdays,
     manage_schedules_start_time,
     manage_schedules_status_active,
+    manage_schedules_status_always,
     manage_schedules_status_inside,
     manage_schedules_status_outside,
     manage_schedules_status_paused,
+    manage_schedules_switch_blocked,
     manage_schedules_team_desc,
     manage_schedules_title,
     manage_schedules_unsaved,
+    manage_schedules_unrepresentable,
     manage_schedules_wake_hint,
     manage_schedules_wake_now,
     manage_schedules_wake_prompt,
@@ -97,7 +103,16 @@
   const UTC_PREF_KEY = "kallip:schedules-clock";
   let utc = $state(readClockPref());
   function setClock(next: boolean): void {
-    utc = next;
+    if (next === utc) return;
+    // In-place reframe: the draft must survive the frame change
+    // exactly, or the switch is refused (the guard renders why).
+    if (draft !== null) {
+      const wire = fromFrame(draft.spec, utc ? 0 : utcOffset);
+      if (wire === null) return;
+      const reframed = toFrame(wire, next ? 0 : utcOffset);
+      if (reframed === null) return;
+      draft.spec = reframed;
+    }
     try {
       localStorage.setItem(UTC_PREF_KEY, next ? "utc" : "local");
     } catch {
@@ -128,7 +143,8 @@
         every_hours: number;
         length_min: number;
         anchor: string;
-      };
+      }
+    | { mode: "always" };
   // (structurally identical to the wire WorkScheduleSpec, minus readonly,
   // so the draft can be edited; assigning into PutWorkScheduleRequest is
   // still sound because the shapes are the same)
@@ -141,12 +157,7 @@
   };
 
   const defaultDraft = (): Draft => ({
-    spec: {
-      mode: "weekly",
-      days: 0b0011_1111,
-      start_minute: 540,
-      end_minute: 1020,
-    },
+    spec: { mode: "always" },
     pre_warn_minutes: 10,
     final_warn_minutes: 5,
     wake_prompt: "",
@@ -154,34 +165,46 @@
   });
 
   let draft = $state<Draft | null>(null);
+
+  // The display frame: monthly keeps UTC (month-day masks cannot cross
+  // month borders losslessly), otherwise the chosen clock.
+  const effUtc = $derived(
+    draft === null || draft.spec.mode !== "monthly" ? utc : true,
+  );
+  const effOff = $derived(effUtc ? 0 : utcOffset);
+
+  // Frame a wire spec for the draft. Null means no exact equivalent in
+  // the current frame (a partial-week full-day weekly outside UTC): fall
+  // back to the UTC frame for this visit — the stored preference is left
+  // alone and the clock-switch guard explains the lock.
+  function applyFrame(spec: WorkScheduleSpec, off: number): MutableSpec {
+    // $state.snapshot: the deep copy sanctioned at reactive boundaries
+    // — structuredClone throws on $state proxies, and the passthrough
+    // arms of toFrame return their input unchanged.
+    const plain = $state.snapshot(spec);
+    const framed = toFrame(plain, off);
+    if (framed === null) {
+      utc = true;
+      return plain;
+    }
+    return framed;
+  }
+
+  function draftFrom(s: WorkSchedule): Draft {
+    return {
+      spec: applyFrame(s.spec, effOff),
+      pre_warn_minutes: s.pre_warn_minutes,
+      final_warn_minutes: s.final_warn_minutes,
+      wake_prompt: s.wake_prompt,
+      status: s.status,
+    };
+  }
   $effect(() => {
     if (schedulesStore.hasLoaded && untrack(() => draft) === null) {
       const s = schedulesStore.schedule;
-      draft = s
-        ? {
-            // $state.snapshot: the deep copy sanctioned at reactive
-            // boundaries — structuredClone throws on $state proxies.
-            spec: $state.snapshot(s.spec),
-            pre_warn_minutes: s.pre_warn_minutes,
-            final_warn_minutes: s.final_warn_minutes,
-            wake_prompt: s.wake_prompt,
-            status: s.status,
-          }
-        : defaultDraft();
+      draft = s ? draftFrom(s) : defaultDraft();
     }
   });
-
-  // --- clock helpers: display minute-of-day in the chosen clock ---
-
-  const off = $derived(utc ? 0 : utcOffset);
-  function showMinute(minute: number): string {
-    return minuteToHHMM(shiftMinute(minute, off));
-  }
-  function editMinute(current: number, text: string): number | null {
-    const m = hhmmToMinute(text);
-    if (m === null) return null;
-    return shiftMinute(m, -off);
-  }
 
   // --- dirty tracking: field-level diff against the server snapshot ---
 
@@ -191,8 +214,10 @@
   const dirty = $derived.by(() => {
     if (!draft || !schedulesStore.hasLoaded) return false;
     if (!snapshot) return true; // unsaved first draft
+    const framedSnap = toFrame(snapshot.spec, effOff);
     return (
-      !specEq(draft.spec, snapshot.spec) ||
+      framedSnap === null ||
+      !specEq(draft.spec, framedSnap) ||
       draft.pre_warn_minutes !== snapshot.pre_warn_minutes ||
       draft.final_warn_minutes !== snapshot.final_warn_minutes ||
       draft.wake_prompt !== snapshot.wake_prompt ||
@@ -213,22 +238,34 @@
       pre >= fin
     );
   });
-  const canSave = $derived(
-    dirty && !specError && warnMinutesValid && !schedulesStore.isSaving,
+  // The UTC spec the draft converts to; null while it has no exact
+  // equivalent (a full-day window on selected days outside the UTC
+  // clock) — saving and leaving the frame are both blocked then.
+  const wireSpec = $derived(
+    draft === null ? null : fromFrame(draft.spec, effOff),
   );
+
+  const canSave = $derived(
+    dirty &&
+      !specError &&
+      warnMinutesValid &&
+      !schedulesStore.isSaving &&
+      wireSpec !== null,
+  );
+
+  // Clock-switch reachability: the draft must survive the frame change.
+  function reaches(targetOff: number): boolean {
+    const spec = draft?.spec;
+    if (!spec) return true;
+    const wire = fromFrame(spec, effOff);
+    return wire !== null && toFrame(wire, targetOff) !== null;
+  }
+  const canShowUtc = $derived(reaches(0));
+  const canShowLocal = $derived(reaches(utcOffset));
 
   function discard(): void {
     const s = schedulesStore.schedule;
-    draft = s
-      ? {
-          // Same proxy boundary as loadDraft; snapshot, never clone.
-          spec: $state.snapshot(s.spec),
-          pre_warn_minutes: s.pre_warn_minutes,
-          final_warn_minutes: s.final_warn_minutes,
-          wake_prompt: s.wake_prompt,
-          status: s.status,
-        }
-      : defaultDraft();
+    draft = s ? draftFrom(s) : defaultDraft();
   }
 
   // A fresh anchor timestamp, seconds zeroed so the minute stays the
@@ -242,19 +279,23 @@
 
   async function save(): Promise<void> {
     if (!draft || !canSave) return;
-    // The draft goes out verbatim. For interval specs the anchor carries
-    // the user's M (the effect keeps it in sync); the server either echoes
-    // it unchanged or re-anchors at save time preserving that minute —
-    // the client never rewrites the anchor itself.
-    const spec = $state.snapshot(draft.spec);
+    // The frame draft crosses to UTC exactly once, here — fromFrame is
+    // the same conversion the dirty check uses, so what saves is what
+    // the page showed. The response is the server's truth (an interval
+    // re-anchors; a full-week full-day weekly normalizes to always) —
+    // re-derive the draft from it so the editor shows what was stored
+    // and dirty clears.
+    const spec = wireSpec;
+    if (spec === null) return;
     try {
-      await schedulesStore.save({
-        spec,
+      const saved = await schedulesStore.save({
+        spec: $state.snapshot(spec),
         pre_warn_minutes: draft.pre_warn_minutes,
         final_warn_minutes: draft.final_warn_minutes,
         wake_prompt: draft.wake_prompt,
         status: draft.status,
       });
+      draft.spec = applyFrame(saved.spec, effOff);
     } catch {
       // surfaced via store error
     }
@@ -284,7 +325,7 @@
       mode === "weekly"
         ? {
             mode: "weekly",
-            days: 0b0011_1111,
+            days: 0b0001_1111,
             start_minute: 540,
             end_minute: 1020,
           }
@@ -295,12 +336,14 @@
               start_minute: 540,
               end_minute: 1020,
             }
-          : {
-              mode: "interval",
-              every_hours: 4,
-              length_min: 60,
-              anchor: freshAnchor(),
-            };
+          : mode === "interval"
+            ? {
+                mode: "interval",
+                every_hours: 4,
+                length_min: 60,
+                anchor: freshAnchor(),
+              }
+            : { mode: "always" };
   }
 
   const overnight = $derived(
@@ -313,29 +356,20 @@
     {
       id: "weekdays",
       label: () => manage_schedules_preset_weekdays(),
-      apply: () => ({ days: 0b0011_1111, start_minute: 540, end_minute: 1020 }),
+      apply: () => ({ days: 0b0001_1111, start_minute: 540, end_minute: 1020 }),
     },
     {
       id: "early",
       label: () => manage_schedules_preset_early(),
-      apply: () => ({ days: 0b0011_1111, start_minute: 360, end_minute: 840 }),
+      apply: () => ({ days: 0b0001_1111, start_minute: 360, end_minute: 840 }),
     },
     {
       id: "night",
       label: () => manage_schedules_preset_night(),
       apply: () => ({
-        days: 0b0011_1111,
+        days: 0b0001_1111,
         start_minute: 22 * 60,
         end_minute: 6 * 60,
-      }),
-    },
-    {
-      id: "allday",
-      label: () => manage_schedules_preset_allday(),
-      apply: () => ({
-        days: 0b0111_1111,
-        start_minute: 0,
-        end_minute: DAY_MINUTES,
       }),
     },
   ];
@@ -354,15 +388,16 @@
   });
 
   function clockTime(d: Date): string {
-    return formatClock(d, utc);
+    return formatClock(d, effUtc);
   }
   function nextStartText(): string | null {
     const st = statusNow;
     if (!st) return null;
-    const sameDay = formatDay(st.nextStart, utc) === formatDay(new Date(), utc);
+    const sameDay =
+      formatDay(st.nextStart, effUtc) === formatDay(new Date(), effUtc);
     return sameDay
       ? clockTime(st.nextStart)
-      : `${formatDay(st.nextStart, utc)} ${clockTime(st.nextStart)}`;
+      : `${formatDay(st.nextStart, effUtc)} ${clockTime(st.nextStart)}`;
   }
 
   function wakeNow(): void {
@@ -373,14 +408,14 @@
   // spread would distribute over the union and confuse the checker).
   function setStartMinute(text: string): void {
     const spec = draft?.spec;
-    if (!spec || spec.mode === "interval") return;
-    const m = editMinute(spec.start_minute, text);
+    if (!spec || spec.mode === "interval" || spec.mode === "always") return;
+    const m = hhmmToMinute(text);
     if (m !== null) draft!.spec = { ...spec, start_minute: m };
   }
   function setEndMinute(text: string): void {
     const spec = draft?.spec;
-    if (!spec || spec.mode === "interval") return;
-    const m = editMinute(spec.end_minute, text);
+    if (!spec || spec.mode === "interval" || spec.mode === "always") return;
+    const m = hhmmToMinute(text);
     if (m !== null) draft!.spec = { ...spec, end_minute: m };
   }
 
@@ -481,7 +516,9 @@
               : manage_schedules_status_paused()}
           </button>
         </div>
-        {#if statusNow}
+        {#if snapshot && snapshot.spec.mode === "always" && snapshot.status === "active"}
+          <p class="text-xs opacity-70">{manage_schedules_status_always()}</p>
+        {:else if statusNow}
           <p class="text-xs opacity-70">
             {statusNow.inside
               ? manage_schedules_status_inside({
@@ -505,30 +542,41 @@
         <span class="opacity-50">{manage_schedules_dst_note()}</span>
         <div class="flex gap-1">
           <button
-            class="btn btn-sm {utc
+            class="btn btn-sm {effUtc
               ? 'preset-filled-primary-500'
               : 'preset-tonal-surface'}"
-            aria-pressed={utc}
+            aria-pressed={effUtc}
+            disabled={!canShowUtc || draft.spec.mode === "monthly"}
             onclick={() => setClock(true)}
           >
             {manage_schedules_clock_utc()}
           </button>
           <button
-            class="btn btn-sm {!utc
+            class="btn btn-sm {!effUtc
               ? 'preset-filled-primary-500'
               : 'preset-tonal-surface'}"
-            aria-pressed={!utc}
+            aria-pressed={!effUtc}
+            disabled={!canShowLocal || draft.spec.mode === "monthly"}
             onclick={() => setClock(false)}
           >
             {manage_schedules_clock_local()}（{offsetLabel(utcOffset)}）
           </button>
         </div>
       </div>
+      {#if draft.spec.mode === "monthly"}
+        <p class="text-xs opacity-50 text-right">
+          {manage_schedules_monthly_utc_note()}
+        </p>
+      {:else if !canShowUtc || !canShowLocal}
+        <p class="text-xs opacity-50 text-right">
+          {manage_schedules_switch_blocked()}
+        </p>
+      {/if}
 
       <!-- period editor -->
       <section class="card preset-tonal-surface p-4 space-y-4">
         <div class="flex gap-1" role="tablist">
-          {#each [["weekly", manage_schedules_mode_weekly()], ["monthly", manage_schedules_mode_monthly()], ["interval", manage_schedules_mode_interval()]] as [mode, label] (mode)}
+          {#each [["weekly", manage_schedules_mode_weekly()], ["monthly", manage_schedules_mode_monthly()], ["interval", manage_schedules_mode_interval()], ["always", manage_schedules_preset_allday()]] as [mode, label] (mode)}
             <button
               role="tab"
               aria-selected={draft.spec.mode === mode}
@@ -600,26 +648,26 @@
             <label class="text-sm space-y-1">
               <span class="opacity-70">
                 {manage_schedules_start_time({
-                  clock: utc ? "UTC" : offsetLabel(utcOffset),
+                  clock: effUtc ? "UTC" : offsetLabel(utcOffset),
                 })}
               </span>
               <input
                 class="input preset-tonal-surface w-full"
                 type="time"
-                value={showMinute(draft.spec.start_minute)}
+                value={minuteToHHMM(draft.spec.start_minute)}
                 onchange={(e) => setStartMinute(e.currentTarget.value)}
               />
             </label>
             <label class="text-sm space-y-1">
               <span class="opacity-70">
                 {manage_schedules_end_time({
-                  clock: utc ? "UTC" : offsetLabel(utcOffset),
+                  clock: effUtc ? "UTC" : offsetLabel(utcOffset),
                 })}
               </span>
               <input
                 class="input preset-tonal-surface w-full"
                 type="time"
-                value={showMinute(draft.spec.end_minute)}
+                value={minuteToHHMM(draft.spec.end_minute)}
                 onchange={(e) => setEndMinute(e.currentTarget.value)}
               />
             </label>
@@ -648,7 +696,7 @@
               </div>
             </div>
           {/if}
-        {:else}
+        {:else if draft.spec.mode === "interval"}
           <div class="grid grid-cols-3 gap-4">
             <label class="text-sm space-y-1">
               <span class="opacity-70">{manage_schedules_interval_hours()}</span
@@ -686,6 +734,8 @@
             </label>
           </div>
           <p class="text-xs opacity-60">{manage_schedules_anchor_note()}</p>
+        {:else}
+          <p class="text-xs opacity-60">{manage_schedules_always_note()}</p>
         {/if}
         {#if specError && specError !== "zero_window"}
           <p class="text-xs text-error-500 dark:text-error-400">
@@ -751,6 +801,11 @@
             >{manage_schedules_unsaved()}</span
           >
           <div class="flex-1"></div>
+          {#if wireSpec === null}
+            <span class="text-xs text-error-500 dark:text-error-400">
+              {manage_schedules_unrepresentable()}
+            </span>
+          {/if}
           <button
             class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
             disabled={schedulesStore.isSaving}

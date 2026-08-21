@@ -1,17 +1,18 @@
-// Tests for workSchedule.ts: validation, minute/offset math, and the
-// evaluator port. Evaluator cases mirror the Rust eval.rs matrix so the
+// Tests for workSchedule.ts: validation, minute/offset math, the
+// evaluator port, and the store-boundary frame pair. Evaluator cases
 // client preview and the backend cannot drift apart silently.
 
 import { assertEquals } from "@std/assert";
 import {
   DAY_MINUTES,
   hhmmToMinute,
+  fromFrame,
   localOffsetMinutes,
   minuteToHHMM,
   monthDayList,
   offsetLabel,
-  shiftMinute,
   validateSpec,
+  toFrame,
   weekdayList,
   windowStatus,
 } from "./workSchedule.ts";
@@ -153,19 +154,6 @@ Deno.test("minuteToHHMM/hhmmToMinute round trip", () => {
   assertEquals(hhmmToMinute("09:60"), null);
   assertEquals(hhmmToMinute("9am"), null);
 });
-
-Deno.test(
-  "shiftMinute wraps in both directions (half-hour offsets too)",
-  () => {
-    // +08:00 east: 23:00 UTC is 07:00 next day local.
-    assertEquals(shiftMinute(23 * 60, 8 * 60), 7 * 60);
-    // -05:00 west: 02:00 UTC is 21:00 previous day local.
-    assertEquals(shiftMinute(2 * 60, -5 * 60), 21 * 60);
-    // Half-hour zone (UTC+05:30): 23:45 UTC → 05:15 local.
-    assertEquals(shiftMinute(23 * 60 + 45, 5 * 60 + 30), 5 * 60 + 15);
-    assertEquals(shiftMinute(0, 0), 0);
-  },
-);
 
 Deno.test("offsetLabel renders signs and half hours", () => {
   assertEquals(offsetLabel(8 * 60), "UTC+08:00");
@@ -404,3 +392,162 @@ Deno.test("windowStatus returns null for a broken anchor", () => {
   } as unknown as WorkScheduleSpec;
   assertEquals(windowStatus(spec, new Date()), null);
 });
+
+// --- frame conversion (the store boundary's only crossing) ---
+
+const OFFS = [-480, -300, 0, 330, 480, 840];
+
+function weeklySpec(
+  days: number,
+  start_minute: number,
+  end_minute: number,
+): WorkScheduleSpec {
+  return { mode: "weekly", days, start_minute, end_minute };
+}
+
+// Window shapes exercised per offset. "regular" stays inside a day,
+// "overnight" crosses midnight, the "seam" family pins the frame
+// start at the wrap point (off / off±1 minutes), "morningTail" ends
+// exactly at the frame's midnight (the 1440-end convention).
+function frameShapes(off: number): Array<[string, WorkScheduleSpec]> {
+  const seam = ((off % 1440) + 1440) % 1440;
+  return [
+    ["regular", weeklySpec(0b0011_1111, 540, 1020)],
+    ["overnight", weeklySpec(0b0001_1111, 22 * 60, 6 * 60)],
+    ["seam-exact", weeklySpec(0b0100_0011, seam, (seam + 300) % 1440 || 1440)],
+    ["seam-minus-1", weeklySpec(0b0011_1111, (seam + 1439) % 1440, 120)],
+    ["seam-plus-1", weeklySpec(0b0110_0011, (seam + 1) % 1440, 600)],
+    [
+      "morningTail",
+      weeklySpec(
+        0b0011_1111,
+        (seam + 1040) % 1440,
+        (seam + 1440) % 1440 || 1440,
+      ),
+    ],
+  ];
+}
+
+Deno.test(
+  "toFrame∘fromFrame is the identity on representable weekly specs",
+  () => {
+    for (const off of OFFS) {
+      for (const [, spec] of frameShapes(off)) {
+        const wire = fromFrame(spec, off);
+        if (wire === null) continue; // excluded family, covered below
+        assertEquals(
+          toFrame(wire, off),
+          spec,
+          `off=${off} ${JSON.stringify(spec)}`,
+        );
+      }
+    }
+  },
+);
+
+Deno.test("fromFrame∘toFrame is the identity on the wire side", () => {
+  for (const off of OFFS) {
+    for (const [, spec] of frameShapes(off)) {
+      const framed = toFrame(spec, off);
+      if (framed === null || framed.mode !== "weekly") continue;
+      assertEquals(
+        fromFrame(framed, off),
+        spec,
+        `off=${off} ${JSON.stringify(spec)}`,
+      );
+    }
+  }
+});
+
+Deno.test("the mask rotates with the start minute's day carry (+8)", () => {
+  // Mon 06:00 UTC + 8h = Mon 14:00 — same day, mask unchanged.
+  assertEquals(
+    toFrame(weeklySpec(0b1, 360, 840), 480),
+    weeklySpec(0b1, 840, 1320),
+  );
+  // Mon 09:00 UTC + 8h = Mon 17:00 — still Monday.
+  assertEquals(
+    toFrame(weeklySpec(0b1, 540, 1020), 480),
+    weeklySpec(0b1, 1020, 60),
+  );
+  // B2 regression: frame Mon–Fri 06:00–14:00 at +8 becomes UTC Sun–Thu
+  // 22:00–06:00 — the mask must rotate back a day, not just the minutes.
+  assertEquals(
+    fromFrame(weeklySpec(0b0001_1111, 360, 840), 480),
+    weeklySpec(0b0100_1111, 1320, 360),
+  );
+});
+
+Deno.test("the mask rotates forward for west offsets (−8)", () => {
+  // West offsets carry when the window starts before 08:00 UTC:
+  // Mon 03:00–10:00 UTC at UTC−8 is Sun 19:00–02:00, owned by Sunday.
+  assertEquals(
+    toFrame(weeklySpec(0b0000_0001, 180, 600), -480),
+    weeklySpec(0b1000000, 1140, 120),
+  );
+});
+
+Deno.test("B1 regression: preset literals save as UTC-shifted minutes", () => {
+  // The 9-to-5 preset applies frame literals (540/1020); at +8 the wire
+  // must hold 60/540, never the frame numbers themselves.
+  assertEquals(
+    fromFrame(weeklySpec(0b0001_1111, 540, 1020), 480),
+    weeklySpec(0b0001_1111, 60, 540),
+  );
+});
+
+Deno.test("full-week full-day normalizes to always, from either side", () => {
+  const fullWeek = weeklySpec(0b0111_1111, 0, 1440);
+  for (const off of OFFS) {
+    assertEquals(fromFrame(fullWeek, off), { mode: "always" });
+    assertEquals(toFrame(fullWeek, off), { mode: "always" });
+  }
+});
+
+Deno.test("always passes through both directions at any offset", () => {
+  const always: WorkScheduleSpec = { mode: "always" };
+  for (const off of OFFS) {
+    assertEquals(toFrame(always, off), always);
+    assertEquals(fromFrame(always, off), always);
+  }
+});
+
+Deno.test("always validates clean and evaluates as inside", () => {
+  assertEquals(validateSpec({ mode: "always" }), null);
+  const st = windowStatus({ mode: "always" }, utc(2026, 8, 21));
+  assertEquals(st !== null && st.inside, true);
+});
+
+Deno.test("monthly and interval pass through untouched", () => {
+  const monthly: WorkScheduleSpec = {
+    mode: "monthly",
+    days: 1 << 5,
+    start_minute: 600,
+    end_minute: 960,
+  };
+  const interval: WorkScheduleSpec = {
+    mode: "interval",
+    every_hours: 5,
+    length_min: 90,
+    anchor: "2026-08-21T00:00:00Z",
+  };
+  for (const off of OFFS) {
+    assertEquals(toFrame(monthly, off), monthly);
+    assertEquals(fromFrame(monthly, off), monthly);
+    assertEquals(toFrame(interval, off), interval);
+    assertEquals(fromFrame(interval, off), interval);
+  }
+});
+
+Deno.test(
+  "partial-week full-day is unrepresentable outside its own frame",
+  () => {
+    // A Monday-only full-day window cannot shift by +8: the frame model
+    // has no double-day window. Save and clock-switch guards key on null.
+    const monday = weeklySpec(0b1, 0, 1440);
+    assertEquals(toFrame(monday, 480), null);
+    assertEquals(fromFrame(monday, 480), null);
+    // In the UTC frame it stays representable.
+    assertEquals(toFrame(monday, 0), monday);
+  },
+);
