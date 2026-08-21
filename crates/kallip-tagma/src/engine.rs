@@ -26,7 +26,6 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::cron::CronExpr;
 use crate::duty::DutyStatus;
 use crate::state::{AgentId, SharedState};
 use crate::work_schedule::{WorkSchedule, WorkScheduleStatus};
@@ -73,7 +72,7 @@ fn retry_anchor(now: OffsetDateTime) -> OffsetDateTime {
 /// Lifecycle phase within a single work cycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SchedulePhase {
-    /// Waiting for the next start_cron fire.
+    /// Waiting for the next shift to start.
     OffDuty,
     /// On-duty, before the pre-warn threshold.
     Working,
@@ -86,9 +85,8 @@ enum SchedulePhase {
 /// Per-schedule runtime state, held in the engine task's local map.
 #[derive(Clone)]
 struct CycleState {
-    /// Selected fields from the schedule, snapshotted to detect cron edits.
-    start_cron: String,
-    end_cron: String,
+    /// Selected fields from the schedule, snapshotted to detect edits.
+    spec: crate::work_schedule::spec::Spec,
     pre_warn_minutes: i64,
     final_warn_minutes: i64,
     agent_id: AgentId,
@@ -114,21 +112,16 @@ enum Transition {
 // Pure scheduling logic
 // ---------------------------------------------------------------------------
 
-/// Determine whether `now` falls inside a work window by comparing the next
-/// start and end fire times.
+/// Determine whether `now` falls inside a work window, straight from the
+/// spec.
 ///
 /// Returns `(is_inside_window, next_start, next_end)`.
 fn window_status(
-    start: &CronExpr,
-    end: &CronExpr,
+    spec: &crate::work_schedule::spec::Spec,
     now: OffsetDateTime,
 ) -> Option<(bool, OffsetDateTime, OffsetDateTime)> {
-    let next_start = start.next_after(now).ok()?;
-    let next_end = end.next_after(now).ok()?;
-    // next_end < next_start  => we are inside a work window (the window's
-    //   end comes before the *next* start).
-    // next_start <= next_end => we are outside (the next event is a start).
-    Some((next_end < next_start, next_start, next_end))
+    let st = crate::work_schedule::eval::window_status(spec, now)?;
+    Some((st.inside, st.next_start, st.next_end))
 }
 
 /// Initialise a [`CycleState`] for a freshly-loaded schedule.
@@ -136,10 +129,8 @@ fn window_status(
 /// Sets duty immediately (recovery) and returns the state with the correct
 /// starting phase. Caller is responsible for the side-effecting duty.set call;
 /// this function only computes the state.
-fn init_cycle(schedule: &WorkSchedule, now: OffsetDateTime) -> Option<CycleState> {
-    let start = CronExpr::parse(&schedule.start_cron).ok()?;
-    let end = CronExpr::parse(&schedule.end_cron).ok()?;
-    let (inside, next_start, next_end) = window_status(&start, &end, now)?;
+fn init_cycle(schedule: &WorkSchedule, root_id: &AgentId, now: OffsetDateTime) -> Option<CycleState> {
+    let (inside, next_start, next_end) = window_status(&schedule.spec, now)?;
 
     let pre = schedule.pre_warn_minutes as i64;
     let fin = schedule.final_warn_minutes as i64;
@@ -159,11 +150,10 @@ fn init_cycle(schedule: &WorkSchedule, now: OffsetDateTime) -> Option<CycleState
         };
 
         Some(CycleState {
-            start_cron: schedule.start_cron.clone(),
-            end_cron: schedule.end_cron.clone(),
+            spec: schedule.spec.clone(),
             pre_warn_minutes: pre,
             final_warn_minutes: fin,
-            agent_id: schedule.agent_id.clone(),
+            agent_id: root_id.clone(),
             wake_prompt: schedule.wake_prompt.clone(),
             phase,
             end_time: next_end,
@@ -172,11 +162,10 @@ fn init_cycle(schedule: &WorkSchedule, now: OffsetDateTime) -> Option<CycleState
     } else {
         // Outside — waiting for the next start.
         Some(CycleState {
-            start_cron: schedule.start_cron.clone(),
-            end_cron: schedule.end_cron.clone(),
+            spec: schedule.spec.clone(),
             pre_warn_minutes: pre,
             final_warn_minutes: fin,
-            agent_id: schedule.agent_id.clone(),
+            agent_id: root_id.clone(),
             wake_prompt: schedule.wake_prompt.clone(),
             phase: SchedulePhase::OffDuty,
             end_time: next_end, // not meaningful in OffDuty
@@ -207,19 +196,28 @@ fn compute_transition(cs: &CycleState, now: OffsetDateTime) -> Option<Transition
     }
 }
 
+/// The End-boundary decision: the evaluator is authoritative there.
+/// Merged or overlapping windows (adjacent daily windows, interval length
+/// >= period) still cover `now`, so the nominal end of one window is not a
+/// real end — returns the covering window's end so the shift continues
+/// instead of flipping the agent off and back on.
+fn end_covered_by_next(
+    spec: &crate::work_schedule::spec::Spec,
+    now: OffsetDateTime,
+) -> Option<OffsetDateTime> {
+    crate::work_schedule::eval::window_status(spec, now)
+        .filter(|st| st.inside)
+        .map(|st| st.next_end)
+}
+
 /// Recompute `next_start` after an End transition.
 fn recompute_start_after_end(cs: &mut CycleState, now: OffsetDateTime) {
-    if let Ok(start) = CronExpr::parse(&cs.start_cron) {
-        match start.next_after(now) {
-            Ok(ns) => cs.next_start = ns,
-            // next_after failed (should not happen for a validated cron, but
-            // guard against NTP jumps or clock skew): set a safe future value
-            // so the tick loop does not spin on a stale next_start.
-            Err(_) => {
-                warn!(agent = %cs.agent_id, "recompute_start_after_end: next_after failed, deferring 1h");
-                cs.next_start = now + time::Duration::hours(1);
-            }
-        }
+    if let Some(st) = crate::work_schedule::eval::window_status(&cs.spec, now) {
+        cs.next_start = st.next_start;
+    } else {
+        // Unreachable for a validated spec; keep the tick loop safe.
+        warn!(agent = %cs.agent_id, "recompute_start_after_end: eval failed, deferring 1h");
+        cs.next_start = now + time::Duration::hours(1);
     }
 }
 
@@ -437,7 +435,22 @@ async fn recompute(
     };
 
     let now = OffsetDateTime::now_utc();
-    let active = store.list(None, Some(WorkScheduleStatus::Active)).await?;
+    let root_id = {
+        let registry = state.registry.read().await;
+        registry
+            .root_agent()
+            .map(|(id, _)| id.clone())
+    };
+    let schedule = match store.get_singleton().await? {
+        Some(s) if s.status == WorkScheduleStatus::Active => vec![s],
+        _ => vec![],
+    };
+    let Some(root_id) = root_id else {
+        // No root agent to carry duty transitions.
+        cycles.clear();
+        return Ok(None);
+    };
+    let active = schedule;
 
     // --- sync: remove deleted/paused schedules ---
     let active_ids: HashSet<&str> = active.iter().map(|s| s.id.as_str()).collect();
@@ -449,7 +462,7 @@ async fn recompute(
 
         // Initialize cycle state for new schedules (recovery: set duty).
         if !cycles.contains_key(id) {
-            match init_cycle(schedule, now) {
+            match init_cycle(schedule, &root_id, now) {
                 Some(c) => {
                     match c.phase {
                         SchedulePhase::OffDuty => {
@@ -484,13 +497,12 @@ async fn recompute(
         // Detect schedule edits: re-init whenever any field that shapes the
         // cycle (window crons, warn thresholds, wake prompt) no longer
         // matches the snapshot.
-        let edited = cs.start_cron != schedule.start_cron
-            || cs.end_cron != schedule.end_cron
+        let edited = cs.spec != schedule.spec
             || cs.pre_warn_minutes != schedule.pre_warn_minutes as i64
             || cs.final_warn_minutes != schedule.final_warn_minutes as i64
             || cs.wake_prompt != schedule.wake_prompt;
         if edited {
-            if let Some(new_cs) = init_cycle(schedule, now) {
+            if let Some(new_cs) = init_cycle(schedule, &root_id, now) {
                 let was_on_duty = !matches!(cs.phase, SchedulePhase::OffDuty);
                 let now_on_duty = !matches!(new_cs.phase, SchedulePhase::OffDuty);
                 if !was_on_duty && now_on_duty {
@@ -528,21 +540,22 @@ async fn recompute(
         while let Some(trans) = compute_transition(cs, now) {
             match trans {
                 Transition::Start => {
-                    // Compute this window's end from the start that fired,
-                    // NOT from `now` (which would always be in the future).
-                    // If the engine stalled past the window end (suspend,
-                    // OOM, NTP jump), skip the Start side-effects.
-                    if let Ok(end) = CronExpr::parse(&cs.end_cron) {
-                        if let Ok(window_end) = end.next_after(cs.next_start) {
-                            if now >= window_end {
-                                info!(agent = %cs.agent_id, "schedule: start window already ended, skipping");
-                                state.duty.set(cs.agent_id.clone(), DutyStatus::OffDuty);
-                                cs.phase = SchedulePhase::OffDuty;
-                                recompute_start_after_end(cs, now);
-                                continue;
-                            }
-                            cs.end_time = window_end;
+                    // A stalled-past-end start (suspend, OOM, NTP jump) is
+                    // naturally detected by evaluating the spec at the fired
+                    // start moment: if that moment's window already ends by
+                    // `now`, skip the Start side-effects.
+                    if let Some(st) = crate::work_schedule::eval::window_status(
+                        &cs.spec,
+                        cs.next_start,
+                    ) {
+                        if now >= st.next_end {
+                            info!(agent = %cs.agent_id, "schedule: start window already ended, skipping");
+                            state.duty.set(cs.agent_id.clone(), DutyStatus::OffDuty);
+                            cs.phase = SchedulePhase::OffDuty;
+                            recompute_start_after_end(cs, now);
+                            continue;
                         }
+                        cs.end_time = st.next_end;
                     }
                     execute_start(state, cs).await;
                     cs.phase = SchedulePhase::Working;
@@ -564,9 +577,21 @@ async fn recompute(
                     cs.phase = SchedulePhase::FinalWarned;
                 }
                 Transition::End => {
-                    execute_end(state, cs).await;
-                    cs.phase = SchedulePhase::OffDuty;
-                    recompute_start_after_end(cs, now);
+                    // The evaluator is authoritative at the boundary: merged or
+                    // overlapping windows (adjacent daily windows, interval
+                    // length >= period) still cover `now`, so the nominal
+                    // end of one window is not a real end. Continue the
+                    // shift under the covering window's end instead of
+                    // flipping the agent off and back on.
+                    if let Some(covering_end) = end_covered_by_next(&cs.spec, now) {
+                        info!(agent = %cs.agent_id, "schedule: window end covered by the next; continuing");
+                        cs.end_time = covering_end;
+                        cs.phase = SchedulePhase::Working;
+                    } else {
+                        execute_end(state, cs).await;
+                        cs.phase = SchedulePhase::OffDuty;
+                        recompute_start_after_end(cs, now);
+                    }
                 }
             }
         }

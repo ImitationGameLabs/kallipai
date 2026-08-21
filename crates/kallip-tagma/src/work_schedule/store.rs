@@ -14,9 +14,11 @@ use time::UtcOffset;
 use tokio::fs;
 use tokio::sync::Notify;
 
-use crate::state::AgentId;
 
-use super::{WorkSchedule, WorkScheduleStatus};
+use super::spec::{Spec, DAY_MINUTES};
+use super::WorkSchedule;
+#[cfg(test)]
+use super::WorkScheduleStatus;
 
 pub(crate) mod entities {
     pub(crate) mod work_schedule {
@@ -27,16 +29,12 @@ pub(crate) mod entities {
         pub struct Model {
             #[sea_orm(primary_key, auto_increment = false)]
             pub id: String,
-            pub name: String,
-            pub agent_id: String,
-            pub start_cron: String,
-            pub end_cron: String,
+            pub spec: Option<String>,
             pub pre_warn_minutes: i64,
             pub final_warn_minutes: i64,
             #[sea_orm(column_type = "Text")]
             pub wake_prompt: String,
             pub status: String,
-            pub timezone: Option<String>,
             pub created_at: i64,
         }
 
@@ -110,15 +108,11 @@ impl WorkScheduleStore {
     pub async fn create(&self, schedule: &WorkSchedule) -> Result<()> {
         let model = ActiveModel {
             id: Set(schedule.id.clone()),
-            name: Set(schedule.name.clone()),
-            agent_id: Set(schedule.agent_id.as_ref().to_string()),
-            start_cron: Set(schedule.start_cron.clone()),
-            end_cron: Set(schedule.end_cron.clone()),
+            spec: Set(Some(serde_json::to_string(&schedule.spec).expect("spec serializes"))),
             pre_warn_minutes: Set(schedule.pre_warn_minutes as i64),
             final_warn_minutes: Set(schedule.final_warn_minutes as i64),
             wake_prompt: Set(schedule.wake_prompt.clone()),
             status: Set(schedule.status.to_string()),
-            timezone: Set(schedule.timezone.clone()),
             created_at: Set(to_unix(schedule.created_at)),
         };
         Entity::insert(model).exec(&self.db).await?;
@@ -126,35 +120,25 @@ impl WorkScheduleStore {
         Ok(())
     }
 
-    pub async fn get(&self, id: &str) -> Result<Option<WorkSchedule>> {
-        Ok(Entity::find_by_id(id).one(&self.db).await?.map(decode))
+    /// The tagma's single schedule, ordered oldest-first (first PUT wins
+    /// the singleton slot; later rows are unreachable in practice).
+    pub async fn get_singleton(&self) -> Result<Option<WorkSchedule>> {
+        Ok(Entity::find()
+            .order_by_asc(Column::CreatedAt)
+            .one(&self.db)
+            .await?
+            .map(decode))
     }
 
-    pub async fn list(
-        &self,
-        agent_id: Option<&AgentId>,
-        status: Option<WorkScheduleStatus>,
-    ) -> Result<Vec<WorkSchedule>> {
-        let mut q = Entity::find();
-        if let Some(aid) = agent_id {
-            q = q.filter(Column::AgentId.eq(aid.as_ref()));
-        }
-        if let Some(s) = status {
-            q = q.filter(Column::Status.eq(s.to_string()));
-        }
-        Ok(q.order_by_desc(Column::CreatedAt)
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(decode)
-            .collect())
-    }
 
     pub async fn update(&self, schedule: &WorkSchedule) -> Result<bool> {
         let result = Entity::update_many()
-            .col_expr(Column::Name, schedule.name.clone().into())
-            .col_expr(Column::StartCron, schedule.start_cron.clone().into())
-            .col_expr(Column::EndCron, schedule.end_cron.clone().into())
+            .col_expr(
+                Column::Spec,
+                serde_json::to_string(&schedule.spec)
+                    .expect("spec serializes")
+                    .into(),
+            )
             .col_expr(
                 Column::PreWarnMinutes,
                 (schedule.pre_warn_minutes as i64).into(),
@@ -165,7 +149,6 @@ impl WorkScheduleStore {
             )
             .col_expr(Column::WakePrompt, schedule.wake_prompt.clone().into())
             .col_expr(Column::Status, schedule.status.to_string().into())
-            .col_expr(Column::Timezone, schedule.timezone.clone().into())
             .filter(Column::Id.eq(schedule.id.clone()))
             .exec(&self.db)
             .await?;
@@ -192,14 +175,6 @@ impl WorkScheduleStore {
         Ok(result.rows_affected > 0)
     }
 
-    pub async fn delete(&self, id: &str) -> Result<bool> {
-        let result = Entity::delete_many()
-            .filter(Column::Id.eq(id))
-            .exec(&self.db)
-            .await?;
-        self.engine_notify.notify_one();
-        Ok(result.rows_affected > 0)
-    }
 }
 
 fn decode(m: entities::work_schedule::Model) -> WorkSchedule {
@@ -207,17 +182,20 @@ fn decode(m: entities::work_schedule::Model) -> WorkSchedule {
         tracing::warn!(schedule_id = %m.id, raw = %m.status, "corrupt status; defaulting");
         Default::default()
     });
+    let id = m.id.clone();
     WorkSchedule {
-        id: m.id,
-        name: m.name,
-        agent_id: m.agent_id.into(),
-        start_cron: m.start_cron,
-        end_cron: m.end_cron,
+        id: id.clone(),
+        spec: m
+            .spec
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| {
+                tracing::warn!(schedule_id = %id, "corrupt spec; defaulting");
+                Spec::Weekly { days: 1, start_minute: 0, end_minute: DAY_MINUTES }
+            }),
         pre_warn_minutes: m.pre_warn_minutes as u32,
         final_warn_minutes: m.final_warn_minutes as u32,
         wake_prompt: m.wake_prompt,
         status,
-        timezone: m.timezone,
         created_at: from_unix(m.created_at),
     }
 }
@@ -249,15 +227,11 @@ mod tests {
     fn sample(id: &str) -> WorkSchedule {
         WorkSchedule {
             id: id.into(),
-            name: "Day shift".into(),
-            agent_id: "agent-1".parse().unwrap(),
-            start_cron: "0 9 * * 1-5".into(),
-            end_cron: "0 17 * * 1-5".into(),
+            spec: Spec::Weekly { days: 0b0001_1111, start_minute: 540, end_minute: 1020 },
             pre_warn_minutes: 10,
             final_warn_minutes: 5,
             wake_prompt: "Good morning.".into(),
             status: WorkScheduleStatus::Active,
-            timezone: None,
             created_at: OffsetDateTime::now_utc(),
         }
     }
@@ -266,50 +240,26 @@ mod tests {
     async fn create_then_get_round_trips() {
         let (store, _d) = open_tmp().await;
         store.create(&sample("ws1")).await.unwrap();
-        let got = store.get("ws1").await.unwrap().unwrap();
-        assert_eq!(got.name, "Day shift");
-        assert_eq!(got.start_cron, "0 9 * * 1-5");
+        let got = store.get_singleton().await.unwrap().unwrap();
+        assert_eq!(got.spec, sample("x").spec);
     }
 
-    #[tokio::test]
-    async fn get_missing_returns_none() {
-        let (store, _d) = open_tmp().await;
-        assert!(store.get("nope").await.unwrap().is_none());
-    }
 
     #[tokio::test]
-    async fn list_filters_by_agent_and_status() {
+    async fn empty_store_returns_none() {
         let (store, _d) = open_tmp().await;
-        let mut a = sample("ws1");
-        a.agent_id = "agent-a".parse().unwrap();
-        let mut b = sample("ws2");
-        b.agent_id = "agent-b".parse().unwrap();
-        b.status = WorkScheduleStatus::Paused;
-        store.create(&a).await.unwrap();
-        store.create(&b).await.unwrap();
-        let aid: AgentId = "agent-a".parse().unwrap();
-        assert_eq!(store.list(Some(&aid), None).await.unwrap().len(), 1);
-        assert_eq!(
-            store
-                .list(None, Some(WorkScheduleStatus::Active))
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(store.list(None, None).await.unwrap().len(), 2);
+        assert!(store.get_singleton().await.unwrap().is_none());
     }
+
 
     #[tokio::test]
     async fn update_changes_fields() {
         let (store, _d) = open_tmp().await;
         let mut s = sample("ws1");
         store.create(&s).await.unwrap();
-        s.name = "Night shift".into();
         s.pre_warn_minutes = 15;
         assert!(store.update(&s).await.unwrap());
-        let got = store.get("ws1").await.unwrap().unwrap();
-        assert_eq!(got.name, "Night shift");
+        let got = store.get_singleton().await.unwrap().unwrap();
         assert_eq!(got.pre_warn_minutes, 15);
     }
 
@@ -324,16 +274,9 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            store.get("ws1").await.unwrap().unwrap().status,
+            store.get_singleton().await.unwrap().unwrap().status,
             WorkScheduleStatus::Paused
         );
     }
 
-    #[tokio::test]
-    async fn delete_removes_schedule() {
-        let (store, _d) = open_tmp().await;
-        store.create(&sample("ws1")).await.unwrap();
-        assert!(store.delete("ws1").await.unwrap());
-        assert!(store.get("ws1").await.unwrap().is_none());
-    }
 }

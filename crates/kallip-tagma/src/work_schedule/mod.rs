@@ -1,24 +1,25 @@
 //! Work schedule: time-based agent lifecycle orchestration.
 //!
-//! A work schedule defines when an agent goes on-duty (start) and off-duty
-//! (end), with pre/final warning prompts before end-of-shift. The scheduling
-//! engine reads stored schedules and fires duty transitions; this
-//! module provides the CRUD layer and HTTP routes.
+//! The work schedule is a single tagma-wide resource (the root agent
+//! carries it and delegates when woken): one spec, GET/PUT, no list.
+//! The engine evaluates the spec and fires duty transitions; this module
+//! provides the store-facing types and HTTP routes.
 
+pub mod eval;
 pub mod migration;
+pub mod spec;
 mod store;
 
 pub use store::WorkScheduleStore;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::State;
 use kallip_common::protocol::ApiError;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tracing::info;
 
-use crate::state::{AgentId, SharedState};
+use crate::state::SharedState;
 
 /// Whether a work schedule is active or paused.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,14 +50,12 @@ impl std::str::FromStr for WorkScheduleStatus {
     }
 }
 
-/// A work schedule definition.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// The tagma's single work schedule. The spec is the structured form the
+/// UI edits; warn minutes and the wake prompt keep their v1 semantics.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkSchedule {
     pub id: String,
-    pub name: String,
-    pub agent_id: AgentId,
-    pub start_cron: String,
-    pub end_cron: String,
+    pub spec: spec::Spec,
     #[serde(default = "default_pre_warn")]
     pub pre_warn_minutes: u32,
     #[serde(default = "default_final_warn")]
@@ -64,8 +63,6 @@ pub struct WorkSchedule {
     pub wake_prompt: String,
     #[serde(default)]
     pub status: WorkScheduleStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timezone: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -77,71 +74,20 @@ fn default_final_warn() -> u32 {
     5
 }
 
-/// Request body for creating a work schedule.
+/// Request body for PUT /work-schedule. The spec is required; a
+/// status-only toggle (the UI's master switch) echoes the stored spec.
 #[derive(Debug, Deserialize)]
-pub struct CreateWorkScheduleRequest {
-    pub name: String,
-    pub agent_id: AgentId,
-    pub start_cron: String,
-    pub end_cron: String,
+pub struct PutWorkScheduleRequest {
+    pub spec: spec::Spec,
     #[serde(default = "default_pre_warn")]
     pub pre_warn_minutes: u32,
     #[serde(default = "default_final_warn")]
     pub final_warn_minutes: u32,
-    pub wake_prompt: String,
+    pub wake_prompt: Option<String>,
     #[serde(default)]
     pub status: WorkScheduleStatus,
-    #[serde(default)]
-    pub timezone: Option<String>,
 }
 
-/// Request body for updating a work schedule (all fields optional except id).
-#[derive(Debug, Deserialize)]
-pub struct UpdateWorkScheduleRequest {
-    pub name: Option<String>,
-    pub start_cron: Option<String>,
-    pub end_cron: Option<String>,
-    pub pre_warn_minutes: Option<u32>,
-    pub final_warn_minutes: Option<u32>,
-    pub wake_prompt: Option<String>,
-    pub status: Option<WorkScheduleStatus>,
-    pub timezone: Option<Option<String>>,
-}
-
-/// Query params for listing work schedules.
-#[derive(Debug, Default, Deserialize)]
-pub struct ListWorkSchedulesQuery {
-    pub agent_id: Option<AgentId>,
-    pub status: Option<WorkScheduleStatus>,
-}
-
-/// Validate cron expressions and warn-minute fields.
-fn validate_schedule(
-    start_cron: &str,
-    end_cron: &str,
-    pre_warn: u32,
-    final_warn: u32,
-) -> Result<(), ApiError> {
-    let start = crate::cron::CronExpr::parse(start_cron)
-        .map_err(|e| ApiError::bad_request(format!("invalid start_cron: {e}")))?;
-    let end = crate::cron::CronExpr::parse(end_cron)
-        .map_err(|e| ApiError::bad_request(format!("invalid end_cron: {e}")))?;
-    // Reject cron expressions that will never fire (e.g. Feb 30).
-    let now = time::OffsetDateTime::now_utc();
-    start
-        .next_after(now)
-        .map_err(|_| ApiError::bad_request("start_cron will never fire within the next 5 years"))?;
-    end.next_after(now)
-        .map_err(|_| ApiError::bad_request("end_cron will never fire within the next 5 years"))?;
-    if pre_warn < final_warn {
-        return Err(ApiError::bad_request(
-            "pre_warn_minutes must be >= final_warn_minutes",
-        ));
-    }
-    Ok(())
-}
-
-/// Get the work-schedule store from AppState, returning 503 if not configured.
 fn get_store(state: &SharedState) -> Result<&WorkScheduleStore, ApiError> {
     state
         .work_schedules
@@ -151,606 +97,376 @@ fn get_store(state: &SharedState) -> Result<&WorkScheduleStore, ApiError> {
 
 // --- Route handlers ---
 
-/// POST /work-schedules — create a new work schedule.
-pub async fn create_work_schedule(
-    State(state): State<SharedState>,
-    auth: crate::auth::AuthIdentity,
-    Json(req): Json<CreateWorkScheduleRequest>,
-) -> Result<(StatusCode, Json<WorkSchedule>), ApiError> {
-    crate::auth::require_operator(auth.identity())?;
-    if req.timezone.is_some() {
-        return Err(ApiError::bad_request(
-            "timezone scheduling is not yet supported; use UTC cron expressions",
-        ));
-    }
-    // Schedules are tagma-wide since the schedule redo: only the root agent
-    // may carry one (it delegates to subagents when woken). The structural
-    // predicate -- created_by == None, via root_agent() -- survives role and
-    // id edits that a literal-role check would not.
-    let is_root_target = {
-        let registry = state.registry.read().await;
-        registry
-            .root_agent()
-            .is_some_and(|(root_id, _)| root_id == &req.agent_id)
-    };
-    if !is_root_target {
-        return Err(ApiError::bad_request(
-            "schedules apply to the whole tagma (root agent)",
-        ));
-    }
-    validate_schedule(
-        &req.start_cron,
-        &req.end_cron,
-        req.pre_warn_minutes,
-        req.final_warn_minutes,
-    )?;
-    let schedule = WorkSchedule {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: req.name,
-        agent_id: req.agent_id,
-        start_cron: req.start_cron,
-        end_cron: req.end_cron,
-        pre_warn_minutes: req.pre_warn_minutes,
-        final_warn_minutes: req.final_warn_minutes,
-        wake_prompt: req.wake_prompt,
-        status: req.status,
-        timezone: req.timezone,
-        created_at: OffsetDateTime::now_utc(),
-    };
-    get_store(&state)?
-        .create(&schedule)
-        .await
-        .map_err(ApiError::internal)?;
-    info!(schedule_id = %schedule.id, "work schedule created");
-    Ok((StatusCode::CREATED, Json(schedule)))
-}
-
-/// GET /work-schedules — list work schedules with optional filters.
-pub async fn list_work_schedules(
-    State(state): State<SharedState>,
-    auth: crate::auth::AuthIdentity,
-    Query(query): Query<ListWorkSchedulesQuery>,
-) -> Result<Json<Vec<WorkSchedule>>, ApiError> {
-    crate::auth::require_operator(auth.identity())?;
-    let schedules = get_store(&state)?
-        .list(query.agent_id.as_ref(), query.status)
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(Json(schedules))
-}
-
-/// GET /work-schedules/{id} — get a single work schedule.
+/// GET /work-schedule — the tagma's schedule, or null when unset.
 pub async fn get_work_schedule(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
-    Path(id): Path<String>,
-) -> Result<Json<WorkSchedule>, ApiError> {
+) -> Result<Json<Option<WorkSchedule>>, ApiError> {
     crate::auth::require_operator(auth.identity())?;
     let schedule = get_store(&state)?
-        .get(&id)
+        .get_singleton()
         .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::not_found("work schedule not found"))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(schedule))
 }
 
-/// PUT /work-schedules/{id} — update a work schedule.
-pub async fn update_work_schedule(
+/// PUT /work-schedule — create (first PUT) or replace the tagma schedule.
+///
+/// The schedule is tagma-wide: it needs a root agent to carry it. An
+/// interval spec re-anchors at save time — the rotation restarts from
+/// now, keeping the requested minute-of-hour (the UI's M field) —
+/// unless the request echoes the stored anchor verbatim (a
+/// status-only toggle), which keeps it.
+pub async fn put_work_schedule(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
-    Path(id): Path<String>,
-    Json(req): Json<UpdateWorkScheduleRequest>,
+    Json(req): Json<PutWorkScheduleRequest>,
 ) -> Result<Json<WorkSchedule>, ApiError> {
     crate::auth::require_operator(auth.identity())?;
-    // Reject timezone updates (engine is UTC-only).
-    if let Some(Some(_)) = req.timezone {
-        return Err(ApiError::bad_request(
-            "timezone scheduling is not yet supported; use UTC cron expressions",
-        ));
-    }
-    let mut existing = get_store(&state)?
-        .get(&id)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::not_found("work schedule not found"))?;
-
-    if let Some(name) = req.name {
-        existing.name = name;
-    }
-    if let Some(start_cron) = req.start_cron {
-        existing.start_cron = start_cron;
-    }
-    if let Some(end_cron) = req.end_cron {
-        existing.end_cron = end_cron;
-    }
-    if let Some(pre) = req.pre_warn_minutes {
-        existing.pre_warn_minutes = pre;
-    }
-    if let Some(fin) = req.final_warn_minutes {
-        existing.final_warn_minutes = fin;
-    }
-    if let Some(prompt) = req.wake_prompt {
-        existing.wake_prompt = prompt;
-    }
-    let was_active = get_store(&state)?
-        .get(&id)
-        .await
-        .ok()
-        .flatten()
-        .map(|s| s.status == WorkScheduleStatus::Active)
-        .unwrap_or(false);
-
-    if let Some(status) = req.status {
-        existing.status = status;
-    }
-
-    validate_schedule(
-        &existing.start_cron,
-        &existing.end_cron,
-        existing.pre_warn_minutes,
-        existing.final_warn_minutes,
-    )?;
-
-    // If the schedule was Active and is now Paused, reset the agent to
-    // OnDuty so messages are not buffered indefinitely. NOTE: this assumes
-    // at most one active schedule per agent (multi-schedule conflict
-    // detection is not yet implemented).
-    let now_paused = was_active && existing.status == WorkScheduleStatus::Paused;
-    if now_paused {
-        state
-            .duty
-            .set(existing.agent_id.clone(), crate::duty::DutyStatus::OnDuty);
-        info!(schedule_id = %id, agent = %existing.agent_id,
-              "schedule paused, duty reset to on-duty");
-    }
-
-    let updated = get_store(&state)?
-        .update(&existing)
-        .await
-        .map_err(ApiError::internal)?;
-    if !updated {
-        return Err(ApiError::not_found("work schedule not found"));
-    }
-    info!(schedule_id = %id, "work schedule updated");
-    Ok(Json(existing))
-}
-
-/// DELETE /work-schedules/{id} — delete a work schedule.
-pub async fn delete_work_schedule(
-    State(state): State<SharedState>,
-    auth: crate::auth::AuthIdentity,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    crate::auth::require_operator(auth.identity())?;
-    // Look up the schedule before deleting to get the agent_id.
-    let schedule = get_store(&state)?
-        .get(&id)
-        .await
-        .map_err(ApiError::internal)?;
-    let deleted = get_store(&state)?
-        .delete(&id)
-        .await
-        .map_err(ApiError::internal)?;
-    if !deleted {
-        return Err(ApiError::not_found("work schedule not found"));
-    }
-    // Reset the agent to OnDuty (the default) — same single-schedule
-    // assumption as the pause path above.
-    if let Some(sched) = schedule {
-        if sched.status == WorkScheduleStatus::Active {
-            state
-                .duty
-                .set(sched.agent_id.clone(), crate::duty::DutyStatus::OnDuty);
-            info!(schedule_id = %id, agent = %sched.agent_id,
-                  "schedule deleted, duty reset to on-duty");
+    {
+        let registry = state.registry.read().await;
+        if registry.root_agent().is_none() {
+            return Err(ApiError::bad_request(
+                "the tagma has no root agent to carry the schedule",
+            ));
         }
     }
-    info!(schedule_id = %id, "work schedule deleted");
-    Ok(StatusCode::NO_CONTENT)
+    if let Err(e) = req.spec.validate() {
+        return Err(ApiError::bad_request(format!("invalid spec: {e}")));
+    }
+    if req.pre_warn_minutes < req.final_warn_minutes {
+        return Err(ApiError::bad_request(
+            "pre_warn_minutes must be >= final_warn_minutes",
+        ));
+    }
+    let mut spec = req.spec.clone();
+    let store = get_store(&state)?;
+    let existing = store.get_singleton().await.map_err(ApiError::internal)?;
+    if let (
+        spec::Spec::Interval {
+            every_hours,
+            length_min,
+            anchor: req_anchor,
+        },
+        spec::Spec::Interval { anchor, .. },
+    ) = (&req.spec, &mut spec)
+    {
+        // The stored anchor survives only the verbatim echo. Any changed
+        // anchor — a new rhythm, or the UI editing the start minute M —
+        // re-anchors at save time so the rotation restarts from now,
+        // preserving the requested minute-of-hour as the phase.
+        let rhythm_unchanged = matches!(
+            existing.as_ref().map(|s| &s.spec),
+            Some(spec::Spec::Interval {
+                every_hours: h,
+                length_min: l,
+                ..
+            }) if h == every_hours && l == length_min
+        );
+        let stored_anchor = match existing.as_ref().map(|s| &s.spec) {
+            Some(spec::Spec::Interval { anchor, .. }) => Some(*anchor),
+            _ => None,
+        };
+        if !(rhythm_unchanged && Some(*req_anchor) == stored_anchor) {
+            *anchor = OffsetDateTime::now_utc()
+                .replace_minute(req_anchor.minute())
+                .unwrap()
+                .replace_second(0)
+                .unwrap()
+                .replace_nanosecond(0)
+                .unwrap();
+        }
+    }
+    let was_active = existing
+        .as_ref()
+        .map(|s| s.status == WorkScheduleStatus::Active)
+        .unwrap_or(false);
+    let now_paused = was_active && req.status == WorkScheduleStatus::Paused;
+    let (schedule, is_update) = match existing {
+        Some(mut s) => {
+            s.spec = spec;
+            s.pre_warn_minutes = req.pre_warn_minutes;
+            s.final_warn_minutes = req.final_warn_minutes;
+            s.wake_prompt = req.wake_prompt.unwrap_or(s.wake_prompt);
+            s.status = req.status;
+            (s, true)
+        }
+        None => (
+            WorkSchedule {
+                id: uuid::Uuid::new_v4().to_string(),
+                spec,
+                pre_warn_minutes: req.pre_warn_minutes,
+                final_warn_minutes: req.final_warn_minutes,
+                wake_prompt: req.wake_prompt.unwrap_or_default(),
+                status: req.status,
+                created_at: OffsetDateTime::now_utc(),
+            },
+            false,
+        ),
+    };
+    if is_update {
+        let updated = store.update(&schedule).await.map_err(ApiError::internal)?;
+        if !updated {
+            return Err(ApiError::internal("work schedule write failed"));
+        }
+    } else {
+        store.create(&schedule).await.map_err(ApiError::internal)?;
+    }
+    if now_paused {
+        // Pausing releases the root from duty so messages are not
+        // buffered indefinitely (mirrors the v1 pause semantics).
+        if let Some((root_id, _)) = state.registry.read().await.root_agent() {
+            state.duty.set(root_id.clone(), crate::duty::DutyStatus::OnDuty);
+        }
+        info!("work schedule paused, duty reset to on-duty");
+    }
+    info!(schedule_id = %schedule.id, "work schedule saved");
+    Ok(Json(schedule))
 }
 
 #[cfg(test)]
 mod route_tests {
     use super::*;
-    use crate::state::RegistryEntry;
-    use crate::test_helpers::{add_root, add_sub, make_faulted_entry, make_state};
+    use crate::test_helpers::{add_root, make_state};
+    use axum::extract::State as ExtractState;
 
-    /// Create a test state with the work-schedule store installed and a live
-    /// root agent registered as `agent-1` (created_by = None), so the create
-    /// guard's structural predicate resolves. Tests that need other registry
-    /// shapes register additional or replacement entries themselves.
     async fn make_ws_state() -> SharedState {
         let state = make_state();
         let store = WorkScheduleStore::open_in_memory().await;
         state.work_schedules.set(store).ok();
-        let root: AgentId = "agent-1".parse().unwrap();
+        let root: crate::state::AgentId = "agent-1".parse().unwrap();
         let mut reg = state.registry.write().await;
         add_root(&mut reg, &root);
         drop(reg);
         state
     }
 
-    fn create_req(agent: &str) -> CreateWorkScheduleRequest {
-        CreateWorkScheduleRequest {
-            name: "Day shift".into(),
-            agent_id: agent.parse().unwrap(),
-            start_cron: "0 9 * * 1-5".into(),
-            end_cron: "0 17 * * 1-5".into(),
+    fn put_req() -> PutWorkScheduleRequest {
+        PutWorkScheduleRequest {
+            spec: spec::Spec::Weekly {
+                days: 0b0001_1111,
+                start_minute: 540,
+                end_minute: 1020,
+            },
             pre_warn_minutes: 10,
             final_warn_minutes: 5,
-            wake_prompt: "Good morning.".into(),
+            wake_prompt: Some("Good morning.".into()),
             status: WorkScheduleStatus::Active,
-            timezone: None,
         }
     }
 
     #[tokio::test]
-    async fn create_non_root_rejected() {
+    async fn first_put_creates_then_get_round_trips() {
         let state = make_ws_state().await;
-        let root: AgentId = "agent-1".parse().unwrap();
-        let sub: AgentId = "sub-1".parse().unwrap();
-        let mut reg = state.registry.write().await;
-        add_sub(&mut reg, &sub, &root);
-        drop(reg);
-        let err = create_work_schedule(
-            State(state),
+        let saved = put_work_schedule(
+            ExtractState(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("sub-1")),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status, 400);
-        assert!(err.message.contains("root agent"));
-    }
-
-    #[tokio::test]
-    async fn create_unknown_agent_rejected() {
-        let state = make_ws_state().await;
-        let err = create_work_schedule(
-            State(state),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("nobody")),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status, 400);
-        assert!(err.message.contains("root agent"));
-    }
-
-    #[tokio::test]
-    async fn create_faulted_root_accepted() {
-        // root_agent() must resolve a faulted root too: the schedule engine
-        // runs independently of the root agent's task liveness.
-        let state = make_ws_state().await;
-        let root: AgentId = "agent-1".parse().unwrap();
-        let mut reg = state.registry.write().await;
-        reg.register(
-            root.clone(),
-            RegistryEntry::Faulted(make_faulted_entry(None, "crash during test")),
-        );
-        drop(reg);
-        let created = create_work_schedule(
-            State(state),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-1")),
+            axum::Json(put_req()),
         )
         .await
         .unwrap();
-        assert_eq!(created.1.agent_id, "agent-1".parse::<AgentId>().unwrap());
-    }
-
-    #[tokio::test]
-    async fn update_legacy_schedule_unaffected() {
-        // Legacy per-agent rows predate the root-only guard; updating them
-        // (name, cron, pause) must keep working -- update never carries an
-        // agent_id, so the guard cannot bite on this path.
-        let state = make_ws_state().await;
-        let legacy = WorkSchedule {
-            id: "legacy-1".into(),
-            name: "Night shift".into(),
-            agent_id: "sub-1".parse().unwrap(),
-            start_cron: "0 22 * * *".into(),
-            end_cron: "0 6 * * *".into(),
-            pre_warn_minutes: 10,
-            final_warn_minutes: 5,
-            wake_prompt: "Good night.".into(),
-            status: WorkScheduleStatus::Active,
-            timezone: None,
-            created_at: OffsetDateTime::now_utc(),
-        };
-        get_store(&state).unwrap().create(&legacy).await.unwrap();
-        let updated = update_work_schedule(
-            State(state),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Path("legacy-1".into()),
-            Json(UpdateWorkScheduleRequest {
-                name: Some("Night shift v2".into()),
-                start_cron: None,
-                end_cron: None,
-                pre_warn_minutes: None,
-                final_warn_minutes: None,
-                wake_prompt: None,
-                status: None,
-                timezone: None,
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(updated.0.name, "Night shift v2");
-    }
-
-    #[tokio::test]
-    async fn create_then_get() {
-        let state = make_ws_state().await;
-        let resp = create_work_schedule(
-            State(state.clone()),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-1")),
-        )
-        .await
-        .unwrap();
-        assert_eq!(resp.0, StatusCode::CREATED);
-        let id = resp.1.id.clone();
-
         let got = get_work_schedule(
-            State(state),
+            ExtractState(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Path(id.clone()),
         )
         .await
         .unwrap();
-        assert_eq!(got.0.name, "Day shift");
+        // The store keeps unix-second timestamps, so the sub-second part
+        // of `created_at` does not survive the round trip.
+        let mut expected = saved.0;
+        expected.created_at = got
+            .0
+            .as_ref()
+            .expect("schedule stored")
+            .created_at;
+        assert_eq!(got.0, Some(expected));
     }
 
     #[tokio::test]
-    async fn list_returns_created() {
+    async fn second_put_replaces_not_appends() {
         let state = make_ws_state().await;
-        create_work_schedule(
-            State(state.clone()),
+        put_work_schedule(
+            ExtractState(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-1")),
+            axum::Json(put_req()),
         )
         .await
         .unwrap();
-        create_work_schedule(
-            State(state.clone()),
+        let mut req = put_req();
+        req.status = WorkScheduleStatus::Paused;
+        put_work_schedule(
+            ExtractState(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-1")),
+            axum::Json(req),
         )
         .await
         .unwrap();
-
-        let resp = list_work_schedules(
-            State(state),
+        let got = get_work_schedule(
+            ExtractState(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Query(ListWorkSchedulesQuery {
-                agent_id: None,
-                status: None,
-            }),
         )
         .await
+        .unwrap()
+        .0
         .unwrap();
-        assert_eq!(resp.0.len(), 2);
+        assert_eq!(got.status, WorkScheduleStatus::Paused);
     }
 
     #[tokio::test]
-    async fn update_changes_name() {
+    async fn put_rejects_invalid_spec() {
         let state = make_ws_state().await;
-        let resp = create_work_schedule(
-            State(state.clone()),
+        let mut req = put_req();
+        req.spec = spec::Spec::Weekly { days: 0, start_minute: 0, end_minute: 60 };
+        let err = put_work_schedule(
+            ExtractState(state),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-1")),
+            axum::Json(req),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("at least one day"));
+    }
+
+    #[tokio::test]
+    async fn put_rejects_missing_root_agent() {
+        let state = make_state();
+        let store = WorkScheduleStore::open_in_memory().await;
+        state.work_schedules.set(store).ok();
+        let err = put_work_schedule(
+            ExtractState(state),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(put_req()),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("no root agent"));
+    }
+
+    #[tokio::test]
+    async fn interval_put_normalizes_anchor_to_now() {
+        let state = make_ws_state().await;
+        let mut req = put_req();
+        let stale = time::macros::datetime!(2020-01-01 0:00 UTC);
+        req.spec = spec::Spec::Interval { every_hours: 5, length_min: 90, anchor: stale };
+        let saved = put_work_schedule(
+            ExtractState(state),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(req),
         )
         .await
         .unwrap();
-        let id = resp.1.id.clone();
+        match saved.0.spec {
+            spec::Spec::Interval { anchor, .. } => {
+                // Re-anchored to save time, keeping the requested
+                // minute-of-hour (M=0): within the hour, aligned.
+                assert!(anchor.minute() == 0
+                    && anchor.second() == 0
+                    && (anchor - OffsetDateTime::now_utc()).whole_seconds().abs() < 3600);
+            }
+            _ => panic!("expected interval spec"),
+        }
+    }
 
-        let updated = update_work_schedule(
-            State(state.clone()),
+    #[tokio::test]
+    async fn status_only_interval_put_keeps_anchor() {
+        let state = make_ws_state().await;
+        let mut req = put_req();
+        req.spec = spec::Spec::Interval {
+            every_hours: 5,
+            length_min: 90,
+            anchor: time::macros::datetime!(2020-01-01 0:00 UTC),
+        };
+        put_work_schedule(
+            ExtractState(state.clone()),
             crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Path(id.clone()),
-            Json(UpdateWorkScheduleRequest {
-                name: Some("Night shift".into()),
-                start_cron: None,
-                end_cron: None,
-                pre_warn_minutes: None,
-                final_warn_minutes: None,
+            axum::Json(req),
+        )
+        .await
+        .unwrap();
+
+        // Force a distinguishable stored anchor, as if saved long ago.
+        let store = state.work_schedules.get().unwrap();
+        let mut row = store.get_singleton().await.unwrap().unwrap();
+        let stale = time::macros::datetime!(2020-01-01 0:00 UTC);
+        if let spec::Spec::Interval { anchor, .. } = &mut row.spec {
+            *anchor = stale;
+        }
+        assert!(store.update(&row).await.unwrap());
+
+        // A status-only toggle echoes the stored spec: anchor survives.
+        let toggle = PutWorkScheduleRequest {
+            spec: row.spec.clone(),
+            pre_warn_minutes: row.pre_warn_minutes,
+            final_warn_minutes: row.final_warn_minutes,
+            wake_prompt: None,
+            status: WorkScheduleStatus::Paused,
+        };
+        let saved = put_work_schedule(
+            ExtractState(state),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(toggle),
+        )
+        .await
+        .unwrap();
+        match saved.0.spec {
+            spec::Spec::Interval { anchor, .. } => assert_eq!(anchor, stale),
+            _ => panic!("expected interval spec"),
+        }
+    }
+
+    #[tokio::test]
+    async fn interval_minute_edit_reanchors_preserving_minute() {
+        let state = make_ws_state().await;
+        let mut req = put_req();
+        req.spec = spec::Spec::Interval {
+            every_hours: 5,
+            length_min: 90,
+            anchor: time::macros::datetime!(2020-01-01 0:00 UTC),
+        };
+        put_work_schedule(
+            ExtractState(state.clone()),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(req),
+        )
+        .await
+        .unwrap();
+
+        // Same rhythm, but the UI asks for a different start minute M=37:
+        // the anchor moves to save time carrying the new minute.
+        let stored = state.work_schedules.get().unwrap();
+        let row = stored.get_singleton().await.unwrap().unwrap();
+        let mut edited = row.clone();
+        if let spec::Spec::Interval { anchor, .. } = &mut edited.spec {
+            *anchor = OffsetDateTime::now_utc()
+                .replace_minute(37)
+                .unwrap()
+                .replace_second(0)
+                .unwrap()
+                .replace_nanosecond(0)
+                .unwrap();
+        }
+        let saved = put_work_schedule(
+            ExtractState(state),
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
+            axum::Json(PutWorkScheduleRequest {
+                spec: edited.spec,
+                pre_warn_minutes: row.pre_warn_minutes,
+                final_warn_minutes: row.final_warn_minutes,
                 wake_prompt: None,
-                status: None,
-                timezone: None,
+                status: row.status,
             }),
         )
         .await
         .unwrap();
-        assert_eq!(updated.0.name, "Night shift");
-    }
-
-    #[tokio::test]
-    async fn delete_removes() {
-        let state = make_ws_state().await;
-        let resp = create_work_schedule(
-            State(state.clone()),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-1")),
-        )
-        .await
-        .unwrap();
-        let id = resp.1.id.clone();
-
-        let status = delete_work_schedule(
-            State(state.clone()),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Path(id),
-        )
-        .await
-        .unwrap();
-        assert_eq!(status, StatusCode::NO_CONTENT);
-
-        let err = get_work_schedule(
-            State(state),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Path(resp.1.id.clone()),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status, 404);
-    }
-
-    #[tokio::test]
-    async fn invalid_cron_rejected() {
-        let state = make_ws_state().await;
-        let mut req = create_req("agent-1");
-        req.start_cron = "not a cron".into();
-        let err = create_work_schedule(
-            State(state),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(req),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status, 400);
-    }
-
-    #[tokio::test]
-    async fn get_missing_returns_404() {
-        let state = make_ws_state().await;
-        let err = get_work_schedule(
-            State(state),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Path("nonexistent".into()),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status, 404);
-    }
-
-    #[tokio::test]
-    async fn impossible_cron_rejected() {
-        let state = make_ws_state().await;
-        let mut req = create_req("agent-1");
-        req.start_cron = "0 0 30 2 *".into(); // Feb 30 never exists
-        let err = create_work_schedule(
-            State(state),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(req),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status, 400);
-        assert!(err.message.contains("never fire"));
-    }
-
-    #[tokio::test]
-    async fn timezone_rejected_on_create() {
-        let state = make_ws_state().await;
-        let mut req = create_req("agent-1");
-        req.timezone = Some("America/New_York".into());
-        let err = create_work_schedule(
-            State(state),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(req),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status, 400);
-        assert!(err.message.contains("timezone"));
-    }
-
-    #[tokio::test]
-    async fn timezone_rejected_on_update() {
-        let state = make_ws_state().await;
-        let created = create_work_schedule(
-            State(state.clone()),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-1")),
-        )
-        .await
-        .unwrap();
-        let id = created.1.id.clone();
-        let err = update_work_schedule(
-            State(state),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Path(id),
-            Json(UpdateWorkScheduleRequest {
-                name: None,
-                start_cron: None,
-                end_cron: None,
-                pre_warn_minutes: None,
-                final_warn_minutes: None,
-                wake_prompt: None,
-                status: None,
-                timezone: Some(Some("America/New_York".into())),
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status, 400);
-        assert!(err.message.contains("timezone"));
-    }
-
-    #[tokio::test]
-    async fn pause_resets_duty_to_on_duty() {
-        let state = make_ws_state().await;
-        let agent: AgentId = "agent-1".parse().unwrap();
-        let created = create_work_schedule(
-            State(state.clone()),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-1")),
-        )
-        .await
-        .unwrap();
-        let id = created.1.id.clone();
-        // Simulate the engine setting the agent off-duty.
-        state
-            .duty
-            .set(agent.clone(), crate::duty::DutyStatus::OffDuty);
-        assert!(state.duty.is_off_duty(&agent));
-        // Pause the schedule.
-        update_work_schedule(
-            State(state.clone()),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Path(id),
-            Json(UpdateWorkScheduleRequest {
-                name: None,
-                start_cron: None,
-                end_cron: None,
-                pre_warn_minutes: None,
-                final_warn_minutes: None,
-                wake_prompt: None,
-                status: Some(WorkScheduleStatus::Paused),
-                timezone: None,
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(state.duty.get(&agent), crate::duty::DutyStatus::OnDuty);
-    }
-
-    #[tokio::test]
-    async fn delete_resets_duty_to_on_duty() {
-        let state = make_ws_state().await;
-        let agent: AgentId = "agent-1".parse().unwrap();
-        let created = create_work_schedule(
-            State(state.clone()),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Json(create_req("agent-1")),
-        )
-        .await
-        .unwrap();
-        let id = created.1.id.clone();
-        // Simulate the engine setting the agent off-duty.
-        state
-            .duty
-            .set(agent.clone(), crate::duty::DutyStatus::OffDuty);
-        assert!(state.duty.is_off_duty(&agent));
-        // Delete the schedule.
-        delete_work_schedule(
-            State(state.clone()),
-            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator),
-            Path(id),
-        )
-        .await
-        .unwrap();
-        assert_eq!(state.duty.get(&agent), crate::duty::DutyStatus::OnDuty);
+        match saved.0.spec {
+            spec::Spec::Interval { anchor, .. } => {
+                assert_eq!(anchor.minute(), 37);
+                assert_eq!(anchor.second(), 0);
+                assert!(
+                    (anchor - OffsetDateTime::now_utc()).whole_seconds().abs() < 3600
+                );
+            }
+            _ => panic!("expected interval spec"),
+        }
     }
 }

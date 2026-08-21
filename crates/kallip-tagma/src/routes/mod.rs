@@ -147,14 +147,8 @@ pub fn router() -> Router<SharedState> {
             axum::routing::post(profile_probe::probe_profiles),
         )
         .route(
-            "/work-schedules",
-            axum::routing::get(crate::work_schedule::list_work_schedules)
-                .post(crate::work_schedule::create_work_schedule),
-        )
-        .route(
-            "/work-schedules/{id}",
+            "/work-schedule",
             axum::routing::get(crate::work_schedule::get_work_schedule)
-                .put(crate::work_schedule::update_work_schedule)
-                .delete(crate::work_schedule::delete_work_schedule),
+                .put(crate::work_schedule::put_work_schedule),
         )
 }

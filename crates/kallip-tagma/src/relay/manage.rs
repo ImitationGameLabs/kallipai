@@ -52,12 +52,8 @@ fn manage_router() -> Router<SharedState> {
         .route("/profiles/probe", post(profile_probe::probe_profiles))
         .route("/profiles/apply", post(profiles::apply_profiles))
         .route(
-            "/work-schedules",
-            get(list_work_schedules_lenient).post(work_schedule::create_work_schedule),
-        )
-        .route(
-            "/work-schedules/{id}",
-            put(work_schedule::update_work_schedule).delete(work_schedule::delete_work_schedule),
+            "/work-schedule",
+            get(work_schedule::get_work_schedule).put(work_schedule::put_work_schedule),
         )
         .fallback(manage_fallback)
 }
@@ -73,19 +69,6 @@ async fn list_agents_lenient(
     let q: ListAgentsQuery =
         serde_urlencoded::from_str(uri.query().unwrap_or("")).unwrap_or_default();
     agent::list_agents(State(state), auth, axum::extract::Query(q))
-        .await
-        .into_response()
-}
-
-/// `list_work_schedules` with the same lenient-query contract as above.
-async fn list_work_schedules_lenient(
-    State(state): State<SharedState>,
-    auth: AuthIdentity,
-    uri: Uri,
-) -> Response {
-    let q: work_schedule::ListWorkSchedulesQuery =
-        serde_urlencoded::from_str(uri.query().unwrap_or("")).unwrap_or_default();
-    work_schedule::list_work_schedules(State(state), auth, axum::extract::Query(q))
         .await
         .into_response()
 }

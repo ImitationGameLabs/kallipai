@@ -3,7 +3,6 @@ mod auth;
 mod backend;
 mod bridge;
 mod credentials;
-mod cron;
 mod delivery;
 mod direct;
 mod duty;
