@@ -109,7 +109,9 @@
      maps the IME into the safe-area env on WebView and resizes-content
      already lifts the composer above the keyboard. The 0px fallback keeps
      engines without keyboard-inset-height on the original behaviour. -->
-<div class="pt-3 px-3 pb-[max(1.5rem,calc(env(safe-area-inset-bottom)-env(keyboard-inset-height,0px)))]">
+<div
+  class="pt-3 px-3 pb-[max(1.5rem,calc(env(safe-area-inset-bottom)-env(keyboard-inset-height,0px)))]"
+>
   <div class="max-w-3xl mx-auto">
     <!-- Input card: one bordered frame holds the textarea + the desktop
          action, so the textarea itself is borderless/transparent and the
@@ -138,7 +140,9 @@
         <div
           class="hidden md:flex justify-end pt-1"
           onmousedown={(e) => e.preventDefault()}
-          onclick={(e) => { if (e.target === e.currentTarget) area?.focus(); }}
+          onclick={(e) => {
+            if (e.target === e.currentTarget) area?.focus();
+          }}
         >
           {@render sendButton()}
         </div>
