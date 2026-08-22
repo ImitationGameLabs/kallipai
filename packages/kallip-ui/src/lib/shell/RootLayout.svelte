@@ -269,10 +269,11 @@
   // and the sidebar always renders).
   const back = $derived(
     mode === "offline" &&
-    pathname.startsWith("/local/") &&
-    pathname !== "/local"
+      pathname.startsWith("/local/") &&
+      pathname !== "/local"
       ? { href: "/local", label: nav_home() }
-      : null);
+      : null,
+  );
 </script>
 
 <!-- Sidebar footer entry; see AccountMenu for behavior. -->

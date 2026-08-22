@@ -268,7 +268,9 @@
     >
       <ChevronLeft class="size-4" />
     </button>
-    <div class="flex flex-col min-w-0 justify-center px-2 text-center md:flex-1 md:px-0 md:text-left">
+    <div
+      class="flex flex-col min-w-0 justify-center px-2 text-center md:flex-1 md:px-0 md:text-left"
+    >
       <p class="text-sm font-semibold truncate">{roomLabel}</p>
       <p class="text-xs opacity-50 truncate">{roomsettings_subtitle()}</p>
     </div>

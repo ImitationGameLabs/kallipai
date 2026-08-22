@@ -292,38 +292,39 @@
        otherwise (e.g. Tauri Android's default, non-edge-to-edge webview). -->
   {#if !back}
     <Navigation layout="bar" class="md:hidden pb-[env(safe-area-inset-bottom)]">
-    <!-- Inline style because the column count is dynamic (visible cells
+      <!-- Inline style because the column count is dynamic (visible cells
          plus More plus Account); a static grid-cols-N utility can't
          express it. It sits inside the {#if !back} block above: on offline
          content pages the back row replaces the whole bar. -->
-    <Navigation.Menu
-      style="display:grid; grid-template-columns: repeat({slots.visible.length +
-        (slots.hasMore ? 1 : 0) +
-        1}, minmax(0, 1fr));"
-    >
-      {#each slots.visible as item (item.href)}
-        {@render navLink(item)}
-      {/each}
-      {#if slots.hasMore}
-        <button
-          type="button"
-          onclick={() => (sheetOpen = true)}
-          aria-label={nav_more()}
-          aria-haspopup="dialog"
-          class="size-10 justify-self-center self-center grid place-items-center rounded-base {moreActive
-            ? 'preset-filled-surface-500'
-            : 'preset-tonal-surface hover:preset-filled-surface-500'}"
-        >
-          <Ellipsis class="size-5" />
-        </button>
-      {/if}
-      {@render navLink({
-        href: "/account",
-        label: account_menu(),
-        icon: User,
-      })}
-    </Navigation.Menu>
-  </Navigation>
+      <Navigation.Menu
+        style="display:grid; grid-template-columns: repeat({slots.visible
+          .length +
+          (slots.hasMore ? 1 : 0) +
+          1}, minmax(0, 1fr));"
+      >
+        {#each slots.visible as item (item.href)}
+          {@render navLink(item)}
+        {/each}
+        {#if slots.hasMore}
+          <button
+            type="button"
+            onclick={() => (sheetOpen = true)}
+            aria-label={nav_more()}
+            aria-haspopup="dialog"
+            class="size-10 justify-self-center self-center grid place-items-center rounded-base {moreActive
+              ? 'preset-filled-surface-500'
+              : 'preset-tonal-surface hover:preset-filled-surface-500'}"
+          >
+            <Ellipsis class="size-5" />
+          </button>
+        {/if}
+        {@render navLink({
+          href: "/account",
+          label: account_menu(),
+          icon: User,
+        })}
+      </Navigation.Menu>
+    </Navigation>
   {/if}
 
   <!-- small: the overflow sheet. Portaled to body; the sheet body is wrapped

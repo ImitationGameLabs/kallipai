@@ -157,21 +157,21 @@
          route hides it below md because the shell top row owns it there. -->
     <div class={statusHeaderMobile ? "contents" : "hidden md:block"}>
       <TagmaStatusHeader
-      status={conv.statusSnapshot}
-      agentRows={{
-        rootRow: statusCardStore.rootRow,
-        subRows: statusCardStore.subRows,
-      }}
-      {sideLayout}
-      onToggleSide={() => {
-        sideWanted = !sideWanted;
-        try {
-          localStorage.setItem("statusLayout", sideWanted ? "side" : "top");
-        } catch {
-          /* storage blocked: the choice lives for this session only */
-        }
-      }}
-    />
+        status={conv.statusSnapshot}
+        agentRows={{
+          rootRow: statusCardStore.rootRow,
+          subRows: statusCardStore.subRows,
+        }}
+        {sideLayout}
+        onToggleSide={() => {
+          sideWanted = !sideWanted;
+          try {
+            localStorage.setItem("statusLayout", sideWanted ? "side" : "top");
+          } catch {
+            /* storage blocked: the choice lives for this session only */
+          }
+        }}
+      />
     </div>
     <!-- The wrapper gives the transcript a flex child whose width can be
          zeroed (min-w-0) in the sidebar state; in the top-bar state it is
