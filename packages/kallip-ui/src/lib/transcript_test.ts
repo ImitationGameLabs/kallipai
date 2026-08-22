@@ -232,7 +232,13 @@ Deno.test("user_message (replay echo) appends a user line + createdAt", () => {
 Deno.test(
   "withUserLine stamps a client-side createdAt + the local sender",
   () => {
-    const t = withUserLine(EMPTY_TRANSCRIPT, "  hi there  ", -1, userS);
+    const t = withUserLine(
+      EMPTY_TRANSCRIPT,
+      "  hi there  ",
+      -1,
+      userS,
+      new Date("2026-08-22T05:10:23.456Z"),
+    );
     assertEquals(t.status, "busy");
     assertEquals(t.lines.length, 1);
     assertEquals(t.lines[0]!.historyId, -1);
@@ -240,10 +246,9 @@ Deno.test(
     assertEquals(t.lines[0]!.text, "hi there");
     assertEquals(t.lines[0]!.sender, userS);
     assertEquals(t.lines[0]!.status, "sending");
-    // A client-side ISO stamp is present so the optimistic line shows a time
-    // immediately; the ack refines it via replaceLineId.
-    assertEquals(typeof t.lines[0]!.createdAt, "string");
-    assert(t.lines[0]!.createdAt!.length > 0);
+    // The stamp comes from the injected clock, so the optimistic line has a
+    // deterministic render time; the ack refines it via replaceLineId.
+    assertEquals(t.lines[0]!.createdAt, "2026-08-22T05:10:23.456Z");
     // Empty / whitespace-only is a no-op.
     assertEquals(
       withUserLine(EMPTY_TRANSCRIPT, "   ", -2, userS),

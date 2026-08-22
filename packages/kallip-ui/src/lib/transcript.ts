@@ -277,6 +277,7 @@ export function withUserLine(
   text: string,
   localId: number,
   sender: ConversationSender,
+  now: Date = new Date(),
 ): ConversationTranscript {
   const trimmed = text.trim();
   if (trimmed === "") return state;
@@ -292,7 +293,7 @@ export function withUserLine(
         // Client-side render time (millis precision); the ack refines this to
         // the server's whole-second `created_at` via `replaceLineId`. The
         // precision gap is invisible to the minute-granularity formatter.
-        createdAt: new Date().toISOString(),
+        createdAt: now.toISOString(),
         status: "sending",
       },
     ],
@@ -323,13 +324,13 @@ export function replaceLineId(
     lines: state.lines.map((l) =>
       l.historyId === localId
         ? {
-            ...l,
-            historyId,
-            status: "sent",
-            ...(sender !== undefined ? { sender } : {}),
-            ...(createdAt !== undefined ? { createdAt } : {}),
-          }
-        : l,
+          ...l,
+          historyId,
+          status: "sent",
+          ...(sender !== undefined ? { sender } : {}),
+          ...(createdAt !== undefined ? { createdAt } : {}),
+        }
+        : l
     ),
   };
 }
@@ -349,7 +350,7 @@ export function markLineSent(
     lines: state.lines.map((l) =>
       l.historyId === localId && l.status === "sending"
         ? { ...l, status: "sent" }
-        : l,
+        : l
     ),
   };
 }
@@ -375,12 +376,12 @@ export function cacheLineOf(
   if (reply.kind === "user_message") {
     return reply.history_id > 0
       ? {
-          historyId: reply.history_id,
-          role: "user",
-          text: reply.text,
-          sender: cs,
-          createdAt: reply.created_at,
-        }
+        historyId: reply.history_id,
+        role: "user",
+        text: reply.text,
+        sender: cs,
+        createdAt: reply.created_at,
+      }
       : null;
   }
   if (reply.kind === "event") {
