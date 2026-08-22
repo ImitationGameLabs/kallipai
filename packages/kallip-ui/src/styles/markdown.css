@@ -71,8 +71,12 @@
 .markdown pre {
   @apply rounded-md p-2 my-2 overflow-x-auto font-mono bg-surface-950 text-surface-50;
 }
+/* Skeleton's base layer pins standalone <code> to nowrap (the chip look);
+   a long inline token in prose must wrap instead of pushing the list past
+   the bubble edge, so restore normal wrapping -- break-all only bites when
+   soft wrap opportunities exist at all. */
 .markdown code {
-  @apply font-mono break-all;
+  @apply font-mono break-all whitespace-normal;
 }
 /* Fenced blocks should scroll horizontally, not wrap like inline code. */
 .markdown pre code {
