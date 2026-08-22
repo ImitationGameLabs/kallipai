@@ -58,7 +58,7 @@
     manage_schedules_overnight,
     manage_schedules_pre_warn,
     manage_schedules_presets,
-    manage_schedules_preset_allday,
+    manage_schedules_preset_always,
     manage_schedules_preset_early,
     manage_schedules_preset_night,
     manage_schedules_preset_weekdays,
@@ -648,7 +648,7 @@
       <!-- period editor -->
       <section class="card preset-tonal-surface p-4 space-y-4">
         <div class="flex gap-1" role="tablist">
-          {#each [["always", manage_schedules_preset_allday()], ["interval", manage_schedules_mode_interval()], ["weekly", manage_schedules_mode_weekly()], ["monthly", manage_schedules_mode_monthly()]] as [mode, label] (mode)}
+          {#each [["always", manage_schedules_preset_always()], ["interval", manage_schedules_mode_interval()], ["weekly", manage_schedules_mode_weekly()], ["monthly", manage_schedules_mode_monthly()]] as [mode, label] (mode)}
             <button
               role="tab"
               aria-selected={draft.spec.mode === mode}

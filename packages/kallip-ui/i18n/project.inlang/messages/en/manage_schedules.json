@@ -35,7 +35,7 @@
   "manage_schedules_preset_weekdays": "9 to 5",
   "manage_schedules_preset_early": "Early 06–14",
   "manage_schedules_preset_night": "Night 22–06",
-  "manage_schedules_preset_allday": "24/7",
+  "manage_schedules_preset_always": "24/7",
   "manage_schedules_status_always": "On duty · 24/7",
   "manage_schedules_always_note": "On duty around the clock — no days, no windows.",
   "manage_schedules_monthly_utc_note": "Monthly day numbers are edited in UTC: crossing month borders is lossy (months differ in length), so this clock stays locked.",

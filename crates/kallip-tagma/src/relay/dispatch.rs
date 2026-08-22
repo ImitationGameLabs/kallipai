@@ -256,11 +256,14 @@ impl RelayHandle {
                     req_id,
                     queue_depth: resp.queue_depth,
                     warning: resp.warning,
-                    // Stamped by `handle_agent_op` with the inbound row id; 0
-                    // until then (and when no history store is configured).
+                    // Intentionally 0: the ack no longer stamps the inbound
+                    // row id. The pump persists the authored half and
+                    // stamps ids onto the Event/UserMessage replies
+                    // (relay/pump.rs); the app dedups its optimistic line
+                    // on that (op_tests.rs: message ack carries 0).
                     history_id: 0,
-                    // Stamped by `handle_agent_op` with the inbound row's
-                    // created_at; absent until then.
+                    // Absent for the same reason: the pump stamps the row's
+                    // created_at when it persists the authored half.
                     created_at: None,
                 })
             }

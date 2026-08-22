@@ -35,7 +35,7 @@
   "manage_schedules_preset_weekdays": "朝九晚五",
   "manage_schedules_preset_early": "早班 06–14",
   "manage_schedules_preset_night": "夜班 22–06",
-  "manage_schedules_preset_allday": "24/7",
+  "manage_schedules_preset_always": "24/7",
   "manage_schedules_status_always": "在班 · 24/7",
   "manage_schedules_always_note": "全天候在班——不设日期与时段。",
   "manage_schedules_monthly_utc_note": "每月日期按 UTC 编辑：跨月边界换算因月长不一而失真，此钟面保持锁定。",
