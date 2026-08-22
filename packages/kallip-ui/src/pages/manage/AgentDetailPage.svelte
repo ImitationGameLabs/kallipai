@@ -13,6 +13,7 @@
   import { agentsStore } from "../../lib/manage/agents.svelte.ts";
   import { formatTokenCount } from "../../lib/tagmata.svelte.ts";
   import { navigate } from "../../lib/shell/port.ts";
+  import { TONAL_ICON_SURF } from "../../lib/classes.ts";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
   import AgentIdentityDialog from "../../components/manage/AgentIdentityDialog.svelte";
   import CopyButton from "../../components/CopyButton.svelte";
@@ -251,7 +252,7 @@
             }}
           >
             <Menu.Trigger
-              class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
+              class="size-10 {TONAL_ICON_SURF} shrink-0"
               aria-label={manage_agent_identity_actions_aria()}
             >
               <MoreVertical class="size-4" />

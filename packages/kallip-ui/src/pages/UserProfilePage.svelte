@@ -8,6 +8,7 @@
   import { agoraClientOrFail } from "../lib/session/agora.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import { formatDateTime } from "../lib/tagmata.svelte.ts";
+  import { TONAL_ICON_SURF } from "../lib/classes.ts";
   import type { PublicUserProfile } from "@kallipai/kallip-agora-client";
   import {
     common_loading,
@@ -67,7 +68,7 @@
   >
     <button
       type="button"
-      class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
+      class="size-8 {TONAL_ICON_SURF} shrink-0"
       aria-label={common_back_aria()}
       onclick={back}
     >

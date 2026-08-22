@@ -13,6 +13,7 @@
     formatRemaining,
     isExpired,
   } from "../../lib/tagmata.svelte.ts";
+  import { TONAL_ICON_PRIM, TONAL_ICON_SURF } from "../../lib/classes.ts";
   import {
     common_copied,
     common_copy,
@@ -164,7 +165,7 @@
       <div class="flex items-center gap-1 shrink-0">
         <button
           type="button"
-          class="size-7 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-primary-500"
+          class="size-7 {TONAL_ICON_PRIM}"
           disabled={saving}
           onclick={save}
           aria-label={tagma_save_name_aria()}
@@ -173,7 +174,7 @@
         </button>
         <button
           type="button"
-          class="size-7 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+          class="size-7 {TONAL_ICON_SURF}"
           disabled={saving}
           onclick={cancel}
           aria-label={tagma_cancel_rename_aria()}
@@ -248,7 +249,7 @@
           }}
         >
           <Menu.Trigger
-            class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+            class="size-8 {TONAL_ICON_SURF}"
             aria-label={tagma_actions_aria()}
           >
             <MoreVertical class="size-4" />

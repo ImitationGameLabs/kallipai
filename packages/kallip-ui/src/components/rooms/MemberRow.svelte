@@ -24,6 +24,7 @@
   // on the settings page (no live dot / no dimming).
   import SenderIdentity from "./SenderIdentity.svelte";
   import { profileHref } from "../../lib/room-message.ts";
+  import { TONAL_ICON_ERR } from "../../lib/classes.ts";
   import { UserMinus } from "@lucide/svelte";
   import {
     room_creator_badge,
@@ -103,7 +104,7 @@
     {#if removable && onRemove}
       <button
         type="button"
-        class="size-7 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-error-500 hover:text-on-error-500"
+        class="size-7 {TONAL_ICON_ERR}"
         aria-label={room_remove_member_aria({ handle: member.handle })}
         title={room_remove_member_aria({ handle: member.handle })}
         onclick={onRemove}

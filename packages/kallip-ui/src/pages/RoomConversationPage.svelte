@@ -29,6 +29,7 @@
   import { agoraSession } from "../lib/session/agora.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import { profileHref } from "../lib/room-message.ts";
+  import { TONAL_ICON_SURF } from "../lib/classes.ts";
   import {
     common_loading,
     common_retry,
@@ -190,7 +191,7 @@
     </button>
     <button
       type="button"
-      class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
+      class="size-10 {TONAL_ICON_SURF} shrink-0"
       aria-label={room_settings_aria()}
       onclick={() => navigate(`/rooms/${roomId}/settings`)}
     >
@@ -292,7 +293,7 @@
             <span class="text-sm font-semibold">{room_members()}</span>
             <button
               type="button"
-              class="size-7 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+              class="size-7 {TONAL_ICON_SURF}"
               aria-label={room_close_members_aria()}
               onclick={() => (showMembers = false)}
             >

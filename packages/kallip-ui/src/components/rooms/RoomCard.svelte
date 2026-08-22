@@ -24,6 +24,7 @@
     room_actions_aria,
     rooms_menu_settings,
   } from "../../paraglide/messages.js";
+  import { TONAL_ICON_SURF } from "../../lib/classes.ts";
 
   let { room, onOpen, onSettings }: RoomCardProps = $props();
 
@@ -69,7 +70,7 @@
         }}
       >
         <Menu.Trigger
-          class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+          class="size-8 {TONAL_ICON_SURF}"
           aria-label={room_actions_aria()}
         >
           <MoreVertical class="size-4" />

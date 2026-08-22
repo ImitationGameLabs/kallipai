@@ -33,6 +33,7 @@
     singleParkingProfileProbeRequest,
     upsertProvider,
   } from "../../lib/manage/compute.ts";
+  import { TONAL_ICON_SURF } from "../../lib/classes.ts";
   import type {
     ProfileProvider,
     ProfileProviderProbeReport,
@@ -628,7 +629,7 @@
                   }}
                 >
                   <Menu.Trigger
-                    class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
+                    class="size-10 {TONAL_ICON_SURF} shrink-0"
                     aria-label={manage_profiles_provider_actions_aria()}
                     disabled={profilesStore.isProbing}
                   >
@@ -761,7 +762,7 @@
                 }}
               >
                 <Menu.Trigger
-                  class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
+                  class="size-10 {TONAL_ICON_SURF} shrink-0"
                   aria-label={manage_profiles_tier_actions_aria()}
                   disabled={profilesStore.isProbing}
                 >
@@ -837,7 +838,7 @@
                     }}
                   >
                     <Menu.Trigger
-                      class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
+                      class="size-10 {TONAL_ICON_SURF} shrink-0"
                       aria-label={manage_profiles_profile_actions_aria()}
                       disabled={profilesStore.isProbing}
                     >
@@ -1000,7 +1001,7 @@
                   }}
                 >
                   <Menu.Trigger
-                    class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
+                    class="size-10 {TONAL_ICON_SURF} shrink-0"
                     aria-label={manage_profiles_profile_actions_aria()}
                     disabled={profilesStore.isProbing}
                   >

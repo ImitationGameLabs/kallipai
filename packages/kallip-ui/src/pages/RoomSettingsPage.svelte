@@ -25,6 +25,7 @@
   import { roomConversationsStore } from "../lib/session/roomConversations.svelte";
   import MemberRow from "../components/rooms/MemberRow.svelte";
   import { navigate } from "../lib/shell/port.ts";
+  import { TONAL_ICON_SURF } from "../lib/classes.ts";
   import { getLocale } from "../paraglide/runtime.js";
 
   import {
@@ -261,7 +262,7 @@
   >
     <button
       type="button"
-      class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
+      class="size-8 {TONAL_ICON_SURF} shrink-0"
       aria-label={roomsettings_back_aria()}
       onclick={() => navigate(`/rooms/${roomId}`)}
     >
