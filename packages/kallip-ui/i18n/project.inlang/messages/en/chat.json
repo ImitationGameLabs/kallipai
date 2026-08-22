@@ -15,7 +15,7 @@
   "chat_notice_local": "The tagma connection dropped. Reconnect from settings.",
   "chat_notice_offline": "The tagma is offline. The channel will reconnect automatically when it returns.",
   "chat_send_to_start": "Send a message to start the conversation.",
-  "composer_placeholder": "Type a message… (Enter to send, Shift+Enter for newline)",
+  "composer_placeholder": "Message… (Enter to send)",
   "composer_message_aria": "Message",
   "composer_send_aria": "Send",
   "composer_queued": "queued: {count}",

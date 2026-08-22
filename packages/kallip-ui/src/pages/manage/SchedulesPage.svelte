@@ -610,9 +610,9 @@
       </section>
 
       <!-- clock switch -->
-      <div class="flex items-center justify-end gap-2 text-xs">
-        <span class="opacity-50">{manage_schedules_dst_note()}</span>
-        <div class="flex gap-1">
+      <div class="flex flex-wrap md:flex-nowrap items-center justify-end gap-x-2 gap-y-1 text-xs">
+        <span class="opacity-50 basis-full md:basis-auto">{manage_schedules_dst_note()}</span>
+        <div class="flex gap-1 shrink-0">
           <button
             class="btn btn-sm {effUtc
               ? 'preset-filled-primary-200-800'

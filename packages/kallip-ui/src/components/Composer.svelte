@@ -45,7 +45,9 @@
 
   function resize() {
     if (!area) return;
-    area.style.height = "auto";
+    // Collapse to 0 first: 'auto' re-lays out at the rows=2 attribute
+    // height, so an empty field would measure ~2 rows and never shrink.
+    area.style.height = "0px";
     // Cap at roughly ten rows before the field scrolls internally.
     area.style.height = `${Math.min(area.scrollHeight, 240)}px`;
   }

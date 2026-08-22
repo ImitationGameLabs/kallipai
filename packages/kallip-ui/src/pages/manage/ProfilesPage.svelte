@@ -617,9 +617,9 @@
         <div class="grid gap-3 sm:grid-cols-2">
           {#each Object.values(profilesStore.draft.endpoints) as ep (ep.id)}
             {@const report = providerReports.get(ep.id)}
-            <div class="card preset-tonal-surface p-4 space-y-2">
+            <div class="card preset-tonal-surface p-4 space-y-2 min-w-0">
               <div class="flex items-center justify-between gap-2">
-                <span class="font-mono text-sm font-semibold">{ep.id}</span>
+                <span class="font-mono text-sm font-semibold truncate min-w-0 flex-1">{ep.id}</span>
                 <Menu
                   positioning={{ placement: "bottom-end" }}
                   onSelect={(e) => {
@@ -660,22 +660,22 @@
               </div>
               <dl class="text-xs space-y-1">
                 <div class="flex gap-2">
-                  <dt class="opacity-60">
+                  <dt class="opacity-60 shrink-0">
                     {manage_profiles_profile_provider_label()}:
                   </dt>
-                  <dd class="font-mono">{ep.family}</dd>
+                  <dd class="font-mono min-w-0">{ep.family}</dd>
                 </div>
                 <div class="flex gap-2">
-                  <dt class="opacity-60">
+                  <dt class="opacity-60 shrink-0">
                     {manage_profiles_provider_card_base_url_label()}:
                   </dt>
-                  <dd class="font-mono truncate">
+                  <dd class="font-mono truncate min-w-0">
                     {ep.base_url ?? manage_profiles_provider_base_url_default()}
                   </dd>
                 </div>
                 <div class="flex gap-2">
-                  <dt class="opacity-60">API key:</dt>
-                  <dd class="font-mono">{ep.api_key}</dd>
+                  <dt class="opacity-60 shrink-0">API key:</dt>
+                  <dd class="font-mono min-w-0 break-all">{ep.api_key}</dd>
                 </div>
               </dl>
               {#if report}

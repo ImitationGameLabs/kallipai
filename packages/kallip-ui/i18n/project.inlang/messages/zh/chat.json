@@ -15,7 +15,7 @@
   "chat_notice_local": "智能体编队连接已断开，请从设置中重新连接。",
   "chat_notice_offline": "智能体编队当前离线，恢复后将自动重连。",
   "chat_send_to_start": "发送一条消息，开始对话。",
-  "composer_placeholder": "输入消息…（Enter 发送，Shift+Enter 换行）",
+  "composer_placeholder": "输入消息，Enter 发送",
   "composer_message_aria": "消息",
   "composer_send_aria": "发送",
   "composer_queued": "已排队：{count}",
