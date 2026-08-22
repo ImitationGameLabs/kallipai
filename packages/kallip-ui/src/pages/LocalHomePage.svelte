@@ -31,11 +31,12 @@
     { href: "/local/manage/profiles", label: nav_profiles, Icon: Settings },
     { href: "/local/manage/schedules", label: nav_schedules, Icon: Calendar },
   ];
-
 </script>
 
-<div class="px-2 py-4 md:p-6 max-w-2xl">
-
+<!-- pt: calc keeps the browser value (1rem) when the inset is 0 and adds the system-bar height under edge-to-edge; these hub pages have no shell top row of their own. -->
+<div
+  class="px-2 pt-[calc(1rem+env(safe-area-inset-top))] pb-4 md:p-6 max-w-2xl"
+>
   <nav class="card preset-tonal-surface" aria-label={nav_home()}>
     <HubRow href="/local/chat" Icon={MessageSquare} label={nav_chat()} />
     <div class="border-t-2 border-surface-300-700"></div>

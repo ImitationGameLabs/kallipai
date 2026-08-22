@@ -30,8 +30,13 @@
   const mode = $derived(modeOf(configStore.value));
 </script>
 
-<div class="px-2 py-4 md:p-6 max-w-2xl space-y-6">
-  <h1 class="text-xl font-semibold">{account_menu()}</h1>
+<!-- pt: calc keeps the browser value (1rem) when the inset is 0 and adds the system-bar height under edge-to-edge; these hub pages have no shell top row of their own. -->
+<div
+  class="px-2 pt-[calc(1rem+env(safe-area-inset-top))] pb-4 md:p-6 max-w-2xl space-y-6"
+>
+  <h1 class="text-xl font-semibold text-center md:text-left">
+    {account_menu()}
+  </h1>
 
   <!-- Row order mirrors the dropdown: settings, then the mode actions. -->
   <nav

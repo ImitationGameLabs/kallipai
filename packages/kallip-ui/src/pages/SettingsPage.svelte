@@ -152,8 +152,12 @@
 <svelte:head><title>{settings_title()}</title></svelte:head>
 
 <div class="h-full overflow-y-auto">
-  <div class="p-6 max-w-md space-y-6">
-    <h1 class="text-xl font-semibold">{settings_heading()}</h1>
+  <div
+    class="px-6 pt-[calc(1.5rem+env(safe-area-inset-top))] pb-6 max-w-md space-y-6"
+  >
+    <h1 class="text-xl font-semibold text-center md:text-left">
+      {settings_heading()}
+    </h1>
 
     <section class="space-y-3">
       <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
