@@ -4,6 +4,9 @@ node_modules
 .output
 .vercel
 .netlify
+
+# Android build workspace (GRADLE_USER_HOME pointee and gradle outputs)
+.gradle
 .wrangler
 /.svelte-kit
 /build
