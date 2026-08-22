@@ -4,12 +4,12 @@
   // reached from the bottom bar's trailing (account) cell. The desktop
   // sidebar keeps its dropdown; this page stays reachable by URL there,
   // mirroring how /local/manage relates to the sidebar's manage section.
-  // Rows mix links (settings) and mode actions: an action has no
-  // destination, so it is a button (not an anchor) and must not push a
-  // history entry. Icons are imported directly here (not injected via
+  // Rows mix links (settings) and mode actions — HubRow renders each as an
+  // anchor or a button. Icons are imported directly here (not injected via
   // NavIcons) because page components already depend on @lucide/svelte
   // directly (ManageHubPage precedent).
   import { ArrowRightLeft, LogOut, Settings } from "@lucide/svelte";
+  import HubRow from "../../components/HubRow.svelte";
   import { configStore } from "../../lib/config/config.svelte";
   import { modeOf } from "../../lib/config/mode.ts";
   import {
@@ -38,43 +38,24 @@
     class="card preset-tonal-surface divide-y divide-surface-200-800"
     aria-label={account_menu()}
   >
-    <!-- One destination per row, full-width with the same 48px touch target
-         and hover fill as ManageHubPage's rows, so the two hub pages read as
-         one pattern. Buttons stretch to the row width (`w-full text-left`)
-         because a bare button sizes to its content, unlike an anchor row. -->
-    <a
-      href="/settings"
-      class="flex items-center gap-3 min-h-12 px-4 hover:preset-filled-surface-500 transition-colors"
-    >
-      <Settings class="size-5 shrink-0 opacity-70" aria-hidden="true" />
-      <span class="text-sm font-medium">{settings_heading()}</span>
-    </a>
+    <HubRow href="/settings" Icon={Settings} label={settings_heading()} />
     {#if mode === "online"}
-      <button
-        type="button"
+      <HubRow
         onclick={() => void logout()}
-        class="flex items-center gap-3 min-h-12 px-4 w-full text-left hover:preset-filled-surface-500 transition-colors"
-      >
-        <LogOut class="size-5 shrink-0 opacity-70" aria-hidden="true" />
-        <span class="text-sm font-medium">{account_logout()}</span>
-      </button>
-      <button
-        type="button"
+        Icon={LogOut}
+        label={account_logout()}
+      />
+      <HubRow
         onclick={() => void switchToOffline()}
-        class="flex items-center gap-3 min-h-12 px-4 w-full text-left hover:preset-filled-surface-500 transition-colors"
-      >
-        <ArrowRightLeft class="size-5 shrink-0 opacity-70" aria-hidden="true" />
-        <span class="text-sm font-medium">{account_go_offline()}</span>
-      </button>
+        Icon={ArrowRightLeft}
+        label={account_go_offline()}
+      />
     {:else}
-      <button
-        type="button"
+      <HubRow
         onclick={() => void switchToOnline()}
-        class="flex items-center gap-3 min-h-12 px-4 w-full text-left hover:preset-filled-surface-500 transition-colors"
-      >
-        <ArrowRightLeft class="size-5 shrink-0 opacity-70" aria-hidden="true" />
-        <span class="text-sm font-medium">{account_go_online()}</span>
-      </button>
+        Icon={ArrowRightLeft}
+        label={account_go_online()}
+      />
     {/if}
   </nav>
 </div>

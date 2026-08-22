@@ -13,6 +13,7 @@
     Users,
     Wallet,
   } from "@lucide/svelte";
+  import HubRow from "../../components/HubRow.svelte";
   import {
     nav_manage,
     nav_overview,
@@ -39,17 +40,7 @@
     aria-label={nav_manage()}
   >
     {#each rows as { href, label, Icon } (href)}
-      <!-- One destination per row, full-width with a 48px touch target (the
-           bar's icon-only cells are smaller because their hit area is the
-           whole grid cell; here the row IS the target). No chevron: the row
-           itself reads as the destination. -->
-      <a
-        {href}
-        class="flex items-center gap-3 min-h-12 px-4 hover:preset-filled-surface-500 transition-colors"
-      >
-        <Icon class="size-5 shrink-0 opacity-70" aria-hidden="true" />
-        <span class="text-sm font-medium">{label()}</span>
-      </a>
+      <HubRow {href} {Icon} label={label()} />
     {/each}
   </nav>
 </div>
