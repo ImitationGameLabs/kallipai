@@ -31,17 +31,20 @@
   ];
 </script>
 
-<div class="p-6 max-w-2xl space-y-6">
+<div class="px-2 py-4 md:p-6 max-w-2xl space-y-6">
   <h1 class="text-xl font-semibold">{nav_manage()}</h1>
 
-  <nav class="card preset-tonal-surface divide-y divide-surface-200-800" aria-label={nav_manage()}>
+  <nav
+    class="card preset-tonal-surface divide-y divide-surface-200-800"
+    aria-label={nav_manage()}
+  >
     {#each rows as { href, label, Icon } (href)}
       <!-- One destination per row, full-width with a 48px touch target (the
            bar's icon-only cells are smaller because their hit area is the
            whole grid cell; here the row IS the target). No chevron: the row
            itself reads as the destination. -->
       <a
-        href={href}
+        {href}
         class="flex items-center gap-3 min-h-12 px-4 hover:preset-filled-surface-500 transition-colors"
       >
         <Icon class="size-5 shrink-0 opacity-70" aria-hidden="true" />

@@ -3,13 +3,13 @@
   import { Dialog, Navigation, Portal } from "@skeletonlabs/skeleton-svelte";
   import type { NavIndicator, NavItem } from "../lib/shell.ts";
   import { navSlots } from "../lib/shell/navSlots.ts";
-  import AccountMenu from "./AccountMenu.svelte";
-  import { Ellipsis } from "@lucide/svelte";
+  import { Ellipsis, User } from "@lucide/svelte";
   import type { NavSection } from "../lib/shell/links.ts";
   import type { ErrorView } from "../lib/errors.ts";
   import Brand from "./Brand.svelte";
   import Banner from "./Banner.svelte";
   import {
+    account_menu,
     shell_connecting,
     nav_more,
     shell_error,
@@ -70,8 +70,8 @@
     // Optional chrome snippets. `brand` defaults to a "KallipAI" wordmark and is
     // shown only in the sidebar header; `status` (e.g. an account menu) is
     // shown only in the sidebar footer. The bar tier keeps its cells compact
-    // and instead mounts its own icon-only AccountMenu (bar variant) in the
-    // last cell, so account actions stay reachable below md.
+    // and instead renders an account cell (a navLink to /account, the
+    // hub page) in the last slot, so account actions stay reachable below md.
     brand?: Snippet;
     status?: Snippet;
     // Rendered as a uniform banner above the page content.
@@ -249,9 +249,10 @@
 
   <!-- small: bottom bar with capped cells. Visible nav items come from the
        slot plan (navSlots); overflow items and every section-manage gear
-       live in the More sheet below. The trailing cell is always the
-       icon-only AccountMenu (account actions have no other home below
-       md). The bottom padding follows the safe-area inset, which is
+       live in the More sheet below. The trailing cell is always
+       the account entry: a navLink to /account — the hub page that
+       carries what the sidebar footer's dropdown serves at md+. The
+       bottom padding follows the safe-area inset, which is
        non-zero only when the webview is edge-to-edge; it collapses to 0
        otherwise (e.g. Tauri Android's default, non-edge-to-edge webview). -->
   <Navigation layout="bar" class="md:hidden pb-[env(safe-area-inset-bottom)]">
@@ -279,9 +280,11 @@
           <Ellipsis class="size-5" />
         </button>
       {/if}
-      <div class="grid place-items-center">
-        <AccountMenu variant="bar" />
-      </div>
+      {@render navLink({
+        href: "/account",
+        label: account_menu(),
+        icon: User,
+      })}
     </Navigation.Menu>
   </Navigation>
 

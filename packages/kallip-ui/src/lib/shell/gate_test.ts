@@ -30,16 +30,14 @@ Deno.test("isPublicRoute flags /login, /register, /connect", () => {
 });
 
 Deno.test("config not loaded -> skeleton on every route (incl. /login)", () => {
-  for (
-    const pathname of [
-      "/",
-      "/login",
-      "/register",
-      "/connect",
-      "/tagmata",
-      "/settings",
-    ]
-  ) {
+  for (const pathname of [
+    "/",
+    "/login",
+    "/register",
+    "/connect",
+    "/tagmata",
+    "/settings",
+  ]) {
     assertEquals(decide({ loaded: false, mode: "online", pathname }), {
       kind: "skeleton",
     });
@@ -115,12 +113,15 @@ Deno.test("offline + /chat/{non-local} -> redirect /local/chat", () => {
   });
 });
 
-Deno.test("offline + /chat/local (old path) -> redirect /local/chat (back-compat)", () => {
-  assertEquals(decide({ mode: "offline", pathname: "/chat/local" }), {
-    kind: "redirect",
-    url: "/local/chat",
-  });
-});
+Deno.test(
+  "offline + /chat/local (old path) -> redirect /local/chat (back-compat)",
+  () => {
+    assertEquals(decide({ mode: "offline", pathname: "/chat/local" }), {
+      kind: "redirect",
+      url: "/local/chat",
+    });
+  },
+);
 
 Deno.test(
   "offline + /rooms/{id} -> redirect /local/chat (rooms are online-only)",
@@ -133,10 +134,30 @@ Deno.test(
 );
 
 Deno.test("offline protected routes render (the local chat + settings)", () => {
-  for (const pathname of ["/local/chat", "/local/manage/overview", "/local/manage/budget", "/settings"]) {
+  for (const pathname of [
+    "/local/chat",
+    "/local/manage/overview",
+    "/local/manage/budget",
+    "/settings",
+  ]) {
     assertEquals(decide({ mode: "offline", pathname }), { kind: "render" });
   }
 });
+
+Deno.test(
+  "/account renders in both modes (the account hub is mode-agnostic)",
+  () => {
+    // The hub page serves account actions in either mode, so the gate must
+    // never fold /account into the /local/* offline-only tree (or the
+    // online-only redirects).
+    assertEquals(decide({ mode: "offline", pathname: "/account" }), {
+      kind: "render",
+    });
+    assertEquals(decide({ mode: "online", pathname: "/account", user: USER }), {
+      kind: "render",
+    });
+  },
+);
 
 // --- online public ---
 
@@ -203,19 +224,29 @@ Deno.test(
   },
 );
 
-Deno.test("online + /local/manage/* -> redirect /tagmata (offline-only)", () => {
-  assertEquals(
-    decide({ mode: "online", pathname: "/local/manage/overview", user: USER }),
-    { kind: "redirect", url: "/tagmata" },
-  );
-});
+Deno.test(
+  "online + /local/manage/* -> redirect /tagmata (offline-only)",
+  () => {
+    assertEquals(
+      decide({
+        mode: "online",
+        pathname: "/local/manage/overview",
+        user: USER,
+      }),
+      { kind: "redirect", url: "/tagmata" },
+    );
+  },
+);
 
-Deno.test("online + /chat/local (old path) -> redirect /tagmata (back-compat)", () => {
-  assertEquals(
-    decide({ mode: "online", pathname: "/chat/local", user: USER }),
-    { kind: "redirect", url: "/tagmata" },
-  );
-});
+Deno.test(
+  "online + /chat/local (old path) -> redirect /tagmata (back-compat)",
+  () => {
+    assertEquals(
+      decide({ mode: "online", pathname: "/chat/local", user: USER }),
+      { kind: "redirect", url: "/tagmata" },
+    );
+  },
+);
 
 Deno.test("online + /chat/{id} + logged-out -> redirect /login", () => {
   assertEquals(
