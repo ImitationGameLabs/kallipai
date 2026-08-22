@@ -21,6 +21,7 @@ import {
   nav_agents,
   nav_budget,
   nav_chat,
+  nav_home,
   nav_manage,
   nav_overview,
   nav_profiles,
@@ -47,6 +48,11 @@ export interface NavSection {
   /** The section's management page, reached via a settings gear beside the
    * title. `icon` is injected by the caller (mirrors NavItem). */
   manage?: { href: string; label: string; icon: Component };
+  /** Small-screen-only kill switch: navSlots drops the section from the
+   * bottom bar and the More sheet entirely; the desktop sidebar (which
+   * renders sections directly) still shows it.
+   */
+  smallScreenHidden?: boolean;
   items: NavItem[];
 }
 
@@ -57,8 +63,8 @@ export interface NavIcons {
   /** Gear icon for the section-management entry beside each section title. */
   settings: Component;
   /** Management section icons (offline mode only). */
-  /** The bottom-bar "manage" hub cell (offline mode only). */
-  manageHub: Component;
+  /** The bottom-bar "home" hub cell (offline mode only). */
+  home: Component;
   manageOverview: Component;
   manageBudget: Component;
   manageAgents: Component;
@@ -115,15 +121,18 @@ export function navFor(args: {
   const { mode, icons, tagmata, rooms } = args;
   if (mode === "offline") {
     return [
-      { items: [{ href: "/local/chat", label: nav_chat(), icon: icons.chat }] },
       {
-        // `hub` folds this whole section into one small-screen bar cell;
-        // the items stay for the desktop sidebar and the hub page itself.
-        hub: {
-          href: "/local/manage",
-          label: nav_manage(),
-          icon: icons.manageHub,
-        },
+        // `hub` folds this section into the small-screen "home" bar cell at
+        // /local; the chat item below stays for the desktop sidebar. The
+        // home page itself (LocalHomePage) carries the chat CTA and the
+        // manage grid, so the bar never needs more than home + account.
+        hub: { href: "/local", label: nav_home(), icon: icons.home },
+        items: [{ href: "/local/chat", label: nav_chat(), icon: icons.chat }],
+      },
+      {
+        // smallScreenHidden: desktop-sidebar-only on small viewports — its
+        // entries live on the /local home grid instead of the bottom bar.
+        smallScreenHidden: true,
         title: nav_manage(),
         items: [
           {

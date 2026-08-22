@@ -20,6 +20,7 @@
   } from "./links.ts";
   import { appGateDecision, isPublicRoute } from "./gate.ts";
   import { navigate } from "./port.ts";
+  import { nav_home } from "../../paraglide/messages.js";
 
   let {
     pathname,
@@ -260,6 +261,16 @@
   $effect(() => {
     if (offlineError) console.error(offlineError);
   });
+  // Offline content pages (any /local/* below the home itself) swap the
+  // small-screen bottom bar for the back row above; the home and every
+  // online route keep the bar. Desktop is unaffected (the row is md:hidden
+  // and the sidebar always renders).
+  const back = $derived(
+    mode === "offline" &&
+    pathname.startsWith("/local/") &&
+    pathname !== "/local"
+      ? { href: "/local", label: nav_home() }
+      : null);
 </script>
 
 <!-- Sidebar footer entry; see AccountMenu for behavior. -->
@@ -270,7 +281,7 @@
 {#if decision.kind === "render" && isPublicRoute(pathname)}
   {@render children()}
 {:else if decision.kind === "render"}
-  <AppShell {links} {isActive} error={errorView} status={statusSnippet}>
+  <AppShell {links} {isActive} {back} error={errorView} status={statusSnippet}>
     {@render children()}
   </AppShell>
 {:else}

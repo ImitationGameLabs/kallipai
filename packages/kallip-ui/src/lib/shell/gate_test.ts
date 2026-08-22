@@ -46,10 +46,10 @@ Deno.test("config not loaded -> skeleton on every route (incl. /login)", () => {
 
 // --- offline public ---
 
-Deno.test("offline + /connect + connected -> redirect /local/chat", () => {
+Deno.test("offline + /connect + connected -> redirect /local", () => {
   assertEquals(
     decide({ mode: "offline", pathname: "/connect", connected: true }),
-    { kind: "redirect", url: "/local/chat" },
+    { kind: "redirect", url: "/local" },
   );
 });
 
@@ -61,11 +61,11 @@ Deno.test("offline + /connect + disconnected -> render the form", () => {
 });
 
 Deno.test(
-  "offline + /login + connected -> redirect /local/chat (one hop)",
+  "offline + /login + connected -> redirect /local (one hop)",
   () => {
     assertEquals(
       decide({ mode: "offline", pathname: "/login", connected: true }),
-      { kind: "redirect", url: "/local/chat" },
+      { kind: "redirect", url: "/local" },
     );
   },
 );
@@ -80,55 +80,55 @@ Deno.test("offline + /login + disconnected -> redirect /connect", () => {
 // --- offline protected ---
 
 Deno.test(
-  "offline + /tagmata -> redirect /local/chat (no tagmata offline)",
+  "offline + /tagmata -> redirect /local (no tagmata offline)",
   () => {
     assertEquals(decide({ mode: "offline", pathname: "/tagmata" }), {
       kind: "redirect",
-      url: "/local/chat",
+      url: "/local",
     });
   },
 );
 
 Deno.test(
-  "offline + /rooms -> redirect /local/chat (rooms are online-only)",
+  "offline + /rooms -> redirect /local (rooms are online-only)",
   () => {
     assertEquals(decide({ mode: "offline", pathname: "/rooms" }), {
       kind: "redirect",
-      url: "/local/chat",
+      url: "/local",
     });
   },
 );
 
-Deno.test("offline + / -> redirect /local/chat (old offline root)", () => {
+Deno.test("offline + / -> redirect /local (old offline root)", () => {
   assertEquals(decide({ mode: "offline", pathname: "/" }), {
     kind: "redirect",
-    url: "/local/chat",
+    url: "/local",
   });
 });
 
-Deno.test("offline + /chat/{non-local} -> redirect /local/chat", () => {
+Deno.test("offline + /chat/{non-local} -> redirect /local", () => {
   assertEquals(decide({ mode: "offline", pathname: "/chat/abc" }), {
     kind: "redirect",
-    url: "/local/chat",
+    url: "/local",
   });
 });
 
 Deno.test(
-  "offline + /chat/local (old path) -> redirect /local/chat (back-compat)",
+  "offline + /chat/local (old path) -> redirect /local (back-compat)",
   () => {
     assertEquals(decide({ mode: "offline", pathname: "/chat/local" }), {
       kind: "redirect",
-      url: "/local/chat",
+      url: "/local",
     });
   },
 );
 
 Deno.test(
-  "offline + /rooms/{id} -> redirect /local/chat (rooms are online-only)",
+  "offline + /rooms/{id} -> redirect /local (rooms are online-only)",
   () => {
     assertEquals(decide({ mode: "offline", pathname: "/rooms/room-1" }), {
       kind: "redirect",
-      url: "/local/chat",
+      url: "/local",
     });
   },
 );
@@ -203,7 +203,7 @@ Deno.test(
   "online + /local/chat -> redirect /tagmata (offline route marker)",
   () => {
     // /local/chat is an offline-only route; it is never a valid online
-    // destination. Mirrors the offline branch collapsing /tagmata -> /local/chat.
+    // destination. Mirrors the offline branch collapsing /tagmata -> /local.
     assertEquals(
       decide({ mode: "online", pathname: "/local/chat", user: USER }),
       { kind: "redirect", url: "/tagmata" },

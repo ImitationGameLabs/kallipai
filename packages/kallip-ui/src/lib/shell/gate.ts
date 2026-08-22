@@ -15,7 +15,7 @@
 //
 //   - "offline" -- no auth, no identity. `connected` reflects the local tagma
 //     transport. Offline routes are /local/* (chat + management). /tagmata
-//     is unavailable and redirects to /local/chat; `/` redirects to /local/chat.
+//     is unavailable and redirects to /local; `/` redirects to /local.
 //
 // Public (front-door) routes are /login, /register (online) and /connect
 // (offline). The gate owns all post-mode-flip / post-connect navigation: pages
@@ -69,9 +69,9 @@ export function appGateDecision(args: {
 
   if (pub) {
     if (args.mode === "offline") {
-      // Already set up -> straight to the local chat (one redirect, not via
+      // Already set up -> straight to the local home (one redirect, not via
       // /connect).
-      if (args.connected) return { kind: "redirect", url: "/local/chat" };
+      if (args.connected) return { kind: "redirect", url: "/local" };
       // Not connected: the form is the right place.
       if (args.pathname === "/connect") return { kind: "render" };
       // /login,/register are the wrong door for an offline user.
@@ -110,14 +110,14 @@ export function appGateDecision(args: {
     if (args.pathname === "/local" || args.pathname.startsWith("/local/")) {
       return { kind: "render" };
     }
-    // Back-compat: old /chat/local → /local/chat.
+    // Back-compat: old /chat/local → /local.
     if (args.pathname === "/chat/local") {
-      return { kind: "redirect", url: "/local/chat" };
+      return { kind: "redirect", url: "/local" };
     }
     // /tagmata + /rooms are online-only (the agora control plane is
     // unreachable offline); `/` is the old offline root. A non-local
     // /chat/{id} deep link is meaningless offline (no relay conversations
-    // exist). All collapse to the local chat.
+    // exist). All collapse to the local home.
     if (
       args.pathname === "/tagmata" ||
       args.pathname === "/rooms" ||
@@ -125,7 +125,7 @@ export function appGateDecision(args: {
       args.pathname.startsWith("/chat/") ||
       args.pathname.startsWith("/rooms/")
     ) {
-      return { kind: "redirect", url: "/local/chat" };
+      return { kind: "redirect", url: "/local" };
     }
     // /settings: page owns its disconnected empty state.
     return { kind: "render" };

@@ -14,7 +14,7 @@
   import {
     Calendar,
     Cpu,
-    FolderCog,
+    House,
     LayoutGrid,
     MessageSquare,
     Settings,
@@ -43,7 +43,7 @@
     rooms: Users,
     settings: Settings,
     manageOverview: LayoutGrid,
-    manageHub: FolderCog,
+    home: House,
     manageBudget: Wallet,
     manageAgents: Users,
     manageProfiles: Settings,

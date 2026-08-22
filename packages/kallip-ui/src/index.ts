@@ -84,6 +84,7 @@ export { default as OAuthCallbackPage } from "./pages/OAuthCallbackPage.svelte";
 export { default as OAuthSignupPage } from "./pages/OAuthSignupPage.svelte";
 export { default as OverviewPage } from "./pages/manage/OverviewPage.svelte";
 export { default as ManageHubPage } from "./pages/manage/ManageHubPage.svelte";
+export { default as LocalHomePage } from "./pages/LocalHomePage.svelte";
 export { default as AccountHubPage } from "./pages/account/AccountHubPage.svelte";
 export { default as BudgetPage } from "./pages/manage/BudgetPage.svelte";
 export { default as AgentsPage } from "./pages/manage/AgentsPage.svelte";

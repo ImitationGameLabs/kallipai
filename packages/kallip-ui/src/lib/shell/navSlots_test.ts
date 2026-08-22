@@ -160,6 +160,20 @@ const cases: {
       },
     ],
   },
+  {
+    name: "smallScreenHidden section -> no bar cell, no sheet rows, no More",
+    links: [
+      {
+        hub: { href: "/local", label: "home", icon: (() => {}) as never },
+        items: [item("/local/chat")],
+      },
+      { title: "Manage", smallScreenHidden: true, items: [item("/m/0"), item("/m/1")] },
+    ],
+    visible: ["/local"],
+    overflow: [],
+    hasMore: false,
+    sheetSections: [],
+  },
 ];
 
 for (const c of cases) {

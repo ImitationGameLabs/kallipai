@@ -6,6 +6,9 @@
 // computed, so its items cannot overflow into the sheet either. Folding is
 // therefore the first step below — computing flat from the raw sections
 // would resurrect the More button this field exists to retire.
+// A smallScreenHidden section is invisible on the small bar AND in the
+// sheet entirely — the small-screen twin of a desktop-only section. The
+// desktop sidebar renders sections directly and never consults this flag.
 // The two app modes share one formula here WITHOUT the mode being passed in:
 // a section `manage` gear exists only in online mode (see links.ts), and the
 // gear's only small-screen home is the sheet — so its presence alone is the
@@ -31,16 +34,19 @@ export interface NavSlotPlan {
 }
 
 export function navSlots(links: NavSection[]): NavSlotPlan {
-  const folded = links.map((s) => (s.hub ? { ...s, items: [] } : s));
+  // Filter first: fold, flat, More and the sheet then all plan the small
+  // viewport from the same section set.
+  const shown = links.filter((s) => !s.smallScreenHidden);
+  const folded = shown.map((s) => (s.hub ? { ...s, items: [] } : s));
   // The hub cell synthesizes into `flat` like any nav item, so the bar
   // renders it through the same loop; it can never reach the sheet
   // because `folded` holds no items for a hub section.
-  const flat = links.flatMap((s) =>
+  const flat = shown.flatMap((s) =>
     s.hub
       ? [{ href: s.hub.href, label: s.hub.label, icon: s.hub.icon }]
-      : s.items,
+      : s.items
   );
-  const hasManage = links.some((s) => s.manage);
+  const hasManage = shown.some((s) => s.manage);
   const hasMore = flat.length > 4 || hasManage;
   // NOTE: fold before measuring — see the header comment.
   // With More present the bar keeps at most 3 nav cells (More + Account fill

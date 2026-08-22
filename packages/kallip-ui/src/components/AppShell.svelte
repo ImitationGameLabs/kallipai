@@ -3,7 +3,7 @@
   import { Dialog, Navigation, Portal } from "@skeletonlabs/skeleton-svelte";
   import type { NavIndicator, NavItem } from "../lib/shell.ts";
   import { navSlots } from "../lib/shell/navSlots.ts";
-  import { Ellipsis, User } from "@lucide/svelte";
+  import { ArrowLeft, Ellipsis, User } from "@lucide/svelte";
   import type { NavSection } from "../lib/shell/links.ts";
   import type { ErrorView } from "../lib/errors.ts";
   import Brand from "./Brand.svelte";
@@ -12,6 +12,7 @@
     account_menu,
     shell_connecting,
     nav_more,
+    nav_home,
     shell_error,
     shell_live,
     shell_offline,
@@ -60,6 +61,7 @@
     isActive,
     brand,
     status,
+    back = null,
     error = null,
     children,
   }: {
@@ -75,6 +77,10 @@
     brand?: Snippet;
     status?: Snippet;
     // Rendered as a uniform banner above the page content.
+    // Small-screen back row: when set (offline content pages), the bottom
+    // bar hides and a home-link row renders above the content instead. The
+    // desktop sidebar stays; the row is md:hidden.
+  back?: { href: string; label: string } | null;
     error?: ErrorView | null;
     children: Snippet;
   } = $props();
@@ -239,6 +245,17 @@
 
   <!-- page content -->
   <main class="flex flex-col min-h-0 min-w-0 overflow-hidden">
+    {#if back}
+      <!-- md:hidden: the desktop sidebar already offers every destination;
+           this row is the small-screen stand-in for the hidden bottom bar. -->
+      <a
+        href={back.href}
+        class="md:hidden flex items-center gap-1.5 px-4 pt-3 text-sm font-medium text-primary-500 dark:text-primary-400 hover:underline"
+      >
+        <ArrowLeft class="size-4 shrink-0" aria-hidden="true" />
+        {back.label}
+      </a>
+    {/if}
     {#if error}
       <Banner title={error.title} detail={error.detail} hint={error.hint} />
     {/if}
@@ -255,10 +272,12 @@
        bottom padding follows the safe-area inset, which is
        non-zero only when the webview is edge-to-edge; it collapses to 0
        otherwise (e.g. Tauri Android's default, non-edge-to-edge webview). -->
-  <Navigation layout="bar" class="md:hidden pb-[env(safe-area-inset-bottom)]">
+  {#if !back}
+    <Navigation layout="bar" class="md:hidden pb-[env(safe-area-inset-bottom)]">
     <!-- Inline style because the column count is dynamic (visible cells
          plus More plus Account); a static grid-cols-N utility can't
-         express it. -->
+         express it. It sits inside the {#if !back} block above: on offline
+         content pages the back row replaces the whole bar. -->
     <Navigation.Menu
       style="display:grid; grid-template-columns: repeat({slots.visible.length +
         (slots.hasMore ? 1 : 0) +
@@ -287,6 +306,7 @@
       })}
     </Navigation.Menu>
   </Navigation>
+  {/if}
 
   <!-- small: the overflow sheet. Portaled to body; the sheet body is wrapped
        in its own stateless Navigation (bar layout) because navLink's
