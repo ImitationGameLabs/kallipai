@@ -92,6 +92,10 @@ re-shells out to `rustup target add` and fails unless the target is named
 explicitly. The full toolchain rationale lives in
 [nix/devshells/tauri.nix](../nix/devshells/tauri.nix).
 
+Gradle writes through `user.home` (inside the sandbox that is the read-only
+`/root`), so the wrapper lock fails until `GRADLE_USER_HOME` points at a
+writable directory, e.g. `export GRADLE_USER_HOME=$PWD/.gradle`.
+
 ## Formatting
 
 Two formatters, split by file type:
