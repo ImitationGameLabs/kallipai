@@ -65,6 +65,7 @@
     topRow = undefined,
     title = undefined,
     error = null,
+    topPanel = undefined,
     children,
   }: {
     links: NavSection[];
@@ -91,6 +92,9 @@
     // second h1 in the tree.
     title?: string;
     error?: ErrorView | null;
+    // Optional second row under the top row (the chat's expanded status
+    // panel): full width, below md only, above the banner.
+    topPanel?: Snippet;
     children: Snippet;
   } = $props();
 
@@ -286,6 +290,11 @@
           {/if}
         </div>
         <span class="size-8"></span>
+      </div>
+    {/if}
+    {#if topPanel}
+      <div class="md:hidden">
+        {@render topPanel()}
       </div>
     {/if}
     {#if error}

@@ -4,6 +4,8 @@
   import AppShell from "../../components/AppShell.svelte";
   import AccountMenu from "../../components/AccountMenu.svelte";
   import TagmaStatusHeader from "../../components/TagmaStatusHeader.svelte";
+  import TagmaStatusLine from "../../components/TagmaStatusLine.svelte";
+  import TagmaStatusPanel from "../../components/TagmaStatusPanel.svelte";
   import { classifyError } from "../errors.ts";
   import { agoraSession } from "../session/agora.svelte";
   import { channelsStore } from "../session/channels.svelte";
@@ -293,6 +295,14 @@
     "/local/manage/schedules": manage_schedules_heading,
   };
   const manageTitle = $derived(manageTitles[pathname]?.());
+  // Mobile status expansion owned by the shell's topPanel pair (chat only).
+  let statusExpanded = $state(false);
+  // Hoisted state survives navigation; reset on route change so returning
+  // to chat starts collapsed like the old in-page header did.
+  $effect(() => {
+    pathname;
+    statusExpanded = false;
+  });
 </script>
 
 <!-- Sidebar footer entry; see AccountMenu for behavior. -->
@@ -300,18 +310,28 @@
   <AccountMenu />
 {/snippet}
 
-<!-- Mobile top row for offline /local/chat: the page's status header lifts
-     into the shell so it rides beside the back chevron and above the
-     banner; only handed over when a back row exists at all. -->
+<!-- Mobile top row for offline /local/chat: a one-line status summary
+     (TagmaStatusLine) rides beside the back chevron; the expanded half
+     (budget + agent rows) renders as the shell's topPanel below the row,
+     so the row stays one line tall in both states. -->
 {#snippet topRowSnippet()}
   {#if mode === "offline" && pathname === "/local/chat"}
-    <TagmaStatusHeader
+    <TagmaStatusLine
+      status={channelsStore.get("local")?.statusSnapshot}
+      expanded={statusExpanded}
+      onToggle={() => (statusExpanded = !statusExpanded)}
+    />
+  {/if}
+{/snippet}
+
+{#snippet topPanelSnippet()}
+  {#if mode === "offline" && pathname === "/local/chat" && statusExpanded}
+    <TagmaStatusPanel
       status={channelsStore.get("local")?.statusSnapshot}
       agentRows={{
         rootRow: statusCardStore.rootRow,
         subRows: statusCardStore.subRows,
       }}
-      sideLayout={false}
     />
   {/if}
 {/snippet}
@@ -324,6 +344,7 @@
     {isActive}
     {back}
     topRow={back && !manageTitle ? topRowSnippet : undefined}
+    topPanel={back && !manageTitle ? topPanelSnippet : undefined}
     title={manageTitle}
     error={errorView}
     status={statusSnippet}
