@@ -28,10 +28,12 @@
 
   let area: HTMLTextAreaElement | undefined = $state();
 
-  // Auto-grow: recompute on every draft change so programmatic writes (e.g. an
-  // empty-state prompt chip) also resize, not just user key strokes.
+  // Auto-grow: recompute on every draft change (and breakpoint flip, below)
+  // so programmatic writes (e.g. an empty-state prompt chip), rows flips and
+  // padding changes all re-measure, not just user key strokes.
   $effect(() => {
     void composer.draft;
+    void desktop; // post-flush: the rows attr has re-rendered before this runs
     resize();
   });
 
@@ -42,56 +44,94 @@
     const token = composer.focusToken;
     if (token > 0) area?.focus();
   });
+  // Cross-breakpoint rows: below md the composer starts at one line and caps
+  // at five (mobile spec); at md+ it keeps the historical two-line start
+  // and 240px cap. Mirrors the AppShell mdQuery listener pattern; the
+  // measure effect below re-runs on the flip (post-flush), so the rows
+  // attribute and the cap are both current when the height is recomputed.
+  const mdQuery = matchMedia("(min-width: 48rem)");
+  let desktop = $state(mdQuery.matches);
+  $effect(() => {
+    const onChange = (event: MediaQueryListEvent) => {
+      desktop = event.matches;
+    };
+    mdQuery.addEventListener("change", onChange);
+    return () => mdQuery.removeEventListener("change", onChange);
+  });
 
   function resize() {
     if (!area) return;
-    // Collapse to 0 first: 'auto' re-lays out at the rows=2 attribute
-    // height, so an empty field would measure ~2 rows and never shrink.
+    // Collapse to 0 first: 'auto' re-lays out at the rows attribute
+    // height, so an empty field would measure the attribute's rows and
+    // never shrink.
     area.style.height = "0px";
-    // Cap at roughly ten rows before the field scrolls internally.
-    area.style.height = `${Math.min(area.scrollHeight, 240)}px`;
+    // Cap before the field scrolls internally: 240px (~ten lines) at
+    // md+, five lines below md. scrollHeight and the computed-style math
+    // both include the textarea's vertical padding, so the units agree.
+    const style = getComputedStyle(area);
+    const cap = desktop
+      ? 240
+      : 5 * Number.parseFloat(style.lineHeight) +
+        Number.parseFloat(style.paddingTop) +
+        Number.parseFloat(style.paddingBottom);
+    area.style.height = `${Math.min(area.scrollHeight, cap)}px`;
   }
 
+  // Enter submits at md+ (the desktop IM convention); below md Enter inserts
+  // a newline instead and the send button is the only way to submit (mobile
+  // keyboards pair Enter with a newline habit, so submit-on-Enter mistypes).
   function onKeydown(event: KeyboardEvent) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (desktop && event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void composer.submit();
     }
   }
 </script>
 
+{#snippet sendButton()}
+  <button
+    type="button"
+    onclick={() => void composer.submit()}
+    disabled={!composer.canSend || composer.sending}
+    aria-label={composer_send_aria()}
+    aria-busy={composer.sending}
+    class="size-10 shrink-0 rounded-full preset-filled-primary-500 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
+  >
+    <ArrowUp
+      class="size-5 {composer.sending ? 'animate-spin' : ''}"
+      aria-hidden="true"
+    />
+  </button>
+{/snippet}
+
 <div class="pt-3 px-3 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
   <div class="max-w-3xl mx-auto">
-    <!-- Input card: one bordered frame holds the textarea + the action, so the
-         textarea itself is borderless/transparent and the card outline is the
-         sole edge. focus-within retints the border to signal the active field. -->
-    <div
-      class="rounded-2xl border-2 border-surface-300-700 shadow-sm p-2 transition hover:shadow-xl focus-within:border-surface-400-600"
-    >
-      <textarea
-        bind:this={area}
-        bind:value={composer.draft}
-        onkeydown={onKeydown}
-        placeholder={composer_placeholder()}
-        rows="2"
-        aria-label={composer_message_aria()}
-        {disabled}
-        class="block w-full resize-none bg-transparent border-0 outline-none focus:ring-0 px-2 pt-1.5 pb-2 text-base leading-relaxed"
-      ></textarea>
-      <div class="flex justify-end pt-1">
-        <button
-          type="button"
-          onclick={() => void composer.submit()}
-          disabled={!composer.canSend || composer.sending}
-          aria-label={composer_send_aria()}
-          aria-busy={composer.sending}
-          class="size-10 shrink-0 rounded-full preset-filled-primary-500 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <ArrowUp
-            class="size-5 {composer.sending ? 'animate-spin' : ''}"
-            aria-hidden="true"
-          />
-        </button>
+    <!-- Input card: one bordered frame holds the textarea + the desktop
+         action, so the textarea itself is borderless/transparent and the
+         card outline is the sole edge. focus-within retints the border to
+         signal the active field. Below md the send button moves outside
+         the card (mobile composer spec): the outer row aligns it with the
+         textarea's last line instead. -->
+    <div class="flex items-end gap-2 md:block">
+      <div
+        class="flex-1 min-w-0 rounded-2xl border-2 border-surface-300-700 shadow-sm p-1 md:p-2 transition hover:shadow-xl focus-within:border-surface-400-600"
+      >
+        <textarea
+          bind:this={area}
+          bind:value={composer.draft}
+          onkeydown={onKeydown}
+          placeholder={desktop ? composer_placeholder() : ""}
+          rows={desktop ? 2 : 1}
+          aria-label={composer_message_aria()}
+          {disabled}
+          class="block w-full resize-none bg-transparent border-0 outline-none focus:ring-0 px-2 pt-0.5 pb-0.5 md:pt-1.5 md:pb-2 text-base leading-relaxed"
+        ></textarea>
+        <div class="hidden md:flex justify-end pt-1">
+          {@render sendButton()}
+        </div>
+      </div>
+      <div class="md:hidden shrink-0">
+        {@render sendButton()}
       </div>
     </div>
 
