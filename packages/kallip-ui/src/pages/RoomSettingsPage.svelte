@@ -9,7 +9,7 @@
   // mutation delegates to `roomsStore`. The roster is fetched directly (not via
   // roomConversationsStore.refreshRoster, which is gated on the transcript being
   // open) so the page works standalone, and re-fetched after each mutation.
-  import { ArrowLeft, ChevronDown } from "@lucide/svelte";
+  import { ChevronDown, ChevronLeft } from "@lucide/svelte";
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
   import { participantIdForTagma } from "@kallipai/kallip-common";
   import type {
@@ -266,7 +266,7 @@
       aria-label={roomsettings_back_aria()}
       onclick={() => navigate(`/rooms/${roomId}`)}
     >
-      <ArrowLeft class="size-4" />
+      <ChevronLeft class="size-4" />
     </button>
     <div class="flex flex-col min-w-0 flex-1">
       <p class="text-sm font-semibold truncate">{roomLabel}</p>

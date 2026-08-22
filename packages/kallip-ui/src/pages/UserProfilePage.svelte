@@ -4,7 +4,7 @@
   // (minimal disclosure: display name + created_at; never email/user_id). Reached
   // by clicking a human sender's header in a room. A protected app-shell route:
   // a logged-out deep link redirects to /login?next=, then returns here.
-  import { ArrowLeft } from "@lucide/svelte";
+  import { ChevronLeft } from "@lucide/svelte";
   import { agoraClientOrFail } from "../lib/session/agora.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import { formatDateTime } from "../lib/tagmata.svelte.ts";
@@ -72,7 +72,7 @@
       aria-label={common_back_aria()}
       onclick={back}
     >
-      <ArrowLeft class="size-4" />
+      <ChevronLeft class="size-4" />
     </button>
     <div class="flex flex-col min-w-0 flex-1">
       <p class="text-sm font-semibold truncate">@{handle}</p>

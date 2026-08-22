@@ -7,7 +7,7 @@
   //
   // The "Message" CTA opens the tagma's DM, but ONLY for a tagma the caller owns
   // (the bilateral DM is owner-scoped); a peer's tagma has no CTA.
-  import { ArrowLeft, Cpu, MessageSquare } from "@lucide/svelte";
+  import { ChevronLeft, Cpu, MessageSquare } from "@lucide/svelte";
   import { agoraClientOrFail, agoraSession } from "../lib/session/agora.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import { formatDateTime } from "../lib/tagmata.svelte.ts";
@@ -85,7 +85,7 @@
       aria-label={common_back_aria()}
       onclick={back}
     >
-      <ArrowLeft class="size-4" />
+      <ChevronLeft class="size-4" />
     </button>
     <div class="flex flex-col min-w-0 flex-1">
       <p class="text-sm font-semibold truncate">

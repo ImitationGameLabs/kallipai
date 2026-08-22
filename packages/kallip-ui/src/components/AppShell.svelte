@@ -3,7 +3,7 @@
   import { Dialog, Navigation, Portal } from "@skeletonlabs/skeleton-svelte";
   import type { NavIndicator, NavItem } from "../lib/shell.ts";
   import { navSlots } from "../lib/shell/navSlots.ts";
-  import { ArrowLeft, Ellipsis, User } from "@lucide/svelte";
+  import { ChevronLeft, Ellipsis, User } from "@lucide/svelte";
   import type { NavSection } from "../lib/shell/links.ts";
   import type { ErrorView } from "../lib/errors.ts";
   import Brand from "./Brand.svelte";
@@ -250,10 +250,10 @@
            this row is the small-screen stand-in for the hidden bottom bar. -->
       <a
         href={back.href}
-        class="md:hidden flex items-center gap-1.5 px-4 pt-3 text-sm font-medium text-primary-500 dark:text-primary-400 hover:underline"
+        aria-label={back.label}
+        class="md:hidden flex items-center px-4 pt-3 text-primary-500 dark:text-primary-400 hover:underline"
       >
-        <ArrowLeft class="size-4 shrink-0" aria-hidden="true" />
-        {back.label}
+        <ChevronLeft class="size-4 shrink-0" aria-hidden="true" />
       </a>
     {/if}
     {#if error}
