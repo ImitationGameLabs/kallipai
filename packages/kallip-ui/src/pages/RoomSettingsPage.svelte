@@ -278,6 +278,10 @@
       <span class="text-xs preset-tonal-surface px-2 py-0.5 rounded-base"
         >{room_public_badge()}</span
       >
+    {:else}
+      <!-- Balances the back button so the title stays optically centred
+           below md when no public badge occupies the third column. -->
+      <span class="size-8 md:hidden" aria-hidden="true"></span>
     {/if}
   </header>
 
