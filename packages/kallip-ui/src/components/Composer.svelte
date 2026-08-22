@@ -126,11 +126,19 @@
           {disabled}
           class="block w-full resize-none bg-transparent border-0 outline-none focus:ring-0 px-2 pt-0.5 pb-0.5 md:pt-1.5 md:pb-2 text-base leading-relaxed"
         ></textarea>
-        <div class="hidden md:flex justify-end pt-1">
+        <!-- The action row reads as part of the input card but sits
+             outside the textarea, so blank-space clicks forward to the
+             field and mousedown is cancelled so the button cannot steal
+             focus. -->
+        <div
+          class="hidden md:flex justify-end pt-1"
+          onmousedown={(e) => e.preventDefault()}
+          onclick={(e) => { if (e.target === e.currentTarget) area?.focus(); }}
+        >
           {@render sendButton()}
         </div>
       </div>
-      <div class="md:hidden shrink-0">
+      <div class="md:hidden shrink-0 pb-2">
         {@render sendButton()}
       </div>
     </div>
