@@ -50,12 +50,12 @@
   // chrome (the auth pages' agora-unreachable banner).
   const rootClass = $derived(
     floating
-      ? "fixed inset-x-0 top-24 z-50 flex justify-center px-4 text-2xl"
+      ? "fixed inset-x-0 top-24 z-50 flex justify-center px-4 text-base md:text-2xl"
       : "flex justify-center px-4 pt-10 text-xl",
   );
   const boxClass = $derived(
     floating
-      ? `flex flex-wrap items-center justify-center gap-x-3 gap-y-1.5 max-w-prose text-center rounded-2xl px-10 py-6 shadow-2xl ring-1 ring-black/10 ${toneClass}`
+      ? `flex flex-wrap items-center justify-center gap-x-3 gap-y-1.5 max-w-prose text-center rounded-2xl px-5 py-4 md:px-10 md:py-6 shadow-2xl ring-1 ring-black/10 ${toneClass}`
       : `flex flex-wrap items-center justify-center gap-x-2.5 gap-y-1 max-w-prose text-center rounded-xl px-6 py-4 shadow-lg ring-1 ring-black/5 ${toneClass}`,
   );
 </script>

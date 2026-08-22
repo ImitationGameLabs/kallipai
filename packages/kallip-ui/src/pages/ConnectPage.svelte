@@ -7,7 +7,7 @@
   import { navigate } from "../lib/shell/port.ts";
   import { classifyError } from "../lib/errors.ts";
   import Brand from "../components/Brand.svelte";
-  import Banner from "../components/Banner.svelte";
+  import FormError from "../components/FormError.svelte";
   import {
     connect_title,
     connect_subtitle,
@@ -25,8 +25,9 @@
   let authToken = $state("");
   // Field-level validation (e.g. malformed URL); shown inline.
   let error = $state<string | null>(null);
-  // Raw connection failure from connectDirect; classified into the banner so
-  // internal paths (e.g. `tagma request failed: /agents`) are never shown.
+  // Raw connection failure from connectDirect; classified into the inline
+  // FormError so internal paths (e.g. `tagma request failed: /agents`) never
+  // reach the user.
   let connectError = $state<unknown>(null);
   const connectView = $derived(
     connectError === null ? null : classifyError(connectError),
@@ -79,8 +80,8 @@
       await configStore.setActiveMode("offline");
       await channelsStore.attachLocal(transport, conversationId);
     } catch (e) {
-      // Full error (with cause chain) to the console; the banner shows only the
-      // classified, path-free message.
+      // Full error (with cause chain) to the console; the inline FormError
+      // shows only the classified, path-free message.
       console.error(e);
       connectError = e;
     } finally {
@@ -102,15 +103,6 @@
 
 <svelte:head><title>{connect_title()}</title></svelte:head>
 
-{#if connectView}
-  <!-- Floats over the centered form; the URL-validation hint stays inline. -->
-  <Banner
-    floating
-    title={connectView.title}
-    detail={connectView.detail}
-    hint={connectView.hint}
-  />
-{/if}
 
 <div class="flex items-center justify-center min-h-dvh p-4 bg-surface-200-800">
   <form
@@ -153,10 +145,11 @@
       <span class="block text-xs opacity-50">{connect_token_hint()}</span>
     </label>
 
+    {#if connectView}
+      <FormError message={connectView.title} detail={connectView.detail} hint={connectView.hint} />
+    {/if}
     {#if error}
-      <p role="alert" class="text-sm text-error-500 dark:text-error-400">
-        {error}
-      </p>
+      <FormError message={error} />
     {/if}
 
     <button

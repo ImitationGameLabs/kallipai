@@ -8,6 +8,7 @@
   import type { PairResult } from "@kallipai/kallip-agora-client";
   import Brand from "../components/Brand.svelte";
   import Banner from "../components/Banner.svelte";
+  import FormError from "../components/FormError.svelte";
   import {
     auth_passkey_cancelled,
     auth_rate_limited,
@@ -44,7 +45,6 @@
   let videoEl: HTMLVideoElement | null = $state(null);
   let controls: { stop: () => void } | null = null;
 
-  const notice = $derived(error ?? agoraSession.authError);
   const canSubmit = $derived(code.trim().length > 0 && !submitting);
 
   onMount(() => {
@@ -122,9 +122,10 @@
 </script>
 
 <svelte:head><title>{pair_title()}</title></svelte:head>
-
-{#if notice}
-  <Banner floating title={auth_couldnt_reach({ notice })} />
+{#if agoraSession.authError}
+  <!-- Environment error (agora unreachable at boot); a submit's own failures
+       render inline in the form below. -->
+  <Banner floating title={auth_couldnt_reach({ notice: agoraSession.authError })} />
 {/if}
 
 <div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100-900">
@@ -190,11 +191,10 @@
         onclick={startScan}>{pair_scan_qr()}</button
       >
     {/if}
-
-    {#if result && !result.ok}
-      <p role="alert" class="text-sm text-error-500 dark:text-error-400">
-        {reasonMessage(result)}
-      </p>
+    {#if error}
+      <FormError message={auth_couldnt_reach({ notice: error })} />
+    {:else if result && !result.ok}
+      <FormError message={reasonMessage(result)} />
     {/if}
 
     <button

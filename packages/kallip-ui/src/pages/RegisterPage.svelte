@@ -6,6 +6,7 @@
   import type { CeremonyResult } from "@kallipai/kallip-agora-client";
   import Brand from "../components/Brand.svelte";
   import Banner from "../components/Banner.svelte";
+  import FormError from "../components/FormError.svelte";
   import OAuthProviderButtons from "../components/OAuthProviderButtons.svelte";
   import UsernameField from "../components/UsernameField.svelte";
   import {
@@ -37,8 +38,9 @@
   let error = $state<string | null>(null);
 
   // The reverse guard (already signed in -> /tagmata) lives in <RootLayout>.
-  // If whoami failed at boot (agora unreachable), surface it proactively.
-  const notice = $derived(error ?? agoraSession.authError);
+  // If whoami failed at boot (agora unreachable), agoraSession.authError is
+  // set -- the floating banner carries that environment error, while a
+  // submit's own transport failure renders inline in the form (FormError).
 
   // Client normalization so the user sees the canonical handle, not a 400 round-trip.
   const normalizedUsername = $derived(username.trim().toLowerCase());
@@ -92,12 +94,10 @@
 </script>
 
 <svelte:head><title>{register_title()}</title></svelte:head>
-
-{#if notice}
-  <!-- Floats over the centered form so an agora-unreachable error is visible
-       without displacing the fields; the ceremony's own failures render inline
-       below. -->
-  <Banner floating title={auth_couldnt_reach({ notice })} />
+{#if agoraSession.authError}
+  <!-- Environment error (agora unreachable at boot); a submit's own failures
+       render inline in the form below. -->
+  <Banner floating title={auth_couldnt_reach({ notice: agoraSession.authError })} />
 {/if}
 
 <div class="flex items-center justify-center min-h-dvh p-4 bg-surface-100-900">
@@ -123,11 +123,10 @@
         bind:value={displayName}
       />
     </label>
-
-    {#if result && !result.ok}
-      <p role="alert" class="text-sm text-error-500 dark:text-error-400">
-        {reasonMessage(result)}
-      </p>
+    {#if error}
+      <FormError message={auth_couldnt_reach({ notice: error })} />
+    {:else if result && !result.ok}
+      <FormError message={reasonMessage(result)} />
     {/if}
 
     <button

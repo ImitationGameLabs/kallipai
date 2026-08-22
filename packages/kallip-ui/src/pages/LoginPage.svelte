@@ -5,6 +5,7 @@
   import { isValidUsername } from "../lib/username.ts";
   import type { CeremonyResult } from "@kallipai/kallip-agora-client";
   import Brand from "../components/Brand.svelte";
+  import FormError from "../components/FormError.svelte";
   import Banner from "../components/Banner.svelte";
   import OAuthProviderButtons from "../components/OAuthProviderButtons.svelte";
   import {
@@ -42,9 +43,9 @@
   // The reverse guard (already signed in -> /tagmata) and the forward guard
   // (logged out -> /login) live in <RootLayout>; this page is only reached for a
   // genuinely logged-out user. If whoami failed at boot (agora unreachable),
-  // agoraSession.authError is set -- surface it so the user isn't staring at a
-  // form they can't submit.
-  const notice = $derived(error ?? agoraSession.authError);
+  // agoraSession.authError is set -- the floating banner above carries that
+  // environment error, while a submit's own transport failure renders inline
+  // in the form below (FormError); the two channels no longer merge.
   const usernameValid = $derived(isValidUsername(username));
   const canSubmit = $derived(usernameValid && !submitting);
 
@@ -138,12 +139,10 @@
 </script>
 
 <svelte:head><title>{login_title()}</title></svelte:head>
-
-{#if notice}
-  <!-- Floats over the centered form so an agora-unreachable error is visible
-       without displacing the fields; the ceremony's own failures render inline
-       below. -->
-  <Banner floating title={auth_couldnt_reach({ notice })} />
+{#if agoraSession.authError}
+  <!-- Environment error (agora unreachable at boot): stays in the floating
+       banner; a submit's own failures render inline in the form below. -->
+  <Banner floating title={auth_couldnt_reach({ notice: agoraSession.authError })} />
 {/if}
 
 <div class="flex items-center justify-center min-h-dvh p-4 bg-surface-200-800">
@@ -177,11 +176,10 @@
         >
       {/if}
     </label>
-
-    {#if result && !result.ok}
-      <p role="alert" class="text-sm text-error-500 dark:text-error-400">
-        {reasonMessage(result)}
-      </p>
+    {#if error}
+      <FormError message={auth_couldnt_reach({ notice: error })} />
+    {:else if result && !result.ok}
+      <FormError message={reasonMessage(result)} />
     {/if}
 
     <button
