@@ -5,6 +5,7 @@
   "connection_not_connected": "未连接",
   "nav_chat": "聊天",
   "nav_manage": "管理",
+  "nav_more": "更多",
   "nav_overview": "概览",
   "nav_budget": "预算管理",
   "nav_agents": "编队细节",
@@ -23,5 +24,6 @@
   "shell_error": "错误",
   "account_logout": "退出登录",
   "account_go_offline": "切换到离线",
-  "account_go_online": "切换到在线"
+  "account_go_online": "切换到在线",
+  "account_menu": "账户"
 }

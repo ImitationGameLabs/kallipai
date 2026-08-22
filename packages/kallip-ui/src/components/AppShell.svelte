@@ -1,13 +1,17 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import { Navigation } from "@skeletonlabs/skeleton-svelte";
+  import { Dialog, Navigation, Portal } from "@skeletonlabs/skeleton-svelte";
   import type { NavIndicator, NavItem } from "../lib/shell.ts";
+  import { navSlots } from "../lib/shell/navSlots.ts";
+  import AccountMenu from "./AccountMenu.svelte";
+  import { Ellipsis } from "@lucide/svelte";
   import type { NavSection } from "../lib/shell/links.ts";
   import type { ErrorView } from "../lib/errors.ts";
   import Brand from "./Brand.svelte";
   import Banner from "./Banner.svelte";
   import {
     shell_connecting,
+    nav_more,
     shell_error,
     shell_live,
     shell_offline,
@@ -64,15 +68,37 @@
     // the shell so deep links such as `/chat/:id` still resolve.
     isActive: (href: string) => boolean;
     // Optional chrome snippets. `brand` defaults to a "KallipAI" wordmark and is
-    // shown only in the sidebar header; `status` (e.g. a connection pill) is
-    // shown only in the sidebar footer. Both are omitted on the bar tier to keep
-    // the compact bottom navigation clean.
+    // shown only in the sidebar header; `status` (e.g. an account menu) is
+    // shown only in the sidebar footer. The bar tier keeps its cells compact
+    // and instead mounts its own icon-only AccountMenu (bar variant) in the
+    // last cell, so account actions stay reachable below md.
     brand?: Snippet;
     status?: Snippet;
     // Rendered as a uniform banner above the page content.
     error?: ErrorView | null;
     children: Snippet;
   } = $props();
+
+  // Small-viewport bar slot plan: cap visible nav cells, overflow the rest
+  // into a bottom sheet opened by the More button (navSlots owns the
+  // arithmetic; both modes stay <= 5 cells incl. More + Account).
+  const slots = $derived(navSlots(links));
+  const moreActive = $derived(slots.overflow.some((i) => isActive(i.href)));
+
+  // The overflow sheet. Backdrop/Escape dismissal comes from the zag
+  // Dialog; in-sheet navigation closes it via the menu-level click
+  // delegate below. Crossing INTO md also closes it: the sheet portals
+  // to body, so past the breakpoint it would float above a bar that no
+  // longer renders (the ChannelChatPage matchMedia listener pattern).
+  let sheetOpen = $state(false);
+  const mdQuery = matchMedia("(min-width: 48rem)");
+  $effect(() => {
+    const onChange = (event: MediaQueryListEvent) => {
+      if (event.matches) sheetOpen = false;
+    };
+    mdQuery.addEventListener("change", onChange);
+    return () => mdQuery.removeEventListener("change", onChange);
+  });
 </script>
 
 {#snippet navLink(item: NavItem)}
@@ -135,6 +161,35 @@
   {/each}
 {/snippet}
 
+{#snippet sheetSection(section: NavSection)}
+  <!-- A sheet copy of one sidebar section: optional title row with its manage
+       gear, then the overflow items. Purely additive (B-plan): the sidebar's
+       navLinks snippet above stays untouched. Gear rows are enlarged to a
+       40px touch target (the sidebar's size-5 is mouse-scale). -->
+  {#if section.title}
+    <div class="px-2 pt-2 flex items-center justify-between gap-2 min-w-0">
+      <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">
+        {section.title}
+      </h2>
+      {#if section.manage}
+        {@const ManageIcon = section.manage.icon}
+        <a
+          href={section.manage.href}
+          aria-label={section.manage.label}
+          title={section.manage.label}
+          class="size-10 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0"
+        >
+          <ManageIcon class="size-4" />
+        </a>
+      {/if}
+    </div>
+    <div class="border-b border-surface-200-800" role="separator"></div>
+  {/if}
+  {#each section.items as item (item.href)}
+    {@render navLink(item)}
+  {/each}
+{/snippet}
+
 <!--
   Responsive shell: two Skeleton `Navigation` instances — a bottom `bar` on
   small viewports and a `sidebar` from `md` up — toggled by a single Tailwind
@@ -188,25 +243,72 @@
     </div>
   </main>
 
-  <!-- small: bottom bar. The bottom padding follows the safe-area inset, which
-       is non-zero only when the webview is edge-to-edge; it collapses to 0
-       otherwise (e.g. Tauri Android's default, non-edge-to-edge webview). The
-       bar is one flat row of items -- section headers/dividers are a sidebar
-       concept, so items are flattened across sections here. -->
+  <!-- small: bottom bar with capped cells. Visible nav items come from the
+       slot plan (navSlots); overflow items and every section-manage gear
+       live in the More sheet below. The trailing cell is always the
+       icon-only AccountMenu (account actions have no other home below
+       md). The bottom padding follows the safe-area inset, which is
+       non-zero only when the webview is edge-to-edge; it collapses to 0
+       otherwise (e.g. Tauri Android's default, non-edge-to-edge webview). -->
   <Navigation layout="bar" class="md:hidden pb-[env(safe-area-inset-bottom)]">
-    <!-- Inline style because the column count is dynamic (the total item
-         count); a static grid-cols-N utility can't express it. -->
+    <!-- Inline style because the column count is dynamic (visible cells
+         plus More plus Account); a static grid-cols-N utility can't
+         express it. -->
     <Navigation.Menu
-      style="display:grid; grid-template-columns: repeat({links.reduce(
-        (n, s) => n + s.items.length,
-        0,
-      )}, minmax(0, 1fr));"
+      style="display:grid; grid-template-columns: repeat({slots.visible.length +
+        (slots.hasMore ? 1 : 0) +
+        1}, minmax(0, 1fr));"
     >
-      {#each links as section}
-        {#each section.items as item (item.href)}
-          {@render navLink(item)}
-        {/each}
+      {#each slots.visible as item (item.href)}
+        {@render navLink(item)}
       {/each}
+      {#if slots.hasMore}
+        <button
+          type="button"
+          onclick={() => (sheetOpen = true)}
+          aria-label={nav_more()}
+          aria-haspopup="dialog"
+          class="size-10 justify-self-center self-center grid place-items-center rounded-base {moreActive
+            ? 'preset-filled-surface-500'
+            : 'preset-tonal-surface hover:preset-filled-surface-500'}"
+        >
+          <Ellipsis class="size-5" />
+        </button>
+      {/if}
+      <div class="grid place-items-center">
+        <AccountMenu variant="bar" />
+      </div>
     </Navigation.Menu>
   </Navigation>
+
+  <!-- small: the overflow sheet. Portaled to body; the sheet body is wrapped
+       in its own stateless Navigation (bar layout) because navLink's
+       TriggerAnchor/TriggerText consume the Navigation root context and
+       would throw outside a Navigation subtree. Any in-sheet anchor click
+       (item or manage gear) closes the sheet. -->
+  {#if slots.hasMore}
+    <Dialog open={sheetOpen} onOpenChange={(e) => (sheetOpen = e.open)}>
+      <Portal>
+        <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
+        <Dialog.Positioner class="fixed inset-0 z-50 grid items-end">
+          <Dialog.Content
+            class="card preset-tonal-surface w-full rounded-t-xl rounded-b-none p-4 pb-[max(1rem,env(safe-area-inset-bottom))] max-h-[80dvh] overflow-y-auto"
+          >
+            <Dialog.Title class="sr-only">{nav_more()}</Dialog.Title>
+            <Navigation layout="bar">
+              <Navigation.Menu
+                onclick={(e) => {
+                  if ((e.target as HTMLElement).closest("a")) sheetOpen = false;
+                }}
+              >
+                {#each slots.sheetSections as section, i (section.title ?? `untitled-${i}`)}
+                  {@render sheetSection(section)}
+                {/each}
+              </Navigation.Menu>
+            </Navigation>
+          </Dialog.Content>
+        </Dialog.Positioner>
+      </Portal>
+    </Dialog>
+  {/if}
 </div>

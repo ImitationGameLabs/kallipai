@@ -15,13 +15,22 @@
     account_go_offline,
     account_go_online,
     account_logout,
+    account_menu,
     settings_heading,
   } from "../paraglide/messages.js";
 
+  let {
+    variant = "footer",
+  }: {
+    variant?: "footer" | "bar";
+  } = $props();
+
   // The account menu is the single entry point for identity + mode actions.
-  // It renders in the sidebar footer (online and offline alike): online shows
-  // the signed-in @handle, offline shows a connection-status dot + label. Both
-  // branches lead with the same User icon so the trigger silhouette is stable.
+  // It renders in two variants: `footer` (the sidebar footer default: online
+  // shows the signed-in @handle, offline a connection-status dot + label) and
+  // `bar` (the small-viewport bottom bar: an icon-only square trigger that
+  // opens upward from the bar's last cell). Menu content and behavior are
+  // identical; only the trigger and its placement differ.
 
   // Branch on mode, not on `user`: the agora session cookie survives offline
   // mode, so `user` can hold a stale MeResponse while offline (see the invariant
@@ -32,6 +41,20 @@
       connected: channelsStore.localConnected,
       connecting: false,
     }),
+  );
+
+  // Variant plumbing: the bar trigger is an icon-only 40px square (the bar's
+  // cell rhythm) and its menu opens above the bar's LAST cell, so the edge
+  // alignment flips to top-end. Footer keeps the original wide pill.
+  const positioning = $derived(
+    variant === "bar"
+      ? ({ placement: "top-end", gutter: 8 } as const)
+      : ({ placement: "top-start", gutter: 8 } as const),
+  );
+  const triggerClass = $derived(
+    variant === "bar"
+      ? "size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+      : "w-full preset-tonal-surface hover:preset-filled-surface-500 px-2 py-1.5 rounded-base text-lg flex items-center gap-1.5",
   );
 
   // Online: end the agora session (destroys the cookie -- distinct from
@@ -122,13 +145,17 @@
 <!--
   The positioner is portaled to document.body so the upward-opening menu is not
   clipped by the shell's `overflow-hidden` grid (RootLayout) or the sidebar
-  column. `placement: "top-start"` opens it above the footer trigger.
+  column. The footer variant opens top-start above its wide trigger; the
+  bar variant opens top-end above the bar's square icon button.
 -->
-<Menu positioning={{ placement: "top-start", gutter: 8 }} {onSelect}>
+<Menu {positioning} {onSelect}>
   <Menu.Trigger
-    class="w-full preset-tonal-surface hover:preset-filled-surface-500 px-2 py-1.5 rounded-base text-lg flex items-center gap-1.5"
+    class={triggerClass}
+    aria-label={variant === "bar" ? account_menu() : undefined}
   >
-    {#if mode === "online" && agoraSession.user}
+    {#if variant === "bar"}
+      <User class="size-5" />
+    {:else if mode === "online" && agoraSession.user}
       <User class="size-4 shrink-0 opacity-70" />
       <span class="truncate opacity-80" title="@{agoraSession.user.username}"
         >@{agoraSession.user.username}</span

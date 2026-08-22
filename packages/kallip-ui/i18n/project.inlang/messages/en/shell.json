@@ -5,6 +5,7 @@
   "connection_not_connected": "not connected",
   "nav_chat": "Chat",
   "nav_manage": "Manage",
+  "nav_more": "More",
   "nav_overview": "Overview",
   "nav_budget": "Budget",
   "nav_agents": "Tagma Details",
@@ -23,5 +24,6 @@
   "shell_error": "error",
   "account_logout": "Log out",
   "account_go_offline": "Go offline",
-  "account_go_online": "Go online"
+  "account_go_online": "Go online",
+  "account_menu": "Account"
 }

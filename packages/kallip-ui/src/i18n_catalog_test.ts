@@ -428,6 +428,7 @@ Deno.test("catalog: _one/_other appear only as complete plural pairs", () => {
 // collide far more often and those collisions are accepted as
 // translation coincidence, not guarded.
 const SYNONYMS: string[][] = [
+  ["account_menu", "settings_account"],
   ["settings_heading", "rooms_menu_settings"],
   ["connection_connecting", "shell_connecting"],
   ["nav_manage", "tagma_menu_manage"],
