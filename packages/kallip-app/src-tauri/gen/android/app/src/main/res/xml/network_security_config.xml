@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cleartext HTTP is denied by default and allowed only for the hosts a
+     self-hosted deployment actually talks to: the operator-entered tagma
+     address on the LAN plus loopback (agora/lesche dev defaults). Add a
+     host here if the tagma IP changes; everything else stays https-only. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.1.7</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

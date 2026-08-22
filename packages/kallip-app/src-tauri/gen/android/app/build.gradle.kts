@@ -27,7 +27,6 @@ android {
     compileSdk = 36
     namespace = "com.kallipai.app"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.kallipai.app"
         minSdk = 24
         targetSdk = 36
@@ -47,7 +46,6 @@ android {
     buildTypes {
         getByName("debug") {
             applicationIdSuffix = ".debug"
-            manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false

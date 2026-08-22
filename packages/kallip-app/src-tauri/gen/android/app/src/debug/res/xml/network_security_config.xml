@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds allow cleartext to any host, matching the pre-NSC
+     android:usesCleartextTraffic="true" the debug variant used to carry;
+     the debug source set overrides the main config of the same name. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
