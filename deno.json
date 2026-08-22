@@ -4,6 +4,7 @@
       "**/node_modules",
       "**/.svelte-kit",
       "**/build",
+      "**/.gradle",
       "**/dist",
       "deno.lock",
       "target",
@@ -15,6 +16,7 @@
       "**/node_modules",
       "**/.svelte-kit",
       "**/build",
+      "**/.gradle",
       "**/dist",
       "target",
       "crates"
