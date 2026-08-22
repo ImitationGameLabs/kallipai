@@ -243,7 +243,6 @@ Status: `202 Accepted`
 | 403  | Not a superior of the target agent |
 | 404  | Agent not found                    |
 
-
 ### `POST /agents/{id}/wake` — Wake parked agent
 
 Kicks a parked agent awake: enqueues a `[system]` turn telling the agent why and

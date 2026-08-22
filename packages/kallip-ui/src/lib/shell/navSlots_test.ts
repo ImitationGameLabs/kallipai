@@ -54,8 +54,7 @@ const cases: {
     ],
   },
   {
-    name:
-      "offline 4 (defensive, structurally unreachable) -> all visible, no More",
+    name: "offline 4 (defensive, structurally unreachable) -> all visible, no More",
     links: offlineSections(4),
     visible: ["/o0", "/o1", "/o2", "/o3"],
     overflow: [],

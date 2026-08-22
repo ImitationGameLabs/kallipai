@@ -16,14 +16,10 @@ import {
 export type CeremonyResult =
   | { ok: true; userId: string }
   | {
-    ok: false;
-    reason:
-      | "cancelled"
-      | "rate-limited"
-      | "duplicate-username"
-      | "unknown";
-    message?: string;
-  };
+      ok: false;
+      reason: "cancelled" | "rate-limited" | "duplicate-username" | "unknown";
+      message?: string;
+    };
 
 export interface RegisterArgs {
   readonly username: string;
@@ -202,16 +198,16 @@ export type OAuthCompleteResult =
   | { ok: true; kind: "signin"; userId: string; returnPath?: string }
   | { ok: true; kind: "link" }
   | {
-    ok: true;
-    kind: "needs-username";
-    signupToken: string;
-    provider: string;
-  }
+      ok: true;
+      kind: "needs-username";
+      signupToken: string;
+      provider: string;
+    }
   | {
-    ok: false;
-    reason: "rate-limited" | "unknown";
-    message?: string;
-  };
+      ok: false;
+      reason: "rate-limited" | "unknown";
+      message?: string;
+    };
 
 /**
  * Complete an OAuth ceremony on the SPA callback page: post the provider's
@@ -266,15 +262,15 @@ export async function completeOAuth(
 export type OAuthSignupResult =
   | { ok: true; userId: string; returnPath?: string }
   | {
-    ok: false;
-    reason:
-      | "duplicate-username"
-      | "invalid-username"
-      | "signup-disabled"
-      | "rate-limited"
-      | "unknown";
-    message?: string;
-  };
+      ok: false;
+      reason:
+        | "duplicate-username"
+        | "invalid-username"
+        | "signup-disabled"
+        | "rate-limited"
+        | "unknown";
+      message?: string;
+    };
 
 /**
  * Submit the chosen username for a held OAuth signup (the token came from a
@@ -326,15 +322,15 @@ export async function completeOAuthSignup(
 export type AddPasskeyResult =
   | { ok: true; passkey: PasskeySummary }
   | {
-    ok: false;
-    reason:
-      | "cancelled"
-      | "reauth-required"
-      | "duplicate-credential"
-      | "rate-limited"
-      | "unknown";
-    message?: string;
-  };
+      ok: false;
+      reason:
+        | "cancelled"
+        | "reauth-required"
+        | "duplicate-credential"
+        | "rate-limited"
+        | "unknown";
+      message?: string;
+    };
 
 export interface AddPasskeyArgs {
   /** The signed-in user's username (login id); used for the passkey step-up
@@ -461,15 +457,15 @@ function mapAddBeginError(e: unknown): AddPasskeyResult {
 export type PairResult =
   | { ok: true; userId: string }
   | {
-    ok: false;
-    reason:
-      | "cancelled"
-      | "invalid-code"
-      | "duplicate-credential"
-      | "rate-limited"
-      | "unknown";
-    message?: string;
-  };
+      ok: false;
+      reason:
+        | "cancelled"
+        | "invalid-code"
+        | "duplicate-credential"
+        | "rate-limited"
+        | "unknown";
+      message?: string;
+    };
 
 export interface PairArgs {
   /** The short pairing code from the already-signed-in device. */

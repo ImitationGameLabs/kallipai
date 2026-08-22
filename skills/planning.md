@@ -73,6 +73,7 @@ The plan file's first line is `Status: draft`, because the marker
 
 lets a reader or concurrent reviewer know the plan is not yet final.
 Done when:
+
 - the plan is executable — each step names what to do and how to verify it
 - every step that edits existing text files names aifed as the tool
 - the plan is at `/tmp/plans/<short-name>.md`
@@ -101,6 +102,7 @@ Update the plan's status to `in-progress` at the start of execution,
 because it signals active implementation so a re-reviewer knows the
 context.
 Done when:
+
 - the plan's status is `in-progress`
 - the task is complete, or the plan is revised with the user
 - the plan is archived: status updated to `done`, then `mv` to

@@ -97,6 +97,7 @@ researcher  idle  ws=/projects/frontend
 $ kallip subagent spawn --role reviewer --description "reviews PRs" < /dev/null
 b4c2d3e5-...
 ```
+
 The spawn reads an optional initial prompt from stdin: `< /dev/null` above
 means "no prompt" and keeps the spawn from swallowing a surrounding script's
 stdin when the id is captured. Pipe or heredoc the prompt instead.

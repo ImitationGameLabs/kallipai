@@ -149,7 +149,9 @@
             {manage_budget_remaining()}
           </div>
           <div class="font-medium">
-            {manage_budget_tokens({ count: formatTokenCount(budgetStore.remaining) })}
+            {manage_budget_tokens({
+              count: formatTokenCount(budgetStore.remaining),
+            })}
           </div>
         </div>
         <div>

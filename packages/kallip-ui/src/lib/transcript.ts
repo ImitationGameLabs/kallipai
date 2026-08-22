@@ -324,13 +324,13 @@ export function replaceLineId(
     lines: state.lines.map((l) =>
       l.historyId === localId
         ? {
-          ...l,
-          historyId,
-          status: "sent",
-          ...(sender !== undefined ? { sender } : {}),
-          ...(createdAt !== undefined ? { createdAt } : {}),
-        }
-        : l
+            ...l,
+            historyId,
+            status: "sent",
+            ...(sender !== undefined ? { sender } : {}),
+            ...(createdAt !== undefined ? { createdAt } : {}),
+          }
+        : l,
     ),
   };
 }
@@ -350,7 +350,7 @@ export function markLineSent(
     lines: state.lines.map((l) =>
       l.historyId === localId && l.status === "sending"
         ? { ...l, status: "sent" }
-        : l
+        : l,
     ),
   };
 }
@@ -376,12 +376,12 @@ export function cacheLineOf(
   if (reply.kind === "user_message") {
     return reply.history_id > 0
       ? {
-        historyId: reply.history_id,
-        role: "user",
-        text: reply.text,
-        sender: cs,
-        createdAt: reply.created_at,
-      }
+          historyId: reply.history_id,
+          role: "user",
+          text: reply.text,
+          sender: cs,
+          createdAt: reply.created_at,
+        }
       : null;
   }
   if (reply.kind === "event") {

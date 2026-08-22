@@ -21,7 +21,11 @@ import {
   generateEphemeralKeyPair,
   verifyKeyExchange,
 } from "./crypto.ts";
-import { decodeB64, encodeB64, participantIdForUser } from "@kallipai/kallip-common";
+import {
+  decodeB64,
+  encodeB64,
+  participantIdForUser,
+} from "@kallipai/kallip-common";
 import type {
   Envelope,
   KeyExchangeInit,
@@ -107,7 +111,10 @@ export class RelayChannel {
   private closed = false;
   private readonly pendingManage = new Map<
     number,
-    { resolve: (v: { status: number; body: unknown }) => void; reject: (e: unknown) => void }
+    {
+      resolve: (v: { status: number; body: unknown }) => void;
+      reject: (e: unknown) => void;
+    }
   >();
 
   /** Assembled by [`openRelayChannel`]; do not construct directly — it skips
@@ -229,8 +236,14 @@ export class RelayChannel {
         reject(new Error(`manage timeout: ${method} ${path}`));
       }, 15_000);
       this.pendingManage.set(req_id, {
-        resolve: (v) => { clearTimeout(timer); resolve(v); },
-        reject: (e) => { clearTimeout(timer); reject(e); },
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
       });
       this.sendControl(ctrl).catch((e) => {
         clearTimeout(timer);

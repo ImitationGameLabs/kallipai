@@ -49,6 +49,7 @@ When the target is a code change, the review standard is
 blocks.
 
 Done when:
+
 - the target is precisely named (file paths, diff, plan text, or commit hash)
 - the applicable standard or criteria is stated (a skill, a spec, or a checklist)
 - if the target is a plan, its Status is `draft` or `in-progress`
@@ -61,6 +62,7 @@ because serial review wastes wall-clock time.
 
 The reviewer count depends on the change's risk and scope, because the
 marginal value of each additional reviewer drops sharply after 2:
+
 - **2 reviewers** (default) — covers most changes; two independent
   perspectives catch most blind spots while keeping budget cost moderate.
 - **3 reviewers** — high-risk or multi-file changes where a third
@@ -70,7 +72,6 @@ marginal value of each additional reviewer drops sharply after 2:
   may be overkill; consider whether a single `skill/reviewing-a-skill`
   pass or self-review suffices instead.
 Done when:
-
 - N reviewers are spawned (2 default, 3 for high-risk), each with the same target and standard
 - each has the delivery rule: report via `kallip message <your-id>` before break
 
@@ -83,6 +84,7 @@ Done when:
 - all spawned reviewers have reported, or a timeout is reached with at least 2 reports collected (1 if only 1 was spawned)
 
 **Meta-review.** Read all findings together. For each finding:
+
 - Verify it against the actual target (re-read the file, diff, or plan) —
   a reviewer may misread or hallucinate.
 - Deduplicate — if two reviewers found the same issue, merge into one.
@@ -91,7 +93,6 @@ Done when:
 - Accept or reject each finding with a reason. "Accept" means it goes into
   the final findings list; "reject" means it was checked and found inapplicable.
 Done when:
-
 - every finding is verified against the target, deduplicated, and accepted or rejected with a reason
 - the final findings list names each accepted finding with its severity (blocking / important / minor)
 

@@ -14,7 +14,6 @@
   const glyph = $derived(agentStateGlyph(state));
 </script>
 
-<span
-  class="text-sm leading-none shrink-0 {glyph.className}"
-  aria-hidden="true"
->{glyph.char}</span>
+<span class="text-sm leading-none shrink-0 {glyph.className}" aria-hidden="true"
+  >{glyph.char}</span
+>

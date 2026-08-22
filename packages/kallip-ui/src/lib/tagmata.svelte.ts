@@ -141,9 +141,10 @@ export function formatTagmaStatusLine(s: TagmaStatusSummary): string {
   // when it is busy.
   const total = 1 + s.subagentsTotal;
   const active = (s.rootState === "busy" ? 1 : 0) + s.subagentsActive;
-  const agents = total === 1
-    ? shell_status_agents_one({ count: active, total })
-    : shell_status_agents_other({ count: active, total });
+  const agents =
+    total === 1
+      ? shell_status_agents_one({ count: active, total })
+      : shell_status_agents_other({ count: active, total });
   const tokens = shell_status_tokens({
     consumed: formatTokenCount(s.tokenConsumed),
     total: formatTokenCount(s.tokenBudget),

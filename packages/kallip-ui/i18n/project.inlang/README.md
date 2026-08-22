@@ -6,26 +6,30 @@ This is an [unpacked (git-friendly)](https://inlang.com/docs/unpacked-project) i
 ## At a glance
 
 Purpose:
+
 - This folder is the Git-friendly representation of an `.inlang` project.
 - The canonical `.inlang` format is a single binary file; this directory is the unpacked version for Git.
 - This folder stores project configuration and plugin cache data.
 - Translation files live outside this folder and are referenced from `settings.json`.
 
 Safe to edit:
+
 - `settings.json`
 
 Do not edit:
+
 - `cache/`
 - `.gitignore`
 
 Key files:
+
 - `settings.json` — locales, plugins, file patterns
 - `cache/` — plugin caches (safe to delete)
 - `.gitignore` — generated
 - `README.md` — generated, explains this folder
 - `.meta.json` — generated SDK metadata
 
-```
+```text
 *.inlang/
 ├── settings.json    # Locales, plugins, and file patterns; kept in Git
 ├── .gitignore       # Ignores everything except settings.json
@@ -58,7 +62,7 @@ Core data model:
 - **Message** — locale-specific translation for a bundle
 - **Variant** — text pattern plus selector matches
 
-```
+```text
 ┌──────────┐        ┌───────────┐         ┌────────────┐
 │ i18n lib │        │Translation│         │   CI/CD    │
 │          │        │   Tool    │         │ Automation │
@@ -128,7 +132,7 @@ Do not:
 
 ## Data model ([docs](https://inlang.com/docs/data-model))
 
-```
+```text
 bundle (a concept, e.g., "welcome_header")
   └── message (per locale, e.g., "en", "de")
         └── variant (plural forms, gender, etc.)

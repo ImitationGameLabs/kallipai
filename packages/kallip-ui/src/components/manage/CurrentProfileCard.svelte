@@ -20,7 +20,8 @@
       <span class="opacity-60 text-xs uppercase tracking-wide block"
         >{manage_agent_profile()}</span
       >
-      <span class="font-mono text-xs break-all block">{profile.profile_id}</span>
+      <span class="font-mono text-xs break-all block">{profile.profile_id}</span
+      >
     </div>
     <div>
       <span class="opacity-60 text-xs uppercase tracking-wide block"

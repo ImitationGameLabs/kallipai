@@ -27,5 +27,8 @@
    tonal fills stay exactly one shade off the root background in both
    modes; imported after Skeleton, so this later definition wins. */
 @theme inline {
-  --color-surface-50-950: light-dark(var(--color-surface-50), var(--color-surface-900));
+  --color-surface-50-950: light-dark(
+    var(--color-surface-50),
+    var(--color-surface-900)
+  );
 }

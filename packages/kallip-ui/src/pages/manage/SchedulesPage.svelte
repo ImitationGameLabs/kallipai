@@ -610,8 +610,12 @@
       </section>
 
       <!-- clock switch -->
-      <div class="flex flex-wrap md:flex-nowrap items-center justify-end gap-x-2 gap-y-1 text-xs">
-        <span class="opacity-50 basis-full md:basis-auto">{manage_schedules_dst_note()}</span>
+      <div
+        class="flex flex-wrap md:flex-nowrap items-center justify-end gap-x-2 gap-y-1 text-xs"
+      >
+        <span class="opacity-50 basis-full md:basis-auto"
+          >{manage_schedules_dst_note()}</span
+        >
         <div class="flex gap-1 shrink-0">
           <button
             class="btn btn-sm {effUtc
@@ -918,20 +922,20 @@
             </span>
           {/if}
           <div class="ml-auto flex gap-3 shrink-0">
-          <button
-            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-            disabled={schedulesStore.isSaving}
-            onclick={discard}
-          >
-            {manage_profiles_discard()}
-          </button>
-          <button
-            class="btn btn-sm preset-filled-primary-200-800"
-            disabled={!canSave}
-            onclick={save}
-          >
-            {common_save()}
-          </button>
+            <button
+              class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+              disabled={schedulesStore.isSaving}
+              onclick={discard}
+            >
+              {manage_profiles_discard()}
+            </button>
+            <button
+              class="btn btn-sm preset-filled-primary-200-800"
+              disabled={!canSave}
+              onclick={save}
+            >
+              {common_save()}
+            </button>
           </div>
         </div>
       {/if}

@@ -30,6 +30,7 @@ staging anything. Committing to `main` when you meant a feature
 branch, or vice versa, is the single most common commit mistake — and
 it is invisible until someone notices the commit in the wrong place.
 Done when:
+
 - you have confirmed the branch name and it matches your intent
 
 **Review the working tree.** Run `git status` and scan every entry
@@ -44,6 +45,7 @@ first (and commit the `.gitignore` change if it is new), because once
 a file is tracked, removing it from history is costly.
 
 Done when:
+
 - every entry in `git status` has been reviewed
 - files that should be ignored are caught (staged separately or
   gitignored)
@@ -56,6 +58,7 @@ tree, stage exactly those files together; if the working tree has
 multiple independent concerns, they are separate commits.
 
 Done when:
+
 - `git diff --cached` shows exactly the changes you intend to commit
 - no unintended or unrelated files are staged
 
@@ -67,6 +70,7 @@ edit freely, and let the message settle before it becomes history. Use
 `git commit -F /tmp/commit-msg.txt` when you are ready.
 
 Done when:
+
 - a commit message is written to a temp file
 - it follows the format and body-density standard in
   `code/commit-messages`
@@ -79,6 +83,7 @@ the change at the right altitude per `code/commit-messages`. This step
 can be self-review or delegated to a subagent for an independent read.
 
 Done when:
+
 - the staged diff is clean (no stray changes, no debug artifacts)
 - the message matches the diff and meets the standard in
   `code/commit-messages`
@@ -92,6 +97,7 @@ Not every review note needs to be adopted; weigh each one against the
 standard and your knowledge of the change.
 
 Done when:
+
 - each review finding is either addressed or consciously accepted with
   a reason
 
@@ -101,6 +107,7 @@ and `git show --stat HEAD`, because a commit that silently failed or
 included the wrong files is not caught until later.
 
 Done when:
+
 - the commit is created and verified (`git log` shows it with the
   expected message and file set)
 

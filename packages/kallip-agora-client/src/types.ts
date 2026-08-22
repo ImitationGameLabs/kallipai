@@ -16,9 +16,8 @@ export interface CeremonyBeginResponse<T> {
   readonly options: T;
 }
 
-export type RegisterBeginResponse = CeremonyBeginResponse<
-  ServerCreationOptions
->;
+export type RegisterBeginResponse =
+  CeremonyBeginResponse<ServerCreationOptions>;
 export type LoginBeginResponse = CeremonyBeginResponse<ServerRequestOptions>;
 
 /** Bodies the client sends to register/login `finish`. */

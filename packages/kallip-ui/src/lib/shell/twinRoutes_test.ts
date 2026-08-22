@@ -26,12 +26,10 @@ function collectTwinFiles(dir: URL, prefix = ""): Map<string, Uint8Array> {
   for (const entry of Deno.readDirSync(dir)) {
     const rel = prefix + entry.name;
     if (entry.isDirectory) {
-      for (
-        const [path, bytes] of collectTwinFiles(
-          new URL(`${entry.name}/`, dir),
-          `${rel}/`,
-        )
-      ) {
+      for (const [path, bytes] of collectTwinFiles(
+        new URL(`${entry.name}/`, dir),
+        `${rel}/`,
+      )) {
         files.set(path, bytes);
       }
     } else if (entry.isFile) {
@@ -65,11 +63,11 @@ Deno.test(
     const onlyWeb = [...web.keys()].filter((p) => !app.has(p));
     assert(
       onlyApp.length === 0 && onlyWeb.length === 0,
-      `route trees diverged: only in kallip-app [${
-        onlyApp.join(", ")
-      }], only in kallip-web [${
-        onlyWeb.join(", ")
-      }] — add the missing twin page or extend EXEMPTED deliberately`,
+      `route trees diverged: only in kallip-app [${onlyApp.join(
+        ", ",
+      )}], only in kallip-web [${onlyWeb.join(
+        ", ",
+      )}] — add the missing twin page or extend EXEMPTED deliberately`,
     );
 
     const drifted: string[] = [];
@@ -84,9 +82,9 @@ Deno.test(
     }
     assert(
       drifted.length === 0,
-      `twin files drifted apart — sync the twin or extend exemptions deliberately (also check EOL / git autocrlf): ${
-        drifted.join("; ")
-      }`,
+      `twin files drifted apart — sync the twin or extend exemptions deliberately (also check EOL / git autocrlf): ${drifted.join(
+        "; ",
+      )}`,
     );
 
     // Exemption health: an exempted file must exist on both hosts and actually

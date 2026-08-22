@@ -51,9 +51,10 @@ const asClient = (m: MockClient): AgoraClient => m as unknown as AgoraClient;
  *  restore function. Captures every options object it is called with. Deno's
  *  test runtime does not always expose `navigator.credentials`, so a minimal
  *  container is installed first when absent. */
-function stubCredentialGet(
-  impl: (opts: unknown) => Promise<unknown>,
-): { restore: () => void; calls: unknown[] } {
+function stubCredentialGet(impl: (opts: unknown) => Promise<unknown>): {
+  restore: () => void;
+  calls: unknown[];
+} {
   const calls: unknown[] = [];
   const wrapper = (opts: unknown): Promise<unknown> => {
     calls.push(opts);
@@ -66,10 +67,7 @@ function stubCredentialGet(
       writable: true,
     });
   }
-  const target = navigator.credentials as unknown as Record<
-    string,
-    unknown
-  >;
+  const target = navigator.credentials as unknown as Record<string, unknown>;
   const original = target.get;
   Object.defineProperty(target, "get", {
     value: wrapper,
@@ -88,48 +86,54 @@ function stubCredentialGet(
   };
 }
 
-Deno.test("loginWithDiscoverablePasskey places mediation on the outer get", async () => {
-  // `mediation: "conditional"` MUST ride on the outer `credentials.get` call,
-  // not inside `publicKey` (the server model drops it from RequestChallenge-
-  // Response). A regression that moves it inside `optionsForGet` would silently
-  // turn conditional autofill into a full-picker get on every browser.
-  const client = asClient({
-    loginDiscoverableBegin: () =>
-      Promise.resolve({
-        ceremony_id: "c",
-        options: { publicKey: { challenge: "" } },
-      }),
-    loginDiscoverableFinish: () => Promise.resolve({ user_id: "u" }),
-  });
-  // Return null (user dismissed) so the driver does not reach a real finish.
-  const stub = stubCredentialGet(() => Promise.resolve(null));
-  try {
-    await loginWithDiscoverablePasskey(client);
-  } finally {
-    stub.restore();
-  }
-  assertEquals(stub.calls.length, 1);
-  const opts = stub.calls[0] as { mediation?: string; publicKey?: unknown };
-  assertEquals(opts.mediation, "conditional");
-  assertEquals(opts.publicKey !== undefined, true);
-});
+Deno.test(
+  "loginWithDiscoverablePasskey places mediation on the outer get",
+  async () => {
+    // `mediation: "conditional"` MUST ride on the outer `credentials.get` call,
+    // not inside `publicKey` (the server model drops it from RequestChallenge-
+    // Response). A regression that moves it inside `optionsForGet` would silently
+    // turn conditional autofill into a full-picker get on every browser.
+    const client = asClient({
+      loginDiscoverableBegin: () =>
+        Promise.resolve({
+          ceremony_id: "c",
+          options: { publicKey: { challenge: "" } },
+        }),
+      loginDiscoverableFinish: () => Promise.resolve({ user_id: "u" }),
+    });
+    // Return null (user dismissed) so the driver does not reach a real finish.
+    const stub = stubCredentialGet(() => Promise.resolve(null));
+    try {
+      await loginWithDiscoverablePasskey(client);
+    } finally {
+      stub.restore();
+    }
+    assertEquals(stub.calls.length, 1);
+    const opts = stub.calls[0] as { mediation?: string; publicKey?: unknown };
+    assertEquals(opts.mediation, "conditional");
+    assertEquals(opts.publicKey !== undefined, true);
+  },
+);
 
-Deno.test("addPasskey with no username (OAuth-only) returns reauth-required", async () => {
-  // An OAuth-only account has no passkey to step up with. The driver must
-  // return `reauth-required` on a 403 WITHOUT calling navigator.credentials or
-  // a second begin. `beginCalls` proves begin ran exactly once (the failing
-  // one) and was not retried.
-  let beginCalls = 0;
-  const client = asClient({
-    addPasskeyBegin: () => {
-      beginCalls += 1;
-      return Promise.reject(new AgoraApiError(403, "reauth-required"));
-    },
-  });
-  const result = await addPasskey(client, { label: "Phone" });
-  assertEquals(result, { ok: false, reason: "reauth-required" });
-  assertEquals(beginCalls, 1);
-});
+Deno.test(
+  "addPasskey with no username (OAuth-only) returns reauth-required",
+  async () => {
+    // An OAuth-only account has no passkey to step up with. The driver must
+    // return `reauth-required` on a 403 WITHOUT calling navigator.credentials or
+    // a second begin. `beginCalls` proves begin ran exactly once (the failing
+    // one) and was not retried.
+    let beginCalls = 0;
+    const client = asClient({
+      addPasskeyBegin: () => {
+        beginCalls += 1;
+        return Promise.reject(new AgoraApiError(403, "reauth-required"));
+      },
+    });
+    const result = await addPasskey(client, { label: "Phone" });
+    assertEquals(result, { ok: false, reason: "reauth-required" });
+    assertEquals(beginCalls, 1);
+  },
+);
 
 Deno.test("addPasskey threads the discoverable opt into begin", async () => {
   // The discoverable opt must reach the FIRST `addPasskeyBegin` (the same

@@ -32,6 +32,7 @@ docs, development documentation, and targeted source reading.
 skill adds depth on top of that base; skipping it means you miss the
 project's purpose and stack while reading conventions that assume them.
 Done when:
+
 - the base survey from `code/exploring` is in context (or you run it
   now before continuing)
 
@@ -42,6 +43,7 @@ an agent about to write code. Read CONTRIBUTING.md if present for the
 contribution conventions (branching, testing, review expectations).
 These encode constraints the code alone does not show.
 Done when:
+
 - you know the conventions and decision rules that constrain your
   change
 
@@ -52,6 +54,7 @@ look for the docs that govern your task, because they record decisions
 (why the layout is what it is, what must not be changed casually) that
 the code does not make obvious.
 Done when:
+
 - you know which development docs exist and which ones govern the task
 
 **Refine the code map from AGENTS.md.** The base survey gave you the
@@ -61,6 +64,7 @@ Read that tree and identify the entry points (src/main.rs,
 src/lib.rs, packages/*/src/index.ts). Do not read source yet — the
 goal is a map, not a deep read.
 Done when:
+
 - you can state the module / crate / package structure and where the
   entry points are, beyond what the base survey already showed
 
@@ -72,6 +76,7 @@ change, not the whole codebase. For code files, use `aifed outline` to
 see the symbol structure first, then `aifed read <file> [start-end]` to
 read only the relevant section rather than the whole file.
 Done when:
+
 - you have the specific files, types, or symbols your change needs
 - you know the conventions (naming, error handling, module layout)
   that apply to the area you will change

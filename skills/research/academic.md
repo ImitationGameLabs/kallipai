@@ -73,16 +73,19 @@ rate-limited for unauthenticated use. Probe them; use them when
 available, fall back to Scholar via browser when not.
 
 Done when:
+
 - you have a ranked list of relevant papers with abstracts and citation
   counts
 - you have enough candidates to start reading (typically 5-15)
 
 **Select papers to read deeply.** Read abstracts and triage. Prioritize:
+
 - highly cited work (use CrossRef or Scholar citation counts)
 - recent survey papers (they map the landscape for you)
 - papers directly matching your framed question
 
 Done when:
+
 - you have 2-5 papers selected for deep reading
 
 **Read papers via LaTeX source.** Load `research/arxiv-reading` and
@@ -93,11 +96,13 @@ results sections; skim related work unless you are mapping the field.
 For papers not on arXiv, use CrossRef to get the DOI, then check if an
 arXiv preprint exists (many published papers have one).
 Done when:
+
 - you understand each paper's contribution, method, and results
 - you can explain how each paper relates to your framed question
 
 **Trace citations.** Key papers cite other key papers. Use the
 citation tools available:
+
 - **CrossRef `/works/{DOI}/` endpoint** returns citation data via curl
 - **Google Scholar "cited by"** finds newer work building on a paper
   (browser-only)
@@ -106,6 +111,7 @@ citation tools available:
 Note recurring citations — papers cited by multiple of your sources are
 likely foundational. This is how you find the roots of a field.
 Done when:
+
 - you have followed the most important citation chains
 - you can name the foundational papers in the area
 

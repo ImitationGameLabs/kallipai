@@ -33,6 +33,7 @@ numbers and one-line descriptions, sorted by relevance. Treat the
 results as a candidate list, not a decision — the top result is not
 necessarily the best fit.
 Done when:
+
 - you have 2–5 candidates with their current version numbers
 
 **Inspect metadata.** Run `cargo info <crate>` on each candidate. This
@@ -41,6 +42,7 @@ cargo registry. The output surfaces: latest version (and whether the
 queried version differs), license, MSRV (`rust-version`), features with
 their dependency graph, and repository link.
 Done when:
+
 - you have the metadata for each candidate
 - the crate source is cached locally (confirmed by checking the registry
   path — see "Locating cached source" below)
@@ -51,6 +53,7 @@ decisive step — metadata tells you *about* the crate; source tells you
 *how to use it* and *whether it fits*. Rust's type signatures make this
 efficient (see "Source-reading strategy" below).
 Done when:
+
 - you have read the `lib.rs` public API and the relevant trait/error
   definitions
 - you can state the key types, function signatures, and error types the
@@ -84,7 +87,7 @@ maximize information per token:
 1. **`src/lib.rs`** — the crate root. Its `pub` items are the public
    API surface; everything `pub use`-d is the intended interface. This
    is the crate's table of contents.
-2. **Trait definitions** — search for `trait ` to find the abstractions
+2. **Trait definitions** — search for `trait` to find the abstractions
    the crate models. Trait bounds tell you what capabilities a type must
    provide; method signatures tell you the contract.
 3. **Error types** — find the error enum or struct (often `error.rs` or

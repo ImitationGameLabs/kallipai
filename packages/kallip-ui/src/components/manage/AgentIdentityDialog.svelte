@@ -56,7 +56,9 @@
   <Portal>
     <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
     <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
-      <Dialog.Content class="card preset-tonal-surface w-full max-w-md p-6 flex flex-col gap-4">
+      <Dialog.Content
+        class="card preset-tonal-surface w-full max-w-md p-6 flex flex-col gap-4"
+      >
         <Dialog.Title class="text-lg font-semibold">
           {manage_agent_edit_dialog_title()}
         </Dialog.Title>
@@ -76,7 +78,8 @@
             <input class="input text-sm" bind:value={roleDraft} />
           </label>
           <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">{manage_agent_description()}</span>
+            <span class="text-xs font-medium">{manage_agent_description()}</span
+            >
             <input class="input text-sm" bind:value={descDraft} />
           </label>
 

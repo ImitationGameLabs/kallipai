@@ -37,6 +37,7 @@ proven structure to start from. Check the codebase for existing patterns and
 conventions — the exploration in `code/exploring` or `code/onboarding`
 should surface these.
 Done when:
+
 - the problem type is named (e.g., "this is a state machine with three states")
 - applicable patterns from the codebase or standard practice are identified
 
@@ -46,11 +47,13 @@ structures, different decomposition boundaries — not minor variations of one
 idea. Sketch the shape of each (modules, data flow, key interfaces), not
 line-level code.
 Done when:
+
 - 2-3 distinct approaches are sketched at the level of structure, not implementation
 - each approach is different enough that rejecting one does not reject all
 
 **Assess each approach.** Evaluate every candidate along three independent
 design dimensions:
+
 - *Complexity* — does the approach add indirection beyond what the problem
   needs? Consult `code/complexity-control` for the over-engineering judgment
   standard.
@@ -74,6 +77,7 @@ more complex approach may be justified by materially better coupling or
 testability. Present the selected approach as the recommended option in the
 plan per `what-makes-a-good-plan`'s Design plan shape.
 Done when:
+
 - one approach is selected with its tradeoffs stated
 - each rejected approach has a one-line reason it lost
 - the selected approach is ready to become the design section of the plan

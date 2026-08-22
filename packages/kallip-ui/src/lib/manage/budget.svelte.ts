@@ -137,7 +137,11 @@ class BudgetStore {
     optimisticDelta: number,
   ): Promise<BudgetResponse> {
     // Snapshot for revert.
-    const prev = { budget: this.budget, consumed: this.consumed, remaining: this.remaining };
+    const prev = {
+      budget: this.budget,
+      consumed: this.consumed,
+      remaining: this.remaining,
+    };
     // Apply optimistic.
     this.inFlightMutation = true;
     if (optimisticDelta !== 0) {

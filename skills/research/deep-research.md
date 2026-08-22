@@ -32,12 +32,14 @@ A research question is not a keyword — it has a goal (evaluate, compare,
 understand a mechanism, map a landscape) and a depth (survey vs.
 deep-dive). Writing the question down forces specificity.
 Done when:
+
 - you can state the question in one or two sentences with a clear goal
 - you know what a good answer would look like (a comparison? a summary?
   a recommendation?)
 
 **Classify the domain.** The domain determines which sources matter and
 how to access them. The two domains with dedicated flows today:
+
 - **Academic / scientific** — papers, preprints, citations. Route to
   `research/academic`.
 - **Open-source / technical** — repos, metadata, community discussion.
@@ -47,6 +49,7 @@ If the question spans both (e.g., "evaluate MemGPT as a system"),
 classify by the *primary* source type and supplement from the other.
 If neither fits cleanly, use the closest flow as a template and adapt.
 Done when:
+
 - you have named the domain and the source types you will prioritize
 
 **Plan the investigation.** Break the research into subtasks that can
@@ -56,6 +59,7 @@ by question facet, not arbitrarily — each subtask should be
 self-contained enough to produce findings independently.
 
 Common decomposition patterns:
+
 - **By source** — one subagent searches arXiv, another GitHub, another
   web search. Each returns findings; you merge.
 - **By facet** — if the question has independent aspects (e.g., "compare
@@ -76,6 +80,7 @@ and find everything in place. These are session artifacts, not
 deliverables — /tmp is ephemeral across reboots, so the directory
 persists for the session but not beyond.
 Done when:
+
 - subtasks are defined and each has a clear scope, assigned sources, and
   expected output
 - dependencies are identified (some subtasks may depend on results from
@@ -88,6 +93,7 @@ Done when:
 sequential work yourself or wait for results. Each subagent follows the
 domain flow and reports findings. Merge results as they arrive.
 Done when:
+
 - all subtasks have reported or the deadline has passed
 - you have raw findings from each source/facet
 
@@ -97,6 +103,7 @@ argument or assessment grounded in the sources. Address the goal you
 stated in step one: if the goal was comparison, produce a comparison;
 if evaluation, produce a judgment with evidence.
 Done when:
+
 - the synthesis answers the framed question
 - each claim is traceable to a source you examined
 

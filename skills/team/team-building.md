@@ -37,6 +37,7 @@ breadth: how many files or sources it touches, whether the codebase is
 familiar, and whether the change is risky. This assessment drives both
 template selection and scale.
 Done when:
+
 - the domain is named (e.g. "software engineering", "research")
 - the breadth is characterized (small / medium / large) with the
   signals that support that judgment
@@ -46,6 +47,7 @@ template exists, apply it; if not, design a team from the principles in
 `what-makes-a-good-team`, treating the surgical-team model as the
 default: one surgeon, optional scout, reviewers.
 Done when:
+
 - a template is selected, or a custom structure is defined with
   reference to the principles it derives from
 - the team-should-build vs go-solo decision is resolved: if the task is
@@ -57,6 +59,7 @@ whether a scout is warranted. The question is never "whether to review"
 but "how many reviewers" — review is a constant. Scale the reviewer
 count to the diff size and risk, not to an aspiration for parallelism.
 Done when:
+
 - the reviewer count is set (1–3) with a rationale tied to diff size
   or risk
 - the scout decision is set (yes/no) with a rationale
@@ -68,6 +71,7 @@ Capture each agent ID immediately. Assign permissions per the template
 agent a focused prompt that names its role, its scope, and your agent
 ID for reporting back.
 Done when:
+
 - all team agents are spawned with their IDs captured
 - each agent knows its role, its boundaries, and how to report back
 - the surgeon holds the workspace dirlock and no other agent has write
@@ -79,6 +83,7 @@ Done when:
 fixes what is justified; the review-fix loop's termination rules (Pass,
 Accept-with-reason, Escalate) live in `skill/reviewing-a-skill`.
 Done when:
+
 - the task is complete and the diff has passed review
 
 **Sustain or clean up.** If this domain has recurring tasks ahead, keep
@@ -88,6 +93,7 @@ the domain is done, remove all agents and release resources. A
 specialized team should persist across related tasks, not be rebuilt
 each time.
 Done when:
+
 - persistent agents (surgeon, reviewers) are kept for the next task, or
   all agents are removed if the domain is complete
 - the scout is removed

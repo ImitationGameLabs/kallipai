@@ -340,41 +340,44 @@ Deno.test("history() sends a cursor-based history control op", async () => {
   channel.close();
 });
 
-Deno.test("manage() round-trips: request and response correlation", async () => {
-  const { lesche, pinnedKeyB64, setChannel, respond, lastRequest } = makeMock(
-    ed25519.utils.randomSecretKey(),
-    "tagma-m",
-    "conv-m",
-  );
-  const channel = await openRelayChannel(
-    lesche as unknown as LescheClient,
-    "tagma-m",
-    "u",
-    "Alice",
-    pinnedKeyB64,
-  );
-  setChannel(channel);
+Deno.test(
+  "manage() round-trips: request and response correlation",
+  async () => {
+    const { lesche, pinnedKeyB64, setChannel, respond, lastRequest } = makeMock(
+      ed25519.utils.randomSecretKey(),
+      "tagma-m",
+      "conv-m",
+    );
+    const channel = await openRelayChannel(
+      lesche as unknown as LescheClient,
+      "tagma-m",
+      "u",
+      "Alice",
+      pinnedKeyB64,
+    );
+    setChannel(channel);
 
-  const managePromise = channel.manage("GET", "/budget");
-  // The mock captured the manage control op (including req_id).
-  const req = lastRequest() as TagmaControl | null;
-  if (!req || req.op !== "manage") {
-    throw new Error(`expected manage control, got ${JSON.stringify(req)}`);
-  }
-  assertEquals(req.method, "GET");
-  assertEquals(req.path, "/budget");
-  // Respond with a manage_result matching the req_id.
-  respond({
-    kind: "manage_result",
-    req_id: req.req_id,
-    status: 200,
-    body: { total: 5000 },
-  });
-  const result = await managePromise;
-  assertEquals(result.status, 200);
-  assertEquals(result.body, { total: 5000 });
-  channel.close();
-});
+    const managePromise = channel.manage("GET", "/budget");
+    // The mock captured the manage control op (including req_id).
+    const req = lastRequest() as TagmaControl | null;
+    if (!req || req.op !== "manage") {
+      throw new Error(`expected manage control, got ${JSON.stringify(req)}`);
+    }
+    assertEquals(req.method, "GET");
+    assertEquals(req.path, "/budget");
+    // Respond with a manage_result matching the req_id.
+    respond({
+      kind: "manage_result",
+      req_id: req.req_id,
+      status: 200,
+      body: { total: 5000 },
+    });
+    const result = await managePromise;
+    assertEquals(result.status, 200);
+    assertEquals(result.body, { total: 5000 });
+    channel.close();
+  },
+);
 
 Deno.test("close() rejects pending manage() promises", async () => {
   const { lesche, pinnedKeyB64, setChannel } = makeMock(

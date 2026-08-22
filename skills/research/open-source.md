@@ -39,21 +39,26 @@ The API returns JSON with name, description, stars, language, topics,
 last-updated, and license. For broader discovery, supplement with web
 search for "awesome" lists, blog posts, and comparison articles.
 Done when:
+
 - you have a candidate list of relevant projects with basic metadata
 - you can name the top 3-5 candidates worth deeper investigation
 
 **Gather metadata and assess health.** For each candidate, collect:
+
 - Stars, forks, open/closed issue ratio (activity and adoption signal)
 - Last commit date and release cadence (is it maintained?)
 - License (compatibility with your use case)
 - Open issues and recent PRs (community health, responsiveness)
 
 The GitHub API provides this without cloning or browsing:
+
 ```bash
 curl -s "https://api.github.com/repos/tokio-rs/axum"
 curl -s "https://api.github.com/repos/tokio-rs/axum/releases?per_page=3"
 ```
+
 Done when:
+
 - you can assess each candidate's health and adoption at a glance
 
 **Shallow-clone and inspect locally.** For projects worth deep
@@ -68,11 +73,13 @@ Then follow `code/exploring` to understand the project: root listing →
 README → architecture docs → key modules. This is where you learn how
 the project actually works, not just what it claims.
 Done when:
+
 - you understand the project's architecture and key design decisions
 - you can explain what the project does and how
 
 **Assess community signals.** The repo tells you what the project is;
 community tells you what it's like to use. Check:
+
 - Stack Overflow: common questions, pain points, gotchas
 - Reddit (r/rust, r/programming): adoption sentiment, comparison threads
 - Blog posts and tutorials: real-world usage patterns, benchmarks
@@ -81,6 +88,7 @@ community tells you what it's like to use. Check:
 This step is where `agent-browser` earns its place — these sites need
 rendering or interaction. Use it to read discussion threads.
 Done when:
+
 - you can describe the community sentiment and common pain points
 - you have enough signal to assess real-world adoption
 

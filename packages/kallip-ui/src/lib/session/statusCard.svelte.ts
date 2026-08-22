@@ -115,8 +115,9 @@ class StatusCardStore {
       // Keep the previous array (and row objects) when nothing observable
       // changed: Svelte skips the update, so DOM rows do not reshuffle.
       const signature = subs
-        .map((r) =>
-          `${r.id}:${r.state}:${r.role}:${r.activity}:${r.contextTokens}:${r.description}:${r.contextWindow}`
+        .map(
+          (r) =>
+            `${r.id}:${r.state}:${r.role}:${r.activity}:${r.contextTokens}:${r.description}:${r.contextWindow}`,
         )
         .join("|");
       if (signature !== this.lastSubSignature) {

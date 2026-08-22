@@ -16,9 +16,7 @@ const icons = {
 
 // The section shape stripped to its structural parts (title + manage href +
 // hub href + item hrefs) for the assertions below.
-function shape(
-  sections: ReturnType<typeof navFor>,
-): {
+function shape(sections: ReturnType<typeof navFor>): {
   title: string | null;
   manage: string | null;
   hub: string | null;

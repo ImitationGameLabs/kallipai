@@ -37,6 +37,7 @@ need ("JSON handling") produces too many candidates; a precise one
 ("streaming JSON parser, no_std compatible, zero-copy") narrows the
 field before you search.
 Done when:
+
 - the capability is stated as a one-sentence requirement
 - the hard constraints are listed (async/no_std/MSRV/license as
   applicable)
@@ -48,6 +49,7 @@ specialized domains like cryptography — but building is justified when
 existing options are poorly designed or the need is small enough that a
 dependency's weight exceeds its benefit.
 Done when:
+
 - you have a reasoned go-search or go-build decision with reference to
   the make-or-buy criteria in `code/dependency-selection`
 
@@ -59,6 +61,7 @@ reverse-dependency counts to gauge ecosystem adoption. Aim for 2–5
 candidates; if fewer, broaden the keywords or check the dependency lists
 of similar crates for suggestions.
 Done when:
+
 - you have 2–5 candidates with their current version numbers and basic
   ecosystem metadata (downloads, last release date)
 
@@ -69,6 +72,7 @@ source-reading strategy), and project fit. Filter first on hard
 constraints (async, no_std, MSRV) to eliminate non-starters, then rank
 the survivors on quality and fit.
 Done when:
+
 - each candidate is evaluated against the comparison dimensions
 - hard-constraint failures are eliminated
 - the survivors are ranked with a rationale for the ordering
@@ -79,6 +83,7 @@ candidates") or, if the need is small enough, revisit the make-or-buy
 decision. Do not select a crate you cannot justify over its
 alternatives — a forced choice is a signal to search more or build.
 Done when:
+
 - one crate is selected with a stated rationale comparing it to the
   alternatives considered
 - or, the decision to build is made with a stated rationale
@@ -90,6 +95,7 @@ flags. Selection and verification are separate because a crate that
 looks right on paper can fail on source inspection — type safety gaps,
 opaque error types, or `unsafe` without justification.
 Done when:
+
 - the selected crate has passed the verification pipeline in
   `code/rust-crate-evaluation`, or the verification surfaces a problem
   that sends you back to "Compare candidates"

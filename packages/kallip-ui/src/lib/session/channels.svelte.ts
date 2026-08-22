@@ -82,8 +82,8 @@ class ChannelsStore {
    *  realtime. `null` until the shell wires it (status just waits then). */
   private statusBackfill:
     | ((
-      tagmaId: string,
-    ) => import("../tagmata.svelte.ts").TagmaStatusSummary | undefined)
+        tagmaId: string,
+      ) => import("../tagmata.svelte.ts").TagmaStatusSummary | undefined)
     | null = null;
 
   /** Bind the cached-status backfill. Called once by the shell at boot. */

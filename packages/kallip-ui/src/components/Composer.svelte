@@ -87,7 +87,10 @@
           aria-busy={composer.sending}
           class="size-10 shrink-0 rounded-full preset-filled-primary-500 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          <ArrowUp class="size-5 {composer.sending ? 'animate-spin' : ''}" aria-hidden="true" />
+          <ArrowUp
+            class="size-5 {composer.sending ? 'animate-spin' : ''}"
+            aria-hidden="true"
+          />
         </button>
       </div>
     </div>

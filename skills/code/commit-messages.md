@@ -14,7 +14,7 @@ see `code/committing`.
 
 ## Format
 
-```
+```text
 type(scope): subject          ← subject line (imperative, lowercase, no period)
 
 Body paragraph or bullets     ← what changed and why (omit for trivial changes)
@@ -81,7 +81,7 @@ in prose adds length without adding understanding.
 why it was needed, and why the approach works. No bullets needed,
 because the change is one thought.
 
-```
+```text
 fix(ui): preserve single newlines in agent markdown
 
 Enable GFM line breaks in the markdown renderer so single newlines
@@ -99,7 +99,7 @@ then one bullet per concern. Each bullet is one or two sentences —
 enough to convey the what and why of that concern, not its
 implementation.
 
-```
+```text
 feat(rooms): add multi-member room chat
 
 - Multi-member rooms: create, invite, open-access join, and chat
@@ -125,7 +125,7 @@ Mark a breaking change with `!` after the type/scope and a
 `BREAKING CHANGE:` footer, because tooling (and readers) need to spot
 these without reading every body.
 
-```
+```text
 refactor(tagma)!: rename kallip-daemon to kallip-tagma
 
 <body>

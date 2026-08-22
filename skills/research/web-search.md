@@ -40,22 +40,26 @@ HTML, so `curl` works directly. `agent-browser` also works, with cleaner
 structured output.
 
 **curl approach:**
+
 ```bash
 curl -sL -A "Mozilla/5.0" "https://cn.bing.com/search?q=rust+web+framework" \
   | grep -oP 'href="(https?://[^"]*)"' \
   | grep -v 'bing\.com\|microsoft\|msn\.com\|miit\.gov\|mps\.gov'
 ```
+
 Note: `www.bing.com` 302-redirects to `cn.bing.com` in China; always use
 `-L` to follow. Results from `cn.bing.com` are biased toward Chinese
 sources (zhihu, juejin, CSDN); English sources appear but rank lower.
 Filter the government registration links (miit/mps) from the URL list.
 
 **agent-browser approach:**
+
 ```bash
 agent-browser open "https://cn.bing.com/search?q=rust+web+framework"
 agent-browser wait --load networkidle
 agent-browser snapshot -i -c -u
 ```
+
 Three steps. Results appear as level-2 headings paired with links, each
 with clean `@eN` refs. Use `-c` (compact) to drop empty structural nodes
 and `-u` (urls) to include hrefs inline. Extract URLs either by parsing
@@ -111,6 +115,7 @@ curl -sL -m 5 -A "Mozilla/5.0" "https://www.google.com/search?q=test" | grep -c 
 
 For browser-required engines, probe with agent-browser and **verify
 result count**:
+
 ```bash
 agent-browser open "https://cn.bing.com/search?q=test"
 agent-browser snapshot -i -c
@@ -122,11 +127,13 @@ agent-browser snapshot -i -c
 The priority order depends on environment (region, proxy availability):
 
 **Without proxy (China environment):**
+
 1. **Bing** (curl or agent-browser) — primary. Works reliably, returns
    real results.
 2. **Baidu** — supplementary only, for China-specific queries.
 
 **With proxy:**
+
 1. **Google** (agent-browser) — broadest index.
 2. **Bing** — supplementary.
 3. **Baidu** — supplementary, for China-specific content.
@@ -174,6 +181,7 @@ required because curl gets an empty shell.
 ## Multi-engine strategy
 
 For broad research, querying multiple engines increases coverage:
+
 - Different engines index different content and rank differently
 - Regional engines surface local sources invisible to global engines
 - Run queries in parallel (multiple subagents or background tasks) when

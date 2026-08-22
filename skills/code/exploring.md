@@ -39,12 +39,14 @@ go.mod), the key doc (README.md), and the top-level directories
 step — it tells you what kind of project this is before you read
 anything.
 Done when:
+
 - you can name the language/stack and the top-level directory layout
 
 **Read the README.** The README states what the project is, what it
 does, and how it is positioned — the one document written for exactly
 the question you are asking.
 Done when:
+
 - you can state the project's purpose and its main capabilities
 
 **Read what the understanding goal requires.** From here, read at the
@@ -65,6 +67,7 @@ Contributor-only documents (AGENTS.md, CONTRIBUTING.md, and development
 guides such as docs/development.md) are for people changing the code and
 add no value to a reader.
 Done when:
+
 - you can explain how the project works at the depth you set out to
   understand it
 

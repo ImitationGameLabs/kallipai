@@ -37,9 +37,8 @@ function memoryStorage(): DraftStorage {
  * `typeof` guards the global so importing this module under Deno is safe. */
 function sessionStorageOrFail(): DraftStorage {
   try {
-    const s = typeof sessionStorage === "undefined"
-      ? undefined
-      : sessionStorage;
+    const s =
+      typeof sessionStorage === "undefined" ? undefined : sessionStorage;
     if (!s) return memoryStorage();
     return {
       getItem: (k) => s.getItem(k),

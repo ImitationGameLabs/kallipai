@@ -85,11 +85,17 @@
           {manage_agents_heading()}
         </h2>
         <div class="text-sm space-y-1">
-          <div>{manage_overview_agents_idle({ count: agentsStore.idleCount })}</div>
-          <div>{manage_overview_agents_busy({ count: agentsStore.busyCount })}</div>
+          <div>
+            {manage_overview_agents_idle({ count: agentsStore.idleCount })}
+          </div>
+          <div>
+            {manage_overview_agents_busy({ count: agentsStore.busyCount })}
+          </div>
           {#if agentsStore.faultedCount > 0}
             <div class="text-error-500 dark:text-error-400">
-              {manage_overview_agents_faulted({ count: agentsStore.faultedCount })}
+              {manage_overview_agents_faulted({
+                count: agentsStore.faultedCount,
+              })}
             </div>
           {/if}
         </div>
@@ -104,7 +110,8 @@
           <button
             class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-primary-500"
             onclick={() => budgetStore.adjust(100_000_000).catch(() => {})}
-            disabled={budgetStore.isBusy}>{manage_overview_100m_budget()}</button
+            disabled={budgetStore.isBusy}
+            >{manage_overview_100m_budget()}</button
           >
           {#if !budgetStore.isPaused}
             <button

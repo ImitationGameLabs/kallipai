@@ -58,6 +58,7 @@ Other `.tex` files are section fragments pulled in via `\input{}` or
 ## What to read, what to skip
 
 **Read:**
+
 - The main `.tex` file(s) — this is the paper. Sections are marked with
   `\section{}`, `\subsection{}`, `\paragraph{}`. The abstract is between
   `\begin{abstract}` and `\end{abstract}`. Tables and math are readable
@@ -67,6 +68,7 @@ Other `.tex` files are section fragments pulled in via `\input{}` or
   without looking up each one.
 
 **Skip:**
+
 - `.sty`, `.bst`, `.cls` files — LaTeX style files, bibliography styles,
   and document classes. They are formatting directives, not content.
 - `images/` or any binary files (`.pdf`, `.png`, `.eps`) — figures, not
