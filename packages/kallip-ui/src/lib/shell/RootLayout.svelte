@@ -22,7 +22,15 @@
   } from "./links.ts";
   import { appGateDecision, isPublicRoute } from "./gate.ts";
   import { navigate } from "./port.ts";
-  import { nav_home } from "../../paraglide/messages.js";
+  import {
+    manage_agents_heading,
+    manage_budget_heading,
+    manage_overview_heading,
+    manage_profiles_heading,
+    manage_schedules_heading,
+    nav_home,
+    nav_manage,
+  } from "../../paraglide/messages.js";
 
   let {
     pathname,
@@ -274,6 +282,17 @@
       ? { href: "/local", label: nav_home() }
       : null,
   );
+  // Mobile top-row title for manage pages: static i18n headings mapped by
+  // route (the pages keep their own h1 for md+; see AppShell `title`).
+  const manageTitles: Record<string, () => string> = {
+    "/local/manage": nav_manage,
+    "/local/manage/overview": manage_overview_heading,
+    "/local/manage/budget": manage_budget_heading,
+    "/local/manage/agents": manage_agents_heading,
+    "/local/manage/profiles": manage_profiles_heading,
+    "/local/manage/schedules": manage_schedules_heading,
+  };
+  const manageTitle = $derived(manageTitles[pathname]?.());
 </script>
 
 <!-- Sidebar footer entry; see AccountMenu for behavior. -->
@@ -304,7 +323,8 @@
     {links}
     {isActive}
     {back}
-    topRow={back ? topRowSnippet : undefined}
+    topRow={back && !manageTitle ? topRowSnippet : undefined}
+    title={manageTitle}
     error={errorView}
     status={statusSnippet}
   >

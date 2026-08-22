@@ -537,7 +537,10 @@
 <div class="h-full overflow-y-auto">
   <div class="p-6 max-w-2xl space-y-6">
     <div class="flex items-center justify-between">
-      <h1 class="text-xl font-semibold">{manage_schedules_heading()}</h1>
+      <!-- md+ keeps this h1; below md the shell top row carries the title (AppShell `title`). -->
+      <h1 class="text-xl font-semibold hidden md:block">
+        {manage_schedules_heading()}
+      </h1>
       <div class="flex gap-2">
         <button
           class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"

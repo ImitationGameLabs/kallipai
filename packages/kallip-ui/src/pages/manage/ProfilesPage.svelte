@@ -449,7 +449,10 @@
   <div class="p-6 max-w-3xl space-y-6">
     <div class="flex items-center justify-between">
       <div>
-        <h1 class="text-xl font-semibold">{manage_profiles_heading()}</h1>
+        <!-- md+ keeps this h1; below md the shell top row carries the title (AppShell `title`). -->
+        <h1 class="text-xl font-semibold hidden md:block">
+          {manage_profiles_heading()}
+        </h1>
         <div class="text-xs opacity-60 mt-1 space-y-0.5">
           <p>{manage_profiles_heading_desc_l1()}</p>
           <p>{manage_profiles_heading_desc_l2()}</p>

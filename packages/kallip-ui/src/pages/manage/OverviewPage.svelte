@@ -47,7 +47,10 @@
 
 <div class="h-full overflow-y-auto">
   <div class="p-6 max-w-2xl space-y-6">
-    <h1 class="text-xl font-semibold">{manage_overview_heading()}</h1>
+    <!-- md+ keeps this h1; below md the shell top row carries the title (AppShell `title`). -->
+    <h1 class="text-xl font-semibold hidden md:block">
+      {manage_overview_heading()}
+    </h1>
 
     {#if budgetStore.error}
       <p class="text-error-500 dark:text-error-400 text-sm">

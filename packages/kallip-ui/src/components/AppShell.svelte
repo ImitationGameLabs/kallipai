@@ -63,6 +63,7 @@
     status,
     back = null,
     topRow = undefined,
+    title = undefined,
     error = null,
     children,
   }: {
@@ -84,6 +85,11 @@
     // the desktop sidebar stays and the whole row is md:hidden.
     back?: { href: string; label: string } | null;
     topRow?: Snippet;
+    // Fallback centre cell when no topRow snippet: a page title (manage
+    // sub-pages map their static i18n heading here; the page keeps its own
+    // h1 for md+). role=heading keeps the accessible name without a
+    // second h1 in the tree.
+    title?: string;
     error?: ErrorView | null;
     children: Snippet;
   } = $props();
@@ -248,7 +254,7 @@
 
   <!-- page content -->
   <main class="flex flex-col min-h-0 min-w-0 overflow-hidden">
-    {#if back || topRow}
+    {#if back || topRow || title}
       <!-- md:hidden mobile top row: the shell's back affordance plus the
            page-supplied status line (chat pages lift their TagmaStatusHeader
            here so the banner sorts below it). The desktop sidebar already
@@ -269,7 +275,15 @@
           <span class="size-8"></span>
         {/if}
         <div class="min-w-0 flex justify-center px-1">
-          {#if topRow}{@render topRow()}{/if}
+          {#if topRow}
+            {@render topRow()}
+          {:else if title}
+            <span
+              role="heading"
+              aria-level="1"
+              class="text-sm font-semibold truncate">{title}</span
+            >
+          {/if}
         </div>
         <span class="size-8"></span>
       </div>
