@@ -9,7 +9,7 @@
   },
   "scripts": {
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "deno test"
+    "test": "deno test --allow-read=../kallip-app/src/routes,../kallip-web/src/routes"
   },
   "dependencies": {
     "@kallipai/kallip-common": "workspace:*",
