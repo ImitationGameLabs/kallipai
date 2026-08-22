@@ -34,13 +34,23 @@
     upsertProvider,
   } from "../../lib/manage/compute.ts";
   import { TONAL_ICON_SURF } from "../../lib/classes.ts";
+  import {
+    clearProfileResult,
+    mergeProfileScope,
+    mergeProfileScopeAll,
+    mergeProviderScope,
+    modelsCountLabel,
+    occupiedIdsOf,
+    parkedLiveSnapshot,
+    profileKey,
+    probeStatusColor,
+    probeStatusLabel,
+    providerIdsOf,
+  } from "../../lib/manage/profiles-view.ts";
   import type {
     ProfileProvider,
     ProfileProviderProbeReport,
     ProfileModelProbeReport,
-    ProfileProbeRequest,
-    ProfileProbeResponse,
-    ProfileProbeStatus,
   } from "@kallipai/kallip-client";
   import {
     common_edit,
@@ -69,14 +79,7 @@
     manage_profiles_parking_add,
     manage_profiles_parking_desc_l1,
     manage_profiles_parking_desc_l2,
-    manage_profiles_probe_models_one,
-    manage_profiles_probe_models_other,
     manage_profiles_probe_request_failed,
-    manage_profiles_probe_status_invalid,
-    manage_profiles_probe_status_ok,
-    manage_profiles_probe_status_partial,
-    manage_profiles_probe_status_unauthorized,
-    manage_profiles_probe_status_unreachable,
     manage_profiles_probe_tier_ok,
     manage_profiles_probe_tier_fail,
     manage_profiles_profile_provider_label,
@@ -132,50 +135,18 @@
   const providerReports = new SvelteMap<string, ProfileProviderProbeReport>();
   const profileReports = new SvelteMap<string, ProfileModelProbeReport>();
 
-  /** `${tierIdx}:${profileId}` — profile ids can repeat across tiers. */
-  function profileKey(tierIdx: number, profileId: string): string {
-    return `${tierIdx}:${profileId}`;
-  }
-
-  function mergeProviderScope(resp: ProfileProbeResponse): void {
-    for (const r of resp.results) providerReports.set(r.endpoint_id, r);
-  }
-
-  function mergeProfileScope(
-    tierIdx: number,
-    resp: ProfileProbeResponse,
-  ): void {
-    // A tier-scoped response's tiers[0] is the requested tier.
-    const t = resp.tiers[0];
-    if (!t) return;
-    for (const p of t.profiles) {
-      profileReports.set(profileKey(tierIdx, p.profile_id), p);
-    }
-  }
-  /**
-   * Merge an all-scope response: response tiers line up 1:1 with the draft
-   * tiers by request order — tiers[i] reports on draft tier i.
-   */
-  function mergeProfileScopeAll(resp: ProfileProbeResponse): void {
-    for (const t of resp.tiers) {
-      for (const p of t.profiles) {
-        profileReports.set(profileKey(t.index, p.profile_id), p);
-      }
-    }
-  }
-
-  function clearProfileResult(tierIdx: number, profileId: string): void {
-    profileReports.delete(profileKey(tierIdx, profileId));
-  }
-
   async function onTestProvider(id: string) {
     await profilesStore.probeProvider(id);
-    if (profilesStore.probe) mergeProviderScope(profilesStore.probe);
+    if (profilesStore.probe) {
+      mergeProviderScope(providerReports, profilesStore.probe);
+    }
   }
 
   async function onTestTier(tierIdx: number) {
     await profilesStore.probeTier(tierIdx);
-    if (profilesStore.probe) mergeProfileScope(tierIdx, profilesStore.probe);
+    if (profilesStore.probe) {
+      mergeProfileScope(tierIdx, profileReports, profilesStore.probe);
+    }
   }
 
   async function onTestProfile(tierIdx: number, profileIdx: number) {
@@ -190,15 +161,15 @@
     if (!body) return;
     const resp = await profilesStore.probeRaw(body);
     if (!resp) return;
-    mergeProviderScope(resp);
-    mergeProfileScope(tierIdx, resp);
+    mergeProviderScope(providerReports, resp);
+    mergeProfileScope(tierIdx, profileReports, resp);
   }
 
   async function onTestAll() {
     await profilesStore.probeAll();
     if (!profilesStore.probe) return;
-    mergeProviderScope(profilesStore.probe);
-    mergeProfileScopeAll(profilesStore.probe);
+    mergeProviderScope(providerReports, profilesStore.probe);
+    mergeProfileScopeAll(profileReports, profilesStore.probe);
   }
 
   function onDiscard() {
@@ -239,7 +210,7 @@
       // Cross-tier: the key is tier-scoped, so clear the stale source entry
       // (same-tier keeps its key — the report survives the reorder).
       const id = draft.tiers[d.fromTier]?.profiles[d.fromIdx]?.id;
-      if (id) clearProfileResult(d.fromTier, id);
+      if (id) clearProfileResult(profileReports, d.fromTier, id);
     }
     profilesStore.draft = moveProfile(draft, d.fromTier, d.fromIdx, toTier);
   }
@@ -254,7 +225,7 @@
     // tier → parking: clear the tier-scoped source entry; the card will
     // re-key its report as p:<id> on the next parking Test.
     const id = draft.tiers[d.fromTier]?.profiles[d.fromIdx]?.id;
-    if (id) clearProfileResult(d.fromTier, id);
+    if (id) clearProfileResult(profileReports, d.fromTier, id);
     profilesStore.draft = moveToParking(draft, d.fromTier, d.fromIdx);
     void refreshParkedLive();
   }
@@ -278,7 +249,7 @@
       parkedLive = null;
       return;
     }
-    const parkedIds = new Set(parked.map((p) => p.id));
+    const parkedIds = parked.map((p) => p.id);
     try {
       const { agents } = await managementBackend().listAgents();
       // Per-agent catch (allSettled): one 409/404 must not void the whole
@@ -286,18 +257,7 @@
       const statuses = await Promise.allSettled(
         agents.map((a) => managementBackend().getAgentStatus(a.id)),
       );
-      let agentCount = 0;
-      const profileIds = new Set<string>();
-      for (const s of statuses) {
-        if (s.status !== "fulfilled") continue;
-        const pid = s.value.profile?.profile_id;
-        if (pid && parkedIds.has(pid)) {
-          agentCount++;
-          profileIds.add(pid);
-        }
-      }
-      parkedLive =
-        agentCount > 0 ? { agentCount, profileIds: [...profileIds] } : null;
+      parkedLive = parkedLiveSnapshot(parkedIds, statuses);
     } catch {
       // Roster failure: leave the previous snapshot (advisory only).
     }
@@ -453,7 +413,7 @@
     if (!body) return;
     const resp = await profilesStore.probeRaw(body);
     if (!resp) return;
-    mergeProviderScope(resp);
+    mergeProviderScope(providerReports, resp);
     const p = resp.tiers[0]?.profiles[0];
     if (p) parkingProbeReport = { status: p.status, detail: p.detail ?? null };
   }
@@ -470,7 +430,7 @@
     if (!body) return;
     const resp = await profilesStore.probeRaw(body);
     if (!resp) return;
-    mergeProviderScope(resp);
+    mergeProviderScope(providerReports, resp);
     const p = resp.tiers[0]?.profiles[0];
     if (p) {
       const id = draft.parking?.[idx]?.id ?? p.profile_id;
@@ -478,50 +438,9 @@
     }
   }
 
-  // --- display helpers ---
+  const providerIds = $derived(providerIdsOf(profilesStore.draft));
 
-  function probeStatusLabel(s: ProfileProbeStatus): string {
-    switch (s) {
-      case "ok":
-        return manage_profiles_probe_status_ok();
-      case "partial":
-        return manage_profiles_probe_status_partial();
-      case "unreachable":
-        return manage_profiles_probe_status_unreachable();
-      case "unauthorized":
-        return manage_profiles_probe_status_unauthorized();
-      case "invalid_config":
-        return manage_profiles_probe_status_invalid();
-    }
-  }
-
-  const probeStatusColor: Record<ProfileProbeStatus, string> = {
-    ok: "text-success-500 dark:text-success-400",
-    partial: "text-warning-500 dark:text-warning-400",
-    unreachable: "text-error-500 dark:text-error-400",
-    unauthorized: "text-error-500 dark:text-error-400",
-    invalid_config: "text-error-500 dark:text-error-400",
-  };
-
-  function modelsCountLabel(count: number): string {
-    return count === 1
-      ? manage_profiles_probe_models_one({ count })
-      : manage_profiles_probe_models_other({ count });
-  }
-
-  const providerIds = $derived(
-    Object.keys(profilesStore.draft?.endpoints ?? {}),
-  );
-
-  /** Every profile id visible in the draft — tiers ∪ parking (the parking
-   * dialog's new-mode duplicate check; advisory only, PUT is authoritative). */
-  const occupiedIds = $derived.by(() => {
-    const draft = profilesStore.draft;
-    const ids = (draft?.tiers ?? []).flatMap((t) =>
-      t.profiles.map((p) => p.id),
-    );
-    return [...ids, ...(draft?.parking ?? []).map((p) => p.id)];
-  });
+  const occupiedIds = $derived(occupiedIdsOf(profilesStore.draft));
 </script>
 
 <svelte:head><title>{manage_profiles_title()}</title></svelte:head>
@@ -620,7 +539,10 @@
             {@const report = providerReports.get(ep.id)}
             <div class="card preset-tonal-surface p-4 space-y-2 min-w-0">
               <div class="flex items-center justify-between gap-2">
-                <span class="font-mono text-sm font-semibold truncate min-w-0 flex-1">{ep.id}</span>
+                <span
+                  class="font-mono text-sm font-semibold truncate min-w-0 flex-1"
+                  >{ep.id}</span
+                >
                 <Menu
                   positioning={{ placement: "bottom-end" }}
                   onSelect={(e) => {
