@@ -84,7 +84,10 @@
   // a 375px viewport (operator-visible failure). The whole status area then
   // collapses to one summary line; tapping it restores the familiar bar +
   // rows for the session. The sidebar placement is lg+ by definition, so it
-  // never collapses.
+  // never collapses. Since the Line/Panel split the local route shows
+  // this header md+ only (below md the shell's Line/Panel own the
+  // status area); the collapse serves the online chat path and the
+  // local route's md..lg band.
   const lgQuery = matchMedia("(min-width: 64rem)");
   let lgMatches = $state(lgQuery.matches);
   $effect(() => {
