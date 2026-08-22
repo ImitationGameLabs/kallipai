@@ -16,7 +16,7 @@
 </script>
 
 <select
-  class="text-sm"
+  class="select text-sm"
   aria-label={settings_language()}
   value={current}
   onchange={(e) => pick(e.currentTarget.value as (typeof locales)[number])}
