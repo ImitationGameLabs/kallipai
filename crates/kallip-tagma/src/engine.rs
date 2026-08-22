@@ -131,7 +131,11 @@ fn window_status(
 /// Sets duty immediately (recovery) and returns the state with the correct
 /// starting phase. Caller is responsible for the side-effecting duty.set call;
 /// this function only computes the state.
-fn init_cycle(schedule: &WorkSchedule, root_id: &AgentId, now: OffsetDateTime) -> Option<CycleState> {
+fn init_cycle(
+    schedule: &WorkSchedule,
+    root_id: &AgentId,
+    now: OffsetDateTime,
+) -> Option<CycleState> {
     let (inside, next_start, next_end) = window_status(&schedule.spec, now)?;
 
     let pre = schedule.pre_warn_minutes as i64;
@@ -471,9 +475,7 @@ async fn recompute(
     let now = OffsetDateTime::now_utc();
     let root_id = {
         let registry = state.registry.read().await;
-        registry
-            .root_agent()
-            .map(|(id, _)| id.clone())
+        registry.root_agent().map(|(id, _)| id.clone())
     };
     let schedule = match store.get_singleton().await? {
         Some(s) if s.status == WorkScheduleStatus::Active => vec![s],
@@ -579,10 +581,9 @@ async fn recompute(
                     // naturally detected by evaluating the spec at the fired
                     // start moment: if that moment's window already ends by
                     // `now`, skip the Start side-effects.
-                    if let Some(st) = crate::work_schedule::eval::window_status(
-                        &cs.spec,
-                        cs.next_start,
-                    ) {
+                    if let Some(st) =
+                        crate::work_schedule::eval::window_status(&cs.spec, cs.next_start)
+                    {
                         if now >= st.next_end {
                             info!(agent = %cs.agent_id, "schedule: start window already ended, skipping");
                             state.duty.set(cs.agent_id.clone(), DutyStatus::OffDuty);

@@ -287,6 +287,18 @@ pub fn make_state_with_preset(preset: PolicyPreset) -> SharedState {
     ))
 }
 
+/// Like [`make_state`], but with a custom spawn entry (delivery's slow-path
+/// test seam; see `AppState::spawn_fn`).
+pub fn make_state_with_spawn(spawn_fn: crate::lifecycle::SpawnFn) -> SharedState {
+    let mut state = AppState::new_with_preset(
+        TokenHash::of("op-token"),
+        make_profile_bundle(),
+        PolicyPreset::Default,
+    );
+    state.spawn_fn = spawn_fn;
+    Arc::new(state)
+}
+
 /// Install an in-memory inbox store on a test `SharedState`.
 /// Required for any test that exercises the off-duty duty gate.
 pub async fn install_inbox_store(state: &SharedState) {

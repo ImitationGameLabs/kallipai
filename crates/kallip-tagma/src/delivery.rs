@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 use crate::lifecycle::{
     SpawnArgs, WorkspaceAcquireFailure, abort_agent, inject_identity_env, resolve_root_agent,
-    spawn_agent, try_acquire_workspace_lock,
+    try_acquire_workspace_lock,
 };
 use crate::messaging::{MessageSender, SenderRelation, format_incoming, sanitize_sender};
 use crate::state::{RegistryEntry, SharedState};
@@ -361,7 +361,7 @@ pub(crate) async fn enqueue_prompt(
         }
     };
 
-    let (agent, new_identity) = match spawn_agent(spawn_args).await {
+    let (agent, new_identity) = match (state.spawn_fn)(spawn_args).await {
         Ok((a, new_identity)) => {
             // Spawn succeeded: the agent owns the workspace lock for its
             // lifetime. Disarm so the guard's (imminent) Drop does not release.
@@ -432,6 +432,9 @@ pub(crate) async fn enqueue_prompt(
         warning: None,
     })
 }
+
+#[cfg(test)]
+mod tests;
 
 /// Swap the agent's prompt sender to a closed channel so concurrent
 /// `try_enqueue` callers see `Closed` instead of accepting a message into a

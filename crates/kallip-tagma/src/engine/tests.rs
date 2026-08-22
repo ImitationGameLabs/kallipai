@@ -45,31 +45,47 @@ fn base_spec() -> Spec {
 
 #[test]
 fn init_outside_window_is_off_duty() {
-    let cs = init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:45 UTC))
-        .expect("init");
+    let cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:45 UTC),
+    )
+    .expect("init");
     assert_eq!(cs.phase, SchedulePhase::OffDuty);
     assert_eq!(cs.next_start, datetime!(2026-08-21 13:00 UTC));
 }
 
 #[test]
 fn init_inside_working() {
-    let cs = init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:05 UTC))
-        .expect("init");
+    let cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:05 UTC),
+    )
+    .expect("init");
     assert_eq!(cs.phase, SchedulePhase::Working);
     assert_eq!(cs.end_time, datetime!(2026-08-21 12:30 UTC));
 }
 
 #[test]
 fn init_inside_pre_warned() {
-    let cs = init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:22 UTC))
-        .expect("init");
+    let cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:22 UTC),
+    )
+    .expect("init");
     assert_eq!(cs.phase, SchedulePhase::PreWarned);
 }
 
 #[test]
 fn init_inside_final_warned() {
-    let cs = init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:27 UTC))
-        .expect("init");
+    let cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:27 UTC),
+    )
+    .expect("init");
     assert_eq!(cs.phase, SchedulePhase::FinalWarned);
 }
 
@@ -94,8 +110,12 @@ fn always_never_transitions_to_a_warn() {
 
 #[test]
 fn transition_off_to_working() {
-    let mut cs =
-        init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:45 UTC)).unwrap();
+    let mut cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:45 UTC),
+    )
+    .unwrap();
     cs.next_start = datetime!(2026-08-21 12:46 UTC); // force due now
     let t = compute_transition(&cs, datetime!(2026-08-21 12:46 UTC)).unwrap();
     assert_eq!(t, Transition::Start);
@@ -103,8 +123,12 @@ fn transition_off_to_working() {
 
 #[test]
 fn transition_working_to_pre_warned() {
-    let mut cs =
-        init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:05 UTC)).unwrap();
+    let mut cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:05 UTC),
+    )
+    .unwrap();
     cs.phase = SchedulePhase::Working;
     let t = compute_transition(&cs, datetime!(2026-08-21 12:21 UTC)).unwrap();
     assert_eq!(t, Transition::PreWarn);
@@ -112,8 +136,12 @@ fn transition_working_to_pre_warned() {
 
 #[test]
 fn transition_pre_to_final() {
-    let mut cs =
-        init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:05 UTC)).unwrap();
+    let mut cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:05 UTC),
+    )
+    .unwrap();
     cs.phase = SchedulePhase::PreWarned;
     let t = compute_transition(&cs, datetime!(2026-08-21 12:26 UTC)).unwrap();
     assert_eq!(t, Transition::FinalWarn);
@@ -121,8 +149,12 @@ fn transition_pre_to_final() {
 
 #[test]
 fn transition_final_to_off() {
-    let mut cs =
-        init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:05 UTC)).unwrap();
+    let mut cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:05 UTC),
+    )
+    .unwrap();
     cs.phase = SchedulePhase::FinalWarned;
     let t = compute_transition(&cs, datetime!(2026-08-21 12:31 UTC)).unwrap();
     assert_eq!(t, Transition::End);
@@ -130,8 +162,12 @@ fn transition_final_to_off() {
 
 #[test]
 fn full_cycle_advances_next_start() {
-    let mut cs =
-        init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:05 UTC)).unwrap();
+    let mut cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:05 UTC),
+    )
+    .unwrap();
     cs.phase = SchedulePhase::FinalWarned;
     let now = datetime!(2026-08-21 12:31 UTC);
     assert_eq!(compute_transition(&cs, now).unwrap(), Transition::End);
@@ -178,8 +214,12 @@ async fn store_active(state: &SharedState, s: &WorkSchedule) {
 #[tokio::test]
 async fn start_sets_on_duty_and_pushes_wake_to_inbox() {
     let state = make_engine_state().await;
-    let cs =
-        init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:05 UTC)).unwrap();
+    let cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:05 UTC),
+    )
+    .unwrap();
     execute_start(&state, &cs).await;
     assert_eq!(state.duty.get(&root()), DutyStatus::OnDuty);
     let entries = state
@@ -216,8 +256,12 @@ async fn start_blank_wake_prompt_sends_the_default() {
 #[tokio::test]
 async fn end_sets_off_duty() {
     let state = make_engine_state().await;
-    let cs =
-        init_cycle(&sample(base_spec()), &root(), datetime!(2026-08-21 12:05 UTC)).unwrap();
+    let cs = init_cycle(
+        &sample(base_spec()),
+        &root(),
+        datetime!(2026-08-21 12:05 UTC),
+    )
+    .unwrap();
     state.duty.set(root(), DutyStatus::OnDuty);
     execute_end(&state, &cs).await;
     assert_eq!(state.duty.get(&root()), DutyStatus::OffDuty);

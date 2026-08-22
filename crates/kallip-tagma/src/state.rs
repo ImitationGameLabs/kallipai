@@ -145,6 +145,12 @@ pub struct AppState {
     pub duty: Arc<crate::duty::DutyStore>,
     /// SQLite-backed work-schedule store. Opened at startup.
     pub work_schedules: std::sync::OnceLock<crate::work_schedule::WorkScheduleStore>,
+    /// Agent spawn entry used by delivery's reactivation (slow path).
+    /// An indirection so tests can observe/stub the spawn without spinning a
+    /// real runtime; production default is `lifecycle::spawn_agent_boxed`.
+    /// create/restore call `lifecycle::spawn_agent` directly (no test seam
+    /// needed there).
+    pub spawn_fn: crate::lifecycle::SpawnFn,
 }
 
 /// Combined index: agent map + token-hash→id lookup + subagent reverse pointers.
@@ -467,6 +473,7 @@ impl AppState {
         preset: PolicyPreset,
     ) -> Self {
         Self {
+            spawn_fn: crate::lifecycle::spawn_agent_boxed(),
             registry: RwLock::new(AgentRegistry::new()),
             preset,
             hook_rules: std::sync::OnceLock::new(),
@@ -501,6 +508,7 @@ impl AppState {
         preset: PolicyPreset,
     ) -> Self {
         Self {
+            spawn_fn: crate::lifecycle::spawn_agent_boxed(),
             registry: RwLock::new(AgentRegistry::new()),
             preset,
             hook_rules: std::sync::OnceLock::new(),

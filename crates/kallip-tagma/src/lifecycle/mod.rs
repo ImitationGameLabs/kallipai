@@ -16,6 +16,27 @@ pub(crate) use identity::{inject_identity_env, resolve_root_agent};
 pub(crate) use restore::restore_agents;
 
 pub(crate) use spawn::{Materialize, SpawnArgs, abort_agent, spawn_agent};
+/// Indirect spawn entry used by delivery's reactivation (slow path); see
+/// [`AppState::spawn_fn`](crate::state::AppState::spawn_fn). An `Arc<dyn Fn>`
+/// so test stubs can capture state.
+pub(crate) type SpawnFn = std::sync::Arc<
+    dyn Fn(
+            SpawnArgs,
+        ) -> std::pin::Pin<
+            Box<
+                dyn Future<
+                        Output = anyhow::Result<(crate::state::Agent, crate::state::AgentIdentity)>,
+                    > + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
+/// Production default for `AppState::spawn_fn`: boxes the async fn into the
+/// `SpawnFn` closure type.
+pub(crate) fn spawn_agent_boxed() -> SpawnFn {
+    std::sync::Arc::new(|args| Box::pin(spawn_agent(args)))
+}
 
 #[cfg(test)]
 pub(crate) use workspace::{EstablishLockFailure, establish_lock_api_error};
