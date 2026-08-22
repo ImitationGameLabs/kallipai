@@ -104,7 +104,12 @@
   </button>
 {/snippet}
 
-<div class="pt-3 px-3 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+<!-- Bottom padding: 1.5rem intended breathing room, or the safe-area
+     inset when larger -- minus the keyboard inset, because edge-to-edge
+     maps the IME into the safe-area env on WebView and resizes-content
+     already lifts the composer above the keyboard. The 0px fallback keeps
+     engines without keyboard-inset-height on the original behaviour. -->
+<div class="pt-3 px-3 pb-[max(1.5rem,calc(env(safe-area-inset-bottom)-env(keyboard-inset-height,0px)))]">
   <div class="max-w-3xl mx-auto">
     <!-- Input card: one bordered frame holds the textarea + the desktop
          action, so the textarea itself is borderless/transparent and the
