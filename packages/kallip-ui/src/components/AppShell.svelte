@@ -135,6 +135,10 @@
 {/snippet}
 
 {#snippet navLinks()}
+  <!-- Sidebar-only snippet: it iterates section.items and never reads
+       section.hub — that field is consumed solely by navSlots on the
+       small-screen bar, so this desktop tree stays identical whether a
+       section carries a hub or not. -->
   {#each links as section, i (section.title ?? `untitled-${i}`)}
     {#if section.title}
       <div class="px-2 pt-2 flex items-center justify-between gap-2 min-w-0">

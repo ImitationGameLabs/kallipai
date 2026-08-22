@@ -1,3 +1,5 @@
 <script lang="ts">
-  // Redirect handled by +page.ts load function.
+  import { ManageHubPage } from "@kallipai/kallip-ui";
 </script>
+
+<ManageHubPage />

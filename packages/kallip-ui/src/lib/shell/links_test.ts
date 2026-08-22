@@ -1,9 +1,9 @@
 import { assertEquals } from "@std/assert";
 import {
   navFor,
+  type NavIcons,
   pathMatches,
   tagmaNavIndicator,
-  type NavIcons,
 } from "./links.ts";
 
 // navFor only stores the icon components; dummies suffice.
@@ -15,13 +15,19 @@ const icons = {
 } as unknown as NavIcons;
 
 // The section shape stripped to its structural parts (title + manage href +
-// item hrefs) for the assertions below.
+// hub href + item hrefs) for the assertions below.
 function shape(
   sections: ReturnType<typeof navFor>,
-): { title: string | null; manage: string | null; items: string[] }[] {
+): {
+  title: string | null;
+  manage: string | null;
+  hub: string | null;
+  items: string[];
+}[] {
   return sections.map((s) => ({
     title: s.title ?? null,
     manage: s.manage?.href ?? null,
+    hub: s.hub?.href ?? null,
     items: s.items.map((l) => l.href),
   }));
 }
@@ -31,8 +37,8 @@ Deno.test(
   () => {
     const sections = navFor({ mode: "online", icons });
     assertEquals(shape(sections), [
-      { title: "Tagmata", manage: "/tagmata", items: [] },
-      { title: "Rooms", manage: "/rooms", items: [] },
+      { title: "Tagmata", manage: "/tagmata", hub: null, items: [] },
+      { title: "Rooms", manage: "/rooms", hub: null, items: [] },
     ]);
   },
 );
@@ -49,8 +55,13 @@ Deno.test(
       ],
     });
     assertEquals(shape(sections), [
-      { title: "Tagmata", manage: "/tagmata", items: [] },
-      { title: "Rooms", manage: "/rooms", items: ["/rooms/r1", "/rooms/r2"] },
+      { title: "Tagmata", manage: "/tagmata", hub: null, items: [] },
+      {
+        title: "Rooms",
+        manage: "/rooms",
+        hub: null,
+        items: ["/rooms/r1", "/rooms/r2"],
+      },
     ]);
   },
 );
@@ -73,6 +84,7 @@ Deno.test("navFor online lists every enrolled tagma under Tagmata", () => {
     sections.map((s) => ({
       title: s.title,
       manage: s.manage?.href ?? null,
+      hub: s.hub?.href ?? null,
       items: s.items.map((l) => ({
         href: l.href,
         label: l.label,
@@ -84,6 +96,7 @@ Deno.test("navFor online lists every enrolled tagma under Tagmata", () => {
       {
         title: "Tagmata",
         manage: "/tagmata",
+        hub: null,
         items: [
           {
             href: "/chat/t/t1",
@@ -105,7 +118,7 @@ Deno.test("navFor online lists every enrolled tagma under Tagmata", () => {
           },
         ],
       },
-      { title: "Rooms", manage: "/rooms", items: [] },
+      { title: "Rooms", manage: "/rooms", hub: null, items: [] },
     ],
   );
 });
@@ -115,8 +128,8 @@ Deno.test(
   () => {
     const sections = navFor({ mode: "online", icons });
     assertEquals(shape(sections), [
-      { title: "Tagmata", manage: "/tagmata", items: [] },
-      { title: "Rooms", manage: "/rooms", items: [] },
+      { title: "Tagmata", manage: "/tagmata", hub: null, items: [] },
+      { title: "Rooms", manage: "/rooms", hub: null, items: [] },
     ]);
   },
 );
@@ -146,10 +159,11 @@ Deno.test("tagmaNavIndicator maps each channel state (transport-only)", () => {
 Deno.test("navFor offline -> Chat + Manage sections", () => {
   const sections = navFor({ mode: "offline", icons });
   assertEquals(shape(sections), [
-    { title: null, manage: null, items: ["/local/chat"] },
+    { title: null, manage: null, hub: null, items: ["/local/chat"] },
     {
       title: "Manage",
       manage: null,
+      hub: "/local/manage",
       items: [
         "/local/manage/overview",
         "/local/manage/budget",

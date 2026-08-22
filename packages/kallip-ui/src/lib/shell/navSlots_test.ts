@@ -1,7 +1,8 @@
 // Table-driven slot-plan tests: the cap arithmetic across both modes and the
 // boundary item counts (0/1/2/3/4/6). Section/manage fixtures mirror the
-// shapes navFor emits (links.ts): offline = one untitled 6-item section, no
-// gears; online = two geared sections with N+M items.
+// shapes navFor emits (links.ts): offline = an untitled chat section plus a
+// geared-hub manage section (untitled raw-item sections cover the defensive
+// arithmetic); online = two geared sections with N+M items.
 import { assertEquals } from "@std/assert";
 import type { NavItem } from "../shell.ts";
 import type { NavSection } from "./links.ts";
@@ -53,9 +54,29 @@ const cases: {
     ],
   },
   {
-    name: "offline 4 (defensive, structurally unreachable) -> all visible, no More",
+    name:
+      "offline 4 (defensive, structurally unreachable) -> all visible, no More",
     links: offlineSections(4),
     visible: ["/o0", "/o1", "/o2", "/o3"],
+    overflow: [],
+    hasMore: false,
+    sheetSections: [],
+  },
+  {
+    name: "offline hub -> manage folds to one cell; no More, sheet stays empty",
+    links: [
+      { items: [item("/local/chat")] },
+      {
+        title: "管理",
+        hub: {
+          href: "/local/manage",
+          label: "管理",
+          icon: (() => {}) as never,
+        },
+        items: offlineSections(6)[0].items,
+      },
+    ],
+    visible: ["/local/chat", "/local/manage"],
     overflow: [],
     hasMore: false,
     sheetSections: [],

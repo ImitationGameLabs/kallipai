@@ -27,17 +27,23 @@ import {
   nav_room_management,
   nav_rooms,
   nav_schedules,
-  nav_tagmata,
   nav_tagma_management,
+  nav_tagmata,
   tagma_profile_unnamed,
 } from "../../paraglide/messages.js";
 
 // One sidebar section. `title` renders as a small header with a divider
 // beneath it; `manage` renders as a settings gear beside the title, linking to
 // the section's management page. An untitled section (offline mode's single
-// Chat entry) renders its items bare.
+// Chat entry) renders its items bare. `hub` is the small-screen-only twin of a
+// titled items list: navSlots folds such a section into one bottom-bar cell
+// whose five items live behind the hub page instead (the desktop sidebar and
+// the More sheet both ignore it).
 export interface NavSection {
   title?: string;
+  /** Small-screen single entry for this section's items; the bar renders it
+   * as one cell instead of the items (which the hub page lists). */
+  hub?: { href: string; label: string; icon: Component };
   /** The section's management page, reached via a settings gear beside the
    * title. `icon` is injected by the caller (mirrors NavItem). */
   manage?: { href: string; label: string; icon: Component };
@@ -51,6 +57,8 @@ export interface NavIcons {
   /** Gear icon for the section-management entry beside each section title. */
   settings: Component;
   /** Management section icons (offline mode only). */
+  /** The bottom-bar "manage" hub cell (offline mode only). */
+  manageHub: Component;
   manageOverview: Component;
   manageBudget: Component;
   manageAgents: Component;
@@ -109,6 +117,13 @@ export function navFor(args: {
     return [
       { items: [{ href: "/local/chat", label: nav_chat(), icon: icons.chat }] },
       {
+        // `hub` folds this whole section into one small-screen bar cell;
+        // the items stay for the desktop sidebar and the hub page itself.
+        hub: {
+          href: "/local/manage",
+          label: nav_manage(),
+          icon: icons.manageHub,
+        },
         title: nav_manage(),
         items: [
           {
