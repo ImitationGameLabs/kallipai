@@ -80,11 +80,12 @@
         <button
           type="button"
           onclick={() => void composer.submit()}
-          disabled={!composer.canSend}
+          disabled={!composer.canSend || composer.sending}
           aria-label={composer_send_aria()}
+          aria-busy={composer.sending}
           class="size-10 shrink-0 rounded-full preset-filled-primary-500 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          <ArrowUp class="size-5" aria-hidden="true" />
+          <ArrowUp class="size-5 {composer.sending ? 'animate-spin' : ''}" aria-hidden="true" />
         </button>
       </div>
     </div>

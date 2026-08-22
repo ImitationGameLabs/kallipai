@@ -17,12 +17,16 @@ export interface ComposerModel {
   /** Increments on each requestFocus; an effect keyed on it focuses the field. */
   readonly focusToken: number;
   readonly canSend: boolean;
+  /** True while a submit is awaiting the transport (covers the parked
+   * retry window); drives the send button spinner. */
+  readonly sending: boolean;
   requestFocus: () => void;
   submit: () => Promise<void>;
 }
 
 export function createComposer(options: ComposerOptions): ComposerModel {
   let draft = $state("");
+  let sending = $state(false);
   let focusToken = $state(0);
 
   return {
@@ -35,6 +39,9 @@ export function createComposer(options: ComposerOptions): ComposerModel {
     get focusToken() {
       return focusToken;
     },
+    get sending() {
+      return sending;
+    },
     get canSend() {
       return options.canSubmit() && draft.trim().length > 0;
     },
@@ -43,7 +50,8 @@ export function createComposer(options: ComposerOptions): ComposerModel {
     },
     async submit() {
       const value = draft.trim();
-      if (!value || !options.canSubmit()) return;
+      if (!value || !options.canSubmit() || sending) return;
+      sending = true;
       draft = "";
       try {
         await options.send(value);
@@ -53,6 +61,8 @@ export function createComposer(options: ComposerOptions): ComposerModel {
         // marks the optimistic line failed + the page renders a retry).
         draft = value;
         if (e instanceof Error) console.error("send failed:", e.message);
+      } finally {
+        sending = false;
       }
     },
   };
