@@ -780,7 +780,7 @@
             </div>
           {/if}
         {:else if draft.spec.mode === "interval"}
-          <div class="grid grid-cols-3 gap-4">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <label class="text-sm space-y-1">
               <span class="opacity-70">{manage_schedules_interval_hours()}</span
               >

@@ -536,7 +536,7 @@
           <p>{manage_profiles_heading_desc_l3()}</p>
         </div>
       </div>
-      <div class="flex gap-2">
+      <div class="flex flex-wrap gap-2">
         <button
           class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
           onclick={() => profilesStore.refresh()}>⟳</button
@@ -628,7 +628,7 @@
                   }}
                 >
                   <Menu.Trigger
-                    class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+                    class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
                     aria-label={manage_profiles_provider_actions_aria()}
                     disabled={profilesStore.isProbing}
                   >
@@ -761,7 +761,7 @@
                 }}
               >
                 <Menu.Trigger
-                  class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+                  class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
                   aria-label={manage_profiles_tier_actions_aria()}
                   disabled={profilesStore.isProbing}
                 >
@@ -837,7 +837,7 @@
                     }}
                   >
                     <Menu.Trigger
-                      class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+                      class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
                       aria-label={manage_profiles_profile_actions_aria()}
                       disabled={profilesStore.isProbing}
                     >
@@ -1000,7 +1000,7 @@
                   }}
                 >
                   <Menu.Trigger
-                    class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+                    class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
                     aria-label={manage_profiles_profile_actions_aria()}
                     disabled={profilesStore.isProbing}
                   >

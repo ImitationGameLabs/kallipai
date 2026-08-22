@@ -150,11 +150,11 @@
           <div class="flex flex-col gap-3">
             {#each rows as row, i (i)}
               <div
-                class="grid grid-cols-[1fr_1fr_1fr_5rem_2.25rem] items-start gap-2"
+                class="grid grid-cols-1 sm:grid-cols-[1fr_1fr_1fr_5rem_2.25rem] items-start gap-2"
               >
                 <label class="flex flex-col gap-1">
                   <span class="text-xs font-medium">
-                    {i === 0 ? manage_profiles_tier_dialog_id_label() : ""}
+                    {manage_profiles_tier_dialog_id_label()}
                   </span>
                   <input
                     class="input text-sm font-mono"
@@ -164,9 +164,7 @@
                 </label>
                 <label class="flex flex-col gap-1">
                   <span class="text-xs font-medium">
-                    {i === 0
-                      ? manage_profiles_tier_dialog_provider_label()
-                      : ""}
+                    {manage_profiles_tier_dialog_provider_label()}
                   </span>
                   <select class="select text-sm" bind:value={row.endpoint}>
                     {#each providerIds as eid (eid)}
@@ -176,7 +174,7 @@
                 </label>
                 <label class="flex flex-col gap-1">
                   <span class="text-xs font-medium">
-                    {i === 0 ? manage_profiles_tier_dialog_model_label() : ""}
+                    {manage_profiles_tier_dialog_model_label()}
                   </span>
                   <input
                     class="input text-sm font-mono"
@@ -186,9 +184,7 @@
                 </label>
                 <label class="flex flex-col gap-1">
                   <span class="text-xs font-medium">
-                    {i === 0
-                      ? manage_profiles_tier_dialog_max_context_label()
-                      : ""}
+                    {manage_profiles_tier_dialog_max_context_label()}
                   </span>
                   <input
                     class="input text-sm font-mono"
@@ -199,7 +195,7 @@
                 </label>
                 <button
                   type="button"
-                  class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500 mt-6"
+                  class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500 mt-6 w-fit sm:w-auto"
                   aria-label={manage_profiles_remove_profile()}
                   onclick={() => (rows = rows.filter((_, ri) => ri !== i))}
                 >

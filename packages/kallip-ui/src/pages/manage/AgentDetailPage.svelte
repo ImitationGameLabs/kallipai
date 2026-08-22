@@ -251,7 +251,7 @@
             }}
           >
             <Menu.Trigger
-              class="size-8 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500"
+              class="size-10 grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-surface-500 shrink-0"
               aria-label={manage_agent_identity_actions_aria()}
             >
               <MoreVertical class="size-4" />
