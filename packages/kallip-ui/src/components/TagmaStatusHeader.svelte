@@ -208,10 +208,13 @@
   {:else}
     {#if collapsedSmall}
       <!-- Collapsed summary line (see the script note): liveness dot +
-           active/total + budget fill; the size-10 chevron meets T1 and
-           restores the full bar + rows. -->
+           active/total -- the same first line the expanded bar leads with
+           (budget only appears expanded, on its own row). The size-10
+           chevron is anchored to the row's right edge, the same anchor the
+           expanded toggle uses, so the control does not shift between
+           states. -->
       <div
-        class="mx-auto w-full max-w-[56rem] px-4 min-h-10 flex items-center gap-3 text-base"
+        class="relative mx-auto w-full max-w-[56rem] px-4 min-h-10 flex items-center gap-3 text-base"
       >
         {#if status}
           <span
@@ -223,15 +226,6 @@
           <span class="tabular-nums whitespace-nowrap"
             >{status.subagentsActive}/{status.subagentsTotal}</span
           >
-          <span
-            class="h-1.5 w-16 shrink-0 rounded-full bg-surface-400-600 overflow-hidden"
-            aria-hidden="true"
-          >
-            <span
-              class="block h-full rounded-full bg-primary-500"
-              style="width: {budgetPct}%"
-            ></span>
-          </span>
         {:else}
           <span
             class="size-2 rounded-full bg-surface-400-600 animate-pulse"
@@ -239,11 +233,10 @@
           ></span>
           <span class="opacity-50">{tagma_status_waiting()}</span>
         {/if}
-        <span class="flex-1"></span>
         <button
           type="button"
           onclick={() => (expandedSmall = true)}
-          class="size-10 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0"
+          class="size-10 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0 absolute right-2 top-1/2 -translate-y-1/2"
           aria-label={tagma_status_show_details()}
           aria-expanded="false"
         >
@@ -251,25 +244,20 @@
         </button>
       </div>
     {:else}
-      <!-- Top bar placement: one centred row of the two segments. The
-         relative wrapper exists so the toggle can ride the bar's right
-         edge (full width) rather than the 56rem cluster's edge. -->
+      <!-- Top bar placement: the first line mirrors the collapsed summary;
+           budget rides a second centred row. The relative wrapper exists so
+           the toggle can ride the bar's right edge (full width) rather than
+           the 56rem cluster's edge. -->
       <div class="relative w-full">
         <div
-          class="mx-auto w-full max-w-[56rem] px-4 py-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 min-h-14 text-lg"
+          class="mx-auto w-full max-w-[56rem] px-4 py-3 flex flex-col items-center gap-y-2 min-h-14 text-lg"
         >
           {#if status}
             {@render subagentsSegment(status)}
-            <!-- Vertical rule between the two segments (aria-hidden: the
-               title attributes carry the names to screen readers). -->
-            <div
-              class="w-px self-stretch bg-surface-400-600"
-              aria-hidden="true"
-            ></div>
-            <!-- Segment 2: token budget. When the two segments no longer fit,
-               flex-wrap starts a second centred row (justify-center on this
-               container too, not a left pin). Track is 400-600 because it
-               must clear the bar's tone in both modes. -->
+            <!-- Budget on its own centred row: the first line then matches
+                 the collapsed summary (dot + counts) in both states. Track
+                 is 400-600 because it must clear the bar's tone in both
+                 modes. -->
             <div class="flex items-center gap-2">
               <span class="text-base opacity-60">{tagma_status_budget()}</span>
               <div

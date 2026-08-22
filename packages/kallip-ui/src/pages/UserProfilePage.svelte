@@ -64,7 +64,7 @@
 
 <div class="flex flex-col h-full">
   <header
-    class="px-4 py-2 border-b border-surface-200-800 flex items-center gap-2"
+    class="px-4 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))] border-b border-surface-200-800 grid grid-cols-[auto_1fr_auto] items-center gap-2 md:flex"
   >
     <button
       type="button"
@@ -74,10 +74,12 @@
     >
       <ChevronLeft class="size-4" />
     </button>
-    <div class="flex flex-col min-w-0 flex-1">
+    <div class="flex flex-col min-w-0 justify-center px-2 text-center md:flex-1 md:px-0 md:text-left">
       <p class="text-sm font-semibold truncate">@{handle}</p>
       <p class="text-xs opacity-50 truncate">{user_profile_subtitle()}</p>
     </div>
+    <!-- Balances the back button so the title stays optically centred below md. -->
+    <span class="size-8 md:hidden" aria-hidden="true"></span>
   </header>
 
   <div class="flex-1 min-h-0 overflow-auto">

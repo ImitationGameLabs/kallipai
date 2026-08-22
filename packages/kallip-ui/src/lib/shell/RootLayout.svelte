@@ -3,9 +3,11 @@
   import type { Snippet } from "svelte";
   import AppShell from "../../components/AppShell.svelte";
   import AccountMenu from "../../components/AccountMenu.svelte";
+  import TagmaStatusHeader from "../../components/TagmaStatusHeader.svelte";
   import { classifyError } from "../errors.ts";
   import { agoraSession } from "../session/agora.svelte";
   import { channelsStore } from "../session/channels.svelte";
+  import { statusCardStore } from "../session/statusCard.svelte.ts";
   import { roomsStore } from "../session/rooms.svelte";
   import { realtimeStore } from "../session/realtime.svelte";
   import { roomConversationsStore } from "../session/roomConversations.svelte";
@@ -278,10 +280,33 @@
   <AccountMenu />
 {/snippet}
 
+<!-- Mobile top row for offline /local/chat: the page's status header lifts
+     into the shell so it rides beside the back chevron and above the
+     banner; only handed over when a back row exists at all. -->
+{#snippet topRowSnippet()}
+  {#if mode === "offline" && pathname === "/local/chat"}
+    <TagmaStatusHeader
+      status={channelsStore.get("local")?.statusSnapshot}
+      agentRows={{
+        rootRow: statusCardStore.rootRow,
+        subRows: statusCardStore.subRows,
+      }}
+      sideLayout={false}
+    />
+  {/if}
+{/snippet}
+
 {#if decision.kind === "render" && isPublicRoute(pathname)}
   {@render children()}
 {:else if decision.kind === "render"}
-  <AppShell {links} {isActive} {back} error={errorView} status={statusSnippet}>
+  <AppShell
+    {links}
+    {isActive}
+    {back}
+    topRow={back ? topRowSnippet : undefined}
+    error={errorView}
+    status={statusSnippet}
+  >
     {@render children()}
   </AppShell>
 {:else}

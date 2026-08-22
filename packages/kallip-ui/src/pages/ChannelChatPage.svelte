@@ -27,7 +27,16 @@
     chat_notice_offline,
   } from "../paraglide/messages.js";
 
-  let { conversationId }: { conversationId: string } = $props();
+  let {
+    conversationId,
+    statusHeaderMobile = true,
+  }: {
+    conversationId: string;
+    /** Keep this page's own status header below md. The offline /local/chat
+     * route lifts it into the shell's mobile top row instead (RootLayout
+     * renders a second instance there) and passes false here. */
+    statusHeaderMobile?: boolean;
+  } = $props();
 
   // Resolves to undefined only briefly: online while a channel's key exchange
   // runs, or offline on a /local/chat deep-link before the boot reconnect lands
@@ -144,7 +153,10 @@
   {/if}
 {:else}
   <div class={sideLayout ? "flex flex-row h-full" : "flex flex-col h-full"}>
-    <TagmaStatusHeader
+    <!-- contents keeps the header a direct flex child on mobile; the local
+         route hides it below md because the shell top row owns it there. -->
+    <div class={statusHeaderMobile ? "contents" : "hidden md:block"}>
+      <TagmaStatusHeader
       status={conv.statusSnapshot}
       agentRows={{
         rootRow: statusCardStore.rootRow,
@@ -160,6 +172,7 @@
         }
       }}
     />
+    </div>
     <!-- The wrapper gives the transcript a flex child whose width can be
          zeroed (min-w-0) in the sidebar state; in the top-bar state it is
          a no-op flex column. -->

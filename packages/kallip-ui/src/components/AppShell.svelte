@@ -62,6 +62,7 @@
     brand,
     status,
     back = null,
+    topRow = undefined,
     error = null,
     children,
   }: {
@@ -77,10 +78,12 @@
     brand?: Snippet;
     status?: Snippet;
     // Rendered as a uniform banner above the page content.
-    // Small-screen back row: when set (offline content pages), the bottom
-    // bar hides and a home-link row renders above the content instead. The
-    // desktop sidebar stays; the row is md:hidden.
-  back?: { href: string; label: string } | null;
+    // Small-screen top row: when set, renders beside the back affordance
+    // above the banner (chat pages lift their status line here). The back
+    // config itself shows the home-link chevron on offline content pages;
+    // the desktop sidebar stays and the whole row is md:hidden.
+    back?: { href: string; label: string } | null;
+    topRow?: Snippet;
     error?: ErrorView | null;
     children: Snippet;
   } = $props();
@@ -245,16 +248,31 @@
 
   <!-- page content -->
   <main class="flex flex-col min-h-0 min-w-0 overflow-hidden">
-    {#if back}
-      <!-- md:hidden: the desktop sidebar already offers every destination;
-           this row is the small-screen stand-in for the hidden bottom bar. -->
-      <a
-        href={back.href}
-        aria-label={back.label}
-        class="md:hidden flex items-center px-4 pt-3 text-primary-500 dark:text-primary-400 hover:underline"
+    {#if back || topRow}
+      <!-- md:hidden mobile top row: the shell's back affordance plus the
+           page-supplied status line (chat pages lift their TagmaStatusHeader
+           here so the banner sorts below it). The desktop sidebar already
+           offers every destination; the grid keeps the centre column truly
+           centred whether or not a back button exists. -->
+      <div
+        class="md:hidden grid grid-cols-[auto_1fr_auto] items-center px-2 pt-[env(safe-area-inset-top)] min-h-10"
       >
-        <ChevronLeft class="size-4 shrink-0" aria-hidden="true" />
-      </a>
+        {#if back}
+          <a
+            href={back.href}
+            aria-label={back.label}
+            class="size-8 grid place-items-center rounded-base text-primary-500 dark:text-primary-400 hover:preset-filled-surface-500"
+          >
+            <ChevronLeft class="size-4" aria-hidden="true" />
+          </a>
+        {:else}
+          <span class="size-8"></span>
+        {/if}
+        <div class="min-w-0 flex justify-center px-1">
+          {#if topRow}{@render topRow()}{/if}
+        </div>
+        <span class="size-8"></span>
+      </div>
     {/if}
     {#if error}
       <Banner title={error.title} detail={error.detail} hint={error.hint} />
