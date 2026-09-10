@@ -242,6 +242,7 @@ mod tests {
     use super::*;
     use crate::retry::RetryPolicy;
     use crate::test_support::{MapSource, ctx_from_source, profile};
+    use crate::test_support::{tool_result_msg, user_msg};
     use just_llm_client::LlmBackend;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -315,7 +316,7 @@ mod tests {
     fn wedge_slice_declares_its_gap() {
         let turn = Turn {
             id: crate::context::turn::TurnId(7),
-            messages: vec![ChatMessage::tool_result(oversized_content(), "w0")],
+            messages: vec![tool_result_msg(oversized_content(), "w0")],
             estimated_tokens: 0,
             kind: TurnKind::Conversation,
         };
@@ -343,8 +344,8 @@ mod tests {
         let (ctx, _server) = summary_ctx().await;
         {
             let mut s = ctx.store.lock().await;
-            s.push_turn(vec![ChatMessage::tool_result(oversized_content(), "w0")]);
-            s.push_turn(vec![ChatMessage::user("small one")]);
+            s.push_turn(vec![tool_result_msg(oversized_content(), "w0")]);
+            s.push_turn(vec![user_msg("small one")]);
             let wedge_est = s.turns()[0].estimated_tokens;
             assert!(
                 wedge_est > SUMMARIZER_INPUT_BUDGET,
@@ -388,7 +389,7 @@ mod tests {
         ctx.store
             .lock()
             .await
-            .push_turn(vec![ChatMessage::tool_result(oversized_content(), "w0")]);
+            .push_turn(vec![tool_result_msg(oversized_content(), "w0")]);
         let outcome = summarize_and_evict(&ctx).await.unwrap();
         assert!(matches!(outcome, CompactOutcome::Compacted));
         let s = ctx.store.lock().await;

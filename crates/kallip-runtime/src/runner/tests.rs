@@ -1,10 +1,11 @@
 use super::*;
+use crate::test_support::{TurnMessage, tool_calls_msg, tool_result_msg, user_msg};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use just_llm_client::{
     LlmBackend,
-    types::chat::{ChatToolCall, ToolCallsMessage},
+    types::chat::{ChatToolCall, FunctionCall, ToolCallsMessage, ToolType},
 };
 use kallip_common::protocol::FailoverChainExhaustion;
 use wiremock::{
@@ -28,30 +29,7 @@ fn no_cancel() -> CancellationToken {
 
 // --- synthesize_unanswered_results unit tests ---
 
-use just_llm_client::types::chat::{FunctionCall, ToolType};
-
-/// Build an assistant `tool_calls` message declaring the given (id, tool name) calls.
-fn assistant_tool_calls(calls: &[(&str, &str)]) -> ChatMessage {
-    ChatMessage::ToolCalls(ToolCallsMessage {
-        role: "assistant".into(),
-        content: None,
-        name: None,
-        tool_calls: calls
-            .iter()
-            .map(|(id, name)| ChatToolCall {
-                id: (*id).into(),
-                kind: ToolType::Function,
-                function: FunctionCall {
-                    name: (*name).into(),
-                    arguments: "{}".into(),
-                },
-            })
-            .collect(),
-        reasoning_content: None,
-    })
-}
-
-fn result_ids(msgs: &[ChatMessage]) -> Vec<&str> {
+fn result_ids(msgs: &[TurnMessage]) -> Vec<&str> {
     msgs.iter().filter_map(|m| m.tool_call_id()).collect()
 }
 
@@ -59,10 +37,7 @@ fn result_ids(msgs: &[ChatMessage]) -> Vec<&str> {
 fn synthesize_answers_break_and_trailing_calls() {
     // [break, bash_exec]: the loop returns at break, so neither ran — break gets
     // its success ack, bash_exec gets an honest not-executed result.
-    let mut msgs = vec![assistant_tool_calls(&[
-        ("c1", "break"),
-        ("c2", "bash_exec"),
-    ])];
+    let mut msgs = vec![tool_calls_msg(&[("c1", "break"), ("c2", "bash_exec")])];
     synthesize_unanswered_results(
         &mut msgs,
         BreakUntil::Wait {
@@ -86,8 +61,8 @@ fn synthesize_answers_break_and_trailing_calls() {
 fn synthesize_preserves_existing_results() {
     // [bash_exec, break]: bash_exec already ran and has a result; only break is filled.
     let mut msgs = vec![
-        assistant_tool_calls(&[("c1", "bash_exec"), ("c2", "break")]),
-        ChatMessage::tool_result("done", "c1"),
+        tool_calls_msg(&[("c1", "bash_exec"), ("c2", "break")]),
+        tool_result_msg("done", "c1"),
     ];
     synthesize_unanswered_results(
         &mut msgs,
@@ -103,8 +78,8 @@ fn synthesize_preserves_existing_results() {
 #[test]
 fn synthesize_is_noop_on_complete_turn_and_idempotent() {
     let mut msgs = vec![
-        assistant_tool_calls(&[("c1", "bash_exec")]),
-        ChatMessage::tool_result("done", "c1"),
+        tool_calls_msg(&[("c1", "bash_exec")]),
+        tool_result_msg("done", "c1"),
     ];
     synthesize_unanswered_results(
         &mut msgs,
@@ -435,10 +410,8 @@ fn wiremock_source(map: HashMap<String, Arc<dyn LlmBackend>>) -> Arc<dyn Backend
 
 /// Drive one `run_agent_rounds`: seed a user turn, mint a round token, run, collect events.
 async fn run_rounds(ctx: &mut AgentContext) -> (Result<RoundOutcome>, Vec<AgentEvent>) {
-    ctx.record_turn(vec![ChatMessage::user(
-        "respond with the single word: done",
-    )])
-    .await;
+    ctx.record_turn(vec![user_msg("respond with the single word: done")])
+        .await;
     let round = RoundToken::new(&ctx.cancel);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
@@ -622,8 +595,7 @@ async fn switch_takes_effect_next_request_and_resets_failover_chain() {
         registry,
     });
 
-    ctx.record_turn(vec![ChatMessage::user("switch time")])
-        .await;
+    ctx.record_turn(vec![user_msg("switch time")]).await;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
     let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx).await;
@@ -805,8 +777,7 @@ async fn bare_assistant_heartbeats_then_force_idles_at_cap() {
     let profiles = vec![profile("p1", "ep1", 500_000)];
     let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
     ctx.config.max_heartbeat_rounds = 2; // force-idle once no_progress reaches 3
-    ctx.record_turn(vec![ChatMessage::user("say something")])
-        .await;
+    ctx.record_turn(vec![user_msg("say something")]).await;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);

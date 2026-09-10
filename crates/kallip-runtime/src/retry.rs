@@ -343,6 +343,7 @@ pub async fn stream_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{request, user_msg};
 
     // --- pure unit tests ---
 
@@ -454,11 +455,7 @@ mod tests {
 
     use crate::profile::ChatClient;
     use futures_util::StreamExt;
-    use just_llm_client::{
-        ChatClientOptions, LlmBackend,
-        provider::OpenAiCompatBackend,
-        types::chat::{ChatCompletionRequest, ChatMessage},
-    };
+    use just_llm_client::{ChatClientOptions, LlmBackend, provider::OpenAiCompatBackend};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
@@ -483,10 +480,6 @@ mod tests {
             max_delay: Duration::from_millis(5),
             retry_timeout: Duration::from_secs(10),
         }
-    }
-
-    fn trivial_request() -> ChatCompletionRequest {
-        ChatCompletionRequest::new("gpt-4.1-mini", vec![ChatMessage::user("hi")])
     }
 
     /// Count `AgentEvent::Retrying` events queued on `rx`.
@@ -518,7 +511,7 @@ mod tests {
         let result = stream_with_retry(
             RetryCall {
                 client: &client,
-                request: trivial_request(),
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(2),
                 round: 0,
                 prior_retries: 0,
@@ -553,7 +546,7 @@ mod tests {
         let result = stream_with_retry(
             RetryCall {
                 client: &client,
-                request: trivial_request(),
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(2),
                 round: 0,
                 prior_retries: 0,
@@ -589,7 +582,7 @@ mod tests {
         let result = stream_with_retry(
             RetryCall {
                 client: &client,
-                request: trivial_request(),
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(2),
                 round: 0,
                 prior_retries: 0,
@@ -618,7 +611,7 @@ mod tests {
         let result = stream_with_retry(
             RetryCall {
                 client: &client,
-                request: trivial_request(),
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(3),
                 round: 0,
                 prior_retries: 0,
@@ -648,7 +641,7 @@ mod tests {
         let result = stream_with_retry(
             RetryCall {
                 client: &client,
-                request: trivial_request(),
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(3),
                 round: 0,
                 prior_retries: 0,
@@ -678,7 +671,7 @@ mod tests {
         let result = stream_with_retry(
             RetryCall {
                 client: &client,
-                request: trivial_request(),
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(3),
                 round: 0,
                 prior_retries: 0,
@@ -711,7 +704,7 @@ mod tests {
         let result = stream_with_retry(
             RetryCall {
                 client: &client,
-                request: trivial_request(),
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(1),
                 round: 0,
                 prior_retries: 0,
@@ -754,7 +747,7 @@ mod tests {
         let result = stream_with_retry(
             RetryCall {
                 client: &client,
-                request: trivial_request(),
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(1),
                 round: 0,
                 prior_retries: 0,
@@ -789,7 +782,7 @@ mod tests {
         let result = stream_with_retry(
             RetryCall {
                 client: &client,
-                request: trivial_request(),
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(1),
                 round: 0,
                 prior_retries: 0,
@@ -829,7 +822,7 @@ mod tests {
         let mut stream = stream_with_retry(
             RetryCall {
                 client: &client,
-                request: trivial_request(),
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(2),
                 round: 0,
                 prior_retries: 0,

@@ -35,6 +35,7 @@ pub(crate) fn estimate_message_tokens(message: &ChatMessage) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::user_msg;
 
     #[test]
     fn estimate_text_is_positive_for_nonempty() {
@@ -60,7 +61,7 @@ mod tests {
         // message (the JSON envelope adds the role/structure tokens).
         let content = "hello world";
         let bare = estimate_text(content);
-        let wrapped = estimate_message_tokens(&ChatMessage::user(content));
+        let wrapped = estimate_message_tokens(&user_msg(content));
         assert!(
             wrapped > bare,
             "message estimate ({wrapped}) should exceed bare content ({bare})"

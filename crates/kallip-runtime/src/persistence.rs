@@ -1212,6 +1212,9 @@ mod tests {
 
     use crate::context::AgenticContext as _;
     use crate::history::{HistoryWriter, RecordKind};
+    use crate::test_support::{
+        TurnMessage, assistant_msg, tool_calls_msg, tool_result_msg, user_msg,
+    };
     use serial_test::serial;
     use tempfile::TempDir;
 
@@ -1226,8 +1229,8 @@ mod tests {
     fn persist_writes_manifest_and_pins_with_backup() {
         let dir = TempDir::new().unwrap();
         let mut store = ContextStore::new();
-        store.pin("note", ChatMessage::assistant("keep")).unwrap();
-        store.push_turn(vec![ChatMessage::user("hello")]);
+        store.pin("note", assistant_msg("keep")).unwrap();
+        store.push_turn(vec![user_msg("hello")]);
         let first_ids = store.to_manifest_doc().conversation_turn_ids.clone();
 
         persist_context(&store, dir.path()).unwrap();
@@ -1239,7 +1242,7 @@ mod tests {
         );
 
         // Second turn changes the manifest; the backup keeps version 1.
-        store.push_turn(vec![ChatMessage::user("more")]);
+        store.push_turn(vec![user_msg("more")]);
         persist_context(&store, dir.path()).unwrap();
         let manifest_v2 = std::fs::read_to_string(dir.path().join("manifest.json")).unwrap();
         let bak = std::fs::read_to_string(dir.path().join("manifest.json.bak")).unwrap();
@@ -1259,10 +1262,8 @@ mod tests {
     fn persist_excludes_injected_turns_from_manifest() {
         let dir = TempDir::new().unwrap();
         let mut store = ContextStore::new();
-        let kept = store.push_turn(vec![ChatMessage::user("kept")]).0;
-        let injected = store
-            .push_turn(vec![ChatMessage::user("[system] restart")])
-            .0;
+        let kept = store.push_turn(vec![user_msg("kept")]).0;
+        let injected = store.push_turn(vec![user_msg("[system] restart")]).0;
         store.register_injected_turn(injected);
 
         persist_context(&store, dir.path()).unwrap();
@@ -1276,13 +1277,11 @@ mod tests {
 
     /// A legacy agent directory: whole-store `context.json` plus matching
     /// history records for the conversation turns.
-    fn legacy_fixture() -> (ContextStore, Vec<ChatMessage>) {
+    fn legacy_fixture() -> (ContextStore, Vec<TurnMessage>) {
         let mut store = ContextStore::new();
-        store
-            .pin("note", ChatMessage::assistant("pinned note"))
-            .unwrap();
-        store.push_turn(vec![ChatMessage::user("first question")]);
-        store.push_turn(vec![ChatMessage::assistant("first answer")]);
+        store.pin("note", assistant_msg("pinned note")).unwrap();
+        store.push_turn(vec![user_msg("first question")]);
+        store.push_turn(vec![assistant_msg("first answer")]);
         store.retry_log.push(kallip_common::retry::RetryRecord {
             timestamp: 9,
             round: 0,
@@ -1295,10 +1294,7 @@ mod tests {
             quota_reset: None,
         });
         // Expected conversation window, in order, for history.
-        let convo = vec![
-            ChatMessage::user("first question"),
-            ChatMessage::assistant("first answer"),
-        ];
+        let convo = vec![user_msg("first question"), assistant_msg("first answer")];
         (store, convo)
     }
 
@@ -1306,7 +1302,7 @@ mod tests {
         dir: &TempDir,
         store: &ContextStore,
         with_history: bool,
-        convo: &[ChatMessage],
+        convo: &[TurnMessage],
     ) {
         std::fs::write(
             dir.path().join("context.json"),
@@ -1340,7 +1336,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (mut store, convo) = legacy_fixture();
         // A restart notice from a previous restore lives in the legacy store.
-        store.push_turn(vec![ChatMessage::user(RESTART_MESSAGE)]);
+        store.push_turn(vec![user_msg(RESTART_MESSAGE)]);
         write_legacy(&dir, &store, true, &convo);
         let legacy_next = store.to_manifest_doc().next_turn_id;
 
@@ -1505,7 +1501,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (mut store, convo) = legacy_fixture();
         // A notice from a previous restore lives in the legacy store.
-        store.push_turn(vec![ChatMessage::user(RESTART_MESSAGE)]);
+        store.push_turn(vec![user_msg(RESTART_MESSAGE)]);
         write_legacy(&dir, &store, true, &convo);
         let id = AgentId::from("twice".to_owned());
         let _ = restore_agent(&id, dir.path(), NO_TRUNCATION).unwrap();
@@ -1574,22 +1570,13 @@ mod tests {
     /// untouched.
     /// A persisted 400-bug-shaped turn: `c2` declared but never answered,
     /// `c9` answering nothing — both pairing directions damaged at once.
-    fn pairing_damaged_dir() -> (TempDir, Vec<ChatMessage>, u64) {
-        use just_llm_client::types::chat::{ChatToolCall, FunctionCall, ToolType};
-        let call = |id: &str, name: &str| ChatToolCall {
-            id: id.to_owned(),
-            kind: ToolType::Function,
-            function: FunctionCall {
-                name: name.to_owned(),
-                arguments: "{}".to_owned(),
-            },
-        };
+    fn pairing_damaged_dir() -> (TempDir, Vec<TurnMessage>, u64) {
         let dir = TempDir::new().unwrap();
         let mut store = ContextStore::new();
         let damaged = vec![
-            ChatMessage::assistant_tool_calls(vec![call("c1", "read"), call("c2", "edit")]),
-            ChatMessage::tool_result("ok", "c1"),
-            ChatMessage::tool_result("ghost", "c9"),
+            tool_calls_msg(&[("c1", "read"), ("c2", "edit")]),
+            tool_result_msg("ok", "c1"),
+            tool_result_msg("ghost", "c9"),
         ];
         let (turn_id, _) = store.push_turn(damaged.clone());
         let history = HistoryWriter::new(dir.path().to_path_buf());
@@ -1713,37 +1700,19 @@ mod tests {
     /// conversation turns (the newest pairing-damaged on demand), usage and
     /// retry-log state that only the manifest carries, and matching history.
     fn wreckable_dir(oldest_damaged: bool) -> (TempDir, ContextStore) {
-        use just_llm_client::types::chat::{ChatToolCall, FunctionCall, ToolType};
-        let call = |id: &str, name: &str| ChatToolCall {
-            id: id.to_owned(),
-            kind: ToolType::Function,
-            function: FunctionCall {
-                name: name.to_owned(),
-                arguments: "{}".to_owned(),
-            },
-        };
         let dir = TempDir::new().unwrap();
         let mut store = ContextStore::new();
-        store.pin("note", ChatMessage::assistant("pinned")).unwrap();
-        let histories: [Vec<ChatMessage>; 3] = [
+        store.pin("note", assistant_msg("pinned")).unwrap();
+        let histories: [Vec<TurnMessage>; 3] = [
             if oldest_damaged {
-                vec![
-                    ChatMessage::tool_result("orphan", "ghost"),
-                    ChatMessage::assistant("reply-a"),
-                ]
+                vec![tool_result_msg("orphan", "ghost"), assistant_msg("reply-a")]
             } else {
-                vec![
-                    ChatMessage::user("ask-a"),
-                    ChatMessage::assistant("reply-a"),
-                ]
+                vec![user_msg("ask-a"), assistant_msg("reply-a")]
             },
+            vec![user_msg("ask-b"), assistant_msg("reply-b")],
             vec![
-                ChatMessage::user("ask-b"),
-                ChatMessage::assistant("reply-b"),
-            ],
-            vec![
-                ChatMessage::assistant_tool_calls(vec![call("c1", "read")]),
-                ChatMessage::tool_result("ok", "c1"),
+                tool_calls_msg(&[("c1", "read")]),
+                tool_result_msg("ok", "c1"),
             ],
         ];
         let history = HistoryWriter::new(dir.path().to_path_buf());
@@ -1768,7 +1737,7 @@ mod tests {
         persist_context(&store, dir.path()).unwrap();
         // A second persist leaves the first manifest as the .bak; the churn
         // turn also reaches history, so the rescan below sees it.
-        let churn = vec![ChatMessage::user("churn")];
+        let churn = vec![user_msg("churn")];
         let (churn_id, _) = store.push_turn(churn.clone());
         let history = HistoryWriter::new(dir.path().to_path_buf());
         history
@@ -1853,7 +1822,7 @@ mod tests {
         // the first fresh turn one past that — no ID is reused.
         let history_max = store.to_manifest_doc().next_turn_id - 1;
         let mut live = restored.store;
-        let (fresh_id, _) = live.push_turn(vec![ChatMessage::user("after loss")]);
+        let (fresh_id, _) = live.push_turn(vec![user_msg("after loss")]);
         assert_eq!(fresh_id.0, history_max + 2, "rescanned past history max");
     }
     /// manifest.json and .bak both corrupt: the window rebuilds from the
@@ -1890,7 +1859,7 @@ mod tests {
         // the manifest rewrite references only kept turns — no collision.
         let history_max = store.to_manifest_doc().next_turn_id - 1;
         let mut live = restored.store;
-        let fresh = vec![ChatMessage::user("after wreck")];
+        let fresh = vec![user_msg("after wreck")];
         let (fresh_id, _) = live.push_turn(fresh.clone());
         // The agent task records every turn to history before persisting;
         // mirror that so the rehydrate below finds the fresh turn.
@@ -2235,13 +2204,7 @@ mod tests {
 
             // One history record (as the live writer would produce).
             HistoryWriter::new(dir.clone())
-                .append(
-                    Some(0),
-                    &[ChatMessage::user("hello")],
-                    16,
-                    RecordKind::Turn,
-                    None,
-                )
+                .append(Some(0), &[user_msg("hello")], 16, RecordKind::Turn, None)
                 .unwrap();
             // A context.json carrying non-zero cumulative usage.
             std::fs::write(

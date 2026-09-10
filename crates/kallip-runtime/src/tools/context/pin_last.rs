@@ -163,7 +163,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::context::ContextStore;
-    use just_llm_client::types::chat::{ChatToolCall, FunctionCall, ToolType};
+    use crate::test_support::{assistant_msg, tool_call_msg, tool_result_msg};
 
     fn handle(store: ContextStore) -> Arc<Mutex<dyn AgenticContext>> {
         Arc::new(Mutex::new(store))
@@ -185,23 +185,12 @@ mod tests {
         .unwrap()
     }
 
-    fn dispatch(id: &str, name: &str, args: &str) -> ChatMessage {
-        ChatMessage::assistant_tool_calls(vec![ChatToolCall {
-            id: id.into(),
-            kind: ToolType::Function,
-            function: FunctionCall {
-                name: name.into(),
-                arguments: args.into(),
-            },
-        }])
-    }
-
     /// The card carries the envelope's tool name, the pairing call's first
     /// arguments line, and the extracted result.output payload — a
     /// self-contained user message with no tool protocol fields.
     #[test]
     fn reference_card_uses_envelope_and_pairing_call() {
-        let msg = ChatMessage::tool_result(envelope("read_file", Some("FILE BODY")), "c1");
+        let msg = tool_result_msg(envelope("read_file", Some("FILE BODY")), "c1");
         let call = ("read_file".to_owned(), "{\"path\":\"a.txt\"}".to_owned());
         let card = reference_card(&msg, Some(&call));
         let mut lines = card.lines();
@@ -215,7 +204,7 @@ mod tests {
 
     #[test]
     fn reference_card_degrades_when_call_missing() {
-        let msg = ChatMessage::tool_result(envelope("bash", Some("out")), "c1");
+        let msg = tool_result_msg(envelope("bash", Some("out")), "c1");
         let card = reference_card(&msg, None);
         assert!(card.starts_with("[pinned tool result · bash · command unavailable]"));
     }
@@ -223,7 +212,7 @@ mod tests {
     #[test]
     fn reference_card_truncates_long_commands() {
         let long = "x".repeat(150);
-        let msg = ChatMessage::tool_result(envelope("t", Some("o")), "c1");
+        let msg = tool_result_msg(envelope("t", Some("o")), "c1");
         let card = reference_card(&msg, Some(&("t".to_owned(), long)));
         let header = card.lines().next().unwrap();
         let cmd = header
@@ -251,7 +240,7 @@ mod tests {
             rest: serde_json::Map::new(),
         })
         .unwrap();
-        let msg = ChatMessage::tool_result(raw, "c1");
+        let msg = tool_result_msg(raw, "c1");
         let card = reference_card(&msg, None);
         assert!(card.starts_with("[pinned tool result · t · command unavailable]"));
         assert!(
@@ -268,19 +257,19 @@ mod tests {
             rest: serde_json::Map::new(),
         })
         .unwrap();
-        let msg = ChatMessage::tool_result(raw, "c1");
+        let msg = tool_result_msg(raw, "c1");
         let card = reference_card(&msg, None);
         assert!(
             card.ends_with("{\"output\":42}"),
             "non-string output pins the serialized result: {card}"
         );
 
-        let plain = ChatMessage::tool_result("plain text", "c1");
+        let plain = tool_result_msg("plain text", "c1");
         let card = reference_card(&plain, None);
         assert!(card.starts_with("[pinned tool result · unknown tool · command unavailable]"));
         assert!(card.ends_with("plain text"));
 
-        let no_output = ChatMessage::tool_result(envelope("t", None), "c1");
+        let no_output = tool_result_msg(envelope("t", None), "c1");
         let card = reference_card(&no_output, None);
         assert!(card.contains(envelope("t", None).as_str()));
     }
@@ -293,8 +282,8 @@ mod tests {
     async fn pinned_card_is_a_plain_user_message() {
         let mut ctx = ContextStore::new();
         ctx.push_turn(vec![
-            dispatch("c1", "read_file", "{\"path\":\"a.txt\"}"),
-            ChatMessage::tool_result(envelope("read_file", Some("BODY")), "c1"),
+            tool_call_msg("c1", "read_file", "{\"path\":\"a.txt\"}"),
+            tool_result_msg(envelope("read_file", Some("BODY")), "c1"),
         ]);
         let store = std::sync::Arc::new(tokio::sync::Mutex::new(ctx));
         let tool = ContextPinLastTool::new(store.clone());
@@ -322,15 +311,15 @@ mod tests {
         let mut store = ContextStore::new();
         // A pinned assistant summary must be skipped by the scan.
         store
-            .pin("context_summary", ChatMessage::assistant("summary"))
+            .pin("context_summary", assistant_msg("summary"))
             .unwrap();
         store.push_turn(vec![
-            dispatch("c1", "read_file", "{\"path\":\"old.txt\"}"),
-            ChatMessage::tool_result(envelope("read_file", Some("OLD")), "c1"),
+            tool_call_msg("c1", "read_file", "{\"path\":\"old.txt\"}"),
+            tool_result_msg(envelope("read_file", Some("OLD")), "c1"),
         ]);
         store.push_turn(vec![
-            dispatch("c2", "read_file", "{\"path\":\"new.txt\"}"),
-            ChatMessage::tool_result(envelope("read_file", Some("NEW BODY")), "c2"),
+            tool_call_msg("c2", "read_file", "{\"path\":\"new.txt\"}"),
+            tool_result_msg(envelope("read_file", Some("NEW BODY")), "c2"),
         ]);
         let store = handle(store);
 
@@ -357,10 +346,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_kind_argument_is_ignored() {
         let mut store = ContextStore::new();
-        store.push_turn(vec![ChatMessage::tool_result(
-            envelope("t", Some("o")),
-            "c1",
-        )]);
+        store.push_turn(vec![tool_result_msg(envelope("t", Some("o")), "c1")]);
         let store = handle(store);
         let tool = ContextPinLastTool::new(store);
         let out = run(&tool, &json!({ "label": "x", "kind": "tool-result" }))
@@ -376,8 +362,8 @@ mod tests {
         // must resolve to the newer one.
         let mut store = ContextStore::new();
         store.push_turn(vec![
-            ChatMessage::tool_result(envelope("t", Some("old within turn")), "c1"),
-            ChatMessage::tool_result(envelope("t", Some("new within turn")), "c2"),
+            tool_result_msg(envelope("t", Some("old within turn")), "c1"),
+            tool_result_msg(envelope("t", Some("new within turn")), "c2"),
         ]);
         let store = handle(store);
         let tool = ContextPinLastTool::new(store);

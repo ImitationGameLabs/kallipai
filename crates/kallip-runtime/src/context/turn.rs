@@ -79,28 +79,20 @@ impl Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{assistant_msg, tool_call_msg, user_msg};
 
     #[test]
     fn estimate_tokens_scales_with_content() {
-        let short = Turn::estimate_tokens(&[ChatMessage::user("hello")]);
-        let long = Turn::estimate_tokens(&[ChatMessage::user("x".repeat(400))]);
+        let short = Turn::estimate_tokens(&[user_msg("hello")]);
+        let long = Turn::estimate_tokens(&[user_msg("x".repeat(400))]);
         assert!(long > short);
     }
 
     #[test]
     fn estimate_tokens_accounts_for_tool_calls() {
-        use just_llm_client::types::chat::{ChatToolCall, FunctionCall, ToolType};
-
-        let plain = Turn::estimate_tokens(&[ChatMessage::assistant("hello")]);
         let with_tools =
-            Turn::estimate_tokens(&[ChatMessage::assistant_tool_calls(vec![ChatToolCall {
-                id: "call_1".into(),
-                kind: ToolType::Function,
-                function: FunctionCall {
-                    name: "test".into(),
-                    arguments: r#"{"key": "value"}"#.into(),
-                },
-            }])]);
+            Turn::estimate_tokens(&[tool_call_msg("call_1", "test", r#"{"key": "value"}"#)]);
+        let plain = Turn::estimate_tokens(&[assistant_msg("hello")]);
         assert!(with_tools > plain);
     }
 

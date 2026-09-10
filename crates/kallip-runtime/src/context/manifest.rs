@@ -63,6 +63,7 @@ pub(crate) struct PinsDoc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::assistant_msg;
 
     #[test]
     fn manifest_doc_round_trips() {
@@ -103,7 +104,7 @@ mod tests {
             pins: vec![PinRecord {
                 id: 42,
                 label: "context_summary".into(),
-                message: ChatMessage::assistant("summary text"),
+                message: assistant_msg("summary text"),
                 estimated_tokens: 12,
             }],
         };

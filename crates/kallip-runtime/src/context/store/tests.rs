@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::{assistant_msg, usage, usage_with_completion, user_msg};
 
 fn new_store() -> ContextStore {
     ContextStore::new()
@@ -24,8 +25,8 @@ fn assert_invariant(store: &ContextStore) {
 #[test]
 fn push_turn_assigns_sequential_ids() {
     let mut store = new_store();
-    let (id0, _) = store.push_turn(vec![ChatMessage::user("a")]);
-    let (id1, _) = store.push_turn(vec![ChatMessage::user("b")]);
+    let (id0, _) = store.push_turn(vec![user_msg("a")]);
+    let (id1, _) = store.push_turn(vec![user_msg("b")]);
     assert_eq!(id0, TurnId(0));
     assert_eq!(id1, TurnId(1));
     assert_eq!(store.turn_count(), 2);
@@ -34,9 +35,9 @@ fn push_turn_assigns_sequential_ids() {
 #[test]
 fn drain_turns_removes_correct_range() {
     let mut store = new_store();
-    store.push_turn(vec![ChatMessage::user("a")]);
-    store.push_turn(vec![ChatMessage::user("b")]);
-    store.push_turn(vec![ChatMessage::user("c")]);
+    store.push_turn(vec![user_msg("a")]);
+    store.push_turn(vec![user_msg("b")]);
+    store.push_turn(vec![user_msg("c")]);
 
     let drained = store.drain_turns(0..2);
     assert_eq!(drained.len(), 2);
@@ -46,7 +47,7 @@ fn drain_turns_removes_correct_range() {
 #[test]
 fn pinned_items_are_tracked() {
     let mut store = new_store();
-    store.pin("test", ChatMessage::user("important")).unwrap();
+    store.pin("test", user_msg("important")).unwrap();
     assert_eq!(store.pinned_turns().count(), 1);
     assert_eq!(store.pinned_labels(), vec!["test"]);
     assert_invariant(&store);
@@ -55,14 +56,14 @@ fn pinned_items_are_tracked() {
 #[test]
 fn pin_rejects_duplicate_label() {
     let mut store = new_store();
-    store.pin("x", ChatMessage::user("a")).unwrap();
-    assert!(store.pin("x", ChatMessage::user("b")).is_err());
+    store.pin("x", user_msg("a")).unwrap();
+    assert!(store.pin("x", user_msg("b")).is_err());
 }
 
 #[test]
 fn unpin_removes_item() {
     let mut store = new_store();
-    store.pin("x", ChatMessage::user("a")).unwrap();
+    store.pin("x", user_msg("a")).unwrap();
     store.unpin("x").unwrap();
     assert_eq!(store.pinned_turns().count(), 0);
 }
@@ -78,19 +79,19 @@ fn pinned_budget_enforced() {
     let mut store = ContextStore::new();
     // Derive the budget from the same estimator the production path uses, so the test is
     // robust to any estimator: 5 pins fill the budget exactly, the 6th must be rejected.
-    let per_pin = estimate_message_tokens(&ChatMessage::user("a"));
+    let per_pin = estimate_message_tokens(&user_msg("a"));
     let budget = per_pin.checked_mul(5).expect("non-zero per-pin estimate");
     store.set_pinned_budget(budget);
     for label in ["a", "b", "c", "d", "e"] {
-        store.pin(label, ChatMessage::user("a")).unwrap();
+        store.pin(label, user_msg("a")).unwrap();
     }
     assert!(
-        store.pin("f", ChatMessage::user("a")).is_err(),
+        store.pin("f", user_msg("a")).is_err(),
         "6th pin must exceed the {budget}-token budget (per-pin = {per_pin})"
     );
     // Unpin frees budget.
     store.unpin("a").unwrap();
-    assert!(store.pin("f", ChatMessage::user("a")).is_ok());
+    assert!(store.pin("f", user_msg("a")).is_ok());
 }
 
 #[test]
@@ -111,17 +112,6 @@ fn warning_tracking() {
 
 // --- incremental-estimate anchor / flag mechanics ---
 
-fn usage(prompt_tokens: u32) -> just_llm_client::types::chat::Usage {
-    just_llm_client::types::chat::Usage {
-        prompt_tokens,
-        completion_tokens: 0,
-        prompt_cache_hit_tokens: None,
-        prompt_cache_miss_tokens: None,
-        total_tokens: prompt_tokens,
-        completion_tokens_details: None,
-    }
-}
-
 #[test]
 fn new_store_starts_in_full_mode() {
     let store = new_store();
@@ -133,8 +123,8 @@ fn new_store_starts_in_full_mode() {
 #[test]
 fn accumulate_usage_sets_anchor_and_clears_flag() {
     let mut store = new_store();
-    store.push_turn(vec![ChatMessage::user("a")]);
-    store.push_turn(vec![ChatMessage::user("b")]);
+    store.push_turn(vec![user_msg("a")]);
+    store.push_turn(vec![user_msg("b")]);
     assert!(store.needs_full_estimate(), "new store starts in full mode");
     store.accumulate_usage(&usage(100));
     assert_eq!(store.last_prompt_tokens(), Some(100));
@@ -152,7 +142,7 @@ fn prefix_ops_set_needs_full_estimate() {
     let mut store = new_store();
 
     clear(&mut store);
-    store.pin("x", ChatMessage::user("a")).unwrap();
+    store.pin("x", user_msg("a")).unwrap();
     assert!(store.needs_full_estimate(), "pin sets the flag");
 
     clear(&mut store);
@@ -160,11 +150,11 @@ fn prefix_ops_set_needs_full_estimate() {
     assert!(store.needs_full_estimate(), "unpin sets the flag");
 
     clear(&mut store);
-    store.replace_pin("y", ChatMessage::user("c")).unwrap();
+    store.replace_pin("y", user_msg("c")).unwrap();
     assert!(store.needs_full_estimate(), "replace_pin sets the flag");
 
-    store.push_turn(vec![ChatMessage::user("t1")]);
-    store.push_turn(vec![ChatMessage::user("t2")]);
+    store.push_turn(vec![user_msg("t1")]);
+    store.push_turn(vec![user_msg("t2")]);
     clear(&mut store);
     store.evict_turns(1);
     assert!(store.needs_full_estimate(), "evict_turns sets the flag");
@@ -177,7 +167,7 @@ fn prefix_ops_set_needs_full_estimate() {
 #[test]
 fn accumulate_usage_no_anchor_leaves_anchor_untouched() {
     let mut store = new_store();
-    store.push_turn(vec![ChatMessage::user("a")]);
+    store.push_turn(vec![user_msg("a")]);
     store.accumulate_usage(&usage(100)); // anchor at 1 turn, base 100
     assert_eq!(store.last_prompt_tokens(), Some(100));
     assert_eq!(store.anchored_turn_count(), 1);
@@ -201,14 +191,14 @@ fn accumulate_usage_no_anchor_leaves_anchor_untouched() {
 #[test]
 fn pinned_turn_caches_estimated_tokens() {
     let mut store = new_store();
-    let msg = ChatMessage::user("hello world");
+    let msg = user_msg("hello world");
     let expected = estimate_message_tokens(&msg);
     store.pin("x", msg).unwrap();
     let pinned = store.pinned_turns().next().unwrap();
     assert_eq!(pinned.estimated_tokens, expected);
     assert_eq!(store.pinned_tokens_total(), expected);
     // replace_pin updates the cache in place.
-    let msg2 = ChatMessage::user("goodbye world and more content here");
+    let msg2 = user_msg("goodbye world and more content here");
     let expected2 = estimate_message_tokens(&msg2);
     store.replace_pin("x", msg2).unwrap();
     let pinned = store.pinned_turns().next().unwrap();
@@ -220,7 +210,7 @@ fn pinned_turn_caches_estimated_tokens() {
 fn reestimate_recomputes_cached_tokens() {
     let mut store = new_store();
     // A legacy pinned item folded in carrying a stale (0) estimate.
-    let msg = ChatMessage::user("legacy content from a pre-caching format");
+    let msg = user_msg("legacy content from a pre-caching format");
     let real = estimate_message_tokens(&msg);
     store.legacy_pinned.push(PinnedItem {
         label: "legacy".into(),
@@ -249,14 +239,14 @@ fn reestimate_recomputes_cached_tokens() {
 fn migrate_legacy_pinned_preserves_order_and_ids() {
     let mut store = new_store();
     // Two conversation turns already in the store.
-    store.push_turn(vec![ChatMessage::user("c1")]);
-    store.push_turn(vec![ChatMessage::user("c2")]);
+    store.push_turn(vec![user_msg("c1")]);
+    store.push_turn(vec![user_msg("c2")]);
     let base_next = store.next_turn_id;
     // Inject three legacy pinned items in a known order.
     for label in ["sum", "skill:foo", "note"] {
         store.legacy_pinned.push(PinnedItem {
             label: label.into(),
-            message: ChatMessage::user(label),
+            message: user_msg(label),
             estimated_tokens: 5,
         });
     }
@@ -280,7 +270,7 @@ fn pinned_item_estimated_tokens_serde_default_is_zero() {
     // New-format pin round-trips with its cached value.
     let item = PinnedItem {
         label: "x".into(),
-        message: ChatMessage::user("hi"),
+        message: user_msg("hi"),
         estimated_tokens: 42,
     };
     let json = serde_json::to_string(&item).unwrap();
@@ -300,12 +290,10 @@ fn pinned_item_estimated_tokens_serde_default_is_zero() {
 #[test]
 fn evict_turns_skips_pinned() {
     let mut store = new_store();
-    store
-        .pin("context_summary", ChatMessage::assistant("sum"))
-        .unwrap();
-    store.push_turn(vec![ChatMessage::user("c1")]);
-    store.push_turn(vec![ChatMessage::user("c2")]);
-    store.push_turn(vec![ChatMessage::user("c3")]);
+    store.pin("context_summary", assistant_msg("sum")).unwrap();
+    store.push_turn(vec![user_msg("c1")]);
+    store.push_turn(vec![user_msg("c2")]);
+    store.push_turn(vec![user_msg("c3")]);
 
     let res = store.evict_turns(3);
     assert_eq!(res.evicted, 3, "all conversation turns evicted");
@@ -328,9 +316,9 @@ fn evict_turns_skips_pinned() {
 #[test]
 fn pin_inserts_after_pinned_partition() {
     let mut store = new_store();
-    store.pin("a", ChatMessage::user("a")).unwrap();
-    store.push_turn(vec![ChatMessage::user("convo")]);
-    store.pin("b", ChatMessage::user("b")).unwrap();
+    store.pin("a", user_msg("a")).unwrap();
+    store.push_turn(vec![user_msg("convo")]);
+    store.pin("b", user_msg("b")).unwrap();
     // Ordering: [a(pinned), b(pinned), convo] — b inserted after the pinned block, not at back.
     let labels: Vec<Option<&str>> = store.turns().iter().map(|t| t.label()).collect();
     assert_eq!(
@@ -344,11 +332,11 @@ fn pin_inserts_after_pinned_partition() {
 #[test]
 fn replace_pin_updates_in_place_keeps_position() {
     let mut store = new_store();
-    store.pin("a", ChatMessage::user("a-original")).unwrap();
-    store.pin("b", ChatMessage::user("b")).unwrap();
-    store.push_turn(vec![ChatMessage::user("convo")]);
+    store.pin("a", user_msg("a-original")).unwrap();
+    store.pin("b", user_msg("b")).unwrap();
+    store.push_turn(vec![user_msg("convo")]);
 
-    let new_msg = ChatMessage::user("a-replaced-longer-content");
+    let new_msg = user_msg("a-replaced-longer-content");
     let new_tokens = estimate_message_tokens(&new_msg);
     store.replace_pin("a", new_msg).unwrap();
 
@@ -364,17 +352,13 @@ fn replace_pin_updates_in_place_keeps_position() {
 #[test]
 fn manifest_projection_splits_pinned_conversation_and_injected() {
     let mut store = new_store();
-    store
-        .pin("context_summary", ChatMessage::assistant("sum"))
-        .unwrap();
-    let a = store.push_turn(vec![ChatMessage::user("a")]).0;
-    let b = store.push_turn(vec![ChatMessage::user("b")]).0;
+    store.pin("context_summary", assistant_msg("sum")).unwrap();
+    let a = store.push_turn(vec![user_msg("a")]).0;
+    let b = store.push_turn(vec![user_msg("b")]).0;
 
     // Simulate a restore-injected restart notice: consumes an ID, lands in
     // the conversation suffix, but is registered as injected.
-    let injected = store
-        .push_turn(vec![ChatMessage::user("[system] restart")])
-        .0;
+    let injected = store.push_turn(vec![user_msg("[system] restart")]).0;
     store.register_injected_turn(injected);
 
     let doc = store.to_manifest_doc();
@@ -393,14 +377,7 @@ fn manifest_projection_splits_pinned_conversation_and_injected() {
 #[test]
 fn manifest_projection_carries_state_history_cannot_rebuild() {
     let mut store = new_store();
-    store.accumulate_usage_no_anchor(&just_llm_client::types::chat::Usage {
-        prompt_tokens: 100,
-        completion_tokens: 40,
-        prompt_cache_hit_tokens: None,
-        prompt_cache_miss_tokens: None,
-        completion_tokens_details: None,
-        total_tokens: 140,
-    });
+    store.accumulate_usage_no_anchor(&usage_with_completion(100, 40));
     store.retry_log.push(kallip_common::retry::RetryRecord {
         timestamp: 5,
         round: 1,
@@ -451,9 +428,9 @@ fn usage_snapshot_reports_largest_turns_largest_first() {
     let mut store = new_store();
     // Three conversation turns with clearly separated estimates; push order
     // differs from size order so the sort has work to do.
-    store.push_turn(vec![ChatMessage::user("m".repeat(400))]);
-    store.push_turn(vec![ChatMessage::user("x".repeat(4_000))]);
-    store.push_turn(vec![ChatMessage::user("s")]);
+    store.push_turn(vec![user_msg("m".repeat(400))]);
+    store.push_turn(vec![user_msg("x".repeat(4_000))]);
+    store.push_turn(vec![user_msg("s")]);
     let usage = store.usage_snapshot();
     assert_eq!(usage.largest_turns.len(), 3);
     let ests: Vec<usize> = usage.largest_turns.iter().map(|(_, t)| *t).collect();
@@ -472,7 +449,7 @@ fn usage_snapshot_reports_largest_turns_largest_first() {
         Some(top_est)
     );
     // A pinned turn never enters the ranking: pin one and re-check.
-    store.pin("note", ChatMessage::user("pinned")).unwrap();
+    store.pin("note", user_msg("pinned")).unwrap();
     let usage = store.usage_snapshot();
     assert_eq!(usage.largest_turns.len(), 3, "pinned turns are not ranked");
 }
@@ -481,10 +458,7 @@ fn usage_snapshot_reports_largest_turns_largest_first() {
 fn usage_snapshot_caps_largest_turns_at_five() {
     let mut store = new_store();
     for i in 0..8 {
-        store.push_turn(vec![ChatMessage::user(format!(
-            "turn {i} {}",
-            "m".repeat(i * 100)
-        ))]);
+        store.push_turn(vec![user_msg(format!("turn {i} {}", "m".repeat(i * 100)))]);
     }
     let usage = store.usage_snapshot();
     assert_eq!(usage.largest_turns.len(), 5);

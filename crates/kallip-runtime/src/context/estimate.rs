@@ -85,10 +85,9 @@ pub(crate) async fn estimate_context_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use just_llm_client::types::chat::ChatMessage;
 
     use crate::context::AgenticContext;
-    use crate::test_support::{make_ctx, profile, usage};
+    use crate::test_support::{make_ctx, profile, usage, user_msg};
 
     /// With an anchor and no turns added since, the incremental estimate equals the authoritative
     /// base exactly (empty delta → +0). Pins the incremental path and the anchor mechanic.
@@ -97,8 +96,8 @@ mod tests {
         let ctx = make_ctx(vec![profile("p1", "ep1", 500_000)], &["ep1"]).await;
         {
             let mut s = ctx.store.lock().await;
-            s.push_turn(vec![ChatMessage::user("first turn")]);
-            s.push_turn(vec![ChatMessage::user("second turn")]);
+            s.push_turn(vec![user_msg("first turn")]);
+            s.push_turn(vec![user_msg("second turn")]);
             s.accumulate_usage(&usage(5_000));
         }
         let est = estimate_context_tokens(&ctx.client, &ctx.store, &[], &[], None)
@@ -113,15 +112,16 @@ mod tests {
         let ctx = make_ctx(vec![profile("p1", "ep1", 500_000)], &["ep1"]).await;
         {
             let mut s = ctx.store.lock().await;
-            s.push_turn(vec![ChatMessage::user("first")]);
+            s.push_turn(vec![user_msg("first")]);
             s.accumulate_usage(&usage(5_000));
         }
         let before = estimate_context_tokens(&ctx.client, &ctx.store, &[], &[], None)
             .await
             .unwrap();
-        ctx.store.lock().await.push_turn(vec![ChatMessage::user(
-            "a brand new turn with some content",
-        )]);
+        ctx.store
+            .lock()
+            .await
+            .push_turn(vec![user_msg("a brand new turn with some content")]);
         let after = estimate_context_tokens(&ctx.client, &ctx.store, &[], &[], None)
             .await
             .unwrap();
@@ -138,8 +138,8 @@ mod tests {
         let ctx = make_ctx(vec![profile("p1", "ep1", 500_000)], &["ep1"]).await;
         {
             let mut s = ctx.store.lock().await;
-            s.push_turn(vec![ChatMessage::user("turn one")]);
-            s.push_turn(vec![ChatMessage::user("turn two")]);
+            s.push_turn(vec![user_msg("turn one")]);
+            s.push_turn(vec![user_msg("turn two")]);
             // A huge authoritative base; the incremental path would report ~the base.
             s.accumulate_usage(&usage(5_000_000));
         }

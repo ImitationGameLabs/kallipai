@@ -337,6 +337,7 @@ pub(crate) fn tail_turns_within_budget(agent_dir: &Path, budget: usize) -> Vec<T
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{assistant_msg, tool_result_msg, user_msg};
 
     fn tmp_agent_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("create temp dir")
@@ -347,7 +348,7 @@ mod tests {
         let dir = tmp_agent_dir();
         let writer = HistoryWriter::new(dir.path().to_owned());
 
-        let msgs = vec![ChatMessage::user("hello, world")];
+        let msgs = vec![user_msg("hello, world")];
         writer
             .append(Some(0), &msgs, 16, RecordKind::Turn, None)
             .unwrap();
@@ -375,7 +376,7 @@ mod tests {
         let dir = tmp_agent_dir();
         let writer = HistoryWriter::new(dir.path().to_owned());
 
-        let msgs = vec![ChatMessage::assistant("summary of turns 1-5")];
+        let msgs = vec![assistant_msg("summary of turns 1-5")];
         writer
             .append(
                 None,
@@ -401,27 +402,15 @@ mod tests {
         let writer = HistoryWriter::new(dir.path().to_owned());
 
         writer
-            .append(
-                Some(0),
-                &[ChatMessage::user("a")],
-                16,
-                RecordKind::Turn,
-                None,
-            )
+            .append(Some(0), &[user_msg("a")], 16, RecordKind::Turn, None)
             .unwrap();
         writer
-            .append(
-                Some(1),
-                &[ChatMessage::assistant("b")],
-                16,
-                RecordKind::Turn,
-                None,
-            )
+            .append(Some(1), &[assistant_msg("b")], 16, RecordKind::Turn, None)
             .unwrap();
         writer
             .append(
                 None,
-                &[ChatMessage::user("restored")],
+                &[user_msg("restored")],
                 32,
                 RecordKind::System,
                 Some(SystemEvent::AgentRestore),
@@ -458,13 +447,7 @@ mod tests {
 
         let writer = HistoryWriter::new(dir.path().to_owned());
         writer
-            .append(
-                Some(0),
-                &[ChatMessage::user("x")],
-                16,
-                RecordKind::Turn,
-                None,
-            )
+            .append(Some(0), &[user_msg("x")], 16, RecordKind::Turn, None)
             .unwrap();
 
         // Now it exists.
@@ -477,7 +460,7 @@ mod tests {
         let writer = HistoryWriter::new(dir.path().to_owned());
 
         // Tool result with embedded newlines — must NOT break NDJSON line boundary.
-        let msgs = vec![ChatMessage::tool_result("line1\nline2\nline3", "call_1")];
+        let msgs = vec![tool_result_msg("line1\nline2\nline3", "call_1")];
         writer
             .append(Some(0), &msgs, 32, RecordKind::Turn, None)
             .unwrap();
@@ -510,7 +493,7 @@ mod tests {
         serde_json::to_string(&HistoryRecord {
             datetime: OffsetDateTime::now_utc(),
             turn_id: id,
-            messages: vec![ChatMessage::user(text)],
+            messages: vec![user_msg(text)],
             estimated_tokens: 8,
             kind: RecordKind::Turn,
             event: None,
@@ -522,7 +505,7 @@ mod tests {
         serde_json::to_string(&HistoryRecord {
             datetime: OffsetDateTime::now_utc(),
             turn_id: None,
-            messages: vec![ChatMessage::user("restore notice")],
+            messages: vec![user_msg("restore notice")],
             estimated_tokens: 4,
             kind: RecordKind::System,
             event: Some(SystemEvent::AgentRestore),
@@ -534,7 +517,7 @@ mod tests {
         serde_json::to_string(&HistoryRecord {
             datetime: OffsetDateTime::now_utc(),
             turn_id: id,
-            messages: vec![ChatMessage::user(text)],
+            messages: vec![user_msg(text)],
             estimated_tokens: tokens,
             kind: RecordKind::Turn,
             event: None,

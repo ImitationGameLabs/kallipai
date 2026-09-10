@@ -397,6 +397,7 @@ fn break_ack(until: BreakUntil) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{assistant_msg, tool_calls_msg, tool_result_msg, user_msg};
 
     /// The `break` argument contract: defaults (`{}` → wait/600), explicit
     /// values pass through, and anything malformed or unrecognized falls back
@@ -446,17 +447,6 @@ mod tests {
         assert!(wait.contains(r#""until":"wait""#), "{wait}");
         assert!(wait.contains(r#""timeout_secs":30"#), "{wait}");
     }
-    use just_llm_client::types::chat::{ChatToolCall, FunctionCall, ToolType};
-    fn call(id: &str, name: &str) -> ChatToolCall {
-        ChatToolCall {
-            id: id.to_owned(),
-            kind: ToolType::Function,
-            function: FunctionCall {
-                name: name.to_owned(),
-                arguments: "{}".to_owned(),
-            },
-        }
-    }
 
     /// The pairing probes agree on a well-formed round (all calls answered,
     /// no orphans) and each flags its own damage class: a declared call with
@@ -464,17 +454,17 @@ mod tests {
     #[test]
     fn pairing_probes_flag_both_damage_directions() {
         let clean = vec![
-            ChatMessage::assistant_tool_calls(vec![call("c1", "read"), call("c2", "edit")]),
-            ChatMessage::tool_result("ok", "c1"),
-            ChatMessage::tool_result("ok", "c2"),
+            tool_calls_msg(&[("c1", "read"), ("c2", "edit")]),
+            tool_result_msg("ok", "c1"),
+            tool_result_msg("ok", "c2"),
         ];
         assert!(unanswered_call_ids(&clean).is_empty());
         assert!(orphan_result_ids(&clean).is_empty());
 
         let damaged = vec![
-            ChatMessage::assistant_tool_calls(vec![call("c1", "read"), call("c2", "edit")]),
-            ChatMessage::tool_result("ok", "c1"),
-            ChatMessage::tool_result("ghost", "c9"),
+            tool_calls_msg(&[("c1", "read"), ("c2", "edit")]),
+            tool_result_msg("ok", "c1"),
+            tool_result_msg("ghost", "c9"),
         ];
         assert_eq!(
             unanswered_call_ids(&damaged),
@@ -483,7 +473,7 @@ mod tests {
         assert_eq!(orphan_result_ids(&damaged), vec!["c9".to_owned()]);
 
         // No tool traffic at all: both probes quiet.
-        let plain = vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")];
+        let plain = vec![user_msg("hi"), assistant_msg("hello")];
         assert!(unanswered_call_ids(&plain).is_empty());
         assert!(orphan_result_ids(&plain).is_empty());
     }
