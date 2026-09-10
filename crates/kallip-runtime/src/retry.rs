@@ -1,15 +1,15 @@
 //! LLM request retry with exponential backoff.
 //!
 //! Retries transient failures (network errors, HTTP 429/5xx) at the
-//! [`LlmBackend`](just_llm_client::LlmBackend) prepare/send/parse boundary. The retry decision
-//! reads the raw HTTP `status` — and the server's `retry-after` header — directly off the response
-//! *before* [`parse_streaming`](just_llm_client::LlmBackend::parse_streaming) converts a non-2xx
-//! response into an error, so it never depends on error-source introspection. Once content deltas
-//! start flowing, retry is off the table — mid-stream failures propagate as errors.
+//! `just_llm_client::Conversation` boundary: each attempt asks the conversation to open a
+//! streaming generation and classifies the resulting [`BackendError`] — by HTTP status for
+//! provider rejections, by variant otherwise; the server's `retry-after` header is not
+//! reachable through the conversation, so backoff is the computed schedule only. Once content
+//! deltas start flowing, retry is off the table — mid-stream failures propagate as errors.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use just_llm_client::{BackendError, GenerationStream};
+use just_llm_client::{BackendError, Conversation, ConversationStream, provider_rejection};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
@@ -36,14 +36,13 @@ impl Default for RetryPolicy {
     }
 }
 
-/// Outcome of a single prepare/send/parse attempt.
+/// Outcome of a single conversation-bound streaming attempt.
 enum Attempt {
     /// 2xx — a live stream ready to hand off to the caller.
-    Stream(GenerationStream),
+    Stream(ConversationStream),
     /// Transient failure (HTTP 429/5xx/408, or a network send failure). Worth retrying in-profile.
     Retry {
         error: BackendError,
-        retry_after: Option<Duration>,
         kind: RetryKind,
     },
     /// Provider/profile-level permanent failure (401/403/404). A different profile (different
@@ -73,89 +72,58 @@ pub enum RequestFailure {
     Cancelled,
 }
 
-/// Whether an HTTP status warrants an in-profile retry: rate-limit (`429`), request timeout
-/// (`408`), and server errors (`5xx`).
-fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || status == reqwest::StatusCode::REQUEST_TIMEOUT
-        || status.is_server_error()
-}
-
-/// Whether an HTTP status is an endpoint/profile-level permanent failure worth failing over:
-/// auth (`401`/`403`) and model-not-found (`404`). A different profile may succeed.
-fn is_failover_status(status: reqwest::StatusCode) -> bool {
-    matches!(
-        status,
-        reqwest::StatusCode::UNAUTHORIZED
-            | reqwest::StatusCode::FORBIDDEN
-            | reqwest::StatusCode::NOT_FOUND
-    )
-}
-
-/// Parse the `retry-after` header, delta-seconds form only.
+/// Run one attempt: open a streaming generation through the conversation, then classify
+/// the outcome.
 ///
-/// The HTTP-date form is intentionally unsupported and yields `None` (callers fall back to the
-/// computed backoff). Delta-seconds is the universal form for LLM rate-limiting.
-fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?;
-    let secs: u64 = value.to_str().ok()?.trim().parse().ok()?;
-    Some(Duration::from_secs(secs))
-}
-
-/// Run one attempt: send a clone of the prepared request, then classify the outcome.
-///
-/// `prepare_streaming` ran once in [`stream_with_retry`] (it is validation + serialization only,
-/// so its failure is deterministic and surfaced before this loop). `send` returns the raw response
-/// without checking status, so `retry-after` and `status` are read here, before `parse_streaming`
-/// consumes the body. `parse_streaming` runs `ensure_success`, so a non-2xx status surfaces as a
-/// [`BackendError`] — the retry decision is then a direct status check, not error-source
-/// archaeology. A `send` failure is transport-level (connect/timeout/...) and is always transient.
+/// The conversation owns the wire payload (full send vs `previous_response_id` delta), so
+/// this layer sees only its verdict: [`BackendError::InvalidRequest`],
+/// [`BackendError::Serialization`], and [`BackendError::Unserializable`] are request-shape
+/// failures — fatal on every profile. A provider rejection is classified by HTTP status
+/// (429/408/5xx retry, 401/403/404 fail over, other statuses fatal); a provider error with no
+/// reachable HTTP status never reached the provider — transport-level, retried. The request is
+/// re-cloned per attempt: `stream_generate` consumes it, and a failed attempt leaves the
+/// conversation's anchor cleared, so the next attempt resends the full context automatically.
 async fn attempt_once(
-    client: &crate::profile::GenerationClient,
-    prepared: &reqwest::Request,
+    conversation: &mut Conversation,
+    request: &just_llm_client::types::generation::GenerationRequest,
 ) -> Attempt {
-    // `reqwest::Request` has no `Clone` impl, but `try_clone` succeeds because the provider sets
-    // the body from buffered JSON bytes (never a stream). Holds for every request this codebase
-    // builds; a non-clonable body would indicate a backend bug.
-    let to_send = prepared
-        .try_clone()
-        .expect("provider request bodies are buffered bytes and therefore clonable");
-
-    let response = match client.send(to_send).await {
-        Ok(response) => response,
-        Err(error) => {
-            return Attempt::Retry {
-                error,
-                retry_after: None,
-                kind: RetryKind::Transport,
-            };
-        }
-    };
-
-    let status = response.status();
-    let retry_after = parse_retry_after(response.headers());
-    match client.parse_streaming(response).await {
+    match conversation.stream_generate(request.clone()).await {
         Ok(stream) => Attempt::Stream(stream),
-        Err(error) => {
-            if is_retryable_status(status) {
-                let kind = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    RetryKind::RateLimit
-                } else if status == reqwest::StatusCode::REQUEST_TIMEOUT {
-                    RetryKind::Timeout
-                } else {
-                    RetryKind::Server
-                };
-                Attempt::Retry {
-                    error,
-                    retry_after,
-                    kind,
-                }
-            } else if is_failover_status(status) {
-                Attempt::Failover(error)
-            } else {
-                Attempt::Fatal(error)
-            }
-        }
+        Err(error) => classify_error(error),
+    }
+}
+
+/// Classify a backend error into a retry outcome (see [`attempt_once`]).
+fn classify_error(error: BackendError) -> Attempt {
+    let status = provider_rejection(&error).map(|rejection| rejection.status);
+    match error {
+        BackendError::Provider { .. } => match status {
+            Some(s) if s == reqwest::StatusCode::TOO_MANY_REQUESTS => Attempt::Retry {
+                error,
+                kind: RetryKind::RateLimit,
+            },
+            Some(s) if s == reqwest::StatusCode::REQUEST_TIMEOUT => Attempt::Retry {
+                error,
+                kind: RetryKind::Timeout,
+            },
+            Some(s) if s.is_server_error() => Attempt::Retry {
+                error,
+                kind: RetryKind::Server,
+            },
+            Some(
+                reqwest::StatusCode::UNAUTHORIZED
+                | reqwest::StatusCode::FORBIDDEN
+                | reqwest::StatusCode::NOT_FOUND,
+            ) => Attempt::Failover(error),
+            Some(_) => Attempt::Fatal(error),
+            None => Attempt::Retry {
+                error,
+                kind: RetryKind::Transport,
+            },
+        },
+        // Pre-flight failures (invalid request, serialization, wire mismatch) fail
+        // identically on every profile, so the failover loop must not advance.
+        _ => Attempt::Fatal(error),
     }
 }
 
@@ -181,7 +149,7 @@ pub(crate) fn backoff_delay(policy: &RetryPolicy, attempt: u32) -> Duration {
 /// its retry accounting. Side-channels (event sink, retry log, cancel token) stay as separate
 /// parameters — different borrow modes, conceptually orthogonal to the call data.
 pub struct RetryCall<'a> {
-    pub client: &'a crate::profile::GenerationClient,
+    pub conversation: &'a mut Conversation,
     pub request: just_llm_client::types::generation::GenerationRequest,
     pub policy: &'a RetryPolicy,
     pub round: usize,
@@ -189,11 +157,11 @@ pub struct RetryCall<'a> {
     pub endpoint_id: &'a str,
 }
 
-/// Open a streaming chat completion with retry on transient errors.
+/// Open a streaming generation through the caller's conversation, retrying transient errors.
 ///
-/// Prepares the request once, then sends it up to `max_retries + 1` times. A transient failure
-/// (HTTP 429/5xx, or a network error) is retried with exponential backoff that floors on the
-/// server's `retry-after` header. An endpoint-level permanent failure (401/403/404) is returned
+/// Sends the request up to `max_retries + 1` times through the caller's conversation. A transient
+/// failure (HTTP 429/408/5xx, or a transport error) is retried with exponential backoff. An
+/// endpoint-level permanent failure (401/403/404) is returned
 /// as [`RequestFailure::Failover`] (a different profile may recover); a request-level permanent
 /// failure (400/422) is returned as [`RequestFailure::Fatal`]; a cancel during backoff is returned
 /// as [`RequestFailure::Cancelled`] (distinct from `Failover` so the caller short-circuits to a
@@ -216,20 +184,15 @@ pub async fn stream_with_retry(
     event_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     retry_log: &mut Vec<RetryRecord>,
     cancel: CancellationToken,
-) -> Result<GenerationStream, RequestFailure> {
+) -> Result<ConversationStream, RequestFailure> {
     let RetryCall {
-        client,
+        conversation,
         request,
         policy,
         round,
         prior_retries,
         endpoint_id,
     } = call;
-    // Prepare once: validation + serialization only, so a failure here is deterministic — surface
-    // it immediately rather than retrying a request that can never succeed.
-    let prepared = client
-        .prepare_streaming(request)
-        .map_err(RequestFailure::Fatal)?;
 
     // Total sends this call = remaining retry budget + the initial attempt. `prior_retries`
     // exceeding `max_retries` saturates to zero, leaving exactly one (final) attempt.
@@ -237,23 +200,17 @@ pub async fn stream_with_retry(
     let deadline = tokio::time::Instant::now() + policy.retry_timeout;
 
     for attempt in 1..=max_attempts {
-        match attempt_once(client, &prepared).await {
+        match attempt_once(conversation, &request).await {
             Attempt::Stream(stream) => return Ok(stream),
             Attempt::Failover(error) => return Err(RequestFailure::Failover(error)),
             Attempt::Fatal(error) => return Err(RequestFailure::Fatal(error)),
-            Attempt::Retry {
-                error,
-                retry_after,
-                kind,
-            } => {
-                let retry_after_secs = retry_after.map(|d| d.as_secs());
+            Attempt::Retry { error, kind } => {
                 let body = crate::llm_error::http_body_for_log(&error);
                 let error_msg = crate::llm_error::render_error(&error);
                 // Budget exhausted — surface the final error without recording a retry.
                 if attempt == max_attempts {
                     error!(
                         attempt = prior_retries + attempt,
-                        retry_after_secs = ?retry_after_secs,
                         body = ?body,
                         error = %error_msg,
                         "retry budget exhausted, advancing failover chain"
@@ -262,22 +219,19 @@ pub async fn stream_with_retry(
                 }
 
                 // Deadline first: if exhausted, don't record a retry we won't perform. Otherwise the
-                // recorded `delay_secs` is the *actual* capped wait (floor on retry-after, then cap
-                // at the remaining deadline), so telemetry never over-reports.
+                // recorded `delay_secs` is the *actual* capped wait (backoff capped at the remaining
+                // deadline), so telemetry never over-reports.
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     error!(
                         attempt = prior_retries + attempt,
-                        retry_after_secs = ?retry_after_secs,
                         body = ?body,
                         error = %error_msg,
                         "retry deadline exhausted, advancing failover chain"
                     );
                     return Err(RequestFailure::Failover(error));
                 }
-                let actual = backoff_delay(policy, attempt - 1)
-                    .max(retry_after.unwrap_or_default())
-                    .min(remaining);
+                let actual = backoff_delay(policy, attempt - 1).min(remaining);
                 let delay_secs = actual.as_secs_f64();
                 let global_attempt = prior_retries + attempt;
 
@@ -285,7 +239,6 @@ pub async fn stream_with_retry(
                     attempt = global_attempt,
                     max_attempts = policy.max_retries,
                     delay_secs,
-                    retry_after_secs = ?retry_after_secs,
                     body = ?body,
                     error = %error_msg,
                     "LLM request failed, retrying"
@@ -317,13 +270,7 @@ pub async fn stream_with_retry(
                     delay_secs,
                     endpoint: Some(endpoint_id.to_string()),
                     kind,
-                    quota_reset: retry_after.map(|d| {
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                            + d.as_secs()
-                    }),
+                    quota_reset: None,
                 };
 
                 tokio::select! {
@@ -346,7 +293,8 @@ pub async fn stream_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{request, user_msg};
+    use crate::test_support::{RecordingBackend, request, user_msg};
+    use just_llm_client::TransportError;
 
     // --- pure unit tests ---
 
@@ -357,68 +305,6 @@ mod tests {
         // Timing fields stay un-pinned here: the full-field mirror test in config/tests.rs
         // guards those against two-sided drift.
         assert_eq!(RetryPolicy::default().max_retries, 10);
-    }
-
-    #[test]
-    fn is_retryable_status_matches_rate_limit_and_server_errors() {
-        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
-        assert!(is_retryable_status(
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR
-        ));
-        assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
-        assert!(is_retryable_status(reqwest::StatusCode::GATEWAY_TIMEOUT));
-        // 408 (Request Timeout) is transient.
-        assert!(is_retryable_status(reqwest::StatusCode::REQUEST_TIMEOUT));
-
-        // Not retryable.
-        assert!(!is_retryable_status(reqwest::StatusCode::OK));
-        assert!(!is_retryable_status(reqwest::StatusCode::NOT_FOUND));
-        assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
-        assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
-    }
-
-    #[test]
-    fn is_failover_status_matches_auth_and_not_found() {
-        // Provider/profile-level — a different profile (credentials / model) may recover.
-        assert!(is_failover_status(reqwest::StatusCode::UNAUTHORIZED));
-        assert!(is_failover_status(reqwest::StatusCode::FORBIDDEN));
-        assert!(is_failover_status(reqwest::StatusCode::NOT_FOUND));
-
-        // Not failover-class.
-        assert!(!is_failover_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
-        assert!(!is_failover_status(
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR
-        ));
-        assert!(!is_failover_status(reqwest::StatusCode::BAD_REQUEST)); // request-level → Fatal
-        assert!(!is_failover_status(reqwest::StatusCode::OK));
-    }
-
-    #[test]
-    fn parse_retry_after_reads_delta_seconds() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "retry-after",
-            reqwest::header::HeaderValue::from_static("30"),
-        );
-        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(30)));
-
-        // Garbage and HTTP-date form yield None (fall back to computed backoff).
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "retry-after",
-            reqwest::header::HeaderValue::from_static("Wed, 21 Oct 2025 07:28:00 GMT"),
-        );
-        assert_eq!(parse_retry_after(&headers), None);
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            "retry-after",
-            reqwest::header::HeaderValue::from_static("soon"),
-        );
-        assert_eq!(parse_retry_after(&headers), None);
-
-        // Absent.
-        assert_eq!(parse_retry_after(&reqwest::header::HeaderMap::new()), None);
     }
 
     #[test]
@@ -509,12 +395,13 @@ mod tests {
         mount_status(&server, 429).await;
 
         let client = mock_client(&server);
+        let mut conversation = client.conversation();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
 
         let result = stream_with_retry(
             RetryCall {
-                client: &client,
+                conversation: &mut conversation,
                 request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(2),
                 round: 0,
@@ -542,6 +429,7 @@ mod tests {
         mount_status(&server, 429).await; // forces a retry → backoff
 
         let client = mock_client(&server);
+        let mut conversation = client.conversation();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
         let cancel = CancellationToken::new();
@@ -549,7 +437,7 @@ mod tests {
 
         let result = stream_with_retry(
             RetryCall {
-                client: &client,
+                conversation: &mut conversation,
                 request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(2),
                 round: 0,
@@ -580,12 +468,13 @@ mod tests {
         mount_status(&server, 500).await;
 
         let client = mock_client(&server);
+        let mut conversation = client.conversation();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
 
         let result = stream_with_retry(
             RetryCall {
-                client: &client,
+                conversation: &mut conversation,
                 request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(2),
                 round: 0,
@@ -609,12 +498,13 @@ mod tests {
         mount_status(&server, 400).await;
 
         let client = mock_client(&server);
+        let mut conversation = client.conversation();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
 
         let result = stream_with_retry(
             RetryCall {
-                client: &client,
+                conversation: &mut conversation,
                 request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(3),
                 round: 0,
@@ -639,12 +529,13 @@ mod tests {
         mount_status(&server, 404).await;
 
         let client = mock_client(&server);
+        let mut conversation = client.conversation();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
 
         let result = stream_with_retry(
             RetryCall {
-                client: &client,
+                conversation: &mut conversation,
                 request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(3),
                 round: 0,
@@ -669,12 +560,13 @@ mod tests {
         mount_status(&server, 401).await;
 
         let client = mock_client(&server);
+        let mut conversation = client.conversation();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
 
         let result = stream_with_retry(
             RetryCall {
-                client: &client,
+                conversation: &mut conversation,
                 request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(3),
                 round: 0,
@@ -693,83 +585,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn honors_retry_after_header_as_backoff_floor() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server);
-        let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        let mut retry_log = Vec::new();
-
-        let result = stream_with_retry(
-            RetryCall {
-                client: &client,
-                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
-                policy: &fast_policy(1),
-                round: 0,
-                prior_retries: 0,
-                endpoint_id: "test",
-            },
-            &tx,
-            &mut retry_log,
-            CancellationToken::new(),
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert_eq!(retry_log.len(), 1);
-        // retry-after (1s) dominates the ~1ms computed backoff.
-        assert!(
-            retry_log[0].delay_secs >= 1.0,
-            "retry-after must floor the delay: {}",
-            retry_log[0].delay_secs
-        );
-    }
-
-    #[tokio::test]
-    async fn falls_back_to_backoff_when_retry_after_is_http_date() {
-        // The HTTP-date form isn't parsed (delta-seconds only), so it must yield None — and the
-        // 429 is still retried using the computed backoff (not treated as permanent).
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("retry-after", "Wed, 21 Oct 2025 07:28:00 GMT"),
-            )
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server);
-        let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        let mut retry_log = Vec::new();
-
-        let result = stream_with_retry(
-            RetryCall {
-                client: &client,
-                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
-                policy: &fast_policy(1),
-                round: 0,
-                prior_retries: 0,
-                endpoint_id: "test",
-            },
-            &tx,
-            &mut retry_log,
-            CancellationToken::new(),
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert_eq!(retry_log.len(), 1, "HTTP-date retry-after still retries");
-        // Computed backoff (~1ms) is used, not a misparsed HTTP-date value.
-        assert!(retry_log[0].delay_secs < 1.0);
-    }
-
-    #[tokio::test]
     async fn retries_on_network_error() {
         // Point the backend at a port nothing listens on — `send` fails at the transport layer.
         let backend = OpenAiCompatBackend::new(
@@ -779,13 +594,14 @@ mod tests {
         )
         .expect("openai-compat backend constructs without network");
         let client = GenerationClient::new(backend, GenerationClientOptions::new("gpt-4.1-mini"));
+        let mut conversation = client.conversation();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
 
         let result = stream_with_retry(
             RetryCall {
-                client: &client,
+                conversation: &mut conversation,
                 request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(1),
                 round: 0,
@@ -820,12 +636,13 @@ mod tests {
             .await;
 
         let client = mock_client(&server);
+        let mut conversation = client.conversation();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
 
         let mut stream = stream_with_retry(
             RetryCall {
-                client: &client,
+                conversation: &mut conversation,
                 request: request("gpt-4.1-mini", vec![user_msg("hi")]),
                 policy: &fast_policy(2),
                 round: 0,
@@ -848,5 +665,205 @@ mod tests {
                 delta: "hi".to_owned()
             }
         );
+    }
+    #[tokio::test]
+    async fn retries_on_request_timeout_classified_as_timeout() {
+        // 408 keeps its own RetryKind (Timeout) through the BackendError classification path.
+        let server = MockServer::start().await;
+        mount_status(&server, 408).await;
+
+        let client = mock_client(&server);
+        let mut conversation = client.conversation();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let mut retry_log = Vec::new();
+
+        let result = stream_with_retry(
+            RetryCall {
+                conversation: &mut conversation,
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
+                policy: &fast_policy(1),
+                round: 0,
+                prior_retries: 0,
+                endpoint_id: "test",
+            },
+            &tx,
+            &mut retry_log,
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(retry_log.len(), 1);
+        assert!(matches!(retry_log[0].kind, RetryKind::Timeout));
+        assert_eq!(retrying_count(&mut rx), 1);
+    }
+
+    // --- stateful chain behavior (recording backend, no network) ---
+
+    use just_llm_client::types::generation::GenerationRequest;
+
+    /// Drive one turn through `stream_with_retry` and drain the returned stream to
+    /// completion — draining is what registers the turn's capture (`End` carries the
+    /// response id), mirroring what `consume_stream` does in production.
+    async fn run_turn(
+        conversation: &mut Conversation,
+        request: GenerationRequest,
+    ) -> Result<(), RequestFailure> {
+        let mut stream = stream_with_retry(
+            RetryCall {
+                conversation,
+                request,
+                policy: &fast_policy(2),
+                round: 0,
+                prior_retries: 0,
+                endpoint_id: "test",
+            },
+            &tokio::sync::mpsc::channel(16).0,
+            &mut Vec::new(),
+            CancellationToken::new(),
+        )
+        .await?;
+        while let Some(event) = stream.next().await {
+            event.expect("turn events are healthy");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stateful_chain_appends_with_previous_response_id() {
+        let backend = RecordingBackend::new();
+        backend.queue_stream("resp-1");
+        backend.queue_stream("resp-2");
+        let client =
+            GenerationClient::new(backend.clone(), GenerationClientOptions::new("test-model"));
+        let mut conversation = client.conversation();
+
+        // Turn 1: the full context goes out, storage on, no continuation id.
+        run_turn(
+            &mut conversation,
+            request("test-model", vec![user_msg("q1")]).with_tools(vec![]),
+        )
+        .await
+        .expect("turn 1 succeeds");
+
+        // Turn 2: mirror + new user turn, as the runner composes it — the wire request is
+        // the delta only, chained by response id, with tools stripped.
+        let mirror = conversation.last_message().expect("turn 1 mirrored");
+        run_turn(
+            &mut conversation,
+            request("test-model", vec![user_msg("q1"), mirror, user_msg("q2")]).with_tools(vec![]),
+        )
+        .await
+        .expect("turn 2 succeeds");
+
+        let requests = backend.take_requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].previous_response_id, None);
+        assert_eq!(requests[0].store, Some(true));
+        assert_eq!(requests[0].messages, vec![user_msg("q1")]);
+        assert!(
+            requests[0].tools.is_some(),
+            "the opening turn carries tools"
+        );
+        assert_eq!(requests[1].previous_response_id.as_deref(), Some("resp-1"));
+        assert_eq!(requests[1].store, Some(true));
+        assert_eq!(requests[1].messages, vec![user_msg("q2")], "delta only");
+        assert!(requests[1].tools.is_none(), "continuation strips tools");
+    }
+
+    #[tokio::test]
+    async fn settings_change_resends_full_context() {
+        let backend = RecordingBackend::new();
+        backend.queue_stream("resp-1");
+        backend.queue_stream("resp-2");
+        let client =
+            GenerationClient::new(backend.clone(), GenerationClientOptions::new("test-model"));
+        let mut conversation = client.conversation();
+
+        run_turn(
+            &mut conversation,
+            request("test-model", vec![user_msg("q1")]),
+        )
+        .await
+        .expect("turn 1 succeeds");
+        let mirror = conversation.last_message().expect("turn 1 mirrored");
+        run_turn(
+            &mut conversation,
+            request("test-model", vec![user_msg("q1"), mirror, user_msg("q2")])
+                .with_temperature(0.7),
+        )
+        .await
+        .expect("turn 2 succeeds");
+
+        let requests = backend.take_requests();
+        assert_eq!(requests.len(), 2);
+        // A settings change is not a pure append: the whole context goes out statelessly.
+        assert_eq!(requests[1].previous_response_id, None);
+        assert_eq!(requests[1].messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn provider_error_retries_and_resends_full_after_anchor_clear() {
+        let backend = RecordingBackend::new();
+        backend.queue_stream("resp-1");
+        backend.queue_stream("resp-2");
+        let client =
+            GenerationClient::new(backend.clone(), GenerationClientOptions::new("test-model"));
+        let mut conversation = client.conversation();
+
+        run_turn(
+            &mut conversation,
+            request("test-model", vec![user_msg("q1")]),
+        )
+        .await
+        .expect("turn 1 succeeds");
+        let mirror = conversation.last_message().expect("turn 1 mirrored");
+        // Turn 2's first attempt is rate-limited; the anchor must clear so the retry
+        // resends the full context instead of continuing an id the provider rejected.
+        // (Queued after turn 1: the mock's error queue fires before any stream.)
+        backend.queue_error(BackendError::provider(
+            "recording",
+            TransportError::HttpStatus {
+                status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                body: "rate limited".to_owned(),
+            },
+        ));
+
+        let mut retry_log = Vec::new();
+        let mut stream = stream_with_retry(
+            RetryCall {
+                conversation: &mut conversation,
+                request: request("test-model", vec![user_msg("q1"), mirror, user_msg("q2")]),
+                policy: &fast_policy(2),
+                round: 0,
+                prior_retries: 0,
+                endpoint_id: "test",
+            },
+            &tokio::sync::mpsc::channel(16).0,
+            &mut retry_log,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn 2 succeeds on retry");
+        while let Some(event) = stream.next().await {
+            event.expect("turn 2 events are healthy");
+        }
+
+        assert_eq!(retry_log.len(), 1);
+        assert!(matches!(retry_log[0].kind, RetryKind::RateLimit));
+
+        let requests = backend.take_requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].previous_response_id, None, "turn 1 opens full");
+        assert_eq!(
+            requests[1].previous_response_id.as_deref(),
+            Some("resp-1"),
+            "the rejected attempt chained normally"
+        );
+        assert_eq!(
+            requests[2].previous_response_id, None,
+            "after the provider rejection the anchor is cleared: full resend"
+        );
+        assert_eq!(requests[2].messages.len(), 3, "full context, not delta");
     }
 }

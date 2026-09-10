@@ -4,9 +4,9 @@
 //! several modules (`runner`, `context::estimate`, `profile::registry`). This module factors out
 //! the shared fixtures so each is written once. `#[cfg(test)]`-gated — never compiled into a build.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Context;
 use just_llm_client::types::generation::{GenerationRequest, Message, ToolCall, Usage};
@@ -128,6 +128,7 @@ pub(crate) async fn ctx_from_source(
         guard.set_pinned_budget(config.pinned_budget());
     }
     AgentContext {
+        conversation: client.conversation(),
         client,
         failover,
         store,
@@ -241,5 +242,147 @@ pub(crate) fn usage_with_completion(prompt_tokens: u32, completion_tokens: u32) 
         cache_write_tokens: None,
         total_tokens: prompt_tokens + completion_tokens,
         completion_tokens_details: None,
+    }
+}
+
+/// Minimal stateful backend modeled on the upstream conversation test mock: it records
+/// the wire requests it receives and answers `stream_generate` from a queue of canned
+/// event lists (plus an optional error queue), so tests can assert exactly what reached
+/// the provider boundary. Never touches the network.
+pub(crate) struct RecordingBackend {
+    requests: Mutex<Vec<GenerationRequest>>,
+    failures: Mutex<VecDeque<just_llm_client::BackendError>>,
+    streams: Mutex<VecDeque<Vec<just_llm_client::types::generation::GenerationEvent>>>,
+}
+
+impl RecordingBackend {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            requests: Mutex::new(Vec::new()),
+            failures: Mutex::new(VecDeque::new()),
+            streams: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    /// One text delta followed by `End` carrying `response_id` — the minimal stream a
+    /// successful turn needs (the capture requires at least one accumulated event).
+    pub(crate) fn queue_stream(&self, response_id: &str) {
+        self.streams.lock().unwrap().push_back(vec![
+            just_llm_client::types::generation::GenerationEvent::Text {
+                delta: "a".to_owned(),
+            },
+            just_llm_client::types::generation::GenerationEvent::End {
+                finish_reason: None,
+                response_id: Some(response_id.to_owned()),
+            },
+        ]);
+    }
+
+    /// Queue an error that surfaces from `stream_generate` itself (pre-stream).
+    pub(crate) fn queue_error(&self, error: just_llm_client::BackendError) {
+        self.failures.lock().unwrap().push_back(error);
+    }
+
+    pub(crate) fn take_requests(&self) -> Vec<GenerationRequest> {
+        std::mem::take(&mut *self.requests.lock().unwrap())
+    }
+}
+
+impl just_llm_client::Identifiable for RecordingBackend {
+    fn family(&self) -> &'static str {
+        "recording"
+    }
+}
+
+impl just_llm_client::CapabilityNegotiation for RecordingBackend {
+    fn supports_stateful_conversation(&self) -> bool {
+        true
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for RecordingBackend {
+    fn prepare(
+        &self,
+        _request: GenerationRequest,
+    ) -> Result<reqwest::Request, just_llm_client::BackendError> {
+        unimplemented!("tests drive stream_generate directly")
+    }
+
+    fn prepare_streaming(
+        &self,
+        _request: GenerationRequest,
+    ) -> Result<reqwest::Request, just_llm_client::BackendError> {
+        unimplemented!("tests drive stream_generate directly")
+    }
+
+    async fn send(
+        &self,
+        _prepared: reqwest::Request,
+    ) -> Result<reqwest::Response, just_llm_client::BackendError> {
+        unimplemented!("tests drive stream_generate directly")
+    }
+
+    async fn parse(
+        &self,
+        _response: reqwest::Response,
+    ) -> Result<just_llm_client::types::generation::GenerationResponse, just_llm_client::BackendError>
+    {
+        unimplemented!("tests drive stream_generate directly")
+    }
+
+    async fn parse_streaming(
+        &self,
+        _response: reqwest::Response,
+    ) -> Result<just_llm_client::GenerationStream, just_llm_client::BackendError> {
+        unimplemented!("tests drive stream_generate directly")
+    }
+
+    async fn stream_generate(
+        &self,
+        request: GenerationRequest,
+    ) -> Result<just_llm_client::GenerationStream, just_llm_client::BackendError> {
+        self.requests.lock().unwrap().push(request);
+        if let Some(error) = self.failures.lock().unwrap().pop_front() {
+            return Err(error);
+        }
+        let events = self
+            .streams
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("no stream queued for recording backend");
+        let stream = futures_util::stream::iter(
+            events
+                .into_iter()
+                .map(Ok::<_, just_llm_client::TransportError>),
+        );
+        Ok(just_llm_client::GenerationStream::new(Box::pin(stream)))
+    }
+
+    fn render_messages(
+        &self,
+        _messages: &[Message],
+    ) -> Result<String, just_llm_client::BackendError> {
+        unimplemented!("tests drive stream_generate directly")
+    }
+
+    fn render_tools(
+        &self,
+        _tools: &[just_llm_client::types::generation::ToolDefinition],
+    ) -> Result<String, just_llm_client::BackendError> {
+        unimplemented!("tests drive stream_generate directly")
+    }
+
+    fn family() -> &'static str {
+        "recording"
+    }
+
+    fn new(
+        _http: reqwest::ClientBuilder,
+        _api_key: &str,
+        _base_url: Option<&str>,
+    ) -> Result<Arc<dyn LlmBackend>, just_llm_client::BackendConstructError> {
+        unimplemented!("tests drive stream_generate directly")
     }
 }

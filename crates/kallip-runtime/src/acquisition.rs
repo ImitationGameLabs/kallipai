@@ -17,9 +17,10 @@ use crate::context::{CompactOutcome, compose_context, summarize_and_evict};
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::failover::FailoverOutcome;
 use crate::stream_accumulator::ToolCallAccumulator;
-use just_llm_client::GenerationStream;
+use just_llm_client::ConversationStream;
 use just_llm_client::types::generation::{
-    GenerationEvent, Message, ToolCall, ToolChoice, ToolChoiceMode, ToolDefinition,
+    GenerationEvent, GenerationRequest, Message, ToolCall, ToolChoice, ToolChoiceMode,
+    ToolDefinition,
 };
 use kallip_common::protocol::FailoverChainExhaustion;
 use kallip_common::retry::{RetryKind, RetryRecord};
@@ -54,7 +55,7 @@ pub(crate) struct StreamConsumed {
 /// Takes ownership of the stream and pins it internally.
 /// Returns `Cancelled` if the cancellation token fires mid-stream.
 async fn consume_stream(
-    stream: GenerationStream,
+    stream: ConversationStream,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     cancel: &CancellationToken,
 ) -> StreamOutcome {
@@ -152,18 +153,24 @@ pub(crate) async fn acquire_stream(
     let consumed = loop {
         let endpoint_id = ctx.failover.current_profile().endpoint.clone();
         let prior_retries = count_recent_retries(ctx, &endpoint_id).await;
-        let request = ctx
-            .client
-            .create_request(messages.clone())
-            .with_tools(tools.clone())
-            .with_tool_choice(ToolChoice::Mode(ToolChoiceMode::Auto));
-        let mut request = request;
-        request.stream = Some(true);
 
+        // Request construction is call-side: the upstream `Conversation` has no
+        // `create_request`, so model and system prompt are injected here from the
+        // failover state (the summarizer keeps its own client-level construction).
+        let mut request = GenerationRequest::new(
+            ctx.failover.current_profile().model.clone(),
+            messages.clone(),
+        )
+        .with_tools(tools.clone())
+        .with_tool_choice(ToolChoice::Mode(ToolChoiceMode::Auto));
+        if let Some(prompt) = ctx.failover.system_prompt() {
+            request = request.with_system_prompt(prompt);
+        }
+        request.stream = Some(true);
         let result = {
             let fut = crate::retry::stream_with_retry(
                 crate::retry::RetryCall {
-                    client: &ctx.client,
+                    conversation: &mut ctx.conversation,
                     request,
                     policy: &ctx.config.retry_policy,
                     round,
@@ -471,6 +478,9 @@ pub(crate) async fn advance_failover(
                 let target_idx = ctx.failover.profile_idx() + offset;
                 ctx.failover.advance_to(target_idx);
                 ctx.client = new_client;
+                // Fresh chain for the fresh client: response ids issued by the old
+                // provider are meaningless to the new, so the next request resends fully.
+                ctx.conversation = ctx.client.conversation();
                 reapply_window(ctx, &from).await;
                 // The carried context may now exceed the (possibly smaller) window — compact so
                 // the rebuilt request fits. summarize_and_evict no-ops when the context already
@@ -539,4 +549,99 @@ async fn reapply_window(ctx: &mut AgentContext, from: &str) {
     let mut store = ctx.store.lock().await;
     store.set_pinned_budget(ctx.config.pinned_budget());
     store.mark_needs_full_estimate();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::retry::{RetryCall, RetryPolicy, stream_with_retry};
+    use crate::test_support::{
+        MapSource, RecordingBackend, ctx_from_source, profile, request, user_msg,
+    };
+    use just_llm_client::LlmBackend;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Failover replaces the client AND the conversation chain: after an advance, the
+    /// next request opens full (no `previous_response_id`), because response ids issued
+    /// by the previous provider are meaningless to the new one.
+    #[tokio::test]
+    async fn failover_advance_rebuilds_the_conversation_chain() {
+        let backend = RecordingBackend::new();
+        backend.queue_stream("resp-1");
+        backend.queue_stream("resp-2");
+        let source = Arc::new(MapSource(HashMap::from([
+            ("p1".to_string(), backend.clone() as Arc<dyn LlmBackend>),
+            ("p2".to_string(), backend.clone() as Arc<dyn LlmBackend>),
+        ])));
+        let mut ctx = ctx_from_source(
+            vec![profile("a", "p1", 100_000), profile("b", "p2", 100_000)],
+            source,
+            RetryPolicy::default(),
+        )
+        .await;
+
+        // One successful turn on the opening profile leaves a capture in the chain.
+        let mut stream = stream_with_retry(
+            RetryCall {
+                conversation: &mut ctx.conversation,
+                request: request("a-model", vec![user_msg("q1")]),
+                policy: &ctx.config.retry_policy,
+                round: 0,
+                prior_retries: 0,
+                endpoint_id: "p1",
+            },
+            &tokio::sync::mpsc::channel(16).0,
+            &mut Vec::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("turn streams");
+        while let Some(event) = stream.next().await {
+            event.expect("turn events are healthy");
+        }
+        assert!(ctx.conversation.last_message().is_some(), "turn 1 anchored");
+
+        // Advance the chain the way a Failover outcome does.
+        let outcome = advance_failover(
+            &mut ctx,
+            vec![user_msg("q1")],
+            anyhow::anyhow!("endpoint dead"),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, FailoverOutcome::Advanced { .. }));
+        assert_eq!(ctx.failover.profile_idx(), 1);
+        // Fresh chain: the previous provider's mirror is gone.
+        assert!(ctx.conversation.last_message().is_none());
+
+        // The next turn on the new profile opens full — no continuation id.
+        let mut stream = stream_with_retry(
+            RetryCall {
+                conversation: &mut ctx.conversation,
+                request: request("b-model", vec![user_msg("q1")]),
+                policy: &ctx.config.retry_policy,
+                round: 0,
+                prior_retries: 0,
+                endpoint_id: "p2",
+            },
+            &tokio::sync::mpsc::channel(16).0,
+            &mut Vec::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("post-failover turn streams");
+        while let Some(event) = stream.next().await {
+            event.expect("turn events are healthy");
+        }
+
+        let requests = backend.take_requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].previous_response_id, None, "turn 1 opens full");
+        assert_eq!(
+            requests[1].previous_response_id, None,
+            "a rebuilt chain cannot continue the old provider's ids"
+        );
+        assert_eq!(requests[1].messages, vec![user_msg("q1")]);
+    }
 }

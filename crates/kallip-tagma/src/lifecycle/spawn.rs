@@ -211,6 +211,9 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         });
 
     let ctx = AgentContext {
+        // Chain minted from the same client the context will own — the borrow must
+        // precede the `client` move one line below (fresh provider → fresh chain).
+        conversation: client.conversation(),
         client,
         failover: kallip_runtime::FailoverState::new(
             args.set,

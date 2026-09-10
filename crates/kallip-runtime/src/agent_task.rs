@@ -102,6 +102,12 @@ pub trait MessagePuller: Send + Sync + 'static {
 /// Shared agent resources passed between modes.
 pub struct AgentContext {
     pub client: crate::profile::GenerationClient,
+    /// Stateful conversation chain bound to `client`: it remembers the last turn's
+    /// provider response id so stateful backends receive `previous_response_id` plus
+    /// a delta instead of the full history. Rebuilt at every site that replaces
+    /// `client` (spawn, failover advance, profile reset) — response ids issued by one
+    /// provider are meaningless to another, so a new client always gets a fresh chain.
+    pub conversation: just_llm_client::Conversation,
     /// Within-set failover state: the resolved profile set, the profile registry (for
     /// rebuilding the client on advance), the system prompt, and the sticky `profile_idx` (the
     /// sole writer of which is `FailoverState::advance_to`). See `FailoverState`.
@@ -518,6 +524,9 @@ fn apply_pending_profile_reset(ctx: &mut AgentContext) {
     match ctx.failover.reset_and_rebuild(reset.set, reset.registry) {
         Ok(new_client) => {
             ctx.client = new_client;
+            // Fresh chain for the fresh client: the reset may switch providers, and a
+            // response id issued by the old one is meaningless to the new.
+            ctx.conversation = ctx.client.conversation();
             if let Err(e) = ctx.config.set_context_window(new_window) {
                 tracing::warn!(
                     window = new_window,

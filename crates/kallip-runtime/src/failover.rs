@@ -94,6 +94,14 @@ impl FailoverState {
         // (advance_to is forward-only; the skip loop bounds via candidate_profile).
         &self.set.profiles[self.profile_idx]
     }
+    /// The agent-level system prompt carried at construction.
+    ///
+    /// Request construction moved to the acquisition call site when the send path
+    /// migrated to `just_llm_client::Conversation` (which has no `create_request`),
+    /// so the prompt must be reachable without rebuilding a client.
+    pub(crate) fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
 
     /// A cloned candidate `offset` positions ahead of the active profile (`None` past the chain
     /// end). Cloned — not borrowed — so callers can mutate `FailoverState` (e.g. `advance_to`)
