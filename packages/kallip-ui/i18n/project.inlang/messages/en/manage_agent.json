@@ -34,6 +34,8 @@
   "manage_agent_last_prompt": "Last prompt",
   "manage_agent_cumulative_in": "Cumulative (in)",
   "manage_agent_cumulative_out": "Cumulative (out)",
+  "manage_agent_cumulative_cache_write": "Cumulative (cache write)",
+  "manage_agent_cumulative_cache_read": "Cumulative (cache read)",
   "manage_agent_recent_retries": "Recent Retries",
   "manage_agent_status_failed": "Could not load agent status.",
   "manage_agent_retry_line": "{date} — {error} ({outcome})",

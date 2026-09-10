@@ -17,6 +17,8 @@
     manage_agent_context_label,
     manage_agent_context_tokens,
     manage_agent_context_usage,
+    manage_agent_cumulative_cache_read,
+    manage_agent_cumulative_cache_write,
     manage_agent_cumulative_in,
     manage_agent_cumulative_out,
     manage_agent_last_prompt,
@@ -95,6 +97,24 @@
       ><span class="font-medium ml-2"
         >{formatTokenCount(
           status.context.cumulative_usage.completion_tokens,
+        )}</span
+      >
+    </div>
+    <div>
+      <span class="opacity-60 text-xs"
+        >{manage_agent_cumulative_cache_read()}</span
+      ><span class="font-medium ml-2"
+        >{formatTokenCount(
+          status.context.cumulative_usage.cache_read_tokens,
+        )}</span
+      >
+    </div>
+    <div>
+      <span class="opacity-60 text-xs"
+        >{manage_agent_cumulative_cache_write()}</span
+      ><span class="font-medium ml-2"
+        >{formatTokenCount(
+          status.context.cumulative_usage.cache_write_tokens,
         )}</span
       >
     </div>

@@ -407,8 +407,11 @@ impl ContextStore {
     pub fn accumulate_usage(&mut self, usage: &just_llm_client::types::generation::Usage) {
         self.cumulative_usage.prompt_tokens += usage.prompt_tokens as u64;
         self.cumulative_usage.completion_tokens += usage.completion_tokens as u64;
-        if let Some(hit) = usage.cache_read_tokens {
-            self.cumulative_usage.cache_hit_tokens += hit as u64;
+        if let Some(read) = usage.cache_read_tokens {
+            self.cumulative_usage.cache_read_tokens += read as u64;
+        }
+        if let Some(write) = usage.cache_write_tokens {
+            self.cumulative_usage.cache_write_tokens += write as u64;
         }
         self.last_prompt_tokens = Some(usage.prompt_tokens);
         self.anchored_turn_count = self.turns.len();
@@ -424,8 +427,11 @@ impl ContextStore {
     ) {
         self.cumulative_usage.prompt_tokens += usage.prompt_tokens as u64;
         self.cumulative_usage.completion_tokens += usage.completion_tokens as u64;
-        if let Some(hit) = usage.cache_read_tokens {
-            self.cumulative_usage.cache_hit_tokens += hit as u64;
+        if let Some(read) = usage.cache_read_tokens {
+            self.cumulative_usage.cache_read_tokens += read as u64;
+        }
+        if let Some(write) = usage.cache_write_tokens {
+            self.cumulative_usage.cache_write_tokens += write as u64;
         }
     }
 

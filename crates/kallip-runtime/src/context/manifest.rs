@@ -74,7 +74,8 @@ mod tests {
             cumulative_usage: CumulativeUsage {
                 prompt_tokens: 11,
                 completion_tokens: 4,
-                cache_hit_tokens: 2,
+                cache_read_tokens: 2,
+                cache_write_tokens: 0,
             },
             next_turn_id: 10,
             retry_log: vec![RetryRecord {

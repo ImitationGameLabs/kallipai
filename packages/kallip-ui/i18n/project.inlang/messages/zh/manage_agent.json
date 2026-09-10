@@ -34,6 +34,8 @@
   "manage_agent_last_prompt": "最近 prompt",
   "manage_agent_cumulative_in": "累计（输入）",
   "manage_agent_cumulative_out": "累计（输出）",
+  "manage_agent_cumulative_cache_write": "累计（缓存写入）",
+  "manage_agent_cumulative_cache_read": "累计（缓存读取）",
   "manage_agent_recent_retries": "最近重试",
   "manage_agent_status_failed": "无法加载智能体状态。",
   "manage_agent_retry_line": "{date} — {error}（{outcome}）",

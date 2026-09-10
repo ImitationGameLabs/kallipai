@@ -145,7 +145,8 @@ export interface ListAgentsManagementResponse {
 export interface CumulativeUsage {
   readonly prompt_tokens: number;
   readonly completion_tokens: number;
-  readonly cache_hit_tokens: number;
+  readonly cache_read_tokens: number;
+  readonly cache_write_tokens: number;
 }
 
 /** Context usage snapshot (`AgentStatusResponse.context`). */

@@ -532,7 +532,8 @@ Auth: any authenticated identity. See [auth.md](auth.md).
     "cumulative_usage": {
       "prompt_tokens": 50000,
       "completion_tokens": 10000,
-      "cache_hit_tokens": 30000
+      "cache_read_tokens": 30000,
+      "cache_write_tokens": 1500
     }
   },
   "recent_retries": [
