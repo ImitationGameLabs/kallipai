@@ -81,7 +81,7 @@ pub(crate) async fn enforce_pre_call_budget(
 /// `Recompose` when a warning was injected; `Return` on exhaustion; `Proceed` to handle tool calls.
 pub(crate) async fn enforce_post_stream_budget(
     ctx: &mut AgentContext,
-    usage: Option<&just_llm_client::types::chat::Usage>,
+    usage: Option<&just_llm_client::types::generation::Usage>,
 ) -> BudgetAction {
     if let Some(usage) = usage {
         ctx.store.lock().await.accumulate_usage(usage);

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64};
 
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use kallip_common::agentid::AgentId;
 use kallip_common::authtoken::{MintedToken, TokenHash};
 use kallip_common::policy::{ExecPolicy, PolicyPreset};
@@ -489,7 +489,7 @@ impl<'a> Materialize<'a> {
             };
             if let Err(e) = store.lock().await.pin(
                 &format!("skill:{skill_name}"),
-                ChatMessage::user(format!("[skill: {skill_name}]\n{content}")),
+                Message::user(format!("[skill: {skill_name}]\n{content}")),
             ) {
                 rollback_unspawned_create(state, rollback_supervisor.as_ref(), &id, &agent_dir)
                     .await;

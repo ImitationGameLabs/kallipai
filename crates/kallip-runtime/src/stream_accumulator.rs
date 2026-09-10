@@ -1,17 +1,20 @@
 //! Streaming tool-call accumulator.
 //!
-//! Accumulates tool-call deltas (which arrive in chunks across multiple SSE
-//! events, indexed by position) into complete `ChatToolCall` objects.
+//! Accumulates tool-call deltas (which arrive fragmented across multiple SSE
+//! events, identified by a stable in-flight index) into complete
+//! [`ToolCall`] objects.
+//!
+//! Why index-keyed: protocols stream a tool call's `id`/`name` on the first
+//! fragment and `arguments` as appended JSON fragments afterwards; parallel
+//! calls interleave, so fragments are grouped by [`ToolCallDelta::index`] (0
+//! when the protocol omits it — the single-call common case).
 
 use std::collections::BTreeMap;
 
-use just_llm_client::types::chat::{
-    ChatCompletionChunkToolCall, ChatToolCall, FunctionCall, ToolType,
-};
+use just_llm_client::types::generation::{ToolCall, ToolCallDelta};
 
-pub(super) struct AccumulatedToolCall {
+struct AccumulatedToolCall {
     id: Option<String>,
-    kind: Option<ToolType>,
     name: Option<String>,
     arguments: String,
 }
@@ -27,40 +30,31 @@ impl ToolCallAccumulator {
         }
     }
 
-    pub(super) fn push(&mut self, delta: &ChatCompletionChunkToolCall) {
+    pub(super) fn push(&mut self, delta: &ToolCallDelta) {
         let index = delta.index.unwrap_or(0);
         let entry = self.calls.entry(index).or_insert(AccumulatedToolCall {
             id: None,
-            kind: None,
             name: None,
             arguments: String::new(),
         });
         if let Some(id) = &delta.id {
             entry.id = Some(id.clone());
         }
-        if let Some(kind) = &delta.kind {
-            entry.kind = Some(kind.clone());
+        if let Some(name) = &delta.name {
+            entry.name = Some(name.clone());
         }
-        if let Some(func) = &delta.function {
-            if let Some(name) = &func.name {
-                entry.name = Some(name.clone());
-            }
-            if let Some(args) = &func.arguments {
-                entry.arguments.push_str(args);
-            }
+        if let Some(args) = &delta.arguments {
+            entry.arguments.push_str(args);
         }
     }
 
-    pub(super) fn finish(self) -> Vec<ChatToolCall> {
+    pub(super) fn finish(self) -> Vec<ToolCall> {
         self.calls
             .into_values()
-            .map(|acc| ChatToolCall {
+            .map(|acc| ToolCall {
                 id: acc.id.unwrap_or_default(),
-                kind: acc.kind.unwrap_or(ToolType::Function),
-                function: FunctionCall {
-                    name: acc.name.unwrap_or_default(),
-                    arguments: acc.arguments,
-                },
+                name: acc.name.unwrap_or_default(),
+                arguments: acc.arguments,
             })
             .collect()
     }

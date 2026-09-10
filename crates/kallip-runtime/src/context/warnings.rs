@@ -5,7 +5,7 @@
 //! crossed, and is a no-op below the lowest threshold. These mutate the store (push a turn + mark
 //! the threshold fired) so the warning fires once per level.
 
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use kallip_common::tokens::format_tokens_m;
 use tracing::info;
 
@@ -55,7 +55,7 @@ pub(crate) async fn check_progressive_warnings(
     );
 
     guard.mark_warned(threshold);
-    let msgs = vec![ChatMessage::user(&msg)];
+    let msgs = vec![Message::user(&msg)];
     let (turn_id, estimated_tokens) = guard.push_turn(msgs.clone());
     drop(guard);
     ctx.append_history(
@@ -108,7 +108,7 @@ pub(crate) async fn check_token_budget_warnings(
     );
 
     guard.mark_budget_warned(threshold);
-    let msgs = vec![ChatMessage::user(&msg)];
+    let msgs = vec![Message::user(&msg)];
     let (turn_id, estimated_tokens) = guard.push_turn(msgs.clone());
     drop(guard);
     ctx.append_history(

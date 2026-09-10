@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use just_llm_client::tools::LlmTool;
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -75,7 +75,7 @@ impl LlmTool for ContextPinTool {
         let args: PinArgs =
             serde_json::from_str(args_json).context("context_pin: invalid arguments")?;
         let mut ctx = self.ctx.lock().await;
-        ctx.pin(&args.label, ChatMessage::user(&args.content))?;
+        ctx.pin(&args.label, Message::user(&args.content))?;
         let labels = ctx.pinned_labels();
         Ok(serde_json::to_string(&json!({
             "pinned": args.label,

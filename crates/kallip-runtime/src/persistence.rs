@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::approval::ApprovalStore;
 use crate::context::ContextStore;
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use kallip_common::AgentId;
 
 /// Resolve the shared data root under which `agents/`, `archived/`, and
@@ -823,7 +823,7 @@ pub fn restore_agent(
     // leaves exactly one fresh notice below.
     strip_restart_turns(&mut store);
 
-    let restart_msgs = vec![ChatMessage::user(RESTART_MESSAGE)];
+    let restart_msgs = vec![Message::user(RESTART_MESSAGE)];
     let (restart_id, estimated_tokens) = store.push_turn(restart_msgs.clone());
     // The restart notice is an on-the-spot prompt with no history record;
     // keep its ID out of the manifest projection (see `injected_turn_ids`).
@@ -966,7 +966,7 @@ pub fn repair_agent_context(
                 "not executed: no result was ever recorded for this call (offline repair)"
                     .to_owned(),
             );
-            turn.messages.push(ChatMessage::tool_result(content, id));
+            turn.messages.push(Message::tool(content, id));
         }
         let orphan_ids: Vec<&str> = orphan.iter().map(String::as_str).collect();
         turn.messages.retain(|m| {
@@ -1149,7 +1149,7 @@ fn rebuild_window_from_tail(
 
 /// Whether a turn's messages violate tool-call/result pairing in either
 /// direction (`tool_execution::unanswered_call_ids` and its mirror).
-fn pairing_damaged(messages: &[ChatMessage]) -> bool {
+fn pairing_damaged(messages: &[Message]) -> bool {
     !crate::tool_execution::unanswered_call_ids(messages).is_empty()
         || !crate::tool_execution::orphan_result_ids(messages).is_empty()
 }
@@ -1361,6 +1361,57 @@ mod tests {
             restored.degraded.is_empty(),
             "clean migration degrades nothing"
         );
+    }
+
+    #[test]
+    fn legacy_context_json_assistant_pin_without_tool_calls_reads_back() {
+        let dir = TempDir::new().unwrap();
+        // A true pre-unification `context.json`: pins live in the `pinned`
+        // array and the assistant message carries the legacy chat face —
+        // `reasoning_content`, with no `tool_calls` key at all (the old
+        // binary skipped it when empty).
+        let legacy = serde_json::json!({
+            "turns": [],
+            "pinned": [{
+                "label": "note",
+                "message": {
+                    "role": "assistant",
+                    "content": "old reply",
+                    "reasoning_content": "done thinking"
+                }
+            }],
+            "last_prompt_tokens": null,
+            "next_turn_id": 0
+        });
+        std::fs::write(dir.path().join("context.json"), legacy.to_string()).unwrap();
+
+        let restored =
+            restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+
+        assert!(
+            restored.degraded.is_empty(),
+            "clean legacy migration degrades nothing"
+        );
+        let turn = restored
+            .store
+            .pinned_turns()
+            .find(|t| t.label() == Some("note"))
+            .expect("legacy assistant pin folds into a pinned turn");
+        let msg = &turn.messages[0];
+        assert_eq!(msg.role(), "assistant");
+        assert_eq!(msg.content(), Some("old reply"));
+        assert_eq!(
+            msg.reasoning().and_then(|r| r.text.as_deref()),
+            Some("done thinking")
+        );
+        assert!(
+            msg.tool_calls().is_empty(),
+            "absent legacy key reads back as no tool calls"
+        );
+        // Deferred migration completed: split files replaced the legacy doc.
+        assert!(dir.path().join("manifest.json").exists());
+        assert!(dir.path().join("pins.json").exists());
+        assert!(!dir.path().join("context.json").exists());
     }
 
     #[test]

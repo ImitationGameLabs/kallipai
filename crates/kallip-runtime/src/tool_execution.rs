@@ -20,7 +20,7 @@ use crate::policy::{ToolCallOutcome, error_result, skipped_tool_result, timed_ou
 use crate::runner::BreakUntil;
 use crate::text_slice::converge_under_cap;
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
-use just_llm_client::types::chat::{ChatMessage, ToolCallsMessage};
+use just_llm_client::types::generation::{Message, Reasoning};
 // ---------------------------------------------------------------------------
 // Tool-call execution
 // ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ use just_llm_client::types::chat::{ChatMessage, ToolCallsMessage};
 /// Outcome of executing the assistant's tool calls.
 pub(crate) enum ToolExecResult {
     /// The assembled turn messages (the assistant tool-call message + tool results).
-    Messages(Vec<ChatMessage>),
+    Messages(Vec<Message>),
     /// The agent called `break`. Carries the turn messages accumulated from the
     /// calls *before* `break` (the assistant tool-call message + any prior results)
     /// so the caller records them — `break` must not drop real work done earlier in
@@ -36,7 +36,7 @@ pub(crate) enum ToolExecResult {
     /// `break`'s own result (and that of any call emitted after it, which the
     /// round loop never reaches) is synthesized by `synthesize_unanswered_results`
     /// so the recorded turn stays protocol-valid; the SSE ack still fires for UI.
-    Break(Vec<ChatMessage>, BreakUntil),
+    Break(Vec<Message>, BreakUntil),
     /// Cancelled mid-execution; partial results are dropped (mirrors the original early-return).
     Cancelled,
 }
@@ -129,21 +129,23 @@ pub(crate) async fn execute_tool_calls(
     tool_timeout: Duration,
     round_cancel: &CancellationToken,
 ) -> ToolExecResult {
-    let mut turn_messages = vec![ChatMessage::ToolCalls(ToolCallsMessage {
-        role: "assistant".into(),
-        content: if consumed.content.is_empty() {
+    let mut turn_messages = vec![Message::assistant_tool_calls(
+        if consumed.content.is_empty() {
             None
         } else {
             Some(consumed.content)
         },
-        name: None,
-        tool_calls: consumed.tool_calls.clone(),
-        reasoning_content: if consumed.reasoning.is_empty() {
+        consumed.tool_calls.clone(),
+        // Old wire shape carried a bare `reasoning_content` string; the generation face wraps it.
+        if consumed.reasoning.is_empty() {
             None
         } else {
-            Some(consumed.reasoning)
+            Some(Reasoning {
+                text: Some(consumed.reasoning),
+                ..Reasoning::default()
+            })
         },
-    })];
+    )];
 
     // Stop on the first call that does not cleanly succeed. The agent composed
     // this round's calls without seeing intermediate results (a returned cwd,
@@ -164,11 +166,11 @@ pub(crate) async fn execute_tool_calls(
         // be followed by a tool result for every id). `synthesize_unanswered_results`
         // fills those in (break -> its real success ack; trailing calls -> a
         // not-executed error). The SSE ack below still fires for UI symmetry.
-        if call.function.name == "break" {
-            let until = parse_break_args(&call.function.arguments);
+        if call.name == "break" {
+            let until = parse_break_args(&call.arguments);
             tx.send(AgentEvent::ToolCall {
                 name: "break".into(),
-                args: call.function.arguments.clone(),
+                args: call.arguments.clone(),
             })
             .await
             .ok();
@@ -179,25 +181,24 @@ pub(crate) async fn execute_tool_calls(
 
         let result = if let Some((prior_name, reason)) = &skip {
             // Earlier call did not cleanly succeed: do not execute this one.
-            skipped_tool_result(&call.function.name, prior_name, reason)
+            skipped_tool_result(&call.name, prior_name, reason)
         } else {
             tx.send(AgentEvent::ToolCall {
-                name: call.function.name.clone(),
-                args: call.function.arguments.clone(),
+                name: call.name.clone(),
+                args: call.arguments.clone(),
             })
             .await
             .ok();
             let outcome = {
                 let tool_fut = run_tool_bounded(
-                    &call.function.name,
+                    &call.name,
                     tool_timeout,
-                    ctx.executor
-                        .execute(&call.function.name, &call.function.arguments),
+                    ctx.executor.execute(&call.name, &call.arguments),
                 );
                 tokio::select! {
                     result = tool_fut => result,
                     _ = round_cancel.cancelled() => {
-                        tracing::info!(tool = %call.function.name, "tool execution cancelled");
+                        tracing::info!(tool = %call.name, "tool execution cancelled");
                         return ToolExecResult::Cancelled;
                     }
                 }
@@ -236,14 +237,11 @@ pub(crate) async fn execute_tool_calls(
             match outcome {
                 ToolCallOutcome::Success(s) => s,
                 ToolCallOutcome::Failed(s) => {
-                    skip = Some((call.function.name.clone(), "did not succeed".to_string()));
+                    skip = Some((call.name.clone(), "did not succeed".to_string()));
                     s
                 }
                 ToolCallOutcome::Deferred(s) => {
-                    skip = Some((
-                        call.function.name.clone(),
-                        "is pending approval".to_string(),
-                    ));
+                    skip = Some((call.name.clone(), "is pending approval".to_string()));
                     s
                 }
             }
@@ -251,7 +249,7 @@ pub(crate) async fn execute_tool_calls(
 
         let result = cap_tool_result(result);
         tx.send(AgentEvent::ToolResult(result.clone())).await.ok();
-        turn_messages.push(ChatMessage::tool_result(result, call.id));
+        turn_messages.push(Message::tool(result, call.id));
     }
 
     // Defensive: the loop above answers every call it iterates, so this is a
@@ -276,12 +274,11 @@ pub(crate) async fn execute_tool_calls(
 /// with that `tool_call_id` somewhere in the slice. Scans all messages
 /// rather than trusting the assistant-first round shape, so it doubles as a
 /// damage probe over persisted turns (restore-time pairing validation).
-pub(crate) fn unanswered_call_ids(messages: &[ChatMessage]) -> Vec<(String, String)> {
+pub(crate) fn unanswered_call_ids(messages: &[Message]) -> Vec<(String, String)> {
     let declared: Vec<(String, String)> = messages
         .iter()
-        .filter_map(|msg| msg.tool_calls())
-        .flatten()
-        .map(|c| (c.id.clone(), c.function.name.clone()))
+        .flat_map(|msg| msg.tool_calls())
+        .map(|c| (c.id.clone(), c.name.clone()))
         .collect();
     let answered: Vec<&str> = messages
         .iter()
@@ -296,11 +293,10 @@ pub(crate) fn unanswered_call_ids(messages: &[ChatMessage]) -> Vec<(String, Stri
 /// Tool results in these messages whose `tool_call_id` no declared call in
 /// the same slice matches — the mirror damage of [`unanswered_call_ids`],
 /// in message order.
-pub(crate) fn orphan_result_ids(messages: &[ChatMessage]) -> Vec<String> {
+pub(crate) fn orphan_result_ids(messages: &[Message]) -> Vec<String> {
     let declared: Vec<&str> = messages
         .iter()
-        .filter_map(|msg| msg.tool_calls())
-        .flatten()
+        .flat_map(|msg| msg.tool_calls())
         .map(|c| c.id.as_str())
         .collect();
     messages
@@ -324,10 +320,7 @@ pub(crate) fn orphan_result_ids(messages: &[ChatMessage]) -> Vec<String> {
 /// Synthesis is honest about what happened: `break` parked (its real success ack),
 /// and any other unanswered call never ran (a not-executed error). Idempotent — a
 /// turn whose ids are all answered is untouched.
-pub(crate) fn synthesize_unanswered_results(
-    turn_messages: &mut Vec<ChatMessage>,
-    until: BreakUntil,
-) {
+pub(crate) fn synthesize_unanswered_results(turn_messages: &mut Vec<Message>, until: BreakUntil) {
     // Snapshot the declared-but-unanswered calls before the mutable push
     // below.
     let unanswered = unanswered_call_ids(turn_messages);
@@ -342,7 +335,7 @@ pub(crate) fn synthesize_unanswered_results(
                     .to_owned(),
             )
         };
-        turn_messages.push(ChatMessage::tool_result(content, id));
+        turn_messages.push(Message::tool(content, id));
     }
 }
 

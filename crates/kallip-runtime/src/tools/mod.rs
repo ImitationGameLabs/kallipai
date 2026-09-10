@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use just_llm_client::ToolDispatcher;
-use just_llm_client::types::chat::{FunctionDefinition, ToolDefinition, ToolType};
+use just_llm_client::types::generation::{FunctionDefinition, ToolDefinition, ToolType};
 use kallip_common::AgentId;
 use kallip_common::policy::ExecPolicy;
 use kallip_shell::{ShellBuilder, shell_tool_set};

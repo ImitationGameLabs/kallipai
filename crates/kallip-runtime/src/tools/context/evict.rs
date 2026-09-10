@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::context::AgenticContext;
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct EvictArgs {
@@ -74,7 +74,7 @@ impl LlmTool for ContextEvictTool {
             }))?);
         }
 
-        ctx.replace_pin("context_summary", ChatMessage::assistant(&args.summary))?;
+        ctx.replace_pin("context_summary", Message::assistant(&args.summary))?;
         let result = ctx.evict_turns(turn_count);
         ctx.reset_context_warnings();
 

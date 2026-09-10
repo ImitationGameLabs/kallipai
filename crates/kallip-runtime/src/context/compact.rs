@@ -4,7 +4,7 @@
 //! pre-loop wrapper for restored agents. [`CompactOutcome`] reports the result.
 
 use anyhow::Result;
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use tracing::{info, warn};
 
 use super::turn::{Turn, TurnKind};
@@ -53,7 +53,7 @@ fn slice_oversized_turn(turn: &Turn, input_budget: usize) -> Turn {
         }
     }
     let (_, _, sliced) = head_tail_slice(&text, cap_chars);
-    let messages = vec![ChatMessage::user(format!(
+    let messages = vec![Message::user(format!(
         "[Turn {} exceeded the summarizer budget; head+tail slice]\n{sliced}",
         turn.id.0
     ))];
@@ -154,7 +154,7 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
         // Write phase: replace summary + evict turns — single lock, no await.
         {
             let mut guard = ctx.store.lock().await;
-            guard.replace_pin("context_summary", ChatMessage::assistant(&result.text))?;
+            guard.replace_pin("context_summary", Message::assistant(&result.text))?;
             guard.evict_turns(result.source_turns);
             guard.reset_context_warnings();
             info!(
@@ -165,7 +165,7 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
         }
 
         // Record compaction event in history.
-        let summary_msg = vec![ChatMessage::assistant(&result.text)];
+        let summary_msg = vec![Message::assistant(&result.text)];
         ctx.append_history(
             None,
             &summary_msg,

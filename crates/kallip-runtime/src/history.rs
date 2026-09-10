@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::context::{Turn, TurnId, TurnKind};
 use anyhow::Result;
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -34,7 +34,8 @@ pub struct HistoryRecord {
     pub turn_id: Option<u64>,
 
     /// The turn's messages in full fidelity.
-    pub messages: Vec<ChatMessage>,
+    #[serde(with = "crate::persisted_message::message_vec")]
+    pub messages: Vec<Message>,
 
     /// Cached token estimate for diagnostics.
     pub estimated_tokens: usize,
@@ -98,7 +99,7 @@ impl HistoryWriter {
     pub fn append(
         &self,
         turn_id: Option<u64>,
-        messages: &[ChatMessage],
+        messages: &[Message],
         estimated_tokens: usize,
         kind: RecordKind,
         event: Option<SystemEvent>,

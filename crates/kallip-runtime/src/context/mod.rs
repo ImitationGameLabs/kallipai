@@ -1,7 +1,7 @@
 //! Agentic context management module.
 //!
 //! - [`ContextStore`] — single source of truth for all context data
-//! - [`compose_context`] — assembles turns into `Vec<ChatMessage>` (pinned entries first)
+//! - [`compose_context`] — assembles turns into `Vec<Message>` (pinned entries first)
 //! - [`ContextSummarizer`] — LLM-powered summarization of old turns
 //! - `estimate_context_tokens` / `check_progressive_warnings` / `check_token_budget_warnings` /
 //!   `summarize_and_evict` — the crate-private context-budget layer behind the round loop and

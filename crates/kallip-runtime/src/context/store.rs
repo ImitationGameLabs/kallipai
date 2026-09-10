@@ -4,7 +4,7 @@ use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 
 use anyhow::{Result, bail};
-use just_llm_client::types::chat::{ChatMessage, ToolDefinition};
+use just_llm_client::types::generation::{Message, ToolDefinition};
 use kallip_common::context::{ContextUsage, CumulativeUsage};
 
 use kallip_common::retry::{RETRY_LOG_KEEP, RetryRecord};
@@ -19,7 +19,8 @@ use super::turn::{Turn, TurnId, TurnKind};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PinnedItem {
     pub label: String,
-    pub message: ChatMessage,
+    #[serde(with = "crate::persisted_message::message")]
+    pub message: Message,
     /// Cached `estimate_message_tokens(&message)`. `#[serde(default)]` so legacy pins
     /// (pre-caching) deserialize as 0 and are backfilled on restore.
     #[serde(default)]
@@ -43,11 +44,11 @@ pub struct EvictResult {
 /// This decouples the tools layer from the context implementation.
 pub trait AgenticContext: Send + Sync {
     /// Pin a message with a label. Errors if the label already exists.
-    fn pin(&mut self, label: &str, message: ChatMessage) -> Result<()>;
+    fn pin(&mut self, label: &str, message: Message) -> Result<()>;
     /// Unpin a message by label. Errors if the label is not found.
     fn unpin(&mut self, label: &str) -> Result<()>;
     /// Atomically replace a pinned item or pin new if label doesn't exist.
-    fn replace_pin(&mut self, label: &str, message: ChatMessage) -> Result<()>;
+    fn replace_pin(&mut self, label: &str, message: Message) -> Result<()>;
     /// Return the labels of all currently pinned items.
     fn pinned_labels(&self) -> Vec<String>;
     /// Return a snapshot of current context layer breakdown.
@@ -75,14 +76,14 @@ pub trait AgenticContext: Send + Sync {
     /// Pinned turns are skipped: calls are recorded in the round that
     /// produced them, never in pinned copies.
     fn tool_call_info(&self, call_id: &str) -> Option<(String, String)>;
-    fn last_conversation_message_by_role(&self, role: &str) -> Option<ChatMessage>;
+    fn last_conversation_message_by_role(&self, role: &str) -> Option<Message>;
 }
 
 /// Single source of truth for all context data in an agent.
 ///
 /// Owns tool definitions and conversation turns. Pinned persistent context (compaction
 /// summaries, skills, notes) is stored as `TurnKind::Pinned` turns at the front of `turns`,
-/// keeping a single collection. Budget checking is handled by the main loop using ChatClient's
+/// keeping a single collection. Budget checking is handled by the main loop using GenerationClient's
 /// accurate token estimation pipeline.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ContextStore {
@@ -164,7 +165,7 @@ pub struct ContextStore {
 }
 
 impl AgenticContext for ContextStore {
-    fn pin(&mut self, label: &str, message: ChatMessage) -> Result<()> {
+    fn pin(&mut self, label: &str, message: Message) -> Result<()> {
         if self.pinned_turns().any(|t| t.label() == Some(label)) {
             bail!("pinned item '{label}' already exists");
         }
@@ -262,7 +263,7 @@ impl AgenticContext for ContextStore {
         }
     }
 
-    fn replace_pin(&mut self, label: &str, message: ChatMessage) -> Result<()> {
+    fn replace_pin(&mut self, label: &str, message: Message) -> Result<()> {
         let msg_tokens = estimate_message_tokens(&message);
         let existing_idx = self
             .turns
@@ -308,7 +309,7 @@ impl AgenticContext for ContextStore {
         self.highest_warned_pct = None;
     }
 
-    fn last_conversation_message_by_role(&self, role: &str) -> Option<ChatMessage> {
+    fn last_conversation_message_by_role(&self, role: &str) -> Option<Message> {
         // Skip pinned turns (front of the deque). The compaction summary is an
         // assistant-role pinned message, so including pinned turns would make
         // `assistant` resolve to the summary instead of the last real reply.
@@ -335,10 +336,9 @@ impl AgenticContext for ContextStore {
             .rev()
             .filter(|t| !t.is_pinned())
             .flat_map(|t| t.messages.iter().rev())
-            .filter_map(|m| m.tool_calls())
-            .flatten()
+            .flat_map(|m| m.tool_calls())
             .find(|c| c.id == call_id)
-            .map(|c| (c.function.name.clone(), c.function.arguments.clone()))
+            .map(|c| (c.name.clone(), c.arguments.clone()))
     }
 }
 
@@ -404,10 +404,10 @@ impl ContextStore {
     /// summarizer, which runs over a different message set), use
     /// [`accumulate_usage_no_anchor`](Self::accumulate_usage_no_anchor) — those must not move
     /// the anchor.
-    pub fn accumulate_usage(&mut self, usage: &just_llm_client::types::chat::Usage) {
+    pub fn accumulate_usage(&mut self, usage: &just_llm_client::types::generation::Usage) {
         self.cumulative_usage.prompt_tokens += usage.prompt_tokens as u64;
         self.cumulative_usage.completion_tokens += usage.completion_tokens as u64;
-        if let Some(hit) = usage.prompt_cache_hit_tokens {
+        if let Some(hit) = usage.cache_read_tokens {
             self.cumulative_usage.cache_hit_tokens += hit as u64;
         }
         self.last_prompt_tokens = Some(usage.prompt_tokens);
@@ -418,10 +418,13 @@ impl ContextStore {
     /// Accumulate usage for a non-main-conversation call (e.g. the summarizer): bumps
     /// `cumulative_usage` only, leaving `last_prompt_tokens` / `anchored_turn_count` /
     /// `needs_full_estimate` untouched so the main prompt anchor is not poisoned.
-    pub fn accumulate_usage_no_anchor(&mut self, usage: &just_llm_client::types::chat::Usage) {
+    pub fn accumulate_usage_no_anchor(
+        &mut self,
+        usage: &just_llm_client::types::generation::Usage,
+    ) {
         self.cumulative_usage.prompt_tokens += usage.prompt_tokens as u64;
         self.cumulative_usage.completion_tokens += usage.completion_tokens as u64;
-        if let Some(hit) = usage.prompt_cache_hit_tokens {
+        if let Some(hit) = usage.cache_read_tokens {
             self.cumulative_usage.cache_hit_tokens += hit as u64;
         }
     }
@@ -454,7 +457,7 @@ impl ContextStore {
 
     /// Append a new conversation turn from the given messages.
     /// Returns the assigned turn ID and the estimated token count.
-    pub fn push_turn(&mut self, messages: Vec<ChatMessage>) -> (TurnId, usize) {
+    pub fn push_turn(&mut self, messages: Vec<Message>) -> (TurnId, usize) {
         let estimated_tokens = Turn::estimate_tokens(&messages);
         let id = TurnId(self.next_turn_id);
         self.next_turn_id += 1;
@@ -508,7 +511,7 @@ impl ContextStore {
         if let Some(summary) = self.summary.take() {
             if !summary.is_empty() {
                 self.unpin("context_summary").ok();
-                self.pin("context_summary", ChatMessage::assistant(&summary))
+                self.pin("context_summary", Message::assistant(&summary))
                     .ok();
                 tracing::info!("migrated legacy summary to pinned item");
             }

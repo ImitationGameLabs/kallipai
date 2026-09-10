@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use just_llm_client::{ToolDispatcher, types::chat::ToolDefinition};
+use just_llm_client::{ToolDispatcher, types::generation::ToolDefinition};
 use kallip_common::toolresult::ToolResultEnvelope;
 use serde::Serialize;
 use serde_json::{Map, Value};

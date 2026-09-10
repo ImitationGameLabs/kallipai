@@ -9,14 +9,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Context;
-use just_llm_client::types::chat::{
-    ChatCompletionRequest, ChatMessage, ChatToolCall, FunctionCall, ToolCallsMessage, ToolType,
-    Usage,
-};
+use just_llm_client::types::generation::{GenerationRequest, Message, ToolCall, Usage};
 
-/// The test-facing message element type. Batch 1 of the just-agent-libs
-/// migration re-points this alias; test signatures never name the chat type.
-pub(crate) type TurnMessage = ChatMessage;
+/// The test-facing message element type. Re-pointed to the generation face by the
+/// just-agent-libs migration; test signatures never name the upstream type.
+pub(crate) type TurnMessage = Message;
 use just_llm_client::{LlmBackend, ToolDispatcher};
 use tokio_util::sync::CancellationToken;
 
@@ -177,74 +174,62 @@ pub(crate) fn usage(prompt_tokens: u32) -> Usage {
     usage_with_completion(prompt_tokens, 0)
 }
 
-// --- chat-face construction funnel ----------------------------------------------
+// --- chat-type construction funnel ----------------------------------------------
 // Every test-side chat type construction goes through these helpers so the
-// just-agent-libs migration (batch 1) swaps the bodies here and touches no
+// just-agent-libs migration swapped the bodies here and touched no
 // test call site. Keep call sites free of chat-face type names: helpers own
 // the types, callers own the intent.
 
 /// A user turn carrying `text`.
-pub(crate) fn user_msg(text: impl Into<String>) -> ChatMessage {
-    ChatMessage::user(text)
+pub(crate) fn user_msg(text: impl Into<String>) -> Message {
+    Message::user(text)
 }
 
 /// An assistant turn carrying `text`.
-pub(crate) fn assistant_msg(text: impl Into<String>) -> ChatMessage {
-    ChatMessage::assistant(text)
+pub(crate) fn assistant_msg(text: impl Into<String>) -> Message {
+    Message::assistant(text)
 }
 
 /// A tool result delivering `content` for call `tool_call_id`.
 pub(crate) fn tool_result_msg(
     content: impl Into<String>,
     tool_call_id: impl Into<String>,
-) -> ChatMessage {
-    ChatMessage::tool_result(content, tool_call_id)
+) -> Message {
+    Message::tool(content, tool_call_id)
 }
 
 /// An assistant turn declaring a single function call with explicit
 /// `arguments` JSON text.
-pub(crate) fn tool_call_msg(id: &str, name: &str, arguments: &str) -> ChatMessage {
-    tool_calls_message(vec![ChatToolCall {
+pub(crate) fn tool_call_msg(id: &str, name: &str, arguments: &str) -> Message {
+    tool_calls_message(vec![ToolCall {
         id: id.into(),
-        kind: ToolType::Function,
-        function: FunctionCall {
-            name: name.into(),
-            arguments: arguments.into(),
-        },
+        name: name.into(),
+        arguments: arguments.into(),
     }])
 }
 
 /// An assistant turn declaring `(id, name)` function calls, each with
 /// empty (`{}`) arguments.
-pub(crate) fn tool_calls_msg(calls: &[(&str, &str)]) -> ChatMessage {
+pub(crate) fn tool_calls_msg(calls: &[(&str, &str)]) -> Message {
     tool_calls_message(
         calls
             .iter()
-            .map(|(id, name)| ChatToolCall {
+            .map(|(id, name)| ToolCall {
                 id: (*id).into(),
-                kind: ToolType::Function,
-                function: FunctionCall {
-                    name: (*name).into(),
-                    arguments: "{}".into(),
-                },
+                name: (*name).into(),
+                arguments: "{}".into(),
             })
             .collect(),
     )
 }
 
-fn tool_calls_message(tool_calls: Vec<ChatToolCall>) -> ChatMessage {
-    ChatMessage::ToolCalls(ToolCallsMessage {
-        role: "assistant".into(),
-        content: None,
-        name: None,
-        tool_calls,
-        reasoning_content: None,
-    })
+fn tool_calls_message(tool_calls: Vec<ToolCall>) -> Message {
+    Message::assistant_tool_calls(None, tool_calls, None)
 }
 
 /// A completion request for `model` over `messages`.
-pub(crate) fn request(model: &str, messages: Vec<ChatMessage>) -> ChatCompletionRequest {
-    ChatCompletionRequest::new(model, messages)
+pub(crate) fn request(model: &str, messages: Vec<Message>) -> GenerationRequest {
+    GenerationRequest::new(model, messages)
 }
 
 /// A [`Usage`] with both token counts set (and derived `total_tokens`).
@@ -252,8 +237,8 @@ pub(crate) fn usage_with_completion(prompt_tokens: u32, completion_tokens: u32) 
     Usage {
         prompt_tokens,
         completion_tokens,
-        prompt_cache_hit_tokens: None,
-        prompt_cache_miss_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
         total_tokens: prompt_tokens + completion_tokens,
         completion_tokens_details: None,
     }

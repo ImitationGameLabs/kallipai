@@ -6,13 +6,13 @@
 //! [`crate::agent_task::AgentContext`] dependency, keeping this layer decoupled from the task.
 
 use anyhow::Result;
-use just_llm_client::types::chat::{ChatMessage, ToolDefinition};
+use just_llm_client::types::generation::{Message, ToolDefinition};
 use tokio::sync::Mutex;
 use tracing::warn;
 
 use super::store::ContextStore;
 use super::tokens::estimate_text;
-use crate::profile::ChatClient;
+use crate::profile::GenerationClient;
 
 /// Estimate the prompt-token size of the next request.
 ///
@@ -30,9 +30,9 @@ use crate::profile::ChatClient;
 /// `compose_context` output (pinned turns first, then conversation; no system prompt); the
 /// system prompt is rendered separately so the full estimate matches what the provider receives.
 pub(crate) async fn estimate_context_tokens(
-    client: &ChatClient,
+    client: &GenerationClient,
     store: &Mutex<ContextStore>,
-    messages: &[ChatMessage],
+    messages: &[Message],
     tools: &[ToolDefinition],
     system_prompt: Option<&str>,
 ) -> Result<usize> {
@@ -52,7 +52,7 @@ pub(crate) async fn estimate_context_tokens(
                     turns_len, "estimate anchor clamped to turns length"
                 );
             }
-            let delta: Vec<ChatMessage> = g
+            let delta: Vec<Message> = g
                 .turns()
                 .iter()
                 .skip(anchored.min(turns_len))
@@ -73,7 +73,7 @@ pub(crate) async fn estimate_context_tokens(
             drop(g);
             let mut rendered = String::new();
             if let Some(sp) = system_prompt {
-                rendered.push_str(&client.render_messages(&[ChatMessage::system(sp)])?);
+                rendered.push_str(&client.render_messages(&[Message::system(sp)])?);
             }
             rendered.push_str(&client.render_messages(messages)?);
             rendered.push_str(&client.render_tools(tools)?);

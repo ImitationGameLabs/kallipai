@@ -4,9 +4,9 @@
 //! [`ContextSummarizer`] summarizes old turns via an LLM call,
 //! pins the summary, and the caller evicts the summarized turns.
 
-use crate::profile::ChatClient;
+use crate::profile::GenerationClient;
 use anyhow::{Result, bail};
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 
 use super::turn::Turn;
 
@@ -54,13 +54,13 @@ impl ContextSummarizer {
         turns: &[Turn],
         existing_summary: Option<&str>,
         available: usize,
-        client: &ChatClient,
-    ) -> Result<(Summary, Option<just_llm_client::types::chat::Usage>)> {
-        let mut messages: Vec<ChatMessage> = Vec::new();
+        client: &GenerationClient,
+    ) -> Result<(Summary, Option<just_llm_client::types::generation::Usage>)> {
+        let mut messages: Vec<Message> = Vec::new();
         let mut input_budget = available.saturating_sub(self.max_tokens as usize);
 
         if let Some(existing) = existing_summary {
-            let msg = ChatMessage::assistant(format!("[Previous context summary]\n{existing}"));
+            let msg = Message::assistant(format!("[Previous context summary]\n{existing}"));
             input_budget =
                 input_budget.saturating_sub(super::tokens::estimate_message_tokens(&msg));
             messages.push(msg);
@@ -79,25 +79,20 @@ impl ContextSummarizer {
             messages.extend(turn.messages.iter().cloned());
         }
 
-        messages.push(ChatMessage::user(&self.prompt));
+        messages.push(Message::user(&self.prompt));
 
         let request = client
             .create_request(messages)
             .with_max_tokens(self.max_tokens);
 
-        let response = client.chat_completion(request).await?;
+        let response = client.generate(request).await?;
         let usage = response.usage.clone();
 
-        let text = match response
-            .first_choice_content()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
+        let text = match response.text().map(str::trim).filter(|s| !s.is_empty()) {
             Some(s) => s.to_owned(),
             None => bail!("summarization: LLM returned empty summary"),
         };
-        let estimated_tokens =
-            super::tokens::estimate_message_tokens(&ChatMessage::assistant(&text));
+        let estimated_tokens = super::tokens::estimate_message_tokens(&Message::assistant(&text));
 
         Ok((
             Summary {

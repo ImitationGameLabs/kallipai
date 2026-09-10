@@ -8,7 +8,7 @@
 //! underestimated CJK text ~4× (a Chinese character is ~1 real token, not 0.25) and so caused
 //! budget/compaction gates to fire far too late for CJK-heavy agents.
 
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 
 /// Estimate tokens for rendered text via `tokenx`.
 pub(crate) fn estimate_text(text: &str) -> usize {
@@ -19,11 +19,11 @@ pub(crate) fn estimate_text(text: &str) -> usize {
 /// key, and tool-call structure are all in the JSON, so the structural overhead is counted
 /// directly and no per-message / per-tool-call magic constants are needed.
 ///
-/// `ChatMessage` derives `Serialize`; its JSON matches `render_messages` closely for the
+/// `Message` derives `Serialize`; its JSON matches `render_messages` closely for the
 /// OpenAI-compatible providers, so this cached per-message estimate stays consistent with the
 /// live full-render estimate in `estimate.rs`. Deliberately separate from that path so the
-/// cache needs no `ChatClient`.
-pub(crate) fn estimate_message_tokens(message: &ChatMessage) -> usize {
+/// cache needs no `GenerationClient`.
+pub(crate) fn estimate_message_tokens(message: &Message) -> usize {
     match serde_json::to_string(message) {
         Ok(json) => estimate_text(&json),
         // Unreachable for a derive(Serialize) enum of String/Vec/Option fields; fall back to

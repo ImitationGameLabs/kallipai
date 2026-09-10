@@ -9,7 +9,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use just_llm_client::{BackendError, ChatCompletionStream};
+use just_llm_client::{BackendError, GenerationStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
@@ -39,7 +39,7 @@ impl Default for RetryPolicy {
 /// Outcome of a single prepare/send/parse attempt.
 enum Attempt {
     /// 2xx — a live stream ready to hand off to the caller.
-    Stream(ChatCompletionStream),
+    Stream(GenerationStream),
     /// Transient failure (HTTP 429/5xx/408, or a network send failure). Worth retrying in-profile.
     Retry {
         error: BackendError,
@@ -110,7 +110,10 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 /// consumes the body. `parse_streaming` runs `ensure_success`, so a non-2xx status surfaces as a
 /// [`BackendError`] — the retry decision is then a direct status check, not error-source
 /// archaeology. A `send` failure is transport-level (connect/timeout/...) and is always transient.
-async fn attempt_once(client: &crate::profile::ChatClient, prepared: &reqwest::Request) -> Attempt {
+async fn attempt_once(
+    client: &crate::profile::GenerationClient,
+    prepared: &reqwest::Request,
+) -> Attempt {
     // `reqwest::Request` has no `Clone` impl, but `try_clone` succeeds because the provider sets
     // the body from buffered JSON bytes (never a stream). Holds for every request this codebase
     // builds; a non-clonable body would indicate a backend bug.
@@ -178,8 +181,8 @@ pub(crate) fn backoff_delay(policy: &RetryPolicy, attempt: u32) -> Duration {
 /// its retry accounting. Side-channels (event sink, retry log, cancel token) stay as separate
 /// parameters — different borrow modes, conceptually orthogonal to the call data.
 pub struct RetryCall<'a> {
-    pub client: &'a crate::profile::ChatClient,
-    pub request: just_llm_client::types::chat::ChatCompletionRequest,
+    pub client: &'a crate::profile::GenerationClient,
+    pub request: just_llm_client::types::generation::GenerationRequest,
     pub policy: &'a RetryPolicy,
     pub round: usize,
     pub prior_retries: u32,
@@ -213,7 +216,7 @@ pub async fn stream_with_retry(
     event_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     retry_log: &mut Vec<RetryRecord>,
     cancel: CancellationToken,
-) -> Result<ChatCompletionStream, RequestFailure> {
+) -> Result<GenerationStream, RequestFailure> {
     let RetryCall {
         client,
         request,
@@ -453,23 +456,24 @@ mod tests {
 
     // --- loop behavior via wiremock (real OpenAiCompat backend against a mock server) ---
 
-    use crate::profile::ChatClient;
+    use crate::profile::GenerationClient;
     use futures_util::StreamExt;
-    use just_llm_client::{ChatClientOptions, LlmBackend, provider::OpenAiCompatBackend};
+    use just_llm_client::types::generation::GenerationEvent;
+    use just_llm_client::{GenerationClientOptions, LlmBackend, provider::OpenAiCompatBackend};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
 
-    /// A real OpenAI-compatible backend pointed at a mock server, wrapped in a `ChatClient`.
-    fn mock_client(server: &MockServer) -> ChatClient {
+    /// A real OpenAI-compatible backend pointed at a mock server, wrapped in a `GenerationClient`.
+    fn mock_client(server: &MockServer) -> GenerationClient {
         let backend = OpenAiCompatBackend::new(
             reqwest::Client::builder().use_rustls_tls(),
             "test-key",
             Some(&server.uri()),
         )
         .expect("openai-compat backend constructs without network");
-        ChatClient::new(backend, ChatClientOptions::new("gpt-4.1-mini"))
+        GenerationClient::new(backend, GenerationClientOptions::new("gpt-4.1-mini"))
     }
 
     /// Fast policy so the suite stays snappy; caller sets `max_retries` per scenario.
@@ -774,7 +778,7 @@ mod tests {
             Some("http://127.0.0.1:0"),
         )
         .expect("openai-compat backend constructs without network");
-        let client = ChatClient::new(backend, ChatClientOptions::new("gpt-4.1-mini"));
+        let client = GenerationClient::new(backend, GenerationClientOptions::new("gpt-4.1-mini"));
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
@@ -837,8 +841,12 @@ mod tests {
 
         assert!(retry_log.is_empty());
         assert_eq!(retrying_count(&mut rx), 0);
-
-        let chunk = stream.next().await.unwrap().unwrap();
-        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(
+            event,
+            GenerationEvent::Text {
+                delta: "hi".to_owned()
+            }
+        );
     }
 }

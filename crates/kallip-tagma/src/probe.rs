@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
 use just_llm_client::client::BackendFactory;
-use just_llm_client::types::chat::{ChatCompletionRequest, ChatMessage};
+use just_llm_client::types::generation::{GenerationRequest, Message};
 use kallip_runtime::profile::{ProfileConfig, Provider};
 use serde::{Deserialize, Serialize};
 
@@ -372,12 +372,12 @@ async fn inference_verdict(
         Ok(backend) => backend,
         Err(e) => return (ProbeStatus::InvalidConfig, Some(format!("{e:#}"))),
     };
-    let request = ChatCompletionRequest::new(
+    let request = GenerationRequest::new(
         model.to_string(),
-        vec![ChatMessage::user(INFERENCE_TEST_PROMPT)],
+        vec![Message::user(INFERENCE_TEST_PROMPT)],
     )
     .with_max_tokens(256);
-    match tokio::time::timeout(timeout, backend.chat_completion(request)).await {
+    match tokio::time::timeout(timeout, backend.generate(request)).await {
         Ok(Ok(_)) => (ProbeStatus::Ok, None),
         Ok(Err(e)) => {
             let (status, detail) = classify_backend_error(&e);

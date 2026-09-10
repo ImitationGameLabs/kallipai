@@ -16,12 +16,12 @@ use anyhow::{Context, Result, bail};
 use just_llm_client::CapabilityNegotiation;
 use just_llm_client::client::BackendFactory;
 use just_llm_client::family;
-use just_llm_client::types::chat::{
-    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ToolDefinition,
+use just_llm_client::types::generation::{
+    GenerationRequest, GenerationResponse, Message, ToolDefinition,
 };
 use just_llm_client::{
-    BackendConstructError, BackendError, ChatClient, ChatClientOptions, ChatCompletionStream,
-    Identifiable, LlmBackend,
+    BackendConstructError, BackendError, GenerationClient, GenerationClientOptions,
+    GenerationStream, Identifiable, LlmBackend,
 };
 use kallip_runtime::profile::{BackendSource, NO_PROFILE_HINT, ProfileConfig, Provider};
 
@@ -91,7 +91,7 @@ fn validate_providers(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<(
 /// The `User-Agent` survives upstream today because `BackendFactory::create` forwards our builder
 /// verbatim and `just-common::build_client` injects only `Authorization`/`Accept` — it sets no UA of
 /// its own. This is an implementation-level property, not a contract: migrate to a
-/// `ChatClientOptions`-level UA API if upstream ever adds one. An override containing characters
+/// `GenerationClientOptions`-level UA API if upstream ever adds one. An override containing characters
 /// illegal in a header value (e.g. CR/LF, control bytes) fails fast here —
 /// `reqwest::ClientBuilder::build` rejects it and the error bubbles up to the caller — at startup
 /// for the active set, lazily on first failover use otherwise.
@@ -218,10 +218,10 @@ pub(crate) fn unconfigured_set() -> kallip_runtime::profile::ProfileSet {
     }
 }
 
-/// Backend handed to the profile-less root's `ChatClient`: every call fails
+/// Backend handed to the profile-less root's `GenerationClient`: every call fails
 /// with the management-page hint until the first profile lands, at which
 /// point `apply_pending_profile_reset` rebuilds the client with a real
-/// backend — keeping `ChatClient` non-optional throughout the runtime.
+/// backend — keeping `GenerationClient` non-optional throughout the runtime.
 struct UnconfiguredBackend;
 
 fn unconfigured_error() -> BackendError {
@@ -239,14 +239,11 @@ impl CapabilityNegotiation for UnconfiguredBackend {}
 
 #[async_trait::async_trait]
 impl LlmBackend for UnconfiguredBackend {
-    fn prepare(&self, _: ChatCompletionRequest) -> Result<reqwest::Request, BackendError> {
+    fn prepare(&self, _: GenerationRequest) -> Result<reqwest::Request, BackendError> {
         Err(unconfigured_error())
     }
 
-    fn prepare_streaming(
-        &self,
-        _: ChatCompletionRequest,
-    ) -> Result<reqwest::Request, BackendError> {
+    fn prepare_streaming(&self, _: GenerationRequest) -> Result<reqwest::Request, BackendError> {
         Err(unconfigured_error())
     }
 
@@ -254,18 +251,18 @@ impl LlmBackend for UnconfiguredBackend {
         Err(unconfigured_error())
     }
 
-    async fn parse(&self, _: reqwest::Response) -> Result<ChatCompletionResponse, BackendError> {
+    async fn parse(&self, _: reqwest::Response) -> Result<GenerationResponse, BackendError> {
         Err(unconfigured_error())
     }
 
     async fn parse_streaming(
         &self,
         _: reqwest::Response,
-    ) -> Result<ChatCompletionStream, BackendError> {
+    ) -> Result<GenerationStream, BackendError> {
         Err(unconfigured_error())
     }
 
-    fn render_messages(&self, _: &[ChatMessage]) -> Result<String, BackendError> {
+    fn render_messages(&self, _: &[Message]) -> Result<String, BackendError> {
         Err(unconfigured_error())
     }
 
@@ -295,17 +292,17 @@ impl LlmBackend for UnconfiguredBackend {
 
 /// The profile-less root's client: typed, but every LLM call fails with the
 /// management-page hint until a real profile is applied.
-pub(crate) fn unconfigured_client(system_prompt: Option<String>) -> ChatClient {
-    let mut options = ChatClientOptions::new(UNCONFIGURED.to_string());
+pub(crate) fn unconfigured_client(system_prompt: Option<String>) -> GenerationClient {
+    let mut options = GenerationClientOptions::new(UNCONFIGURED.to_string());
     if let Some(sp) = system_prompt {
         options = options.with_system_prompt(sp);
     }
-    ChatClient::new(Arc::new(UnconfiguredBackend), options)
+    GenerationClient::new(Arc::new(UnconfiguredBackend), options)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use just_llm_client::types::chat::{ChatCompletionRequest, ChatMessage};
+    use just_llm_client::types::generation::{GenerationRequest, Message};
     use kallip_runtime::profile::{Profile, ProfileSet};
     use std::collections::BTreeMap;
 
@@ -410,12 +407,14 @@ mod tests {
     #[test]
     fn unknown_family_referenced_errors() {
         let mut cfg = ds_cfg();
-        cfg.endpoints.get_mut("ds").unwrap().family = "anthropic".into();
+        // "anthropic" registered once the migration enabled its feature (R10); pick a
+        // family string no factory has.
+        cfg.endpoints.get_mut("ds").unwrap().family = "nonexistent".into();
         let err = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT)
             .err()
             .expect("unregistered family should error");
         let msg = format!("{err}");
-        assert!(msg.contains("unknown family 'anthropic'"), "got: {msg}");
+        assert!(msg.contains("unknown family 'nonexistent'"), "got: {msg}");
     }
 
     #[test]
@@ -481,7 +480,7 @@ mod tests {
         };
         let factory = BackendFactory::new();
         let backend = build_one(&factory, &endpoint, user_agent).expect("backend builds");
-        let request = ChatCompletionRequest::new("m", vec![ChatMessage::user("hi")]);
+        let request = GenerationRequest::new("m", vec![Message::user("hi")]);
         let prepared = backend.prepare(request).expect("prepare serializes");
         // `send` does not parse — a bare 200 satisfies it. The mock's `.and(header(...))` is the
         // assertion: a non-matching UA means zero hits, failing `.expect(1)` when `server` drops.

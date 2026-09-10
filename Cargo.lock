@@ -2354,10 +2354,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "just-anthropic"
+version = "0.1.0"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=4a9585f#4a9585f4977907157b08454ac112ea57a6d1c16d"
+dependencies = [
+ "futures-core",
+ "just-common",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "just-common"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b743335816a6882809bc1c502bfb2fc480b4a462a5543217ad19921127e98be"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=4a9585f#4a9585f4977907157b08454ac112ea57a6d1c16d"
 dependencies = [
  "async-stream",
  "futures-core",
@@ -2371,8 +2382,7 @@ dependencies = [
 [[package]]
 name = "just-deepseek"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05c9550cadaaa1dafbfcb988e14d161a3fb3fe03b6594e92aecc0a38a134a0e9"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=4a9585f#4a9585f4977907157b08454ac112ea57a6d1c16d"
 dependencies = [
  "futures-core",
  "just-common",
@@ -2384,27 +2394,40 @@ dependencies = [
 [[package]]
 name = "just-llm-client"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ba6c7aeea62a61d9c63cc36a201b3ed6ec9e352ad6e672577f4f91023743ca1"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=4a9585f#4a9585f4977907157b08454ac112ea57a6d1c16d"
 dependencies = [
  "anyhow",
  "async-trait",
  "futures-core",
  "futures-util",
+ "just-anthropic",
  "just-common",
  "just-deepseek",
  "just-openai-compat",
+ "just-openai-responses",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
 name = "just-openai-compat"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62f943a5e21415f9012ea59ab4da77e4bd1b9dc23277dda3244bf17d429aea0f"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=4a9585f#4a9585f4977907157b08454ac112ea57a6d1c16d"
+dependencies = [
+ "futures-core",
+ "just-common",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "just-openai-responses"
+version = "0.1.0"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=4a9585f#4a9585f4977907157b08454ac112ea57a6d1c16d"
 dependencies = [
  "futures-core",
  "just-common",

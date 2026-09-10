@@ -18,10 +18,10 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use kallip_common::protocol::FailoverChainExhaustion;
 
-use crate::profile::{ChatClient, Profile, ProfileRegistry, ProfileSet};
+use crate::profile::{GenerationClient, Profile, ProfileRegistry, ProfileSet};
 
 /// Runtime within-set failover state. Owned by [`crate::agent_task::AgentContext`] as
 /// `ctx.failover`.
@@ -126,9 +126,9 @@ impl FailoverState {
         self.profile_idx + 1 < self.set.profiles.len()
     }
 
-    /// Build a [`ChatClient`] for `profile` via the registry (looks up the endpoint's backend),
+    /// Build a [`GenerationClient`] for `profile` via the registry (looks up the endpoint's backend),
     /// applying this agent's system prompt.
-    pub(crate) fn build_client(&self, profile: &Profile) -> Result<ChatClient> {
+    pub(crate) fn build_client(&self, profile: &Profile) -> Result<GenerationClient> {
         self.registry
             .build_client(profile, self.system_prompt.clone())
     }
@@ -162,7 +162,7 @@ impl FailoverState {
     /// online profile-apply path). Builds the client for the new set's active
     /// profile first (fail-fast on a misconfigured endpoint), then commits the
     /// set, registry, resets `profile_idx` to 0, and rewrites the shared profile snapshot.
-    /// [`ChatClient`] so the caller can swap `ctx.client`. On error, nothing is
+    /// [`GenerationClient`] so the caller can swap `ctx.client`. On error, nothing is
     /// mutated — the agent continues on its prior config.
     ///
     /// `system_prompt` is carried over (it is agent-level config, not
@@ -172,7 +172,7 @@ impl FailoverState {
         &mut self,
         set: ProfileSet,
         registry: Arc<ProfileRegistry>,
-    ) -> Result<ChatClient> {
+    ) -> Result<GenerationClient> {
         let profile = set.active_profile();
         let client = registry.build_client(profile, self.system_prompt.clone())?;
         self.set_name = set.name.clone();
@@ -205,7 +205,7 @@ pub struct ProfileSnapshot {
 /// unchanged — so the acquisition loop can rebind its local without `advance_failover` taking
 /// it by `&mut`.
 ///
-/// `Debug` is manual because [`Advanced`](Self::Advanced) carries `Vec<ChatMessage>` and
+/// `Debug` is manual because [`Advanced`](Self::Advanced) carries `Vec<Message>` and
 /// [`ChainExhausted`](Self::ChainExhausted) carries `anyhow::Error` (neither critical for the
 /// diagnostic line tests need).
 pub(crate) enum FailoverOutcome {
@@ -215,7 +215,7 @@ pub(crate) enum FailoverOutcome {
     Advanced {
         from: String,
         to: String,
-        messages: Vec<ChatMessage>,
+        messages: Vec<Message>,
     },
     /// No buildable candidate ahead — the chain is exhausted. Carries the **original** trigger
     /// (the endpoint-level failure that started the advance), not the per-candidate build errors

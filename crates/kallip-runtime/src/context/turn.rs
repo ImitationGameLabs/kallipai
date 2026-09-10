@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 
 /// Stable unique identifier for a turn within an agent's lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -43,7 +43,8 @@ impl Default for TurnKind {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Turn {
     pub id: TurnId,
-    pub messages: Vec<ChatMessage>,
+    #[serde(with = "crate::persisted_message::message_vec")]
+    pub messages: Vec<Message>,
     /// Cached token estimate computed on insertion.
     pub estimated_tokens: usize,
     /// Whether this is pinned persistent context or a normal conversation turn.
@@ -68,7 +69,7 @@ impl Turn {
 
     /// Estimate the token count for a slice of messages via the crate's token-estimation seam
     /// (`context::tokens`).
-    pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
+    pub fn estimate_tokens(messages: &[Message]) -> usize {
         messages
             .iter()
             .map(super::tokens::estimate_message_tokens)

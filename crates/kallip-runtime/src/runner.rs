@@ -20,7 +20,7 @@ use crate::budget_gate::{BudgetAction, enforce_post_stream_budget, enforce_pre_c
 use crate::context::{compose_context, estimate_context_tokens};
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::tool_execution::{ToolExecResult, execute_tool_calls};
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 
 // ---------------------------------------------------------------------------
 // Round-loop control-flow signals
@@ -84,7 +84,7 @@ pub(crate) async fn run_agent_rounds(
         let notifications = ctx.approvals.lock().await.drain_notifications();
         if !notifications.is_empty() {
             let msg = format_approval_notifications(&notifications);
-            ctx.record_turn(vec![ChatMessage::user(&msg)]).await;
+            ctx.record_turn(vec![Message::user(&msg)]).await;
         }
 
         // -- Context composition and token estimation --
@@ -188,7 +188,7 @@ async fn drain_interjections(
             })
             .collect::<Vec<_>>()
             .join("\n");
-        ctx.record_turn(vec![ChatMessage::user(&msg)]).await;
+        ctx.record_turn(vec![Message::user(&msg)]).await;
         info!(count = interjected.len(), "injected interjected messages");
     }
 }

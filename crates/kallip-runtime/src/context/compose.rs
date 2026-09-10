@@ -1,8 +1,8 @@
-//! Context composition: assembles layers into `Vec<ChatMessage>`.
+//! Context composition: assembles layers into `Vec<Message>`.
 
 use std::sync::Arc;
 
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use tokio::sync::Mutex;
 
 use super::store::ContextStore;
@@ -13,7 +13,7 @@ use super::store::ContextStore;
 /// single iteration yields persistent pinned context first, then the conversation in order.
 /// Returns all messages without budget filtering — the caller is responsible for estimating
 /// tokens and triggering summarize_and_evict.
-pub async fn compose_context(store: Arc<Mutex<ContextStore>>) -> Vec<ChatMessage> {
+pub async fn compose_context(store: Arc<Mutex<ContextStore>>) -> Vec<Message> {
     let guard = store.lock().await;
     let mut messages = Vec::new();
     for turn in guard.turns() {

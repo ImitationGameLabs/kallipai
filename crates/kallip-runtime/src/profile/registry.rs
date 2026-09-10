@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use just_llm_client::{ChatClient, ChatClientOptions, LlmBackend};
+use just_llm_client::{GenerationClient, GenerationClientOptions, LlmBackend};
 
 use super::model::{Profile, ProfileSet};
 
@@ -88,13 +88,13 @@ impl ProfileRegistry {
         }
     }
 
-    /// Build a [`ChatClient`] for a profile, looking up its provider's backend via the
+    /// Build a [`GenerationClient`] for a profile, looking up its provider's backend via the
     /// [`BackendSource`] (pre-built for the active set, lazily constructed for failover profiles).
     pub fn build_client(
         &self,
         profile: &Profile,
         system_prompt: Option<String>,
-    ) -> Result<ChatClient> {
+    ) -> Result<GenerationClient> {
         let backend = self.source.get(&profile.endpoint).with_context(|| {
             format!(
                 "profile '{}' references endpoint '{}' with no backend",
@@ -102,11 +102,11 @@ impl ProfileRegistry {
             )
         })?;
 
-        let mut options = ChatClientOptions::new(profile.model.clone());
+        let mut options = GenerationClientOptions::new(profile.model.clone());
         if let Some(system_prompt) = system_prompt {
             options = options.with_system_prompt(system_prompt);
         }
-        Ok(ChatClient::new(backend, options))
+        Ok(GenerationClient::new(backend, options))
     }
 }
 

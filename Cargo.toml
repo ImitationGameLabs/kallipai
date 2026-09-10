@@ -40,7 +40,7 @@ license = "MIT"
 name = "kallip"
 
 [workspace.dependencies]
-just-llm-client = "0.2.0"
+just-llm-client = { git = "https://github.com/ImitationGameLabs/just-agent-libs.git", rev = "4a9585f", features = ["responses", "anthropic"] }
 
 kallip-common = { path = "crates/kallip-common", default-features = false }
 kallip-archeion-common = { path = "crates/platform/kallip-archeion-common" }

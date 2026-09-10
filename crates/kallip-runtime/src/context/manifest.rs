@@ -8,7 +8,7 @@
 //! land as un-IDed system records). Conversation turns are hydrated from the
 //! append-only history log by turn ID; see `persistence::restore_agent`.
 
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use kallip_common::context::CumulativeUsage;
 use kallip_common::retry::RetryRecord;
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,8 @@ pub(crate) struct PinRecord {
     /// The pinned turn's stable ID. In-place `replace_pin` keeps it.
     pub id: u64,
     pub label: String,
-    pub message: ChatMessage,
+    #[serde(with = "crate::persisted_message::message")]
+    pub message: Message,
     pub estimated_tokens: usize,
 }
 

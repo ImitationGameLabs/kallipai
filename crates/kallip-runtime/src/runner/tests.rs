@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use just_llm_client::{
     LlmBackend,
-    types::chat::{ChatToolCall, FunctionCall, ToolCallsMessage, ToolType},
+    types::generation::{Message, Reasoning, ToolCall},
 };
 use kallip_common::protocol::FailoverChainExhaustion;
 use wiremock::{
@@ -102,20 +102,18 @@ fn synthesize_is_noop_on_complete_turn_and_idempotent() {
 
 #[test]
 fn synthesize_keeps_assistant_content_and_reasoning_intact() {
-    let mut msgs = vec![ChatMessage::ToolCalls(ToolCallsMessage {
-        role: "assistant".into(),
-        content: Some("parking now".into()),
-        name: None,
-        tool_calls: vec![ChatToolCall {
+    let mut msgs = vec![Message::assistant_tool_calls(
+        Some("parking now".into()),
+        vec![ToolCall {
             id: "c1".into(),
-            kind: ToolType::Function,
-            function: FunctionCall {
-                name: "break".into(),
-                arguments: "{}".into(),
-            },
+            name: "break".into(),
+            arguments: "{}".into(),
         }],
-        reasoning_content: Some("done thinking".into()),
-    })];
+        Some(Reasoning {
+            text: Some("done thinking".into()),
+            ..Reasoning::default()
+        }),
+    )];
     synthesize_unanswered_results(
         &mut msgs,
         BreakUntil::Wait {
@@ -123,7 +121,10 @@ fn synthesize_keeps_assistant_content_and_reasoning_intact() {
         },
     );
     assert_eq!(msgs[0].content(), Some("parking now"));
-    assert_eq!(msgs[0].reasoning_content(), Some("done thinking"));
+    assert_eq!(
+        msgs[0].reasoning().and_then(|r| r.text.as_deref()),
+        Some("done thinking")
+    );
     assert_eq!(msgs[1].tool_call_id(), Some("c1"));
 }
 

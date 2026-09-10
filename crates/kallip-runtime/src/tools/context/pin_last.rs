@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use just_llm_client::tools::LlmTool;
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use kallip_common::toolresult::ToolResultEnvelope;
 use serde::{Deserialize, Serialize};
 
@@ -104,7 +104,7 @@ impl LlmTool for ContextPinLastTool {
         let call = message.tool_call_id().and_then(|id| ctx.tool_call_info(id));
         let card = reference_card(&message, call.as_ref());
         let preview: String = card.chars().take(PREVIEW_CHARS).collect();
-        ctx.pin(&args.label, ChatMessage::user(card))?;
+        ctx.pin(&args.label, Message::user(card))?;
         let labels = ctx.pinned_labels();
         Ok(serde_json::to_string(&json!({
             "pinned": args.label,
@@ -124,7 +124,7 @@ impl LlmTool for ContextPinLastTool {
 /// result when there is none; with no envelope or no result field the
 /// full body stands in. A missing pairing call degrades the header to
 /// `command unavailable`.
-fn reference_card(message: &ChatMessage, call: Option<&(String, String)>) -> String {
+fn reference_card(message: &Message, call: Option<&(String, String)>) -> String {
     let content = message.content().unwrap_or_default();
     let envelope = serde_json::from_str::<ToolResultEnvelope>(content).ok();
     let tool = envelope
@@ -298,7 +298,7 @@ mod tests {
         let msg = &pinned.messages[0];
         assert_eq!(msg.role(), "user");
         assert_eq!(msg.tool_call_id(), None);
-        assert!(msg.tool_calls().is_none_or(|c| c.is_empty()));
+        assert!(msg.tool_calls().is_empty());
         assert!(
             msg.content()
                 .unwrap_or_default()

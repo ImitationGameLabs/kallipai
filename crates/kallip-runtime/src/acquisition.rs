@@ -17,8 +17,9 @@ use crate::context::{CompactOutcome, compose_context, summarize_and_evict};
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::failover::FailoverOutcome;
 use crate::stream_accumulator::ToolCallAccumulator;
-use just_llm_client::types::chat::{
-    ChatMessage, ChatToolCall, StreamOptions, ToolChoice, ToolChoiceMode, ToolDefinition,
+use just_llm_client::GenerationStream;
+use just_llm_client::types::generation::{
+    GenerationEvent, Message, ToolCall, ToolChoice, ToolChoiceMode, ToolDefinition,
 };
 use kallip_common::protocol::FailoverChainExhaustion;
 use kallip_common::retry::{RetryKind, RetryRecord};
@@ -44,8 +45,8 @@ enum StreamOutcome {
 pub(crate) struct StreamConsumed {
     pub(crate) content: String,
     pub(crate) reasoning: String,
-    pub(crate) tool_calls: Vec<ChatToolCall>,
-    pub(crate) usage: Option<just_llm_client::types::chat::Usage>,
+    pub(crate) tool_calls: Vec<ToolCall>,
+    pub(crate) usage: Option<just_llm_client::types::generation::Usage>,
 }
 
 /// Consume an SSE stream, accumulating content, reasoning, tool calls, and usage.
@@ -53,21 +54,21 @@ pub(crate) struct StreamConsumed {
 /// Takes ownership of the stream and pins it internally.
 /// Returns `Cancelled` if the cancellation token fires mid-stream.
 async fn consume_stream(
-    stream: just_llm_client::ChatCompletionStream,
+    stream: GenerationStream,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     cancel: &CancellationToken,
 ) -> StreamOutcome {
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut tool_acc = ToolCallAccumulator::new();
-    let mut response_usage: Option<just_llm_client::types::chat::Usage> = None;
+    let mut response_usage: Option<just_llm_client::types::generation::Usage> = None;
 
     tokio::pin!(stream);
     loop {
         tokio::select! {
-            chunk_result = stream.next() => {
-                let chunk = match chunk_result {
-                    Some(Ok(c)) => c,
+            event_result = stream.next() => {
+                let event = match event_result {
+                    Some(Ok(e)) => e,
                     Some(Err(e)) => {
                         // Mid-stream transport drop (connection reset, h2 error, premature EOF, ...).
                         // The partial content already emitted via deltas is void; the caller retries
@@ -80,33 +81,26 @@ async fn consume_stream(
                     }
                     None => break,
                 };
-                let choice = match chunk.choices.first() {
-                    Some(c) => c,
-                    None => continue,
-                };
-
-                if let Some(delta) = &choice.delta.content {
-                    content.push_str(delta);
-                    tx.send(AgentEvent::AssistantContentDelta { delta: delta.clone() })
-                        .await
-                        .ok();
-                }
-
-                if let Some(delta) = &choice.delta.reasoning_content {
-                    reasoning.push_str(delta);
-                    tx.send(AgentEvent::ReasoningDelta { delta: delta.clone() })
-                        .await
-                        .ok();
-                }
-
-                if let Some(deltas) = &choice.delta.tool_calls {
-                    for tc in deltas {
-                        tool_acc.push(tc);
+                match event {
+                    GenerationEvent::Text { delta } => {
+                        content.push_str(&delta);
+                        tx.send(AgentEvent::AssistantContentDelta { delta })
+                            .await
+                            .ok();
                     }
-                }
-
-                if let Some(usage) = chunk.usage.clone() {
-                    response_usage = Some(usage);
+                    GenerationEvent::Reasoning { delta } => {
+                        reasoning.push_str(&delta);
+                        tx.send(AgentEvent::ReasoningDelta { delta }).await.ok();
+                    }
+                    GenerationEvent::ToolCall { delta } => {
+                        tool_acc.push(&delta);
+                    }
+                    GenerationEvent::Usage { usage } => {
+                        response_usage = Some(usage);
+                    }
+                    // Stream close, not `End`, terminates the loop; `End` only carries the
+                    // finish reason / response id, which the round loop does not consume yet.
+                    GenerationEvent::End { .. } => {}
                 }
             }
             _ = cancel.cancelled() => {
@@ -148,7 +142,7 @@ pub(crate) enum AcquireResult {
 /// inside this function so a cancel during the retry backoff flushes and short-circuits here.
 pub(crate) async fn acquire_stream(
     ctx: &mut AgentContext,
-    mut messages: Vec<ChatMessage>,
+    mut messages: Vec<Message>,
     tools: Vec<ToolDefinition>,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     round_cancel: &CancellationToken,
@@ -165,9 +159,6 @@ pub(crate) async fn acquire_stream(
             .with_tool_choice(ToolChoice::Mode(ToolChoiceMode::Auto));
         let mut request = request;
         request.stream = Some(true);
-        request.stream_options = Some(StreamOptions {
-            include_usage: Some(true),
-        });
 
         let result = {
             let fut = crate::retry::stream_with_retry(
@@ -365,7 +356,7 @@ enum FailoverStep {
 /// diagnostic captured from `trigger` before it is moved into [`advance_failover`].
 async fn step_failover(
     ctx: &mut AgentContext,
-    messages: &mut Vec<ChatMessage>,
+    messages: &mut Vec<Message>,
     trigger: Error,
     reason: String,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
@@ -431,7 +422,7 @@ async fn step_failover(
 /// iteration); this is pre-existing behavior, inherited from the inline arm.
 pub(crate) async fn advance_failover(
     ctx: &mut AgentContext,
-    prior_messages: Vec<ChatMessage>,
+    prior_messages: Vec<Message>,
     trigger: anyhow::Error,
     round_cancel: &CancellationToken,
 ) -> FailoverOutcome {

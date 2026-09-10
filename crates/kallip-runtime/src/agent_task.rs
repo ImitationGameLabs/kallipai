@@ -22,7 +22,7 @@ use crate::history::{HistoryWriter, RecordKind};
 use crate::policy::AuthorizedToolExecutor;
 use crate::runner;
 use crate::text_slice::converge_under_cap;
-use just_llm_client::types::chat::ChatMessage;
+use just_llm_client::types::generation::Message;
 use kallip_shell::spill::{self, MESSAGE_SPILL, spill_root};
 
 /// Consecutive context-persist failures before the streak escalates from a
@@ -101,7 +101,7 @@ pub trait MessagePuller: Send + Sync + 'static {
 
 /// Shared agent resources passed between modes.
 pub struct AgentContext {
-    pub client: crate::profile::ChatClient,
+    pub client: crate::profile::GenerationClient,
     /// Within-set failover state: the resolved profile set, the profile registry (for
     /// rebuilding the client on advance), the system prompt, and the sticky `profile_idx` (the
     /// sole writer of which is `FailoverState::advance_to`). See `FailoverState`.
@@ -219,7 +219,7 @@ impl AgentContext {
     pub(crate) fn append_history(
         &self,
         turn_id: Option<u64>,
-        messages: &[ChatMessage],
+        messages: &[Message],
         estimated_tokens: usize,
         kind: RecordKind,
         event: Option<crate::history::SystemEvent>,
@@ -233,7 +233,7 @@ impl AgentContext {
 
     /// Record a turn to both the context store and the append-only history log.
     /// Returns the assigned `TurnId`.
-    pub async fn record_turn(&self, messages: Vec<ChatMessage>) -> TurnId {
+    pub async fn record_turn(&self, messages: Vec<Message>) -> TurnId {
         let (turn_id, estimated_tokens) = {
             let mut guard = self.store.lock().await;
             guard.push_turn(messages.clone())
@@ -261,7 +261,7 @@ impl AgentContext {
     /// outweighs size hygiene.
     pub async fn record_message_turn(&self, text: &str) -> TurnId {
         let guarded = cap_external_message(text);
-        self.record_turn(vec![ChatMessage::user(&guarded)]).await
+        self.record_turn(vec![Message::user(&guarded)]).await
     }
 }
 #[cfg(test)]
@@ -355,7 +355,7 @@ pub async fn agent_task(
         if p.is_empty() {
             return;
         }
-        ctx.record_turn(vec![ChatMessage::user(&p)]).await;
+        ctx.record_turn(vec![Message::user(&p)]).await;
         if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
             return;
         }
@@ -481,7 +481,7 @@ pub async fn agent_task(
                     // model — it would only accumulate context noise on
                     // every probe cycle. Real wait wakes inject as usual.
                     if !ctx.token_budget.is_exceeded() {
-                        ctx.record_turn(vec![ChatMessage::user(wait_elapsed_text(armed_secs))])
+                        ctx.record_turn(vec![Message::user(wait_elapsed_text(armed_secs))])
                             .await;
                     }
                     if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
@@ -616,10 +616,8 @@ pub async fn run_and_report(
                     agent_tx.send(AgentEvent::Idle).await.ok();
                     return false;
                 }
-                ctx.record_turn(vec![ChatMessage::assistant(&content)])
-                    .await;
-                ctx.record_turn(vec![ChatMessage::user(HEARTBEAT_TEXT)])
-                    .await;
+                ctx.record_turn(vec![Message::assistant(&content)]).await;
+                ctx.record_turn(vec![Message::user(HEARTBEAT_TEXT)]).await;
                 continue;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::Cancelled)) => {
