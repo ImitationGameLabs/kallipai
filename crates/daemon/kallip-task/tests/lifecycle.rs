@@ -472,8 +472,8 @@ async fn association_accepts_a_legal_window() {
 async fn concurrent_starts_on_separate_pools_both_land() {
     // BEGIN IMMEDIATE semantics: the first statement of every write
     // transaction takes the write lock, so two starts for different
-    // assignees queue on busy_timeout instead of racing a deferred
-    // snapshot upgrade (the loser used to fail with SQLITE_BUSY).
+    // assignees queue on busy_timeout instead of a deferred snapshot
+    // upgrade racing into SQLITE_BUSY.
     let dir = std::env::temp_dir().join(format!("kallip-task-conc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let a = TaskStore::open(&dir.join("tasks.sqlite")).await.unwrap();

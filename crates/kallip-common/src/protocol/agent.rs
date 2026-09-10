@@ -425,9 +425,9 @@ pub struct AgentPermissionsResponse {
     pub preset: PolicyPreset,
     /// FS-access permission class actually granted to this agent, as the
     /// lowercase wire spelling (`"normal"` / `"guest"`) — the value the tagma
-    /// clamped at spawn and re-validates on restore. Surfaced here (it was
-    /// previously invisible to clients) so an explicit downgrade is observable
-    /// and verifiable. String-typed to keep `kallip-common` runtime-free.
+    /// clamped at spawn and re-validates on restore. Surfaced here so an
+    /// explicit downgrade is observable and verifiable. String-typed to keep
+    /// kallip-common runtime-free.
     pub permission_class: String,
 }
 

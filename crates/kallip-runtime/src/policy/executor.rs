@@ -283,8 +283,8 @@ pub(crate) fn skipped_tool_result(tool_name: &str, prior_name: &str, reason: &st
     )
 }
 
-/// Error envelope for a tool call that exceeded its timeout. Normalizes what
-/// used to be a bare diagnostic string into the standard `ok:false` envelope.
+/// Error envelope for a tool call that exceeded its timeout. The error goes
+/// out as the standard `ok:false` envelope, never a bare diagnostic string.
 pub(crate) fn timed_out_tool_result(tool_name: &str, secs: u64) -> String {
     error_result(tool_name, format!("timed out after {secs}s"))
 }

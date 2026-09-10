@@ -1,7 +1,7 @@
 <script lang="ts" module>
   // A room list entry: the room's name + description + visibility + a kebab menu
   // that opens the room's settings page (where invite/add-tagma/leave live). A
-  // clean list row, not the management surface it used to be. The body opens the
+  // clean list row; management lives on the settings page. The body opens the
   // conversation; the kebab opens settings. Prop-driven throughout.
   import type { RoomView } from "@kallipai/kallip-lesche-client";
 

@@ -511,9 +511,9 @@ mod tests {
 
     #[test]
     fn instance_state_tolerates_unknown_tokens() {
-        // An older daemon still emits a token this build never wrote
-        // (the retired adoption state); one unknown token must degrade
-        // to one Unknown instance, not fail the whole list decode.
+        // An older daemon still emits a token this build never wrote; one
+        // unknown token must degrade to one Unknown instance, not fail the
+        // whole list decode.
         let parsed: InstanceState = serde_json::from_str("\"adopted\"").expect("legacy token");
         assert_eq!(parsed, InstanceState::Unknown);
         let parsed: InstanceState = serde_json::from_str("\"running\"").expect("known token");

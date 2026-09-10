@@ -107,7 +107,7 @@ pub(crate) fn try_acquire_workspace_lock<'a>(
 /// entry. If `release_all` ran first, `writer` would become `None` and the
 /// back-transfer would be a `NotOwner` no-op, permanently stranding the lock.
 /// Encoding the reverse transfer in the manual `Drop` body (which always runs
-/// before field autodrop) makes this previously prose-only invariant
+/// before field autodrop) makes this invariant
 /// structural — every caller that lets an `EstablishedLock` go out of scope on
 /// an error path gets the right order for free.
 ///

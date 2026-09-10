@@ -496,10 +496,10 @@ fn spawn_rejects_slug_reuse_and_workspace_overlap() {
 
 #[test]
 fn start_recovers_from_stale_runtime_json() {
-    // The regression this locks: a leftover runtime.json from a previous
-    // incarnation used to poison the launch poll, and its recorded pid
-    // (required to look like a tagma before it was trusted) decided
-    // between a bogus match and a 30s kill. The launch now clears the
+    // The failure mode this locks: a leftover runtime.json from a previous
+    // incarnation must not poison the launch poll, and its recorded pid
+    // (required to look like a tagma before it is trusted) must not decide
+    // between a bogus match and a 30s kill. The launch clears the
     // leftover before starting the helper, so the poll only ever sees
     // this launch's self-report.
     let daemon = start_daemon();

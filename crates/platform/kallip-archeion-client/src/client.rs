@@ -6,8 +6,8 @@
 //! - **Admin** (the `admin_*` methods): operator management driving
 //!   `/v1/admin/*` with an `sk-admin-` bearer token.
 //!
-//! The tagma room discovery formerly here has
-//! moved to `kallip-lesche-client` (the chat domain lives in lesche now).
+//! Tagma room discovery lives in `kallip-lesche-client` (the chat domain
+//! is lesche).
 //!
 //! All admin DTOs are shared with the server via [`kallip_archeion_common::admin`],
 //! so client and server cannot drift on the wire contract.

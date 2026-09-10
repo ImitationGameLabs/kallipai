@@ -1,6 +1,6 @@
 // manageChannelStalled: which no-conversation channel states can never
-// produce a channel on their own. These tests pin the two stall forms the
-// manage page used to render as a permanent "opening" placeholder.
+// produce a channel on their own. These tests pin the two stall forms so
+// the manage page cannot get stuck on a permanent opening placeholder.
 
 import { assertEquals } from "@std/assert";
 import { manageChannelStalled } from "./channelStalled.ts";

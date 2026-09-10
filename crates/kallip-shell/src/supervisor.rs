@@ -174,8 +174,8 @@ pub(super) struct Pumps {
     pub(super) err: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// Everything one watcher task needs; converges what used to be eight
-/// loose `watch` arguments. `pumps` and `marker_read` are set only for
+/// Everything one watcher task needs; consolidates the loose `watch`
+/// arguments. `pumps` and `marker_read` are set only for
 /// adopted (converted) tasks.
 struct WatchArgs {
     child: Child,

@@ -1,13 +1,11 @@
 //! The single upstream channel: `POST /v1/tagmata/{tagma_id}/upstream`.
 //!
 //! One authenticated endpoint carries a batched `Vec<UpstreamEvent>` of the
-//! three plaintext metadata kinds the retired per-kind endpoints (status
-//! POST / signal POST / state PUT) served individually.
+//! three plaintext metadata kinds (status / signal / state).
 //! The tagma's upstream flusher serializes its bus topics into the
-//! wire enum; here each element demultiplexes into the fan logic those
-//! endpoints used, now the only copy. The retired per-kind shapes are
-//! nailed dead by the route-shape negative legs in `routes.rs` (the
-//! deprecation window closed with this deletion).
+//! wire enum; here each element demultiplexes into its fan logic. The
+//! per-kind shapes are nailed dead by the route-shape negative legs in
+//! `routes.rs`.
 //!
 //! Batch semantics: elements are applied in order; the first failing
 //! element aborts the batch with that element's error (earlier elements

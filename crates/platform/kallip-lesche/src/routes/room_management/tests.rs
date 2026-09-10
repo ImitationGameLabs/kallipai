@@ -1090,8 +1090,9 @@ async fn owner_removes_own_tagma_without_being_creator() {
 }
 
 /// The owner-pulls-agent path works CROSS-ROOM: the owner is neither the
-/// creator nor even a member of the room their tagma is in. This is the case
-/// `require_member_locked` used to forbid; the new authz admits it.
+/// creator nor even a member of the room their tagma is in. This is the
+/// case plain member gating (`require_member_locked`) forbids; the
+/// owner-based authz admits it.
 #[tokio::test]
 async fn non_member_owner_removes_own_tagma_succeeds() {
     let (state, control) = db_state().await;

@@ -1,7 +1,7 @@
 // Behavior tests for the schedule draft seam: framing, dirty tracking,
 // the save gate, and clock-switch reachability. Frame-math edge cases
 // themselves live in the workSchedule tests; these lock the draft-side
-// semantics the page previously held untested.
+// semantics.
 
 import { assertEquals } from "@std/assert";
 import type { WorkSchedule, WorkScheduleSpec } from "@kallipai/kallip-client";

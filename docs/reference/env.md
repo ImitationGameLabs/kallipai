@@ -442,4 +442,4 @@ server together (both flow from the root `.env` via direnv):
 | --------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `KALLIP_EDGE_TLS` | `on` | Edge shape: `on` = Caddy-fronted https+domain topology with the mkcert cert; `off` = plain http (no cert/DNS trust setup; see docs/development.md). |
 | `KALLIP_EDGE_PORT` | `443` | Dev edge listener port (compose caddy + the web dev server when non-default); the browser-facing web origin carries it and CORS/oauth derive from it verbatim. |
-| `KALLIP_DOMAIN` | `kallipai.com` | The domain the dev server and compose topology derive from (both edge shapes; the plain-http quick start sets `localhost` explicitly); the web app's URLs derive in the browser at runtime. Formerly `KALLIP_DEV_DOMAIN` (renamed 2026-08-27). |
+| `KALLIP_DOMAIN` | `kallipai.com` | The domain the dev server and compose topology derive from (both edge shapes; the plain-http quick start sets `localhost` explicitly); the web app's URLs derive in the browser at runtime. |

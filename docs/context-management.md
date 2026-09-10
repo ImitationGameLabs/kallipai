@@ -28,7 +28,7 @@ The `ContextStore` holds two layers, composed in priority order:
 | Pinned layer  | Labeled items          | Always included. Survives eviction.               |
 | Working turns | Chronological messages | Subject to eviction and compaction (newest last). |
 
-Each turn is a `Vec<ChatMessage>` (assistant message + tool results) with a
+Each turn is a `Vec<Message>` (assistant message + tool results) with a
 pre-cached token estimate.
 
 Oversized external messages are size-guarded where they enter the working

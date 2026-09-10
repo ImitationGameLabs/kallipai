@@ -62,9 +62,9 @@ fn start_daemon() -> DaemonProc {
         // derivation would follow the host HOME); the XDG data anchor
         // isolates the instance trees.
         .env("KALLIP_DAEMON_RECORD_DIR", state_dir.path().join("records"))
-        // The daemon owns the relay-URL defaults now (the instances-side
-        // fill is retired): the unit env would carry these, so the
-        // relay-intent e2e exercises the daemon-side fill against them.
+        // The daemon owns the relay-URL defaults: the unit env carries
+        // these, so the relay-intent e2e exercises the daemon-side fill
+        // against them.
         .env("KALLIP_DAEMON_RELAY_ARCHEION_URL", "http://localhost:7100")
         .env("KALLIP_DAEMON_RELAY_LESCHE_URL", "http://localhost:7200")
         .env("XDG_DATA_HOME", data_dir.path())

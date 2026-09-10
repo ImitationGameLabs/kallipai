@@ -1,6 +1,6 @@
 //! Within-set failover state and outcome types.
 //!
-//! [`FailoverState`] bundles the runtime failover fields that were previously scattered on
+//! [`FailoverState`] bundles the runtime failover fields rather than leaving them scattered on
 //! [`crate::agent_task::AgentContext`]: the resolved [`ProfileSet`], the
 //! [`ProfileRegistry`] (used to rebuild the client on advance), the system prompt applied to
 //! every client built for this agent, and a sticky `profile_idx`. `profile_idx` is private and

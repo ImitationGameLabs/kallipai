@@ -163,8 +163,8 @@ mod tests {
     use axum::Router;
 
     /// Route-shape nails: every ROUTE_TABLE row
-    /// must serve at its registered /v1 shape, the retired shapes must be
-    /// gone (double prefix, singular alias, projection segment), and a
+    /// must serve at its registered /v1 shape, the dead shapes (double
+    /// prefix, singular alias, projection segment) must stay gone, and a
     /// wrong verb must answer 405. Status vocabulary: 401 = route reached
     /// (the auth extractor answers unauthenticated requests), 404 = no
     /// route mounted here, 405 = route exists, verb not served. The table
@@ -198,14 +198,13 @@ mod tests {
         }
     }
 
-    /// The retired shapes stay dead: the double /v1 prefix, the
-    /// singular /tagma alias, and the projection
-    /// segment the rename replaced (including the projection events GET)
-    /// must all 404 -- as must the two retired per-kind writers, status
-    /// POST and signal POST. A state PUT on the surviving route is a 405
-    /// (wrong verb), not a 404.
+    /// The dead shapes stay dead: the double /v1 prefix, the singular
+    /// /tagma alias, and the projection segment (including the projection
+    /// events GET) must all 404 -- as must the two per-kind writers,
+    /// status POST and signal POST. A state PUT on the surviving route is
+    /// a 405 (wrong verb), not a 404.
     #[tokio::test]
-    async fn retired_shapes_are_not_mounted() {
+    async fn dead_shapes_are_not_mounted() {
         let (state, _control) =
             crate::test_support::make_state(60, std::time::Duration::from_secs(10));
         let app = axum::Router::new().nest("/v1", super::router(state, None));

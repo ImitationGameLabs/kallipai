@@ -82,9 +82,8 @@ fn is_valid_handle(s: &str) -> bool {
 /// These handles would collide with the platform's own faces: the operator
 /// account (hardcoded `admin`), staff/ops roles a squatter could pose as,
 /// and the service/brand names (`kallip`, `kallipai`, `archeion`, `lesche`,
-/// `files`). The list is static by design: the operator-facing knob that
-/// used to parameterize the admin handle is gone, so no runtime state
-/// feeds this check. Signup paths check membership AFTER `normalize`, so
+/// `files`). The list is static by design: no runtime state feeds this
+/// check. Signup paths check membership AFTER `normalize`, so
 /// entries are stored pre-normalized (lowercase). `admin-login` is exempt
 /// by construction -- it IS the legitimate owner of `admin`.
 pub const RESERVED: &[&str] = &[

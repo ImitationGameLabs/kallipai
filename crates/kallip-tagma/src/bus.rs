@@ -42,9 +42,8 @@ pub(crate) trait Event: Any + Clone + Send + Sync {
 }
 
 /// One authored message: the sender paired with the persisted, stamped
-/// reply (the authored half of the retired `ExternalFrame`). The projector
-/// — the sole writer — publishes; the relay envelope pump and the local
-/// SSE assembler subscribe.
+/// reply. The projector — the sole writer — publishes; the relay envelope
+/// pump and the local SSE assembler subscribe.
 #[derive(Clone, Debug)]
 pub(crate) struct AuthoredFrame {
     pub(crate) sender: Participant,
@@ -56,9 +55,8 @@ impl Event for AuthoredFrame {
 }
 
 /// A runtime signal (busy/idle presence, turn terminals, errors): ephemeral,
-/// never persisted, carries no sender (the signal half of the retired
-/// `ExternalFrame`). Consumers: the relay signal path, the projection pump
-/// wake, the local SSE assembler.
+/// never persisted, carries no sender. Consumers: the relay signal path, the
+/// projection pump wake, the local SSE assembler.
 #[derive(Clone, Debug)]
 pub(crate) struct SignalFrame(pub(crate) SignalEvent);
 

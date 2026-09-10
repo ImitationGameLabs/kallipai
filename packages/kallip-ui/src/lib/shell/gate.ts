@@ -2,8 +2,8 @@
 // <RootLayout> component calls appGateDecision() inside a $effect and acts on
 // the result.
 //
-// Two modes, now a property of the shell (shellMode in port.ts) rather
-// than derived from the persisted config. Only one is active at a time,
+// Two modes, a property of the shell (shellMode in port.ts), not derived
+// from the persisted config. Only one is active at a time,
 // though both sessions may be retained underneath:
 //
 //   - "online" -- archeion passkey auth. `user` is the tri-state from
@@ -13,12 +13,12 @@
 //     are /settings + /chat/{server-id} (relay conversations) + the mode-neutral
 //     /tagmata (the unified tagmata page: registry cards + local processes).
 //     `/` is the panorama home (the root route itself sends small screens
-//     to /chats). `/local/*` (offline-only routes) and the retired
+//     to /chats). `/local/*` (offline-only routes) and the
 //     `/chat/local` marker are not valid online destinations and redirect
 //     to /chats (the chats hub).
 //   - "offline" -- no auth, no identity. `connected` reflects the local tagma
 //     transport. Offline routes are /local/* (chat + management) + the
-//     mode-neutral /tagmata; the pre-merge /instances route is gone (404).
+//     mode-neutral /tagmata; the /instances route is gone (404).
 //
 // Public (front-door) routes are /login, /register (online) and /connect
 // (offline). The gate owns all post-mode-flip / post-connect navigation: pages
@@ -152,11 +152,11 @@ export function appGateDecision(args: {
   }
 
   // online protected
-  // `/chat/local` is a retired offline-only route marker; `/local/*` is
+  // `/chat/local` is an offline-only route marker; `/local/*` is
   // the offline-only route tree (chat + management). Neither is a valid
   // online destination, so go to the online home. Placed above the user
   // checks so it also fires during the whoami-in-flight window; the next
-  // iteration on /chats then resolves auth. `/` is a real destination now
+  // iteration on /chats then resolves auth. `/` is a real destination
   // (the panorama home) and falls through to the user tri-state below.
   if (
     args.pathname === "/local" ||

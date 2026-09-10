@@ -49,8 +49,8 @@ Deno.test(
   () => {
     const src = source(DASHBOARD);
     assert(src.includes('uploadPrefix = $state("shared/")'));
-    // The free-form input is retired; the select offers only the
-    // server-legal areas and the 400 stays as the client-side fallback.
+    // The select offers only the server-legal areas (no free-form input)
+    // and the 400 stays as the client-side fallback.
     assert(src.includes("<select"));
     assert(src.includes("uploadAreas()"));
     assert(
@@ -69,7 +69,7 @@ Deno.test(
       const src = source(url);
       assert(src.includes("saveBlob("));
       // The inline triple (createObjectURL + synthetic click + revoke)
-      // was the duplication the saveBlob extraction retired.
+      // must not reappear: download I/O rides the shared saveBlob helper.
       assert(
         !src.includes("URL.createObjectURL"),
         "download I/O must ride the shared saveBlob helper",

@@ -9,9 +9,8 @@
 //! file and there is no aggregate index to corrupt, so discovery has
 //! exactly one place to look — the record area, never the data trees.
 //!
-//! A record carries everything the daemon previously kept in the
-//! instance data tree's `meta.json` (identity, spawn-time env, the
-//! anchored incarnation) plus what the split layouts need: the pointer
+//! A record carries the instance's identity, spawn-time env, and anchored
+//! incarnation, plus what the split layouts need: the pointer
 //! to the instance's data directory (owned by the tagma, written only
 //! by the tagma) and the target user the instance runs as.
 
@@ -140,9 +139,9 @@ pub fn create_record(root: &Path, slug: &str, record: &InstanceRecord) -> std::i
 
 /// Update a record in one atomic overwrite: the full JSON is staged,
 /// then rename(2)d over the record — a concurrent reader sees either
-/// the whole old or the whole new file, never a torn one (a crash or a
-/// full disk mid-write used to leave a half-written record that reads
-/// back as unparseable).
+/// the whole old or the whole new file, never a torn one, and a crash or
+/// a full disk mid-write cannot leave a half-written record that reads
+/// back as unparseable.
 pub fn write_record(root: &Path, slug: &str, record: &InstanceRecord) -> std::io::Result<()> {
     std::fs::create_dir_all(root)?;
     let staged = staging_path(root, slug);
@@ -261,8 +260,8 @@ mod tests {
     #[test]
     fn concurrent_creates_of_one_slug_elect_a_single_winner() {
         let root = tempfile::tempdir().expect("tempdir");
-        // Per-write staging names make this race exact: shared staging
-        // used to let a loser's cleanup drop the winner's staged file
+        // Per-write staging names keep this race exact: shared staging
+        // would let a loser's cleanup drop the winner's staged file
         // (wrong error kind) or interleave loser bytes into the
         // winner's publish (a rejected request's config registered).
         let handles: Vec<_> = (0..8)

@@ -1,5 +1,5 @@
 //! Native work-schedule spec: the structured form the UI edits and the
-//! evaluator consumes. Replaces the retired cron-string representation.
+//! evaluator consumes.
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;

@@ -7,7 +7,6 @@
  * divider, height, and segment style). A route with no entry renders no bar
  * at all, which keeps the offline /local/* tree bar-free; the one deliberate
  * tabled exception to the shell-only rule is the agent detail route below,
- * which retired its page-level trail in the same batch.
  *
  * Resolvers run inside the shell's $derived, so store reads (room names,
  * channel labels) stay reactive while a deep view loads. The matching engine

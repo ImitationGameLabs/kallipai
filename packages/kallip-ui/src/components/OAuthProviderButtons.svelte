@@ -2,8 +2,8 @@
   // The "Continue with X" provider buttons rendered above the passkey form on
   // the login and register pages. Reads the configured-provider list from the
   // store and navigates to the chosen provider's authorize URL on click.
-  // Extracted so the two pages cannot drift apart (they previously diverged on
-  // the divider border shade). `returnPath` is the sanitized path to resume to
+  // Extracted so the two pages cannot drift apart. `returnPath` is the
+  // sanitized path to resume to
   // after a signin; register has none (a brand-new account always lands on
   // /tagmata).
   import { archeionSession } from "../lib/session/archeion.svelte";

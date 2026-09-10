@@ -326,9 +326,9 @@
             </button>
 
             {#if advanced}
-              <!-- The manual launch fields, verbatim from the retired resident
-                   form: slug + workspace are required; the optional relay/LLM
-                   fields become the daemon env allowlist on the page side. -->
+              <!-- The manual launch fields: slug + workspace are required;
+                   the optional relay/LLM fields become the daemon env
+                   allowlist on the page side. -->
               <div class="grid gap-4 sm:grid-cols-2">
                 <label class="flex flex-col gap-1">
                   <span class="text-sm font-medium">

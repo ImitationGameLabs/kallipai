@@ -781,9 +781,9 @@ impl kallip_files::BlobStore for WindowRecorder {
 #[tokio::test]
 async fn body_cap_survives_large_frames() {
     // A frame larger than both the 64 KiB reader buffer and the remaining
-    // allowance walks the pending path with a small remainder; served
-    // unclamped it used to wrap the u64 remainder counter (panic in debug,
-    // cap escape in release). A 200 KiB frame against a 100 KiB cap puts
+    // allowance walks the pending path with a small remainder; unclamped,
+    // the u64 remainder counter would wrap (panic in debug, cap escape in
+    // release). A 200 KiB frame against a 100 KiB cap puts
     // the first read exactly in that window.
     let world = TestWorld::with_cap(100 * 1024).await;
     let oversized = vec![9u8; 200 * 1024];

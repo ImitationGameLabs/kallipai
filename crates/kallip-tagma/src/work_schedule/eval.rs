@@ -1,7 +1,6 @@
 //! Evaluator for the native work-schedule spec: turns a [`Spec`] plus a
-//! point in time into window facts. Replaces the retired cron evaluator;
-//! unlike cron hour steps, the interval mode rotates strictly every N
-//! hours across day boundaries.
+//! point in time into window facts. Unlike cron hour steps, the interval
+//! mode rotates strictly every N hours across day boundaries.
 //!
 //! A display-only TypeScript port lives at
 //! packages/kallip-ui/src/lib/manage/workSchedule.ts; any change to a

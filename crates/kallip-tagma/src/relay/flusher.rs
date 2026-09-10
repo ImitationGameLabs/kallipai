@@ -146,8 +146,6 @@ impl RelayHandle {
                     .client
                     .post_upstream(&self.inner.tagma_id, &batch);
                 // Cancel-select'd: a tunnel-down aborts the in-flight POST
-                // instead of waiting out the 30 s HTTP timeout (the same
-                // bound the per-driver POSTs used to own).
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return,

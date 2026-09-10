@@ -1823,7 +1823,7 @@ mod tests {
     }
 
     /// manifest.json deleted but its backup intact: the backup feeds the
-    /// restore (previously the existence gate skipped the whole chain),
+    /// restore (the existence gate must not skip the whole chain),
     /// and the primary is rewritten by the next persist, not by the load.
     #[test]
     fn missing_manifest_falls_back_to_backup() {

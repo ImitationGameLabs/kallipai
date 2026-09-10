@@ -467,7 +467,7 @@
 
   // Revoke tears down the revoked tagma's open channel + purges its cache,
   // so a shared device does not keep the previous user's plaintext
-  // transcript (the retired section's discipline).
+  // transcript.
   async function onRevoke(id: string) {
     await archeionSession.revokeTagma(id);
     channelsStore.closeByTagma(id);
@@ -609,8 +609,8 @@
     </div>
 
     {#if empty}
-      <!-- First-run empty state: promote the single primary action (the
-           retired dashboard's hero pattern, opening the two-path dialog). -->
+      <!-- First-run empty state: promote the
+           single primary action, opening the two-path dialog. -->
       <div class="p-10 grid place-items-center gap-4">
         <p class="text-sm opacity-70">{manage_instances_empty()}</p>
         <button

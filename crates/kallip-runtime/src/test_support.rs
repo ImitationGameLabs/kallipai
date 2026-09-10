@@ -178,10 +178,9 @@ pub(crate) fn usage(prompt_tokens: u32) -> Usage {
 }
 
 // --- chat-type construction funnel ----------------------------------------------
-// Every test-side chat type construction goes through these helpers so the
-// just-agent-libs migration swapped the bodies here and touched no
-// test call site. Keep call sites free of chat-face type names: helpers own
-// the types, callers own the intent.
+// Every test-side chat type construction goes through these helpers, so
+// body changes touch no test call site. Keep call sites free of chat-face
+// type names: helpers own the types, callers own the intent.
 
 /// A user turn carrying `text`.
 pub(crate) fn user_msg(text: impl Into<String>) -> Message {

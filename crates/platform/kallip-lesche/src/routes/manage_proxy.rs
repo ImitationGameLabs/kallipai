@@ -2,8 +2,7 @@
 //!
 //! Bridges the plaintext manage surface: an
 //! authenticated operator session is checked against the tunnel's owner
-//! (the only application-layer authorization, replacing the
-//! authorization boundary the E2EE envelope used to provide), then the
+//! (the only application-layer authorization), then the
 //! request is fanned down the tagma's tunnel as a
 //! [`TunnelInbound::ManageRest`] frame and the plaintext reply POST is
 //! awaited. Tunnel offline degrades to an immediate 502; a dropped reply
@@ -73,8 +72,8 @@ async fn proxy_manage(
     };
     let tagma_id = TagmaId::from(id.clone());
 
-    // Tenant authorization. The E2EE envelope used to carry this
-    // boundary implicitly; on the plaintext frame it must be explicit.
+    // Tenant authorization. On the plaintext frame this boundary
+    // must be explicit.
     let tx = {
         let registry = state.registry.read().expect("registry lock");
         match registry.presence.get(&ParticipantId::for_tagma(&tagma_id)) {

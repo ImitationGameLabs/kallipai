@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use crate::bus::{AuthoredFrame, SignalFrame, StatusSnapshot, TopicReceiver};
 
 /// One frame on the direct SSE stream — the endpoint's private wire-assembly
-/// enum (retired as a bus item, it survives only here).
+/// enum, not a bus item.
 /// The variant is the SSE event-name discriminator; the inner value is the
 /// `data:` payload. Serialization (variant name + inner JSON) lives in
 /// [`serialize_direct_frame`].
@@ -183,11 +183,9 @@ pub(crate) fn merge_direct_frames(
         .into_stream()
         .map(|frame| DirectFrame::Status(frame.0));
     // Three erased sources, interleaved as they yield (no cross-source
-    // ordering promise); a lagged source is skipped here — the same skip
-    // semantics as the old single-channel stream — and its loss lands in
-    // the topic's lagged counter (`into_stream` keeps the counting leg at
-    // the bus core). All three sources are counted alike now — the legacy
-    // uncounted direct line retired with the three-topic merge.
+    // ordering promise); a lagged source is skipped here and its loss
+    // lands in the topic's lagged counter (`into_stream` keeps the
+    // counting leg at the bus core). All three sources are counted alike.
     let sources: Vec<std::pin::Pin<Box<dyn Stream<Item = DirectFrame> + Send>>> =
         vec![Box::pin(authored), Box::pin(signals), Box::pin(status)];
     futures_util::stream::select_all(sources)

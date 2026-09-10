@@ -21,8 +21,8 @@
   // carries a concise `aria-label`, and hides the inner tokens from AT so the
   // nested `role="img"` does not bloat the link's accessible name.
   //
-  // The kind icon carries the human/agent distinction (previously a text
-  // badge), so its wrapping span is `role="img"` with an `aria-label`; the
+  // The kind icon carries the human/agent distinction, so its wrapping
+  // span is `role="img"` with an `aria-label`; the
   // lucide glyph itself stays decorative (`aria-hidden`). Self-agnostic -- the
   // self distinction (bubble alignment+fill, member-row highlight) is applied
   // by the consumer.
