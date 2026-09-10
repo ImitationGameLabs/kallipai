@@ -613,6 +613,8 @@ pub enum BudgetCommand {
     Decrease(BudgetAmountArgs),
     /// Set remaining tagma-wide token budget (=0 pauses all agents)
     Set(BudgetAmountArgs),
+    /// Switch to an unlimited budget (enforcement off, consumption still tracked)
+    Unlimited,
 }
 
 #[derive(Args)]

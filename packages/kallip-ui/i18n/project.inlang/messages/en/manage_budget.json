@@ -29,5 +29,7 @@
   "manage_budget_set_resume": "Set & Resume",
   "manage_budget_clear_hint": "Sets remaining budget to 0 — all agents will stop immediately.",
   "manage_budget_load_failed": "Could not load budget.",
-  "manage_budget_update_failed": "Could not update budget."
+  "manage_budget_update_failed": "Could not update budget.",
+  "manage_budget_unlimited": "Unlimited",
+  "manage_budget_unlimited_hint": "No spending cap. Set a finite remaining budget to re-enable adjustments."
 }

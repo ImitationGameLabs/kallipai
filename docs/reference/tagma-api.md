@@ -131,8 +131,9 @@ subagent for review work, but no agent can escalate a child above
 itself. The granted class is observable on
 `GET /agents/{id}/permissions`.
 
-> **Token budget:** All agents share a single tagma-wide token budget
-> (default: 100M tokens). Use `POST /budget` to adjust at runtime.
+> **Token budget:** All agents share a single tagma-wide spend cap. Start with
+> no cap (unlimited); `KALLIP_TOKEN_BUDGET` or `POST /budget` imposes one —
+> see [Token Budget](#token-budget).
 
 #### Response
 
@@ -546,6 +547,7 @@ Auth: any authenticated identity. See [auth.md](auth.md).
   ],
   "token_budget": 100000000,
   "token_consumed": 23500000,
+  "token_budget_unlimited": false,
   "activity": "reading docs/architecture.md"
 }
 ```
@@ -560,8 +562,12 @@ Auth: any authenticated identity. See [auth.md](auth.md).
   zeroed if no calls have been made.
 - `recent_retries`: last 20 retry records, newest first. Empty if no retries
   have occurred.
-- `token_budget`: tagma-wide cumulative token consumption limit (shared by all agents).
+- `token_budget`: tagma-wide cumulative token spend cap (shared by all agents);
+  `0` while unlimited.
 - `token_consumed`: tagma-wide cumulative tokens consumed (shared by all agents).
+- `token_budget_unlimited`: true when no finite cap is set — `token_budget` and
+  the derived remaining read `0`, enforcement is off, and `token_consumed`
+  keeps accumulating.
 
 Status: `200 OK`
 
@@ -689,12 +695,14 @@ Status: `204 No Content`
 
 ## Token Budget
 
-A single tagma-wide token budget is shared by all agents. The budget resets
-to the default (100M tokens) on tagma restart.
+A single tagma-wide spend cap is shared by all agents. It starts unlimited —
+no enforcement until a cap is set. Impose one at boot with
+`KALLIP_TOKEN_BUDGET`, or at runtime with `POST /budget` below.
 
 ### `GET /budget` — Get budget status
 
-Returns the tagma-wide token budget, cumulative consumption, and remaining tokens.
+Returns the tagma-wide token budget, cumulative consumption, remaining
+tokens, and whether the cap is unlimited.
 
 Auth: any authenticated identity. See [auth.md](auth.md).
 
@@ -704,16 +712,20 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 {
   "budget": 100000000,
   "consumed": 23500000,
-  "remaining": 76500000
+  "remaining": 76500000,
+  "unlimited": false
 }
 ```
 
 Status: `200 OK`
 
+While `unlimited` is `true`, `budget` and `remaining` read `0` (no finite
+cap), enforcement is off, and `consumed` keeps accumulating.
+
 ### `POST /budget` — Adjust or set budget
 
-Updates the tagma-wide token budget. Exactly one of `set_remaining` or `delta`
-must be provided. The change affects all agents immediately.
+Updates the tagma-wide token budget. Exactly one of `set_remaining`, `delta`,
+or `set_unlimited` must be provided. The change affects all agents immediately.
 
 Auth: operator only. See [auth.md](auth.md).
 
@@ -727,6 +739,8 @@ Auth: operator only. See [auth.md](auth.md).
 
 The tagma computes `new_total = consumed + set_remaining`. Use `set_remaining: 0`
 to pause all agents (remaining = 0 triggers immediate budget exceeded).
+When the budget is unlimited, setting a finite remaining migrates it to a
+limited budget (the `new_total = consumed + set_remaining` rule applies).
 
 #### Request body (delta adjustment)
 
@@ -737,7 +751,21 @@ to pause all agents (remaining = 0 triggers immediate budget exceeded).
 ```
 
 Adjusts the total budget by a signed delta. Positive increases, negative
-decreases. The new budget must remain above tokens already consumed.
+decreases. The delta itself must be non-zero — a zero delta is rejected
+with 400. The new budget must remain above tokens already consumed.
+Rejected with 409 while the budget is unlimited — set a finite budget first.
+
+#### Request body (remove the cap)
+
+```json
+{
+  "set_unlimited": true
+}
+```
+
+Switches the tagma to an unlimited budget: enforcement turns off, `budget`
+and `remaining` read `0` in the response, and consumption keeps its true
+accumulated value. Impose a finite cap later with `set_remaining`.
 
 #### Response
 
@@ -745,20 +773,21 @@ decreases. The new budget must remain above tokens already consumed.
 {
   "budget": 150000000,
   "consumed": 23500000,
-  "remaining": 126500000
+  "remaining": 126500000,
+  "unlimited": false
 }
 ```
 
 Status: `200 OK`
 
-| Code | Condition                                                                 |
-| ---- | ------------------------------------------------------------------------- |
-| 400  | Both or neither `set_remaining`/`delta` provided, or `delta` is zero      |
-| 403  | Not the operator                                                          |
-| 409  | New budget would be at or below tokens already consumed (delta path only) |
+| Code | Condition |
+| ---- | --------- |
+| 400  | Not exactly one of `set_remaining`/`delta`/`set_unlimited` provided, or `delta` is zero |
+| 403  | Not the operator |
+| 409  | `delta` while the budget is unlimited (set a finite budget first), or a delta landing at or below tokens already consumed |
 
-> **No persistence:** Budget changes are in-memory only. The budget resets to
-> the default (100M tokens) on tagma restart.
+> **No persistence:** Budget changes are in-memory only. On restart the cap
+> comes back from `KALLIP_TOKEN_BUDGET` — unset, the tagma boots unlimited.
 
 ## Approvals
 

@@ -350,11 +350,13 @@ pub fn make_profile_bundle_two_sets() -> Arc<arc_swap::ArcSwap<crate::state::Pro
 /// Like [`make_state`], but over [`make_profile_bundle_two_sets`].
 pub fn make_state_two_sets() -> SharedState {
     ensure_test_data_dir();
-    Arc::new(AppState::new_with_preset(
+    let mut state = AppState::new_with_preset(
         TokenHash::of("op-token"),
         make_profile_bundle_two_sets(),
         PolicyPreset::Default,
-    ))
+    );
+    pin_test_budget(&mut state);
+    Arc::new(state)
 }
 
 /// Create a fresh `SharedState` (default preset) for testing. The operator token
@@ -367,11 +369,10 @@ pub fn make_state() -> SharedState {
 /// Like [`make_state`], but with a custom tagma-global preset.
 pub fn make_state_with_preset(preset: PolicyPreset) -> SharedState {
     ensure_test_data_dir();
-    Arc::new(AppState::new_with_preset(
-        TokenHash::of("op-token"),
-        make_profile_bundle(),
-        preset,
-    ))
+    let mut state =
+        AppState::new_with_preset(TokenHash::of("op-token"), make_profile_bundle(), preset);
+    pin_test_budget(&mut state);
+    Arc::new(state)
 }
 
 /// Like [`make_state`], but with a custom spawn entry (delivery's slow-path
@@ -383,8 +384,16 @@ pub fn make_state_with_spawn(spawn_fn: crate::lifecycle::SpawnFn) -> SharedState
         make_profile_bundle(),
         PolicyPreset::Default,
     );
+    pin_test_budget(&mut state);
     state.spawn_fn = spawn_fn;
     Arc::new(state)
+}
+
+/// Pin the tagma-wide budget for tests: a known finite starting point that
+/// budget assertions can lean on (the tagma binary itself resolves
+/// `KALLIP_TOKEN_BUDGET` at startup and passes the value in).
+fn pin_test_budget(state: &mut AppState) {
+    state.token_budget = kallip_runtime::token_budget::TokenBudget::new(1_000_000, 0);
 }
 
 /// Install an in-memory inbox store on a test `SharedState`.

@@ -46,6 +46,7 @@ pub async fn agent_status(
         recent_retries,
         token_budget: snap.budget,
         token_consumed: snap.consumed,
+        token_budget_unlimited: snap.unlimited,
         activity,
         parked_reason: live.agent.parked_reason_snapshot(),
         retrying: live.agent.retrying_snapshot(),

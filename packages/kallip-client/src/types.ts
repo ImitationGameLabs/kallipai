@@ -103,12 +103,14 @@ export interface BudgetResponse {
   readonly budget: number;
   readonly consumed: number;
   readonly remaining: number;
+  readonly unlimited: boolean;
 }
 
-/** `POST /budget` request body — exactly one of set_remaining or delta. */
+/** `POST /budget` request body — exactly one of set_remaining, delta, or set_unlimited. */
 export interface BudgetUpdateRequest {
   readonly set_remaining?: number;
   readonly delta?: number;
+  readonly set_unlimited?: boolean;
 }
 
 // Agent management

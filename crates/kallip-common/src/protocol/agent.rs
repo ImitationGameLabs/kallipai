@@ -355,6 +355,10 @@ pub struct AgentStatusResponse {
     pub token_budget: u64,
     /// Cumulative tagma-wide tokens consumed toward the budget.
     pub token_consumed: u64,
+    /// Whether the tagma-wide budget is unlimited (no enforcement;
+    /// consumption still tracked). Absent (false) from older servers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub token_budget_unlimited: bool,
     /// Ephemeral, agent-self-reported current activity. Empty when idle.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub activity: String,

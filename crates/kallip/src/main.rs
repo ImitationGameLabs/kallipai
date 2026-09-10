@@ -107,13 +107,20 @@ async fn main() -> Result<()> {
                 println!("{}", status.context.format_summary());
                 // Tagma-wide shared budget rides in the context group; it is a
                 // token magnitude, so it never participates in --relative-time.
-                println!(
-                    "budget: {} / {} remaining",
-                    timefmt::humanize_count(
-                        status.token_budget.saturating_sub(status.token_consumed)
-                    ),
-                    timefmt::humanize_count(status.token_budget)
-                );
+                if status.token_budget_unlimited {
+                    println!(
+                        "budget: unlimited / {} consumed",
+                        timefmt::humanize_count(status.token_consumed)
+                    );
+                } else {
+                    println!(
+                        "budget: {} / {} remaining",
+                        timefmt::humanize_count(
+                            status.token_budget.saturating_sub(status.token_consumed)
+                        ),
+                        timefmt::humanize_count(status.token_budget)
+                    );
+                }
                 if !status.recent_retries.is_empty() {
                     println!();
                     // The summary carries our classification, not the vendor's
@@ -427,6 +434,16 @@ async fn main() -> Result<()> {
                 let resp = client.set_token_budget(value).await?;
                 println!("Budget set. {}", resp.format_display());
             }
+            BudgetCommand::Unlimited => {
+                if let Err(e) = client.set_token_budget_unlimited().await {
+                    match unlimited_reject_hint(&e) {
+                        Some(hint) => anyhow::bail!("{hint}"),
+                        None => return Err(e),
+                    }
+                }
+                let resp = client.get_token_budget().await?;
+                println!("Budget is now unlimited. {}", resp.format_display());
+            }
         },
         Commands::ProfileSet(cmd) => match cmd {
             ProfileSetCommand::List => {
@@ -709,11 +726,19 @@ async fn print_status_overview(client: &TagmaClient) -> Result<()> {
     let budget = client.get_token_budget().await?;
     println!("current datetime: {}", timefmt::format_utc(now));
     println!();
-    println!(
-        "budget: {} / {} remaining",
-        timefmt::humanize_count(budget.remaining),
-        timefmt::humanize_count(budget.budget)
-    );
+    if budget.unlimited {
+        println!(
+            "budget: unlimited / {} consumed",
+            timefmt::humanize_count(budget.consumed)
+        );
+    } else {
+        println!(
+            "budget: {} / {} remaining",
+            timefmt::humanize_count(budget.remaining),
+            timefmt::humanize_count(budget.budget)
+        );
+    }
+    println!();
     println!();
     if agents.is_empty() {
         println!("(no agents)");
@@ -837,6 +862,20 @@ fn render_session_line(entry: &LescheSessionEntry) -> String {
             entry.peer_handle.as_deref().unwrap_or(""),
         ),
         kind => format!("{kind} {}", entry.id),
+    }
+}
+
+/// Maps a failed `budget unlimited` request to the user-facing hint.
+/// Servers predating the unlimited wire field reject the request with a
+/// 400 whose text says the request "must specify" a budget — surface
+/// an upgrade hint instead of the raw protocol error. `None` for any
+/// other error, which is propagated unchanged.
+fn unlimited_reject_hint(err: &anyhow::Error) -> Option<&'static str> {
+    let msg = format!("{err:#}");
+    if msg.contains("must specify") {
+        Some("this server does not support unlimited budgets; upgrade the tagma")
+    } else {
+        None
     }
 }
 
@@ -980,5 +1019,35 @@ mod tests {
             render_session_line(&direct),
             "direct sess-1 peer=tagma-peer \"Peer\""
         );
+    }
+
+    /// The unlimited subcommand parses bare (no amount), wiring the
+    /// set-unlimited request path.
+    #[test]
+    fn budget_unlimited_parses_without_args() {
+        let cli = Cli::try_parse_from(["kallip", "budget", "unlimited"]).expect("parses");
+        match cli.command.expect("command") {
+            Commands::Budget(BudgetCommand::Unlimited) => {}
+            _ => panic!("expected budget unlimited"),
+        }
+    }
+
+    /// A pre-unlimited server rejection maps to the upgrade hint.
+    #[test]
+    fn unlimited_reject_hint_maps_must_specify_errors() {
+        let err = anyhow::anyhow!(
+            "failed to set token budget unlimited: HTTP 400: request must specify one of 'set_remaining', 'delta', or 'set_unlimited'"
+        );
+        assert_eq!(
+            unlimited_reject_hint(&err),
+            Some("this server does not support unlimited budgets; upgrade the tagma")
+        );
+    }
+
+    /// Any other failure propagates unchanged (no hint).
+    #[test]
+    fn unlimited_reject_hint_ignores_unrelated_errors() {
+        let err = anyhow::anyhow!("connection refused");
+        assert_eq!(unlimited_reject_hint(&err), None);
     }
 }

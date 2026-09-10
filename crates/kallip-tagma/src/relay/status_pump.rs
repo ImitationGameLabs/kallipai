@@ -93,6 +93,7 @@ pub(crate) fn snapshot_status(
         subagents_active: sub_active,
         token_budget: budget.budget,
         token_consumed: budget.consumed,
+        token_budget_unlimited: budget.unlimited,
     }
 }
 /// Captures the aggregate status snapshot from the live registry + token
@@ -421,6 +422,7 @@ mod tests {
             subagents_active: 0,
             token_budget: 1000,
             token_consumed: 0,
+            token_budget_unlimited: false,
         };
         let now = std::time::Instant::now();
         assert!(needs_post(None, &payload, now), "nothing posted yet");

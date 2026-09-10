@@ -687,6 +687,7 @@ fn with_limits_sets_max_agents() {
         5,
         make_profile_bundle(),
         PolicyPreset::Default,
+        kallip_runtime::token_budget::TokenBudget::unlimited(),
     );
     assert_eq!(state.max_agents, 50);
     assert_eq!(state.max_subagents, 20);
@@ -796,4 +797,38 @@ async fn summary_lock_visibility_follows_class_and_lifecycle() {
         None,
         "faulted agents hold no locks by definition"
     );
+}
+
+#[test]
+fn startup_token_budget_covers_grammar_and_error_paths() {
+    // Unset → unlimited (enforcement off, tracking on).
+    let b = AppState::startup_token_budget(None).expect("unset boots");
+    assert!(b.is_unlimited());
+    assert!(!b.is_exceeded());
+
+    // Pure number, K/M/G suffixes → finite from zero consumed.
+    for (raw, expected) in [
+        ("500", 500),
+        ("5K", 5_000),
+        ("5M", 5_000_000),
+        ("2G", 2_000_000_000),
+    ] {
+        let b = AppState::startup_token_budget(Some(raw.to_string()))
+            .unwrap_or_else(|e| panic!("{raw:?}: {e}"));
+        assert_eq!(b.budget(), expected, "raw = {raw:?}");
+        assert!(!b.is_unlimited());
+        assert_eq!(b.consumed(), 0);
+    }
+
+    // Zero = startup paused (same semantics as `budget set 0`).
+    let b = AppState::startup_token_budget(Some("0".to_string())).expect("zero boots");
+    assert!(b.is_exceeded());
+
+    // Set-but-invalid (including the empty string) must fail loudly, never
+    // fall back to unlimited — the error names the bad value.
+    for bad in ["", "abc", "-5M", "10X"] {
+        let err = AppState::startup_token_budget(Some(bad.to_string()))
+            .expect_err("invalid values must fail-fast");
+        assert!(err.to_string().contains(bad) || bad.is_empty(), "{err}");
+    }
 }

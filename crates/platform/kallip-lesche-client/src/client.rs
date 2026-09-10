@@ -1022,6 +1022,7 @@ mod tests {
                         subagents_active: 1,
                         token_budget: 9,
                         token_consumed: 3,
+                        token_budget_unlimited: false,
                     }),
                     UpstreamEvent::Signal(SignalEvent::Idle),
                 ],

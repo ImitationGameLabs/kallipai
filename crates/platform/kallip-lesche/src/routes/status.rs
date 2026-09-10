@@ -108,6 +108,7 @@ mod tests {
                 subagents_active: 2,
                 token_budget: 50_000,
                 token_consumed: 12_000,
+                token_budget_unlimited: false,
             },
         )
         .await

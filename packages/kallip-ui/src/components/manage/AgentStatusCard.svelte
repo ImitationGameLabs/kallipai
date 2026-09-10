@@ -4,6 +4,11 @@
   // against a wrong budget lies) plus the six context counters. Receives
   // the already-derived windowTokens/contextWindow pair so the derivation
   // (and its profileConfig dependency) stays in the page.
+  // The card accepts `unlimited` (default false) and forwards it to
+  // BudgetBar so both callers share the bar's unlimited form (badge
+  // overlay, no fill). The context window itself is always finite —
+  // a caller pins this to the tagma budget's unlimited flag only if a
+  // product decision wants that badge on the context card.
 
   import BudgetBar from "./BudgetBar.svelte";
   import { formatTokenCount } from "../../lib/tagmata.svelte.ts";
@@ -24,10 +29,12 @@
     status,
     windowTokens,
     contextWindow,
+    unlimited = false,
   }: {
     status: AgentStatusResponse;
     windowTokens: number;
     contextWindow: number | null;
+    unlimited?: boolean;
   } = $props();
 </script>
 
@@ -40,6 +47,7 @@
       consumed={windowTokens}
       budget={contextWindow}
       label={manage_agent_context_label()}
+      {unlimited}
     />
     <p class="text-xs opacity-70">
       {manage_agent_context_tokens({

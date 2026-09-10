@@ -8,6 +8,7 @@
     manage_overview_title,
     manage_overview_heading,
     manage_budget_heading,
+    manage_budget_tokens,
     manage_overview_budget_consumed_line,
     manage_agents_heading,
     manage_overview_agents_idle,
@@ -70,12 +71,19 @@
         <BudgetBar
           consumed={budgetStore.consumed}
           budget={budgetStore.budget}
+          unlimited={budgetStore.unlimited}
         />
         <div class="text-sm">
-          {manage_overview_budget_consumed_line({
-            pct: budgetStore.consumedPct,
-            remaining: formatTokenCount(budgetStore.remaining),
-          })}
+          {#if budgetStore.unlimited}
+            {manage_budget_tokens({
+              count: formatTokenCount(budgetStore.consumed),
+            })}
+          {:else}
+            {manage_overview_budget_consumed_line({
+              pct: budgetStore.consumedPct,
+              remaining: formatTokenCount(budgetStore.remaining),
+            })}
+          {/if}
         </div>
       </a>
 
@@ -110,12 +118,14 @@
           {manage_overview_quick_actions()}
         </h2>
         <div class="flex flex-wrap gap-2">
-          <button
-            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-primary-500"
-            onclick={() => budgetStore.adjust(100_000_000).catch(() => {})}
-            disabled={budgetStore.isBusy}
-            >{manage_overview_100m_budget()}</button
-          >
+          {#if !budgetStore.unlimited}
+            <button
+              class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-primary-500"
+              onclick={() => budgetStore.adjust(100_000_000).catch(() => {})}
+              disabled={budgetStore.isBusy}
+              >{manage_overview_100m_budget()}</button
+            >
+          {/if}
           {#if !budgetStore.isPaused}
             <button
               class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"

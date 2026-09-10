@@ -23,7 +23,7 @@ pub use agent::{
 pub use approval::{
     ApprovalDecisionBody, ApprovalEntry, ListApprovalsQuery, ListApprovalsResponse,
 };
-pub use budget::{DEFAULT_TOKEN_BUDGET, TokenBudgetResponse, TokenBudgetUpdateRequest};
+pub use budget::{TokenBudgetResponse, TokenBudgetUpdateRequest};
 pub use error::ApiError;
 pub use external::{AuthoredEvent, SignalEvent};
 pub use inbox::{InboxEntry, InboxListQuery, InboxSummary};

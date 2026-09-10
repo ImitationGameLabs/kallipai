@@ -29,5 +29,7 @@
   "manage_budget_set_resume": "设置并恢复",
   "manage_budget_clear_hint": "将剩余预算设为 0 后，所有智能体将立即停止。",
   "manage_budget_load_failed": "无法加载预算。",
-  "manage_budget_update_failed": "无法更新预算。"
+  "manage_budget_update_failed": "无法更新预算。",
+  "manage_budget_unlimited": "无限制",
+  "manage_budget_unlimited_hint": "当前无消费上限，设置有限额度后即可恢复调整。"
 }

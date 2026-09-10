@@ -29,6 +29,7 @@ impl TagmaClient {
                 &TokenBudgetUpdateRequest {
                     set_remaining: None,
                     delta: Some(delta),
+                    set_unlimited: false,
                 },
             ))
             .send()
@@ -49,6 +50,7 @@ impl TagmaClient {
                 &TokenBudgetUpdateRequest {
                     set_remaining: Some(value),
                     delta: None,
+                    set_unlimited: false,
                 },
             ))
             .send()
@@ -57,5 +59,49 @@ impl TagmaClient {
             "failed to parse budget response",
         )
         .await
+    }
+
+    /// Switch the tagma to an unlimited token budget: enforcement off,
+    /// consumption still tracked. On servers predating the unlimited wire
+    /// field this gets the 400 must-specify error back; the CLI maps that
+    /// to an unsupported-server message instead of a usage error.
+    pub async fn set_token_budget_unlimited(&self) -> Result<TokenBudgetResponse> {
+        self.handle_response(
+            self.with_auth(
+                self.inner
+                    .http
+                    .post(self.url("/budget"))
+                    .json(&unlimited_request()),
+            )
+            .send()
+            .await
+            .context("failed to set token budget unlimited")?,
+            "failed to parse budget response",
+        )
+        .await
+    }
+}
+
+/// The request body `set_token_budget_unlimited` sends. Extracted from
+/// the method so the wire shape has a direct test.
+fn unlimited_request() -> TokenBudgetUpdateRequest {
+    TokenBudgetUpdateRequest {
+        set_remaining: None,
+        delta: None,
+        set_unlimited: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The unlimited request body carries `set_unlimited` and neither of
+    /// the other two write shapes — the exactly-one contract the server
+    /// 400s on when violated.
+    #[test]
+    fn unlimited_request_body_carries_only_set_unlimited() {
+        let body = serde_json::to_value(unlimited_request()).unwrap();
+        assert_eq!(body, serde_json::json!({ "set_unlimited": true }));
     }
 }

@@ -107,3 +107,30 @@ pub(crate) async fn enforce_post_stream_budget(
 
     BudgetAction::Proceed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::test_support::{make_ctx, profile, usage};
+
+    /// Unlimited gate passthrough: the post-stream gate must fall
+    /// through to `Proceed` even with an enormous accumulated
+    /// consumption — no warning injection (usage_pct is 0 when
+    /// unlimited) and no exhaustion (`is_exceeded` short-circuits
+    /// false on the unlimited snapshot).
+    #[tokio::test]
+    async fn post_stream_gate_proceeds_when_budget_is_unlimited() {
+        let mut ctx = make_ctx(vec![profile("p1", "ep1", 500_000)], &["ep1"]).await;
+        ctx.token_budget.set_unlimited();
+        ctx.token_budget.record_usage(u64::MAX / 2, u64::MAX / 2);
+        assert!(ctx.token_budget.snapshot().unlimited);
+
+        let action = enforce_post_stream_budget(&mut ctx, Some(&usage(1_000))).await;
+
+        assert!(
+            matches!(action, BudgetAction::Proceed),
+            "an unlimited budget must never gate a round"
+        );
+    }
+}

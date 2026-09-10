@@ -386,6 +386,7 @@ mod tests {
                 subagents_active: 0,
                 token_budget: 50_000,
                 token_consumed: 0,
+                token_budget_unlimited: false,
             },
         ))
         .unwrap();

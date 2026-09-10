@@ -373,6 +373,7 @@ mod tests {
             subagents_active: 0,
             token_budget: 1000,
             token_consumed: consumed,
+            token_budget_unlimited: false,
         }
     }
 

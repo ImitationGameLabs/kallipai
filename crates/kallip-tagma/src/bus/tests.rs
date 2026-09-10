@@ -73,6 +73,7 @@ async fn tagma_topics_roundtrip_preserve_payloads() {
         subagents_active: 1,
         token_budget: 50_000,
         token_consumed: 1_234,
+        token_budget_unlimited: false,
     };
     bus.publish(StatusSnapshot(status.clone())).unwrap();
     bus.publish(ProjectionSnapshot(ProjectionSnapshotPayload {

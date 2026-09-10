@@ -670,6 +670,7 @@ impl AppState {
             5,
             profiles,
             preset,
+            kallip_runtime::token_budget::TokenBudget::unlimited(),
         )
     }
 
@@ -681,6 +682,7 @@ impl AppState {
         prompt_queue_size: usize,
         profiles: Arc<ArcSwap<ProfileBundle>>,
         preset: PolicyPreset,
+        token_budget: kallip_runtime::token_budget::TokenBudget,
     ) -> Self {
         let (invalidations, _) = tokio::sync::watch::channel(0u64);
         Self {
@@ -693,10 +695,7 @@ impl AppState {
             max_agents,
             max_subagents,
             prompt_queue_size,
-            token_budget: kallip_runtime::token_budget::TokenBudget::new(
-                kallip_common::protocol::DEFAULT_TOKEN_BUDGET,
-                0,
-            ),
+            token_budget,
             profiles,
             lock_manager: Arc::new(kallip_runtime::dirlock::DirLockManager::new()),
             relays: std::sync::Mutex::new(HashMap::new()),
@@ -714,6 +713,30 @@ impl AppState {
             converge: tokio::sync::Mutex::new(()),
             invalidations,
         }
+    }
+
+    /// Startup budget resolution for the tagma binary: `KALLIP_TOKEN_BUDGET`
+    /// sets a finite limit (pure number or K/M/G suffix, the CLI amount
+    /// grammar); unset means unlimited. A set-but-invalid value, **including
+    /// the empty string**, is a boot error rather than a silent fallback to
+    /// unlimited — falling back would defeat an operator cap that failed to
+    /// parse (e.g. a typo'd value with a trailing space). `Some("0")` boots
+    /// paused — the same semantics as `budget set 0`, valid but unusual.
+    ///
+    /// The env read and the `?`-propagated error live in the binary's
+    /// startup (anyhow context), not here: this is a pure parse with no
+    /// process state.
+    pub(crate) fn startup_token_budget(
+        raw: Option<String>,
+    ) -> anyhow::Result<kallip_runtime::token_budget::TokenBudget> {
+        Ok(match raw {
+            None => kallip_runtime::token_budget::TokenBudget::unlimited(),
+            Some(raw) => {
+                let value = kallip_common::tokens::parse_token_amount(&raw)
+                    .map_err(|err| anyhow::anyhow!("invalid value {raw:?}: {err}"))?;
+                kallip_runtime::token_budget::TokenBudget::new(value, 0)
+            }
+        })
     }
 }
 

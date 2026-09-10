@@ -136,6 +136,12 @@ async fn run(args: Args) -> Result<()> {
         registry,
     }));
 
+    // Startup token budget: the env read and parse happen here (not inside
+    // AppState::with_limits) so an invalid KALLIP_TOKEN_BUDGET fails the
+    // boot through this anyhow chain — a clean operator-facing error, not a
+    // panic with a backtrace. Unset boots unlimited; `0` boots paused.
+    let token_budget = AppState::startup_token_budget(std::env::var("KALLIP_TOKEN_BUDGET").ok())
+        .context("invalid KALLIP_TOKEN_BUDGET")?;
     let state = Arc::new(AppState::with_limits(
         operator.hash().clone(),
         args.max_agents,
@@ -143,6 +149,7 @@ async fn run(args: Args) -> Result<()> {
         args.prompt_queue_size,
         profiles,
         kallip_runtime::config::policy_preset_from_env(),
+        token_budget,
     ));
 
     // The typed topic bus registered inline at construction; surface the

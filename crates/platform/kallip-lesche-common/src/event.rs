@@ -156,6 +156,10 @@ pub struct TagmaStatusPayload {
     pub subagents_active: u32,
     pub token_budget: u64,
     pub token_consumed: u64,
+    /// Whether the tagma's budget is unlimited (enforcement off,
+    /// consumption still tracked). Absent (false) from older tagmas.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub token_budget_unlimited: bool,
 }
 
 /// `POST /v1/tagmata/{tagma_id}/upstream` request body element — one

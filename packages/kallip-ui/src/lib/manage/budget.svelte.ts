@@ -32,10 +32,11 @@ class BudgetStore {
   budget = $state(0);
   consumed = $state(0);
   remaining = $state(0);
+  unlimited = $state(false);
   isLoading = $state(false);
   error = $state<string | null>(null);
 
-  /** Tagma-wide budget is paused (remaining === 0). */
+  /** Tagma-wide budget is paused (remaining is 0 with a finite budget). */
   get isPaused(): boolean {
     return computeIsPaused(this.remaining, this.budget);
   }
@@ -61,6 +62,8 @@ class BudgetStore {
 
   /** Estimated minutes until budget exhaustion at current burn rate. Null if idle. */
   get etaMinutes(): number | null {
+    // An unlimited budget never exhausts — no ETA.
+    if (this.unlimited) return null;
     return computeEta(this.remaining, this.burnRate);
   }
 
@@ -101,6 +104,7 @@ class BudgetStore {
     this.budget = 0;
     this.consumed = 0;
     this.remaining = 0;
+    this.unlimited = false;
     this.error = null;
     this.inFlightMutation = false;
     this.samples = [];
@@ -129,12 +133,26 @@ class BudgetStore {
     }, -this.remaining);
   }
 
+  /** Remove the spending cap (switch to an unlimited budget). Optimistic.
+   * The wire reads budget/remaining as 0 while unlimited; consumed keeps
+   * its true accumulated value. */
+  setUnlimited(): Promise<BudgetResponse> {
+    return this.mutate(
+      async () => {
+        return await this.backend.updateBudget({ set_unlimited: true });
+      },
+      0,
+      true,
+    );
+  }
+
   // --- internals ---
 
   private applyResponse(resp: BudgetResponse): void {
     this.budget = resp.budget;
     this.consumed = resp.consumed;
     this.remaining = resp.remaining;
+    this.unlimited = resp.unlimited;
     // Track samples for burn-rate computation (keep last 6).
     this.samples.push({ consumed: resp.consumed, timestamp: Date.now() });
     if (this.samples.length > 6) this.samples.shift();
@@ -143,15 +161,22 @@ class BudgetStore {
   private async mutate(
     fn: () => Promise<BudgetResponse>,
     optimisticDelta: number,
+    optimisticUnlimited = false,
   ): Promise<BudgetResponse> {
     // Snapshot for revert.
     const prev = {
       budget: this.budget,
       consumed: this.consumed,
       remaining: this.remaining,
+      unlimited: this.unlimited,
     };
     // Apply optimistic.
     this.inFlightMutation = true;
+    if (optimisticUnlimited) {
+      this.unlimited = true;
+      this.budget = 0;
+      this.remaining = 0;
+    }
     if (optimisticDelta !== 0) {
       this.remaining = Math.max(0, this.remaining + optimisticDelta);
       this.budget = this.consumed + this.remaining;
@@ -165,6 +190,7 @@ class BudgetStore {
       this.budget = prev.budget;
       this.consumed = prev.consumed;
       this.remaining = prev.remaining;
+      this.unlimited = prev.unlimited;
       this.error = displayError("budget", e, manage_budget_update_failed());
       throw e;
     } finally {

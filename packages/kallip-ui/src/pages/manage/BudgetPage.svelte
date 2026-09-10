@@ -27,6 +27,8 @@
     manage_budget_decrease,
     manage_budget_set,
     manage_budget_adjust_hint,
+    manage_budget_unlimited,
+    manage_budget_unlimited_hint,
     manage_budget_cleared,
     manage_budget_budget_cleared_hint,
     manage_budget_amount_restore,
@@ -134,17 +136,27 @@
 
     <!-- Progress bar -->
     <section class="card preset-tonal-surface p-5 space-y-4">
-      <BudgetBar consumed={budgetStore.consumed} budget={budgetStore.budget} />
+      <BudgetBar
+        consumed={budgetStore.consumed}
+        budget={budgetStore.budget}
+        unlimited={budgetStore.unlimited}
+      />
       <div class="grid grid-cols-2 gap-4 text-sm">
         <div>
           <div class="opacity-60 text-xs uppercase tracking-wide">
             {manage_budget_consumed()}
           </div>
           <div class="font-medium">
-            {manage_budget_tokens_of({
-              consumed: formatTokenCount(budgetStore.consumed),
-              total: formatTokenCount(budgetStore.budget),
-            })}
+            {#if budgetStore.unlimited}
+              {manage_budget_tokens({
+                count: formatTokenCount(budgetStore.consumed),
+              })}
+            {:else}
+              {manage_budget_tokens_of({
+                consumed: formatTokenCount(budgetStore.consumed),
+                total: formatTokenCount(budgetStore.budget),
+              })}
+            {/if}
           </div>
         </div>
         <div>
@@ -152,9 +164,13 @@
             {manage_budget_remaining()}
           </div>
           <div class="font-medium">
-            {manage_budget_tokens({
-              count: formatTokenCount(budgetStore.remaining),
-            })}
+            {#if budgetStore.unlimited}
+              {manage_budget_unlimited()}
+            {:else}
+              {manage_budget_tokens({
+                count: formatTokenCount(budgetStore.remaining),
+              })}
+            {/if}
           </div>
         </div>
         <div>
@@ -172,38 +188,40 @@
       </div>
     </section>
 
-    <!-- Quick adjust -->
-    <section class="card preset-tonal-surface p-5 space-y-3">
-      <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-        {manage_budget_quick_adjust()}
-      </h2>
-      <div class="flex flex-wrap gap-2">
-        <button
-          class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-primary-500"
-          disabled={budgetStore.isBusy}
-          onclick={() => budgetStore.adjust(50_000_000).catch(() => {})}
-          >+50M</button
-        >
-        <button
-          class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-primary-500"
-          disabled={budgetStore.isBusy}
-          onclick={() => budgetStore.adjust(100_000_000).catch(() => {})}
-          >+100M</button
-        >
-        <button
-          class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
-          disabled={budgetStore.isBusy}
-          onclick={() => budgetStore.adjust(-50_000_000).catch(() => {})}
-          >−50M</button
-        >
-        <button
-          class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
-          disabled={budgetStore.isBusy}
-          onclick={() => budgetStore.adjust(-100_000_000).catch(() => {})}
-          >−100M</button
-        >
-      </div>
-    </section>
+    {#if !budgetStore.unlimited}
+      <!-- Quick adjust -->
+      <section class="card preset-tonal-surface p-5 space-y-3">
+        <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+          {manage_budget_quick_adjust()}
+        </h2>
+        <div class="flex flex-wrap gap-2">
+          <button
+            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-primary-500"
+            disabled={budgetStore.isBusy}
+            onclick={() => budgetStore.adjust(50_000_000).catch(() => {})}
+            >+50M</button
+          >
+          <button
+            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-primary-500"
+            disabled={budgetStore.isBusy}
+            onclick={() => budgetStore.adjust(100_000_000).catch(() => {})}
+            >+100M</button
+          >
+          <button
+            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
+            disabled={budgetStore.isBusy}
+            onclick={() => budgetStore.adjust(-50_000_000).catch(() => {})}
+            >−50M</button
+          >
+          <button
+            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-error-500"
+            disabled={budgetStore.isBusy}
+            onclick={() => budgetStore.adjust(-100_000_000).catch(() => {})}
+            >−100M</button
+          >
+        </div>
+      </section>
+    {/if}
 
     <!-- Precise adjust -->
     <section class="card preset-tonal-surface p-5 space-y-3">
@@ -218,7 +236,10 @@
           placeholder={manage_budget_amount()}
           bind:value={adjustInput}
           onkeydown={(e) => {
-            if (e.key === "Enter") onIncrease();
+            if (e.key === "Enter") {
+              if (budgetStore.unlimited) onSet();
+              else onIncrease();
+            }
           }}
         />
         <select
@@ -232,16 +253,18 @@
         </select>
       </div>
       <div class="flex gap-2">
-        <button
-          class="btn preset-filled-primary-500 flex-1"
-          disabled={adjustDisabled || budgetStore.isBusy}
-          onclick={onIncrease}>{manage_budget_increase()}</button
-        >
-        <button
-          class="btn preset-filled-error-500 flex-1"
-          disabled={adjustDisabled || budgetStore.isBusy}
-          onclick={onDecrease}>{manage_budget_decrease()}</button
-        >
+        {#if !budgetStore.unlimited}
+          <button
+            class="btn preset-filled-primary-500 flex-1"
+            disabled={adjustDisabled || budgetStore.isBusy}
+            onclick={onIncrease}>{manage_budget_increase()}</button
+          >
+          <button
+            class="btn preset-filled-error-500 flex-1"
+            disabled={adjustDisabled || budgetStore.isBusy}
+            onclick={onDecrease}>{manage_budget_decrease()}</button
+          >
+        {/if}
         <button
           class="btn preset-outlined-surface-500 hover:preset-filled-surface-500 flex-1"
           disabled={adjustDisabled || budgetStore.isBusy}
@@ -249,7 +272,11 @@
         >
       </div>
       <p class="text-xs opacity-50">
-        {manage_budget_adjust_hint()}
+        {#if budgetStore.unlimited}
+          {manage_budget_unlimited_hint()}
+        {:else}
+          {manage_budget_adjust_hint()}
+        {/if}
       </p>
     </section>
 
