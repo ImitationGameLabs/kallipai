@@ -56,6 +56,8 @@ pub(crate) fn profile(id: &str, provider: &str, window: usize) -> Profile {
         endpoint: provider.into(),
         model: format!("{id}-model"),
         max_context_window: window,
+        store: None,
+        effort: None,
     }
 }
 

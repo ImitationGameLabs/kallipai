@@ -151,6 +151,8 @@ mod tests {
                 endpoint: "ds".into(),
                 model: model.into(),
                 max_context_window: 500_000,
+                store: None,
+                effort: None,
             }],
         }
     }

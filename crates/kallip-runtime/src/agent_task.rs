@@ -521,12 +521,15 @@ fn apply_pending_profile_reset(ctx: &mut AgentContext) {
         .take();
     let Some(reset) = reset else { return };
     let new_window = reset.set.active_profile().max_context_window;
+    let new_store = reset.set.active_profile().store.unwrap_or(true);
     match ctx.failover.reset_and_rebuild(reset.set, reset.registry) {
         Ok(new_client) => {
             ctx.client = new_client;
             // Fresh chain for the fresh client: the reset may switch providers, and a
             // response id issued by the old one is meaningless to the new.
-            ctx.conversation = ctx.client.conversation();
+            // Store rides the reset's active profile (read before `reset.set` moves into
+            // the rebuild; `None` = client default, store on).
+            ctx.conversation = ctx.client.conversation().with_store(new_store);
             if let Err(e) = ctx.config.set_context_window(new_window) {
                 tracing::warn!(
                     window = new_window,

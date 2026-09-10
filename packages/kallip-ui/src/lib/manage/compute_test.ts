@@ -352,6 +352,45 @@ Deno.test("replaceSetProfiles: swaps the set's profile list wholesale", () => {
   assertEquals(r.sets["set-1"].profiles, profiles);
 });
 
+Deno.test(
+  "replaceSetProfiles: carries declared store and effort through",
+  () => {
+    const base = addProfile(addSet(emptyConfig), "set-1");
+    const r = replaceSetProfiles(base, "set-1", [
+      {
+        id: "p9",
+        endpoint: "ep1",
+        model: "m9",
+        max_context_window: 1,
+        store: false,
+        effort: "high",
+      },
+    ]);
+    assertEquals(r.sets["set-1"].profiles[0].store, false);
+    assertEquals(r.sets["set-1"].profiles[0].effort, "high");
+  },
+);
+
+Deno.test(
+  "profileConfigToWire: profile store and effort ride through to sets",
+  () => {
+    const base = addProfile(addSet(emptyConfig), "set-1");
+    const draft = replaceSetProfiles(base, "set-1", [
+      {
+        id: "p9",
+        endpoint: "ep1",
+        model: "m9",
+        max_context_window: 1,
+        store: false,
+        effort: "high",
+      },
+    ]);
+    const wire = profileConfigToWire(draft);
+    assertEquals(wire.sets[0].profiles[0].store, false);
+    assertEquals(wire.sets[0].profiles[0].effort, "high");
+  },
+);
+
 Deno.test("replaceSetProfiles: unknown set name is a no-op", () => {
   const base = addSet(emptyConfig);
   assertEquals(replaceSetProfiles(base, "ghost", []), base);

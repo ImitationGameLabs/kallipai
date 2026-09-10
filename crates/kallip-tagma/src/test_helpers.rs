@@ -261,6 +261,8 @@ pub fn make_profile_bundle() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundl
                     endpoint: "test".into(),
                     model: "test".into(),
                     max_context_window: 128_000,
+                    store: None,
+                    effort: None,
                 }],
             },
         )]),
@@ -321,6 +323,8 @@ pub fn make_profile_bundle_two_sets() -> Arc<arc_swap::ArcSwap<crate::state::Pro
                     endpoint: ep.into(),
                     model: ep.into(),
                     max_context_window: 128_000,
+                    store: None,
+                    effort: None,
                 }],
             },
         )

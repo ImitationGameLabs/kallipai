@@ -101,6 +101,10 @@ pub fn from_env() -> Result<ProfileConfig> {
         endpoint: provider.clone(),
         model,
         max_context_window,
+        // The implicit env profile keeps both behavior fields unset: the client defaults
+        // (store on, no effort) are exactly the unconfigured semantics.
+        store: None,
+        effort: None,
     };
     let mut endpoints = HashMap::new();
     endpoints.insert(provider, implicit_provider);
@@ -476,6 +480,92 @@ struct ProviderEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use just_llm_client::types::generation::ReasoningEffort;
+
+    #[test]
+    fn parse_profile_behavior_fields() {
+        // store / effort are optional per-profile behavior knobs; absent = None.
+        let toml = r#"
+default = "a"
+
+[endpoints.ds]
+family = "deepseek"
+api_key = "fake"
+
+[sets.a]
+
+  [[sets.a.profiles]]
+  id = "tuned"
+  endpoint = "ds"
+  model = "m"
+  max_context_window = 1000
+  store = false
+  effort = "high"
+
+  [[sets.a.profiles]]
+  id = "plain"
+  endpoint = "ds"
+  model = "m2"
+  max_context_window = 1000
+"#;
+        let file: ConfigFile = toml::from_str(toml).unwrap();
+        validate(&file).unwrap();
+        let tuned = &file.sets["a"].profiles[0];
+        assert_eq!(tuned.store, Some(false));
+        assert_eq!(tuned.effort, Some(ReasoningEffort::High));
+        let plain = &file.sets["a"].profiles[1];
+        assert_eq!(plain.store, None);
+        assert_eq!(plain.effort, None);
+    }
+
+    #[test]
+    fn parse_rejects_unknown_effort_level() {
+        // Effort levels are the upstream enum, so a typo dies at deserialization
+        // (config load) instead of surfacing as a bad request downstream.
+        let toml = r#"
+default = "a"
+
+[endpoints.ds]
+family = "deepseek"
+api_key = "fake"
+
+[sets.a]
+
+  [[sets.a.profiles]]
+  id = "p"
+  endpoint = "ds"
+  model = "m"
+  max_context_window = 1000
+  effort = "absurd"
+"#;
+        assert!(toml::from_str::<ConfigFile>(toml).is_err());
+    }
+
+    #[test]
+    fn behavior_fields_round_trip_without_none_noise() {
+        // Unset fields must stay out of the serialized TOML (Option::None has no
+        // TOML representation), while set ones round-trip as plain values.
+        let tuned = Profile {
+            id: "p".into(),
+            endpoint: "e".into(),
+            model: "m".into(),
+            max_context_window: 1,
+            store: Some(false),
+            effort: Some(ReasoningEffort::Xhigh),
+        };
+        let s = toml::to_string(&tuned).unwrap();
+        assert!(s.contains("store = false"));
+        assert!(s.contains("effort = \"xhigh\""));
+
+        let plain = Profile {
+            store: None,
+            effort: None,
+            ..tuned
+        };
+        let s = toml::to_string(&plain).unwrap();
+        assert!(!s.contains("store"));
+        assert!(!s.contains("effort"));
+    }
 
     fn ds_env() -> [(&'static str, Option<&'static str>); 4] {
         [
@@ -688,12 +778,16 @@ max_context_window = 1000
                                 endpoint: "ds".into(),
                                 model: "deepseek-pro".into(),
                                 max_context_window: 500_000,
+                                store: None,
+                                effort: None,
                             },
                             Profile {
                                 id: "backup".into(),
                                 endpoint: "oa".into(),
                                 model: "gpt-4".into(),
                                 max_context_window: 128_000,
+                                store: None,
+                                effort: None,
                             },
                         ],
                     },
@@ -708,6 +802,8 @@ max_context_window = 1000
                             endpoint: "ds".into(),
                             model: "deepseek-flash".into(),
                             max_context_window: 128_000,
+                            store: None,
+                            effort: None,
                         }],
                     },
                 ),
@@ -720,6 +816,8 @@ max_context_window = 1000
                 endpoint: "oa".into(),
                 model: "gpt-4-mini".into(),
                 max_context_window: 128_000,
+                store: None,
+                effort: None,
             }],
         };
 
@@ -788,6 +886,8 @@ max_context_window = 1000
                         endpoint: "ds".into(),
                         model: "m".into(),
                         max_context_window: 1000,
+                        store: None,
+                        effort: None,
                     }],
                 },
             )]),

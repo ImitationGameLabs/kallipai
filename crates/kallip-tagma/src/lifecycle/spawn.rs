@@ -210,10 +210,13 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
             )) as Arc<dyn kallip_runtime::agent_task::MessagePuller>
         });
 
+    // The seeded conversation's store flag rides the spawn-time active profile
+    // (`None` = client default, store on).
+    let active_store = args.set.active_profile().store.unwrap_or(true);
     let ctx = AgentContext {
         // Chain minted from the same client the context will own — the borrow must
         // precede the `client` move one line below (fresh provider → fresh chain).
-        conversation: client.conversation(),
+        conversation: client.conversation().with_store(active_store),
         client,
         failover: kallip_runtime::FailoverState::new(
             args.set,

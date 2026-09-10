@@ -1,5 +1,6 @@
 //! Runtime data model for the profile registry.
 
+use just_llm_client::types::generation::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 
 /// A provider instance: credentials + endpoint. Maps ~1:1 to a just-llm-client backend.
@@ -25,6 +26,15 @@ pub struct Profile {
     /// (`profile::from_env`) derives it from `KALLIP_CONTEXT_WINDOW_TOKENS`. Installed into
     /// `AgentConfig` at spawn via `set_context_window`, and re-applied on within-set failover.
     pub max_context_window: usize,
+    /// Server-side conversation storage for the upstream chain (`None` = enabled, matching
+    /// the client default). Only Responses-family backends continue chains; `false` (and any
+    /// non-Responses family) replays the full conversation every turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    /// Requested reasoning effort, forwarded to every backend that maps it (`None` = leave
+    /// the request's effort unset). Levels: low/medium/high/xhigh/max.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
 }
 
 /// A named set of profiles with an ordered failover chain.

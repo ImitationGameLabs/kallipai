@@ -163,6 +163,11 @@ pub(crate) async fn acquire_stream(
         )
         .with_tools(tools.clone())
         .with_tool_choice(ToolChoice::Mode(ToolChoiceMode::Auto));
+        // Effort rides the current profile and is re-read every round: a failover that
+        // swaps profiles must swap the requested effort with it.
+        if let Some(effort) = ctx.failover.current_profile().effort.clone() {
+            request = request.with_reasoning_effort(effort);
+        }
         if let Some(prompt) = ctx.failover.system_prompt() {
             request = request.with_system_prompt(prompt);
         }
@@ -480,7 +485,12 @@ pub(crate) async fn advance_failover(
                 ctx.client = new_client;
                 // Fresh chain for the fresh client: response ids issued by the old
                 // provider are meaningless to the new, so the next request resends fully.
-                ctx.conversation = ctx.client.conversation();
+                // The fresh chain's store flag rides the profile we just advanced to
+                // (`None` = client default, store on).
+                ctx.conversation = ctx
+                    .client
+                    .conversation()
+                    .with_store(candidate.store.unwrap_or(true));
                 reapply_window(ctx, &from).await;
                 // The carried context may now exceed the (possibly smaller) window — compact so
                 // the rebuilt request fits. summarize_and_evict no-ops when the context already
@@ -554,13 +564,99 @@ async fn reapply_window(ctx: &mut AgentContext, from: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::retry::{RetryCall, RetryPolicy, stream_with_retry};
     use crate::test_support::{
         MapSource, RecordingBackend, ctx_from_source, profile, request, user_msg,
     };
     use just_llm_client::LlmBackend;
+    use just_llm_client::types::generation::ReasoningEffort;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    /// Effort rides the current profile into the wire request: a profile declaring
+    /// `effort` produces requests carrying that `reasoning_effort`.
+    #[tokio::test]
+    async fn acquire_stream_injects_profile_effort_into_the_request() {
+        let backend = RecordingBackend::new();
+        backend.queue_stream("resp-1");
+        let source = Arc::new(MapSource(HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let mut p = profile("a", "p1", 100_000);
+        p.effort = Some(ReasoningEffort::High);
+        let mut ctx = ctx_from_source(vec![p], source, RetryPolicy::default()).await;
+
+        let outcome = acquire_stream(
+            &mut ctx,
+            vec![user_msg("q1")],
+            Vec::new(),
+            &tokio::sync::mpsc::channel(16).0,
+            &CancellationToken::new(),
+            0,
+        )
+        .await;
+        assert!(matches!(outcome, AcquireResult::Consumed(_)));
+        let reqs = backend.take_requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    /// Store rides the profile into the rebuilt conversation: advancing to a candidate
+    /// declaring `store = false` yields a stateless chain even though the backend supports
+    /// continuation, while `None` keeps the client default (stateful).
+    #[tokio::test]
+    async fn failover_advance_applies_candidate_store_to_the_conversation() {
+        let backend = RecordingBackend::new();
+        let source = Arc::new(MapSource(HashMap::from([
+            ("p1".to_string(), backend.clone() as Arc<dyn LlmBackend>),
+            ("p2".to_string(), backend.clone() as Arc<dyn LlmBackend>),
+            ("p3".to_string(), backend.clone() as Arc<dyn LlmBackend>),
+        ])));
+        let mut stateless = profile("b", "p2", 100_000);
+        stateless.store = Some(false);
+        let mut ctx = ctx_from_source(
+            vec![
+                profile("a", "p1", 100_000),
+                stateless,
+                profile("c", "p3", 100_000),
+            ],
+            source,
+            RetryPolicy::default(),
+        )
+        .await;
+        assert!(
+            ctx.conversation.is_stateful(),
+            "the opening chain keeps the client default"
+        );
+
+        let outcome = advance_failover(
+            &mut ctx,
+            vec![user_msg("q1")],
+            anyhow::anyhow!("endpoint dead"),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, FailoverOutcome::Advanced { .. }));
+        assert!(
+            !ctx.conversation.is_stateful(),
+            "store = false advances to a stateless chain"
+        );
+
+        let outcome = advance_failover(
+            &mut ctx,
+            vec![user_msg("q2")],
+            anyhow::anyhow!("endpoint dead"),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, FailoverOutcome::Advanced { .. }));
+        assert!(
+            ctx.conversation.is_stateful(),
+            "store = None advances back to the client default"
+        );
+    }
 
     /// Failover replaces the client AND the conversation chain: after an advance, the
     /// next request opens full (no `previous_response_id`), because response ids issued

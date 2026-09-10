@@ -7,13 +7,17 @@
   // result to its draft. In edit mode the id is locked — the id is the
   // profile's identity in the sets ∪ parking uniqueness rule, and
   // renaming would dangle probe reports keyed by it.
-  import type { ProfileModel } from "@kallipai/kallip-client";
+  import type { ProfileModel, ReasoningEffort } from "@kallipai/kallip-client";
 
   export interface ParkingDialogResult {
     readonly id: string;
     readonly endpoint: string;
     readonly model: string;
     readonly max_context_window: number;
+    /** Pass-through: the form has no inputs for these; edits keep the parked
+     * profile's declared values so a save never silently resets them. */
+    readonly store?: boolean;
+    readonly effort?: ReasoningEffort;
   }
 </script>
 
@@ -121,6 +125,8 @@
       endpoint,
       model: trimmedModel,
       max_context_window: Number(maxContext),
+      store: profile?.store,
+      effort: profile?.effort,
     });
   }
 </script>

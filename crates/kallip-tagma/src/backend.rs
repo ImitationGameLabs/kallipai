@@ -210,6 +210,9 @@ pub(crate) fn unconfigured_set() -> kallip_runtime::profile::ProfileSet {
         endpoint: UNCONFIGURED.into(),
         model: UNCONFIGURED.into(),
         max_context_window: 128_000,
+        // The sentinel carries no behavior config: both fields stay unset.
+        store: None,
+        effort: None,
     };
     kallip_runtime::profile::ProfileSet {
         name: UNCONFIGURED.into(),
@@ -344,6 +347,8 @@ mod tests {
                         endpoint: endpoint.into(),
                         model: "deepseek-test".into(),
                         max_context_window: 500_000,
+                        store: None,
+                        effort: None,
                     }],
                 },
             )]),
@@ -378,6 +383,8 @@ mod tests {
             endpoint: "backup".into(),
             model: "deepseek-backup".into(),
             max_context_window: 500_000,
+            store: None,
+            effort: None,
         });
 
         let source = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT).unwrap();
@@ -461,6 +468,8 @@ mod tests {
                         endpoint: "oa".into(),
                         model: "gpt-4.1-mini".into(),
                         max_context_window: 128_000,
+                        store: None,
+                        effort: None,
                     }],
                 },
             )]),

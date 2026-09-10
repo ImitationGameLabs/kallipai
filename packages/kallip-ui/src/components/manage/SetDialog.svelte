@@ -7,13 +7,17 @@
   // the dialog never touches a store; on save it hands name, description,
   // and the full profile list back, and the page applies them
   // (renameSet / updateSetDescription / replaceSetProfiles).
-  import type { ProfileModel } from "@kallipai/kallip-client";
+  import type { ProfileModel, ReasoningEffort } from "@kallipai/kallip-client";
 
   export interface SetDialogRow {
     readonly id: string;
     readonly endpoint: string;
     readonly model: string;
     readonly max_context_window: number;
+    /** Pass-through: the row form has no inputs for these; edits keep the
+     * profile's declared values so a save never silently resets them. */
+    readonly store?: boolean;
+    readonly effort?: ReasoningEffort;
   }
 </script>
 
@@ -74,6 +78,8 @@
     endpoint: string;
     model: string;
     maxContext: string;
+    store?: boolean;
+    effort?: ReasoningEffort;
   }
 
   // Rows and the meta fields, reset on each open transition (plain
@@ -91,6 +97,8 @@
         endpoint: p.endpoint,
         model: p.model,
         maxContext: String(p.max_context_window),
+        store: p.store,
+        effort: p.effort,
       }));
       if (rows.length === 0) rows = [blankRow()];
     }
@@ -145,6 +153,8 @@
         endpoint: r.endpoint,
         model: r.model.trim(),
         max_context_window: Number(r.maxContext),
+        store: r.store,
+        effort: r.effort,
       })),
     });
   }

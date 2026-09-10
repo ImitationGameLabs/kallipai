@@ -73,7 +73,8 @@ description = "cheap delegation"
 
 - `family` must be one of `deepseek`, `openai-compatible`, `openai-responses`, `anthropic`.
 - `base_url` is required for `openai-compatible` and optional elsewhere: every other family falls back to its official endpoint when omitted.
-- `openai-responses` keeps server-side conversation state between turns; `anthropic` holds none, so every turn replays the full conversation.
+- `store` (optional, default `true`) keeps server-side conversation storage on, so `openai-responses` continues each turn from the stored chain; `store = false` (or any non-Responses family) replays the full conversation every turn.
+- `effort` (optional) requests a reasoning effort — `low`, `medium`, `high`, `xhigh`, or `max`. Providers honor it within their own limits (DeepSeek officially downgrades `medium` and `xhigh` to `high` per its [API reference](https://api-docs.deepseek.com/api/create-chat-completion)).
 - `${VAR}` in `api_key` / `base_url` is expanded from the process environment.
 - The config file should be `chmod 600` (the tagma warns if
   group/other-readable, since it may hold API keys).

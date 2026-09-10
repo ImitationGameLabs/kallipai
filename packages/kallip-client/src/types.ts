@@ -227,12 +227,19 @@ export interface ProfileProvider {
   readonly base_url: string | null;
 }
 
+/** Reasoning effort levels a profile may request; forwarded to providers as-is. */
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
 /** A model bound to a provider. */
 export interface ProfileModel {
   readonly id: string;
   readonly endpoint: string;
   readonly model: string;
   readonly max_context_window: number;
+  /** Absent = the client default (response storage on). */
+  readonly store?: boolean;
+  /** Absent = no effort level requested. */
+  readonly effort?: ReasoningEffort;
 }
 
 /** A named profile set: an ordered failover chain. The map key in

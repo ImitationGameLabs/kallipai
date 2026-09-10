@@ -18,6 +18,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 
+use just_llm_client::types::generation::ReasoningEffort;
 use kallip_common::protocol::{ApiError, DeleteSetResponse, SetDefaultRequest, SetReference};
 use kallip_runtime::profile::{
     Profile, ProfileConfig, ProfileRegistry, ProfileSet, Provider, is_valid_set_name,
@@ -117,6 +118,8 @@ struct ProfileWire {
     endpoint: String,
     model: String,
     max_context_window: usize,
+    store: Option<bool>,
+    effort: Option<ReasoningEffort>,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +217,8 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                 endpoint: p.endpoint,
                 model: p.model,
                 max_context_window: p.max_context_window,
+                store: p.store,
+                effort: p.effort,
             })
             .collect();
         let set = ProfileSet {
@@ -245,6 +250,8 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                 endpoint: p.endpoint,
                 model: p.model,
                 max_context_window: p.max_context_window,
+                store: p.store,
+                effort: p.effort,
             })
             .collect(),
     };
@@ -625,6 +632,36 @@ pub async fn delete_profile_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_wire_profile_behavior_fields_pass_through() {
+        let w: ProfileConfigWire = serde_json::from_value(serde_json::json!({
+            "endpoints": { "main": { "id": "main", "family": "deepseek", "api_key": null, "base_url": null } },
+            "sets": [
+                { "name": "a", "profiles": [
+                    { "id": "tuned", "endpoint": "main", "model": "m", "max_context_window": 8, "store": false, "effort": "low" },
+                    { "id": "plain", "endpoint": "main", "model": "m2", "max_context_window": 8 }
+                ] }
+            ],
+            "parking": [
+                { "id": "parked", "endpoint": "main", "model": "m3", "max_context_window": 8, "store": false, "effort": "xhigh" }
+            ],
+            "default": "a"
+        }))
+        .unwrap();
+        let cfg = merge_wire(&live_config(), w).unwrap();
+        let profiles = &cfg.sets["a"].profiles;
+        assert_eq!(profiles[0].store, Some(false));
+        assert_eq!(profiles[0].effort, Some(ReasoningEffort::Low));
+        assert_eq!(profiles[1].store, None);
+        assert_eq!(profiles[1].effort, None);
+        // A present parking list replaces wholesale; the behavior fields ride
+        // through exactly like the sets path.
+        let parked = &cfg.parking;
+        assert_eq!(parked.len(), 1);
+        assert_eq!(parked[0].store, Some(false));
+        assert_eq!(parked[0].effort, Some(ReasoningEffort::Xhigh));
+    }
     use crate::state::RegistryEntry;
     use crate::test_helpers::{alt_bound_sub, make_entry_with_rx, make_state, make_state_two_sets};
     use kallip_common::agentid::AgentId;
@@ -940,6 +977,8 @@ mod tests {
             endpoint: "main".into(),
             model: "m2".into(),
             max_context_window: 8,
+            store: None,
+            effort: None,
         }]);
         let merged = merge_wire(&live_config(), w).unwrap();
         assert_eq!(merged.parking.len(), 1);
@@ -989,6 +1028,8 @@ mod tests {
                 endpoint: "main".into(),
                 model: "pm".into(),
                 max_context_window: 64_000,
+                store: None,
+                effort: None,
             }],
         }
     }

@@ -49,6 +49,7 @@
     ProfileProviderProbeReport,
     ProfileModelProbeReport,
     ProfileSet,
+    ReasoningEffort,
   } from "@kallipai/kallip-client";
   import {
     common_remove,
@@ -349,6 +350,8 @@
       endpoint: string;
       model: string;
       max_context_window: number;
+      store?: boolean;
+      effort?: ReasoningEffort;
     }[];
   }) {
     const draft = profilesStore.draft;
@@ -398,6 +401,8 @@
     endpoint: string;
     model: string;
     max_context_window: number;
+    store?: boolean;
+    effort?: ReasoningEffort;
   }) {
     const draft = profilesStore.draft;
     if (!draft) return;
@@ -451,6 +456,8 @@
     endpoint: string;
     model: string;
     max_context_window: number;
+    store?: boolean;
+    effort?: ReasoningEffort;
   }) {
     const draft = profilesStore.draft;
     if (!draft) return;
