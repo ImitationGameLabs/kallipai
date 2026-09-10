@@ -9,6 +9,8 @@ automatically via `.envrc`.
 These variables select and configure the LLM backend. They are **required** when
 no [model profiles](#model-profiles) config file is present.
 
+The env path supports `deepseek` and `openai-compatible` only; the `openai-responses` and `anthropic` families are reachable through a [model profiles](#model-profiles) config file.
+
 | Variable                            | Required    | Default          | Description                                                                                                 |
 | ----------------------------------- | ----------- | ---------------- | ----------------------------------------------------------------------------------------------------------- |
 | `KALLIP_LLM_PROVIDER`               | **yes**     | —                | LLM backend. Supported values: `deepseek`, `openai-compatible`.                                             |
@@ -48,6 +50,10 @@ family = "openai-compatible"
 api_key = "${OPENROUTER_API_KEY}"
 base_url = "https://openrouter.ai/api/v1"
 
+[endpoints.official-openai]
+family = "openai-responses"
+api_key = "${OPENAI_API_KEY}" # no base_url: talks to the official endpoint
+
 [sets.primary]
 description = "full-capability work"
   [[sets.primary.profiles]]
@@ -65,7 +71,9 @@ description = "cheap delegation"
   max_context_window = 128000
 ```
 
-- `family` must be one of `deepseek`, `openai-compatible`.
+- `family` must be one of `deepseek`, `openai-compatible`, `openai-responses`, `anthropic`.
+- `base_url` is required for `openai-compatible` and optional elsewhere: every other family falls back to its official endpoint when omitted.
+- `openai-responses` keeps server-side conversation state between turns; `anthropic` holds none, so every turn replays the full conversation.
 - `${VAR}` in `api_key` / `base_url` is expanded from the process environment.
 - The config file should be `chmod 600` (the tagma warns if
   group/other-readable, since it may hold API keys).

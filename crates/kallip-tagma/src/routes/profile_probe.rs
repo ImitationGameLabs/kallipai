@@ -364,4 +364,60 @@ mod tests {
         assert_eq!(resp.sets[0].profiles[1].status, ProbeStatus::Ok);
         assert!(resp.sets[0].all_ok);
     }
+
+    #[tokio::test]
+    async fn responses_family_catalog_probe_ok() {
+        let server = wiremock::MockServer::start().await;
+        mock_catalog(&server, &["gpt-test"]).await;
+
+        let state = make_state();
+        // Endpoints only (no sets): the catalog is the whole probe.
+        let req = probe_req(serde_json::json!({
+            "endpoints": [{
+                "id": "resp",
+                "family": "openai-responses",
+                "api_key": "sk-test",
+                "base_url": server.uri()
+            }]
+        }));
+        let resp = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(resp.results[0].status, ProbeStatus::Ok);
+        assert_eq!(resp.results[0].catalog_count, Some(1));
+    }
+
+    #[tokio::test]
+    async fn anthropic_family_catalog_probe_ok() {
+        use wiremock::matchers::{method, path};
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{ "id": "claude-test", "type": "model" }]
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = make_state();
+        let req = probe_req(serde_json::json!({
+            "endpoints": [{
+                "id": "ant",
+                "family": "anthropic",
+                "api_key": "sk-ant-test",
+                "base_url": server.uri()
+            }]
+        }));
+        let resp = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(resp.results[0].status, ProbeStatus::Ok);
+        assert_eq!(resp.results[0].catalog_count, Some(1));
+    }
 }

@@ -396,7 +396,7 @@ mod tests {
             "dead".into(),
             Provider {
                 id: "dead".into(),
-                family: "anthropic".into(), // would be invalid if referenced, but it's not
+                family: "anthropic".into(), // a valid family; the point is it is unreferenced
                 api_key: "fake".into(),
                 base_url: None,
             },
@@ -407,14 +407,35 @@ mod tests {
     #[test]
     fn unknown_family_referenced_errors() {
         let mut cfg = ds_cfg();
-        // "anthropic" registered once the migration enabled its feature (R10); pick a
-        // family string no factory has.
+        // Any family string no factory registers — the registered set is
+        // whatever the factory was built with (feature-gated registrations included).
         cfg.endpoints.get_mut("ds").unwrap().family = "nonexistent".into();
         let err = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT)
             .err()
             .expect("unregistered family should error");
         let msg = format!("{err}");
         assert!(msg.contains("unknown family 'nonexistent'"), "got: {msg}");
+    }
+
+    #[test]
+    fn responses_family_builds_without_base_url() {
+        // The responses family defaults to the official OpenAI endpoint when
+        // base_url is omitted; construction is offline and must succeed.
+        let mut cfg = ds_cfg();
+        cfg.endpoints.get_mut("ds").unwrap().family = family::OPENAI_RESPONSES.into();
+        cfg.sets.get_mut("default").unwrap().profiles[0].model = "gpt-test".into();
+        let source = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT).unwrap();
+        assert!(source.get("ds").is_ok(), "responses family builds");
+    }
+
+    #[test]
+    fn anthropic_family_builds_without_base_url() {
+        // Same optional-base_url rule; construction is offline.
+        let mut cfg = ds_cfg();
+        cfg.endpoints.get_mut("ds").unwrap().family = family::ANTHROPIC.into();
+        cfg.sets.get_mut("default").unwrap().profiles[0].model = "claude-test".into();
+        let source = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT).unwrap();
+        assert!(source.get("ds").is_ok(), "anthropic family builds");
     }
 
     #[test]
