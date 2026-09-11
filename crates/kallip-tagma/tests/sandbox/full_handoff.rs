@@ -27,10 +27,12 @@ async fn scenario5_full_handoff() {
     let ws = world.workspace.path().to_path_buf();
     // The spawned child id is captured to /tmp (baseline-writable, persists
     // across the separate shell of each bash_exec) so the remove step can read
-    // it; the test deletes the file once it ends. The workspace itself is
-    // unwritable once the handoff fires, so the id cannot live there.
+    // it; a RemoveOnDrop guard deletes it when the scope ends, panic
+    // included. The workspace itself is unwritable once the handoff
+    // fires, so the id cannot live there.
     let child_id_file =
         std::env::temp_dir().join(format!("kallip-fh-child-{}", std::process::id()));
+    let _child_id_cleanup = RemoveOnDrop::new(&child_id_file);
     let script = vec![
         // 0: write own workspace (before handoff).
         Reply::Tool(format!("echo root > {}/own.txt", ws.display())),
@@ -115,5 +117,4 @@ async fn scenario5_full_handoff() {
     assert!(ws.join("back.txt").exists(), "back.txt must exist");
 
     fx.tagma.kill().await;
-    let _ = std::fs::remove_file(&child_id_file);
 }

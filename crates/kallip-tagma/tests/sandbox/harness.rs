@@ -116,6 +116,41 @@ fn testdata_root() -> PathBuf {
     dir
 }
 
+/// Removes the file when dropped. A scenario's tail cleanup must also
+/// fire when an assertion panics: a panic unwinds, so Drop runs where
+/// a plain trailing `remove_file` would be skipped. An abort still
+/// escapes every drop guard.
+pub struct RemoveOnDrop(PathBuf);
+
+impl RemoveOnDrop {
+    /// Arm the guard for `path`; the file may not exist yet.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self(path.into())
+    }
+}
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn remove_on_drop_cleans_up_through_a_panic() {
+    let path = std::env::temp_dir().join(format!("kallip-remove-on-drop-{}", std::process::id()));
+    std::fs::write(&path, b"probe").unwrap();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = RemoveOnDrop::new(&path);
+        panic!("simulated assertion failure");
+    }));
+    assert!(panicked.is_err(), "the inner scope must have panicked");
+    assert!(
+        !path.exists(),
+        "the guard must remove the file despite the panic"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 // ===========================================================================
 // On-disk world setup
 // ===========================================================================

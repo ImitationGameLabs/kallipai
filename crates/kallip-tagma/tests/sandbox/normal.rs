@@ -29,6 +29,10 @@ async fn scenario2_normal() {
     // full-handoff scenario's child-id file precedent).
     let tmp_probe = format!("/tmp/scenario2_tmp-{}", std::process::id());
     let shm_probe = format!("/dev/shm/scenario2_shm-{}", std::process::id());
+    // Tail cleanup must also fire when an assertion panics (Drop
+    // runs on unwind); the world tree cleans the home file itself.
+    let _tmp_cleanup = RemoveOnDrop::new(&tmp_probe);
+    let _shm_cleanup = RemoveOnDrop::new(&shm_probe);
     let mut script = vec![
         Reply::Tool(format!("echo hello > {}/test.txt", ws.display())), // 0: workspace writable
         Reply::Tool("echo hb > $HOME/scenario2_home.txt".into()),       // 1: home broad-write
@@ -100,14 +104,11 @@ async fn scenario2_normal() {
         "meta.json must be unchanged (data tree is read-only)"
     );
 
-    // /tmp cleanup so the assertion is repeatable.
-    let _ = std::fs::remove_file(&tmp_probe);
     // Home cleanup.
     let _ = std::fs::remove_file(fx.world.home_path().join("scenario2_home.txt"));
-    // /dev/shm corroboration + cleanup.
+    // /dev/shm corroboration.
     if have_shm {
         assert!(Path::new(&shm_probe).exists(), "/dev/shm file must exist");
-        let _ = std::fs::remove_file(&shm_probe);
     }
 
     fx.tagma.kill().await;
