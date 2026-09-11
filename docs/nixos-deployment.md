@@ -167,6 +167,29 @@ file instead (the `adminTokenFile` option description covers the file
 format and the OAuth client secrets it can carry) — pin for a stable
 token, leave unset to accept a short-lived one.
 
+## Users, launch identities, and the real-root guard
+
+The module's daemon unit runs as `root` — a system service that reads
+every declared user's passwd entry — while the declared `tagmaUsers`
+are the only launch identities instances ever run as. A root daemon
+refuses an inferred in-place launch (the error asks for `--user`), so
+every `adopt` and `start` on NixOS names one of the declared users
+explicitly; nothing the platform hosts runs as the host's real root,
+and a tagma started directly as real root refuses to boot outright
+(the escape hatch is `KALLIP_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT=1`, not
+meant for this deployment form).
+
+The declared users are provisioned with a home directory and linger:
+`/home/<user>` holds the instance's XDG config, data, and state
+trees, and logind pre-creates `/run/user/<uid>` at boot — the spawned
+instance's `XDG_RUNTIME_DIR`, with no per-instance setup. Without
+linger the runtime directory is simply absent: an instance still
+binds its TCP port and never reads `XDG_RUNTIME_DIR`, so nothing
+else breaks. Service-owned persistent state (the polis services'
+stores and the internal token) stays under `/var/lib/kallipai`,
+separate from the per-user homes — the same lifetime split the
+internal-token section describes.
+
 ## The reverse proxy (your edge)
 
 The Minimal configuration block above is the complete edge: one Caddy

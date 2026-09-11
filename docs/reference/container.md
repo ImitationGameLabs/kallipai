@@ -292,6 +292,18 @@ on the `tagma` service only:
 
 The archeion and both postgres services need no special privileges.
 
+Docker's default shape is rootful: the container's uid 0 is the host's
+uid 0 in the initial user namespace — exactly what the guard refuses,
+since every spawned instance would be a host-root process and the
+sandbox stack does not reclaim uid capabilities. Prefer a rootless or
+userns-remapped runtime. Where that is not an option, set
+`KALLIP_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT=1` (exact value) in the tagma
+service's environment and accept the per-boot warning; anything else —
+unset, empty, `0` — keeps the refusal. Inside the platform this
+variable travels through the request env pairs (`kallipctl --env`),
+not the daemon's own environment: the daemon forwards only what a
+request carries (see the Local daemon section in [env.md](env.md)).
+
 ## Volumes and workspaces
 
 In dev and the prod-tagma composition, tagma data and the agent workspace are
