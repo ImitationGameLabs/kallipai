@@ -691,6 +691,9 @@ in
           RuntimeDirectory = "kallipai";
           ConfigurationDirectory = "kallipai";
           Restart = "on-failure";
+          # A crash-looping unit must not slam the start-rate limit
+          # and lock itself out of restarting (archeion precedent).
+          RestartSec = "5s";
         };
       };
     })
@@ -835,6 +838,9 @@ in
             RuntimeDirectoryMode = "0700";
             LogsDirectoryMode = "0750";
             Restart = "on-failure";
+            # A crash-looping archeion must not slam the unit start-rate
+            # limit and lock itself out of restarting.
+            RestartSec = "5s";
             EnvironmentFile = lib.optional (polisCfg.adminTokenFile != null) (toString polisCfg.adminTokenFile);
           };
         };
@@ -842,15 +848,16 @@ in
         kallip-lesche = {
           description = "kallipai lesche data-plane relay";
           wantedBy = [ "multi-user.target" ];
-          # Hard dependency: the lesche reads the archeion's provisioned
-          # internal-token file at boot, so the archeion must be up (and
-          # the file present) first. Operator-accepted cost: an archeion
-          # stop cascades here.
+          # Soft dependency: the lesche reads the archeion's provisioned
+          # internal-token file at boot, so the archeion starts first.
+          # If the archeion goes down later, the lesche keeps running
+          # degraded (auth answers 503) and recovers on its own -- an
+          # archeion crash no longer cascades here.
           after = [
             "network.target"
             "kallip-archeion.service"
           ];
-          requires = [ "kallip-archeion.service" ];
+          wants = [ "kallip-archeion.service" ];
           environment = {
             KALLIP_LESCHE_ADDR = "127.0.0.1:${toString polisPorts.lesche}";
             KALLIP_LESCHE_ARCHEION_INTERNAL_URL = "http://127.0.0.1:${toString polisPorts.archeion}";
@@ -871,6 +878,9 @@ in
             StateDirectoryMode = "0700";
             LogsDirectoryMode = "0750";
             Restart = "on-failure";
+            # A crash-looping unit must not slam the start-rate limit
+            # and lock itself out of restarting (archeion precedent).
+            RestartSec = "5s";
             EnvironmentFile = lib.optional (polisCfg.notifyTokenFile != null) (
               toString polisCfg.notifyTokenFile
             );
@@ -884,8 +894,11 @@ in
             "network.target"
             "kallip-archeion.service"
           ];
-          # Hard dependency: the internal-token file must be provisioned first.
-          requires = [ "kallip-archeion.service" ];
+          # Soft dependency: the internal-token file is provisioned by
+          # the archeion first (see after); if the archeion goes down
+          # later, this unit keeps running degraded and recovers on
+          # its own.
+          wants = [ "kallip-archeion.service" ];
           environment = {
             KALLIP_FILES_ADDR = "127.0.0.1:${toString polisPorts.files}";
             KALLIP_FILES_ARCHEION_INTERNAL_URL = "http://127.0.0.1:${toString polisPorts.archeion}";
@@ -910,6 +923,9 @@ in
             StateDirectoryMode = "0700";
             LogsDirectoryMode = "0750";
             Restart = "on-failure";
+            # A crash-looping unit must not slam the start-rate limit
+            # and lock itself out of restarting (archeion precedent).
+            RestartSec = "5s";
             EnvironmentFile = lib.optional (polisCfg.notifyTokenFile != null) (
               toString polisCfg.notifyTokenFile
             );
@@ -918,17 +934,21 @@ in
         kallip-instances = {
           description = "kallipai instances management proxy";
           wantedBy = [ "multi-user.target" ];
-          # Two dependencies, two postures: the daemon is soft (a restart
-          # answers 503 daemon_unreachable, not a failed unit); the
-          # archeion is hard -- its provisioned internal-token file is read
-          # at boot, so it must be up first.
+          # Two dependencies, one posture: both are soft. The daemon
+          # answers a restart with 503 daemon_unreachable, not a failed
+          # unit; the archeion's provisioned internal-token file is read
+          # at boot, so the archeion starts first, and an outage later
+          # leaves this unit running degraded (auth answers 503) until
+          # it returns.
           after = [
             "network.target"
             "kallip-daemon.service"
             "kallip-archeion.service"
           ];
-          wants = [ "kallip-daemon.service" ];
-          requires = [ "kallip-archeion.service" ];
+          wants = [
+            "kallip-daemon.service"
+            "kallip-archeion.service"
+          ];
           environment = {
             KALLIP_INSTANCES_ADDR = "127.0.0.1:${toString polisPorts.instances}";
             KALLIP_DAEMON_SOCKET = daemonSocket;
@@ -944,6 +964,9 @@ in
             # A pure UDS proxy: no state or log directory of its own --
             # the daemon owns both sides of that split.
             Restart = "on-failure";
+            # A crash-looping unit must not slam the start-rate limit
+            # and lock itself out of restarting (archeion precedent).
+            RestartSec = "5s";
           };
         };
       };
