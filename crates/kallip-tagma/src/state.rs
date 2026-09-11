@@ -701,7 +701,13 @@ impl AppState {
             prompt_queue_size,
             token_budget,
             profiles,
-            files_http: reqwest::Client::new(),
+            // Bounded so a wedged files connection cannot hang the boot
+            // path (restore re-assembly awaits this client).
+            files_http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("files HTTP client constructs without network"),
             lock_manager: Arc::new(kallip_runtime::dirlock::DirLockManager::new()),
             relays: std::sync::Mutex::new(HashMap::new()),
             bus: crate::bus::tagma_bus().expect("static topic registry is conflict-free"),

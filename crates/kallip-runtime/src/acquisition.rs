@@ -9,19 +9,23 @@
 
 use anyhow::Error;
 use futures_util::StreamExt;
+use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::agent_task::AgentContext;
-use crate::context::{CompactOutcome, compose_context, summarize_and_evict};
+use crate::context::{
+    CompactOutcome, compose_context, message_has_images, strip_message_images, summarize_and_evict,
+};
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::failover::FailoverOutcome;
+use crate::history::collect_sidecar_refs;
 use crate::stream_accumulator::ToolCallAccumulator;
-use just_llm_client::ConversationStream;
 use just_llm_client::types::generation::{
     GenerationEvent, GenerationRequest, Message, ToolCall, ToolChoice, ToolChoiceMode,
     ToolDefinition,
 };
+use just_llm_client::{BackendError, ConversationStream, provider_rejection};
 use kallip_common::protocol::FailoverChainExhaustion;
 use kallip_common::retry::{RetryKind, RetryRecord};
 use kallip_common::timefmt;
@@ -131,6 +135,132 @@ pub(crate) enum AcquireResult {
     Outcome(AgentOutcome),
     /// A request-level error — the round errors.
     Error(Error),
+}
+
+/// The provider HTTP status behind a request-level acquisition error, if
+/// any: a `400`/`422`-family rejection that failed on this profile.
+/// Auth/404 statuses never reach the Fatal arm (they fail over instead)
+/// and pre-flight serialization failures carry no status — both return
+/// `None`, so the caller's image-degrade path only fires on true
+/// provider rejections.
+pub(crate) fn fatal_provider_status(error: &Error) -> Option<reqwest::StatusCode> {
+    let backend = error.downcast_ref::<BackendError>()?;
+    provider_rejection(backend)
+        .map(|rejection| rejection.status)
+        .filter(|status| {
+            status.is_client_error()
+                && *status != reqwest::StatusCode::UNAUTHORIZED
+                && *status != reqwest::StatusCode::FORBIDDEN
+                && *status != reqwest::StatusCode::NOT_FOUND
+        })
+}
+
+/// The deterministic image-rejection fallback: the provider rejected the
+/// request with a 4xx while the composed request carried images. Strip
+/// the images from a recomposed copy (the store stays untouched until
+/// the retry proves the images were the problem), retry once, and on
+/// success apply the strip for good — recording each affected sidecar
+/// reference as invalidated (`SystemEvent::ReferenceInvalidated`) so
+/// neither later rounds nor a restore replays the failure, plus a
+/// plain-language note turn so the agent knows its images were dropped.
+///
+/// Returns `Some(result)` when the degrade path owned the outcome (the
+/// retried stream, or a cancel/budget outcome from the retry); `None`
+/// hands the original error back to the caller — the retry failed too,
+/// so the images were probably not the cause, and nothing was
+/// invalidated.
+///
+/// Attribution granularity is the turn: the provider blames the request,
+/// not an individual part. Every ingest turn carries exactly one image
+/// today, so turn granularity equals reference granularity; multi-image
+/// turns would need finer attribution.
+pub(crate) async fn degrade_on_image_rejection(
+    ctx: &mut AgentContext,
+    error: &Error,
+    tools: Vec<ToolDefinition>,
+    tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    round_cancel: &CancellationToken,
+    round: usize,
+) -> Option<AcquireResult> {
+    let status = fatal_provider_status(error)?;
+
+    // Which live turns carry images? None → the rejection is not about
+    // images; hand the error back untouched.
+    let image_turn_ids: Vec<u64> = {
+        let guard = ctx.store.lock().await;
+        guard
+            .turns()
+            .iter()
+            .filter(|t| t.messages.iter().any(message_has_images))
+            .map(|t| t.id.0)
+            .collect()
+    };
+    if image_turn_ids.is_empty() {
+        return None;
+    }
+
+    // Recompose (the store has not moved since the failed compose) and
+    // retry once without the images.
+    let composed = compose_context(ctx.store.clone()).await;
+    let stripped: Vec<Message> = composed
+        .iter()
+        .map(|m| strip_message_images(m).unwrap_or_else(|| m.clone()))
+        .collect();
+    match acquire_stream(ctx, stripped, tools, tx, round_cancel, round).await {
+        AcquireResult::Consumed(consumed) => {
+            // The images were the problem: make the strip permanent.
+            {
+                let mut guard = ctx.store.lock().await;
+                for turn in guard.turns_mut() {
+                    if !image_turn_ids.contains(&turn.id.0) {
+                        continue;
+                    }
+                    for message in &mut turn.messages {
+                        if let Some(stripped) = strip_message_images(message) {
+                            *message = stripped;
+                        }
+                    }
+                    turn.estimated_tokens = crate::context::Turn::estimate_tokens(&turn.messages);
+                }
+                guard.mark_needs_full_estimate();
+            }
+
+            // Mark every reference of the stripped turns invalid, with the
+            // reason carried for the recovery truth.
+            if let Some(agent_dir) = ctx.agent_dir.as_ref() {
+                let sidecar = collect_sidecar_refs(agent_dir, &image_turn_ids, &HashSet::new());
+                for (turn_id, refs) in sidecar {
+                    for r in refs {
+                        ctx.append_history(
+                            None,
+                            &[],
+                            0,
+                            crate::history::RecordKind::System,
+                            Some(crate::history::SystemEvent::ReferenceInvalidated {
+                                turn_id,
+                                record_id: r.record_id,
+                                reason: format!(
+                                    "provider rejected the image content (HTTP {status})"
+                                ),
+                            }),
+                            &[],
+                        );
+                    }
+                }
+            }
+
+            // Tell the agent, in plain text, what happened to its images.
+            let note = format!(
+                "[system] image attachments were removed from the request: the provider \
+                 rejected them (HTTP {status}). The affected references are marked invalid; \
+                 continue without the image content."
+            );
+            ctx.record_turn(vec![Message::user(&note)]).await;
+            Some(AcquireResult::Consumed(consumed))
+        }
+        AcquireResult::Outcome(outcome) => Some(AcquireResult::Outcome(outcome)),
+        AcquireResult::Error(_) => None,
+    }
 }
 /// Within-set failover acquisition: rebuild the request per profile, retry, and on a `Failover`
 /// outcome advance the chain. Self-contained — owns `retry_records` and flushes them on every
@@ -739,5 +869,219 @@ mod tests {
             "a rebuilt chain cannot continue the old provider's ids"
         );
         assert_eq!(requests[1].messages, vec![user_msg("q1")]);
+    }
+
+    // -- deterministic image-rejection degrade -------------------------
+
+    use crate::context::compose_context;
+    use crate::history::HistoryWriter;
+    use just_llm_client::TransportError;
+    use just_llm_client::types::generation::ContentPart;
+
+    fn fatal_400() -> Error {
+        BackendError::provider(
+            "recording",
+            TransportError::HttpStatus {
+                status: reqwest::StatusCode::BAD_REQUEST,
+                body: "images are not supported".to_owned(),
+            },
+        )
+        .into()
+    }
+
+    /// A ctx whose single profile sits on a `RecordingBackend`, with a live
+    /// image turn (turn 0) plus its matching history sidecar record.
+    async fn image_ctx(
+        backend: Arc<RecordingBackend>,
+    ) -> (AgentContext, tempfile::TempDir, uuid::Uuid) {
+        let source = Arc::new(MapSource(HashMap::from([(
+            "p1".to_string(),
+            Arc::clone(&backend) as Arc<dyn LlmBackend>,
+        )])));
+        let mut ctx = ctx_from_source(
+            vec![profile("p1", "p1", 100_000)],
+            source,
+            crate::retry::RetryPolicy::default(),
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        ctx.agent_dir = Some(dir.path().to_owned());
+        ctx.history = Some(HistoryWriter::new(dir.path().to_owned()));
+
+        let record_id = uuid::Uuid::from_u128(0xD00D);
+        let (turn_id, estimated) = {
+            let mut guard = ctx.store.lock().await;
+            guard.push_turn(vec![Message::user_parts(vec![
+                ContentPart::Text {
+                    text: "chart caption".to_owned(),
+                },
+                ContentPart::Image {
+                    source: just_llm_client::types::generation::ImageSource::Base64 {
+                        data: "aGk=".to_owned(),
+                        media_type: "image/png".to_owned(),
+                    },
+                    detail: None,
+                },
+            ])])
+        };
+        ctx.append_history(
+            Some(turn_id.0),
+            &[Message::user("chart caption")],
+            estimated,
+            crate::history::RecordKind::Turn,
+            None,
+            &[crate::history::AttachmentRef {
+                modality: kallip_common::protocol::Modality::Image,
+                record_id,
+                media_type: "image/png".to_owned(),
+                caption: Some("chart caption".to_owned()),
+            }],
+        );
+        (ctx, dir, record_id)
+    }
+
+    #[tokio::test]
+    async fn degrade_strips_retries_and_records_the_invalidation() {
+        let backend = RecordingBackend::new();
+        // Attempt 1: the provider 400s the request; attempt 2 (stripped) streams.
+        backend.queue_error(BackendError::provider(
+            "recording",
+            TransportError::HttpStatus {
+                status: reqwest::StatusCode::BAD_REQUEST,
+                body: "unsupported image".to_owned(),
+            },
+        ));
+        backend.queue_stream("resp-1");
+        let (mut ctx, _dir, record_id) = image_ctx(backend.clone()).await;
+
+        let messages = compose_context(ctx.store.clone()).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        // The round's first acquire fails 400 on the image-carrying request.
+        let error = match acquire_stream(
+            &mut ctx,
+            messages,
+            Vec::new(),
+            &tx,
+            &tokio_util::sync::CancellationToken::new(),
+            0,
+        )
+        .await
+        {
+            AcquireResult::Error(e) => e,
+            _other => panic!("expected a fatal image rejection"),
+        };
+        let result = degrade_on_image_rejection(
+            &mut ctx,
+            &error,
+            Vec::new(),
+            &tx,
+            &tokio_util::sync::CancellationToken::new(),
+            0,
+        )
+        .await;
+        assert!(matches!(result, Some(AcquireResult::Consumed(_))));
+
+        // The live image turn is text-only now, plus the plain-language note.
+        {
+            let guard = ctx.store.lock().await;
+            let image_turn = &guard.turns()[0];
+            assert!(
+                image_turn
+                    .messages
+                    .iter()
+                    .all(|m| !crate::context::message_has_images(m))
+            );
+            let note = guard.turns().back().unwrap();
+            assert!(format!("{:?}", note.messages).contains("[system]"));
+        }
+
+        // The sidecar reference is invalidated with the provider's verdict
+        // carried as the recovery truth.
+        let dir_path = ctx.agent_dir.as_ref().unwrap();
+        let invalidated = crate::history::scan_invalidated_refs(dir_path);
+        assert_eq!(invalidated.len(), 1);
+        assert!(invalidated.contains(&(0, record_id)));
+    }
+
+    #[tokio::test]
+    async fn degraded_retry_failure_leaves_the_store_untouched() {
+        let backend = RecordingBackend::new();
+        // Both attempts 400: the images were not the (only) problem.
+        backend.queue_error(BackendError::provider(
+            "recording",
+            TransportError::HttpStatus {
+                status: reqwest::StatusCode::BAD_REQUEST,
+                body: "still bad".to_owned(),
+            },
+        ));
+        backend.queue_error(BackendError::provider(
+            "recording",
+            TransportError::HttpStatus {
+                status: reqwest::StatusCode::BAD_REQUEST,
+                body: "still bad".to_owned(),
+            },
+        ));
+        let (mut ctx, _dir, record_id) = image_ctx(backend.clone()).await;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let result = degrade_on_image_rejection(
+            &mut ctx,
+            &fatal_400(),
+            Vec::new(),
+            &tx,
+            &tokio_util::sync::CancellationToken::new(),
+            0,
+        )
+        .await;
+        assert!(result.is_none());
+
+        // Nothing moved: the image turn keeps its parts, no note turn was
+        // appended, and no reference was invalidated.
+        {
+            let guard = ctx.store.lock().await;
+            assert_eq!(guard.turn_count(), 1);
+            assert!(
+                guard.turns()[0]
+                    .messages
+                    .iter()
+                    .any(crate::context::message_has_images)
+            );
+        }
+        let invalidated = crate::history::scan_invalidated_refs(ctx.agent_dir.as_ref().unwrap());
+        assert!(invalidated.is_empty());
+        let _ = record_id;
+    }
+
+    #[test]
+    fn fatal_provider_status_filters_non_request_level_statuses() {
+        let mk = |status: reqwest::StatusCode| {
+            BackendError::provider(
+                "recording",
+                TransportError::HttpStatus {
+                    status,
+                    body: String::new(),
+                },
+            )
+            .into()
+        };
+        assert_eq!(
+            fatal_provider_status(&mk(reqwest::StatusCode::BAD_REQUEST)),
+            Some(reqwest::StatusCode::BAD_REQUEST)
+        );
+        // Auth/404/5xx statuses belong to failover/retry arms — never degrade.
+        assert_eq!(
+            fatal_provider_status(&mk(reqwest::StatusCode::UNAUTHORIZED)),
+            None
+        );
+        assert_eq!(
+            fatal_provider_status(&mk(reqwest::StatusCode::NOT_FOUND)),
+            None
+        );
+        assert_eq!(
+            fatal_provider_status(&mk(reqwest::StatusCode::INTERNAL_SERVER_ERROR)),
+            None
+        );
+        // A pre-flight (non-provider) failure has no status at all.
+        assert_eq!(fatal_provider_status(&anyhow::anyhow!("boom")), None);
     }
 }

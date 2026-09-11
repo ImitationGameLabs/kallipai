@@ -607,11 +607,16 @@ pub async fn run_and_report(
     // modalities the bound set cannot serve must not start a round — the
     // model would silently never see the referenced content. Surface one
     // actionable error and park; a rebind (profile apply) clears the gate
-    // on the next wake. The excluded seam stays empty until the
-    // invalidation flow lands and fills it.
+    // on the next wake. References recorded as invalidated are excluded:
+    // a deterministic failure was already recorded once — the gate must
+    // not keep demanding a modality the runtime has given up on.
     if let Some(agent_dir) = ctx.agent_dir.as_ref() {
-        let required =
-            crate::history::scan_history_modalities(agent_dir, &std::collections::HashSet::new());
+        let excluded_turns: std::collections::HashSet<u64> =
+            crate::history::scan_invalidated_refs(agent_dir)
+                .into_iter()
+                .map(|(turn_id, _)| turn_id)
+                .collect();
+        let required = crate::history::scan_history_modalities(agent_dir, &excluded_turns);
         if let Err(blocked) = ctx.failover.set().ensure_supports(&required) {
             tracing::warn!(error = %blocked, "wake blocked by modality gate");
             agent_tx

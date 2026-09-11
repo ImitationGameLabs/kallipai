@@ -71,7 +71,7 @@ pub(crate) async fn ingest_attachment(
     // files round-trip.
     enforce(&state, &target, req.modality).await?;
 
-    let bytes = fetch_bytes(&state.files_http, req.record_id).await?;
+    let bytes = crate::files::fetch_record_bytes(&state.files_http, req.record_id).await?;
     record_ingest(&target, &req, bytes).await
 }
 
@@ -120,47 +120,6 @@ async fn enforce(
         .map_err(|blocked| ApiError::forbidden(blocked.to_string()))
 }
 
-/// Fetch the record's bytes from the files service (the tagma process's
-/// own credentials). Whole-body: the service caps uploads, so a stream
-/// would add plumbing without changing the memory story.
-async fn fetch_bytes(http: &reqwest::Client, record_id: uuid::Uuid) -> Result<Vec<u8>, ApiError> {
-    let base = std::env::var("KALLIP_FILES_URL").map_err(|_| {
-        ApiError::unavailable("KALLIP_FILES_URL is not set; the tagma cannot fetch media")
-    })?;
-    let token = std::env::var("KALLIP_FILES_TOKEN").map_err(|_| {
-        ApiError::unavailable("KALLIP_FILES_TOKEN is not set; the tagma cannot fetch media")
-    })?;
-    let response = http
-        .get(format!("{base}/v1/files/{record_id}"))
-        .header("authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .map_err(|e| ApiError::unavailable(format!("files fetch failed: {e}")))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(files_fetch_error(record_id, status));
-    }
-    response
-        .bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|e| ApiError::unavailable(format!("files read failed: {e}")))
-}
-
-/// Map a files-service failure status: only a missing record means the
-/// caller named something that does not exist; any other status is an
-/// upstream fault (credentials, service health) surfaced as a gateway
-/// error that keeps the upstream status for triage.
-fn files_fetch_error(record_id: uuid::Uuid, status: reqwest::StatusCode) -> ApiError {
-    if status == reqwest::StatusCode::NOT_FOUND {
-        ApiError::not_found(format!("files record {record_id} does not exist"))
-    } else {
-        ApiError::bad_gateway(format!(
-            "files fetch for {record_id}: upstream HTTP {status}"
-        ))
-    }
-}
-
 /// Record the ingest: live-store push plus the history sidecar append.
 /// History failures warn, never fail the ingest — the runtime's own
 /// appender has the same posture.
@@ -193,8 +152,8 @@ async fn record_ingest(
     // History stores the text form, never the assembled bytes: the
     // Base64 payload lives only in this in-memory message and the
     // upstream request. A files deletion leaves no image data in the
-    // record; a restart rebuilds live context from text, and image
-    // re-assembly is the compose path's job.
+    // record; a restart re-assembles the parts message from the sidecar
+    // reference via the compose path (context::compose::reassemble_attachments).
     let pointer = format!("[image {}]", req.record_id);
     let history_message = match &req.caption {
         Some(caption) => Message::user(format!("{caption}\n{pointer}")),
@@ -336,20 +295,5 @@ mod tests {
         assert!(stored.contains("a chart"));
         assert!(stored.contains(&format!("[image {record_id}]")));
         assert!(!line.contains(&base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4])));
-    }
-
-    #[test]
-    fn files_fetch_error_keeps_404_and_folds_the_rest_into_bad_gateway() {
-        assert_eq!(
-            files_fetch_error(uuid::Uuid::nil(), reqwest::StatusCode::NOT_FOUND).status,
-            404
-        );
-        for status in [401, 403, 500, 503] {
-            let err = files_fetch_error(
-                uuid::Uuid::nil(),
-                reqwest::StatusCode::from_u16(status).unwrap(),
-            );
-            assert_eq!(err.status, 502, "upstream {status} must not report 404");
-        }
     }
 }

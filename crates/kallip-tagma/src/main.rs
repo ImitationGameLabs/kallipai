@@ -15,6 +15,7 @@ mod direct;
 mod duty;
 mod engine;
 mod external;
+mod files;
 mod inbox;
 mod lifecycle;
 mod messaging;

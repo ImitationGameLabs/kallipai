@@ -13,7 +13,7 @@ use anyhow::{Result, bail};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::acquisition::{AcquireResult, acquire_stream};
+use crate::acquisition::{AcquireResult, acquire_stream, degrade_on_image_rejection};
 use crate::agent_task::{AgentContext, cap_external_message};
 use crate::approval::format_approval_notifications;
 use crate::budget_gate::{BudgetAction, enforce_post_stream_budget, enforce_pre_call_budget};
@@ -117,12 +117,24 @@ pub(crate) async fn run_agent_rounds(
             BudgetAction::Proceed => {}
         }
 
-        // -- Within-set failover acquisition (also consumes the stream, retrying mid-stream
-        // transport drops in-place) --
-        let consumed = match acquire_stream(ctx, messages, tools, tx, round_cancel, round).await {
+        // -- Within-set failover acquisition: consume the stream with mid-stream transport
+        // retry in-place and failover on endpoint-level failures. A 4xx while the request
+        // carried images triggers the runtime degrade (strip, retry once, invalidate on
+        // success — see `degrade_on_image_rejection`). --
+        let consumed = match acquire_stream(ctx, messages, tools.clone(), tx, round_cancel, round)
+            .await
+        {
             AcquireResult::Consumed(c) => c,
             AcquireResult::Outcome(outcome) => return Ok(RoundOutcome::Park(outcome)),
-            AcquireResult::Error(e) => return Err(e),
+            AcquireResult::Error(e) => {
+                match degrade_on_image_rejection(ctx, &e, tools, tx, round_cancel, round).await {
+                    Some(AcquireResult::Consumed(c)) => c,
+                    Some(AcquireResult::Outcome(outcome)) => {
+                        return Ok(RoundOutcome::Park(outcome));
+                    }
+                    Some(AcquireResult::Error(_)) | None => return Err(e),
+                }
+            }
         };
 
         match enforce_post_stream_budget(ctx, consumed.usage.as_ref()).await {

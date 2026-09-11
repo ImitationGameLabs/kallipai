@@ -4,7 +4,7 @@
 //! directory. History files are append-only (O(1) per write) and survive
 //! context compaction — evicted turns remain accessible in history.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -95,6 +95,19 @@ pub enum SystemEvent {
     AgentRestore,
     /// Context compaction summarized and evicted turns.
     CompactionSummary,
+    /// A previously recorded attachment reference was invalidated at runtime
+    /// (the media is gone, or the provider rejected it): restore-time
+    /// re-assembly and the wake modality gate skip it from here on.
+    ReferenceInvalidated {
+        /// The turn whose sidecar record carries the invalidated reference.
+        turn_id: u64,
+        /// The files-service record id of the invalidated media.
+        record_id: uuid::Uuid,
+        /// Why the reference was invalidated — carried so the recovery
+        /// truth (what failed, and that it was not silent) survives
+        /// restarts with the event.
+        reason: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -289,11 +302,10 @@ pub(crate) fn hydrate_turns(agent_dir: &Path, ids: &[u64]) -> (Vec<Turn>, Hydrat
 /// every daily file is in scope (an old image turn still demands an
 /// image-capable set at wake), so the scan is O(history lines).
 ///
-/// `excluded` reserves the invalidation seam: turn IDs (matched against
-/// the enclosing record's `turn_id`) whose attachments no longer count
-/// (filled in when the invalidation flow lands; callers pass an empty
-/// set until then — the parameter shape is the frozen contract, the
-/// filtering behavior arrives with it).
+/// `excluded` filters out invalidated references: turn IDs (matched against
+/// the enclosing record's `turn_id`) whose attachments the runtime has
+/// given up on, derived at wake from `scan_invalidated_refs` — the
+/// parameter shape is the frozen contract.
 pub(crate) fn scan_history_modalities(
     agent_dir: &Path,
     excluded: &HashSet<u64>,
@@ -325,6 +337,77 @@ pub(crate) fn scan_history_modalities(
         }
     }
     modalities
+}
+
+/// Run `f` over every parseable record in the log, newest file first and
+/// newest line first within a file (the `hydrate_turns` traversal order).
+fn for_each_record(agent_dir: &Path, mut f: impl FnMut(HistoryRecord)) {
+    for path in history_files(agent_dir).into_iter().rev() {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines().rev() {
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(rec) = serde_json::from_str::<HistoryRecord>(line) {
+                f(rec);
+            }
+        }
+    }
+}
+
+/// Scan the history log for attachment references invalidated at runtime
+/// (`SystemEvent::ReferenceInvalidated` records). Returns the
+/// `(turn_id, record_id)` pairs: both the wake modality gate and the
+/// restore-time re-assembly filter by the pair, so one invalidation never
+/// poisons a different reference that shares only a turn or only a record id.
+pub(crate) fn scan_invalidated_refs(agent_dir: &Path) -> HashSet<(u64, uuid::Uuid)> {
+    let mut out = HashSet::new();
+    for_each_record(agent_dir, |rec| {
+        if let Some(SystemEvent::ReferenceInvalidated {
+            turn_id, record_id, ..
+        }) = rec.event
+        {
+            out.insert((turn_id, record_id));
+        }
+    });
+    out
+}
+
+/// Collect the sidecar attachment references of `turn_ids` (the restore
+/// window). A turn id recorded more than once resolves to the newest record,
+/// mirroring `hydrate_turns` — offline repair appends corrected records under
+/// the same id instead of rewriting. Pairs in `invalidated` are dropped: the
+/// runtime has given up on them, and re-fetching would replay the same
+/// deterministic failure on every restore.
+pub(crate) fn collect_sidecar_refs(
+    agent_dir: &Path,
+    turn_ids: &[u64],
+    invalidated: &HashSet<(u64, uuid::Uuid)>,
+) -> BTreeMap<u64, Vec<AttachmentRef>> {
+    let mut wanted: HashSet<u64> = turn_ids.iter().copied().collect();
+    let mut out: BTreeMap<u64, Vec<AttachmentRef>> = BTreeMap::new();
+    for_each_record(agent_dir, |rec| {
+        if rec.kind != RecordKind::Turn {
+            return;
+        }
+        let Some(id) = rec.turn_id else {
+            return;
+        };
+        if !wanted.remove(&id) {
+            return;
+        }
+        let refs = rec
+            .attachments
+            .into_iter()
+            .filter(|a| !invalidated.contains(&(id, a.record_id)))
+            .collect::<Vec<_>>();
+        if !refs.is_empty() {
+            out.insert(id, refs);
+        }
+    });
+    out
 }
 /// Highest turn ID ever recorded in the history log (`0` when none).
 ///
@@ -935,5 +1018,162 @@ mod tests {
             profiles: vec![cover],
         };
         covering.ensure_supports(&required).unwrap();
+    }
+    /// A reference-invalidation event for `turn_id` about record `seed`.
+    fn invalidated_event(turn_id: u64, seed: u64) -> SystemEvent {
+        SystemEvent::ReferenceInvalidated {
+            turn_id,
+            record_id: attachment(Modality::Image, seed).record_id,
+            reason: "files record no longer exists".to_owned(),
+        }
+    }
+
+    #[test]
+    fn reference_invalidated_roundtrip() {
+        let rec = HistoryRecord {
+            datetime: OffsetDateTime::now_utc(),
+            turn_id: None,
+            messages: vec![],
+            estimated_tokens: 0,
+            kind: RecordKind::System,
+            event: Some(invalidated_event(7, 3)),
+            attachments: vec![],
+        };
+        let line = serde_json::to_string(&rec).unwrap();
+        assert!(line.contains("reference_invalidated"), "got: {line}");
+        let back: HistoryRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.event, rec.event);
+
+        // Records written before the variant existed still read: the old
+        // shape has no `event` key at all.
+        let stamp = rec
+            .datetime
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let old = format!(
+            r#"{{"datetime":"{stamp}","turn_id":null,"messages":[],"estimated_tokens":0,"kind":"system"}}"#,
+        );
+        let parsed: HistoryRecord = serde_json::from_str(&old).unwrap();
+        assert!(parsed.event.is_none());
+    }
+
+    #[test]
+    fn scan_invalidated_refs_collects_event_pairs() {
+        let dir = tmp_agent_dir();
+        let writer = HistoryWriter::new(dir.path().to_owned());
+        writer
+            .append(
+                None,
+                &[],
+                0,
+                RecordKind::System,
+                Some(invalidated_event(7, 3)),
+                &[],
+            )
+            .unwrap();
+        writer
+            .append(
+                None,
+                &[],
+                0,
+                RecordKind::System,
+                Some(invalidated_event(9, 4)),
+                &[],
+            )
+            .unwrap();
+        let refs = scan_invalidated_refs(dir.path());
+        assert_eq!(refs.len(), 2);
+        assert!(refs.contains(&(7, attachment(Modality::Image, 3).record_id)));
+        assert!(refs.contains(&(9, attachment(Modality::Image, 4).record_id)));
+    }
+
+    #[test]
+    fn collect_sidecar_refs_newest_wins_and_filters_by_pair() {
+        let dir = tmp_agent_dir();
+        let writer = HistoryWriter::new(dir.path().to_owned());
+
+        // Turn 7 recorded twice: the newest record's refs win, mirroring
+        // hydrate_turns' same-id resolution.
+        writer
+            .append(
+                Some(7),
+                &[user_msg("older")],
+                8,
+                RecordKind::Turn,
+                None,
+                &[attachment(Modality::Image, 1)],
+            )
+            .unwrap();
+        writer
+            .append(
+                Some(7),
+                &[user_msg("newest")],
+                8,
+                RecordKind::Turn,
+                None,
+                &[attachment(Modality::Image, 2)],
+            )
+            .unwrap();
+        // Turn 9 with its own record id — a different turn, a different ref.
+        writer
+            .append(
+                Some(9),
+                &[user_msg("kept")],
+                8,
+                RecordKind::Turn,
+                None,
+                &[attachment(Modality::Image, 5)],
+            )
+            .unwrap();
+
+        // No invalidations: newest wins for turn 7, turn 9 intact.
+        let empty = HashSet::new();
+        let refs = collect_sidecar_refs(dir.path(), &[7, 9], &empty);
+        assert_eq!(refs[&7], vec![attachment(Modality::Image, 2)]);
+        assert_eq!(refs[&9], vec![attachment(Modality::Image, 5)]);
+
+        // Invalidate exactly (7, record 2): turn 7 drops out entirely; turn
+        // 9 keeps its ref — the pair (7, 2) never poisons (9, 5), and a
+        // turn_id alone never excludes a record_id that was not named.
+        let mut invalidated = HashSet::new();
+        invalidated.insert((7, attachment(Modality::Image, 2).record_id));
+        let refs = collect_sidecar_refs(dir.path(), &[7, 9], &invalidated);
+        assert!(!refs.contains_key(&7));
+        assert_eq!(refs[&9], vec![attachment(Modality::Image, 5)]);
+    }
+
+    #[test]
+    fn scan_history_modalities_skips_invalidated_turns() {
+        let dir = tmp_agent_dir();
+        let writer = HistoryWriter::new(dir.path().to_owned());
+        writer
+            .append(
+                Some(7),
+                &[user_msg("with chart")],
+                8,
+                RecordKind::Turn,
+                None,
+                &[attachment(Modality::Image, 3)],
+            )
+            .unwrap();
+        writer
+            .append(
+                None,
+                &[],
+                0,
+                RecordKind::System,
+                Some(invalidated_event(7, 3)),
+                &[],
+            )
+            .unwrap();
+
+        // Without the invalidation the turn demands image; with it the log
+        // is text-only and the wake gate must pass a text-only set.
+        let mut excluded = HashSet::new();
+        excluded.insert(7);
+        let required = scan_history_modalities(dir.path(), &excluded);
+        assert!(required.is_empty());
+        let required = scan_history_modalities(dir.path(), &HashSet::new());
+        assert!(required.contains(&Modality::Image));
     }
 }

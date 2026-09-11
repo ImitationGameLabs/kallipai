@@ -6,7 +6,7 @@
 
 use crate::profile::GenerationClient;
 use anyhow::{Result, bail};
-use just_llm_client::types::generation::Message;
+use just_llm_client::types::generation::{ContentPart, Message, MessageContent};
 
 use super::turn::Turn;
 
@@ -76,7 +76,7 @@ impl ContextSummarizer {
             turns_used += 1;
         }
         for turn in turns.iter().take(turns_used) {
-            messages.extend(turn.messages.iter().cloned());
+            messages.extend(turn.messages.iter().map(summarizer_view));
         }
 
         messages.push(Message::user(&self.prompt));
@@ -102,5 +102,77 @@ impl ContextSummarizer {
             },
             usage,
         ))
+    }
+}
+
+/// The summarizer input view of a message: image parts swapped for the
+/// [`super::IMAGE_PLACEHOLDER`] text. The summarizer consumes words, not
+/// pixels, and a raw Base64 blob would flood both the request and the
+/// input budget; the placeholder keeps the image's existence visible so
+/// the summary can mention it.
+fn summarizer_view(message: &Message) -> Message {
+    let Some(parts) = message.content_parts() else {
+        return message.clone();
+    };
+    if !parts.iter().any(|p| matches!(p, ContentPart::Image { .. })) {
+        return message.clone();
+    }
+    let swapped = parts
+        .iter()
+        .map(|part| match part {
+            ContentPart::Image { .. } => ContentPart::Text {
+                text: super::IMAGE_PLACEHOLDER.to_owned(),
+            },
+            other => other.clone(),
+        })
+        .collect();
+    match message {
+        Message::User { .. } => Message::User {
+            content: MessageContent::Parts(swapped),
+        },
+        _ => Message::System {
+            content: MessageContent::Parts(swapped),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parts_message() -> Message {
+        Message::user_parts(vec![
+            ContentPart::Text {
+                text: "chart caption".to_owned(),
+            },
+            ContentPart::Image {
+                source: just_llm_client::types::generation::ImageSource::Base64 {
+                    data: "aGk=".to_owned(),
+                    media_type: "image/png".to_owned(),
+                },
+                detail: None,
+            },
+        ])
+    }
+
+    #[test]
+    fn summarizer_view_swaps_images_for_the_placeholder() {
+        let view = summarizer_view(&parts_message());
+        let Message::User {
+            content: MessageContent::Parts(parts),
+        } = &view
+        else {
+            panic!("expected a user parts message");
+        };
+        assert!(!parts.iter().any(|p| matches!(p, ContentPart::Image { .. })));
+        assert!(parts.iter().any(
+            |p| matches!(p, ContentPart::Text { text } if text == crate::context::IMAGE_PLACEHOLDER)
+        ));
+    }
+
+    #[test]
+    fn summarizer_view_leaves_plain_messages_untouched() {
+        let plain = Message::user("just words");
+        assert_eq!(summarizer_view(&plain), plain);
     }
 }

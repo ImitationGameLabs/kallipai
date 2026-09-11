@@ -238,13 +238,59 @@ async fn restore_one(
     let mut config = AgentConfig::load(None, vec![], Some(p.meta.workspace_root.clone()))?;
     // Config first: the tail-recovery budget derives from it (window size / 4)
     // and feeds the manifest-loss rebuild inside restore_agent.
-    let restored =
+    let mut restored =
         persistence::restore_agent(&p.agent_id, &p.agent_dir, config.tail_recovery_budget())?;
 
     // Surface non-fatal restore damage (missing history turns, skipped
     // corrupt lines) as structured warnings; a degraded agent still boots.
     for d in &restored.degraded {
         tracing::warn!(id = %p.agent_id, kind = ?d.kind, "agent restored degraded: {}", d.detail);
+    }
+
+    // Re-assemble image attachments: hydrated turns carry the text form
+    // only, so each sidecar reference's bytes are fetched and the assembled
+    // multimodal message swapped back in (invalidated references stay
+    // excluded — a deterministic failure is marked once, never replayed).
+    // Never fails the restore: a text-only boot is always possible, and
+    // transient fetch failures simply leave the turn text-only for the
+    // next restart to try again.
+    let shared = shared_state.clone();
+    let report = kallip_runtime::context::reassemble_attachments(
+        &mut restored.store,
+        &restored.agent_dir,
+        move |record_id| {
+            let shared = shared.clone();
+            Box::pin(async move {
+                crate::files::fetch_for_reassembly(&shared.files_http, record_id).await
+            })
+        },
+    )
+    .await;
+    for (turn_id, record_id, reason) in &report.invalidated {
+        tracing::warn!(
+            id = %p.agent_id, turn_id, %record_id,
+            "attachment reference invalidated during restore: {reason}"
+        );
+        kallip_runtime::history::HistoryWriter::new(restored.agent_dir.clone())
+            .append(
+                None,
+                &[],
+                0,
+                kallip_runtime::history::RecordKind::System,
+                Some(kallip_runtime::history::SystemEvent::ReferenceInvalidated {
+                    turn_id: *turn_id,
+                    record_id: *record_id,
+                    reason: reason.clone(),
+                }),
+                &[],
+            )
+            .ok();
+    }
+    for (_, record_id, reason) in &report.skipped {
+        tracing::warn!(
+            id = %p.agent_id, %record_id,
+            "attachment reference left text-only after transient fetch failure: {reason}"
+        );
     }
 
     config.agent_id = Some(p.agent_id.clone());

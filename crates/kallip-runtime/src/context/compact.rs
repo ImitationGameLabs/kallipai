@@ -66,8 +66,9 @@ fn slice_oversized_turn(turn: &Turn, input_budget: usize) -> Turn {
 
 /// The message's text: plain text content, or the concatenated text parts
 /// of a multimodal message (joined with newlines). Image parts contribute
-/// nothing — the slice and the summary consume words, not pixels; a
-/// dropped image remains in the turn's history sidecar record.
+/// the [`IMAGE_PLACEHOLDER`] — the slice notes the image existed instead
+/// of dropping it without a trace; the image itself remains in the turn's
+/// history sidecar record.
 fn message_text(message: &Message) -> String {
     if let Some(content) = message.content() {
         return content.to_owned();
@@ -77,9 +78,9 @@ fn message_text(message: &Message) -> String {
     };
     parts
         .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
-            _ => None,
+        .map(|part| match part {
+            ContentPart::Text { text } => text.as_str(),
+            ContentPart::Image { .. } => super::IMAGE_PLACEHOLDER,
         })
         .collect::<Vec<_>>()
         .join("\n")
