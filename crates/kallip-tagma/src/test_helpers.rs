@@ -427,7 +427,13 @@ pub fn ensure_test_data_dir() {
     GUARD.get_or_init(|| {
         let tmp = tempfile::Builder::new()
             .prefix("kallip-tagma-test-data-")
-            .tempdir()
+            // Inside the managed root so the one deliberate
+            // process-lifetime leak stays under operator cleanup.
+            .tempdir_in({
+                let root = std::env::temp_dir().join("kallipai-dev");
+                std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
+                root
+            })
             .expect("create test data dir");
         let path = tmp.path().to_path_buf();
         // Leak the TempDir so the directory outlives every test in the
