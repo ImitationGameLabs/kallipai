@@ -86,8 +86,9 @@ fn start_daemon() -> DaemonProc {
         .expect("spawn daemon");
     for _ in 0..100 {
         if socket.exists() {
-            // The daemon owns the data dir; the tempdirs must outlive
-            // The guards live in DaemonProc, so both tempdirs die with it.
+            // The daemon owns the data dir; the tempdirs must outlive the
+            // reaped child. The guards live in DaemonProc, so both tempdirs
+            // die with it.
             let records = state_dir.path().join("records");
             return DaemonProc {
                 socket,
