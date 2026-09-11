@@ -24,10 +24,15 @@ async fn scenario2_normal() {
     let world = World::setup();
     let ws = world.workspace.path().to_path_buf();
     let agent_data = format!("{}/agents/$KALLIP_ID", world.data_root().display());
+    // A fixed global name would let two test binaries running in
+    // parallel trample each other; suffix with the test pid (the
+    // full-handoff scenario's child-id file precedent).
+    let tmp_probe = format!("/tmp/scenario2_tmp-{}", std::process::id());
+    let shm_probe = format!("/dev/shm/scenario2_shm-{}", std::process::id());
     let mut script = vec![
         Reply::Tool(format!("echo hello > {}/test.txt", ws.display())), // 0: workspace writable
         Reply::Tool("echo hb > $HOME/scenario2_home.txt".into()),       // 1: home broad-write
-        Reply::Tool("echo t > /tmp/scenario2_tmp".into()),              // 2: /tmp baseline-writable
+        Reply::Tool(format!("echo t > {tmp_probe}")),                   // 2: /tmp baseline-writable
         Reply::Tool(format!("echo x >> {agent_data}/meta.json")),       // 3: data tree RO
         Reply::Tool(format!("cat {agent_data}/meta.json")),             // 4: read ok
         Reply::Tool("ls -A $HOME/.ssh".into()),                         // 5: Normal reads .ssh
@@ -35,7 +40,7 @@ async fn scenario2_normal() {
         Reply::Tool("cat \"$XDG_CONFIG_HOME/kallipai/tagmata/main/profiles/profiles.toml\"".into()), // 7: Normal reads profiles
     ];
     if have_shm {
-        script.push(Reply::Tool("echo s > /dev/shm/scenario2_shm".into())); // 8: /dev/shm writable
+        script.push(Reply::Tool(format!("echo s > {shm_probe}"))); // 8: /dev/shm writable
     }
     script.push(Reply::End("done"));
 
@@ -87,10 +92,7 @@ async fn scenario2_normal() {
         fx.world.home_path().join("scenario2_home.txt").exists(),
         "home scenario2_home.txt must exist (home broad-write)"
     );
-    assert!(
-        Path::new("/tmp/scenario2_tmp").exists(),
-        "/tmp file must exist"
-    );
+    assert!(Path::new(&tmp_probe).exists(), "/tmp file must exist");
     let meta_after =
         std::fs::read_to_string(agent_meta_path(&fx.data_root, &run.agent_id)).unwrap();
     assert_eq!(
@@ -99,16 +101,13 @@ async fn scenario2_normal() {
     );
 
     // /tmp cleanup so the assertion is repeatable.
-    let _ = std::fs::remove_file("/tmp/scenario2_tmp");
+    let _ = std::fs::remove_file(&tmp_probe);
     // Home cleanup.
     let _ = std::fs::remove_file(fx.world.home_path().join("scenario2_home.txt"));
     // /dev/shm corroboration + cleanup.
     if have_shm {
-        assert!(
-            Path::new("/dev/shm/scenario2_shm").exists(),
-            "/dev/shm file must exist"
-        );
-        let _ = std::fs::remove_file("/dev/shm/scenario2_shm");
+        assert!(Path::new(&shm_probe).exists(), "/dev/shm file must exist");
+        let _ = std::fs::remove_file(&shm_probe);
     }
 
     fx.tagma.kill().await;
