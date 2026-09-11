@@ -10,8 +10,9 @@
 use crate::records::{self, InstanceRecord};
 use crate::scan::{self, ScannedInstance};
 use crate::spawn::{
-    SpawnError, authorized, instance_data_dir, now_unix, overlaps, resolve_launch_identity,
-    validate_user_env,
+    LaunchIdentity, OwnerInference, SpawnError, authorized, cached_passwd_identity,
+    infer_owner_decision, instance_data_dir, now_unix, overlaps, passwd_by_uid, path_owner_uid,
+    require_root_for_drop, resolve_launch_identity, validate_user_env,
 };
 use anyhow::Context as _;
 use kallip_daemon_common::wire::{InstanceState, valid_slug};
@@ -39,23 +40,13 @@ pub fn adopt(
             "slug {slug:?} does not match [a-z0-9][a-z0-9-]*"
         )));
     }
-    // Resolution precedes authorization, and both precede every probe:
-    // a denied requester learns nothing about slug existence from the
-    // error (the discipline spawn's entry comment pins).
-    let identity = resolve_launch_identity(request_user, owner_uid)?;
-    let target_uid = identity.uid();
-    if !authorized(owner_uid, target_uid) {
-        return Err(SpawnError::Denied {
-            peer_uid: owner_uid,
-            target_uid,
-        });
-    }
-    // Early occupancy probe: the common sequential-reuse case fails
-    // here. Advisory only — the exclusive publication in create_record
-    // below is the authority, exactly as in spawn.
-    if records::read_record(record_root, slug).is_some() {
-        return Err(SpawnError::SlugTaken(slug.to_string()));
-    }
+    // The externally-supplied paths are read (shape and ownership)
+    // before identity resolution: the default identity is *inferred*
+    // from the data dir's owner, so reading it is an input to
+    // resolution, not a probe after it. Record-area probes stay after
+    // authorization: a denied requester still learns nothing about
+    // slug existence from the error (the discipline spawn's entry
+    // comment pins).
     let workspace_path = PathBuf::from(workspace);
     if !workspace_path.is_dir() {
         return Err(SpawnError::Invalid(format!(
@@ -65,6 +56,8 @@ pub fn adopt(
     let workspace_canon = workspace_path
         .canonicalize()
         .map_err(|e| SpawnError::Invalid(format!("canonicalizing workspace: {e}")))?;
+    let workspace_owner = path_owner_uid(&workspace_canon)
+        .map_err(|e| SpawnError::Invalid(format!("reading workspace owner: {e}")))?;
 
     // The data directory is adopt's second externally-supplied path.
     // Shape: an existing directory carrying at least one of the
@@ -88,6 +81,55 @@ pub fn adopt(
         return Err(SpawnError::Invalid(format!(
             "data dir {data_dir:?} does not look like an instance data directory (no runtime.json, no credentials/)"
         )));
+    }
+    let data_dir_owner = path_owner_uid(&data_dir_canon)
+        .map_err(|e| SpawnError::Invalid(format!("reading data dir owner: {e}")))?;
+
+    // Identity. An explicit --user wins verbatim (the declared
+    // dedicated form). Absent, the on-disk owners are the request:
+    // diverging owners leave two candidate identities, which refuses
+    // instead of picking silently; agreeing owners resolve through
+    // the data dir's owner — the daemon's own user collapses to the
+    // in-place form, anything else drops to that owner (root-only,
+    // like every drop-to).
+    let identity = match request_user {
+        Some(_) => resolve_launch_identity(request_user, owner_uid)?,
+        None => {
+            let daemon_uid = unsafe { libc::geteuid() };
+            match infer_owner_decision(workspace_owner, data_dir_owner, daemon_uid) {
+                OwnerInference::Divergent => {
+                    return Err(SpawnError::Invalid(format!(
+                        "workspace is owned by uid {workspace_owner} but the data dir by uid {data_dir_owner}; pass --user explicitly to pick the launch identity"
+                    )));
+                }
+                OwnerInference::InPlace => LaunchIdentity::InPlace {
+                    uid: daemon_uid,
+                    username: cached_passwd_identity()
+                        .map(|(name, _)| name.to_string_lossy().into_owned()),
+                },
+                OwnerInference::DropTo(uid) => {
+                    require_root_for_drop()?;
+                    LaunchIdentity::DropTo(passwd_by_uid(uid).ok_or_else(|| {
+                        SpawnError::Invalid(format!(
+                            "data dir owner uid {uid} has no passwd entry; cannot resolve a home for it"
+                        ))
+                    })?)
+                }
+            }
+        }
+    };
+    let target_uid = identity.uid();
+    if !authorized(owner_uid, target_uid) {
+        return Err(SpawnError::Denied {
+            peer_uid: owner_uid,
+            target_uid,
+        });
+    }
+    // Early occupancy probe: the common sequential-reuse case fails
+    // here. Advisory only — the exclusive publication in create_record
+    // below is the authority, exactly as in spawn.
+    if records::read_record(record_root, slug).is_some() {
+        return Err(SpawnError::SlugTaken(slug.to_string()));
     }
 
     // Disjointness: adopt introduces a second external path, so every

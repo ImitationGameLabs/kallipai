@@ -193,7 +193,7 @@ pub(crate) fn identity_from_record(
 /// that is not root cannot launch for anyone but itself, and saying
 /// so here (a plain request rejection) beats a setuid failure deep in
 /// the launch.
-fn require_root_for_drop() -> Result<(), SpawnError> {
+pub(crate) fn require_root_for_drop() -> Result<(), SpawnError> {
     if unsafe { libc::geteuid() } != 0 {
         return Err(SpawnError::Invalid(
             "launching an instance for another user requires the daemon to run as root".into(),
@@ -202,6 +202,41 @@ fn require_root_for_drop() -> Result<(), SpawnError> {
     Ok(())
 }
 
+/// The uid that owns a path: the input to the ownership-inference
+/// rules (adopt's default identity, spawn's divergence guard). A
+/// stat on a canonical path — the caller owns canon first.
+pub(crate) fn path_owner_uid(path: &Path) -> std::io::Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(std::fs::metadata(path)?.uid())
+}
+
+/// The ownership-inference decision shared by spawn's divergence
+/// guard and adopt's default identity: two externally-supplied
+/// owners that disagree leave the launch ambiguous, agreeing
+/// owners resolve through the data dir's owner against the
+/// daemon's own uid. Pure so the whole matrix is testable
+/// without filesystem ownership (chown needs privileges and a
+/// uid the host namespace actually maps).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OwnerInference {
+    InPlace,
+    DropTo(u32),
+    Divergent,
+}
+
+pub(crate) fn infer_owner_decision(
+    workspace_owner: u32,
+    data_dir_owner: u32,
+    daemon_uid: u32,
+) -> OwnerInference {
+    if workspace_owner != data_dir_owner {
+        OwnerInference::Divergent
+    } else if data_dir_owner == daemon_uid {
+        OwnerInference::InPlace
+    } else {
+        OwnerInference::DropTo(data_dir_owner)
+    }
+}
 /// NSS scratch-buffer floor for the `_r` lookups: what sysconf
 /// falls back to on platforms that report no hint.
 const NSS_BUF_FLOOR: usize = 1024;
@@ -245,7 +280,7 @@ fn passwd_by_name(name: &str) -> Option<ResolvedUser> {
 
 /// passwd lookup by uid (the nameless cross-user self form); same
 /// `_r` discipline as [`passwd_by_name`].
-fn passwd_by_uid(uid: u32) -> Option<ResolvedUser> {
+pub(crate) fn passwd_by_uid(uid: u32) -> Option<ResolvedUser> {
     let mut buf = vec![0u8; nss_buf_len()];
     loop {
         let mut pwd: std::mem::MaybeUninit<libc::passwd> = std::mem::MaybeUninit::uninit();
@@ -415,7 +450,7 @@ impl HarvestSeed {
 /// never changes during its lifetime — so read it once (through the
 /// `_r` lookup, same as every launch-time resolution) and share the
 /// snapshot.
-fn cached_passwd_identity() -> Option<(OsString, OsString)> {
+pub(crate) fn cached_passwd_identity() -> Option<(OsString, OsString)> {
     static PASSWD: std::sync::OnceLock<Option<(OsString, OsString)>> = std::sync::OnceLock::new();
     PASSWD
         .get_or_init(|| {
@@ -821,6 +856,25 @@ pub fn spawn(
     let workspace_canon = workspace_path
         .canonicalize()
         .map_err(|e| SpawnError::Invalid(format!("canonicalizing workspace: {e}")))?;
+    // The default identity runs the instance as the daemon's own
+    // user, and the fresh data dir is then daemon-owned too; a
+    // workspace owned by someone else would mix the two worlds in
+    // one launch. An explicit --user declares the target and needs
+    // no guard — the divergence rule fires only for the inferred
+    // default.
+    if request_user.is_none() {
+        let workspace_owner = path_owner_uid(&workspace_canon)
+            .map_err(|e| SpawnError::Invalid(format!("reading workspace owner: {e}")))?;
+        let daemon_uid = unsafe { libc::geteuid() };
+        if matches!(
+            infer_owner_decision(workspace_owner, daemon_uid, daemon_uid),
+            OwnerInference::Divergent
+        ) {
+            return Err(SpawnError::Invalid(format!(
+                "workspace is owned by uid {workspace_owner} but the data dir would be created as uid {daemon_uid}; pass --user explicitly to pick the launch identity"
+            )));
+        }
+    }
 
     // Workspace disjointness: against every registered instance's
     // workspace and against the data tree itself (an agent whose
@@ -1583,6 +1637,35 @@ mod tests {
         assert!(authorized(uid, uid), "the target user itself passes");
         assert!(authorized(0, uid), "root passes (the admin exemption)");
         assert!(!authorized(uid + 1, uid), "a foreign uid is denied");
+    }
+
+    /// The full inference matrix, pure: divergence refuses, agreeing
+    /// foreign owners drop to the data dir's owner, the daemon's own
+    /// owner stays in place. The adopt wiring maps these onto passwd
+    /// resolution and the root gate; real-owner coverage would need
+    /// chown privileges a test host cannot assume.
+    #[test]
+    fn diverging_path_owners_refuse_the_inferred_default() {
+        assert!(matches!(
+            infer_owner_decision(1000, 1001, 1000),
+            OwnerInference::Divergent
+        ));
+    }
+
+    #[test]
+    fn agreeing_foreign_owners_infer_the_drop_to_target() {
+        assert_eq!(
+            infer_owner_decision(65534, 65534, 1000),
+            OwnerInference::DropTo(65534)
+        );
+    }
+
+    #[test]
+    fn the_daemons_own_owner_collapses_to_in_place() {
+        assert_eq!(
+            infer_owner_decision(1000, 1000, 1000),
+            OwnerInference::InPlace
+        );
     }
     #[test]
     fn resolve_defaults_to_the_peer_and_collapses_to_in_place() {
