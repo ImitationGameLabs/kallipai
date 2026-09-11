@@ -4,7 +4,7 @@
 //! pre-loop wrapper for restored agents. [`CompactOutcome`] reports the result.
 
 use anyhow::Result;
-use just_llm_client::types::generation::Message;
+use just_llm_client::types::generation::{ContentPart, Message};
 use tracing::{info, warn};
 
 use super::turn::{Turn, TurnKind};
@@ -47,10 +47,9 @@ fn slice_oversized_turn(turn: &Turn, input_budget: usize) -> Turn {
     let cap_chars = WEDGE_SLICE_MAX_CHARS.min(input_budget * 9 / 10);
     let mut text = String::new();
     for message in &turn.messages {
-        if let Some(content) = message.content() {
-            text.push_str(content);
-            text.push('\n');
-        }
+        let content = message_text(message);
+        text.push_str(&content);
+        text.push('\n');
     }
     let (_, _, sliced) = head_tail_slice(&text, cap_chars);
     let messages = vec![Message::user(format!(
@@ -63,6 +62,27 @@ fn slice_oversized_turn(turn: &Turn, input_budget: usize) -> Turn {
         messages,
         kind: TurnKind::Conversation,
     }
+}
+
+/// The message's text: plain text content, or the concatenated text parts
+/// of a multimodal message (joined with newlines). Image parts contribute
+/// nothing — the slice and the summary consume words, not pixels; a
+/// dropped image remains in the turn's history sidecar record.
+fn message_text(message: &Message) -> String {
+    if let Some(content) = message.content() {
+        return content.to_owned();
+    }
+    let Some(parts) = message.content_parts() else {
+        return String::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 /// Summarize turns to bring context within budget.
 ///
@@ -90,7 +110,7 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
                 .pinned_turns()
                 .find(|t| t.label() == Some("context_summary"))
                 .and_then(|t| t.messages.first())
-                .and_then(|m| m.content().map(|c| c.to_owned()));
+                .map(message_text);
 
             // Take oldest CONVERSATION turns (skip pinned) that fit in summarizer_input_budget.
             // Pinned turns are never summarized — excluding them here also prevents an infinite
@@ -396,5 +416,35 @@ mod tests {
         let s = ctx.store.lock().await;
         let remaining = s.turns().iter().filter(|t| !t.is_pinned()).count();
         assert_eq!(remaining, 0);
+    }
+
+    /// A multimodal message survives the slice with its text: the
+    /// pre-fix behavior dropped the whole message because `content()`
+    /// is `None` for non-text content.
+    #[test]
+    fn slice_keeps_the_text_of_a_parts_message() {
+        let message = Message::user_parts(vec![
+            just_llm_client::types::generation::ContentPart::Text {
+                text: "chart caption".to_owned(),
+            },
+            just_llm_client::types::generation::ContentPart::Image {
+                source: just_llm_client::types::generation::ImageSource::Base64 {
+                    data: "aGk=".to_owned(),
+                    media_type: "image/png".to_owned(),
+                },
+                detail: None,
+            },
+        ]);
+        let turn = Turn {
+            id: crate::context::turn::TurnId(9),
+            messages: vec![message],
+            estimated_tokens: 0,
+            kind: TurnKind::Conversation,
+        };
+        let sliced = slice_oversized_turn(&turn, SUMMARIZER_INPUT_BUDGET);
+        let content = sliced.messages[0].content().unwrap_or_default();
+        assert!(content.contains("chart caption"), "got: {content}");
+        // The image itself contributes no words — text only.
+        assert!(!content.contains("aGk="));
     }
 }

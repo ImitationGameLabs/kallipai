@@ -60,6 +60,12 @@ pub enum Commands {
     /// KALLIP_FILES_URL + KALLIP_FILES_TOKEN.
     #[command(subcommand)]
     File(FileCommand),
+    /// Read an image record into this agent's conversation. Self-scoped:
+    /// the tagma enforces the bound set's modalities and records the turn.
+    /// Connects to the tagma (KALLIP_TAGMA_URL + KALLIP_AUTH_TOKEN), not
+    /// the file family's direct files-service connection.
+    #[command(subcommand)]
+    Image(ImageCommand),
     /// Task ledger on the tagma: queue, state machine, event trail, hard
     /// gates, and closed-task archives (served by the tagma task API).
     #[command(subcommand)]
@@ -345,6 +351,26 @@ pub struct FileLsArgs {
     /// Print the listing as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// The `kallip image` family: read image records into the conversation.
+#[derive(Subcommand)]
+pub enum ImageCommand {
+    /// Ingest an image record into this agent's live context.
+    Read(ImageReadArgs),
+}
+
+/// Args for `kallip image read`.
+#[derive(Args)]
+pub struct ImageReadArgs {
+    /// Files-service record id to ingest.
+    pub id: String,
+    /// Media type of the record (default `image/png`).
+    #[arg(long, value_name = "TYPE")]
+    pub media_type: Option<String>,
+    /// Caption carried alongside the reference.
+    #[arg(long, value_name = "TEXT")]
+    pub caption: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

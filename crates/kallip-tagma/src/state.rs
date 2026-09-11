@@ -205,6 +205,10 @@ pub struct AppState {
     /// Profile registry loaded once at startup (config file or implicit env profile).
     /// Shared so the pre-built backends survive across agents.
     pub profiles: Arc<ArcSwap<ProfileBundle>>,
+    /// Shared HTTP client for tagma-side outbound calls (the files-service
+    /// media fetch): one client reuses its connection pool across requests,
+    /// and clones are cheap (an internal `Arc`).
+    pub files_http: reqwest::Client,
     /// Tagma-wide directory write-lock coordinator. Shared across all agents so
     /// one agent holding a dir's write-lock blocks another. The tagma build
     /// enforces locks via landlock on Linux (mandatory); advisory elsewhere.
@@ -697,6 +701,7 @@ impl AppState {
             prompt_queue_size,
             token_budget,
             profiles,
+            files_http: reqwest::Client::new(),
             lock_manager: Arc::new(kallip_runtime::dirlock::DirLockManager::new()),
             relays: std::sync::Mutex::new(HashMap::new()),
             bus: crate::bus::tagma_bus().expect("static topic registry is conflict-free"),

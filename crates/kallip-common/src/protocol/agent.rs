@@ -451,6 +451,31 @@ pub struct MessageResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
+/// Request body for ingesting an attachment into an agent's live context:
+/// the tagma fetches the media bytes from the files service, assembles the
+/// multimodal message, and records the turn (sidecar refs plus the live
+/// store). The bound set's effective modalities gate the request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentIngestRequest {
+    /// The files-service record id of the media to ingest.
+    pub record_id: uuid::Uuid,
+    /// The modality to ingest as. The endpoint is generic; each CLI
+    /// subcommand pins one.
+    pub modality: Modality,
+    /// Media type for the assembled image part (e.g. `image/png`).
+    /// Absent defaults to `image/png` server-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// Optional human-readable caption carried alongside the reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+}
+
+/// Response body for an attachment ingest: the recorded turn id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentIngestResponse {
+    pub turn_id: u64,
+}
 
 /// Response for GET /agents/{id}/permissions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,7 +496,7 @@ pub struct AgentPermissionsResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::CreateAgentRequest;
+    use super::{AttachmentIngestRequest, CreateAgentRequest, Modality};
 
     #[test]
     fn modality_as_str_matches_serde_spelling() {
@@ -481,6 +506,31 @@ mod tests {
                 format!("\"{}\"", m.as_str())
             );
         }
+    }
+
+    #[test]
+    fn attachment_ingest_request_round_trips_with_and_without_optionals() {
+        let full = AttachmentIngestRequest {
+            record_id: uuid::Uuid::from_bytes([1; 16]),
+            modality: Modality::Image,
+            media_type: Some("image/png".to_owned()),
+            caption: Some("a chart".to_owned()),
+        };
+        let line = serde_json::to_string(&full).unwrap();
+        assert!(line.contains("media_type"));
+        assert!(line.contains("caption"));
+        let back: AttachmentIngestRequest = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.record_id, full.record_id);
+
+        // Absent optionals deserialize to None (older callers keep the
+        // historical-minimum body).
+        let minimal = format!(
+            "{{\"record_id\":\"{}\",\"modality\":\"image\"}}",
+            uuid::Uuid::from_bytes([1; 16])
+        );
+        let back: AttachmentIngestRequest = serde_json::from_str(&minimal).unwrap();
+        assert_eq!(back.media_type, None);
+        assert_eq!(back.caption, None);
     }
 
     #[test]

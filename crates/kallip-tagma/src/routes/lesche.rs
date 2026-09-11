@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use kallip_archeion_common::bytes::Ciphertext;
 use kallip_archeion_common::ids::{ChannelId, TagmaId, TraceId};
 use kallip_common::message::DeliveryResponse;
-use kallip_common::protocol::ApiError;
+use kallip_common::protocol::{ApiError, Modality};
 use kallip_lesche_common::direct::{
     DirectMessage, DirectMessageView, DirectSessionId, FileAttachment,
 };
@@ -557,11 +557,24 @@ fn render_direct_text(session: &DirectSessionId, rows: Vec<DirectMessageView>) -
             seq,
             sender,
             text,
-            attachment: _,
+            attachment,
             created_at,
         }) = direct_json_row(session, row)
         else {
             continue;
+        };
+        // An attachment renders as a bracketed pointer line under the
+        // text: the pixels stay in the files service, the reader gets
+        // the record id to drive the ingest with. The label follows the
+        // declared modality; the pre-modality wire shape only carried
+        // images.
+        let text = match attachment {
+            Some(att) => format!(
+                "{text}\n[{} {}]",
+                attachment_label(att.modality),
+                att.record_id
+            ),
+            None => text,
         };
         let sender_id = sender.id.as_ref().to_string();
         let kind = sender.kind.as_str();
@@ -577,6 +590,32 @@ fn render_direct_text(session: &DirectSessionId, rows: Vec<DirectMessageView>) -
         ));
     }
     out
+}
+
+/// The bracketed-render label for an attachment: the declared modality in
+/// lowercase. The pre-modality wire shape carried only images, so an
+/// absent modality still renders as `image`.
+fn attachment_label(modality: Option<Modality>) -> &'static str {
+    match modality {
+        Some(Modality::Image) | None => "image",
+        Some(Modality::Audio) => "audio",
+        Some(Modality::Video) => "video",
+        Some(Modality::Text) => "text",
+    }
+}
+
+#[cfg(test)]
+mod render_label_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_label_follows_the_declared_modality() {
+        assert_eq!(attachment_label(Some(Modality::Image)), "image");
+        assert_eq!(attachment_label(None), "image");
+        assert_eq!(attachment_label(Some(Modality::Audio)), "audio");
+        assert_eq!(attachment_label(Some(Modality::Video)), "video");
+        assert_eq!(attachment_label(Some(Modality::Text)), "text");
+    }
 }
 
 /// Flatten one stored row into the json view: the decoded `DirectMessage`

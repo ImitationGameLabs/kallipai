@@ -14,6 +14,7 @@
 mod compact;
 mod compose;
 mod estimate;
+mod ingest;
 pub(crate) mod manifest;
 mod store;
 mod summarize;
@@ -22,6 +23,7 @@ mod turn;
 mod warnings;
 
 pub use compose::compose_context;
+pub use ingest::{IngestImage, ingest_message};
 pub use store::{AgenticContext, ContextStore};
 pub use summarize::{ContextSummarizer, Summary};
 pub(crate) use tokens::estimate_text;

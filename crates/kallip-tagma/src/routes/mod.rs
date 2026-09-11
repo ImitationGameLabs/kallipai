@@ -7,6 +7,7 @@ pub(crate) mod approval;
 mod approval;
 pub(crate) mod context;
 mod inbox;
+pub(crate) mod ingest;
 pub(crate) mod lesche;
 mod message;
 pub(crate) mod profile_probe;
@@ -57,6 +58,10 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/agents/{id}/message",
             axum::routing::post(message::send_message),
+        )
+        .route(
+            "/agents/{id}/attachments/ingest",
+            axum::routing::post(ingest::ingest_attachment),
         )
         .route(
             "/agents/{id}/lesche/messages",

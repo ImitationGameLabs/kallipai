@@ -5,6 +5,7 @@ use kallip_common::protocol::ApiError;
 
 mod agents;
 mod approvals;
+mod attachments;
 mod budget;
 mod inbox;
 mod lesche;

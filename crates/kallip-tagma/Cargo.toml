@@ -76,6 +76,7 @@ wiremock = { workspace = true }
 # kallip-shell.
 tempfile = { workspace = true }
 temp-env = { workspace = true }
+base64 = { workspace = true }
 kallip-testkit = { workspace = true }
 serial_test = { workspace = true }
 # Process-start constructor: installs a global default tracing subscriber before any test thread runs — tracing callsite interest-cache race guard.

@@ -1,6 +1,7 @@
 //! kallip: tagma client CLI.
 
 mod args;
+mod image;
 mod reference;
 mod skill;
 mod task;
@@ -24,7 +25,7 @@ use kallip_runtime::profile::{ProfileConfig, ProfileSet};
 use uuid::Uuid;
 
 /// Read agent ID from KALLIP_ID env var.
-fn agent_id_from_env() -> anyhow::Result<AgentId> {
+pub(crate) fn agent_id_from_env() -> anyhow::Result<AgentId> {
     std::env::var("KALLIP_ID")
         .map_err(|_| anyhow::anyhow!("KALLIP_ID env var not set"))
         .and_then(|s| s.parse::<AgentId>().map_err(Into::into))
@@ -606,6 +607,7 @@ async fn main() -> Result<()> {
         // Dispatched before the tagma client is built; the compiler
         // still wants the arm here.
         Commands::File(_) => unreachable!("file family dispatched above"),
+        Commands::Image(cmd) => image::run_image(&client, &cmd).await?,
         Commands::Task(cmd) => task::run_task(&client, &cmd).await?,
         Commands::Team(cmd) => team::run_team(&client, &cmd).await?,
     }

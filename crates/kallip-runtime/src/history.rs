@@ -31,7 +31,7 @@ pub struct AttachmentRef {
     /// media storage and known to the caller before the turn exists. Turn
     /// membership is carried by the enclosing record's `turn_id`, never
     /// here: this struct is built before the turn is recorded.
-    pub record_id: u64,
+    pub record_id: uuid::Uuid,
     /// MIME type of the referenced media (e.g. `image/png`).
     pub media_type: String,
     /// Optional human-readable caption carried alongside the reference.
@@ -777,7 +777,24 @@ mod tests {
     fn attachment(modality: Modality, record_id: u64) -> AttachmentRef {
         AttachmentRef {
             modality,
-            record_id,
+            record_id: uuid::Uuid::from_bytes([
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                record_id as u8,
+            ]),
             media_type: "image/png".to_owned(),
             caption: Some("a chart".to_owned()),
         }
