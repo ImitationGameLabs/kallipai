@@ -6,11 +6,12 @@
 //! the rest of the chain is the within-set failover order, whose backends are built
 //! lazily on first use. Cross-set failover is intentionally off.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use just_llm_client::{GenerationClient, GenerationClientOptions, LlmBackend};
+use kallip_common::protocol::Modality;
 
 use super::model::{Profile, ProfileSet};
 
@@ -135,6 +136,40 @@ impl std::fmt::Display for DanglingSet {
     }
 }
 
+/// Wake modality gate failure: the restored context carries
+/// references to content in modalities the bound set cannot serve. Mirrors
+/// [`DanglingSet`]'s shape — a human reason plus the two decision values —
+/// so callers surface one recovery action: rebind the agent to a set whose
+/// effective modalities cover the context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModalityBlocked {
+    pub reason: String,
+    pub required: BTreeSet<Modality>,
+    pub served: BTreeSet<Modality>,
+}
+
+impl std::fmt::Display for ModalityBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}; context requires {{{}}}, bound set serves {{{}}}; rebind the agent to a set whose modalities cover the context",
+            self.reason,
+            fmt_modalities(&self.required),
+            fmt_modalities(&self.served),
+        )
+    }
+}
+
+/// Canonical-order modality list for gate messages (mirrors
+/// `Modality::as_str`, joined for display).
+fn fmt_modalities(modalities: &BTreeSet<Modality>) -> String {
+    Modality::ALL
+        .iter()
+        .filter(|m| modalities.contains(m))
+        .map(|m| m.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +323,20 @@ mod tests {
             .build_client(&profile, None)
             .expect_err("build_client should error on a missing provider");
         assert!(format!("{err}").contains("no backend"), "got: {err}");
+    }
+
+    #[test]
+    fn ensure_supports_failure_carries_required_and_served() {
+        let s = set("a", "m");
+        let required = BTreeSet::from([Modality::Text, Modality::Image]);
+        let err = s.ensure_supports(&required).unwrap_err();
+        assert_eq!(
+            err.required,
+            BTreeSet::from([Modality::Text, Modality::Image])
+        );
+        assert_eq!(err.served, BTreeSet::from([Modality::Text]));
+        // Within-capacity requirements pass.
+        s.ensure_supports(&BTreeSet::from([Modality::Text]))
+            .unwrap();
     }
 }

@@ -839,6 +839,7 @@ pub fn restore_agent(
             estimated_tokens,
             crate::history::RecordKind::System,
             Some(crate::history::SystemEvent::AgentRestore),
+            &[],
         ) {
             tracing::warn!("history restore record failed: {e:#}");
         }
@@ -982,6 +983,7 @@ pub fn repair_agent_context(
                 turn.estimated_tokens,
                 crate::history::RecordKind::Turn,
                 None,
+                &[],
             )
             .with_context(|| format!("appending repaired turn {} to history", turn.id.0))?;
     }
@@ -1325,6 +1327,7 @@ mod tests {
                         8,
                         RecordKind::Turn,
                         None,
+                        &[],
                     )
                     .unwrap();
             }
@@ -1632,7 +1635,7 @@ mod tests {
         let (turn_id, _) = store.push_turn(damaged.clone());
         let history = HistoryWriter::new(dir.path().to_path_buf());
         history
-            .append(Some(turn_id.0), &damaged, 8, RecordKind::Turn, None)
+            .append(Some(turn_id.0), &damaged, 8, RecordKind::Turn, None, &[])
             .unwrap();
         persist_context(&store, dir.path()).unwrap();
         (dir, damaged, turn_id.0)
@@ -1770,7 +1773,7 @@ mod tests {
         for msgs in histories {
             let (id, _) = store.push_turn(msgs.clone());
             history
-                .append(Some(id.0), &msgs, 8, RecordKind::Turn, None)
+                .append(Some(id.0), &msgs, 8, RecordKind::Turn, None, &[])
                 .unwrap();
         }
         store.accumulate_usage(&crate::test_support::usage(1000));
@@ -1792,7 +1795,7 @@ mod tests {
         let (churn_id, _) = store.push_turn(churn.clone());
         let history = HistoryWriter::new(dir.path().to_path_buf());
         history
-            .append(Some(churn_id.0), &churn, 8, RecordKind::Turn, None)
+            .append(Some(churn_id.0), &churn, 8, RecordKind::Turn, None, &[])
             .unwrap();
         persist_context(&store, dir.path()).unwrap();
         (dir, store)
@@ -1915,7 +1918,7 @@ mod tests {
         // The agent task records every turn to history before persisting;
         // mirror that so the rehydrate below finds the fresh turn.
         HistoryWriter::new(dir.path().to_path_buf())
-            .append(Some(fresh_id.0), &fresh, 8, RecordKind::Turn, None)
+            .append(Some(fresh_id.0), &fresh, 8, RecordKind::Turn, None, &[])
             .unwrap();
         // The restart notice (pushed by restore) took history_max + 1; the
         // first fresh turn is one past that — neither reuses a historical ID.
@@ -2255,7 +2258,14 @@ mod tests {
 
             // One history record (as the live writer would produce).
             HistoryWriter::new(dir.clone())
-                .append(Some(0), &[user_msg("hello")], 16, RecordKind::Turn, None)
+                .append(
+                    Some(0),
+                    &[user_msg("hello")],
+                    16,
+                    RecordKind::Turn,
+                    None,
+                    &[],
+                )
                 .unwrap();
             // A context.json carrying non-zero cumulative usage.
             std::fs::write(

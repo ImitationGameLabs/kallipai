@@ -229,9 +229,17 @@ impl AgentContext {
         estimated_tokens: usize,
         kind: RecordKind,
         event: Option<crate::history::SystemEvent>,
+        attachments: &[crate::history::AttachmentRef],
     ) {
         if let Some(ref history) = self.history
-            && let Err(e) = history.append(turn_id, messages, estimated_tokens, kind, event)
+            && let Err(e) = history.append(
+                turn_id,
+                messages,
+                estimated_tokens,
+                kind,
+                event,
+                attachments,
+            )
         {
             tracing::warn!(turn_id = ?turn_id, "history write failed: {e:#}");
         }
@@ -240,6 +248,19 @@ impl AgentContext {
     /// Record a turn to both the context store and the append-only history log.
     /// Returns the assigned `TurnId`.
     pub async fn record_turn(&self, messages: Vec<Message>) -> TurnId {
+        self.record_turn_with_attachments(messages, Vec::new())
+            .await
+    }
+
+    /// The attachment-carrying form of [`Self::record_turn`] — the frozen
+    /// recording contract: the image read path fills `attachments` (and
+    /// the message parts); this signature does not change again.
+    /// `record_turn` delegates here with none.
+    pub async fn record_turn_with_attachments(
+        &self,
+        messages: Vec<Message>,
+        attachments: Vec<crate::history::AttachmentRef>,
+    ) -> TurnId {
         let (turn_id, estimated_tokens) = {
             let mut guard = self.store.lock().await;
             guard.push_turn(messages.clone())
@@ -250,6 +271,7 @@ impl AgentContext {
             estimated_tokens,
             RecordKind::Turn,
             None,
+            &attachments,
         );
         turn_id
     }
@@ -268,6 +290,21 @@ impl AgentContext {
     pub async fn record_message_turn(&self, text: &str) -> TurnId {
         let guarded = cap_external_message(text);
         self.record_turn(vec![Message::user(&guarded)]).await
+    }
+
+    /// The attachment-carrying form of [`Self::record_message_turn`] — the
+    /// other half of the frozen recording contract: the image read path calls
+    /// this with the sidecar refs matching the parts it assembled. The same
+    /// entry-cap transform applies (it guards text size only; attachment
+    /// refs are tiny metadata).
+    pub async fn record_message_turn_with_attachments(
+        &self,
+        text: &str,
+        attachments: Vec<crate::history::AttachmentRef>,
+    ) -> TurnId {
+        let guarded = cap_external_message(text);
+        self.record_turn_with_attachments(vec![Message::user(&guarded)], attachments)
+            .await
     }
 }
 #[cfg(test)]
@@ -566,6 +603,33 @@ pub async fn run_and_report(
     apply_pending_profile_reset(ctx);
     // Every entry here is from a non-Running state by construction (the outer
     // loop parks between runs); the transition table asserts exactly that.
+    // Wake modality gate: a restored context whose sidecar attachments claim
+    // modalities the bound set cannot serve must not start a round — the
+    // model would silently never see the referenced content. Surface one
+    // actionable error and park; a rebind (profile apply) clears the gate
+    // on the next wake. The excluded seam stays empty until the
+    // invalidation flow lands and fills it.
+    if let Some(agent_dir) = ctx.agent_dir.as_ref() {
+        let required =
+            crate::history::scan_history_modalities(agent_dir, &std::collections::HashSet::new());
+        if let Err(blocked) = ctx.failover.set().ensure_supports(&required) {
+            tracing::warn!(error = %blocked, "wake blocked by modality gate");
+            agent_tx
+                .send(AgentEvent::Error(blocked.to_string()))
+                .await
+                .ok();
+            ctx.lifecycle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .transition(LifecycleState::Parked {
+                    reason: ParkedReason::FatalError {
+                        message: blocked.to_string(),
+                    },
+                    at: std::time::Instant::now(),
+                });
+            return false;
+        }
+    }
     ctx.lifecycle
         .lock()
         .unwrap_or_else(|e| e.into_inner())

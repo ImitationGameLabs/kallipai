@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::BTreeSet;
 
+use super::registry::ModalityBlocked;
 use kallip_common::protocol::Modality;
 
 /// A provider instance: credentials + endpoint. Maps ~1:1 to a just-llm-client backend.
@@ -135,6 +136,20 @@ impl ProfileSet {
     /// Kept modality-agnostic — adding a modality never changes this code.
     pub fn supports(&self, required: &BTreeSet<Modality>) -> bool {
         required.is_subset(&self.effective_modalities())
+    }
+
+    /// Wake modality gate: [`Self::supports`] as a checked
+    /// judgment — the failure carries the required and served sets plus the
+    /// recovery action, so the wake path can surface one actionable error.
+    pub fn ensure_supports(&self, required: &BTreeSet<Modality>) -> Result<(), ModalityBlocked> {
+        if self.supports(required) {
+            return Ok(());
+        }
+        Err(ModalityBlocked {
+            reason: "bound profile set cannot serve the restored context".to_owned(),
+            required: required.clone(),
+            served: self.effective_modalities(),
+        })
     }
 }
 

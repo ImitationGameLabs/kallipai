@@ -4,13 +4,14 @@
 //! directory. History files are append-only (O(1) per write) and survive
 //! context compaction — evicted turns remain accessible in history.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::context::{Turn, TurnId, TurnKind};
 use anyhow::Result;
 use just_llm_client::types::generation::Message;
+use kallip_common::protocol::Modality;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -18,11 +19,30 @@ use time::OffsetDateTime;
 // Record types
 // ---------------------------------------------------------------------------
 
+/// A sidecar reference to external media attached to a turn. Pure
+/// metadata: the binary content lives outside the NDJSON log, this only
+/// records what the restored context can claim modality-wise (the wake
+/// modality gate reads it; see `ProfileSet::ensure_supports`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AttachmentRef {
+    /// The modality of the referenced content.
+    pub modality: Modality,
+    /// The files-service record id of the referenced media — assigned by
+    /// media storage and known to the caller before the turn exists. Turn
+    /// membership is carried by the enclosing record's `turn_id`, never
+    /// here: this struct is built before the turn is recorded.
+    pub record_id: u64,
+    /// MIME type of the referenced media (e.g. `image/png`).
+    pub media_type: String,
+    /// Optional human-readable caption carried alongside the reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+}
 /// A single record in the append-only history log.
 ///
 /// Serialized as one NDJSON line. Turn records carry `turn_id`; system records
 /// carry `event` instead.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct HistoryRecord {
     /// ISO 8601 UTC timestamp when this record was written.
     #[serde(with = "time::serde::rfc3339")]
@@ -47,6 +67,12 @@ pub struct HistoryRecord {
     /// System event discriminator. Present only when `kind == System`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event: Option<SystemEvent>,
+
+    /// Sidecar attachment references. Absent in records written before
+    /// this field existed (deserializes to empty — old logs need zero
+    /// migration) and omitted when empty on write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
 }
 
 /// Distinguishes conversation turns from system events in the history log.
@@ -103,6 +129,7 @@ impl HistoryWriter {
         estimated_tokens: usize,
         kind: RecordKind,
         event: Option<SystemEvent>,
+        attachments: &[AttachmentRef],
     ) -> Result<()> {
         let history_dir = ensure_history_dir(&self.agent_dir)?;
         let path = today_path(&history_dir);
@@ -114,6 +141,7 @@ impl HistoryWriter {
             estimated_tokens,
             kind,
             event,
+            attachments: attachments.to_vec(),
         };
 
         let mut file = std::fs::OpenOptions::new()
@@ -255,6 +283,49 @@ pub(crate) fn hydrate_turns(agent_dir: &Path, ids: &[u64]) -> (Vec<Turn>, Hydrat
     )
 }
 
+/// Scan the history log for the modalities its attachment sidecar
+/// references claim. Pure metadata: attachment lines are read, message
+/// bodies are never parsed, and no media file is touched. Every record in
+/// every daily file is in scope (an old image turn still demands an
+/// image-capable set at wake), so the scan is O(history lines).
+///
+/// `excluded` reserves the invalidation seam: turn IDs (matched against
+/// the enclosing record's `turn_id`) whose attachments no longer count
+/// (filled in when the invalidation flow lands; callers pass an empty
+/// set until then — the parameter shape is the frozen contract, the
+/// filtering behavior arrives with it).
+pub(crate) fn scan_history_modalities(
+    agent_dir: &Path,
+    excluded: &HashSet<u64>,
+) -> BTreeSet<Modality> {
+    let mut modalities = BTreeSet::new();
+    for path in history_files(agent_dir) {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(rec) = serde_json::from_str::<HistoryRecord>(line) else {
+                continue;
+            };
+            if rec.kind != RecordKind::Turn {
+                continue;
+            }
+            let Some(id) = rec.turn_id else {
+                continue;
+            };
+            if excluded.contains(&id) {
+                continue;
+            }
+            for a in &rec.attachments {
+                modalities.insert(a.modality);
+            }
+        }
+    }
+    modalities
+}
 /// Highest turn ID ever recorded in the history log (`0` when none).
 ///
 /// Used by the manifest-loss rebuild to keep `next_turn_id` ahead of every
@@ -351,7 +422,7 @@ mod tests {
 
         let msgs = vec![user_msg("hello, world")];
         writer
-            .append(Some(0), &msgs, 16, RecordKind::Turn, None)
+            .append(Some(0), &msgs, 16, RecordKind::Turn, None, &[])
             .unwrap();
 
         // Verify history/ directory was created.
@@ -385,6 +456,7 @@ mod tests {
                 200,
                 RecordKind::System,
                 Some(SystemEvent::CompactionSummary),
+                &[],
             )
             .unwrap();
 
@@ -403,10 +475,17 @@ mod tests {
         let writer = HistoryWriter::new(dir.path().to_owned());
 
         writer
-            .append(Some(0), &[user_msg("a")], 16, RecordKind::Turn, None)
+            .append(Some(0), &[user_msg("a")], 16, RecordKind::Turn, None, &[])
             .unwrap();
         writer
-            .append(Some(1), &[assistant_msg("b")], 16, RecordKind::Turn, None)
+            .append(
+                Some(1),
+                &[assistant_msg("b")],
+                16,
+                RecordKind::Turn,
+                None,
+                &[],
+            )
             .unwrap();
         writer
             .append(
@@ -415,6 +494,7 @@ mod tests {
                 32,
                 RecordKind::System,
                 Some(SystemEvent::AgentRestore),
+                &[],
             )
             .unwrap();
 
@@ -448,7 +528,7 @@ mod tests {
 
         let writer = HistoryWriter::new(dir.path().to_owned());
         writer
-            .append(Some(0), &[user_msg("x")], 16, RecordKind::Turn, None)
+            .append(Some(0), &[user_msg("x")], 16, RecordKind::Turn, None, &[])
             .unwrap();
 
         // Now it exists.
@@ -463,7 +543,7 @@ mod tests {
         // Tool result with embedded newlines — must NOT break NDJSON line boundary.
         let msgs = vec![tool_result_msg("line1\nline2\nline3", "call_1")];
         writer
-            .append(Some(0), &msgs, 32, RecordKind::Turn, None)
+            .append(Some(0), &msgs, 32, RecordKind::Turn, None, &[])
             .unwrap();
 
         let ndjson_path = today_path(&dir.path().join("history"));
@@ -498,6 +578,7 @@ mod tests {
             estimated_tokens: 8,
             kind: RecordKind::Turn,
             event: None,
+            attachments: Vec::new(),
         })
         .unwrap()
     }
@@ -510,6 +591,7 @@ mod tests {
             estimated_tokens: 4,
             kind: RecordKind::System,
             event: Some(SystemEvent::AgentRestore),
+            attachments: Vec::new(),
         })
         .unwrap()
     }
@@ -522,6 +604,7 @@ mod tests {
             estimated_tokens: tokens,
             kind: RecordKind::Turn,
             event: None,
+            attachments: Vec::new(),
         })
         .unwrap()
     }
@@ -689,5 +772,151 @@ mod tests {
         let ids: Vec<u64> = turns.iter().map(|t| t.id.0).collect();
         assert_eq!(ids, vec![2, 3]);
         assert_eq!(turns[1].messages[0].content(), Some("repaired"));
+    }
+
+    fn attachment(modality: Modality, record_id: u64) -> AttachmentRef {
+        AttachmentRef {
+            modality,
+            record_id,
+            media_type: "image/png".to_owned(),
+            caption: Some("a chart".to_owned()),
+        }
+    }
+
+    #[test]
+    fn attachment_sidecar_roundtrip_and_old_record_reads_empty() {
+        let rec = HistoryRecord {
+            datetime: OffsetDateTime::now_utc(),
+            turn_id: Some(7),
+            messages: vec![user_msg("see chart")],
+            estimated_tokens: 8,
+            kind: RecordKind::Turn,
+            event: None,
+            attachments: vec![attachment(Modality::Image, 7)],
+        };
+        let line = serde_json::to_string(&rec).unwrap();
+        let back: HistoryRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.attachments, rec.attachments);
+        // Caption round-trips both ways: None is omitted on write and
+        // deserializes back to None; the Some arm is covered above.
+        let mut uncaptioned = rec.clone();
+        uncaptioned.attachments[0].caption = None;
+        let line = serde_json::to_string(&uncaptioned).unwrap();
+        assert!(!line.contains("caption"), "got: {line}");
+        let back: HistoryRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.attachments[0].caption, None);
+
+        // Empty sidecar is omitted on write.
+        let mut bare = rec.clone();
+        bare.attachments = Vec::new();
+        let line = serde_json::to_string(&bare).unwrap();
+        assert!(!line.contains("attachments"), "got: {line}");
+
+        // Records written before the field existed deserialize to empty —
+        // old logs need zero migration.
+        let stamp = rec
+            .datetime
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let old = format!(
+            r#"{{"datetime":"{stamp}","turn_id":1,"messages":[],"estimated_tokens":8,"kind":"turn"}}"#,
+        );
+        let parsed: HistoryRecord = serde_json::from_str(&old).unwrap();
+        assert!(parsed.attachments.is_empty());
+    }
+
+    #[test]
+    fn scan_history_modalities_collects_and_respects_exclusion() {
+        let dir = tmp_agent_dir();
+        let writer = HistoryWriter::new(dir.path().to_owned());
+        writer
+            .append(
+                Some(0),
+                &[user_msg("with chart")],
+                8,
+                RecordKind::Turn,
+                None,
+                &[attachment(Modality::Image, 0)],
+            )
+            .unwrap();
+        writer
+            .append(
+                Some(1),
+                &[user_msg("plain")],
+                8,
+                RecordKind::Turn,
+                None,
+                &[],
+            )
+            .unwrap();
+        writer
+            .append(
+                Some(2),
+                &[user_msg("audio note")],
+                8,
+                RecordKind::Turn,
+                None,
+                &[attachment(Modality::Audio, 2)],
+            )
+            .unwrap();
+        // System records never contribute, whatever they carry.
+        writer
+            .append(
+                None,
+                &[user_msg("system")],
+                8,
+                RecordKind::System,
+                Some(SystemEvent::AgentRestore),
+                &[attachment(Modality::Video, 9)],
+            )
+            .unwrap();
+
+        let all = scan_history_modalities(dir.path(), &HashSet::new());
+        assert_eq!(all, BTreeSet::from([Modality::Image, Modality::Audio]));
+
+        let mut excluded = HashSet::new();
+        excluded.insert(2u64);
+        let minus_two = scan_history_modalities(dir.path(), &excluded);
+        assert_eq!(minus_two, BTreeSet::from([Modality::Image]));
+    }
+
+    #[test]
+    fn wake_modality_gate_blocks_text_only_set_and_passes_covering_set() {
+        let dir = tmp_agent_dir();
+        let writer = HistoryWriter::new(dir.path().to_owned());
+        writer
+            .append(
+                Some(0),
+                &[user_msg("with chart")],
+                8,
+                RecordKind::Turn,
+                None,
+                &[attachment(Modality::Image, 0)],
+            )
+            .unwrap();
+        let required = scan_history_modalities(dir.path(), &HashSet::new());
+
+        // Positive arm: a text-only set cannot serve the context — the
+        // error carries both values plus the recovery action.
+        let set = crate::profile::ProfileSet {
+            name: "a".into(),
+            description: None,
+            profiles: vec![crate::test_support::profile("p", "ds", 1000)],
+        };
+        let err = set.ensure_supports(&required).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("image"), "got: {msg}");
+        assert!(msg.contains("text"), "got: {msg}");
+        assert!(msg.contains("rebind"), "got: {msg}");
+
+        // Negative arm: a set whose intersection covers the context passes.
+        let mut cover = crate::test_support::profile("p", "ds", 1000);
+        cover.modalities = vec![Modality::Text, Modality::Image];
+        let covering = crate::profile::ProfileSet {
+            name: "a".into(),
+            description: None,
+            profiles: vec![cover],
+        };
+        covering.ensure_supports(&required).unwrap();
     }
 }

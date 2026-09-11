@@ -94,6 +94,13 @@ impl FailoverState {
         // (advance_to is forward-only; the skip loop bounds via candidate_profile).
         &self.set.profiles[self.profile_idx]
     }
+
+    /// The resolved set this failover chain runs against. Read-side view
+    /// for the wake modality gate (see `ProfileSet::ensure_supports`); the set
+    /// itself is replaced only by `reset_and_rebuild`.
+    pub(crate) fn set(&self) -> &ProfileSet {
+        &self.set
+    }
     /// The agent-level system prompt carried at construction.
     ///
     /// Request construction moved to the acquisition call site when the send path

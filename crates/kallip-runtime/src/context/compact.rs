@@ -172,6 +172,7 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
             result.estimated_tokens,
             RecordKind::System,
             Some(SystemEvent::CompactionSummary),
+            &[],
         );
 
         // Accumulate usage from the summarization LLM call WITHOUT re-anchoring: the summarizer
