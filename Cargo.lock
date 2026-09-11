@@ -2950,6 +2950,7 @@ dependencies = [
  "kallip-runtime",
  "kallip-shell",
  "kallip-task",
+ "libc",
  "reqwest",
  "sea-orm",
  "sea-orm-migration",

@@ -45,6 +45,7 @@ futures-util = { workspace = true }
 url = { workspace = true }
 dirs = { workspace = true }
 arc-swap = { workspace = true }
+libc = { workspace = true }
 
 [features]
 default = []

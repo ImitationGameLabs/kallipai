@@ -22,6 +22,7 @@ mod probe;
 mod projector;
 mod pump_driver;
 mod relay;
+mod root_guard;
 pub(crate) mod routes;
 mod shutdown;
 mod sse;
@@ -67,6 +68,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run(args: Args) -> Result<()> {
+    // Real-root guard first: logging is live by now, and no filesystem
+    // state or agent surface exists yet — a refusal must land before
+    // boot_identity touches the slug-derived tree.
+    root_guard::enforce();
     // Identity first: everything below (log placement, profile config, the
     // data root itself) hangs off the slug-derived tree, so an unnamed or
     // legacy-addressed boot must fail before it touches the filesystem.
