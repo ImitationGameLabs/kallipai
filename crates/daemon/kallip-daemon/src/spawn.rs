@@ -210,6 +210,20 @@ pub(crate) fn path_owner_uid(path: &Path) -> std::io::Result<u32> {
     Ok(std::fs::metadata(path)?.uid())
 }
 
+/// An actionable gate on the tagma resolution: the helper execve's
+/// its payload without a PATH search, so a bare-name resolution
+/// dies as exit 66 deep in the helper with a message about a file
+/// that is not there. Refuse here instead, with the fixes named
+/// (the helper's own error stays as the backstop).
+fn require_resolved_binary(path: &Path, name: &str, hint: &str) -> Result<(), SpawnError> {
+    if path.is_file() {
+        return Ok(());
+    }
+    Err(SpawnError::Invalid(format!(
+        "{name} resolved to {path:?}, which is not an existing file; {hint}"
+    )))
+}
+
 /// The ownership-inference decision shared by spawn's divergence
 /// guard and adopt's default identity: two externally-supplied
 /// owners that disagree leave the launch ambiguous, agreeing
@@ -1143,12 +1157,23 @@ pub(crate) fn launch(
         );
     }
     let helper = bins::resolve("kallip-daemon-spawn");
+    // The daemon spawns the helper itself through Command, which
+    // searches PATH — a bare-name helper rides the caller's PATH
+    // (the unit's `path` in the nix deployment). The tagma is
+    // different: the helper execve's it without a PATH search, so
+    // its resolution gets the file gate below.
     // Explicit dev exe wins over the resolved one; the resolver stays
-    // the production path (KALLIP_BIN_DIR, then PATH).
+    // the production path (KALLIP_BIN_DIR, then CARGO_BIN_EXE_* in
+    // tests).
     let tagma = match exe {
         Some(exe) => PathBuf::from(exe),
         None => bins::resolve("kallip-tagma"),
     };
+    require_resolved_binary(
+        &tagma,
+        "kallip-tagma",
+        "set KALLIP_BIN_DIR to the bin directory of the installed kallip package, or pass --bin with an explicit path",
+    )?;
     let base = harvest_base_env(tagma.parent(), identity);
     let (state_home, target_user) = match identity {
         LaunchIdentity::InPlace { .. } => (dirs::state_dir(), None),
@@ -1666,6 +1691,20 @@ mod tests {
             infer_owner_decision(1000, 1000, 1000),
             OwnerInference::InPlace
         );
+    }
+
+    #[test]
+    fn a_non_file_resolution_refuses_with_an_actionable_error() {
+        let error = require_resolved_binary(
+            Path::new("definitely-not-a-real-kallip-binary"),
+            "kallip-tagma",
+            "set KALLIP_BIN_DIR, or pass --bin",
+        )
+        .expect_err("that path does not exist");
+        let SpawnError::Invalid(message) = error else {
+            panic!("expected Invalid, got {error}")
+        };
+        assert!(message.contains("KALLIP_BIN_DIR"), "{message}");
     }
     #[test]
     fn resolve_defaults_to_the_peer_and_collapses_to_in_place() {

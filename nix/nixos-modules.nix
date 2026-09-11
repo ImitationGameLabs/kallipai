@@ -120,12 +120,10 @@ in
         default = hostPackages.workspace;
         description = ''
           The kallipai daemon package, defaulting to this flake's full
-          workspace build. The daemon resolves its helpers by bare name
-          through its unit PATH, which carries the system path: helpers
-          come from the system path's build. A pin therefore covers the
-          daemon binary only -- a version skew against the on-PATH
-          helpers is possible and yours to manage; the workspace
-          default keeps them aligned.
+          workspace build. The unit pins KALLIP_BIN_DIR to this
+          package's bin directory, so the daemon, its spawn helper,
+          and the tagma it launches all come from one build; a
+          custom package moves the whole set together.
         '';
       };
 
@@ -634,13 +632,16 @@ in
         wantedBy = [ "multi-user.target" ];
         after = [ "network.target" ];
 
-        # A NixOS unit's PATH is empty unless the unit lists `path`
-        # (the system profile is a session-side default only), so the
-        # daemon's bare-name helper lookups would fail inside the unit
-        # even though they succeed in an interactive shell. The system
-        # path is what bare-name resolution rides.
+        # A NixOS unit's PATH is empty unless the unit lists `path`.
+        # The daemon's own binaries ride KALLIP_BIN_DIR (pinned
+        # below); the system path stays for anything else that
+        # expects a standard PATH inside the unit.
         path = [ config.system.path ];
         environment = {
+          # The spawn helper execs the tagma with execve, which does
+          # not search PATH: pin the bin directory of the same package
+          # the unit runs, so daemon, helper, and tagma stay one build.
+          KALLIP_BIN_DIR = "${cfg.package}/bin";
           KALLIP_DAEMON_SOCKET = daemonSocket;
           KALLIP_DAEMON_RECORD_DIR = "/var/lib/kallipai/daemon/instances";
           # Dedicated socket gate, not the shared platform gate: the group
