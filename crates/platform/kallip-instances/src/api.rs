@@ -25,6 +25,10 @@ pub struct SpawnRequest {
     /// the backend default. A value the backend does not support is
     /// rejected before the backend is touched.
     pub method: Option<String>,
+    /// Launch identity; omitted = the daemon's implicit-launch
+    /// rules (self-launch in place, or a drop to the peer's uid).
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +112,7 @@ async fn spawn(
         workspace,
         env,
         method,
+        user,
     }) = match payload {
         Ok(Json(body)) => Json(body),
         Err(rejection) => return bad_body(rejection),
@@ -125,7 +130,9 @@ async fn spawn(
             format!("provisioning method not supported: {method}"),
         );
     }
-    let outcome = state.backend.spawn(slug, workspace, env).await;
+    // user: the launch identity field, carried verbatim -- the daemon
+    // owns the implicit-vs-explicit identity rules.
+    let outcome = state.backend.spawn(slug, workspace, env, user).await;
     respond(outcome)
 }
 

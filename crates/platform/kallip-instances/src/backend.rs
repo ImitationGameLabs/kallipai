@@ -18,12 +18,14 @@ use crate::wire::{BackendError, unwrap_health, unwrap_list, unwrap_spawn, unwrap
 /// The full management surface, one method per HTTP route.
 #[async_trait]
 pub trait InstanceBackend: Send + Sync + 'static {
-    /// Launch one instance; the outcome carries its listen port.
+    /// Launch one instance under `user` (None = the daemon's
+    /// implicit-launch rules); the outcome carries its port.
     async fn spawn(
         &self,
         slug: String,
         workspace: String,
         env: Vec<String>,
+        user: Option<String>,
     ) -> Result<Spawned, BackendError>;
 
     /// Stop one instance by slug.
@@ -63,6 +65,7 @@ impl InstanceBackend for UdsBackend {
         slug: String,
         workspace: String,
         env: Vec<String>,
+        user: Option<String>,
     ) -> Result<Spawned, BackendError> {
         // The env passes through verbatim: relay-URL defaults are the
         // daemon's fill (it owns the deployment's relay URLs), applied
@@ -74,7 +77,7 @@ impl InstanceBackend for UdsBackend {
                 workspace,
                 env,
                 exe: None,
-                user: None,
+                user,
             })
             .await?;
         unwrap_spawn(wire)

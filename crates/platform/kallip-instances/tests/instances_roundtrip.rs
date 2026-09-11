@@ -6,8 +6,9 @@
 //! helpers by bare name (KALLIP_BIN_DIR → PATH), so these tests hand
 //! the daemon a KALLIP_BIN_DIR pinning the workspace build dir that
 //! resolve_bin finds. Build the workspace (or at least `cargo build
-//! -p kallip-daemon kallip-instances kallip`) before running, or the
-//! tests spuriously fail.
+//! -p kallip-daemon kallip-instances kallip`) before running: a
+//! missing build is an environment fault, while a stale one is
+//! reported by the contract tests as a version canary.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -112,6 +113,25 @@ impl Drop for DaemonProc {
     }
 }
 
+// The daemon's own passwd name, passed explicitly: an *inferred*
+// in-place identity is refused for a root daemon (the guard asks
+// for an explicit one), while None keeps working on a non-root
+// host, whose inference is allowed.
+fn daemon_user() -> Option<String> {
+    let passwd = unsafe { libc::getpwuid(libc::geteuid()) };
+    if passwd.is_null() {
+        return None;
+    }
+    let name = unsafe { (*passwd).pw_name };
+    if name.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
 async fn send(
     app: &axum::Router,
     method: &str,
@@ -195,6 +215,10 @@ async fn full_management_round_trip_with_guards() {
     let spawn_body = serde_json::json!({
         "slug": "web-e2e",
         "workspace": workspace.path().display().to_string(),
+        // An explicit launch identity: the sandbox daemon and this
+        // test process share a uid, so the implicit self-launch is
+        // refused and the explicit name is required.
+        "user": daemon_user(),
         "env": [
             "KALLIP_OPERATOR_TOKEN=test-op-token",
             "KALLIP_LLM_PROVIDER=deepseek",
@@ -338,6 +362,7 @@ async fn relay_intent_spawn_persists_filled_urls() {
                 "KALLIP_LLM_DEEPSEEK_API_KEY=test-key".into(),
                 "KALLIP_TAGMA_RELAY_ENROLLMENT_CODE=sk-x".into(),
             ],
+            daemon_user(),
         )
         .await
         .expect("relay-intent spawn");
@@ -391,6 +416,7 @@ async fn local_spawn_meta_stays_free_of_relay_keys() {
                 "KALLIP_LLM_MODEL=test-model".into(),
                 "KALLIP_LLM_DEEPSEEK_API_KEY=test-key".into(),
             ],
+            daemon_user(),
         )
         .await
         .expect("local spawn");
@@ -412,6 +438,56 @@ async fn local_spawn_meta_stays_free_of_relay_keys() {
     let _ = backend.stop("local-e2e".into()).await;
 }
 
+// The wire contract for existing callers: a body with no user key
+// still parses (serde default = None) and reaches the daemon, whose
+// implicit-launch rules then decide. Under a root daemon that rule
+// is the refused self-launch; a non-root host would accept and
+// launch, so the assertion is root-only.
+
+// A red against an older daemon binary is version discrimination
+// (this test canaries the guard's presence), not an environment
+// fault.
+#[tokio::test]
+async fn spawn_without_user_key_still_parses_and_hits_guard() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    let daemon = start_daemon();
+    let _ = DaemonClient::new(&daemon.socket)
+        .call(kallip_daemon_common::wire::RequestBody::List)
+        .await;
+
+    let state = AppState {
+        backend: kallip_instances::backend::UdsBackend::arc(DaemonClient::new(&daemon.socket)),
+        auth: kallip_instances::guard::AuthMode::Token("itest-token".into()),
+        cors_origins: String::new(),
+        allowed_hosts: vec![],
+    };
+    let app = build_router(state);
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let spawn_body = serde_json::json!({
+        "slug": "no-user-key",
+        "workspace": workspace.path().display().to_string(),
+        "env": [
+            "KALLIP_OPERATOR_TOKEN=test-op-token",
+            "KALLIP_LLM_PROVIDER=deepseek",
+            "KALLIP_LLM_MODEL=test-model",
+            "KALLIP_LLM_DEEPSEEK_API_KEY=test-key",
+        ],
+    })
+    .to_string();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/instances/spawn",
+        Some("itest-token"),
+        Some(&spawn_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body.contains("\"invalid_spawn_input\""), "{body}");
+}
 /// A scriptable stand-in for the archeion verifier: each call consumes the next
 /// programmed outcome.
 struct MockVerifier {
