@@ -5,6 +5,7 @@
 // in the .svelte.ts / .svelte files.
 
 import type {
+  Modality,
   ProfileConfig,
   ProfileConfigPutRequest,
   ProfileProvider,
@@ -187,6 +188,44 @@ export function setDefaultSet(
   return config.sets[name] === undefined
     ? config
     : { ...config, default: name };
+}
+
+// ---------------------------------------------------------------------------
+// Profile modality helpers
+// ---------------------------------------------------------------------------
+
+/** Canonical modality display order (mirrors kallip-common Modality::ALL). */
+const ALL_MODALITIES: readonly Modality[] = ["text", "image", "audio", "video"];
+
+/** Modalities a profile declares; absent = text-only (the server default). */
+export function profileModalities(profile: ProfileModel): readonly Modality[] {
+  return profile.modalities ?? ["text"];
+}
+
+/** Effective modalities of a set: the intersection across member
+ * profiles. An empty set short-circuits to the empty intersection,
+ * matching kallip-runtime ProfileSet::effective_modalities. */
+export function setEffectiveModalities(set: ProfileSet): Modality[] {
+  if (set.profiles.length === 0) {
+    return [];
+  }
+  return ALL_MODALITIES.filter((m) =>
+    set.profiles.every((p) => profileModalities(p).includes(m)),
+  );
+}
+
+/** True when some member declares modalities beyond the set's effective
+ * intersection; requests silently narrow to the intersection. */
+export function setHasShadowedMembers(set: ProfileSet): boolean {
+  const effective = setEffectiveModalities(set);
+  return set.profiles.some((p) =>
+    profileModalities(p).some((m) => !effective.includes(m)),
+  );
+}
+
+/** Join modalities in canonical order for display ("text, image"). */
+export function formatModalities(modalities: readonly Modality[]): string {
+  return ALL_MODALITIES.filter((m) => modalities.includes(m)).join(", ");
 }
 
 /** Add a blank profile with default fields to the named set. Unknown set

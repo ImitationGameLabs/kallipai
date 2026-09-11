@@ -328,6 +328,7 @@ mod tests {
                 record_id: uuid::Uuid::nil(),
                 name: "report.pdf".into(),
                 size: 1234,
+                modality: None,
             }),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -371,6 +372,7 @@ mod tests {
                 record_id: uuid::Uuid::nil(),
                 name: "report.pdf".into(),
                 size: 1234,
+                modality: None,
             }),
         })
         .unwrap();

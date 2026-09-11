@@ -229,6 +229,9 @@ export interface ProfileProvider {
 
 /** Reasoning effort levels a profile may request; forwarded to providers as-is. */
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+/** Content modalities a profile may serve; a profile set's effective
+ * modalities are the intersection across its member profiles. */
+export type Modality = "text" | "image" | "audio" | "video";
 
 /** A model bound to a provider. */
 export interface ProfileModel {
@@ -240,6 +243,8 @@ export interface ProfileModel {
   readonly store?: boolean;
   /** Absent = no effort level requested. */
   readonly effort?: ReasoningEffort;
+  /** Modalities the profile declares it can serve; absent = text-only. */
+  readonly modalities?: readonly Modality[];
 }
 
 /** A named profile set: an ordered failover chain. The map key in

@@ -781,6 +781,7 @@ mod tests {
                 max_context_window: 500_000,
                 store: None,
                 effort: None,
+                modalities: kallip_runtime::profile::Profile::default_modalities(),
             }],
         };
         let reg = kallip_runtime::profile::ProfileRegistry::new(

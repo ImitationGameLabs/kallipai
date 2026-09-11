@@ -153,6 +153,7 @@ mod tests {
                 max_context_window: 500_000,
                 store: None,
                 effort: None,
+                modalities: Profile::default_modalities(),
             }],
         }
     }

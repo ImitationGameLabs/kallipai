@@ -263,6 +263,7 @@ pub fn make_profile_bundle() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundl
                     max_context_window: 128_000,
                     store: None,
                     effort: None,
+                    modalities: Profile::default_modalities(),
                 }],
             },
         )]),
@@ -325,6 +326,7 @@ pub fn make_profile_bundle_two_sets() -> Arc<arc_swap::ArcSwap<crate::state::Pro
                     max_context_window: 128_000,
                     store: None,
                     effort: None,
+                    modalities: Profile::default_modalities(),
                 }],
             },
         )

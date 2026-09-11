@@ -3,7 +3,12 @@
 // burn rate / ETA calculations, and profile draft mutators.
 
 import { assertEquals } from "@std/assert";
-import type { ProfileConfig } from "@kallipai/kallip-client";
+import type {
+  Modality,
+  ProfileConfig,
+  ProfileModel,
+  ProfileSet,
+} from "@kallipai/kallip-client";
 import {
   addProvider,
   addProfile,
@@ -16,12 +21,14 @@ import {
   consumedPct,
   cronHasFiveFields,
   etaMinutes,
+  formatModalities,
   isBudgetPaused,
   moveFromParking,
   moveProfile,
   moveToParking,
   profileConfigEqual,
   profileConfigToWire,
+  profileModalities,
   removeProvider,
   removeProfile,
   removeSet,
@@ -29,6 +36,8 @@ import {
   replaceParkingProfiles,
   replaceSetProfiles,
   setDefaultSet,
+  setEffectiveModalities,
+  setHasShadowedMembers,
   singleProviderProbeRequest,
   singleProfileProbeRequest,
   singleParkingProfileProbeRequest,
@@ -884,4 +893,70 @@ Deno.test("singleParkingProfileProbeRequest: out of range returns null", () => {
 
   assertEquals(singleParkingProfileProbeRequest(null, parkedConfig(), 3), null);
   // A draft whose parking key was never present is out of range too.
+});
+
+// --- profile modality helpers ---
+
+const modalityModel = (modalities?: readonly Modality[]): ProfileModel => ({
+  id: "m",
+  endpoint: "https://example.com/v1",
+  model: "test-model",
+  max_context_window: 128,
+  ...(modalities === undefined ? {} : { modalities }),
+});
+
+const modalitySet = (profiles: ProfileModel[]): ProfileSet => ({
+  description: null,
+  profiles,
+});
+
+Deno.test("profileModalities: absent field falls back to text", () => {
+  assertEquals(profileModalities(modalityModel()), ["text"]);
+});
+Deno.test("profileModalities: declared modalities pass through", () => {
+  assertEquals(profileModalities(modalityModel(["audio"])), ["audio"]);
+});
+Deno.test("setEffectiveModalities: intersection across members", () => {
+  assertEquals(
+    setEffectiveModalities(
+      modalitySet([modalityModel(["text", "image"]), modalityModel(["text"])]),
+    ),
+    ["text"],
+  );
+});
+Deno.test(
+  "setEffectiveModalities: empty set yields the empty intersection",
+  () => {
+    assertEquals(setEffectiveModalities(modalitySet([])), []);
+  },
+);
+Deno.test("setEffectiveModalities: canonical display order", () => {
+  assertEquals(
+    setEffectiveModalities(modalitySet([modalityModel(["video", "text"])])),
+    ["text", "video"],
+  );
+});
+Deno.test("setHasShadowedMembers: member beyond intersection", () => {
+  assertEquals(
+    setHasShadowedMembers(
+      modalitySet([modalityModel(["text", "image"]), modalityModel(["text"])]),
+    ),
+    true,
+  );
+});
+Deno.test("setHasShadowedMembers: within intersection is clean", () => {
+  assertEquals(
+    setHasShadowedMembers(
+      modalitySet([modalityModel(), modalityModel(["text"])]),
+    ),
+    false,
+  );
+});
+Deno.test("formatModalities: canonical order join", () => {
+  assertEquals(formatModalities(["image", "text"]), "text, image");
+  assertEquals(
+    formatModalities(["video", "audio", "image", "text"]),
+    "text, image, audio, video",
+  );
+  assertEquals(formatModalities([]), "");
 });

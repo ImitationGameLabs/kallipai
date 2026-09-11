@@ -190,6 +190,7 @@ mod tests {
             record_id: Uuid::from_u128(42),
             name: "notes.txt".to_string(),
             size: 11,
+            modality: None,
         };
         let bytes = serde_json::to_vec(&fa).unwrap();
         assert_eq!(

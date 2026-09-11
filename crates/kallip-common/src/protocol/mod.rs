@@ -17,8 +17,8 @@ pub use agent::{
     ActiveProfile, AgentPermissionsResponse, AgentState, AgentStatusResponse, AgentSummary,
     CreateAgentRequest, CreateAgentResponse, DELEGATION_CARVE_OUT, DELEGATION_FULL_HANDOFF,
     DeleteSetResponse, DutyStatus, ListAgentsQuery, ListAgentsResponse, LockState, MaxToolRounds,
-    MessageRequest, MessageResponse, ParkedReason, ProfileSetUpdateRequest, SetDefaultRequest,
-    SetReference, UpdateActivityRequest, UpdateAgentMetadataRequest,
+    MessageRequest, MessageResponse, Modality, ParkedReason, ProfileSetUpdateRequest,
+    SetDefaultRequest, SetReference, UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 pub use approval::{
     ApprovalDecisionBody, ApprovalEntry, ListApprovalsQuery, ListApprovalsResponse,

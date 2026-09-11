@@ -58,6 +58,7 @@ pub(crate) fn profile(id: &str, provider: &str, window: usize) -> Profile {
         max_context_window: window,
         store: None,
         effort: None,
+        modalities: Profile::default_modalities(),
     }
 }
 

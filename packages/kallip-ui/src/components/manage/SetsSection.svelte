@@ -28,6 +28,11 @@
     probeStatusLabel,
   } from "../../lib/manage/profiles-view.ts";
   import {
+    formatModalities,
+    setEffectiveModalities,
+    setHasShadowedMembers,
+  } from "../../lib/manage/compute.ts";
+  import {
     common_edit,
     common_remove,
     manage_profiles_add_set,
@@ -41,6 +46,8 @@
     manage_profiles_set_as_default,
     manage_profiles_set_default_badge,
     manage_profiles_set_drop_here,
+    manage_profiles_set_modalities_label,
+    manage_profiles_set_modalities_shadowed,
     manage_profiles_sets,
     manage_profiles_sets_desc_l1,
     manage_profiles_sets_desc_l2,
@@ -143,6 +150,18 @@
           </div>
           {#if set.description}
             <p class="text-xs opacity-60 mt-0.5 truncate">{set.description}</p>
+          {/if}
+          {#if set.profiles.length > 0}
+            <p class="text-xs opacity-60 mt-0.5 truncate">
+              {manage_profiles_set_modalities_label()}:
+              {formatModalities(setEffectiveModalities(set))}
+              {#if setHasShadowedMembers(set)}
+                <span
+                  class="text-warning-500"
+                  title={manage_profiles_set_modalities_shadowed()}>!</span
+                >
+              {/if}
+            </p>
           {/if}
         </div>
         <Menu

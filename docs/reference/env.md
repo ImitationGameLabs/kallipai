@@ -26,6 +26,9 @@ A profile binds a model to an endpoint and its declared capabilities
 (`max_context_window`), grouped into named sets. With a profiles config
 file, the tagma loads multiple provider/model combinations, each profile
 declaring its own `max_context_window`.
+Each profile may also declare `modalities`; an omitted declaration
+defaults to text-only, and a set's effective modalities are the
+intersection across its members.
 
 The profiles config file lives at the instance config root's
     `profiles/profiles.toml` — `<config home>/kallipai/tagmata/<slug>/`.

@@ -16,6 +16,7 @@ use just_llm_client::family;
 use serde::{Deserialize, Serialize};
 
 use super::model::{Profile, ProfileSet, Provider};
+use kallip_common::protocol::Modality;
 
 /// Parsed + validated profile configuration: the data the tagma assembles into a
 /// [`super::registry::ProfileRegistry`] after building backends. Pure data — no reqwest, no
@@ -105,6 +106,9 @@ pub fn from_env() -> Result<ProfileConfig> {
         // (store on, no effort) are exactly the unconfigured semantics.
         store: None,
         effort: None,
+        // The implicit env profile is text-only by default, like every
+        // un-annotated profile.
+        modalities: Profile::default_modalities(),
     };
     let mut endpoints = HashMap::new();
     endpoints.insert(provider, implicit_provider);
@@ -142,6 +146,16 @@ fn load_file(path: &Path) -> Result<ProfileConfig> {
         .try_into()
         .with_context(|| format!("failed to parse profiles config {}", path.display()))?;
     validate(&file)?;
+    // Declared-capability shrinkage inside a set is never silent: the
+    // intersection governs, and members declaring more are warned at load
+    // (the CLI and the management UI surface the same fact).
+    for (name, effective) in shadowed_set_notices(&file.sets) {
+        tracing::warn!(
+            set = %name,
+            effective = %effective,
+            "profile set has members declaring beyond the effective intersection; the intersection governs"
+        );
+    }
 
     let endpoints: HashMap<String, Provider> = file
         .endpoints
@@ -413,7 +427,48 @@ fn validate(file: &ConfigFile) -> Result<()> {
             bail!("duplicate profile id '{}'", p.id);
         }
     }
+    for set in file.sets.values() {
+        for p in &set.profiles {
+            require_text_member("set", p)?;
+        }
+    }
+    for p in &file.parking {
+        require_text_member("parking", p)?;
+    }
     Ok(())
+}
+
+/// Every profile must accept text: system prompts and tool
+/// results are plain text, so a profile that cannot take text can never
+/// hold a useful conversation; an explicit declaration lacking `text` is
+/// refused at load (absent declarations fall back to text-only and never
+/// trip this). Distinct from the set-level uniformity question — this is
+/// a per-profile validity rule.
+pub fn require_text_member(where_in: &str, p: &Profile) -> Result<()> {
+    if p.modalities.contains(&Modality::Text) {
+        return Ok(());
+    }
+    let declared = p
+        .modalities
+        .iter()
+        .map(|m| m.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "{where_in} profile '{}' declares modalities = [{declared}], which lacks the required 'text' member; every profile must accept text",
+        p.id
+    )
+}
+
+/// Per-set shadow notices: (set name, effective-modalities debug text)
+/// for every set whose members declare beyond the intersection. Both the
+/// load path and the PUT path warn with these; kept pure so the rule is
+/// unit-testable without a tracing subscriber.
+pub fn shadowed_set_notices(sets: &BTreeMap<String, ProfileSet>) -> Vec<(String, String)> {
+    sets.iter()
+        .filter(|(_, s)| s.has_shadowed_members())
+        .map(|(name, s)| (name.clone(), format!("{:?}", s.effective_modalities())))
+        .collect()
 }
 
 /// A set name: non-empty, ASCII letters, digits, `_`, `-`. This keeps the name
@@ -481,6 +536,7 @@ struct ProviderEntry {
 mod tests {
     use super::*;
     use just_llm_client::types::generation::ReasoningEffort;
+    use std::collections::BTreeSet;
 
     #[test]
     fn parse_profile_behavior_fields() {
@@ -552,6 +608,7 @@ api_key = "fake"
             max_context_window: 1,
             store: Some(false),
             effort: Some(ReasoningEffort::Xhigh),
+            modalities: Profile::default_modalities(),
         };
         let s = toml::to_string(&tuned).unwrap();
         assert!(s.contains("store = false"));
@@ -701,6 +758,105 @@ max_context_window = 1000
     }
 
     #[test]
+    fn rejects_explicit_modalities_without_text() {
+        // A profile that cannot accept text can never hold a useful
+        // conversation — an explicit declaration lacking `text` is refused.
+        // Absent declarations default to [text] and never trip this.
+        let toml = r#"
+[endpoints.ds]
+family = "deepseek"
+api_key = "fake"
+
+[sets.a]
+
+  [[sets.a.profiles]]
+  id = "vision-only"
+  endpoint = "ds"
+  model = "m"
+  max_context_window = 1000
+  modalities = ["image"]
+"#;
+        let file: ConfigFile = toml::from_str(toml).unwrap();
+        let err = validate(&file).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vision-only"), "got: {msg}");
+        assert!(msg.contains("image"), "got: {msg}");
+        assert!(msg.contains("text"), "got: {msg}");
+    }
+
+    #[test]
+    fn declared_modalities_parse_and_the_intersection_governs() {
+        // An explicit multi-modal declaration parses; an absent one defaults
+        // to [text]; the mixed set's effective modalities are the
+        // intersection, and the shadowed member is flagged.
+        let toml = r#"
+[endpoints.ds]
+family = "deepseek"
+api_key = "fake"
+
+[sets.a]
+
+  [[sets.a.profiles]]
+  id = "multi"
+  endpoint = "ds"
+  model = "m"
+  max_context_window = 1000
+  modalities = ["text", "image"]
+
+  [[sets.a.profiles]]
+  id = "quiet"
+  endpoint = "ds"
+  model = "m2"
+  max_context_window = 1000
+"#;
+        let file: ConfigFile = toml::from_str(toml).unwrap();
+        validate(&file).unwrap();
+        let set = file.sets.get("a").unwrap();
+        assert_eq!(
+            set.profiles[0].modalities,
+            vec![Modality::Text, Modality::Image]
+        );
+        assert!(Profile::modalities_is_default(&set.profiles[1].modalities));
+        assert_eq!(set.effective_modalities(), BTreeSet::from([Modality::Text]));
+        assert!(set.has_shadowed_members());
+    }
+    #[test]
+    fn shadowed_set_notices_reports_only_shadowed_sets() {
+        let toml = r#"
+[endpoints.ds]
+family = "deepseek"
+api_key = "fake"
+
+[sets.a]
+
+  [[sets.a.profiles]]
+  id = "multi"
+  endpoint = "ds"
+  model = "m"
+  max_context_window = 1000
+  modalities = ["text", "image"]
+
+  [[sets.a.profiles]]
+  id = "quiet"
+  endpoint = "ds"
+  model = "m2"
+  max_context_window = 1000
+
+[sets.b]
+
+  [[sets.b.profiles]]
+  id = "solo"
+  endpoint = "ds"
+  model = "m3"
+  max_context_window = 1000
+"#;
+        let file: ConfigFile = toml::from_str(toml).unwrap();
+        let notices = shadowed_set_notices(&file.sets);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].0, "a");
+        assert!(notices[0].1.contains("Text"), "got: {:?}", notices);
+    }
+    #[test]
     fn rejects_duplicate_set_key() {
         // Duplicate set names are rejected by the TOML parser itself (duplicate key).
         let toml = r#"
@@ -780,6 +936,7 @@ max_context_window = 1000
                                 max_context_window: 500_000,
                                 store: None,
                                 effort: None,
+                                modalities: Profile::default_modalities(),
                             },
                             Profile {
                                 id: "backup".into(),
@@ -788,6 +945,7 @@ max_context_window = 1000
                                 max_context_window: 128_000,
                                 store: None,
                                 effort: None,
+                                modalities: Profile::default_modalities(),
                             },
                         ],
                     },
@@ -804,6 +962,7 @@ max_context_window = 1000
                             max_context_window: 128_000,
                             store: None,
                             effort: None,
+                            modalities: Profile::default_modalities(),
                         }],
                     },
                 ),
@@ -818,6 +977,7 @@ max_context_window = 1000
                 max_context_window: 128_000,
                 store: None,
                 effort: None,
+                modalities: Profile::default_modalities(),
             }],
         };
 
@@ -888,6 +1048,7 @@ max_context_window = 1000
                         max_context_window: 1000,
                         store: None,
                         effort: None,
+                        modalities: Profile::default_modalities(),
                     }],
                 },
             )]),

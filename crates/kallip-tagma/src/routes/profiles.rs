@@ -19,7 +19,9 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 
 use just_llm_client::types::generation::ReasoningEffort;
-use kallip_common::protocol::{ApiError, DeleteSetResponse, SetDefaultRequest, SetReference};
+use kallip_common::protocol::{
+    ApiError, DeleteSetResponse, Modality, SetDefaultRequest, SetReference,
+};
 use kallip_runtime::profile::{
     Profile, ProfileConfig, ProfileRegistry, ProfileSet, Provider, is_valid_set_name,
     normalize_default,
@@ -88,6 +90,15 @@ pub async fn put_profiles(
         ));
     }
     let registry = validate_config(&config)?;
+    // Declared-capability shrinkage inside a set is never silent on the PUT
+    // path either; load_file warns the same way at startup.
+    for (name, effective) in kallip_runtime::profile::shadowed_set_notices(&config.sets) {
+        warn!(
+            set = %name,
+            effective = %effective,
+            "profile set has members declaring beyond the effective intersection; the intersection governs"
+        );
+    }
 
     persist_config(&config);
 
@@ -120,6 +131,11 @@ struct ProfileWire {
     max_context_window: usize,
     store: Option<bool>,
     effort: Option<ReasoningEffort>,
+    /// Absent on the wire = the text-only default (matching the runtime
+    /// model's TOML semantics), so older clients that omit the key keep
+    /// their declarations intact across a PUT.
+    #[serde(default = "kallip_runtime::profile::Profile::default_modalities")]
+    modalities: Vec<Modality>,
 }
 
 #[derive(Deserialize)]
@@ -219,6 +235,7 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                 max_context_window: p.max_context_window,
                 store: p.store,
                 effort: p.effort,
+                modalities: p.modalities,
             })
             .collect();
         let set = ProfileSet {
@@ -252,6 +269,7 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                 max_context_window: p.max_context_window,
                 store: p.store,
                 effort: p.effort,
+                modalities: p.modalities,
             })
             .collect(),
     };
@@ -276,6 +294,20 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                 p.id
             )));
         }
+    }
+    // Text-membership rule, same as the file boundary's validate(): a
+    // profile that cannot accept text is refused, so a PUT cannot persist
+    // a config the tagma could no longer start from (absent declarations
+    // default to [text] and never trip).
+    for set in sets.values() {
+        for p in &set.profiles {
+            kallip_runtime::profile::require_text_member("set", p)
+                .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+        }
+    }
+    for p in &parking {
+        kallip_runtime::profile::require_text_member("parking", p)
+            .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
     }
     Ok(ProfileConfig {
         sets,
@@ -905,6 +937,35 @@ mod tests {
             "got: {err}"
         );
     }
+    #[test]
+    fn merge_wire_rejects_set_profile_without_text() {
+        let w: ProfileConfigWire = serde_json::from_value(serde_json::json!({
+            "endpoints": { "main": { "id": "main", "family": "deepseek", "api_key": null, "base_url": null } },
+            "sets": [
+                { "name": "a", "profiles": [ { "id": "p", "endpoint": "main", "model": "m", "max_context_window": 8, "modalities": ["image"] } ] }
+            ],
+            "default": "a"
+        }))
+        .unwrap();
+        let err = merge_wire(&live_config(), w).unwrap_err();
+        assert!(err.to_string().contains("must accept text"), "got: {err}");
+    }
+    #[test]
+    fn merge_wire_rejects_parking_profile_without_text() {
+        let w: ProfileConfigWire = serde_json::from_value(serde_json::json!({
+            "endpoints": { "main": { "id": "main", "family": "deepseek", "api_key": null, "base_url": null } },
+            "sets": [
+                { "name": "a", "profiles": [ { "id": "ok", "endpoint": "main", "model": "m", "max_context_window": 8 } ] }
+            ],
+            "parking": [
+                { "id": "pk", "endpoint": "main", "model": "m", "max_context_window": 8, "modalities": ["image"] }
+            ],
+            "default": "a"
+        }))
+        .unwrap();
+        let err = merge_wire(&live_config(), w).unwrap_err();
+        assert!(err.to_string().contains("must accept text"), "got: {err}");
+    }
 
     #[test]
     fn merge_wire_rejects_invalid_set_name() {
@@ -979,6 +1040,7 @@ mod tests {
             max_context_window: 8,
             store: None,
             effort: None,
+            modalities: Profile::default_modalities(),
         }]);
         let merged = merge_wire(&live_config(), w).unwrap();
         assert_eq!(merged.parking.len(), 1);
@@ -1030,6 +1092,7 @@ mod tests {
                 max_context_window: 64_000,
                 store: None,
                 effort: None,
+                modalities: Profile::default_modalities(),
             }],
         }
     }

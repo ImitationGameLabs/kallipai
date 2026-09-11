@@ -20,6 +20,7 @@ use kallip_common::policy::{ExecDecision, ExecOverride};
 use kallip_common::protocol::{ProfileSetUpdateRequest, SetDefaultRequest};
 use kallip_common::timefmt;
 use kallip_common::tokens::parse_token_amount;
+use kallip_runtime::profile::{ProfileConfig, ProfileSet};
 use uuid::Uuid;
 
 /// Read agent ID from KALLIP_ID env var.
@@ -38,6 +39,30 @@ fn read_text_stdin() -> Result<String> {
     let mut buf = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
     Ok(buf)
+}
+
+/// Render a set's effective modalities in canonical order ("text, image").
+/// Shared by `profile-set list` and the per-agent `status` deep view so both
+/// faces read the same fact.
+fn modality_list(
+    effective: std::collections::BTreeSet<kallip_common::protocol::Modality>,
+) -> String {
+    kallip_common::protocol::Modality::ALL
+        .iter()
+        .filter(|m| effective.contains(m))
+        .map(|m| m.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Display suffix for a set whose members declare beyond the effective
+/// intersection (shared by `profile-set list` and the `status` deep view).
+fn modality_shadow_suffix(set: &ProfileSet) -> &str {
+    if set.has_shadowed_members() {
+        " (intersection; some members declare more)"
+    } else {
+        ""
+    }
 }
 
 /// Map the stdin text to the optional initial spawn prompt: empty or
@@ -148,6 +173,30 @@ async fn main() -> Result<()> {
                             r.round,
                             r.delay_secs,
                         );
+                    }
+                }
+                // The bound set's effective modalities — the same fact the
+                // management UI and `profile-set list` show (the member
+                // intersection governs; shadowed members are flagged). A
+                // profiles-fetch or parse failure degrades the read view to
+                // the bare set name rather than failing the whole status.
+                if let Some(active) = &status.profile {
+                    let cfg = client
+                        .get_profiles()
+                        .await
+                        .ok()
+                        .and_then(|v| serde_json::from_value::<ProfileConfig>(v).ok());
+                    if let Some(set) = cfg.as_ref().and_then(|c| c.sets.get(&active.profile_set)) {
+                        let suffix = modality_shadow_suffix(set);
+                        println!();
+                        println!(
+                            "profile set: {} (modalities: {}){suffix}",
+                            active.profile_set,
+                            modality_list(set.effective_modalities())
+                        );
+                    } else {
+                        println!();
+                        println!("profile set: {}", active.profile_set);
                     }
                 }
             }
@@ -447,24 +496,25 @@ async fn main() -> Result<()> {
         },
         Commands::ProfileSet(cmd) => match cmd {
             ProfileSetCommand::List => {
-                let cfg = client.get_profiles().await?;
+                // Typed parse of the masked wire config: the modality
+                // presentation comes from the same effective_modalities()
+                // source the runtime and the management UI use.
+                let cfg: ProfileConfig = serde_json::from_value(client.get_profiles().await?)?;
                 let agents = client.list_agents(None).await?;
-                if let Some(default) = cfg.get("default").and_then(|v| v.as_str()) {
-                    println!("default set: {default}");
+                if !cfg.default.is_empty() {
+                    println!("default set: {}", cfg.default);
                 }
-                if let Some(sets) = cfg.get("sets").and_then(|v| v.as_object()) {
-                    for (name, set) in sets {
-                        let count = set
-                            .get("profiles")
-                            .and_then(|v| v.as_array())
-                            .map(|a| a.len())
-                            .unwrap_or(0);
-                        let users = agents
-                            .iter()
-                            .filter(|a| a.profile_set.as_deref() == Some(name.as_str()))
-                            .count();
-                        println!("{name}: {count} profile(s), {users} agent(s)");
-                    }
+                for (name, set) in &cfg.sets {
+                    let users = agents
+                        .iter()
+                        .filter(|a| a.profile_set.as_deref() == Some(name.as_str()))
+                        .count();
+                    let suffix = modality_shadow_suffix(set);
+                    println!(
+                        "{name}: {} profile(s), {users} agent(s), modalities: {}{suffix}",
+                        set.profiles.len(),
+                        modality_list(set.effective_modalities())
+                    );
                 }
             }
             ProfileSetCommand::Bind { id, set } => {

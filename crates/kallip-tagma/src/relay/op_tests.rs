@@ -689,6 +689,7 @@ async fn send_message_attachment_persists_and_replays() {
         record_id: uuid::Uuid::nil(),
         name: "report.pdf".into(),
         size: 1234,
+        modality: None,
     };
     handle
         .handle_user_op(user_envelope(

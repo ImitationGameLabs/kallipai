@@ -64,6 +64,8 @@
   "manage_profiles_set_actions_aria": "配置集操作",
   "manage_profiles_set_as_default": "设为默认",
   "manage_profiles_set_default_badge": "默认",
+  "manage_profiles_set_modalities_label": "模态",
+  "manage_profiles_set_modalities_shadowed": "部分成员声明的模态超出集合可用范围；请求按交集执行。",
   "manage_profiles_dangling_desc": "保存将使 $count 个 agent 的配置集引用悬空：\n$list\n\n仍要保存请确认；取消则继续编辑。",
   "manage_profiles_dangling_title": "保存存在悬空引用？",
   "manage_profiles_remove_set_confirm_title": "移除配置集",

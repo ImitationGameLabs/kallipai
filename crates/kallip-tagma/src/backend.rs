@@ -213,6 +213,7 @@ pub(crate) fn unconfigured_set() -> kallip_runtime::profile::ProfileSet {
         // The sentinel carries no behavior config: both fields stay unset.
         store: None,
         effort: None,
+        modalities: kallip_runtime::profile::Profile::default_modalities(),
     };
     kallip_runtime::profile::ProfileSet {
         name: UNCONFIGURED.into(),
@@ -349,6 +350,7 @@ mod tests {
                         max_context_window: 500_000,
                         store: None,
                         effort: None,
+                        modalities: Profile::default_modalities(),
                     }],
                 },
             )]),
@@ -385,6 +387,7 @@ mod tests {
             max_context_window: 500_000,
             store: None,
             effort: None,
+            modalities: Profile::default_modalities(),
         });
 
         let source = build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT).unwrap();
@@ -470,6 +473,7 @@ mod tests {
                         max_context_window: 128_000,
                         store: None,
                         effort: None,
+                        modalities: Profile::default_modalities(),
                     }],
                 },
             )]),

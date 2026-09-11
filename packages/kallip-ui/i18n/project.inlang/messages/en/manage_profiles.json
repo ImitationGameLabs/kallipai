@@ -64,6 +64,8 @@
   "manage_profiles_set_actions_aria": "Set actions",
   "manage_profiles_set_as_default": "Set as default",
   "manage_profiles_set_default_badge": "default",
+  "manage_profiles_set_modalities_label": "modalities",
+  "manage_profiles_set_modalities_shadowed": "Some members declare more modalities than the set supports; requests use the intersection.",
   "manage_profiles_dangling_desc": "Saving will leave $count agent binding(s) pointing at a removed set:\n$list\n\nSave anyway, or cancel to keep editing.",
   "manage_profiles_dangling_title": "Save with dangling references?",
   "manage_profiles_remove_set_confirm_title": "Remove set",

@@ -375,6 +375,39 @@ pub struct AgentStatusResponse {
     pub profile: Option<ActiveProfile>,
 }
 
+/// The input modality a model profile accepts or a file attachment carries.
+/// `image` is the only non-text modality implemented so far; `audio` and
+/// `video` are reserved for providers that accept them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Modality {
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
+impl Modality {
+    /// Canonical display order — human faces render in this order, not
+    /// sorted order.
+    pub const ALL: [Modality; 4] = [
+        Modality::Text,
+        Modality::Image,
+        Modality::Audio,
+        Modality::Video,
+    ];
+
+    /// The wire/JSON spelling (also used in diagnostics).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Modality::Text => "text",
+            Modality::Image => "image",
+            Modality::Audio => "audio",
+            Modality::Video => "video",
+        }
+    }
+}
+
 /// A file attached to a message: where it lives in the files service (the
 /// record the sender uploaded/delivered) plus the display facts a file card
 /// needs without a round trip. Wire shape `{record_id, name, size}`; the
@@ -385,6 +418,11 @@ pub struct FileAttachment {
     pub record_id: uuid::Uuid,
     pub name: String,
     pub size: u64,
+    /// Input modality the attachment carries, when declared. Absent from the
+    /// historical wire shape; serde default + skip keep bodies without one
+    /// byte-identical (older servers/clients ignore the unknown field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modality: Option<Modality>,
 }
 
 /// Request body for sending a message to an agent.
@@ -434,6 +472,16 @@ pub struct AgentPermissionsResponse {
 #[cfg(test)]
 mod tests {
     use super::CreateAgentRequest;
+
+    #[test]
+    fn modality_as_str_matches_serde_spelling() {
+        for m in super::Modality::ALL {
+            assert_eq!(
+                serde_json::to_string(&m).unwrap(),
+                format!("\"{}\"", m.as_str())
+            );
+        }
+    }
 
     #[test]
     fn rejects_request_without_workspace_root() {

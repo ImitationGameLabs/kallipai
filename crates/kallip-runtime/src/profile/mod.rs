@@ -10,7 +10,10 @@ pub mod config;
 pub mod model;
 pub mod registry;
 
-pub use config::{ProfileConfig, config_path, is_valid_set_name, load, normalize_default, save};
+pub use config::{
+    ProfileConfig, config_path, is_valid_set_name, load, normalize_default, require_text_member,
+    save, shadowed_set_notices,
+};
 pub use just_llm_client::GenerationClient;
 pub use model::{Profile, ProfileSet, Provider};
 pub use registry::{BackendSource, DanglingSet, NO_PROFILE_HINT, ProfileRegistry};
