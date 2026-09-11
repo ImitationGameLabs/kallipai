@@ -246,7 +246,7 @@ const NSS_BUF_FLOOR: usize = 1024;
 /// the server's blocking pool cannot tear one launch's copy while
 /// another rewrites shared static state — the hazard the non-`_r`
 /// calls carry.
-fn passwd_by_name(name: &str) -> Option<ResolvedUser> {
+pub(crate) fn passwd_by_name(name: &str) -> Option<ResolvedUser> {
     let name_c = CString::new(name).ok()?;
     let mut buf = vec![0u8; nss_buf_len()];
     loop {

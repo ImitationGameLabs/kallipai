@@ -17,6 +17,7 @@ mod bins;
 mod log;
 mod reconcile;
 mod records;
+mod remove;
 mod scan;
 mod server;
 mod spawn;

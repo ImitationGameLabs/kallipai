@@ -251,6 +251,24 @@ impl Daemon {
                     }
                 }
             }
+            RequestBody::Remove { slug } => {
+                let slug_out = slug.clone();
+                match tokio::task::spawn_blocking({
+                    let record_root = self.record_root.clone();
+                    move || crate::remove::remove(&record_root, &slug, peer_uid)
+                })
+                .await
+                {
+                    Ok(Ok(())) => ok(OkPayload::Remove { slug: slug_out }),
+                    Ok(Err(error)) => {
+                        let code = kallip_daemon_common::wire::ErrorCode::from(&error);
+                        err(code, error.to_string())
+                    }
+                    Err(join_error) => {
+                        err(ErrorCode::Internal, format!("remove task: {join_error}"))
+                    }
+                }
+            }
             RequestBody::Log {
                 slug,
                 lines,

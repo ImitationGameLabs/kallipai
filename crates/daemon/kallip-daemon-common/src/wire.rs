@@ -95,6 +95,11 @@ pub enum RequestBody {
         #[serde(default)]
         accept_local_only: bool,
     },
+    /// Deregister an instance: the record goes away, the process
+    /// does not — a running instance keeps running unmanaged, so
+    /// stop it first when the goal is a stopped instance.
+    /// Idempotent: a slug with no record removes as a no-op.
+    Remove { slug: String },
     /// Tail an instance's log files — a read-only diagnostic: no
     /// state change, works on stopped instances too. `lines` is the
     /// request intent (the daemon clamps and may return fewer to
@@ -165,6 +170,9 @@ pub enum OkPayload {
         next_cursor: Option<LogCursor>,
     },
     Stop {
+        slug: String,
+    },
+    Remove {
         slug: String,
     },
     List {

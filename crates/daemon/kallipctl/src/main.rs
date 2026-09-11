@@ -58,6 +58,10 @@ enum Command {
     },
     /// Terminate an instance (TERM, grace, KILL).
     Stop { slug: String },
+    /// Deregister an instance without touching its process: a
+    /// running instance keeps running unmanaged — stop it first if
+    /// you want it terminated. Idempotent.
+    Remove { slug: String },
     /// Relaunch a stopped or dead instance under its recorded workspace
     /// and env.
     Start {
@@ -171,6 +175,7 @@ async fn main() -> Result<()> {
             user,
         },
         Command::Stop { slug } => RequestBody::Stop { slug },
+        Command::Remove { slug } => RequestBody::Remove { slug },
         Command::Start { slug, env } => RequestBody::Start {
             slug,
             env,
@@ -314,6 +319,9 @@ fn print(response: Response, started: bool) -> Result<()> {
                 }
                 OkPayload::Stop { slug } => {
                     println!("stopped {slug}");
+                }
+                OkPayload::Remove { slug } => {
+                    println!("removed {slug}");
                 }
                 OkPayload::List { instances } => {
                     if instances.is_empty() {

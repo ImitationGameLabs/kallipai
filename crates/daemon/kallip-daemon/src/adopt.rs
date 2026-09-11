@@ -125,10 +125,21 @@ pub fn adopt(
             target_uid,
         });
     }
-    // Early occupancy probe: the common sequential-reuse case fails
-    // here. Advisory only — the exclusive publication in create_record
-    // below is the authority, exactly as in spawn.
-    if records::read_record(record_root, slug).is_some() {
+    // Re-registration reads its subject up front: a record owned by
+    // someone else is not this peer's to replace, and the answer is
+    // the same SlugTaken a fresh spawn would say (nothing new leaks —
+    // spawn's own probe tells an authorized peer as much). The true
+    // cause stays in the log.
+    let existing = records::read_record(record_root, slug);
+    if let Some(previous) = &existing
+        && !authorized(owner_uid, previous.owner_uid)
+    {
+        tracing::warn!(
+            slug = %slug,
+            peer_uid = owner_uid,
+            record_owner = previous.owner_uid,
+            "adopt upsert denied: the record belongs to another owner"
+        );
         return Err(SpawnError::SlugTaken(slug.to_string()));
     }
 
@@ -145,12 +156,15 @@ pub fn adopt(
         .canonicalize()
         .unwrap_or_else(|_| data_root.clone());
     let registered = scan::scan_instances(record_root);
-    check_overlaps(
-        &workspace_canon,
-        &data_dir_canon,
-        &data_root_canon,
-        &registered,
-    )?;
+
+    // A re-adopt replaces its own record, so the slug is not its own
+    // overlap rival; everyone else's registrations still are.
+    let others: Vec<ScannedInstance> = registered
+        .iter()
+        .filter(|instance| instance.slug != slug)
+        .cloned()
+        .collect();
+    check_overlaps(&workspace_canon, &data_dir_canon, &data_root_canon, &others)?;
 
     // Env: allowlist, daemon-owned keys, addr shape — the same
     // validation spawn applies, verbatim.
@@ -186,13 +200,13 @@ pub fn adopt(
     if let Some(pid) = live_pid {
         // Split-brain guard: a registered record already anchoring this
         // live pid means this data dir (or a copy of it) was adopted
-        // once under another slug. Two records sharing one anchor could
+        // once under another slug (the slug's own record is the one a
+        // re-adopt replaces, so it is not its own rival). Two records
         // each pass stop's verification and kill the other's process;
         // refuse the second adoption instead.
-        if registered
-            .iter()
-            .any(|instance| instance.anchored.as_ref().is_some_and(|a| a.pid == pid))
-        {
+        if registered.iter().any(|instance| {
+            instance.slug != slug && instance.anchored.as_ref().is_some_and(|a| a.pid == pid)
+        }) {
             return Err(SpawnError::Invalid(format!(
                 "live pid {pid} is already anchored by a registered instance; a data-dir copy must not be adopted twice"
             )));
@@ -229,8 +243,17 @@ pub fn adopt(
     }
 
     // --- register -----------------------------------------------------------
+    // Upsert: a fresh slug publishes exclusively (create_record's
+    // hard-link gate elects one winner among racers); a re-adopt
+    // overwrites atomically (write_record's rename). The replaced
+    // record keeps its instance_id — the same data tree under the
+    // same slug is the same instance (the id follows the slug, not
+    // the tree), and observers joining on the id keep their key.
     let record = InstanceRecord {
-        instance_id: uuid::Uuid::new_v4().to_string(),
+        instance_id: existing
+            .as_ref()
+            .map(|previous| previous.instance_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         owner_uid,
         target_uid,
         target_username: identity.username(),
@@ -239,10 +262,14 @@ pub fn adopt(
         identity: anchor,
         data_dir: data_dir_canon,
     };
-    // Authoritative collision gate (spawn's semantics): the hardlink
-    // publication is exclusive, so concurrent adopts of one slug
-    // produce exactly one winner.
-    records::create_record(record_root, slug, &record).map_err(|e| match e.kind() {
+    let published = match &existing {
+        Some(_) => records::write_record(record_root, slug, &record),
+        None => records::create_record(record_root, slug, &record),
+    };
+    published.map_err(|e| match e.kind() {
+        // A racer published the slug after the read above; its
+        // ownership is unchecked, so this adopt loses exactly as a
+        // spawn would and the retry upserts.
         std::io::ErrorKind::AlreadyExists => SpawnError::SlugTaken(slug.to_string()),
         _ => anyhow::anyhow!("registering instance record: {e}").into(),
     })?;
@@ -492,14 +519,60 @@ mod tests {
         );
     }
 
+    /// Upsert is the owner's or root's act: a record owned by
+    /// another peer refuses with the same SlugTaken a fresh spawn
+    /// would say, and the record survives untouched. The caller
+    /// reaches the check as a real non-root uid via --user nobody
+    /// (skipped on hosts without that passwd entry).
     #[test]
-    fn adopt_rejects_a_taken_slug() {
+    fn adopt_refuses_to_replace_a_record_owned_by_another_peer() {
+        let root = tempdir();
+
+        let Some(nobody) = crate::spawn::passwd_by_name("nobody") else {
+            return; // no `nobody` on this host: skip
+        };
+        let ws = tempdir();
+
+        let dd = mk_stopped_data_dir(root.path(), "dd");
+        let mut seeded = mk_record(&dd);
+        seeded.owner_uid = 65535;
+        records::create_record(root.path(), "taken", &seeded).expect("seed record");
+        let error = adopt(
+            root.path(),
+            "taken",
+            ws.path().to_str().expect("utf8 workspace"),
+            dd.to_str().expect("utf8 data dir"),
+            &[],
+            nobody.uid,
+            Some("nobody"),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(error, SpawnError::SlugTaken(_)), "{error}");
+        let kept = records::read_record(root.path(), "taken").expect("record");
+        assert_eq!(kept.instance_id, seeded.instance_id);
+    }
+
+    /// The upsert flow: a same-owner re-adopt succeeds, the
+    /// instance_id carries over (the same data tree stays the same
+    /// instance), and the record's mutable fields take the new
+    /// request's values.
+    #[test]
+    fn adopt_upserts_a_same_slug_registration_and_keeps_the_instance_id() {
         let root = tempdir();
         let ws = tempdir();
         let dd = mk_stopped_data_dir(root.path(), "dd");
-        records::create_record(root.path(), "taken", &mk_record(&dd)).expect("seed record");
-        let error = adopt_at(root.path(), "taken", ws.path(), &dd, &[]).unwrap_err();
-        assert!(matches!(error, SpawnError::SlugTaken(_)));
+        let mut seeded = mk_record(&dd);
+        seeded.workspace = None;
+        records::create_record(root.path(), "team-a", &seeded).expect("seed record");
+        let state = adopt_at(root.path(), "team-a", ws.path(), &dd, &[]).expect("upsert");
+        assert_eq!(state, InstanceState::Stopped);
+        let record = records::read_record(root.path(), "team-a").expect("record");
+        assert_eq!(record.instance_id, seeded.instance_id);
+        assert_eq!(
+            record.workspace.as_deref(),
+            Some(ws.path().to_str().expect("utf8 workspace"))
+        );
     }
 
     #[test]
