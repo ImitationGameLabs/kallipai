@@ -127,6 +127,20 @@ in
         '';
       };
 
+      delegates = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        description = ''
+          System accounts allowed to act on behalf of other declared
+          users across the instance-management verbs (delegated
+          administration). The daemon resolves each name through
+          passwd at startup and refuses to start on an unknown name,
+          root, or its own account. Empty by default: no delegation.
+          Enabling the polis platform services adds the
+          kallip-instances service account automatically.
+        '';
+      };
+
       group = lib.mkOption {
         type = lib.types.str;
         default = "kallipai-polis";
@@ -648,6 +662,12 @@ in
           # admits only actual socket consumers. The tagma users keep the
           # nix gate (which the platform gate group carries) untouched.
           KALLIP_DAEMON_SOCKET_GROUP = "kallipai-daemon";
+          # Delegated administration: the polis gate contributes the
+          # instances proxy's own account; the daemon refuses an
+          # unresolvable name, so option and service drift is loud.
+          KALLIP_DAEMON_DELEGATES = lib.concatStringsSep "," (
+            lib.unique (cfg.delegates ++ lib.optional cfg.polis.enable "kallip-instances")
+          );
           # NixOS has no /bin/bash; the login-environment harvest needs a
           # fixed administrative bash, never the caller's shell.
           KALLIP_HARVEST_BASH = "${pkgs.bash}/bin/bash";
