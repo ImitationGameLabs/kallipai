@@ -71,6 +71,12 @@ in
         XDG_STATE_HOME = "/var/lib";
         KALLIP_WORKSPACE_ROOT = "/workspace";
         KALLIP_TAGMA_ADDR = "0.0.0.0:3000";
+        # A rootful container has no uid mapping, so the tagma would run as the
+        # host's real root -- which the real-root boot guard refuses by default
+        # (docs/reference/env.md). This flag is the explicit, documented escape:
+        # instances inherit the container's root. Rootless or userns-remap
+        # deployments remain the preferred shapes.
+        KALLIP_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT = "1";
         RUST_LOG = "info";
         # KALLIP_AUTH_TOKEN (operator token), KALLIP_TAGMA_RELAY_ENROLLMENT_CODE
         # (first run only), KALLIP_TAGMA_RELAY_ARCHEION_URL (enroll-only), and

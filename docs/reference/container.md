@@ -304,6 +304,11 @@ variable travels through the request env pairs (`kallipctl --env`),
 not the daemon's own environment: the daemon forwards only what a
 request carries (see the Local daemon section in [env.md](env.md)).
 
+The grant lives on the compose `service.environment` line, not in
+`.env`: the tagma services also load `.env` (via `env_file`), but an
+explicit `service.environment` entry wins -- so the consent is
+granted and revoked by editing the compose file, never the env file.
+
 ## Volumes and workspaces
 
 In dev and the prod-tagma composition, tagma data and the agent workspace are
