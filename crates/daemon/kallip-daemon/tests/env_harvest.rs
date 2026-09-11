@@ -144,6 +144,25 @@ fn boot_env(extra: &[&str]) -> Vec<String> {
     env
 }
 
+// The daemon's own passwd name, passed explicitly: an *inferred*
+// in-place identity is refused for a root daemon, and these tests
+// exercise harvest mechanics on any host. None (the old default)
+// still works for a non-root daemon, whose inference is allowed.
+fn daemon_user() -> Option<String> {
+    let passwd = unsafe { libc::getpwuid(libc::geteuid()) };
+    if passwd.is_null() {
+        return None;
+    }
+    let name = unsafe { (*passwd).pw_name };
+    if name.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
 fn exchange(
     client: &DaemonClient,
     request: RequestBody,
@@ -170,7 +189,7 @@ fn spawn_instance(client: &DaemonClient, workspace: &Path, extra: &[&str]) -> u3
             workspace: workspace.display().to_string(),
             env: boot_env(extra),
             exe: None,
-            user: None,
+            user: daemon_user(),
         },
     )) else {
         panic!("expected spawn payload");

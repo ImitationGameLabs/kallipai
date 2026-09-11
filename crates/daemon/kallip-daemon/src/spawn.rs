@@ -125,6 +125,10 @@ pub(crate) fn resolve_launch_identity(
     match request_user {
         None => {
             if peer_uid == daemon_uid {
+                // An inferred self-launch under a root daemon would run the
+                // instance as the host's real root — refuse and ask for an
+                // explicit identity instead.
+                ensure_not_root_inplace(daemon_uid)?;
                 return Ok(LaunchIdentity::InPlace {
                     uid: peer_uid,
                     username: cached_passwd_identity()
@@ -158,6 +162,25 @@ pub(crate) fn resolve_launch_identity(
             }
         }
     }
+}
+
+/// The inferred in-place form under a root daemon would launch the
+/// instance as the host's real root — exactly what tagma's own startup
+/// guard refuses. Explicit `--user` selections skip this check: an
+/// operator who names a user has made the decision the inference must
+/// not make for them, and tagma enforces the real-root rule at its own
+/// boot. Record replays skip it too: a stored identity is the explicit
+/// decision of the adopt that wrote it.
+pub(crate) fn ensure_not_root_inplace(daemon_uid: u32) -> Result<(), SpawnError> {
+    if daemon_uid == 0 {
+        return Err(SpawnError::Invalid(
+            "the daemon runs as root and no --user was given: an inferred in-place \
+             launch would run the instance as the host's real root — pass --user \
+             <dedicated user> to name an unprivileged launch identity"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Re-resolve a record's target identity for a relaunch. The record's
@@ -1709,6 +1732,13 @@ mod tests {
     #[test]
     fn resolve_defaults_to_the_peer_and_collapses_to_in_place() {
         let peer = unsafe { libc::geteuid() };
+        // A root daemon refuses the inferred self-form (the guard fires
+        // below); the collapse stays observable on non-root dev hosts.
+        if peer == 0 {
+            let error = resolve_launch_identity(None, peer).unwrap_err();
+            assert!(error.to_string().contains("--user"), "{error}");
+            return;
+        }
         let identity = resolve_launch_identity(None, peer).expect("resolves");
         assert_eq!(
             identity,
@@ -1907,6 +1937,11 @@ mod tests {
             data_dir: data.path().to_path_buf(),
         };
         records::write_record(root.path(), "taken", &record).expect("write record");
+        // An explicit user skips the root-daemon inference guard — this
+        // test's subject is the collision verdict, not the identity.
+        let user = cached_passwd_identity()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .expect("test host has a passwd entry");
         let error = spawn(
             root.path(),
             "taken",
@@ -1915,7 +1950,7 @@ mod tests {
             None,
             Duration::from_secs(1),
             unsafe { libc::getuid() },
-            None,
+            Some(&user),
         )
         .unwrap_err();
         assert!(matches!(error, SpawnError::SlugTaken(_)), "{error}");
@@ -2250,6 +2285,36 @@ mod tests {
         let error = validate_user_env(&["KALLIP_TAGMA_ADDR=not-an-addr".into()])
             .expect_err("a bad addr shape dies at request time");
         assert!(error.to_string().contains("SocketAddr"), "{error}");
+    }
+
+    #[test]
+    fn ensure_not_root_inplace_refuses_only_uid_zero() {
+        assert!(ensure_not_root_inplace(0).is_err());
+        assert!(ensure_not_root_inplace(1).is_ok());
+        assert!(ensure_not_root_inplace(1000).is_ok());
+        assert!(ensure_not_root_inplace(65535).is_ok());
+        let error = ensure_not_root_inplace(0).unwrap_err();
+        assert!(error.to_string().contains("--user"), "{error}");
+    }
+
+    #[test]
+    fn the_tagma_real_root_escape_rides_the_request_env_pairs() {
+        // The escape hatch is a plain KALLIP_* key: it must survive the
+        // request-env allowlist and land in the composed child env — a
+        // rootful container sets it via kallipctl --env, and a pair
+        // dropped here would quietly disarm tagma's own unlock.
+        let pair = "KALLIP_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT=1";
+        validate_user_env(&[pair.to_string()]).expect("KALLIP_* allowlist");
+        let env = compose_launch_env(
+            &[],
+            &[pair.to_string()],
+            "team-a",
+            Path::new("/ws"),
+            Path::new("/dd"),
+            None,
+            None,
+        );
+        assert!(env.iter().any(|entry| entry == pair), "{env:?}");
     }
 
     // --- fill_relay_defaults --------------------------------------------

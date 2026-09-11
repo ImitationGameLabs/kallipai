@@ -11,8 +11,9 @@ use crate::records::{self, InstanceRecord};
 use crate::scan::{self, ScannedInstance};
 use crate::spawn::{
     LaunchIdentity, OwnerInference, SpawnError, authorized, cached_passwd_identity,
-    infer_owner_decision, instance_data_dir, now_unix, overlaps, passwd_by_uid, path_owner_uid,
-    require_root_for_drop, resolve_launch_identity, validate_user_env,
+    ensure_not_root_inplace, infer_owner_decision, instance_data_dir, now_unix, overlaps,
+    passwd_by_uid, path_owner_uid, require_root_for_drop, resolve_launch_identity,
+    validate_user_env,
 };
 use anyhow::Context as _;
 use kallip_daemon_common::wire::{InstanceState, valid_slug};
@@ -102,11 +103,18 @@ pub fn adopt(
                         "workspace is owned by uid {workspace_owner} but the data dir by uid {data_dir_owner}; pass --user explicitly to pick the launch identity"
                     )));
                 }
-                OwnerInference::InPlace => LaunchIdentity::InPlace {
-                    uid: daemon_uid,
-                    username: cached_passwd_identity()
-                        .map(|(name, _)| name.to_string_lossy().into_owned()),
-                },
+                OwnerInference::InPlace => {
+                    // Same rule as spawn's self-form: an inferred in-place
+                    // launch under a root daemon is a real-root instance.
+                    // An explicit --user skips this — tagma's boot guard
+                    // owns that case.
+                    ensure_not_root_inplace(daemon_uid)?;
+                    LaunchIdentity::InPlace {
+                        uid: daemon_uid,
+                        username: cached_passwd_identity()
+                            .map(|(name, _)| name.to_string_lossy().into_owned()),
+                    }
+                }
                 OwnerInference::DropTo(uid) => {
                     require_root_for_drop()?;
                     LaunchIdentity::DropTo(passwd_by_uid(uid).ok_or_else(|| {
@@ -433,6 +441,15 @@ mod tests {
         unsafe { libc::geteuid() }
     }
 
+    fn daemon_user() -> String {
+        // The explicit self user: the guard refuses an *inferred*
+        // in-place identity for a root daemon, so the mechanics tests
+        // name the user explicitly (works on any host, root or not).
+        cached_passwd_identity()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .expect("test host has a passwd entry")
+    }
+
     fn adopt_at(
         root: &Path,
         slug: &str,
@@ -447,7 +464,7 @@ mod tests {
             data_dir.to_str().expect("utf8 data dir"),
             env,
             peer(),
-            None,
+            Some(&daemon_user()),
             false,
         )
     }
@@ -962,13 +979,40 @@ mod tests {
             dd.to_str().unwrap(),
             &[],
             peer(),
-            None,
+            Some(&daemon_user()),
             true,
         )
         .expect("the flag carries the choice");
         assert_eq!(state, InstanceState::Stopped);
     }
 
+    #[test]
+    fn a_root_daemon_refuses_an_inferred_in_place_adopt() {
+        // Live on this host (root sandbox): self-owned dirs and no
+        // --user would launch the instance as the daemon's real-root
+        // identity; non-root hosts keep the in-place default.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let root = tempdir();
+        let ws = tempdir();
+        let dd = mk_stopped_data_dir(root.path(), "dd");
+        let error = adopt(
+            root.path(),
+            "team-a",
+            ws.path().to_str().unwrap(),
+            dd.to_str().unwrap(),
+            &[],
+            peer(),
+            None,
+            false,
+        )
+        .unwrap_err();
+        let SpawnError::Invalid(message) = error else {
+            panic!("expected Invalid, got {error}")
+        };
+        assert!(message.contains("--user"), "{message}");
+    }
     #[test]
     fn a_relays_toml_neutralizes_the_probe() {
         let root = tempdir();
