@@ -14,6 +14,7 @@
 
 mod adopt;
 mod bins;
+mod delegates;
 mod log;
 mod reconcile;
 mod records;
@@ -31,6 +32,12 @@ fn main() -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    // Delegation grants fail at startup, not at first use: a list that
+    // cannot be honored (unknown name, root, the daemon itself) means
+    // this binary must not serve.
+    delegates::init_from_env()
+        .map_err(|e| anyhow::anyhow!("parse KALLIP_DAEMON_DELEGATES: {e}"))?;
 
     let record_root = records::record_root()?;
     // The record area is the only tree this daemon owns. It is created

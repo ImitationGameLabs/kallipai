@@ -114,6 +114,15 @@ pub fn adopt(
     // the data dir's owner — the daemon's own user collapses to the
     // in-place form, anything else drops to that owner (root-only,
     // like every drop-to).
+    // A delegate peer must name its target here too: the inference
+    // would hand the adopted instance to the delegate's own service
+    // account, and delegates own nothing.
+    if request_user.is_none()
+        && let Some(err) =
+            crate::spawn::delegate_keyless_rejection(crate::delegates::current(), owner_uid)
+    {
+        return Err(err);
+    }
     let identity = match request_user {
         Some(_) => resolve_launch_identity(request_user, owner_uid)?,
         None => {

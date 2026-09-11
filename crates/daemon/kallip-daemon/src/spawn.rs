@@ -60,13 +60,77 @@ const RESERVED_KEYS: [&str; 3] = [
 ];
 
 /// The launch authorization (platform-hosting access rule): an
-/// instance may run as the requesting peer itself, or as any declared
+/// instance may run as the requesting peer itself, as any declared
 /// user when the peer is root (the admin exemption behind
-/// `sudo kallipctl`). Called before any state change — in particular
+/// `sudo kallipctl`), or — for peers on the delegates list — as any
+/// declared user (the delegated-administration grant fed by the
+/// deployment). Called before any state change — in particular
 /// before the slug collision probe — so a denied peer cannot probe
 /// slug existence through error deltas.
+pub(crate) fn authorized_with(
+    delegates: &std::collections::HashSet<u32>,
+    peer_uid: u32,
+    target_uid: u32,
+) -> bool {
+    peer_uid == target_uid || peer_uid == 0 || delegates.contains(&peer_uid)
+}
+
+/// The process-wide view: the grant parsed at startup (empty unless
+/// the deployment configured one).
 pub(crate) fn authorized(peer_uid: u32, target_uid: u32) -> bool {
-    peer_uid == target_uid || peer_uid == 0
+    authorized_with(crate::delegates::current(), peer_uid, target_uid)
+}
+
+/// The keyless form is always a refusal for a delegate peer: it would
+/// silently claim the instance for the delegate's own service
+/// account, which owns nothing. Pure so each verb (and each test)
+/// drives the same check.
+pub(crate) fn delegate_keyless_rejection(
+    delegates: &std::collections::HashSet<u32>,
+    peer_uid: u32,
+) -> Option<SpawnError> {
+    if delegates.contains(&peer_uid) {
+        Some(SpawnError::Invalid(format!(
+            "peer uid {peer_uid} is a delegate: name the launch user explicitly"
+        )))
+    } else {
+        None
+    }
+}
+
+/// The targets a delegate peer may not name: root (tagma's own boot
+/// guard would be the only backstop), the daemon's own account (an
+/// instance inside the daemon's identity holds the record area), and
+/// another delegate account (service accounts own nothing). Pure for
+/// the same reason; the refusal carries the alternative action.
+pub(crate) fn delegate_target_rejection(
+    delegates: &std::collections::HashSet<u32>,
+    peer_uid: u32,
+    target_uid: u32,
+    daemon_uid: u32,
+) -> Option<SpawnError> {
+    if !delegates.contains(&peer_uid) {
+        return None;
+    }
+    if target_uid == 0 {
+        return Some(SpawnError::Invalid(
+            "delegate peers may not launch instances as root; name a declared user instead"
+                .to_string(),
+        ));
+    }
+    if target_uid == daemon_uid {
+        return Some(SpawnError::Invalid(
+            "delegate peers may not launch instances as the daemon's own account; name a declared user instead"
+                .to_string(),
+        ));
+    }
+    if delegates.contains(&target_uid) {
+        return Some(SpawnError::Invalid(
+            "delegate peers may not target another delegate account; name a declared user instead"
+                .to_string(),
+        ));
+    }
+    None
 }
 
 /// The execution identity a launch resolves to. The two forms carry
@@ -135,6 +199,9 @@ pub(crate) fn resolve_launch_identity(
                         .map(|(name, _)| name.to_string_lossy().into_owned()),
                 });
             }
+            if let Some(err) = delegate_keyless_rejection(crate::delegates::current(), peer_uid) {
+                return Err(err);
+            }
             // Another user's self-form request: full resolution with
             // no name to go by — the uid must carry its own passwd
             // entry.
@@ -151,6 +218,16 @@ pub(crate) fn resolve_launch_identity(
             let user = passwd_by_name(name).ok_or_else(|| {
                 SpawnError::Invalid(format!("user {name:?} does not exist on this host"))
             })?;
+
+            // Delegate targets are validated, not inherited.
+            if let Some(err) = delegate_target_rejection(
+                crate::delegates::current(),
+                peer_uid,
+                user.uid,
+                daemon_uid,
+            ) {
+                return Err(err);
+            }
             if user.uid == daemon_uid {
                 Ok(LaunchIdentity::InPlace {
                     uid: user.uid,
@@ -1685,6 +1762,86 @@ mod tests {
         assert!(authorized(uid, uid), "the target user itself passes");
         assert!(authorized(0, uid), "root passes (the admin exemption)");
         assert!(!authorized(uid + 1, uid), "a foreign uid is denied");
+    }
+
+    /// The delegate grant, pure: a listed peer may act for a declared
+    /// user (any target outside the grant), a foreign peer naming
+    /// others is denied, the self and root arms stay untouched, and
+    /// an empty grant is the status quo. The full-stack path with a
+    /// real non-root delegate peer is not exercisable in this sandbox
+    /// (the test process is root, and root passes by the admin
+    /// exemption before delegates are consulted).
+    #[test]
+    fn delegate_grant_extends_the_authorization_matrix() {
+        use std::collections::HashSet as Set;
+        let delegates: Set<u32> = [61000u32, 61001].into_iter().collect();
+        let uid = 62000u32;
+        // A delegate peer may act for a declared user.
+        assert!(
+            authorized_with(&delegates, 61000, uid),
+            "delegate acts for a declared user"
+        );
+        // The grant is per-delegate, not universal.
+        assert!(
+            !authorized_with(&delegates, uid, 62001),
+            "a foreign uid is denied"
+        );
+        // Self and root arms are untouched by the grant.
+        assert!(
+            authorized_with(&delegates, 61000, 61000),
+            "self still passes"
+        );
+        assert!(authorized_with(&delegates, 0, uid), "root still passes");
+        // An empty grant is the status quo.
+        assert!(
+            !authorized_with(&Set::new(), 61000, uid),
+            "empty set denies"
+        );
+    }
+
+    /// Each delegate refusal is independently falsifiable: deleting
+    /// any single check turns exactly its assert red. Pure inputs
+    /// only — the in-process grant is empty in tests, so the arms
+    /// drive the set directly. The keyless arm covers both the spawn
+    /// resolver and the adopt inference, which share the check.
+    #[test]
+    fn delegate_refusal_arms_are_independently_falsifiable() {
+        use std::collections::HashSet as Set;
+        let delegates: Set<u32> = [61000u32].into_iter().collect();
+        let uid = 62000u32;
+
+        // Keyless form (spawn resolver + adopt inference).
+        let err = delegate_keyless_rejection(&delegates, 61000).unwrap();
+        assert!(
+            err.to_string().contains("name the launch user explicitly"),
+            "{err}"
+        );
+        assert!(
+            delegate_keyless_rejection(&delegates, uid).is_none(),
+            "non-delegates keep the keyless form"
+        );
+        assert!(
+            delegate_keyless_rejection(&Set::new(), 61000).is_none(),
+            "an empty grant keeps it too"
+        );
+
+        // Target arms: root, the daemon's own account, another delegate.
+        let err = delegate_target_rejection(&delegates, 61000, 0, uid).unwrap();
+        assert!(err.to_string().contains("as root"), "{err}");
+        let err = delegate_target_rejection(&delegates, 61000, uid, uid).unwrap();
+        assert!(err.to_string().contains("own account"), "{err}");
+        let err = delegate_target_rejection(&delegates, 61000, 61000, uid).unwrap();
+        assert!(err.to_string().contains("another delegate"), "{err}");
+        // A declared user outside the grant passes.
+        assert!(
+            delegate_target_rejection(&delegates, 61000, uid, 0).is_none(),
+            "a declared non-root target passes"
+        );
+        // Non-delegate peers skip the target checks entirely.
+        assert!(
+            delegate_target_rejection(&delegates, uid, 0, uid).is_none(),
+            "the checks are delegate-gated"
+        );
     }
 
     /// The full inference matrix, pure: divergence refuses, agreeing
