@@ -19,6 +19,27 @@ use anyhow::Context as _;
 use kallip_daemon_common::wire::{InstanceState, valid_slug};
 use std::path::{Path, PathBuf};
 
+/// The publish-time half of the upsert authorization. The gate above
+/// the register section decided against the snapshot read; by rename
+/// time a racer may have replaced the record. The fresh owner must
+/// satisfy the same rule — unchanged (nothing to re-decide), owned by
+/// this peer, or a root peer — or the adopt loses with the usual
+/// SlugTaken instead of overwriting a registration it never saw. A
+/// vanished record publishes as a fresh registration: nothing stands
+/// there to overwrite.
+fn publish_authorized(
+    previous_owner: u32,
+    current: Option<&InstanceRecord>,
+    peer_uid: u32,
+) -> bool {
+    match current {
+        Some(record) => {
+            record.owner_uid == previous_owner || authorized(peer_uid, record.owner_uid)
+        }
+        None => true,
+    }
+}
+
 /// Register an externally-born instance. `workspace` and `data_dir`
 /// are absolute paths to existing directories; `user_env` is the
 /// persistent env snapshot later starts replay (spawn's env semantics,
@@ -271,7 +292,21 @@ pub fn adopt(
         data_dir: data_dir_canon,
     };
     let published = match &existing {
-        Some(_) => records::write_record(record_root, slug, &record),
+        Some(previous) => {
+            // The snapshot gate above authorized against what the read
+            // saw; the rename would publish over what stands there now.
+            let current = records::read_record(record_root, slug);
+            if !publish_authorized(previous.owner_uid, current.as_ref(), owner_uid) {
+                tracing::warn!(
+                    slug = %slug,
+                    peer_uid = owner_uid,
+                    record_owner = current.as_ref().map(|r| r.owner_uid),
+                    "adopt upsert denied: the record changed hands mid-adopt"
+                );
+                return Err(SpawnError::SlugTaken(slug.to_string()));
+            }
+            records::write_record(record_root, slug, &record)
+        }
         None => records::create_record(record_root, slug, &record),
     };
     published.map_err(|e| match e.kind() {
@@ -1012,6 +1047,25 @@ mod tests {
             panic!("expected Invalid, got {error}")
         };
         assert!(message.contains("--user"), "{message}");
+    }
+
+    #[test]
+    fn publish_revalidation_only_redecides_a_changed_owner() {
+        // Explicit ids throughout: on this host the real euid is root,
+        // whose authorized() exemption would blank the denial arm.
+        let mut snapshot = mk_record(Path::new("/dd"));
+        snapshot.owner_uid = 1000;
+        let mut raced = mk_record(Path::new("/dd"));
+        raced.owner_uid = 2000;
+        // Unchanged owner: the snapshot decision stands.
+        assert!(publish_authorized(1000, Some(&snapshot), 1000));
+        // A racer's owner this peer may not touch: the adopt loses.
+        assert!(!publish_authorized(1000, Some(&raced), 1000));
+        // A root peer — and the fresh owner itself — still decide.
+        assert!(publish_authorized(1000, Some(&raced), 0));
+        assert!(publish_authorized(1000, Some(&raced), 2000));
+        // A vanished record publishes as a fresh registration.
+        assert!(publish_authorized(1000, None, 1000));
     }
     #[test]
     fn a_relays_toml_neutralizes_the_probe() {
