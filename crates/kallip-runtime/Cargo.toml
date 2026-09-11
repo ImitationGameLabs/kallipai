@@ -44,3 +44,4 @@ kallip-shell = { workspace = true, features = ["testutils"] }
 tempfile = { workspace = true }
 wiremock = { workspace = true }
 serial_test = { workspace = true }
+kallip-testkit = { workspace = true }

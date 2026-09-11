@@ -28,6 +28,7 @@ members = [
   "crates/platform/kallip-instances",
   "crates/platform/kallip-files",
   "crates/kallip-blob-store",
+  "crates/kallip-testkit",
 ]
 
 resolver = "3"
@@ -66,6 +67,7 @@ kallipctl = { path = "crates/daemon/kallipctl" }
 kallip-instances = { path = "crates/platform/kallip-instances" }
 kallip-blob-store = { path = "crates/kallip-blob-store" }
 kallip-files = { path = "crates/platform/kallip-files" }
+kallip-testkit = { path = "crates/kallip-testkit" }
 
 anyhow = "1.0.102"
 async-trait = "0.1.89"

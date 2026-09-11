@@ -25,6 +25,7 @@ reqwest = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 kallip-files = { workspace = true }
+kallip-testkit = { workspace = true }
 kallip-archeion-common = { workspace = true }
 axum = { workspace = true }
 sea-orm = { workspace = true }

@@ -256,41 +256,11 @@ fn normal_config(ws: &std::path::Path) -> AgentConfig {
     config
 }
 
-/// A guard under the managed /tmp/kallipai-dev root: the TempDir
-/// deletes the tree on drop, so nothing outlives the run (Deref/
-/// AsRef keep call sites reading as plain paths).
-struct DevDir(tempfile::TempDir);
-
-impl DevDir {
-    fn path(&self) -> &std::path::Path {
-        self.0.path()
-    }
-}
-
-impl std::ops::Deref for DevDir {
-    type Target = std::path::Path;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.path()
-    }
-}
-
-impl AsRef<std::path::Path> for DevDir {
-    fn as_ref(&self) -> &std::path::Path {
-        self.0.path()
-    }
-}
+use kallip_testkit::DevDir;
 
 /// Unique existing temp dir (acquire canonicalizes the path).
 fn ws_dir(label: &str) -> DevDir {
-    let root = std::env::temp_dir().join("kallipai-dev");
-    std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
-    DevDir(
-        tempfile::Builder::new()
-            .prefix(&format!("acquire-ws-test-{label}-"))
-            .tempdir_in(root)
-            .expect("create test tempdir"),
-    )
+    DevDir::new(&format!("acquire-ws-test-{label}"))
 }
 
 #[tokio::test]

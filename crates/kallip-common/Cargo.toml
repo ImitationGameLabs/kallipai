@@ -30,3 +30,4 @@ subtle = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+kallip-testkit = { workspace = true }

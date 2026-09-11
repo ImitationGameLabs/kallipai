@@ -673,33 +673,9 @@ mod tests {
         assert_eq!(scanned[1].port, None);
     }
 
-    /// A guard under the managed /tmp/kallipai-dev root: the TempDir
-    /// deletes the tree on drop, so nothing outlives the run (Deref/
-    /// AsRef keep call sites reading as plain paths).
-    struct DevDir(tempfile::TempDir);
-
-    impl std::ops::Deref for DevDir {
-        type Target = std::path::Path;
-
-        fn deref(&self) -> &Self::Target {
-            self.0.path()
-        }
-    }
-
-    impl AsRef<std::path::Path> for DevDir {
-        fn as_ref(&self) -> &std::path::Path {
-            self.0.path()
-        }
-    }
+    use kallip_testkit::DevDir;
 
     fn tempfile_dir(name: &str) -> DevDir {
-        let root = std::env::temp_dir().join("kallipai-dev");
-        std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
-        DevDir(
-            tempfile::Builder::new()
-                .prefix(&format!("scan-test-{name}-"))
-                .tempdir_in(root)
-                .expect("create test tempdir"),
-        )
+        DevDir::new(&format!("scan-test-{name}"))
     }
 }

@@ -1593,39 +1593,10 @@ async fn deactivate_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// A guard under the managed /tmp/kallipai-dev root: the TempDir
-    /// deletes the tree on drop, so nothing outlives the run.
-    struct DevDir(tempfile::TempDir);
-
-    impl DevDir {
-        fn path(&self) -> &std::path::Path {
-            self.0.path()
-        }
-    }
-
-    impl std::ops::Deref for DevDir {
-        type Target = std::path::Path;
-
-        fn deref(&self) -> &Self::Target {
-            self.0.path()
-        }
-    }
-
-    impl AsRef<std::path::Path> for DevDir {
-        fn as_ref(&self) -> &std::path::Path {
-            self.0.path()
-        }
-    }
+    use kallip_testkit::DevDir;
 
     fn dev_tempdir(label: &str) -> DevDir {
-        let root = std::env::temp_dir().join("kallipai-dev");
-        std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
-        DevDir(
-            tempfile::Builder::new()
-                .prefix(&format!("{label}-"))
-                .tempdir_in(root)
-                .expect("create test tempdir"),
-        )
+        DevDir::new(label)
     }
 
     fn live(role: &str) -> LiveEntry {

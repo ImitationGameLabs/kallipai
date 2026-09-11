@@ -11,4 +11,4 @@ serde_json = { workspace = true }
 dirs = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
+kallip-testkit = { workspace = true }

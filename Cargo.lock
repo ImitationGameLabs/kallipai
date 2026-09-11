@@ -2448,6 +2448,7 @@ dependencies = [
  "kallip-common",
  "kallip-files",
  "kallip-runtime",
+ "kallip-testkit",
  "reqwest",
  "sea-orm",
  "serde",
@@ -2585,6 +2586,7 @@ dependencies = [
  "base64 0.22.1",
  "futures-core",
  "getrandom 0.4.2",
+ "kallip-testkit",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2672,6 +2674,7 @@ dependencies = [
  "dirs",
  "kallip-daemon-client",
  "kallip-daemon-common",
+ "kallip-testkit",
  "libc",
  "serde",
  "serde_json",
@@ -2698,9 +2701,9 @@ name = "kallip-daemon-common"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "kallip-testkit",
  "serde",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -2880,6 +2883,7 @@ dependencies = [
  "just-llm-client",
  "kallip-common",
  "kallip-shell",
+ "kallip-testkit",
  "rable",
  "regex",
  "reqwest",
@@ -2907,6 +2911,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "just-llm-client",
+ "kallip-testkit",
  "libc",
  "libsandbox",
  "nix 0.31.3",
@@ -2951,6 +2956,7 @@ dependencies = [
  "kallip-runtime",
  "kallip-shell",
  "kallip-task",
+ "kallip-testkit",
  "libc",
  "reqwest",
  "sea-orm",
@@ -2986,6 +2992,7 @@ version = "0.1.0"
 dependencies = [
  "kallip-blob-store",
  "kallip-common",
+ "kallip-testkit",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -2996,6 +3003,13 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
+]
+
+[[package]]
+name = "kallip-testkit"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
