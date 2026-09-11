@@ -430,7 +430,7 @@ fn stored_credentials_in_any_entry(data_dir: &Path) -> bool {
 mod tests {
     use super::*;
     use std::process::{Child, Command};
-    use std::{fs, path::Path};
+    use std::{fs, io, path::Path, sync::OnceLock, time::Duration};
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
@@ -516,16 +516,142 @@ mod tests {
     /// The test host's sleep binary, probed by exec (the sandbox may
     /// hide binaries from stat but not from exec — the spawn tests'
     /// bash() precedent).
+    ///
+    /// Resolved once per process and cached: a transient exec failure
+    /// must not flip later tests from run to skip mid-session. A
+    /// missing candidate is told apart from a transient spawn failure:
+    /// `NotFound` abandons the candidate at once, any other spawn
+    /// error is retried before the candidate is given up on.
     fn sleep_exe() -> Option<&'static str> {
-        ["/bin/sleep", "/usr/bin/sleep"]
-            .into_iter()
-            .find(|candidate| {
-                Command::new(candidate)
-                    .arg("0")
-                    .stdin(std::process::Stdio::null())
-                    .status()
-                    .is_ok_and(|status| status.success())
-            })
+        static SLEEP: OnceLock<Option<&'static str>> = OnceLock::new();
+        *SLEEP.get_or_init(|| resolve_exec_candidate(SLEEP_CANDIDATES, probe_exec))
+    }
+
+    /// One exec probe attempt against one candidate binary.
+    #[derive(Debug, PartialEq, Eq)]
+    enum ProbeAttempt {
+        /// The candidate ran and exited cleanly.
+        Ran,
+        /// The candidate is unusable here (absent, or present but
+        /// broken) — retrying will not mend it.
+        Missing,
+        /// A transient spawn failure — worth retrying.
+        Transient,
+    }
+
+    const SLEEP_CANDIDATES: &[&str] = &["/bin/sleep", "/usr/bin/sleep"];
+
+    /// Total tries before a transiently failing candidate is abandoned.
+    const PROBE_ATTEMPTS: usize = 3;
+
+    /// Walk the candidates in order and return the first one that runs.
+    /// A missing candidate is skipped for good; a transient spawn
+    /// failure gets `PROBE_ATTEMPTS` tries before the candidate is
+    /// abandoned.
+    fn resolve_exec_candidate<'a>(
+        candidates: &[&'a str],
+        mut probe: impl FnMut(&str) -> ProbeAttempt,
+    ) -> Option<&'a str> {
+        for candidate in candidates {
+            for attempt in 1..=PROBE_ATTEMPTS {
+                match probe(candidate) {
+                    ProbeAttempt::Ran => return Some(candidate),
+                    ProbeAttempt::Missing => break,
+                    ProbeAttempt::Transient if attempt == PROBE_ATTEMPTS => break,
+                    ProbeAttempt::Transient => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// One real exec probe: existence is decided by running the
+    /// candidate with a zero-length sleep.
+    fn probe_exec(candidate: &str) -> ProbeAttempt {
+        match Command::new(candidate)
+            .arg("0")
+            .stdin(std::process::Stdio::null())
+            .status()
+        {
+            Ok(status) if status.success() => ProbeAttempt::Ran,
+            Ok(_) => ProbeAttempt::Missing,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => ProbeAttempt::Missing,
+            Err(_) => ProbeAttempt::Transient,
+        }
+    }
+
+    #[test]
+    fn resolve_takes_the_first_candidate_that_runs() {
+        let ran = resolve_exec_candidate(&["/first", "/second"], |c| {
+            assert_eq!(c, "/first");
+            ProbeAttempt::Ran
+        });
+        assert_eq!(ran, Some("/first"));
+    }
+
+    #[test]
+    fn resolve_moves_past_a_missing_candidate_without_retrying_it() {
+        let mut first_probes = 0;
+        let ran = resolve_exec_candidate(&["/first", "/second"], |c| match c {
+            "/first" => {
+                first_probes += 1;
+                ProbeAttempt::Missing
+            }
+            _ => ProbeAttempt::Ran,
+        });
+        assert_eq!(ran, Some("/second"));
+        assert_eq!(first_probes, 1, "a missing candidate must not be retried");
+    }
+
+    #[test]
+    fn resolve_exhausts_a_transient_candidate_then_takes_the_next() {
+        let mut first_probes = 0;
+        let ran = resolve_exec_candidate(&["/first", "/second"], |c| match c {
+            "/first" => {
+                first_probes += 1;
+                ProbeAttempt::Transient
+            }
+            _ => ProbeAttempt::Ran,
+        });
+        assert_eq!(ran, Some("/second"));
+        assert_eq!(
+            first_probes, PROBE_ATTEMPTS,
+            "a transient candidate gets exactly PROBE_ATTEMPTS tries"
+        );
+    }
+
+    #[test]
+    fn resolve_recovers_on_a_later_transient_try() {
+        let mut tries = 0;
+        let ran = resolve_exec_candidate(&["/only"], |_| {
+            tries += 1;
+            if tries < 2 {
+                ProbeAttempt::Transient
+            } else {
+                ProbeAttempt::Ran
+            }
+        });
+        assert_eq!(ran, Some("/only"));
+        assert_eq!(tries, 2);
+    }
+
+    #[test]
+    fn resolve_yields_none_when_every_candidate_is_missing() {
+        let mut probes = 0;
+        let ran = resolve_exec_candidate(&["/a", "/b"], |_| {
+            probes += 1;
+            ProbeAttempt::Missing
+        });
+        assert_eq!(ran, None);
+        assert_eq!(probes, 2);
+    }
+
+    #[test]
+    fn resolve_yields_none_when_transients_exhaust_everywhere() {
+        let ran = resolve_exec_candidate(&["/a", "/b"], |_| ProbeAttempt::Transient);
+        assert_eq!(ran, None);
     }
 
     /// A live process the scan's exe family check classifies as a
