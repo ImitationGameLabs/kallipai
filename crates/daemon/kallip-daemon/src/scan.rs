@@ -410,7 +410,6 @@ fn read_tagma_id(data_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn write(path: &Path, text: &str) {
         if let Some(parent) = path.parent() {
@@ -674,11 +673,33 @@ mod tests {
         assert_eq!(scanned[1].port, None);
     }
 
-    fn tempfile_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("kallip-scan-test-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tempdir");
-        dir
+    /// A guard under the managed /tmp/kallipai-dev root: the TempDir
+    /// deletes the tree on drop, so nothing outlives the run (Deref/
+    /// AsRef keep call sites reading as plain paths).
+    struct DevDir(tempfile::TempDir);
+
+    impl std::ops::Deref for DevDir {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<std::path::Path> for DevDir {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    fn tempfile_dir(name: &str) -> DevDir {
+        let root = std::env::temp_dir().join("kallipai-dev");
+        std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
+        DevDir(
+            tempfile::Builder::new()
+                .prefix(&format!("scan-test-{name}-"))
+                .tempdir_in(root)
+                .expect("create test tempdir"),
+        )
     }
 }

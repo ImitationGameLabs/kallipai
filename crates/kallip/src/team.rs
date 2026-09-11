@@ -553,8 +553,7 @@ mod tests {
 
     #[test]
     fn read_lock_classifies_missing_corrupt_and_valid() {
-        let dir = std::env::temp_dir().join(format!("kallip-read-lock-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = write_scratch_dir("read-lock");
         // Missing: a legal empty archive (a first converge).
         assert!(read_lock(&dir.join("absent.lock")).unwrap().is_none());
         // Corrupt: refused with the rebuild guidance, never empty.
@@ -579,14 +578,12 @@ mod tests {
         .unwrap();
         let lock = read_lock(&good).unwrap().expect("valid lock parses");
         assert_eq!(lock.roles.len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn read_lock_refuses_zero_record_documents() {
-        let dir =
-            std::env::temp_dir().join(format!("kallip-read-lock-zero-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = write_scratch_dir("read-lock-zero");
+
         // Three legal TOML documents that record no members: a pure
         // comment, an explicit empty array, and a key serde folds
         // into the default. Each refuses, never reads as "no members".
@@ -602,7 +599,6 @@ mod tests {
             assert!(err.contains("holds no role records"), "{name}: {err}");
             assert!(err.contains("lock rebuild"));
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn archive(role: &str, id: &str) -> LockFile {
@@ -615,11 +611,34 @@ mod tests {
         }
     }
 
-    fn write_scratch_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("kallip-lock-write-{}-{}", std::process::id(), name));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A guard under the managed /tmp/kallipai-dev root: the TempDir
+    /// deletes the tree on drop, so nothing outlives the run (Deref/
+    /// AsRef keep call sites reading as plain paths).
+    struct DevDir(tempfile::TempDir);
+
+    impl std::ops::Deref for DevDir {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<std::path::Path> for DevDir {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    fn write_scratch_dir(name: &str) -> DevDir {
+        let root = std::env::temp_dir().join("kallipai-dev");
+        std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
+        DevDir(
+            tempfile::Builder::new()
+                .prefix(&format!("lock-write-{name}-"))
+                .tempdir_in(root)
+                .expect("create test tempdir"),
+        )
     }
 
     #[test]
@@ -635,7 +654,6 @@ mod tests {
         let lock = read_lock(&path).unwrap().expect("published archive parses");
         assert_eq!(lock.roles.len(), 1);
         assert_eq!(lock.roles[0].name, "dev");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -655,7 +673,6 @@ mod tests {
         let lock = read_lock(&path).unwrap().expect("published archive parses");
         assert_eq!(lock.roles.len(), 1);
         assert_eq!(lock.roles[0].name, "ops");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -677,7 +694,6 @@ mod tests {
         let lock = read_lock(&path).unwrap().expect("published archive parses");
         assert_eq!(lock.roles.len(), 1);
         assert_eq!(lock.roles[0].name, "ops");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -697,7 +713,6 @@ mod tests {
         let lock = read_lock(&path).unwrap().expect("published archive parses");
         assert_eq!(lock.roles.len(), 1);
         assert!(lock.roles[0].name == "dev" || lock.roles[0].name == "ops");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1593,6 +1593,40 @@ async fn deactivate_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A guard under the managed /tmp/kallipai-dev root: the TempDir
+    /// deletes the tree on drop, so nothing outlives the run.
+    struct DevDir(tempfile::TempDir);
+
+    impl DevDir {
+        fn path(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    impl std::ops::Deref for DevDir {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<std::path::Path> for DevDir {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    fn dev_tempdir(label: &str) -> DevDir {
+        let root = std::env::temp_dir().join("kallipai-dev");
+        std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
+        DevDir(
+            tempfile::Builder::new()
+                .prefix(&format!("{label}-"))
+                .tempdir_in(root)
+                .expect("create test tempdir"),
+        )
+    }
 
     fn live(role: &str) -> LiveEntry {
         LiveEntry {
@@ -2441,7 +2475,8 @@ mod tests {
         // The degraded fallback spawns under the registry's live root.
         let mut root_entry =
             crate::test_helpers::make_entry_with_rx(None, "root-token".to_string()).0;
-        let root_ws = std::env::temp_dir().join(format!("kallip-conv-root-{}", std::process::id()));
+        let root_ws_guard = dev_tempdir("conv-root");
+        let root_ws = root_ws_guard.path().to_path_buf();
         root_entry.identity.config.workspace_root = root_ws.clone();
         let root_id = AgentId::random();
         state

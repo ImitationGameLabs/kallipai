@@ -1,13 +1,41 @@
 use super::*;
 
+/// A guard under the managed /tmp/kallipai-dev root: the TempDir
+/// deletes the tree on drop, so nothing outlives the run (Deref/
+/// AsRef keep call sites reading as plain paths).
+struct DevDir(tempfile::TempDir);
+
+impl std::ops::Deref for DevDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+impl AsRef<std::path::Path> for DevDir {
+    fn as_ref(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+fn dev_tempdir(label: &str) -> DevDir {
+    let root = std::env::temp_dir().join("kallipai-dev");
+    std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
+    DevDir(
+        tempfile::Builder::new()
+            .prefix(&format!("{label}-"))
+            .tempdir_in(root)
+            .expect("create test tempdir"),
+    )
+}
 fn prefix(tokens: &[&str]) -> Trigger {
     Trigger::Prefix(tokens.iter().map(|t| (*t).to_owned()).collect())
 }
 
 #[test]
 fn exec_hooks_missing_file_yields_builtin_preset() {
-    let dir = std::env::temp_dir().join(format!("exec-hooks-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = dev_tempdir("exec-hooks");
     let rules = load_exec_hook_rules(&dir.join("exec_hooks.toml"));
     assert_eq!(rules.len(), 2);
     // BTreeMap canonical-key order: '@' sorts before letters.

@@ -1,6 +1,41 @@
 use super::*;
 use crate::builder::ShellBuilder;
 
+/// A guard under the managed /tmp/kallipai-dev root: the TempDir
+/// deletes the tree on drop, so nothing outlives the run (Deref/
+/// AsRef keep call sites reading as plain paths).
+struct DevDir(tempfile::TempDir);
+
+impl DevDir {
+    fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+impl std::ops::Deref for DevDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+impl AsRef<std::path::Path> for DevDir {
+    fn as_ref(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+fn dev_tempdir(label: &str) -> DevDir {
+    let root = std::env::temp_dir().join("kallipai-dev");
+    std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
+    DevDir(
+        tempfile::Builder::new()
+            .prefix(&format!("{label}-"))
+            .tempdir_in(root)
+            .expect("create test tempdir"),
+    )
+}
 /// Collect all spill files under `root`, recursively: in-flight `.tmp-*`
 /// temp names and finalized content-addressed `{2 hex}/{14 hex}.txt` files.
 fn spill_files(root: &Path) -> Vec<PathBuf> {
@@ -814,15 +849,10 @@ async fn color_vars_suppress_in_foreground() {
 /// cwd rides the fd channel, and a spill file appears only on overflow.
 #[tokio::test]
 async fn exec_leaves_no_scratch_in_cwd() {
-    let probe = std::env::temp_dir().join(format!(
-        "ja-shell-probe-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&probe).unwrap();
+    let probe = dev_tempdir("shell-probe");
     let scratch = tempfile::TempDir::new().unwrap();
     let mut backend = ShellBuilder::new()
-        .initial_cwd(probe.clone())
+        .initial_cwd(probe.path().to_path_buf())
         .spill_dir(scratch.path().join("spill"))
         .build()
         .await
@@ -845,7 +875,6 @@ async fn exec_leaves_no_scratch_in_cwd() {
         spill_files(scratch.path()).is_empty(),
         "under-budget exec wrote a spill file"
     );
-    let _ = std::fs::remove_dir_all(&probe);
 }
 
 /// A command whose `bash -c` script exceeds `MAX_SCRIPT_BYTES` is rejected

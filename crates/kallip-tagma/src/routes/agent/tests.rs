@@ -256,16 +256,41 @@ fn normal_config(ws: &std::path::Path) -> AgentConfig {
     config
 }
 
+/// A guard under the managed /tmp/kallipai-dev root: the TempDir
+/// deletes the tree on drop, so nothing outlives the run (Deref/
+/// AsRef keep call sites reading as plain paths).
+struct DevDir(tempfile::TempDir);
+
+impl DevDir {
+    fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+impl std::ops::Deref for DevDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+impl AsRef<std::path::Path> for DevDir {
+    fn as_ref(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
 /// Unique existing temp dir (acquire canonicalizes the path).
-fn ws_dir(label: &str) -> PathBuf {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "ja-acquire-ws-test-{}-{label}-{n}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn ws_dir(label: &str) -> DevDir {
+    let root = std::env::temp_dir().join("kallipai-dev");
+    std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
+    DevDir(
+        tempfile::Builder::new()
+            .prefix(&format!("acquire-ws-test-{label}-"))
+            .tempdir_in(root)
+            .expect("create test tempdir"),
+    )
 }
 
 #[tokio::test]
@@ -517,7 +542,7 @@ async fn remove_agent_returns_full_handoff_lock_to_supervisor() {
         let mut entry = make_entry(Some(sup.clone()), format!("agent-{child}"));
         entry.identity.config.delegation_mode = DelegationMode::FullHandoff;
         entry.identity.config.permissions_class = PermissionClass::Normal;
-        entry.identity.config.workspace_root = ws.clone();
+        entry.identity.config.workspace_root = ws.path().to_path_buf();
         reg.register(child.clone(), crate::state::RegistryEntry::Live(entry));
     }
     // Simulate the spawn carve: sup held ws, then transferred it to the child.
@@ -895,8 +920,7 @@ async fn create_agent_rejects_duplicate_role() {
     let sup = AgentId::random();
     // A workspace inside the root supervisor's /tmp tree but outside the
     // test data dir (which the isolation guard also parks under /tmp).
-    let ws = std::env::temp_dir().join("kallip-agent-ws-test");
-    std::fs::create_dir_all(&ws).expect("create test workspace");
+    let ws = ws_dir("child-rewrite");
 
     let resp = super::create_agent(
         State(state.clone()),
@@ -944,8 +968,7 @@ fn spawn_request_requires_profile_set_and_permission_class() {
 async fn create_agent_rejects_unknown_set_name() {
     let state = make_state();
     let sup = AgentId::random();
-    let ws = std::env::temp_dir().join("kallip-agent-ws-test");
-    std::fs::create_dir_all(&ws).expect("create test workspace");
+    let ws = ws_dir("sup-rewrite");
     {
         let mut reg = state.registry.write().await;
         add_root(&mut reg, &sup);

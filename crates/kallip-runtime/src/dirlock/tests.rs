@@ -3,13 +3,34 @@ use super::*;
 fn agent(name: &str) -> AgentId {
     AgentId::from(name.to_owned())
 }
+/// A test workspace under the managed /tmp/kallipai-dev root: the
+/// TempDir guard deletes the tree on drop, so nothing outlives the
+/// run (Deref/AsRef keep call sites reading as plain paths).
+struct DevDir(tempfile::TempDir);
 
-fn tmp_dir() -> PathBuf {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("ja-dirlock-test-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+impl std::ops::Deref for DevDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.path()
+    }
+}
+
+impl AsRef<std::path::Path> for DevDir {
+    fn as_ref(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+fn tmp_dir() -> DevDir {
+    let root = std::env::temp_dir().join("kallipai-dev");
+    std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
+    DevDir(
+        tempfile::Builder::new()
+            .prefix("dirlock-test-")
+            .tempdir_in(root)
+            .expect("create test tempdir"),
+    )
 }
 
 #[test]
@@ -137,7 +158,9 @@ fn release_on_deleted_path_is_idempotent() {
 fn non_existent_path_is_rejected() {
     let mgr = DirLockManager::new();
     let a = agent("a");
-    let ghost = std::env::temp_dir().join("ja-dirlock-ghost-does-not-exist");
+    let ghost = std::env::temp_dir()
+        .join("kallipai-dev")
+        .join("ghost-does-not-exist");
     assert!(mgr.acquire(&a, &ghost, &[]).is_err());
 }
 
@@ -175,6 +198,9 @@ struct Tree {
     a_d: PathBuf,
     x: PathBuf,
     x_y: PathBuf,
+    // The root guard must live as long as the tree: dropping it
+    // (as a local in new()) would delete the created paths.
+    _root: DevDir,
     a_b_c_d: PathBuf,
 }
 
@@ -199,6 +225,7 @@ impl Tree {
             x,
             x_y,
             a_b_c_d,
+            _root: root,
         }
     }
 }

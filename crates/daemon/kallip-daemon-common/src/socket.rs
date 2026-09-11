@@ -181,6 +181,35 @@ fn failure_phrase(kind: std::io::ErrorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A guard under the managed /tmp/kallipai-dev root: the TempDir
+    /// deletes the tree on drop, so nothing outlives the run (Deref/
+    /// AsRef keep call sites reading as plain paths).
+    struct DevDir(tempfile::TempDir);
+
+    impl std::ops::Deref for DevDir {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<std::path::Path> for DevDir {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    fn dev_tempdir(label: &str) -> DevDir {
+        let root = std::env::temp_dir().join("kallipai-dev");
+        std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
+        DevDir(
+            tempfile::Builder::new()
+                .prefix(&format!("{label}-"))
+                .tempdir_in(root)
+                .expect("create test tempdir"),
+        )
+    }
     use std::sync::Mutex;
 
     /// Env mutation is process-global: serialize the env-touching tests.
@@ -324,9 +353,7 @@ mod tests {
 
     #[test]
     fn probe_walks_candidates_in_order_until_one_answers() {
-        let dir = std::env::temp_dir().join(format!("kp-sock-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dev_tempdir("sock");
         let live = dir.join("live.sock");
         let listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
         let dead = dir.join("dead.sock");
@@ -334,7 +361,6 @@ mod tests {
         let found = probe(&[dead.clone(), live.clone()]).ok();
         assert_eq!(found, Some(live), "dead candidate skipped, live answered");
         drop(listener);
-        let _ = std::fs::remove_dir_all(&dir);
     }
     use std::os::unix::fs::PermissionsExt;
 
@@ -375,9 +401,7 @@ mod tests {
             // Root bypasses the permission bits this test is built on.
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kp-sock-denied-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dev_tempdir("sock-denied");
         let guarded = dir.join("guarded.sock");
         let listener = std::os::unix::net::UnixListener::bind(&guarded).unwrap();
         std::fs::set_permissions(&guarded, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -407,7 +431,6 @@ mod tests {
         );
 
         drop(listener);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -415,9 +438,7 @@ mod tests {
         if running_as_root() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kp-sock-mixed-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dev_tempdir("sock-mixed");
         let guarded = dir.join("guarded.sock");
         let listener = std::os::unix::net::UnixListener::bind(&guarded).unwrap();
         std::fs::set_permissions(&guarded, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -442,7 +463,6 @@ mod tests {
         assert!(report.contains(guarded.to_str().unwrap()));
         assert!(report.contains("permission denied"));
         drop(listener);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -450,9 +470,7 @@ mod tests {
         if running_as_root() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kp-sock-denied-live-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dev_tempdir("sock-denied-live");
         let guarded = dir.join("guarded.sock");
         let denied_listener = std::os::unix::net::UnixListener::bind(&guarded).unwrap();
         std::fs::set_permissions(&guarded, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -467,7 +485,6 @@ mod tests {
         );
         drop(denied_listener);
         drop(listener);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

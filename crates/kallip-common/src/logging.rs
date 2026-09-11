@@ -110,14 +110,34 @@ mod tests {
         tracing_subscriber::EnvFilter::new("info")
     }
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "kallip-logging-{label}-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A guard under the managed /tmp/kallipai-dev root: the TempDir
+    /// deletes the tree on drop, so nothing outlives the run (Deref/
+    /// AsRef keep call sites reading as plain paths).
+    struct DevDir(tempfile::TempDir);
+
+    impl std::ops::Deref for DevDir {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<std::path::Path> for DevDir {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.path()
+        }
+    }
+
+    fn temp_dir(label: &str) -> DevDir {
+        let root = std::env::temp_dir().join("kallipai-dev");
+        std::fs::create_dir_all(&root).expect("create /tmp/kallipai-dev");
+        DevDir(
+            tempfile::Builder::new()
+                .prefix(&format!("logging-{label}-"))
+                .tempdir_in(root)
+                .expect("create test tempdir"),
+        )
     }
 
     #[test]
@@ -156,7 +176,6 @@ mod tests {
                 .any(|text| text.contains("kallip logging marker event")),
             "the marker event must land in a rolling file, got {contents:?}"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -168,7 +187,6 @@ mod tests {
             build_file_layer::<tracing_subscriber::Registry>(&blocker, "archeion", &test_filter())
                 .is_none()
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[derive(Clone)]
@@ -224,6 +242,5 @@ mod tests {
             stdout_text.contains(0x1b as char),
             "the stdout arm keeps ANSI coloring"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
