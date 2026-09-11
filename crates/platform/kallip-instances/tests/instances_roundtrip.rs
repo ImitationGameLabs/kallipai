@@ -21,10 +21,10 @@ use tower::ServiceExt;
 
 struct DaemonProc {
     socket: PathBuf,
-    _data_root: PathBuf,
+    _data_dir: tempfile::TempDir,
     records: PathBuf,
     child: std::process::Child,
-    _state: PathBuf,
+    _state_dir: tempfile::TempDir,
 }
 
 fn resolve_bin(name: &str) -> PathBuf {
@@ -86,18 +86,15 @@ fn start_daemon() -> DaemonProc {
         .expect("spawn daemon");
     for _ in 0..100 {
         if socket.exists() {
-            // The daemon owns the data dir; keep both tempdirs alive by
-            // leaking them (test-scoped, under /tmp).
-            let data_root = data_dir.path().join("kallipai").join("tagmata");
+            // The daemon owns the data dir; the tempdirs must outlive
+            // The guards live in DaemonProc, so both tempdirs die with it.
             let records = state_dir.path().join("records");
-            std::mem::forget(data_dir);
-            std::mem::forget(state_dir);
             return DaemonProc {
                 socket,
-                _data_root: data_root,
+                _data_dir: data_dir,
                 records,
                 child,
-                _state: PathBuf::new(),
+                _state_dir: state_dir,
             };
         }
         std::thread::sleep(Duration::from_millis(50));

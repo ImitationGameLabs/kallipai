@@ -21,7 +21,7 @@ use kallip_daemon_common::wire::{ErrorCode, InstanceState, OkPayload, RequestBod
 struct DaemonProc {
     socket: PathBuf,
     child: std::process::Child,
-    _data: PathBuf,
+    _state: tempfile::TempDir,
     data_dir: tempfile::TempDir,
     records: PathBuf,
     log_path: PathBuf,
@@ -89,7 +89,7 @@ fn start_daemon() -> DaemonProc {
             return DaemonProc {
                 socket,
                 child,
-                _data: state_dir.keep(),
+                _state: state_dir,
                 data_dir,
                 records,
                 log_path,
