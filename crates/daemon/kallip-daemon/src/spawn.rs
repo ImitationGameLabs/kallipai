@@ -1351,6 +1351,9 @@ mod tests {
     /// body must stick to bash builtins: the shim runs under the
     /// harvest's cleared env, where no PATH exists to resolve external
     /// binaries (the first draft's `sleep 30` failed with exit 127).
+    /// Exec it via harvest_shim, never harvest_login_env directly: a
+    /// just-written script sits in the close-to-exec ETXTBSY window
+    /// (see there).
     fn shim(dir: &Path, body: &str) -> PathBuf {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt;
@@ -1362,6 +1365,42 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("chmod shim");
         path
+    }
+
+    /// Run the harvest against a just-written shim. Exec of a file
+    /// whose write handle closed microseconds ago races the kernel's
+    /// deferred release of that handle: ETXTBSY with no writer left
+    /// holding the path (the same probe-verified window behind
+    /// adopt's fake-tagma retry: filesystem-independent, and it
+    /// fires without any concurrent writer). The window is
+    /// transient and every legitimate outcome is stable, so a
+    /// bounded retry reruns the whole call.
+    /// The 10-attempt bound is this helper's own conservative
+    /// ceiling (its callers assert elapsed time); adopt's fake
+    /// tagma picks 50 for the same window.
+    fn harvest_shim(
+        bash: &Path,
+        seed: &HarvestSeed,
+        timeout: Duration,
+        run_as: Option<(u32, u32)>,
+    ) -> Result<Vec<(String, String)>, HarvestError> {
+        for _ in 0..10 {
+            match harvest_login_env(bash, seed, timeout, run_as) {
+                // Spawn(String) flattens the io error to text, so
+                // match the message: the process never setlocale(3)s,
+                // glibc/musl wording is stable, and a missed match
+                // degrades into the test's explicit assertion
+                // failure, not a silent flake.
+                Err(HarvestError::Spawn(message)) if message.contains("Text file busy") => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                outcome => return outcome,
+            }
+        }
+        panic!(
+            "harvest shim still ETXTBSY after 10 attempts: {}",
+            bash.display()
+        );
     }
 
     fn tempdir() -> tempfile::TempDir {
@@ -1496,8 +1535,8 @@ mod tests {
         };
         let dir = tempdir();
         let bash = shim(dir.path(), "exit 3");
-        let error = harvest_login_env(&bash, &HarvestSeed::default(), HARVEST_TEST_BUDGET, None)
-            .unwrap_err();
+        let error =
+            harvest_shim(&bash, &HarvestSeed::default(), HARVEST_TEST_BUDGET, None).unwrap_err();
         assert!(matches!(error, HarvestError::Exit(_)));
     }
 
@@ -1510,7 +1549,7 @@ mod tests {
         let dir = tempdir();
         let bash = shim(dir.path(), "while :; do :; done");
         let start = Instant::now();
-        let error = harvest_login_env(
+        let error = harvest_shim(
             &bash,
             &HarvestSeed::default(),
             Duration::from_millis(300),
@@ -2281,7 +2320,7 @@ mod tests {
         let dir = tempdir();
         let wedge = shim(dir.path(), "read -t 10 x < /dev/zero & exit 0");
         let start = Instant::now();
-        let error = harvest_login_env(
+        let error = harvest_shim(
             &wedge,
             &HarvestSeed::default(),
             Duration::from_millis(300),
@@ -2307,7 +2346,7 @@ mod tests {
             "while :; do printf 'A%.0s' {1..4096}; done & exit 0",
         );
         let start = Instant::now();
-        let error = harvest_login_env(
+        let error = harvest_shim(
             &spammer,
             &HarvestSeed::default(),
             Duration::from_secs(2),

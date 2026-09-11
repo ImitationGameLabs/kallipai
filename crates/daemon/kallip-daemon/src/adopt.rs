@@ -410,12 +410,30 @@ mod tests {
         fs::create_dir_all(&family).expect("create family dir");
         let exe = family.join("sleep");
         fs::copy(source, &exe).expect("copy sleep");
-        let child = Command::new(&exe)
-            .arg("60")
-            .stdin(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn fake tagma");
-        (child, family)
+        // Executing a file the moment after its copy races the
+        // kernel's deferred release of the copy's write handle:
+        // ETXTBSY with no process holding the path (probe baseline:
+        // ~8.6% of spawns under load, btrfs and tmpfs alike; later
+        // bounded-retry runs absorbed 166 fires, zero exhaustion).
+        // Not a shared-path collision -- each call site owns a
+        // fresh tempdir. The 50-attempt bound is this site's own
+        // conservative ceiling; harvest shims pick 10 for the same
+        // window under their own timing asserts.
+        let mut command = Command::new(&exe);
+        command.arg("60").stdin(std::process::Stdio::null());
+        for _ in 0..50 {
+            match command.spawn() {
+                Ok(child) => return (child, family),
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(error) => panic!("spawn fake tagma: {error}"),
+            }
+        }
+        panic!(
+            "spawn fake tagma: still busy (ETXTBSY) after 50 attempts: {}",
+            exe.display()
+        );
     }
 
     // --- validation -----------------------------------------------------
