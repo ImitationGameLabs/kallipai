@@ -1147,6 +1147,17 @@ pub fn spawn(
                 ));
             }
         }
+        // And against its data dir: a workspace laid over another
+        // instance's (necessarily tree-external) data home would
+        // write into it — the adopt direction-6 mirror.
+        if overlaps(&workspace_canon, &instance.data_dir) {
+            return Err(SpawnError::overlaps_instance_data_dir(
+                OverlapInput::Workspace,
+                Path::new(workspace),
+                &instance.slug,
+                &instance.data_dir,
+            ));
+        }
     }
 
     validate_user_env(&user_env)?;
@@ -2241,6 +2252,59 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, SpawnError::SlugTaken(_)), "{error}");
+    }
+
+    #[test]
+    fn the_spawn_overlap_error_names_input_requested_and_rival() {
+        let error = SpawnError::overlaps_instance_data_dir(
+            OverlapInput::Workspace,
+            Path::new("/chosen/ws"),
+            "settled",
+            Path::new("/elsewhere/dd"),
+        );
+        assert_eq!(
+            error.to_string(),
+            "workspace /chosen/ws overlaps instance settled's data dir at /elsewhere/dd"
+        );
+    }
+
+    #[test]
+    fn spawn_refuses_a_workspace_overlapping_a_registered_data_dir() {
+        let root = tempdir();
+        let data = tempdir();
+        let record = records::InstanceRecord {
+            instance_id: "instance-1".into(),
+            owner_uid: unsafe { libc::getuid() },
+            target_uid: unsafe { libc::getuid() },
+            target_username: None,
+            workspace: None,
+            env: Vec::new(),
+            identity: None,
+            data_dir: data.path().to_path_buf(),
+        };
+        records::write_record(root.path(), "settled", &record).expect("write record");
+        let user = cached_passwd_identity()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .expect("test host has a passwd entry");
+        let error = spawn(
+            root.path(),
+            "fresh",
+            data.path().to_str().expect("utf8 data dir"),
+            &[],
+            Some("/bin/sh"),
+            Duration::from_secs(1),
+            unsafe { libc::getuid() },
+            Some(&user),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "workspace {} overlaps instance settled's data dir at {}",
+                data.path().canonicalize().unwrap().display(),
+                data.path().display(),
+            )
+        );
     }
 
     // --- spawn request validation -------------------------------------
