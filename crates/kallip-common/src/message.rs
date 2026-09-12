@@ -11,6 +11,7 @@
 //! [`message_sent_line`] is the sibling echo for `kallip message` (agent-to-agent)
 //! sends; its key is deliberately distinct from the lesche marker.
 
+use crate::protocol::DeliveryMode;
 use serde::{Deserialize, Serialize};
 
 /// Wire key of the lesche message marker (see [`marker_line`]). Shared by
@@ -45,7 +46,7 @@ pub fn marker_line(text: &str) -> String {
 /// The stable stdout echo `kallip message` prints after a successful send,
 /// exactly one JSON line:
 /// `{"kallip.message.sent":{"to":"<id>","text":"<message>","queue_depth":N}}`
-/// (plus `"warning"` when the tagma included one). The key is deliberately
+/// (plus `"warning"` / `"mode"` when the tagma included them). The key is deliberately
 /// distinct from the lesche marker: local clients (CLI, transcript reducers)
 /// match on `kallip.lesche.message` to render user chat lines, and must not
 /// render an agent-to-agent send as one.
@@ -54,6 +55,7 @@ pub fn message_sent_line(
     text: &str,
     queue_depth: usize,
     warning: Option<&str>,
+    mode: Option<DeliveryMode>,
 ) -> String {
     #[derive(Serialize)]
     struct Sent<'a> {
@@ -62,6 +64,8 @@ pub fn message_sent_line(
         queue_depth: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         warning: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mode: Option<DeliveryMode>,
     }
     #[derive(Serialize)]
     struct Wrapper<'a> {
@@ -74,6 +78,7 @@ pub fn message_sent_line(
             text,
             queue_depth,
             warning,
+            mode,
         },
     })
     .unwrap_or_else(|_| r#"{"kallip.message.sent":{"to":"","text":"","queue_depth":0}}"#.to_owned())
@@ -157,7 +162,7 @@ mod tests {
     }
     #[test]
     fn message_sent_line_escapes_and_skips_warning() {
-        let s = message_sent_line("id-1", "hi `whoami` \"q\"\nnewline", 2, None);
+        let s = message_sent_line("id-1", "hi `whoami` \"q\"\nnewline", 2, None, None);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["kallip.message.sent"]["to"], "id-1");
         assert_eq!(
@@ -166,11 +171,12 @@ mod tests {
         );
         assert_eq!(v["kallip.message.sent"]["queue_depth"], 2);
         assert!(v["kallip.message.sent"].get("warning").is_none());
+        assert!(v["kallip.message.sent"].get("mode").is_none());
     }
 
     #[test]
     fn message_sent_line_includes_warning_and_distinct_key() {
-        let s = message_sent_line("id-1", "queued", 3, Some("queued behind 3"));
+        let s = message_sent_line("id-1", "queued", 3, Some("queued behind 3"), None);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["kallip.message.sent"]["warning"], "queued behind 3");
         // For ordinary text the lesche marker key does not appear in the echo
@@ -180,10 +186,20 @@ mod tests {
     }
 
     #[test]
+    fn message_sent_line_renders_delivery_mode_snake_case() {
+        let s = message_sent_line("id-1", "m", 0, None, Some(DeliveryMode::InRound));
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["kallip.message.sent"]["mode"], "in_round");
+        let s = message_sent_line("id-1", "m", 0, Some("w"), Some(DeliveryMode::Buffered));
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["kallip.message.sent"]["mode"], "buffered");
+    }
+
+    #[test]
     fn marker_keys_match_serialized_lines() {
         let m = marker_line("x");
         assert!(m.contains(&format!("\"{LESCHE_MESSAGE_KEY}\":")));
-        let s = message_sent_line("id", "x", 0, None);
+        let s = message_sent_line("id", "x", 0, None, None);
         assert!(s.contains(&format!("\"{MESSAGE_SENT_KEY}\":")));
     }
 
@@ -192,7 +208,7 @@ mod tests {
         // The needle stage hits (the key appears as a JSON value), but the
         // brace walk yields the `kallip.message.sent` object, which has no
         // `kallip.lesche.message` key — so no user chat line renders.
-        let echo = message_sent_line("id-1", LESCHE_MESSAGE_KEY, 0, None);
+        let echo = message_sent_line("id-1", LESCHE_MESSAGE_KEY, 0, None, None);
         assert!(find_lesche_message(&echo).is_none());
     }
 

@@ -16,10 +16,10 @@ pub mod team;
 pub use agent::{
     ActiveProfile, AgentPermissionsResponse, AgentState, AgentStatusResponse, AgentSummary,
     AttachmentIngestRequest, AttachmentIngestResponse, CreateAgentRequest, CreateAgentResponse,
-    DELEGATION_CARVE_OUT, DELEGATION_FULL_HANDOFF, DeleteSetResponse, DutyStatus, ListAgentsQuery,
-    ListAgentsResponse, LockState, MaxToolRounds, MessageRequest, MessageResponse, Modality,
-    ParkedReason, ProfileSetUpdateRequest, SetDefaultRequest, SetReference, UpdateActivityRequest,
-    UpdateAgentMetadataRequest,
+    DELEGATION_CARVE_OUT, DELEGATION_FULL_HANDOFF, DeleteSetResponse, DeliveryMode, DutyStatus,
+    ListAgentsQuery, ListAgentsResponse, LockState, MaxToolRounds, MessageRequest, MessageResponse,
+    Modality, ParkedReason, ProfileSetUpdateRequest, SetDefaultRequest, SetReference,
+    UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 pub use approval::{
     ApprovalDecisionBody, ApprovalEntry, ListApprovalsQuery, ListApprovalsResponse,

@@ -102,14 +102,15 @@ async fn main() -> Result<()> {
                 // Echo prints only on success: a failed send must not look
                 // delivered.
                 let text = read_text_stdin()?;
-                let resp = client.post_message(&id, &text).await?;
+                let resp = client.post_message(&id, &text, args.defer).await?;
                 println!(
                     "{}",
                     kallip_common::message::message_sent_line(
                         id.as_ref(),
                         &text,
                         resp.queue_depth,
-                        resp.warning.as_deref()
+                        resp.warning.as_deref(),
+                        resp.delivery_mode
                     )
                 );
             }

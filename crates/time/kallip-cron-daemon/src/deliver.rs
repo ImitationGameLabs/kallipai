@@ -85,7 +85,7 @@ impl Deliverer {
             let id = sched.id.clone();
             let agent_id = sched.agent_id.clone();
             let message = sched.message.clone();
-            match self.tagma.post_message(&agent_id, &message).await {
+            match self.tagma.post_message(&agent_id, &message, false).await {
                 Ok(resp) => {
                     // Ack per-id: recurring -> Active (next_fire already
                     // advanced at trigger time), one-time -> Completed.

@@ -407,6 +407,12 @@ pub async fn agent_task(
     loop {
         tokio::select! {
             input = prompt_rx.recv() => {
+                // Declared race window (accepted, microseconds): this arm has
+                // no parked guard, so a busy notice enqueued just before the
+                // recipient parks is presented here and runs one round while
+                // parked. Nothing is lost: the message body already sits in
+                // the inbox and the notice is only a visibility hint. The
+                // sender side of this window is documented in delivery.rs.
                 match input {
                     Some(text) => {
                         clear_transient_retry(&ctx);
@@ -1209,6 +1215,77 @@ mod tests {
         assert!(found.unwrap_or(false), "inbox message should drive a round");
     }
 
+    /// A peer notice that arrives as the outer loop takes the prompt arm is
+    /// recorded, and the post-round pull still brings the message body —
+    /// the race-window guarantee that a notice is never lost even when it
+    /// lands between rounds.
+    #[tokio::test]
+    async fn prompt_arm_notice_is_followed_by_post_round_body_pull() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct StubPuller(Arc<AtomicBool>);
+        #[async_trait::async_trait]
+        impl MessagePuller for StubPuller {
+            async fn pull_undelivered(&self) -> Option<String> {
+                if self.0.swap(false, Ordering::SeqCst) {
+                    Some("pulled message body".to_string())
+                } else {
+                    None
+                }
+            }
+        }
+
+        let mut ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+        let flag = Arc::new(AtomicBool::new(true));
+        ctx.message_puller = Some(Arc::new(StubPuller(flag.clone())));
+
+        let cancel = ctx.cancel.clone();
+        let store = ctx.store.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+        let (prompt_tx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+        let handle = tokio::spawn(agent_task(ctx, None, prompt_rx, tx));
+
+        prompt_tx
+            .send("peer message from alice is in your inbox (preview: hi)".to_string())
+            .await
+            .unwrap();
+
+        let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let guard = store.lock().await;
+                let mut contents = Vec::new();
+                for t in guard.turns().iter() {
+                    for m in &t.messages {
+                        if let Some(c) = m.content() {
+                            contents.push(c.to_owned());
+                        }
+                    }
+                }
+                drop(guard);
+                let notice = contents
+                    .iter()
+                    .any(|c| c.contains("peer message from alice"));
+                let body = contents.iter().any(|c| c.contains("pulled message body"));
+                if notice && body {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+
+        cancel.cancel();
+        let _ = rx.recv().await;
+        handle.abort();
+        assert!(
+            found.unwrap_or(false),
+            "notice turn must be recorded and the post-round pull must bring the body"
+        );
+    }
     /// Guard-authority twin for the retry arm (the wait twin is above): a
     /// stored permit is inert once the retry deadline was cleared — a sleep
     /// that fired after an external wake won the race cannot fire a turn.

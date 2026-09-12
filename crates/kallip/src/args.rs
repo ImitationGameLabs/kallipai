@@ -507,6 +507,10 @@ pub struct ActivityArgs {
 pub struct MessageArgs {
     /// Agent ID or role.
     pub id: AgentId,
+    /// Defer visibility to the receiver's run boundary: skip the in-round
+    /// notice and the parked wake. The message still lands in the inbox.
+    #[arg(long)]
+    pub defer: bool,
 }
 
 #[derive(Args)]

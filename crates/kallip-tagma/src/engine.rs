@@ -317,7 +317,15 @@ async fn execute_pre_warn(state: &SharedState, cs: &CycleState) {
         cs.pre_warn_minutes
     );
     info!(agent = %cs.agent_id, "schedule: pre-warn ({} min)", cs.pre_warn_minutes);
-    if let Err(e) = crate::delivery::enqueue_prompt(state, &cs.agent_id, msg, "system").await {
+    if let Err(e) = crate::delivery::enqueue_prompt(
+        state,
+        &cs.agent_id,
+        msg,
+        "system",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    {
         warn!(agent = %cs.agent_id, error = %e, "schedule: failed to enqueue pre-warn");
     }
 }
@@ -340,7 +348,15 @@ async fn execute_final_warn(state: &SharedState, cs: &CycleState) {
         _ => default,
     };
     info!(agent = %cs.agent_id, "schedule: final-warn ({} min)", cs.final_warn_minutes);
-    if let Err(e) = crate::delivery::enqueue_prompt(state, &cs.agent_id, msg, "system").await {
+    if let Err(e) = crate::delivery::enqueue_prompt(
+        state,
+        &cs.agent_id,
+        msg,
+        "system",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    {
         warn!(agent = %cs.agent_id, error = %e, "schedule: failed to enqueue final-warn");
     }
 }

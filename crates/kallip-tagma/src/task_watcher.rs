@@ -141,7 +141,15 @@ async fn announce(state: &SharedState, ev: &TaskChanged) {
             .collect()
     };
     for id in targets {
-        match enqueue_prompt(state, &id, text.clone(), "task").await {
+        match enqueue_prompt(
+            state,
+            &id,
+            text.clone(),
+            "task",
+            crate::delivery::DeliveryNotice::Surface,
+        )
+        .await
+        {
             Ok(_) => {
                 info!(agent = %id, task = ev.task_id, verb = %ev.verb, "task wake hint queued")
             }

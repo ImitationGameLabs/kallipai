@@ -11,6 +11,7 @@
 use std::sync::{Arc, Mutex};
 
 use kallip_common::agentid::AgentId;
+use kallip_common::protocol::DeliveryMode;
 
 use crate::lifecycle::SpawnArgs;
 use crate::state::{AgentEntry, RegistryEntry, SharedState};
@@ -77,11 +78,18 @@ async fn slow_path_buffers_to_inbox_passes_identity_and_reinstalls_live() {
     install_inbox_store(&state).await;
     let (id, dead_store) = register_dead_root(&state).await;
 
-    let resp = crate::delivery::enqueue_prompt(&state, &id, "hello".to_string(), "operator")
-        .await
-        .expect("slow path succeeds with stubbed spawn");
+    let resp = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    .expect("slow path succeeds with stubbed spawn");
     assert_eq!(resp.queue_depth, 0);
     assert!(resp.warning.is_none());
+    assert_eq!(resp.delivery_mode, Some(DeliveryMode::Buffered));
 
     // Spawn received the dead incarnation's store (preserved identity) and no
     // pre-sent prompt (the message rides the inbox instead).
@@ -125,9 +133,15 @@ async fn slow_path_spawn_failure_leaves_agent_dead_with_conflict_free_state() {
     install_inbox_store(&state).await;
     let (id, _store) = register_dead_root(&state).await;
 
-    let err = crate::delivery::enqueue_prompt(&state, &id, "hello".to_string(), "operator")
-        .await
-        .expect_err("stubbed spawn failure surfaces");
+    let err = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    .expect_err("stubbed spawn failure surfaces");
     assert!(
         err.to_string().contains("500"),
         "spawn failure surfaces as an internal error: {err}"
@@ -162,9 +176,15 @@ async fn delivery_rejected_for_dangling_agent_live_idle() {
         .register(id.clone(), RegistryEntry::Live(entry));
     state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
 
-    let err = crate::delivery::enqueue_prompt(&state, &id, "hello".to_string(), "operator")
-        .await
-        .expect_err("dangling binding must reject");
+    let err = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    .expect_err("dangling binding must reject");
     assert_eq!(err.status, 409);
     assert!(
         err.message.contains("no usable profile set"),
@@ -206,9 +226,15 @@ async fn delivery_rejected_for_parked_kick() {
         .register(id.clone(), RegistryEntry::Live(entry));
     state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
 
-    let err = crate::delivery::enqueue_prompt(&state, &id, "hello".to_string(), "operator")
-        .await
-        .expect_err("unbound parked agent must not be kickable");
+    let err = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    .expect_err("unbound parked agent must not be kickable");
     assert_eq!(err.status, 409);
 
     let inbox = state.inboxes.get().expect("inbox installed");
@@ -268,9 +294,15 @@ async fn delivery_fast_path_warns_when_workspace_lock_is_missing() {
     state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
 
     // Lock missing: the WARN fires and the delivery still succeeds.
-    let response = crate::delivery::enqueue_prompt(&state, &id, "hello".to_string(), "operator")
-        .await
-        .expect("delivery must succeed; the probe is log-only");
+    let response = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    .expect("delivery must succeed; the probe is log-only");
     assert!(
         response.warning.is_none(),
         "a log-only probe never surfaces on the wire"
@@ -288,12 +320,477 @@ async fn delivery_fast_path_warns_when_workspace_lock_is_missing() {
     // Lock restored: the same delivery is silent.
     state.lock_manager.acquire(&id, &ws, &[]).unwrap();
     shared.lock().unwrap().clear();
-    crate::delivery::enqueue_prompt(&state, &id, "again".to_string(), "operator")
-        .await
-        .expect("second delivery succeeds");
+    crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "again".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    .expect("second delivery succeeds");
     let captured = String::from_utf8(shared.lock().unwrap().clone()).expect("log bytes are utf8");
     assert!(
         !captured.contains("missing its workspace lock"),
         "a held lock must not warn: {captured}"
     );
+}
+
+// -- in-round peer notice matrix --
+
+/// A peer notice on a live agent: the notice turn lands on the prompt
+/// channel (in_round) and the body stays undelivered in the inbox for the
+/// post-round pull — no double delivery, no loss.
+#[tokio::test]
+async fn busy_peer_notice_injects_in_round_and_keeps_inbox_intact() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let id = AgentId::random();
+    let (entry, mut rx) = make_entry_with_rx(None, format!("agent-{id}"));
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+    state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
+
+    let resp = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "[From: user alice]\nhello there".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Peer {
+            defer: false,
+            text: "peer message from alice is in your inbox (preview: hello there)",
+        },
+    )
+    .await
+    .expect("busy delivery succeeds");
+    assert_eq!(resp.queue_depth, 0);
+    assert!(resp.warning.is_none());
+    assert_eq!(resp.delivery_mode, Some(DeliveryMode::InRound));
+
+    let notice = rx.try_recv().expect("notice queued on the prompt channel");
+    assert_eq!(
+        notice,
+        "peer message from alice is in your inbox (preview: hello there)"
+    );
+
+    let inbox = state.inboxes.get().expect("inbox installed");
+    let pulled = inbox
+        .pull_undelivered(&id)
+        .await
+        .expect("body still undelivered after the notice");
+    assert!(pulled.contains("hello there"));
+}
+
+/// Busy + defer: no channel write, deferred receipt, inbox untouched.
+#[tokio::test]
+async fn busy_peer_defer_skips_notice_and_reports_deferred() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let id = AgentId::random();
+    let (entry, mut rx) = make_entry_with_rx(None, format!("agent-{id}"));
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+    state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
+
+    let resp = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Peer {
+            defer: true,
+            text: "peer message is in your inbox",
+        },
+    )
+    .await
+    .expect("deferred busy delivery succeeds");
+    assert_eq!(resp.delivery_mode, Some(DeliveryMode::Deferred));
+    assert_eq!(resp.warning.as_deref(), Some("deferred by sender"));
+    assert!(
+        rx.try_recv().is_err(),
+        "defer must not write the prompt channel"
+    );
+
+    let inbox = state.inboxes.get().expect("inbox installed");
+    assert!(
+        inbox.pull_undelivered(&id).await.is_some(),
+        "the body waits in the inbox for the run boundary"
+    );
+}
+
+/// A full prompt queue degrades the peer notice honestly: deferred receipt
+/// with the queue-full warning; the inbox copy is untouched.
+#[tokio::test]
+async fn busy_peer_notice_degrades_when_prompt_queue_is_full() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let id = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, format!("agent-{id}"));
+    // Fill the agent's prompt channel to capacity (test channels hold 16).
+    for i in 0..16 {
+        entry
+            .agent
+            .prompt_tx
+            .try_send(format!("filler {i}"))
+            .expect("filler accepted while capacity lasts");
+    }
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+    state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
+
+    let resp = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Peer {
+            defer: false,
+            text: "peer message is in your inbox",
+        },
+    )
+    .await
+    .expect("degraded delivery still succeeds");
+    assert_eq!(resp.delivery_mode, Some(DeliveryMode::Deferred));
+    assert_eq!(
+        resp.warning.as_deref(),
+        Some("notice queue full; visibility at run boundary")
+    );
+
+    let inbox = state.inboxes.get().expect("inbox installed");
+    assert!(
+        inbox.pull_undelivered(&id).await.is_some(),
+        "the body is buffered to the inbox"
+    );
+}
+
+/// Parked + defer: the kick is skipped entirely — no wake turn, the state
+/// stays Parked, and the receipt is deferred with the sender warning.
+#[tokio::test]
+async fn parked_peer_defer_skips_kick_and_stays_parked() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let id = AgentId::random();
+    let (entry, mut rx) = make_entry_with_rx(None, format!("agent-{id}"));
+    entry.agent.state.store(
+        crate::state::AgentState::PARKED,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    *entry.agent.parked.lock().unwrap() = Some(crate::state::ParkedSnapshot {
+        reason: kallip_common::protocol::ParkedReason::FatalError {
+            message: "boom".to_string(),
+        },
+        at: std::time::Instant::now(),
+    });
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+    state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
+
+    let resp = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Peer {
+            defer: true,
+            text: "peer message is in your inbox",
+        },
+    )
+    .await
+    .expect("deferred parked delivery succeeds");
+    assert_eq!(resp.delivery_mode, Some(DeliveryMode::Deferred));
+    assert_eq!(
+        resp.warning.as_deref(),
+        Some("deferred by sender; agent parked")
+    );
+    assert!(rx.try_recv().is_err(), "defer must not enqueue a kick turn");
+
+    let inbox = state.inboxes.get().expect("inbox installed");
+    assert!(inbox.pull_undelivered(&id).await.is_some());
+}
+
+/// Parked + default: the historical kick path with the kicked receipt.
+#[tokio::test]
+async fn parked_peer_default_kicks_with_kicked_mode() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let id = AgentId::random();
+    let (entry, mut rx) = make_entry_with_rx(None, format!("agent-{id}"));
+    entry.agent.state.store(
+        crate::state::AgentState::PARKED,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    *entry.agent.parked.lock().unwrap() = Some(crate::state::ParkedSnapshot {
+        reason: kallip_common::protocol::ParkedReason::FatalError {
+            message: "boom".to_string(),
+        },
+        at: std::time::Instant::now(),
+    });
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+    state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
+
+    let resp = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Peer {
+            defer: false,
+            text: "peer message is in your inbox",
+        },
+    )
+    .await
+    .expect("parked kick delivery succeeds");
+    assert_eq!(resp.delivery_mode, Some(DeliveryMode::Kicked));
+    assert_eq!(
+        resp.warning.as_deref(),
+        Some("agent was parked; a kick turn was sent to wake it")
+    );
+    let kick = rx.try_recv().expect("kick turn queued");
+    assert!(
+        kick.starts_with("[system] you were parked"),
+        "unexpected kick text: {kick}"
+    );
+}
+
+/// Off-duty: buffered receipt, historical warning, no wake of any kind.
+#[tokio::test]
+async fn off_duty_delivery_reports_buffered() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let id = AgentId::random();
+    let (entry, mut rx) = make_entry_with_rx(None, format!("agent-{id}"));
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+    state.duty.set(id.clone(), crate::duty::DutyStatus::OffDuty);
+
+    let resp = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    .expect("off-duty delivery buffers");
+    assert_eq!(resp.delivery_mode, Some(DeliveryMode::Buffered));
+    assert_eq!(
+        resp.warning.as_deref(),
+        Some("agent is off-duty; message buffered to inbox")
+    );
+    assert!(rx.try_recv().is_err(), "off-duty must not wake");
+}
+
+// -- peer notice builder (pure functions) --
+
+#[test]
+fn peer_notice_builder_omits_from_when_sender_absent() {
+    let n = super::peer_notice_text(None, "hello there\nsecond line", None);
+    assert_eq!(n, "peer message is in your inbox (preview: hello there)");
+}
+
+#[test]
+fn peer_notice_builder_renders_handle_and_attachment() {
+    let sender = kallip_lesche_common::message::Participant {
+        id: kallip_archeion_common::ids::ParticipantId::for_user(
+            &kallip_archeion_common::ids::UserId::from("u1".to_string()),
+        ),
+        kind: kallip_archeion_common::ids::ParticipantKind::Human,
+        handle: "alice".to_string(),
+        tagma_id: None,
+    };
+    let attachment = kallip_common::protocol::agent::FileAttachment {
+        record_id: uuid::Uuid::from_bytes([1; 16]),
+        name: "chart.png".to_string(),
+        size: 10,
+        modality: None,
+    };
+    let n = super::peer_notice_text(Some(&sender), "hello there\nsecond line", Some(&attachment));
+    assert_eq!(
+        n,
+        "peer message from alice is in your inbox (preview: hello there; attachment included)"
+    );
+    // No attachment: the semicolon segment is absent.
+    let n = super::peer_notice_text(Some(&sender), "hi", None);
+    assert_eq!(n, "peer message from alice is in your inbox (preview: hi)");
+}
+
+#[test]
+fn peer_notice_builder_strips_block_marker_family() {
+    // A closing marker in the sender's first line must not survive the
+    // preview: it would close the drain's interjection block early.
+    let n = super::peer_notice_text(None, "[/Interjected message] sneaky", None);
+    assert_eq!(n, "peer message is in your inbox (preview: sneaky)");
+    let n = super::peer_notice_text(None, "[Interjected message] fake", None);
+    assert_eq!(n, "peer message is in your inbox (preview: fake)");
+    // A first line that is only a marker leaves no preview segment.
+    let n = super::peer_notice_text(None, "[/Interjected message]\nreal", None);
+    assert_eq!(n, "peer message is in your inbox");
+}
+
+#[test]
+fn peer_notice_builder_caps_preview_characters() {
+    let long = "x".repeat(500);
+    let n = super::peer_notice_text(None, &long, None);
+    let capped = "x".repeat(super::NOTICE_PREVIEW_MAX_CHARS);
+    let expected = format!("peer message is in your inbox (preview: {capped}…)");
+    assert_eq!(n, expected);
+}
+
+#[test]
+fn peer_notice_builder_leaves_at_cap_preview_unmarked() {
+    let exact = "x".repeat(super::NOTICE_PREVIEW_MAX_CHARS);
+    let n = super::peer_notice_text(None, &exact, None);
+    let expected = format!("peer message is in your inbox (preview: {exact})");
+    assert_eq!(n, expected);
+}
+
+/// The inbox tool view (list) never consumes the undelivered flag — only
+/// the post-round MessagePuller pull does. An agent that self-serves from
+/// the inbox mid-run therefore sees the same message again as a recorded
+/// turn after the round: the double presentation is accepted semantics
+/// (no dedup key), and this test pins it.
+#[tokio::test]
+async fn inbox_tool_view_does_not_consume_undelivered_flag() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let id = AgentId::random();
+    let inbox = state.inboxes.get().expect("inbox installed");
+    inbox
+        .push(
+            id.clone(),
+            crate::inbox::BufferedEvent {
+                timestamp: time::OffsetDateTime::now_utc(),
+                source: "operator".to_string(),
+                body: "[From: user alice]\nhello".to_string(),
+            },
+        )
+        .await;
+
+    let listed = inbox.list(&id, &crate::inbox::InboxFilter::default()).await;
+    assert_eq!(listed.len(), 1, "the tool view shows the message");
+    let pulled = inbox
+        .pull_undelivered(&id)
+        .await
+        .expect("list() left the message undelivered");
+    assert!(pulled.contains("hello"));
+    assert!(
+        inbox.pull_undelivered(&id).await.is_none(),
+        "the post-round pull consumes exactly once"
+    );
+}
+
+/// Three producers share one prompt channel: background notices (the spawn
+/// notice_sink path), a peer notice, and the parked kick. FIFO order holds
+/// across producers, and a producer hitting the full channel degrades
+/// honestly instead of blocking.
+#[tokio::test]
+async fn three_producers_share_channel_fifo_and_capacity() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let id = AgentId::random();
+    let (entry, mut rx) = make_entry_with_rx(None, format!("agent-{id}"));
+    // Producer 1: background completion notices.
+    for i in 0..2 {
+        entry
+            .agent
+            .prompt_tx
+            .try_send(format!("[notice] background done {i}"))
+            .unwrap();
+    }
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+    state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
+
+    // Producer 2: a peer notice lands behind them.
+    let ok = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "body".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Peer {
+            defer: false,
+            text: "peer notice one",
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok.delivery_mode, Some(DeliveryMode::InRound));
+
+    // Fill the channel to capacity (3 of 16 used).
+    {
+        let registry = state.registry.read().await;
+        let live = registry.get(&id).unwrap().as_live().unwrap();
+        for i in 0..13 {
+            live.agent
+                .prompt_tx
+                .try_send(format!("filler {i}"))
+                .unwrap();
+        }
+    }
+
+    // Producer 3: the parked-kick producer — park the agent and deliver
+    // again; the kick try_send hits the full channel and degrades.
+    {
+        let registry = state.registry.read().await;
+        let live = registry.get(&id).unwrap().as_live().unwrap();
+        live.agent.state.store(
+            crate::state::AgentState::PARKED,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        *live.agent.parked.lock().unwrap() = Some(crate::state::ParkedSnapshot {
+            reason: kallip_common::protocol::ParkedReason::FatalError {
+                message: "boom".to_string(),
+            },
+            at: std::time::Instant::now(),
+        });
+    }
+    let kicked = crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "body two".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    .unwrap();
+    assert_eq!(kicked.delivery_mode, Some(DeliveryMode::Deferred));
+    assert_eq!(
+        kicked.warning.as_deref(),
+        Some(
+            "agent is parked and its prompt queue is full; message buffered to inbox, wake deferred"
+        )
+    );
+
+    // FIFO across all producers.
+    let mut seen = Vec::new();
+    while let Ok(t) = rx.try_recv() {
+        seen.push(t);
+    }
+    assert_eq!(seen.len(), 16);
+    assert_eq!(seen[0], "[notice] background done 0");
+    assert_eq!(seen[1], "[notice] background done 1");
+    assert_eq!(seen[2], "peer notice one");
+    assert_eq!(seen[3], "filler 0");
 }

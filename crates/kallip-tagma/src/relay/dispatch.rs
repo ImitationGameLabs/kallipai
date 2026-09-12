@@ -277,6 +277,7 @@ impl RelayHandle {
                     &self.inner.root_agent,
                     &text,
                     attachment.clone(),
+                    false,
                 )
                 .await?;
                 Ok(TagmaReply::MessageAccepted {

@@ -35,10 +35,12 @@ impl TagmaClient {
     /// - `queue_depth == 0`: agent will process the message immediately.
     /// - `queue_depth > 0`: message is queued behind existing messages (warning included).
     /// - Returns an error on 503 if the message queue is full.
+    /// - `defer`: ask for run-boundary visibility on the receiver (wire `defer`).
     pub async fn post_message(
         &self,
         id: &AgentId,
         text: &str,
+        defer: bool,
     ) -> Result<crate::types::MessageResponse> {
         self.handle_response(
             self.with_auth(
@@ -48,6 +50,7 @@ impl TagmaClient {
                     .json(&MessageRequest {
                         text: text.to_owned(),
                         attachment: None,
+                        defer,
                     }),
             )
             .send()
@@ -382,5 +385,35 @@ mod tests {
         assert!(msg.contains("held by 2 agents"), "{msg}");
         assert!(msg.contains(&uuid(1)), "{msg}");
         assert!(msg.contains(&uuid(2)), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn post_message_sends_defer_flag_and_parses_delivery_mode() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/agents/{}/message", uuid(1))))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "queue_depth": 0,
+                "delivery_mode": "deferred",
+            })))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        let id: AgentId = uuid(1).parse().unwrap();
+        let resp = client.post_message(&id, "later", true).await.unwrap();
+        assert_eq!(
+            resp.delivery_mode,
+            Some(kallip_common::protocol::DeliveryMode::Deferred)
+        );
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["text"], "later");
+        assert_eq!(body["defer"], true);
+        assert!(
+            body.get("attachment").is_none(),
+            "a defer send without attachment keeps the minimal body"
+        );
     }
 }

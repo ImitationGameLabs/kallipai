@@ -1236,3 +1236,34 @@ async fn interjections_pass_entry_cap_individually() {
     );
     crate::agent_task::set_message_spill_root(None);
 }
+
+/// Two peer notices drained in one round merge into a single recorded
+/// turn, in arrival order, each wrapped in the interjection markers — the
+/// delivery-side notices present exactly like parked-kick turns do.
+#[tokio::test]
+async fn drained_notices_merge_into_one_turn_in_fifo_order() {
+    let mut ctx = make_ctx(vec![profile("test", "ep1", 4096)], &["ep1"]).await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
+    tx.send("peer message from alice is in your inbox (preview: first)".to_owned())
+        .await
+        .unwrap();
+    tx.send("peer message from bob is in your inbox (preview: second)".to_owned())
+        .await
+        .unwrap();
+    drop(tx);
+    drain_interjections(&mut ctx, &mut rx).await;
+
+    let store = ctx.store.lock().await;
+    let injected: Vec<String> = store
+        .turns()
+        .iter()
+        .filter_map(|t| t.messages[0].content())
+        .filter(|c| c.contains("[Interjected message]"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(injected.len(), 1, "notices merge into a single turn");
+    let first = injected[0].find("preview: first").unwrap();
+    let second = injected[0].find("preview: second").unwrap();
+    assert!(first < second, "FIFO order must hold across notices");
+    assert!(injected[0].contains("[/Interjected message]"));
+}

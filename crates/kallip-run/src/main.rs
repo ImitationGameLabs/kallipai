@@ -105,7 +105,7 @@ async fn run() -> Result<ExitCode> {
         None => client.get_root_agent().await?.id,
     };
     let stream = client.event_stream(&id).await?;
-    let resp = client.post_message(&id, &cli.prompt).await?;
+    let resp = client.post_message(&id, &cli.prompt, false).await?;
     // Diagnostics belong on stderr regardless of --json (which only governs
     // stdout): a queue warning must still be visible.
     if let Some(warning) = resp.warning {

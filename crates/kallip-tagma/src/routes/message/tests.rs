@@ -32,6 +32,7 @@ async fn operator_message_stores_envelope_in_inbox() {
         Json(MessageRequest {
             text: "do the thing".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -81,6 +82,7 @@ async fn agent_message_stores_sender_and_relation() {
         Json(MessageRequest {
             text: "results attached".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -120,6 +122,7 @@ async fn self_message_stored_in_inbox() {
         Json(MessageRequest {
             text: "note to self".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -152,6 +155,7 @@ async fn send_message_to_faulted_returns_conflict() {
         Json(MessageRequest {
             text: "hi".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -205,6 +209,7 @@ async fn send_message_to_parked_agent_auto_wakes_with_kick_turn() {
         Json(MessageRequest {
             text: "hi".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -262,6 +267,7 @@ async fn send_message_to_parked_agent_without_reason_buffers_with_warning() {
         Json(MessageRequest {
             text: "hi".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -312,6 +318,7 @@ async fn off_duty_message_buffers_to_inbox() {
         Json(MessageRequest {
             text: "urgent task".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -359,6 +366,7 @@ async fn on_duty_message_stored_in_inbox() {
         Json(MessageRequest {
             text: "hello".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -403,6 +411,7 @@ async fn duty_toggle_off_then_on() {
         Json(MessageRequest {
             text: "first".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -420,6 +429,7 @@ async fn duty_toggle_off_then_on() {
         Json(MessageRequest {
             text: "second".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -515,6 +525,7 @@ async fn parked_send_records_row_and_frame_exactly_once() {
         Json(MessageRequest {
             text: "hi".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await
@@ -571,6 +582,7 @@ async fn repeated_parked_sends_each_record_one_row() {
             Json(MessageRequest {
                 text: format!("hi {i}"),
                 attachment: None,
+                defer: false,
             }),
         )
         .await
@@ -621,6 +633,7 @@ async fn off_duty_message_still_recorded() {
         Json(MessageRequest {
             text: "later".into(),
             attachment: None,
+            defer: false,
         }),
     )
     .await

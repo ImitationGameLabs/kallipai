@@ -7,7 +7,7 @@
 
 use kallip_archeion_common::ids::ParticipantKind;
 use kallip_common::agentid::AgentId;
-use kallip_common::protocol::{ApiError, MessageResponse};
+use kallip_common::protocol::{ApiError, DeliveryMode, MessageResponse};
 use kallip_lesche_common::message::Participant;
 use tracing::{error, info, warn};
 
@@ -18,10 +18,112 @@ use crate::lifecycle::{
 use crate::messaging::{MessageSender, SenderRelation, format_incoming, sanitize_sender};
 use crate::state::{RegistryEntry, SharedState};
 
+/// What the busy branch of [`enqueue_prompt`] may inject into a live agent's
+/// prompt channel. Peer direct messages inject an in-round notice unless the
+/// sender deferred; every other caller (relay surfaces, task watcher,
+/// schedule engine) keeps the historical run-boundary behavior.
+pub(crate) enum DeliveryNotice<'a> {
+    Peer {
+        /// Sender-opted run-boundary visibility: suppresses the notice here
+        /// and the parked kick below.
+        defer: bool,
+        /// Pre-rendered notice line (see [`peer_notice_text`]).
+        text: &'a str,
+    },
+    /// No injection; the envelope rides the inbox alone.
+    Surface,
+}
+
+/// Maximum characters of the sender's first line kept in the in-round notice
+/// preview. Local to kallip-tagma: the runtime's interjection cap is
+/// `pub(crate)` there and token-denominated, not reusable across crates.
+const NOTICE_PREVIEW_MAX_CHARS: usize = 120;
+
+/// Build the busy-branch notice line for a peer direct message. The runner's
+/// interjection drain wraps queued lines in `[Interjected message]` markers,
+/// so this returns one bare line — and strips that marker family from the
+/// preview, since a sender's first line carrying a marker could otherwise
+/// close the interjection block early. Content stays single-sourced in the
+/// inbox: the notice carries only the sender handle, a first-line preview,
+/// and an attachment flag.
+fn peer_notice_text(
+    sender: Option<&Participant>,
+    text: &str,
+    attachment: Option<&kallip_common::protocol::agent::FileAttachment>,
+) -> String {
+    let mut notice = String::from("peer message");
+    if let Some(handle) = sender.map(|p| p.handle.as_str()).filter(|h| !h.is_empty()) {
+        notice.push_str(&format!(" from {handle}"));
+    }
+    notice.push_str(" is in your inbox");
+    // First line only, block-marker family stripped, character-capped.
+    // A preview shortened by the cap carries an ellipsis.
+    let first = text.lines().next().unwrap_or("");
+    let stripped = first
+        .replace("[Interjected message]", "")
+        .replace("[/Interjected message]", "");
+    let trimmed = stripped.trim();
+    let mut preview: String = trimmed.chars().take(NOTICE_PREVIEW_MAX_CHARS).collect();
+    if preview.chars().count() < trimmed.chars().count() {
+        preview.push('…');
+    }
+    if !preview.is_empty() && attachment.is_some() {
+        notice.push_str(&format!(" (preview: {preview}; attachment included)"));
+    } else if !preview.is_empty() {
+        notice.push_str(&format!(" (preview: {preview})"));
+    } else if attachment.is_some() {
+        notice.push_str(" (attachment included)");
+    }
+    notice
+}
+
+/// Assemble the fast-path response for a live (running or idle-waiting)
+/// agent: peer notices `try_send` onto the prompt channel for in-round
+/// visibility (honestly degrading to run-boundary when the queue is full),
+/// deferred sends skip the channel write, and surface messages keep the
+/// historical notify-only behavior with no delivery-mode claim.
+///
+/// Declared race window (accepted, microseconds): a peer notice can land in
+/// the prompt channel just as the agent parks; the prompt arm has no parked
+/// guard, so the notice turn presents (and may run a round) in Parked
+/// state. The message itself is already durable in the inbox either way.
+fn busy_peer_response(
+    prompt_tx: &tokio::sync::mpsc::Sender<String>,
+    notice: &DeliveryNotice<'_>,
+) -> MessageResponse {
+    match notice {
+        DeliveryNotice::Peer { defer: false, text } => match prompt_tx.try_send(text.to_string()) {
+            Ok(()) => MessageResponse {
+                queue_depth: 0,
+                warning: None,
+                delivery_mode: Some(DeliveryMode::InRound),
+            },
+            Err(_) => MessageResponse {
+                queue_depth: 0,
+                warning: Some("notice queue full; visibility at run boundary".to_string()),
+                delivery_mode: Some(DeliveryMode::Deferred),
+            },
+        },
+        DeliveryNotice::Peer { defer: true, .. } => MessageResponse {
+            queue_depth: 0,
+            warning: Some("deferred by sender".to_string()),
+            delivery_mode: Some(DeliveryMode::Deferred),
+        },
+        DeliveryNotice::Surface => MessageResponse {
+            queue_depth: 0,
+            warning: None,
+            delivery_mode: None,
+        },
+    }
+}
 /// Deliver `text` to agent `id` as `identity`, attaching the `[From: ...]`
 /// header, enqueuing on the live prompt channel, and reactivating a dead agent.
 /// The HTTP `send_message` handler and the in-process relay share this single
 /// seam so reactivation + header formatting cannot drift.
+///
+/// `defer` (the wire `MessageRequest.defer`) asks for run-boundary
+/// visibility: no in-round notice and no parked kick — the message still
+/// lands in the inbox either way.
 ///
 /// `sender` is the user-facing wire sender (`Participant`): the relay passes
 /// the (relay-authenticated) envelope peer; the offline HTTP path passes `None`
@@ -36,6 +138,7 @@ pub async fn deliver_message(
     id: &AgentId,
     text: &str,
     attachment: Option<kallip_common::protocol::agent::FileAttachment>,
+    defer: bool,
 ) -> Result<MessageResponse, ApiError> {
     // Sanitize the wire sender's handle once, at ingest, so the persisted row
     // and the prompt header both see a clean value (format_incoming sanitizes
@@ -73,7 +176,18 @@ pub async fn deliver_message(
     info!(receiver = %id, sender = ?header_sender, relation = ?relation, "delivering message");
     let envelope = format_incoming(&header_sender, relation, text);
 
-    let response = enqueue_prompt(state, id, envelope, "operator").await?;
+    let notice = peer_notice_text(sender.as_ref(), text, attachment.as_ref());
+    let response = enqueue_prompt(
+        state,
+        id,
+        envelope,
+        "operator",
+        DeliveryNotice::Peer {
+            defer,
+            text: &notice,
+        },
+    )
+    .await?;
     // The external chat-room conversation is root-only, and only
     // user-facing inbounds (operator identity — `sender = None` on the
     // direct path, `Some(user)` on the relay; inter-agent messages
@@ -135,7 +249,14 @@ pub async fn deliver_inbound_relay_message(
         surface,
         text,
     );
-    enqueue_prompt(state, id, envelope, surface.source()).await
+    enqueue_prompt(
+        state,
+        id,
+        envelope,
+        surface.source(),
+        DeliveryNotice::Surface,
+    )
+    .await
 }
 
 /// Coarse human-readable duration for the kick turn ("45s", "3m 12s",
@@ -169,14 +290,15 @@ fn format_kick_text(
 /// Enqueue an already-formatted prompt string to an agent: the fast path
 /// (non-blocking send to a live agent's prompt channel) and the slow path
 /// (reactivating a dead agent on a fresh channel). Shared by the bilateral
-/// [`deliver_message`] and the room `deliver_room_message` so both paths
-/// wake a dead root agent identically; only the prompt formatting and the
-/// (bilateral-only) inbound persistence differ between the callers.
+/// [`deliver_message`], the relay inbound tail, the task watcher, and the
+/// schedule engine, so every caller wakes a dead root agent identically;
+/// `DeliveryNotice` separates peer in-round injection from surface calls.
 pub(crate) async fn enqueue_prompt(
     state: &SharedState,
     id: &AgentId,
     envelope: String,
     source: &str,
+    notice: DeliveryNotice<'_>,
 ) -> Result<MessageResponse, ApiError> {
     // Dangling-binding gate: an agent whose recorded profile-set binding
     // does not resolve (a record that predates set binding, or one naming
@@ -227,6 +349,7 @@ pub(crate) async fn enqueue_prompt(
         return Ok(MessageResponse {
             queue_depth: 0,
             warning: Some("agent is off-duty; message buffered to inbox".to_string()),
+            delivery_mode: Some(DeliveryMode::Buffered),
         });
     }
 
@@ -268,19 +391,40 @@ pub(crate) async fn enqueue_prompt(
         }
     };
     if let Some(wake) = parked_wake {
-        let warning = match wake {
+        // Sender-opted defer: skip the kick entirely — no wake turn, no
+        // notify. The message waits in the inbox for the agent's next
+        // natural wake.
+        if matches!(notice, DeliveryNotice::Peer { defer: true, .. }) {
+            return Ok(MessageResponse {
+                queue_depth: 0,
+                warning: Some("deferred by sender; agent parked".to_string()),
+                delivery_mode: Some(DeliveryMode::Deferred),
+            });
+        }
+        let (warning, delivery_mode) = match wake {
             ParkedWake::Kick(text, prompt_tx) => match prompt_tx.try_send(text) {
-                Ok(()) => "agent was parked; a kick turn was sent to wake it".to_string(),
+                Ok(()) => (
+                    "agent was parked; a kick turn was sent to wake it".to_string(),
+                    DeliveryMode::Kicked,
+                ),
                 // Queue full: the message is safe in the inbox; the kick is
                 // deferred until the queue drains (a parked agent keeps
                 // consuming prompt turns, so this is a pathological state).
-                Err(_) => "agent is parked and its prompt queue is full; message buffered to inbox, wake deferred".to_string(),
+                Err(_) => (
+                    "agent is parked and its prompt queue is full; message buffered to inbox, wake deferred".to_string(),
+                    DeliveryMode::Deferred,
+                ),
             },
-            ParkedWake::ParkedWithoutReason => "agent is parked without a parked reason (invariant break); message buffered to inbox".to_string(),
+            ParkedWake::ParkedWithoutReason => (
+                "agent is parked without a parked reason (invariant break); message buffered to inbox"
+                    .to_string(),
+                DeliveryMode::Deferred,
+            ),
         };
         return Ok(MessageResponse {
             queue_depth: 0,
             warning: Some(warning),
+            delivery_mode: Some(delivery_mode),
         });
     }
 
@@ -320,11 +464,9 @@ pub(crate) async fn enqueue_prompt(
                     "live normal-class agent is missing its workspace lock at delivery"
                 );
             }
+            let response = busy_peer_response(&live.agent.prompt_tx, &notice);
             live.agent.notify.notify_one();
-            return Ok(MessageResponse {
-                queue_depth: 0,
-                warning: None,
-            });
+            return Ok(response);
         }
         // Channel closed: fall through to reactivation.
     }
@@ -353,13 +495,11 @@ pub(crate) async fn enqueue_prompt(
             .ok_or_else(|| ApiError::conflict("agent is faulted; cannot reactivate"))?;
 
         // Double-check: another request may have reactivated since the read-lock
-        // probe. If the channel is now open, just notify.
+        // probe. If the channel is now open, take the busy fast path.
         if !live.agent.prompt_tx.is_closed() {
+            let response = busy_peer_response(&live.agent.prompt_tx, &notice);
             live.agent.notify.notify_one();
-            return Ok(MessageResponse {
-                queue_depth: 0,
-                warning: None,
-            });
+            return Ok(response);
         }
 
         info!(id = %id, "reactivating agent");
@@ -553,9 +693,12 @@ pub(crate) async fn enqueue_prompt(
         }
     }
 
+    // The envelope never entered a prompt channel: the fresh incarnation
+    // pulls it from the inbox on its first wake — buffered visibility.
     Ok(MessageResponse {
         queue_depth: 0,
         warning: None,
+        delivery_mode: Some(DeliveryMode::Buffered),
     })
 }
 

@@ -435,6 +435,12 @@ pub struct MessageRequest {
     /// the wiser (they ignore the unknown field).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<FileAttachment>,
+    /// Defer visibility to the receiver's run boundary: the tagma skips the
+    /// in-round notice and the parked wake. The message still lands in the
+    /// inbox. Absent from the historical wire shape; serde default + skip
+    /// keep bodies without one byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub defer: bool,
 }
 
 /// Response body for sending a message to an agent.
@@ -450,6 +456,32 @@ pub struct MessageResponse {
     /// Human-readable note when queue is non-empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// How the message will become visible to the receiver, when the tagma
+    /// reports it. Absent from the historical wire shape and from paths the
+    /// delivery-mode semantics do not cover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<DeliveryMode>,
+}
+
+/// Where a delivered message's visibility comes from, reported on the
+/// [`MessageResponse`] so the sender can gauge expected latency.
+///
+/// - `in_round`: the busy receiver's prompt channel took an in-round notice
+///   turn; visibility within the running round (minutes).
+/// - `kicked`: the receiver was parked and a kick turn woke it; visibility
+///   at the kick round.
+/// - `deferred`: visibility at the run boundary — the sender asked for it
+///   (`defer`), the notice queue was full, or the parked wake could not be
+///   sent; the receipt's `warning` distinguishes.
+/// - `buffered`: the receiver is off-duty (or dead and reactivating); the
+///   message sits in the inbox until the agent next pulls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    InRound,
+    Kicked,
+    Deferred,
+    Buffered,
 }
 /// Request body for ingesting an attachment into an agent's live context:
 /// the tagma fetches the media bytes from the files service, assembles the
@@ -496,7 +528,73 @@ pub struct AgentPermissionsResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{AttachmentIngestRequest, CreateAgentRequest, Modality};
+    use super::{
+        AttachmentIngestRequest, CreateAgentRequest, DeliveryMode, MessageRequest, MessageResponse,
+        Modality,
+    };
+
+    #[test]
+    fn message_request_without_defer_keeps_historical_wire_shape() {
+        // Old bodies (no defer field) parse with defer = false...
+        let old: MessageRequest = serde_json::from_str("{\"text\":\"hi\"}").unwrap();
+        assert!(!old.defer);
+        assert_eq!(old.text, "hi");
+        assert_eq!(old.attachment, None);
+        // ...and a default request serializes byte-identical to the old shape.
+        let req = MessageRequest {
+            text: "hi".to_owned(),
+            attachment: None,
+            defer: false,
+        };
+        assert_eq!(serde_json::to_string(&req).unwrap(), "{\"text\":\"hi\"}");
+    }
+
+    #[test]
+    fn message_request_defer_round_trips() {
+        let req = MessageRequest {
+            text: "later".to_owned(),
+            attachment: None,
+            defer: true,
+        };
+        let line = serde_json::to_string(&req).unwrap();
+        assert!(line.contains("\"defer\":true"));
+        let back: MessageRequest = serde_json::from_str(&line).unwrap();
+        assert!(back.defer);
+    }
+
+    #[test]
+    fn message_response_delivery_mode_wire_compat() {
+        // Old responses (no delivery_mode) parse with None; new responses
+        // render the mode as snake_case and skip the field when None.
+        let old: MessageResponse = serde_json::from_str("{\"queue_depth\":0}").unwrap();
+        assert_eq!(old.delivery_mode, None);
+        let resp = MessageResponse {
+            queue_depth: 0,
+            warning: None,
+            delivery_mode: Some(DeliveryMode::InRound),
+        };
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            "{\"queue_depth\":0,\"delivery_mode\":\"in_round\"}"
+        );
+        let resp = MessageResponse {
+            queue_depth: 0,
+            warning: None,
+            delivery_mode: None,
+        };
+        assert_eq!(serde_json::to_string(&resp).unwrap(), "{\"queue_depth\":0}");
+        for (mode, spelling) in [
+            (DeliveryMode::InRound, "in_round"),
+            (DeliveryMode::Kicked, "kicked"),
+            (DeliveryMode::Deferred, "deferred"),
+            (DeliveryMode::Buffered, "buffered"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&mode).unwrap(),
+                format!("\"{spelling}\"")
+            );
+        }
+    }
 
     #[test]
     fn modality_as_str_matches_serde_spelling() {

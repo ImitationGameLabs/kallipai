@@ -36,6 +36,7 @@ pub async fn send_message(
         &id,
         &req.text,
         attachment,
+        req.defer,
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(response)))
