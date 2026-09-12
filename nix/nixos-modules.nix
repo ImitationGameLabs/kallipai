@@ -666,7 +666,7 @@ in
           # instances proxy's own account; the daemon refuses an
           # unresolvable name, so option and service drift is loud.
           KALLIP_DAEMON_DELEGATES = lib.concatStringsSep "," (
-            lib.unique (cfg.delegates ++ lib.optional cfg.polis.enable "kallip-instances")
+            lib.unique (cfg.delegates ++ lib.optional polisCfg.enable "kallip-instances")
           );
           # NixOS has no /bin/bash; the login-environment harvest needs a
           # fixed administrative bash, never the caller's shell.
