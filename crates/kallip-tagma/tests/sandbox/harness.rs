@@ -697,7 +697,11 @@ impl BashOut {
 
 /// Read all history records for an agent as raw JSON values.
 pub fn history_records(data_root: &Path, agent_id: &str) -> Vec<Value> {
-    let dir = data_root.join("agents").join(agent_id).join("history");
+    let dir = data_root
+        .join("agents")
+        .join("active")
+        .join(agent_id)
+        .join("history");
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for ent in entries.flatten() {
@@ -724,9 +728,13 @@ pub fn history_records(data_root: &Path, agent_id: &str) -> Vec<Value> {
     out
 }
 
-/// `<data_root>/agents/<id>/meta.json` -- used for the data-tree write-denial check.
+/// `<data_root>/agents/active/<id>/meta.json` -- used for the data-tree write-denial check.
 pub fn agent_meta_path(data_root: &Path, id: &str) -> PathBuf {
-    data_root.join("agents").join(id).join("meta.json")
+    data_root
+        .join("agents")
+        .join("active")
+        .join(id)
+        .join("meta.json")
 }
 
 /// Extract `bash_exec` tool results in execution order. The runtime wraps each

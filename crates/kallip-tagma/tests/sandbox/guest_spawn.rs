@@ -68,6 +68,7 @@ async fn scenario4_guest_spawn_downgrade() {
     let child_meta = std::fs::read_to_string(
         fx.data_root
             .join("agents")
+            .join("active")
             .join(&child_id)
             .join("meta.json"),
     )

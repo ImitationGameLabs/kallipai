@@ -19,8 +19,9 @@ use crate::context::ContextStore;
 use just_llm_client::types::generation::Message;
 use kallip_common::AgentId;
 
-/// Resolve the shared data root under which `agents/`, `archived/`, and
-/// `skills/` live: `<platform_data_dir>/kallipai/tagmata/<KALLIP_TAGMA_SLUG>`.
+/// Resolve the shared data root under which `agents/` (the `active/`,
+/// `inactive/`, and `archived/` life stages) and `skills/` live:
+/// `<platform_data_dir>/kallipai/tagmata/<KALLIP_TAGMA_SLUG>`.
 ///
 /// The instance identity comes solely from `KALLIP_TAGMA_SLUG` — the daemon
 /// injects it for managed instances, and every direct run (container,
@@ -30,8 +31,8 @@ use kallip_common::AgentId;
 /// leaf — a process that cannot name itself must not guess where its
 /// data lives.
 ///
-/// Both `agents_base` and `archived_base` route through this so the live and
-/// archived trees share one root. When that root is on a single filesystem,
+/// All three life-stage bases route through this so every life-stage tree
+/// shares one root. When that root is on a single filesystem,
 /// `archive_agent_dir`'s `rename` is atomic; if the root is symlinked across a
 /// filesystem boundary the `rename` raises `EXDEV` and the archive falls back to
 /// a recursive copy + delete (see `archive_agent_dir`).
@@ -172,21 +173,20 @@ pub fn ensure_workspace_disjoint(workspace_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the base live-agents directory.
+/// Resolve the base live-agents directory (`agents/active/`).
 fn agents_base() -> Result<PathBuf> {
-    Ok(data_dir_root()?.join("agents"))
+    Ok(data_dir_root()?.join("agents").join("active"))
 }
 
-/// Resolve the base archived-agents directory (sibling of `agents/`).
+/// Resolve the base archived-agents directory (`agents/archived/`).
 ///
 /// Archived agents live here, fully transparent to [`scan_agents`] and the live
 /// registry. See [`archive_agent_dir`].
 fn archived_base() -> Result<PathBuf> {
-    Ok(data_dir_root()?.join("archived"))
+    Ok(data_dir_root()?.join("agents").join("archived"))
 }
 
-/// Resolve the base deactivated (inactive) agents directory (sibling of
-/// `agents/`).
+/// Resolve the base inactive agents directory (`agents/inactive/`).
 ///
 /// Inactive agents are parked here by the declarative-team converge flow:
 /// their declaration no longer references them, but the lock still holds
@@ -194,10 +194,10 @@ fn archived_base() -> Result<PathBuf> {
 /// transparent to [`scan_agents`] and the live registry — see
 /// [`deactivate_agent_dir`].
 fn inactive_base() -> Result<PathBuf> {
-    Ok(data_dir_root()?.join("agents-inactive"))
+    Ok(data_dir_root()?.join("agents").join("inactive"))
 }
 
-/// Inactive directory for a given agent (sibling of [`agent_dir`]).
+/// Inactive directory for a given agent (under `inactive_base`).
 ///
 /// Public for the tagma's team status face, which probes whether a lock
 /// record's id is parked here (the restore-vs-spawn input); the layout
@@ -205,7 +205,7 @@ fn inactive_base() -> Result<PathBuf> {
 pub fn inactive_dir(agent_id: &AgentId) -> Result<PathBuf> {
     Ok(inactive_base()?.join(agent_id.as_ref()))
 }
-/// Archived directory for a given agent (sibling of [`agent_dir`]).
+/// Archived directory for a given agent (under `archived_base`).
 pub fn archived_dir(agent_id: &AgentId) -> Result<PathBuf> {
     Ok(archived_base()?.join(agent_id.as_ref()))
 }
@@ -334,11 +334,11 @@ fn move_agent_dir(src: &Path, dst: &Path, agent_id: &AgentId, what: &str) -> Res
     Ok(())
 }
 
-/// Move a lived agent's directory from `agents/` to `archived/` on remove.
+/// Move a lived agent's directory from `agents/active/` to `agents/archived/` on remove.
 ///
 /// The agent's data (history, `context.json` with cumulative usage, approvals,
 /// exec_policy, meta) is preserved verbatim — removal becomes archival, not
-/// destruction. `archived/` is a sibling of `agents/`, so it is invisible to
+/// destruction. `agents/archived/` is a sibling of `agents/active/`, so it is invisible to
 /// [`scan_agents`] and the live registry.
 ///
 /// Idempotent: a missing source is a no-op. Bails if the destination already
@@ -365,7 +365,7 @@ pub fn archive_agent_dir(agent_id: &AgentId) -> Result<()> {
              to overwrite (agent id collision should be impossible)"
         );
     }
-    // Ensure the archived base exists (parent of `dst`), co-located with `agents_base`.
+    // Ensure the archived base exists (parent of `dst`).
     std::fs::create_dir_all(dst.parent().context("archived path has no parent")?)?;
     move_agent_dir(&src, &dst, agent_id, "archive")
 }
@@ -2291,8 +2291,8 @@ mod tests {
             // root; single filesystem here, so `rename` is atomic — a cross-fs
             // EXDEV falls back to copy + delete).
             let root = data_dir_root().unwrap();
-            assert!(root.join("agents").exists());
-            assert!(root.join("archived").exists());
+            assert!(root.join("agents").join("active").exists());
+            assert!(root.join("agents").join("archived").exists());
         })
     }
 
@@ -2407,11 +2407,13 @@ mod tests {
     #[serial]
     fn scan_and_find_error_when_the_agents_dir_is_unreadable() {
         with_data_dir(|_| {
-            // agents/ exists but as a regular file: read_dir fails with
+            // The agents base exists but as a regular file: read_dir fails with
             // ENOTDIR, standing in for permission-denied states the runner
             // cannot reproduce (root ignores file modes).
             std::fs::create_dir_all(data_dir_root().unwrap()).unwrap();
-            std::fs::write(agents_base().unwrap(), "not a directory").unwrap();
+            let base = agents_base().unwrap();
+            std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+            std::fs::write(&base, "not a directory").unwrap();
             let err = match scan_agents() {
                 Ok(_) => panic!("scan must not swallow an unreadable dir"),
                 Err(e) => e,

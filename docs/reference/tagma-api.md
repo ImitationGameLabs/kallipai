@@ -223,9 +223,9 @@ Stops and removes an agent instance. Any state except busy is removable (the
 lifecycle cancel is honored everywhere, including waiting/retrying outer-loop
 parks); the agent must have no active subagents.
 
-Removal **archives** the agent: its directory is moved to `archived/<id>/`
+Removal **archives** the agent: its directory is moved to `agents/archived/<id>/`
 (history, cumulative usage, and all persisted state preserved) rather than
-destroyed. `scan_agents` ignores `archived/`, so an archived agent is absent
+destroyed. `scan_agents` ignores `agents/archived/`, so an archived agent is absent
 from the live registry and is not restored on tagma restart. There is **no
 purge mechanism yet** — archived data (which may contain secrets/PII) persists
 indefinitely; a purge command/TTL is a tracked pre-production requirement.

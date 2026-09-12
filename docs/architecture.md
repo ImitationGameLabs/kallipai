@@ -51,7 +51,7 @@ an `RwLock`; lookup is by UUID.
 1. **Create** — `POST /agents` spawns both tasks, returns the agent ID.
 2. **Interact** — send messages, stream events, approve or deny pending actions.
 3. **Remove** — `DELETE /agents/{id}` aborts both tokio tasks, then moves the
-   agent directory to `archived/` (history and usage preserved) and drops the
+   agent directory to `agents/archived/` (history and usage preserved) and drops the
    registry entry.
 
 The tagma exposes an HTTP API for managing agents and approvals. For the full

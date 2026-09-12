@@ -23,7 +23,7 @@ async fn scenario2_normal() {
     let have_shm = Path::new("/dev/shm").is_dir();
     let world = World::setup();
     let ws = world.workspace.path().to_path_buf();
-    let agent_data = format!("{}/agents/$KALLIP_ID", world.data_root().display());
+    let agent_data = format!("{}/agents/active/$KALLIP_ID", world.data_root().display());
     // A fixed global name would let two test binaries running in
     // parallel trample each other; suffix with the test pid (the
     // full-handoff scenario's child-id file precedent).

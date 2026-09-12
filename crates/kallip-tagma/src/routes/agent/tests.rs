@@ -1037,6 +1037,7 @@ fn ensure_root_agent_refuses_to_mint_when_a_disk_root_exists() {
         .join("tagmata")
         .join("disk-root")
         .join("agents")
+        .join("active")
         .join("disk-root-1");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
@@ -1080,7 +1081,7 @@ fn ensure_root_agent_refuses_to_mint_when_a_disk_root_exists() {
 #[test]
 #[serial_test::serial]
 fn ensure_root_agent_refuses_to_mint_when_the_agents_dir_is_unreadable() {
-    // Same /dev/shm rationale as the disk-root test above. agents/ exists
+    // Same /dev/shm rationale as the disk-root test above. agents/active exists
     // as a regular file so read_dir fails with ENOTDIR -- the runner cannot
     // reproduce a permission-denied directory as root.
     let tmp = tempfile::TempDir::new_in("/dev/shm").unwrap();
@@ -1089,7 +1090,8 @@ fn ensure_root_agent_refuses_to_mint_when_the_agents_dir_is_unreadable() {
         .join("kallipai")
         .join("tagmata")
         .join("disk-root")
-        .join("agents");
+        .join("agents")
+        .join("active");
     std::fs::create_dir_all(agents_at.parent().unwrap()).unwrap();
     std::fs::write(agents_at, "not a directory").unwrap();
     let path = tmp.path().to_str().unwrap().to_owned();

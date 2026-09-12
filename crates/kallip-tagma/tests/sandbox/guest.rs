@@ -14,7 +14,7 @@ async fn scenario1_guest() {
     }
     let world = World::setup();
     let ws = world.workspace.path().to_path_buf();
-    let agent_data = format!("{}/agents/$KALLIP_ID", world.data_root().display());
+    let agent_data = format!("{}/agents/active/$KALLIP_ID", world.data_root().display());
     let script = vec![
         Reply::Tool("ls -A $HOME/.ssh".into()), // 0: hide-hole => empty
         Reply::Tool(format!("echo x > {}/probe.txt", ws.display())), // 1: workspace RO

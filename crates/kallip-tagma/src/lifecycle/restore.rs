@@ -647,7 +647,7 @@ pub async fn restore_agents(state: &SharedState) -> anyhow::Result<()> {
     if roots.len() > 1 {
         anyhow::bail!(
             "multiple root agents on disk ({count}); the tagma owns exactly one \
-             root. Remove the extras from the instance data root's agents/ and restart",
+             root. Remove the extras from the instance data root's agents/active and restart",
             count = roots.len()
         );
     }
@@ -1004,7 +1004,8 @@ mod tests {
             .join("kallipai")
             .join("tagmata")
             .join("cycle")
-            .join("agents");
+            .join("agents")
+            .join("active");
         std::fs::create_dir_all(&base).unwrap();
         let a = AgentId::from("cycle-a".to_owned());
         let b = AgentId::from("cycle-b".to_owned());
