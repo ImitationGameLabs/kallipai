@@ -26,6 +26,8 @@
   "chat_send_failed": "无法发送消息。",
   "chat_reconnecting": "正在重连…",
   "chat_unread_badge_aria": "{count} 条未读",
+  "chat_jump_to_latest": "跳到最新",
+  "chat_new_while_away_aria": "离开期间 {count} 条新消息",
   "chat_notifications_label": "通知",
   "chat_notifications_desc": "应用在后台时，收到新消息显示系统通知。",
   "chat_notifications_denied": "通知已在浏览器设置中被阻止。请先在浏览器设置中重新启用，再打开此开关。",

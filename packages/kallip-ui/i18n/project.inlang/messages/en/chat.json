@@ -26,6 +26,8 @@
   "chat_send_failed": "Could not send the message.",
   "chat_reconnecting": "Reconnecting…",
   "chat_unread_badge_aria": "{count} unread",
+  "chat_jump_to_latest": "Jump to latest",
+  "chat_new_while_away_aria": "{count} new while away",
   "chat_notifications_label": "Notifications",
   "chat_notifications_desc": "Show a system notification for new messages while the app is in the background.",
   "chat_notifications_denied": "Notifications are blocked in your browser settings. Re-enable them there, then turn this on again.",

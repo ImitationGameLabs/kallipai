@@ -7,6 +7,7 @@
   // inside its own flex column.
   import Composer from "./Composer.svelte";
   import MessageBubble from "./MessageBubble.svelte";
+  import ScrollToBottomButton from "./ScrollToBottomButton.svelte";
   import {
     createAutoScroll,
     createTogglePin,
@@ -38,6 +39,7 @@
     downloadAttachment,
     fileButton,
     attachmentBar,
+    sessionKey,
   }: {
     lines: ConversationLine[];
     status: ConversationTranscript["status"];
@@ -65,6 +67,12 @@
     /** The page-supplied download I/O for message file cards, forwarded
      *  verbatim (omitted = the cards render without a download button). */
     downloadAttachment?: (attachment: FileAttachment) => Promise<void>;
+    /** Identity of the conversation feeding `lines` (the route param). A
+     *  change resets the auto-scroll controller: SvelteKit reuses this
+     *  component across param changes, and the new conversation must not
+     *  inherit the old one's scroll position or missed count. Omitted =
+     *  never reset (static callers). */
+    sessionKey?: string;
 
     /** Optional page-supplied notice rendered inside the scrollable transcript
      *  (after the inline error), so it scrolls with the messages. Used for the
@@ -81,9 +89,16 @@
 
   // Stick to the tail as lines arrive; stop once the user scrolls up to read.
   const scroll = createAutoScroll();
+  // Session-key reset must be declared BEFORE the stick effect: effects in
+  // the same flush run in declaration order, so a param change resets the
+  // controller before stick() observes the new conversation's lines.
+  $effect(() => {
+    void sessionKey;
+    scroll.reset();
+  });
   $effect(() => {
     void lines.length;
-    scroll.stick();
+    scroll.stick(lines.length, lines.at(-1)?.historyId);
   });
 
   // One scroll-pin controller for the whole transcript (a single active
@@ -150,83 +165,97 @@
   });
 </script>
 
-<div
-  class="flex-1 min-h-0 overflow-auto"
-  bind:this={scroll.viewport}
-  onscroll={scroll.onScroll}
->
-  <div class="mx-auto w-full max-w-[80rem] p-4 flex flex-col gap-3">
-    {#if loadOlder}
-      <!-- Pager sentinel: zero-height and inert to layout; the observer
+<div class="relative flex-1 min-h-0 flex">
+  <div
+    class="flex-1 min-h-0 overflow-auto"
+    bind:this={scroll.viewport}
+    onscroll={scroll.onScroll}
+  >
+    <div class="mx-auto w-full max-w-[80rem] p-4 flex flex-col gap-3">
+      {#if loadOlder}
+        <!-- Pager sentinel: zero-height and inert to layout; the observer
            reports zero-area targets entering the root fine. -->
-      <div
-        bind:this={sentinel}
-        class="h-0 w-full shrink-0"
-        aria-hidden="true"
-      ></div>
-    {/if}
-    {#if lines.length === 0 && !busy && composer}
-      <p class="text-sm opacity-60 text-center mt-8">
-        {chat_send_to_start()}
-      </p>
-    {/if}
-    {#each lines as line, i (line.historyId)}
-      {@const m = markers[i]}
-      {#if m?.dateDivider}
         <div
-          class="self-center text-xs opacity-50 my-2 text-center max-w-[80%]"
-        >
-          {m.dateDivider}{#if m.timeLabel}
-            <span class="opacity-70">· {m.timeLabel}</span>{/if}
-        </div>
-      {:else if m?.timeLabel}
-        <div class="self-center text-xs opacity-50 mt-2 text-center">
-          {m.timeLabel}
-        </div>
+          bind:this={sentinel}
+          class="h-0 w-full shrink-0"
+          aria-hidden="true"
+        ></div>
       {/if}
-      {#if line.role === "system"}
-        <p
-          class="text-xs opacity-60 text-center whitespace-pre-wrap break-words"
-        >
-          {line.text}
+      {#if lines.length === 0 && !busy && composer}
+        <p class="text-sm opacity-60 text-center mt-8">
+          {chat_send_to_start()}
         </p>
-      {:else}
-        <div
-          class="group flex flex-col {line.role === 'user'
-            ? 'items-end'
-            : 'items-start'}"
-        >
-          {#if line.role !== "user" && line.sender && (i === 0 || lines[i - 1]?.sender?.id !== line.sender.id)}
-            <span class="text-xs opacity-50 px-1 mb-0.5"
-              >{line.sender.handle}</span
-            >
-          {/if}
-          <MessageBubble
-            text={line.text}
-            markdown={line.role === "assistant"}
-            mine={line.role === "user"}
-            bare={line.role === "user" && line.status === "sending"}
-            pending={line.status === "sending"}
-            attachment={line.attachment}
-            {downloadAttachment}
-            pin={togglePin}
-          />
-          {#if line.role === "user" && line.status === "sending"}
-            <span
-              class="text-xs opacity-50 animate-pulse"
-              aria-label={room_sending_aria()}>··</span
-            >
-          {/if}
-        </div>
       {/if}
-    {/each}
-    {#if status === "error" && error}
-      <p class="text-xs text-error-500 dark:text-error-400 text-center">
-        {error}
-      </p>
-    {/if}
-    {@render notice?.()}
+      {#each lines as line, i (line.historyId)}
+        {@const m = markers[i]}
+        {#if m?.dateDivider}
+          <div
+            class="self-center text-xs opacity-50 my-2 text-center max-w-[80%]"
+          >
+            {m.dateDivider}{#if m.timeLabel}
+              <span class="opacity-70">· {m.timeLabel}</span>{/if}
+          </div>
+        {:else if m?.timeLabel}
+          <div class="self-center text-xs opacity-50 mt-2 text-center">
+            {m.timeLabel}
+          </div>
+        {/if}
+        {#if line.role === "system"}
+          <p
+            class="text-xs opacity-60 text-center whitespace-pre-wrap break-words"
+          >
+            {line.text}
+          </p>
+        {:else}
+          <div
+            class="group flex flex-col {line.role === 'user'
+              ? 'items-end'
+              : 'items-start'}"
+          >
+            {#if line.role !== "user" && line.sender && (i === 0 || lines[i - 1]?.sender?.id !== line.sender.id)}
+              <span class="text-xs opacity-50 px-1 mb-0.5"
+                >{line.sender.handle}</span
+              >
+            {/if}
+            <MessageBubble
+              text={line.text}
+              markdown={line.role === "assistant"}
+              mine={line.role === "user"}
+              bare={line.role === "user" && line.status === "sending"}
+              pending={line.status === "sending"}
+              attachment={line.attachment}
+              {downloadAttachment}
+              pin={togglePin}
+            />
+            {#if line.role === "user" && line.status === "sending"}
+              <span
+                class="text-xs opacity-50 animate-pulse"
+                aria-label={room_sending_aria()}>··</span
+              >
+            {/if}
+          </div>
+        {/if}
+      {/each}
+      {#if status === "error" && error}
+        <p class="text-xs text-error-500 dark:text-error-400 text-center">
+          {error}
+        </p>
+      {/if}
+      {@render notice?.()}
+    </div>
   </div>
+  {#if !scroll.follow}
+    <!-- z-10: a hosting page may append absolute siblings after this one;
+      later siblings stack above by DOM order unless outranked. -->
+    <div
+      class="absolute inset-x-0 bottom-4 z-10 flex justify-center pointer-events-none"
+    >
+      <ScrollToBottomButton
+        missed={scroll.missed}
+        onclick={() => scroll.forceBottom()}
+      />
+    </div>
+  {/if}
 </div>
 {#if composer}
   <Composer {composer} {disabled} {pendingCount} {attachmentBar} {fileButton} />

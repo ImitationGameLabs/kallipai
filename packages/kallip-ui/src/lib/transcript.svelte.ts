@@ -14,26 +14,83 @@ export interface AutoScroll {
   viewport: HTMLDivElement | undefined;
   /** Whether we are currently pinned to the tail. */
   readonly follow: boolean;
+  /** Lines that landed while not following (the jump-to-latest badge). */
+  readonly missed: number;
   /** Attach to the viewport's `onscroll`. */
   onScroll: () => void;
-  /** Call from a content-change effect; scrolls down only if following. */
-  stick: () => void;
+  /**
+   * Call from a content-change effect with the line count and the tail
+   * line's stable key. Scrolls down only if following; while detached it
+   * counts the appended lines into `missed` (a grown array whose tail key
+   * did not move is an older-history prepend, not new conversation).
+   */
+  stick: (contentLength: number, tailKey?: string | number) => void;
+  /** Unconditional jump to the tail: resume following, drop the count. */
+  forceBottom: () => void;
+  /** Return to fresh-mount state (follow, zero count, empty tail); the
+   *  viewport binding survives. Call when the feeding session changes. */
+  reset: () => void;
+}
+
+/** The tail snapshot one stick() call observes. */
+export interface TailSnapshot {
+  length: number;
+  key: string | number | undefined;
+}
+
+/**
+ * Lines to count as missed when content grows while not following: the
+ * appended delta. A grown array whose tail key did not move is an
+ * older-history prepend (the lazy-window pager), which is not new
+ * conversation. Pure so the prepend fence is testable without a viewport
+ * (the badgeLabel precedent in session/unread.svelte.ts).
+ */
+export function missedLines(
+  prev: TailSnapshot,
+  next: TailSnapshot,
+  follow: boolean,
+): number {
+  if (follow) return 0;
+  if (next.length <= prev.length) return 0;
+  if (next.key === prev.key) return 0;
+  return next.length - prev.length;
 }
 
 export function createAutoScroll(options: AutoScrollOptions = {}): AutoScroll {
   const threshold = options.threshold ?? 24;
   let viewport: HTMLDivElement | undefined = $state();
   let follow = $state(true);
+  let missed = $state(0);
+  let lastTail: TailSnapshot = { length: 0, key: undefined };
 
   function onScroll(): void {
     if (!viewport) return;
     const distanceFromBottom =
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
     follow = distanceFromBottom < threshold;
+    // Back at the tail by hand: whatever piled up while away is seen now.
+    if (follow) missed = 0;
   }
 
-  function stick(): void {
+  function stick(contentLength: number, tailKey?: string | number): void {
+    missed += missedLines(
+      lastTail,
+      { length: contentLength, key: tailKey },
+      follow,
+    );
+    lastTail = { length: contentLength, key: tailKey };
     if (follow && viewport) viewport.scrollTop = viewport.scrollHeight;
+  }
+
+  function forceBottom(): void {
+    follow = true;
+    missed = 0;
+    if (viewport) viewport.scrollTop = viewport.scrollHeight;
+  }
+  function reset(): void {
+    follow = true;
+    missed = 0;
+    lastTail = { length: 0, key: undefined };
   }
 
   return {
@@ -46,8 +103,13 @@ export function createAutoScroll(options: AutoScrollOptions = {}): AutoScroll {
     get follow() {
       return follow;
     },
+    get missed() {
+      return missed;
+    },
     onScroll,
     stick,
+    forceBottom,
+    reset,
   };
 }
 

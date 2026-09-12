@@ -365,6 +365,7 @@
             lines={conv.transcript.lines}
             status={conv.transcript.status}
             error={conv.transcript.error}
+            sessionKey={conversationId}
             {composer}
             {disabled}
             {pendingCount}

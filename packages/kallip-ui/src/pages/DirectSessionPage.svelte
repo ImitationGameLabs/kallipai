@@ -140,6 +140,7 @@
           ? "error"
           : "idle"}
       error={phase === "unavailable" ? chat_direct_unavailable() : undefined}
+      sessionKey={`${tagmaId}:${peerId}`}
       disabled={true}
       pendingCount={0}
       {downloadAttachment}

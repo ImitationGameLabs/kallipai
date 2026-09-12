@@ -17,6 +17,7 @@
   import Composer from "../components/Composer.svelte";
   import MessageBubble from "../components/MessageBubble.svelte";
   import PageHeader from "../components/PageHeader.svelte";
+  import ScrollToBottomButton from "../components/ScrollToBottomButton.svelte";
   import {
     createAutoScroll,
     createTogglePin,
@@ -124,9 +125,16 @@
 
   // Stick to the tail as lines arrive; stop once the user scrolls up to read.
   const scroll = createAutoScroll();
+  // Session-key reset must be declared BEFORE the stick effect: effects in
+  // the same flush run in declaration order, so a param change resets the
+  // controller before stick() observes the new room's lines.
+  $effect(() => {
+    void roomId;
+    scroll.reset();
+  });
   $effect(() => {
     void conv?.lines.length;
-    scroll.stick();
+    scroll.stick(conv?.lines.length ?? 0, conv?.lines.at(-1)?.seq);
   });
 
   // The viewing line tick: lines rendered on the open conversation count as
@@ -314,6 +322,18 @@
           {/if}
         </div>
       </div>
+      {#if !scroll.follow}
+        <!-- No z-index on purpose: the members panel (z-10, a later
+          sibling) must win when open. -->
+        <div
+          class="absolute inset-x-0 bottom-4 flex justify-center pointer-events-none"
+        >
+          <ScrollToBottomButton
+            missed={scroll.missed}
+            onclick={() => scroll.forceBottom()}
+          />
+        </div>
+      {/if}
       {#if showMembers}
         <!-- Backdrop: a non-interactive click-catcher that closes the panel on
           mobile (the panel is an overlay on narrow viewports; a flex column on
