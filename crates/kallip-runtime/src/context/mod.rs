@@ -23,7 +23,7 @@ mod warnings;
 
 pub use compose::{
     FetchedImage, IngestImage, ReassemblyReport, compose_context, ingest_message,
-    reassemble_attachments,
+    reassemble_attachments, reassemble_pin_attachments,
 };
 pub(crate) use compose::{message_has_images, strip_message_images};
 pub use store::{AgenticContext, ContextStore};

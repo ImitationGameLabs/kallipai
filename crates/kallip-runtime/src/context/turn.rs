@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::manifest::PinAttachment;
 use just_llm_client::types::generation::Message;
 
 /// Stable unique identifier for a turn within an agent's lifetime.
@@ -20,7 +21,15 @@ pub enum TurnKind {
     /// Pinned persistent context — a compaction summary, loaded skill, or agent note.
     /// Never evicted; always composed before conversation turns; identified by `label` for
     /// replace/remove-by-label (e.g. `"context_summary"`, `"skill:foo"`).
-    Pinned { label: String },
+    Pinned {
+        label: String,
+        /// Files-service references named by the pin's pointer lines, carried so
+        /// restore can re-fetch the bytes (see `reassemble_pin_attachments`).
+        /// The field is optional when reading; pins without attachments read
+        /// back an empty set.
+        #[serde(default)]
+        attachments: Vec<PinAttachment>,
+    },
 }
 
 impl Default for TurnKind {
@@ -62,7 +71,26 @@ impl Turn {
     /// The label identifying a pinned turn, or `None` for conversation turns.
     pub fn label(&self) -> Option<&str> {
         match &self.kind {
-            TurnKind::Pinned { label } => Some(label),
+            TurnKind::Pinned { label, .. } => Some(label),
+            TurnKind::Conversation => None,
+        }
+    }
+
+    /// The attachment references a pinned turn carries (empty for
+    /// conversation turns and for pins whose images are already assembled).
+    pub fn pinned_attachments(&self) -> &[PinAttachment] {
+        match &self.kind {
+            TurnKind::Pinned { attachments, .. } => attachments,
+            TurnKind::Conversation => &[],
+        }
+    }
+
+    /// Mutable access to a pinned turn's attachment references; `None` for
+    /// conversation turns. The restore-time re-assembly pass drops
+    /// deterministically-gone references through this.
+    pub fn pinned_attachments_mut(&mut self) -> Option<&mut Vec<PinAttachment>> {
+        match &mut self.kind {
+            TurnKind::Pinned { attachments, .. } => Some(attachments),
             TurnKind::Conversation => None,
         }
     }

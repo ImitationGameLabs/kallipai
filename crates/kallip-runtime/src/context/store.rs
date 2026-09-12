@@ -178,6 +178,7 @@ impl AgenticContext for ContextStore {
             );
         }
         let id = TurnId(self.next_turn_id);
+        let attachments = super::compose::extract_pin_attachments(&message);
         self.next_turn_id += 1;
         self.turns.insert(
             self.pinned_turn_count(),
@@ -187,6 +188,7 @@ impl AgenticContext for ContextStore {
                 estimated_tokens: msg_tokens,
                 kind: TurnKind::Pinned {
                     label: label.to_owned(),
+                    attachments,
                 },
             },
         );
@@ -284,9 +286,14 @@ impl AgenticContext for ContextStore {
 
         if let Some(idx) = existing_idx {
             // In-place update keeps the turn's position and id; only content/tokens change.
+            let refs = super::compose::extract_pin_attachments(&message);
+            if let Some(attachments) = self.turns[idx].pinned_attachments_mut() {
+                *attachments = refs;
+            }
             self.turns[idx].messages = vec![message];
             self.turns[idx].estimated_tokens = msg_tokens;
         } else {
+            let refs = super::compose::extract_pin_attachments(&message);
             let id = TurnId(self.next_turn_id);
             self.next_turn_id += 1;
             self.turns.insert(
@@ -297,6 +304,7 @@ impl AgenticContext for ContextStore {
                     estimated_tokens: msg_tokens,
                     kind: TurnKind::Pinned {
                         label: label.to_owned(),
+                        attachments: refs,
                     },
                 },
             );
@@ -554,7 +562,10 @@ impl ContextStore {
                     id,
                     messages: vec![item.message],
                     estimated_tokens: item.estimated_tokens,
-                    kind: TurnKind::Pinned { label: item.label },
+                    kind: TurnKind::Pinned {
+                        label: item.label,
+                        attachments: Vec::new(),
+                    },
                 },
             );
             inserted += 1;
@@ -579,6 +590,7 @@ impl ContextStore {
                 estimated_tokens: p.estimated_tokens,
                 kind: TurnKind::Pinned {
                     label: p.label.clone(),
+                    attachments: p.attachments.clone(),
                 },
             });
         }
@@ -661,11 +673,19 @@ impl ContextStore {
             version: FORMAT_VERSION,
             pins: self
                 .pinned_turns()
-                .map(|t| PinRecord {
-                    id: t.id.0,
-                    label: t.label().expect("pinned turn has a label").to_owned(),
-                    message: t.messages[0].clone(),
-                    estimated_tokens: t.estimated_tokens,
+                .map(|t| {
+                    // The pins document carries the text form plus the turn's
+                    // attachment references — the same shape history records
+                    // use — so binary data never reaches `pins.json`. Restore
+                    // swaps the bytes back in through `reassemble_pin_attachments`.
+                    let message = super::compose::pin_text_form(&t.messages[0]);
+                    PinRecord {
+                        id: t.id.0,
+                        label: t.label().expect("pinned turn has a label").to_owned(),
+                        estimated_tokens: estimate_message_tokens(&message),
+                        message,
+                        attachments: t.pinned_attachments().to_vec(),
+                    }
                 })
                 .collect(),
         }

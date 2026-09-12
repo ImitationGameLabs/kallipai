@@ -40,6 +40,15 @@ pub(crate) struct ManifestDoc {
     pub retry_log: Vec<RetryRecord>,
 }
 
+/// One attachment reference carried alongside a pinned message's text
+/// form: the files record to fetch on restore and the media type the
+/// bytes were stored with.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PinAttachment {
+    pub record_id: uuid::Uuid,
+    pub media_type: String,
+}
+
 /// One pinned turn, in full. `message` is single-message by construction
 /// (`pin`/`replace_pin` both store exactly one).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +59,11 @@ pub(crate) struct PinRecord {
     #[serde(with = "crate::persisted_message::message")]
     pub message: Message,
     pub estimated_tokens: usize,
+    /// Attachment references named by the message's pointer lines. The
+    /// field is optional when reading; pins without attachments read
+    /// back an empty set.
+    #[serde(default)]
+    pub attachments: Vec<PinAttachment>,
 }
 
 /// Pinned-layer document written as `pins.json` whenever pins change.
@@ -108,6 +122,10 @@ mod tests {
                 label: "context_summary".into(),
                 message: assistant_msg("summary text"),
                 estimated_tokens: 12,
+                attachments: vec![PinAttachment {
+                    record_id: uuid::Uuid::from_u128(0x42),
+                    media_type: "image/png".to_owned(),
+                }],
             }],
         };
         let json = serde_json::to_string(&doc).unwrap();
@@ -117,5 +135,31 @@ mod tests {
         assert_eq!(back.pins[0].label, "context_summary");
         assert_eq!(back.pins[0].message.content(), Some("summary text"));
         assert_eq!(back.pins[0].estimated_tokens, 12);
+        assert_eq!(back.pins[0].attachments.len(), 1);
+        assert_eq!(
+            back.pins[0].attachments[0].record_id,
+            uuid::Uuid::from_u128(0x42)
+        );
+    }
+
+    #[test]
+    fn pins_doc_reads_records_without_attachments_field() {
+        let doc = PinsDoc {
+            version: FORMAT_VERSION,
+            pins: vec![PinRecord {
+                id: 42,
+                label: "context_summary".into(),
+                message: assistant_msg("summary text"),
+                estimated_tokens: 12,
+                attachments: vec![],
+            }],
+        };
+        let mut value = serde_json::to_value(&doc).unwrap();
+        value["pins"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("attachments");
+        let back: PinsDoc = serde_json::from_value(value).unwrap();
+        assert!(back.pins[0].attachments.is_empty());
     }
 }

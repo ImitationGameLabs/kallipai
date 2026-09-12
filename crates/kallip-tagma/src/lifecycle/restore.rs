@@ -255,42 +255,58 @@ async fn restore_one(
     // transient fetch failures simply leave the turn text-only for the
     // next restart to try again.
     let shared = shared_state.clone();
-    let report = kallip_runtime::context::reassemble_attachments(
-        &mut restored.store,
-        &restored.agent_dir,
-        move |record_id| {
-            let shared = shared.clone();
-            Box::pin(async move {
-                crate::files::fetch_for_reassembly(&shared.files_http, record_id).await
-            })
-        },
-    )
-    .await;
-    for (turn_id, record_id, reason) in &report.invalidated {
-        tracing::warn!(
-            id = %p.agent_id, turn_id, %record_id,
-            "attachment reference invalidated during restore: {reason}"
-        );
-        kallip_runtime::history::HistoryWriter::new(restored.agent_dir.clone())
-            .append(
-                None,
-                &[],
-                0,
-                kallip_runtime::history::RecordKind::System,
-                Some(kallip_runtime::history::SystemEvent::ReferenceInvalidated {
-                    turn_id: *turn_id,
-                    record_id: *record_id,
-                    reason: reason.clone(),
-                }),
-                &[],
-            )
-            .ok();
-    }
-    for (_, record_id, reason) in &report.skipped {
-        tracing::warn!(
-            id = %p.agent_id, %record_id,
-            "attachment reference left text-only after transient fetch failure: {reason}"
-        );
+    type BoxedFetch = std::pin::Pin<
+        Box<dyn std::future::Future<Output = kallip_runtime::context::FetchedImage> + Send>,
+    >;
+    let mut fetch = move |record_id| -> BoxedFetch {
+        let shared = shared.clone();
+        Box::pin(
+            async move { crate::files::fetch_for_reassembly(&shared.files_http, record_id).await },
+        )
+    };
+    let reports = [
+        kallip_runtime::context::reassemble_attachments(
+            &mut restored.store,
+            &restored.agent_dir,
+            &mut fetch,
+        )
+        .await,
+        // Pins persist as text plus references, so their bytes come back
+        // through the same mechanism (invalidated references excluded).
+        kallip_runtime::context::reassemble_pin_attachments(
+            &mut restored.store,
+            &restored.agent_dir,
+            &mut fetch,
+        )
+        .await,
+    ];
+    for report in &reports {
+        for (turn_id, record_id, reason) in &report.invalidated {
+            tracing::warn!(
+                id = %p.agent_id, turn_id, %record_id,
+                "attachment reference invalidated during restore: {reason}"
+            );
+            kallip_runtime::history::HistoryWriter::new(restored.agent_dir.clone())
+                .append(
+                    None,
+                    &[],
+                    0,
+                    kallip_runtime::history::RecordKind::System,
+                    Some(kallip_runtime::history::SystemEvent::ReferenceInvalidated {
+                        turn_id: *turn_id,
+                        record_id: *record_id,
+                        reason: reason.clone(),
+                    }),
+                    &[],
+                )
+                .ok();
+        }
+        for (_, record_id, reason) in &report.skipped {
+            tracing::warn!(
+                id = %p.agent_id, %record_id,
+                "attachment reference left text-only after transient fetch failure: {reason}"
+            );
+        }
     }
 
     config.agent_id = Some(p.agent_id.clone());

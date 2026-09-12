@@ -464,3 +464,34 @@ fn usage_snapshot_caps_largest_turns_at_five() {
     assert_eq!(usage.largest_turns.len(), 5);
     assert_eq!(usage.turn_count, 8);
 }
+
+#[test]
+fn pins_projection_strips_image_bytes_to_text_and_references() {
+    let mut store = new_store();
+    let record_id = uuid::Uuid::from_u128(0xB0B);
+    let message = crate::context::compose::ingest_message(
+        &format!("caption\n[image {record_id}]"),
+        &[crate::context::compose::IngestImage {
+            media_type: "image/png".to_owned(),
+            bytes: b"PINTESTBYTES-should-never-hit-disk".to_vec(),
+        }],
+    );
+    store.pin("shot", message).unwrap();
+
+    let doc = store.to_pins_doc();
+    assert_eq!(doc.pins.len(), 1);
+    assert_eq!(doc.pins[0].attachments.len(), 1);
+    assert_eq!(doc.pins[0].attachments[0].record_id, record_id);
+    assert_eq!(doc.pins[0].attachments[0].media_type, "image/png");
+    assert_eq!(
+        doc.pins[0].message.content(),
+        Some(format!("caption\n[image {record_id}]").as_str())
+    );
+
+    let json = serde_json::to_string(&doc).unwrap();
+    assert!(
+        !json.contains("UElOVEVTV"),
+        "Base64 of the marker bytes must never reach pins.json"
+    );
+    assert!(json.contains(&format!("[image {record_id}]")));
+}
