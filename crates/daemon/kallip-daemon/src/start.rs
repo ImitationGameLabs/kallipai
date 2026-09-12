@@ -12,12 +12,14 @@ use kallip_daemon_common::wire::ErrorCode;
 
 use crate::records::{self, InstanceRecord};
 use crate::scan;
-use crate::spawn::{SpawnError, identity_from_record, launch, validate_user_env};
+use crate::spawn::{SpawnError, deny_guidance, identity_from_record, launch, validate_user_env};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
     #[error("no instance named {0}")]
     NotFound(String),
+    #[error("start denied: slug {slug} is owned by uid {target_uid}; {}", deny_guidance(.target_uid))]
+    Denied { slug: String, target_uid: u32 },
     #[error("{0}")]
     Invalid(String),
     #[error("instance {0} is already running")]
@@ -39,6 +41,7 @@ impl From<&StartError> for ErrorCode {
             // spawn; the message carries the precise state.
             StartError::AlreadyRunning(_) => ErrorCode::SlugTaken,
             StartError::NotFound(_) => ErrorCode::NotFound,
+            StartError::Denied { .. } => ErrorCode::Denied,
             StartError::Invalid(_) => ErrorCode::InvalidSpawnInput,
             StartError::Timeout { .. } => ErrorCode::SpawnTimeout,
             StartError::Internal(_) => ErrorCode::Internal,
@@ -165,9 +168,9 @@ pub fn start(
     // removal and the relaunch both follow). The target is the
     // recorded instance owner — the same-uid or dedicated user
     // chosen at spawn — so the access rule travels with the
-    // instance. A foreign peer gets the missing-slug shape, not a
-    // distinct denied delta: the difference would leak that the
-    // slug exists. The true cause stays in the log.
+    // instance. A foreign peer is refused with Denied, naming the
+    // slug and its owner: spawn's SlugTaken already makes slug
+    // existence public, so the refusal states its terms instead.
     if !crate::spawn::authorized(peer_uid, record.target_uid) {
         tracing::warn!(
             slug = %slug,
@@ -175,7 +178,10 @@ pub fn start(
             target_uid = record.target_uid,
             "start denied: foreign peer"
         );
-        return Err(StartError::NotFound(slug.to_string()));
+        return Err(StartError::Denied {
+            slug: slug.to_string(),
+            target_uid: record.target_uid,
+        });
     }
     let identity = identity_from_record(record.target_uid, record.target_username.as_deref())?;
     let data_dir = record.data_dir.clone();
@@ -230,6 +236,17 @@ pub fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn start_denial_guidance_names_root_for_a_root_owned_record() {
+        let error = StartError::Denied {
+            slug: "instance-1".to_string(),
+            target_uid: 0,
+        };
+        assert_eq!(
+            error.to_string(),
+            "start denied: slug instance-1 is owned by uid 0; run as root"
+        );
+    }
 
     fn record(env: &[&str], data_dir: &std::path::Path) -> InstanceRecord {
         InstanceRecord {
@@ -264,8 +281,8 @@ mod tests {
     fn start_refuses_a_peer_that_is_not_the_recorded_owner() {
         // Same pure-comparison negative as stop's: a foreign peer is
         // answered before any state change (the stale-runtime cleanup
-        // included), with the missing-slug shape — nothing learned
-        // about the instance.
+        // included), with Denied, which names the slug and its owner
+        // instead of the missing-slug shape.
         let root = tempfile::tempdir().expect("record root");
         write_record_with_target(root.path(), unsafe { libc::getuid() } + 1);
         // A foreign peer, never root: root has the admin exemption.
@@ -279,7 +296,13 @@ mod tests {
             unsafe { libc::getuid() } + 2,
         )
         .unwrap_err();
-        assert!(matches!(error, StartError::NotFound(_)), "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "start denied: slug instance-1 is owned by uid {}; run as the owner or root",
+                unsafe { libc::getuid() } + 1
+            )
+        );
         // Root passes the same gate (the admin exemption).
         let error = start(
             root.path(),

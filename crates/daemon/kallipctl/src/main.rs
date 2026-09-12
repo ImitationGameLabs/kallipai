@@ -298,7 +298,7 @@ fn error_prefix(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::SlugTaken => "instance conflict",
         ErrorCode::Denied => "not authorized",
-        ErrorCode::WorkspaceOverlap => "workspace overlaps an existing instance",
+        ErrorCode::WorkspaceOverlap => "instance path overlap",
         ErrorCode::InvalidSpawnInput => "invalid spawn input",
         ErrorCode::SpawnTimeout => "spawn timed out (rolled back)",
         ErrorCode::NotFound => "no such instance",
@@ -398,4 +398,8 @@ mod tests {
 fn error_prefix_is_the_scripting_vocabulary() {
     assert_eq!(error_prefix(ErrorCode::NotFound), "no such instance");
     assert_eq!(error_prefix(ErrorCode::Denied), "not authorized");
+    assert_eq!(
+        error_prefix(ErrorCode::WorkspaceOverlap),
+        "instance path overlap"
+    );
 }

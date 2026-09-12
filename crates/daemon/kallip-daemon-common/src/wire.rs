@@ -271,12 +271,14 @@ pub struct HealthReport {
 pub enum ErrorCode {
     /// The slug already exists in the record area.
     SlugTaken,
-    /// The requester may not launch an instance as the target user.
-    /// Fired before any state change, so it leaks nothing about slug
-    /// existence.
+    /// The requester is not authorized to act on the target user.
+    /// Spawn and adopt fire it before any record read; remove, start
+    /// and stop fire it after the record is read, so it does assert
+    /// slug existence — existence is already public via SlugTaken,
+    /// and the refusal names the owner instead of hiding it.
     Denied,
-    /// The workspace overlaps an existing instance's workspace or the
-    /// instance tree itself.
+    /// A request path overlaps the instance tree, a registered
+    /// instance's workspace, or a registered instance's data dir.
     WorkspaceOverlap,
     /// A spawn configuration input is invalid (bad slug grammar, missing
     /// required env pair, non-directory workspace).

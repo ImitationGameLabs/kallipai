@@ -4,12 +4,15 @@
 //! (its record, and with it the daemon's ability to stop it, is gone).
 use std::path::Path;
 
+use crate::spawn::deny_guidance;
 use kallip_daemon_common::wire::{ErrorCode, valid_slug};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RemoveError {
     #[error("no instance named {0}")]
     NotFound(String),
+    #[error("remove denied: slug {slug} is owned by uid {owner_uid}; {}", deny_guidance(.owner_uid))]
+    Denied { slug: String, owner_uid: u32 },
     #[error("remove of {slug} failed: {message}")]
     Internal { slug: String, message: String },
 }
@@ -18,6 +21,7 @@ impl From<&RemoveError> for ErrorCode {
     fn from(error: &RemoveError) -> Self {
         match error {
             RemoveError::NotFound(_) => ErrorCode::NotFound,
+            RemoveError::Denied { .. } => ErrorCode::Denied,
             RemoveError::Internal { .. } => ErrorCode::Internal,
         }
     }
@@ -26,10 +30,11 @@ impl From<&RemoveError> for ErrorCode {
 /// Blocking deregister. Idempotent by contract: a slug with no record
 /// removes as a successful no-op — for a peer who may remove at all.
 /// Authorization reads the record's registration owner (the owner
-/// themselves or root, the re-registration rule); a foreign peer gets
-/// NotFound, distinguishable from the missing-slug no-op — an
-/// existence signal the spawn path already gives via SlugTaken.
-/// The true cause stays in the log.
+/// themselves or root, the re-registration rule). A foreign peer is
+/// refused with Denied, naming the slug and its owner: spawn's
+/// SlugTaken already makes slug existence public to any local peer,
+/// so hiding it here protects nothing and the refusal states its
+/// terms instead.
 pub fn remove(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), RemoveError> {
     // Same grammar gate as stop: an invalid slug is not an instance
     // name, so it cannot exist — NotFound without a record-area read
@@ -47,7 +52,10 @@ pub fn remove(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), Remov
             record_owner = record.owner_uid,
             "remove denied: foreign peer"
         );
-        return Err(RemoveError::NotFound(slug.to_string()));
+        return Err(RemoveError::Denied {
+            slug: slug.to_string(),
+            owner_uid: record.owner_uid,
+        });
     }
     crate::records::delete_record(record_root, slug).map_err(|e| RemoveError::Internal {
         slug: slug.to_string(),
@@ -59,6 +67,17 @@ pub fn remove(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), Remov
 mod tests {
     use super::*;
     use crate::records::InstanceRecord;
+    #[test]
+    fn remove_denial_guidance_names_root_for_a_root_owned_record() {
+        let error = RemoveError::Denied {
+            slug: "team-a".to_string(),
+            owner_uid: 0,
+        };
+        assert_eq!(
+            error.to_string(),
+            "remove denied: slug team-a is owned by uid 0; run as root"
+        );
+    }
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
@@ -99,8 +118,8 @@ mod tests {
         assert!(matches!(error, RemoveError::NotFound(_)), "{error}");
     }
 
-    /// A foreign peer's NotFound is distinguishable from a missing
-    /// slug's no-op — and the record survives the attempt.
+    /// A foreign peer's refusal names the slug and its owner, and
+    /// the record survives the attempt.
     #[test]
     fn remove_denies_a_foreign_peer_and_keeps_the_record() {
         let root = tempdir();
@@ -110,7 +129,10 @@ mod tests {
         seeded.owner_uid = 65535;
         crate::records::create_record(root.path(), "team-a", &seeded).expect("seed");
         let error = remove(root.path(), "team-a", 65534).unwrap_err();
-        assert!(matches!(error, RemoveError::NotFound(_)), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "remove denied: slug team-a is owned by uid 65535; run as the owner or root"
+        );
         let kept = crate::records::read_record(root.path(), "team-a").expect("record survives");
         assert_eq!(kept.instance_id, seeded.instance_id);
     }

@@ -361,6 +361,9 @@ fn log_start_outcome(slug: &str, error: &crate::start::StartError) {
         StartError::NotFound(_) => {
             tracing::info!(slug = %slug, %error, "start refused: no such instance")
         }
+        StartError::Denied { .. } => {
+            tracing::info!(slug = %slug, %error, "start refused: denied")
+        }
         StartError::Invalid(_) => {
             tracing::info!(slug = %slug, %error, "start refused: invalid request")
         }

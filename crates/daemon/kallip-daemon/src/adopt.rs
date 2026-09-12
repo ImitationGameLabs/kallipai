@@ -10,7 +10,7 @@
 use crate::records::{self, InstanceRecord};
 use crate::scan::{self, ScannedInstance};
 use crate::spawn::{
-    LaunchIdentity, OwnerInference, SpawnError, authorized, cached_passwd_identity,
+    LaunchIdentity, OverlapInput, OwnerInference, SpawnError, authorized, cached_passwd_identity,
     ensure_not_root_inplace, infer_owner_decision, instance_data_dir, now_unix, overlaps,
     passwd_by_uid, path_owner_uid, require_root_for_drop, resolve_launch_identity,
     validate_user_env,
@@ -344,57 +344,57 @@ fn check_overlaps(
     instances: &[ScannedInstance],
 ) -> Result<(), SpawnError> {
     if overlaps(workspace, tree_root) {
-        return Err(SpawnError::Overlap {
-            requested: workspace.display().to_string(),
-            existing_slug: "(instance tree)".into(),
-            existing_workspace: tree_root.display().to_string(),
-        });
+        return Err(SpawnError::overlaps_instance_tree(
+            OverlapInput::Workspace,
+            workspace,
+            tree_root,
+        ));
     }
     if overlaps(data_dir, workspace) {
-        return Err(SpawnError::Overlap {
-            requested: data_dir.display().to_string(),
-            existing_slug: "(requested workspace)".into(),
-            existing_workspace: workspace.display().to_string(),
-        });
+        return Err(SpawnError::overlaps_request_workspace(data_dir, workspace));
     }
     if overlaps(data_dir, tree_root) {
-        return Err(SpawnError::Overlap {
-            requested: data_dir.display().to_string(),
-            existing_slug: "(instance tree)".into(),
-            existing_workspace: tree_root.display().to_string(),
-        });
+        return Err(SpawnError::overlaps_instance_tree(
+            OverlapInput::DataDir,
+            data_dir,
+            tree_root,
+        ));
     }
     for instance in instances {
         if let Some(existing) = &instance.workspace {
             let existing_path = PathBuf::from(existing);
             if overlaps(workspace, &existing_path) {
-                return Err(SpawnError::Overlap {
-                    requested: workspace.display().to_string(),
-                    existing_slug: instance.slug.clone(),
-                    existing_workspace: existing.clone(),
-                });
+                return Err(SpawnError::overlaps_instance_workspace(
+                    OverlapInput::Workspace,
+                    workspace,
+                    &instance.slug,
+                    &existing_path,
+                ));
             }
             if overlaps(data_dir, &existing_path) {
-                return Err(SpawnError::Overlap {
-                    requested: data_dir.display().to_string(),
-                    existing_slug: instance.slug.clone(),
-                    existing_workspace: existing.clone(),
-                });
+                return Err(SpawnError::overlaps_instance_workspace(
+                    OverlapInput::DataDir,
+                    data_dir,
+                    &instance.slug,
+                    &existing_path,
+                ));
             }
         }
         if overlaps(workspace, &instance.data_dir) {
-            return Err(SpawnError::Overlap {
-                requested: workspace.display().to_string(),
-                existing_slug: instance.slug.clone(),
-                existing_workspace: instance.data_dir.display().to_string(),
-            });
+            return Err(SpawnError::overlaps_instance_data_dir(
+                OverlapInput::Workspace,
+                workspace,
+                &instance.slug,
+                &instance.data_dir,
+            ));
         }
         if overlaps(data_dir, &instance.data_dir) {
-            return Err(SpawnError::Overlap {
-                requested: data_dir.display().to_string(),
-                existing_slug: instance.slug.clone(),
-                existing_workspace: instance.data_dir.display().to_string(),
-            });
+            return Err(SpawnError::overlaps_instance_data_dir(
+                OverlapInput::DataDir,
+                data_dir,
+                &instance.slug,
+                &instance.data_dir,
+            ));
         }
     }
     Ok(())
@@ -429,6 +429,7 @@ fn stored_credentials_in_any_entry(data_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spawn::OverlapRival;
     use std::process::{Child, Command};
     use std::{fs, io, path::Path, sync::OnceLock, time::Duration};
 
@@ -836,9 +837,24 @@ mod tests {
         }
     }
 
-    fn overlap_slug(error: &SpawnError) -> String {
+    fn overlap_rival_slug(error: &SpawnError) -> String {
         match error {
-            SpawnError::Overlap { existing_slug, .. } => existing_slug.clone(),
+            SpawnError::Overlap { rival, .. } => match rival {
+                OverlapRival::InstanceTree { .. } => "(instance tree)".into(),
+                OverlapRival::RequestedWorkspace { .. } => "(requested workspace)".into(),
+                OverlapRival::InstanceWorkspace { slug, .. }
+                | OverlapRival::InstanceDataDir { slug, .. } => slug.clone(),
+            },
+            other => panic!("expected Overlap, got {other}"),
+        }
+    }
+
+    fn overlap_input(error: &SpawnError) -> &'static str {
+        match error {
+            SpawnError::Overlap { input, .. } => match input {
+                OverlapInput::Workspace => "workspace",
+                OverlapInput::DataDir => "data dir",
+            },
             other => panic!("expected Overlap, got {other}"),
         }
     }
@@ -866,35 +882,52 @@ mod tests {
 
         // workspace vs the shared tree (spawn's rule, still enforced).
         let error = check_overlaps(&tree.join("nested"), &dd, &tree, &instances).unwrap_err();
-        assert_eq!(overlap_slug(&error), "(instance tree)");
+        assert_eq!(overlap_input(&error), "workspace");
+        assert_eq!(overlap_rival_slug(&error), "(instance tree)");
 
         // The two request paths against each other (both nestings).
         let error = check_overlaps(&ws, &ws.join("as-data"), &tree, &instances).unwrap_err();
-        assert_eq!(overlap_slug(&error), "(requested workspace)");
+        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_rival_slug(&error), "(requested workspace)");
         let error = check_overlaps(&dd.join("as-workspace"), &dd, &tree, &instances).unwrap_err();
-        assert_eq!(overlap_slug(&error), "(requested workspace)");
+        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_rival_slug(&error), "(requested workspace)");
 
         // data dir vs the shared tree: two instances never share a tree.
         let error = check_overlaps(&ws, &tree.join("nested"), &tree, &instances).unwrap_err();
-        assert_eq!(overlap_slug(&error), "(instance tree)");
+        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_rival_slug(&error), "(instance tree)");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "data dir {} overlaps the instance tree rooted at {}",
+                tree.join("nested").display(),
+                tree.display()
+            )
+        );
 
         // Both request paths vs a registered workspace.
         let other_ws = root.path().join("other-ws");
         let error = check_overlaps(&other_ws.join("x"), &dd, &tree, &instances).unwrap_err();
-        assert_eq!(overlap_slug(&error), "other");
+        assert_eq!(overlap_input(&error), "workspace");
+        assert_eq!(overlap_rival_slug(&error), "other");
         let error = check_overlaps(&ws, &other_ws.join("x"), &tree, &instances).unwrap_err();
-        assert_eq!(overlap_slug(&error), "other");
+        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_rival_slug(&error), "other");
 
         // data dir vs a registered data dir (the double-adoption shape).
         let error = check_overlaps(&ws, &other_dd.join("x"), &tree, &instances).unwrap_err();
-        assert_eq!(overlap_slug(&error), "other");
+        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_rival_slug(&error), "other");
 
         // workspace vs a registered data dir (both nestings): an
         // adopted instance's outside data dir is off the workspace map.
         let error = check_overlaps(&managed, &dd, &tree, &instances).unwrap_err();
-        assert_eq!(overlap_slug(&error), "other");
+        assert_eq!(overlap_input(&error), "workspace");
+        assert_eq!(overlap_rival_slug(&error), "other");
         let error = check_overlaps(&other_dd.join("x"), &dd, &tree, &instances).unwrap_err();
-        assert_eq!(overlap_slug(&error), "other");
+        assert_eq!(overlap_input(&error), "workspace");
+        assert_eq!(overlap_rival_slug(&error), "other");
     }
 
     // --- env ------------------------------------------------------------

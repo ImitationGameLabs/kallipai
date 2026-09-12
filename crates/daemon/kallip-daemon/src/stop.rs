@@ -7,12 +7,15 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::spawn::deny_guidance;
 use kallip_daemon_common::wire::{ErrorCode, valid_slug};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StopError {
     #[error("no instance named {0}")]
     NotFound(String),
+    #[error("stop denied: slug {slug} is owned by uid {target_uid}; {}", deny_guidance(.target_uid))]
+    Denied { slug: String, target_uid: u32 },
     #[error("instance {0} is not running (stale or missing pid)")]
     NotRunning(String),
     #[error("stop of {slug} failed after SIGKILL: {message}")]
@@ -23,6 +26,7 @@ impl From<&StopError> for ErrorCode {
     fn from(error: &StopError) -> Self {
         match error {
             StopError::NotFound(_) => ErrorCode::NotFound,
+            StopError::Denied { .. } => ErrorCode::Denied,
             StopError::NotRunning(_) => ErrorCode::NotRunning,
             StopError::Internal { .. } => ErrorCode::Internal,
         }
@@ -46,10 +50,10 @@ pub fn stop(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), StopErr
     };
     // Authorization precedes every state change. The target is the
     // recorded instance owner (the platform-hosting access rule):
-    // the owner themselves or root may stop. A foreign peer gets
-    // the same NotFound shape as a missing slug — a distinct
-    // "denied" delta would leak that the slug exists; the true
-    // cause stays in the log.
+    // the owner themselves or root may stop. A foreign peer is
+    // refused with Denied, naming the slug and its owner: spawn's
+    // SlugTaken already makes slug existence public, so the refusal
+    // states its terms instead.
     if !crate::spawn::authorized(peer_uid, record.target_uid) {
         tracing::warn!(
             slug = %slug,
@@ -57,7 +61,10 @@ pub fn stop(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), StopErr
             target_uid = record.target_uid,
             "stop denied: foreign peer"
         );
-        return Err(StopError::NotFound(slug.to_string()));
+        return Err(StopError::Denied {
+            slug: slug.to_string(),
+            target_uid: record.target_uid,
+        });
     }
     let data_dir = record.data_dir.clone();
     let pid: u32 = crate::scan::read_runtime(&data_dir)
@@ -127,6 +134,17 @@ fn alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stop_denial_guidance_names_root_for_a_root_owned_record() {
+        let error = StopError::Denied {
+            slug: "mine".to_string(),
+            target_uid: 0,
+        };
+        assert_eq!(
+            error.to_string(),
+            "stop denied: slug mine is owned by uid 0; run as root"
+        );
+    }
 
     #[test]
     fn stop_refuses_an_invalid_slug_before_touching_the_record_area() {
@@ -142,8 +160,8 @@ mod tests {
         // The authorization verdict is a pure comparison against the
         // record, so the negative is exercisable without a second user:
         // record a foreign target uid, connect as the real one. The
-        // refused peer is answered with the missing-slug shape — it
-        // learns nothing, not even that the instance exists.
+        // refused peer is answered with Denied, which names the
+        // slug and its owner instead of the missing-slug shape.
         let root = tempfile::tempdir().expect("record root");
         crate::records::write_record(
             root.path(),
@@ -163,7 +181,13 @@ mod tests {
         // A foreign peer, never root: root has the admin exemption, so
         // the negative needs a uid that is neither the target nor 0.
         let error = stop(root.path(), "mine", unsafe { libc::getuid() } + 2).unwrap_err();
-        assert!(matches!(error, StopError::NotFound(_)), "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "stop denied: slug mine is owned by uid {}; run as the owner or root",
+                unsafe { libc::getuid() } + 1
+            )
+        );
         // Root passes the same gate (the admin exemption), then
         // fails on the missing runtime.json like any authorized
         // caller.
@@ -191,14 +215,21 @@ mod tests {
         )
         .expect("write record");
         // The owner passes authorization (and then fails on the
-        // missing runtime.json — NotRunning); a foreign peer gets
-        // the missing-slug shape, indistinguishable from a slug
-        // that was never recorded; root's exemption still passes.
+        // missing runtime.json — NotRunning). The ghost slug's
+        // missing-slug no-op stays NotFound; a foreign peer on a
+        // recorded slug is refused with Denied; root passes.
         let error = stop(root.path(), "ghost", uid + 1).unwrap_err();
         assert!(matches!(error, StopError::NotFound(_)), "{error}");
         let error = stop(root.path(), "mine", uid).unwrap_err();
         assert!(matches!(error, StopError::NotRunning(_)), "{error}");
         let error = stop(root.path(), "mine", uid + 1).unwrap_err();
-        assert!(matches!(error, StopError::NotFound(_)), "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "stop denied: slug mine is owned by uid {}; {}",
+                uid,
+                deny_guidance(&uid)
+            )
+        );
     }
 }
