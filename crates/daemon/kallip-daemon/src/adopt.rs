@@ -82,12 +82,12 @@ pub fn adopt(
         .map_err(|e| SpawnError::Invalid(format!("reading workspace owner: {e}")))?;
 
     // The data directory is adopt's second externally-supplied path.
-    // Shape: an existing directory carrying at least one of the
-    // daemon's two real read touchpoints — `runtime.json` (the scan's
-    // runtime file) and `credentials/` (the enrolled id). A directory
-    // with neither would only ever produce a permanently Stopped
-    // record with no identity. `relays.toml` is deliberately not a
-    // criterion: a local-only instance legitimately lacks it.
+    // Shape: an existing directory — nothing more. `runtime.json` and
+    // `credentials/` are written by the tagma itself once it starts,
+    // so the daemon does not require them up front; a directory with
+    // neither simply anchors a Stopped record with no identity yet.
+    // A foreign directory mistaken for one is bounded by the owner
+    // gate below and the disjointness check against known records.
     let data_dir_path = PathBuf::from(data_dir);
     if !data_dir_path.is_dir() {
         return Err(SpawnError::Invalid(format!(
@@ -97,13 +97,6 @@ pub fn adopt(
     let data_dir_canon = data_dir_path
         .canonicalize()
         .map_err(|e| SpawnError::Invalid(format!("canonicalizing data dir: {e}")))?;
-    let looks_like_instance =
-        data_dir_canon.join("runtime.json").exists() || data_dir_canon.join("credentials").is_dir();
-    if !looks_like_instance {
-        return Err(SpawnError::Invalid(format!(
-            "data dir {data_dir:?} does not look like an instance data directory (no runtime.json, no credentials/)"
-        )));
-    }
     let data_dir_owner = path_owner_uid(&data_dir_canon)
         .map_err(|e| SpawnError::Invalid(format!("reading data dir owner: {e}")))?;
 
@@ -462,9 +455,8 @@ mod tests {
         fs::write(path, text).expect("write");
     }
 
-    /// A data dir that satisfies the shape check via an empty
-    /// `credentials/` dir: probe-neutral (no enrolled entry) and
-    /// runtime-less (adopts as Stopped).
+    /// A data dir with an empty `credentials/` dir: probe-neutral
+    /// (no enrolled entry) and runtime-less (adopts as Stopped).
     fn mk_stopped_data_dir(root: &Path, name: &str) -> PathBuf {
         let dir = root.join(name);
         fs::create_dir_all(dir.join("credentials")).expect("create data dir");
@@ -812,22 +804,23 @@ mod tests {
     }
 
     #[test]
-    fn adopt_rejects_a_contentless_data_dir() {
+    fn adopt_accepts_a_contentless_data_dir() {
         // A bare directory adopts into a permanently Stopped, anchor-less
-        // record — the ghost-record shape refused by rule.
+        // record with no identity.
         let root = tempdir();
         let ws = tempdir();
         let dd = root.path().join("bare");
         fs::create_dir_all(&dd).expect("bare dir");
-        let error = adopt_at(root.path(), "team-a", ws.path(), &dd, &[]).unwrap_err();
-        let SpawnError::Invalid(message) = error else {
-            panic!("expected Invalid, got {error}")
-        };
-        assert!(message.contains("does not look like"), "{message}");
+        assert!(matches!(
+            adopt_at(root.path(), "team-a", ws.path(), &dd, &[]),
+            Ok(InstanceState::Stopped)
+        ));
+        let record = records::read_record(root.path(), "team-a").expect("record");
+        assert!(record.identity.is_none());
     }
 
     #[test]
-    fn adopt_accepts_runtime_json_alone_as_the_shape() {
+    fn adopt_accepts_a_dead_runtime_json() {
         let root = tempdir();
         let ws = tempdir();
         let dd = root.path().join("rt");
@@ -1094,15 +1087,17 @@ mod tests {
         let canonical = home.path().join("kallipai").join("tagmata").join(slug);
         fs::create_dir_all(&canonical).expect("canonical position");
 
-        // The shape gate does not bend for the canonical position:
-        // an empty directory there is still not an instance.
+        // The canonical position admits a bare directory, and the
+        // record stores that canonical form.
         let ws = tempdir();
-        let error = adopt_at(ws.path(), slug, ws.path(), &canonical, &[]).unwrap_err();
-        assert!(error.to_string().contains("does not look like"), "{error}");
+        let first_root = tempdir();
+        let state = adopt_at(first_root.path(), slug, ws.path(), &canonical, &[]).expect("adopt");
+        assert!(matches!(state, InstanceState::Stopped), "{state:?}");
+        let stored = records::read_record(first_root.path(), slug).expect("record");
+        assert_eq!(stored.data_dir, canonical.canonicalize().unwrap());
 
         // A valid alias admits the adopt, and the record stores the
         // canonical form, never the alias.
-        fs::write(canonical.join("runtime.json"), "{}").expect("runtime");
         let alias = home.path().join("alias-to-canonical");
         std::os::unix::fs::symlink(&canonical, &alias).expect("symlink");
         let root = tempdir();
