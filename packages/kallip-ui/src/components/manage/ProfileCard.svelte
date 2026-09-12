@@ -92,17 +92,17 @@
               <Pencil class="size-4" />
               {common_edit()}
             </Menu.Item>
+            {#if onRemove}
+              <Menu.Separator class="my-1 border-t border-surface-300" />
+              <Menu.Item
+                value="remove"
+                class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
+              >
+                <Trash class="size-4" />
+                {common_remove()}
+              </Menu.Item>
+            {/if}
           </Menu.Content>
-          {#if onRemove}
-            <Menu.Separator class="my-1 border-t border-surface-300" />
-            <Menu.Item
-              value="remove"
-              class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
-            >
-              <Trash class="size-4" />
-              {common_remove()}
-            </Menu.Item>
-          {/if}
         </Menu.Positioner>
       </Portal>
     </Menu>
