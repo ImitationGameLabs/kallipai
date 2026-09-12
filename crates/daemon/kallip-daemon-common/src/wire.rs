@@ -277,8 +277,8 @@ pub enum ErrorCode {
     /// slug existence — existence is already public via SlugTaken,
     /// and the refusal names the owner instead of hiding it.
     Denied,
-    /// A request path overlaps the instance tree, a registered
-    /// instance's workspace, or a registered instance's data dir.
+    /// A request path overlaps the instance tree, the request's own
+    /// workspace, or a registered instance's workspace or data dir.
     WorkspaceOverlap,
     /// A spawn configuration input is invalid (bad slug grammar, missing
     /// required env pair, non-directory workspace).

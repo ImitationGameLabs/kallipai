@@ -28,7 +28,7 @@ impl From<&RemoveError> for ErrorCode {
 }
 
 /// Blocking deregister. Idempotent by contract: a slug with no record
-/// removes as a successful no-op — for a peer who may remove at all.
+/// removes as a successful no-op.
 /// Authorization reads the record's registration owner (the owner
 /// themselves or root, the re-registration rule). A foreign peer is
 /// refused with Denied, naming the slug and its owner: spawn's
