@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+kallip-blob-store = { workspace = true }
 kallip-common = { workspace = true }
 kallip-shell = { workspace = true }
 just-llm-client = { workspace = true }

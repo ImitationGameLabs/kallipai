@@ -72,7 +72,8 @@ pub(crate) async fn ingest_attachment(
     enforce(&state, &target, req.modality).await?;
 
     let bytes = crate::files::fetch_record_bytes(&state.files_http, req.record_id).await?;
-    record_ingest(&target, &req, bytes).await
+    let blob_id = crate::files::store_mirror(state.attachment_blobs.get(), &bytes).await;
+    record_ingest(&target, &req, bytes, blob_id).await
 }
 
 /// The live handles an ingest touches, cloned out from under the registry
@@ -132,6 +133,7 @@ async fn record_ingest(
     target: &IngestTarget,
     req: &AttachmentIngestRequest,
     bytes: Vec<u8>,
+    blob_id: Option<String>,
 ) -> Result<Json<AttachmentIngestResponse>, ApiError> {
     let media_type = req
         .media_type
@@ -146,6 +148,7 @@ async fn record_ingest(
         record_id: req.record_id,
         media_type: media_type.clone(),
         caption: req.caption.clone(),
+        blob_id,
     }];
     let message = ingest_message(&text, &[IngestImage { media_type, bytes }]);
 
@@ -243,7 +246,7 @@ mod tests {
         let record_id = uuid::Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
         let req = request(record_id);
 
-        let response = record_ingest(&target, &req, vec![1, 2, 3, 4])
+        let response = record_ingest(&target, &req, vec![1, 2, 3, 4], None)
             .await
             .unwrap();
 
@@ -295,5 +298,45 @@ mod tests {
         assert!(stored.contains("a chart"));
         assert!(stored.contains(&format!("[image {record_id}]")));
         assert!(!line.contains(&base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4])));
+    }
+
+    #[tokio::test]
+    async fn record_ingest_writes_the_mirror_anchor_into_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror_dir = tempfile::tempdir().unwrap();
+        let backend = kallip_blob_store::LocalBackend::arc(mirror_dir.path().to_owned());
+        let mut entry = make_entry(None, "tok".to_owned());
+        entry.identity.agent_dir = Some(dir.path().to_owned());
+
+        let target = IngestTarget::of(&entry);
+        let record_id = uuid::Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
+        let req = request(record_id);
+
+        let blob_id = crate::files::store_mirror(Some(&backend), &[7, 8])
+            .await
+            .unwrap();
+        let _response = record_ingest(&target, &req, vec![7, 8], Some(blob_id.clone()))
+            .await
+            .unwrap();
+
+        let file = std::fs::read_dir(dir.path().join("history"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let line = std::fs::read_to_string(&file).unwrap();
+        let record: kallip_runtime::history::HistoryRecord =
+            serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            record.attachments[0].blob_id.as_deref(),
+            Some(blob_id.as_str())
+        );
+        // The mirror holds the same bytes under that address.
+        let stored = backend
+            .get(&kallip_blob_store::BlobId::parse(&blob_id).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(stored, vec![7, 8]);
     }
 }

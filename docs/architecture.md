@@ -276,6 +276,25 @@ runtime-mutable via `PUT /exec-policy`, inherited monotonically). An explicit
 override `Deny`/`Ask` is authoritative and not relaxed by the `auto` preset; a
 deliberate supervisor decision stays meaningful under every preset.
 
+## Data-area blob stores
+
+The tagma data area holds two content-addressed blob stores under `blobs/`,
+both `kallip-blob-store` local backends addressed by `sha256-<hex>` and
+bucketed by the digest's first two hex characters:
+
+- `blobs/tasks` — closed-task dossiers, handed to close/extract alongside
+  `tasks.sqlite`.
+- `blobs/attachments` — attachment media that entered an agent's context.
+  Every write path (live ingest, restore backfill) seeds it, restore reads
+  it first, and only a missing copy reaches the files service — a retained
+  copy keeps serving even if the files record is later deleted.
+
+Media references carry the address as an optional `blob_id` (history
+sidecar records and pinned turns); references recorded before the field
+existed have no `blob_id` and restore from the files service. These stores
+are the agent's own retained copy of its data, not a cache: no eviction,
+no revalidation against the files service.
+
 ## Crate responsibilities
 
 | Crate            | Role                                                                                                                                                                                                      |

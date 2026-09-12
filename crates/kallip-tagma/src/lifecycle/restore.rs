@@ -258,11 +258,19 @@ async fn restore_one(
     type BoxedFetch = std::pin::Pin<
         Box<dyn std::future::Future<Output = kallip_runtime::context::FetchedImage> + Send>,
     >;
-    let mut fetch = move |record_id| -> BoxedFetch {
+    let mut fetch = move |record_id, blob_id: Option<String>| -> BoxedFetch {
         let shared = shared.clone();
-        Box::pin(
-            async move { crate::files::fetch_for_reassembly(&shared.files_http, record_id).await },
-        )
+        Box::pin(async move {
+            // fetch_record_bytes is only constructed here, not started:
+            // fetch_local_first awaits it only when the local copy is
+            // missing, so a local hit starts no files request.
+            crate::files::fetch_local_first(
+                shared.attachment_blobs.get(),
+                crate::files::fetch_record_bytes(&shared.files_http, record_id),
+                blob_id.as_deref(),
+            )
+            .await
+        })
     };
     let reports = [
         kallip_runtime::context::reassemble_attachments(

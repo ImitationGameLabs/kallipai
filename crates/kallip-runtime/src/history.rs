@@ -34,6 +34,13 @@ pub struct AttachmentRef {
     pub record_id: uuid::Uuid,
     /// MIME type of the referenced media (e.g. `image/png`).
     pub media_type: String,
+    /// The local copy's content address for the same bytes
+    /// (`sha256-<hex>`, the `kallip-blob-store` id), when the tagma data
+    /// area holds one. Absent for references recorded before the
+    /// local-copy store existed: restore then falls back to the files
+    /// service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_id: Option<String>,
     /// Optional human-readable caption carried alongside the reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
@@ -879,6 +886,7 @@ mod tests {
                 record_id as u8,
             ]),
             media_type: "image/png".to_owned(),
+            blob_id: None,
             caption: Some("a chart".to_owned()),
         }
     }

@@ -269,6 +269,12 @@ pub struct AppState {
     /// Content-addressed blob root for closed-task dossiers, handed to
     /// close/extract alongside the store. Installed at startup.
     pub task_blobs: std::sync::OnceLock<std::sync::Arc<dyn kallip_task::BlobStore>>,
+    /// Content-addressed local copy of attachment media (bytes that entered
+    /// an agent's context). Not a derived cache: once written, the copy is
+    /// the agent's own retained data -- restore reads it first and only
+    /// falls back to the files service when a copy is missing. Installed
+    /// at startup.
+    pub attachment_blobs: std::sync::OnceLock<std::sync::Arc<dyn kallip_blob_store::BlobStore>>,
     /// The single agent spawn entry: agent create, boot restore, and
     /// delivery's reactivation all route through here. An indirection so
     /// tests can observe/stub the spawn without spinning a real runtime;
@@ -721,6 +727,7 @@ impl AppState {
             work_schedules: std::sync::OnceLock::new(),
             tasks: std::sync::OnceLock::new(),
             task_blobs: std::sync::OnceLock::new(),
+            attachment_blobs: std::sync::OnceLock::new(),
             converge: tokio::sync::Mutex::new(()),
             invalidations,
         }

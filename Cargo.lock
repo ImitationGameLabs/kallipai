@@ -2882,6 +2882,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "just-llm-client",
+ "kallip-blob-store",
  "kallip-common",
  "kallip-shell",
  "kallip-testkit",

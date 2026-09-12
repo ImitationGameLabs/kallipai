@@ -205,7 +205,17 @@ async fn run(args: Args) -> Result<()> {
     state
         .task_blobs
         .set(kallip_blob_store::LocalBackend::arc(
-            kallip_runtime::persistence::data_dir_root()?.join("task-blobs"),
+            kallip_runtime::persistence::data_dir_root()?
+                .join("blobs")
+                .join("tasks"),
+        ))
+        .ok();
+    state
+        .attachment_blobs
+        .set(kallip_blob_store::LocalBackend::arc(
+            kallip_runtime::persistence::data_dir_root()?
+                .join("blobs")
+                .join("attachments"),
         ))
         .ok();
 

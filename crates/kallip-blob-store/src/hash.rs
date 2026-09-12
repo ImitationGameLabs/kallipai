@@ -1,6 +1,7 @@
 //! Blob id encoding: `sha256-` plus the full 64 lowercase hex digest
 //! characters.
 
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 use crate::error::Error;
@@ -20,6 +21,16 @@ impl BlobId {
     /// The id of a SHA-256 digest: the canonical encoding path.
     pub fn from_digest(digest: [u8; 32]) -> Self {
         Self(format!("{}{}", Self::PREFIX, hex::encode(digest)))
+    }
+
+    /// The content address of some bytes: hash first, then encode. The
+    /// one-call form callers want when they hold the bytes and need the
+    /// key (a mirror write-through computing the address it will read
+    /// back later).
+    pub fn for_bytes(bytes: &[u8]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        Self::from_digest(hasher.finalize().into())
     }
 
     /// Validates and wraps an id string: [`Self::PREFIX`] plus exactly 64
@@ -81,5 +92,18 @@ mod tests {
         assert!(BlobId::parse("sha256-deadbeef").is_err());
         assert!(BlobId::parse(&format!("sha256-{}", "A".repeat(64))).is_err());
         assert!(BlobId::parse(&format!("sha256-{}", "g".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn for_bytes_matches_known_sha256_vectors() {
+        // Standard SHA-256 vectors (NIST): the empty string and "abc".
+        assert_eq!(
+            BlobId::for_bytes(b"").as_str(),
+            "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            BlobId::for_bytes(b"abc").as_str(),
+            "sha256-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

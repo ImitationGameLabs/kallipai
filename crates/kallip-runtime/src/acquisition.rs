@@ -934,6 +934,7 @@ mod tests {
                 modality: kallip_common::protocol::Modality::Image,
                 record_id,
                 media_type: "image/png".to_owned(),
+                blob_id: None,
                 caption: Some("chart caption".to_owned()),
             }],
         );
