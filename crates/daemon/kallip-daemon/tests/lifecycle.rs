@@ -688,6 +688,7 @@ fn manual_boot_with_slug_publishes_runtime_json() {
         .env_remove("KALLIP_TAGMA_RELAY_ARCHEION_URL")
         .env_remove("KALLIP_TAGMA_RELAY_LESCHE_URL")
         .env_remove("KALLIP_TAGMA_RELAY_ENROLLMENT_CODE")
+        .env_remove("KALLIP_TAGMA_DATA_DIR")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
