@@ -9,7 +9,11 @@
   // its own i18n keys. In edit mode the id is locked — the id is the
   // profile's identity in the sets ∪ parking uniqueness rule, and
   // renaming would dangle probe reports keyed by it.
-  import type { ProfileModel, ReasoningEffort } from "@kallipai/kallip-client";
+  import type {
+    Modality,
+    ProfileModel,
+    ReasoningEffort,
+  } from "@kallipai/kallip-client";
 
   export interface ProfileDialogResult {
     readonly id: string;
@@ -20,11 +24,19 @@
      * profile's declared values so a save never silently resets them. */
     readonly store?: boolean;
     readonly effort?: ReasoningEffort;
+    /** Edited by the form; a text-only selection rides as absent (the
+     * server default) so an untouched form never dirties the draft. */
+    readonly modalities?: readonly Modality[];
   }
 </script>
 
 <script lang="ts">
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import {
+    MODALITY_ORDER,
+    normalizeModalities,
+    profileModalities,
+  } from "../../lib/manage/compute.ts";
   import {
     common_cancel,
     common_save,
@@ -37,6 +49,7 @@
     manage_profiles_profile_dialog_id_label,
     manage_profiles_profile_dialog_max_context_label,
     manage_profiles_profile_dialog_model_label,
+    manage_profiles_profile_modalities_label,
     manage_profiles_remove_profile,
     manage_profiles_test,
   } from "../../paraglide/messages.js";
@@ -84,6 +97,7 @@
   let endpoint = $state("");
   let model = $state("");
   let maxContext = $state("128000");
+  let selected = $state<Modality[]>([]);
   let lastOpen = false;
   $effect(() => {
     if (open && !lastOpen) {
@@ -91,6 +105,14 @@
       endpoint = profile?.endpoint ?? providerIds[0] ?? "";
       model = profile?.model ?? "";
       maxContext = String(profile?.max_context_window ?? 128000);
+      // text is a permanent, locked selection: a stored profile may
+      // declare no text — the latch unions it in, so the selection
+      // always carries text and saves the union back.
+      selected = MODALITY_ORDER.filter(
+        (m) =>
+          m === "text" ||
+          (profile !== null && profileModalities(profile).includes(m)),
+      );
     }
     lastOpen = open;
   });
@@ -125,6 +147,7 @@
 
   function submit(): void {
     if (!canSubmit) return;
+    const modalities = normalizeModalities(selected);
     onSave({
       id: trimmedId,
       endpoint,
@@ -132,7 +155,22 @@
       max_context_window: Number(maxContext),
       store: profile?.store,
       effort: profile?.effort,
+      // Text-only rides as absent (the server default), so an
+      // untouched form never marks the draft dirty.
+      ...(modalities ? { modalities } : {}),
     });
+  }
+
+  // Toggle one modality; the selection stays in canonical order.
+  // text is a permanent, locked selection — the guard keeps the
+  // empty set unreachable even below the non-interactive pill.
+  function toggleModality(m: Modality): void {
+    if (m === "text") return;
+    if (selected.includes(m)) {
+      selected = selected.filter((x) => x !== m);
+    } else {
+      selected = MODALITY_ORDER.filter((x) => x === m || selected.includes(x));
+    }
   }
 </script>
 
@@ -221,6 +259,40 @@
               >
             {/if}
           </label>
+
+          <div class="flex flex-col gap-1">
+            <span class="text-sm font-medium">
+              {manage_profiles_profile_modalities_label()}
+            </span>
+            <div
+              class="flex flex-wrap gap-1.5"
+              role="group"
+              aria-label={manage_profiles_profile_modalities_label()}
+            >
+              {#each MODALITY_ORDER as m (m)}
+                {#if m === "text"}
+                  <span
+                    class="badge rounded-full text-xs preset-filled-primary-500"
+                  >
+                    {m}
+                  </span>
+                {:else}
+                  <button
+                    type="button"
+                    aria-pressed={selected.includes(m)}
+                    class="badge rounded-full text-xs cursor-pointer transition {selected.includes(
+                      m,
+                    )
+                      ? 'preset-filled-primary-500'
+                      : 'preset-outlined-surface-500 hover:preset-filled-surface-500'}"
+                    onclick={() => toggleModality(m)}
+                  >
+                    {m}
+                  </button>
+                {/if}
+              {/each}
+            </div>
+          </div>
 
           {#if probeReport}
             <div class="border-t border-surface-300 pt-2 text-xs">

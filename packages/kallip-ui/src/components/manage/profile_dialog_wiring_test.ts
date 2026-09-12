@@ -9,6 +9,7 @@ const PROFILES_PAGE = new URL(
   "../../pages/manage/ProfilesPage.svelte",
   import.meta.url,
 );
+const PROFILE_DIALOG = new URL("./ProfileDialog.svelte", import.meta.url);
 
 function source(url: URL): string {
   return new TextDecoder().decode(Deno.readFileSync(url));
@@ -43,6 +44,26 @@ Deno.test(
     assert(
       src.includes("manage_profiles_profile_dialog_edit_title()"),
       "the set-member dialog speaks with its own i18n keys",
+    );
+  },
+);
+
+Deno.test(
+  "text is a permanent, locked modality selection",
+  { permissions: { read: [PROFILE_DIALOG] } },
+  () => {
+    const src = source(PROFILE_DIALOG);
+    assert(
+      src.includes('m === "text" ||'),
+      "the latch must union text into the initial selection",
+    );
+    assert(
+      src.includes('if (m === "text") return;'),
+      "toggleModality must refuse to cancel text",
+    );
+    assert(
+      src.includes('{#if m === "text"}'),
+      "the text pill must render as a static, non-interactive badge",
     );
   },
 );

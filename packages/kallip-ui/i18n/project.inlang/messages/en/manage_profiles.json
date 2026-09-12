@@ -87,6 +87,7 @@
   "manage_profiles_parking_dialog_desc": "Describe a profile without a set commitment; drag it into a set to enable it later.",
   "manage_profiles_profile_dialog_edit_title": "Edit Profile",
   "manage_profiles_profile_dialog_desc": "Edit this profile's provider, model, and context window.",
+  "manage_profiles_profile_modalities_label": "modalities",
   "manage_profiles_profile_dialog_id_label": "Profile ID",
   "manage_profiles_profile_dialog_endpoint_label": "Provider",
   "manage_profiles_profile_dialog_model_label": "Model",

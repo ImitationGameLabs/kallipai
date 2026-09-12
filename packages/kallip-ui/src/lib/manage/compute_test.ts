@@ -27,6 +27,7 @@ import {
   moveProfile,
   moveToParking,
   profileConfigEqual,
+  normalizeModalities,
   profileConfigToWire,
   profileModalities,
   removeProvider,
@@ -440,6 +441,15 @@ Deno.test("replaceSetProfile: unknown set name is a no-op", () => {
     max_context_window: 1,
   };
   assertEquals(replaceSetProfile(base, "ghost", 0, replacement), base);
+});
+
+Deno.test("normalizeModalities: text-only rides as absent", () => {
+  assertEquals(normalizeModalities(["text"]), undefined);
+});
+
+Deno.test("normalizeModalities: anything else carries as declared", () => {
+  assertEquals(normalizeModalities(["text", "image"]), ["text", "image"]);
+  assertEquals(normalizeModalities(["video"]), ["video"]);
 });
 Deno.test("profileConfigEqual: true for identical configs", () => {
   const a = addSet(emptyConfig);

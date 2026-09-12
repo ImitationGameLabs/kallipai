@@ -87,6 +87,7 @@
   "manage_profiles_parking_dialog_desc": "填写一个无需归属配置集的配置；之后拖入配置集即可启用。",
   "manage_profiles_profile_dialog_edit_title": "编辑配置",
   "manage_profiles_profile_dialog_desc": "编辑该配置的模型提供商、模型与最大上下文。",
+  "manage_profiles_profile_modalities_label": "模态",
   "manage_profiles_profile_dialog_id_label": "配置 ID",
   "manage_profiles_profile_dialog_endpoint_label": "模型提供商",
   "manage_profiles_profile_dialog_model_label": "模型",

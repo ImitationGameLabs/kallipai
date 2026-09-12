@@ -47,6 +47,7 @@
   } from "../../lib/manage/profiles-view.ts";
   import type {
     ProfileProvider,
+    Modality,
     ProfileProviderProbeReport,
     ProfileModelProbeReport,
     ProfileSet,
@@ -403,6 +404,7 @@
     max_context_window: number;
     store?: boolean;
     effort?: ReasoningEffort;
+    modalities?: readonly Modality[];
   }) {
     const draft = profilesStore.draft;
     if (!draft) return;
@@ -425,6 +427,7 @@
     max_context_window: number;
     store?: boolean;
     effort?: ReasoningEffort;
+    modalities?: readonly Modality[];
   }) {
     const draft = profilesStore.draft;
     if (!draft) return;
@@ -480,6 +483,7 @@
     max_context_window: number;
     store?: boolean;
     effort?: ReasoningEffort;
+    modalities?: readonly Modality[];
   }) {
     const draft = profilesStore.draft;
     if (!draft) return;

@@ -195,7 +195,12 @@ export function setDefaultSet(
 // ---------------------------------------------------------------------------
 
 /** Canonical modality display order (mirrors kallip-common Modality::ALL). */
-const ALL_MODALITIES: readonly Modality[] = ["text", "image", "audio", "video"];
+export const MODALITY_ORDER: readonly Modality[] = [
+  "text",
+  "image",
+  "audio",
+  "video",
+];
 
 /** Modalities a profile declares; absent = text-only (the server default). */
 export function profileModalities(profile: ProfileModel): readonly Modality[] {
@@ -209,7 +214,7 @@ export function setEffectiveModalities(set: ProfileSet): Modality[] {
   if (set.profiles.length === 0) {
     return [];
   }
-  return ALL_MODALITIES.filter((m) =>
+  return MODALITY_ORDER.filter((m) =>
     set.profiles.every((p) => profileModalities(p).includes(m)),
   );
 }
@@ -225,7 +230,20 @@ export function setHasShadowedMembers(set: ProfileSet): boolean {
 
 /** Join modalities in canonical order for display ("text, image"). */
 export function formatModalities(modalities: readonly Modality[]): string {
-  return ALL_MODALITIES.filter((m) => modalities.includes(m)).join(", ");
+  return MODALITY_ORDER.filter((m) => modalities.includes(m)).join(", ");
+}
+
+/** Modalities for the wire: a text-only selection is the server
+ * default and rides as absent (keeps isDirty honest); anything
+ * else is carried as declared.
+ */
+export function normalizeModalities(
+  modalities: readonly Modality[],
+): readonly Modality[] | undefined {
+  if (modalities.length === 1 && modalities[0] === "text") {
+    return undefined;
+  }
+  return [...modalities];
 }
 
 /** Add a blank profile with default fields to the named set. Unknown set
