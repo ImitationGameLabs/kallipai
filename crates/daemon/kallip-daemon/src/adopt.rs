@@ -193,6 +193,12 @@ pub fn adopt(
     let data_root_canon = data_root
         .canonicalize()
         .unwrap_or_else(|_| data_root.clone());
+    // The canonical position for this slug and identity: the one
+    // in-tree location a data dir may occupy (each slug answers to
+    // its own place). Canonical like the comparisons above;
+    // verbatim when the tree does not exist yet.
+    let canonical_data = instance_data_dir(&identity, slug)?;
+    let canonical_data = canonical_data.canonicalize().unwrap_or(canonical_data);
     let registered = scan::scan_instances(record_root);
 
     // A re-adopt replaces its own record, so the slug is not its own
@@ -202,7 +208,13 @@ pub fn adopt(
         .filter(|instance| instance.slug != slug)
         .cloned()
         .collect();
-    check_overlaps(&workspace_canon, &data_dir_canon, &data_root_canon, &others)?;
+    check_overlaps(
+        &workspace_canon,
+        &data_dir_canon,
+        &data_root_canon,
+        &canonical_data,
+        &others,
+    )?;
 
     // Env: allowlist, daemon-owned keys, addr shape — the same
     // validation spawn applies, verbatim.
@@ -337,10 +349,16 @@ pub fn adopt(
 /// instance tree, and each against every registered instance's
 /// workspace and data dir. `overlaps` is mutual prefix containment,
 /// so each comparison covers both nesting directions by itself.
+///
+/// The one in-tree exception is the canonical data position
+/// (`canonical_data`): a data dir exactly equal to it skips the
+/// tree check — each slug answers to its own place — while every
+/// other in-tree location still refuses.
 fn check_overlaps(
     workspace: &Path,
     data_dir: &Path,
     tree_root: &Path,
+    canonical_data: &Path,
     instances: &[ScannedInstance],
 ) -> Result<(), SpawnError> {
     if overlaps(workspace, tree_root) {
@@ -353,7 +371,7 @@ fn check_overlaps(
     if overlaps(data_dir, workspace) {
         return Err(SpawnError::overlaps_request_workspace(data_dir, workspace));
     }
-    if overlaps(data_dir, tree_root) {
+    if data_dir != canonical_data && overlaps(data_dir, tree_root) {
         return Err(SpawnError::overlaps_instance_tree(
             OverlapInput::DataDir,
             data_dir,
@@ -878,23 +896,52 @@ mod tests {
         fs::create_dir_all(&dd).expect("dd");
 
         // Disjoint everywhere: the pass shape.
-        check_overlaps(&ws, &dd, &tree, &instances).expect("disjoint paths pass");
+        check_overlaps(&ws, &dd, &tree, &tree.join("team-a"), &instances)
+            .expect("disjoint paths pass");
 
         // workspace vs the shared tree (spawn's rule, still enforced).
-        let error = check_overlaps(&tree.join("nested"), &dd, &tree, &instances).unwrap_err();
+        let error = check_overlaps(
+            &tree.join("nested"),
+            &dd,
+            &tree,
+            &tree.join("team-a"),
+            &instances,
+        )
+        .unwrap_err();
         assert_eq!(overlap_input(&error), "workspace");
         assert_eq!(overlap_rival_slug(&error), "(instance tree)");
 
         // The two request paths against each other (both nestings).
-        let error = check_overlaps(&ws, &ws.join("as-data"), &tree, &instances).unwrap_err();
+        let error = check_overlaps(
+            &ws,
+            &ws.join("as-data"),
+            &tree,
+            &tree.join("team-a"),
+            &instances,
+        )
+        .unwrap_err();
         assert_eq!(overlap_input(&error), "data dir");
         assert_eq!(overlap_rival_slug(&error), "(requested workspace)");
-        let error = check_overlaps(&dd.join("as-workspace"), &dd, &tree, &instances).unwrap_err();
+        let error = check_overlaps(
+            &dd.join("as-workspace"),
+            &dd,
+            &tree,
+            &tree.join("team-a"),
+            &instances,
+        )
+        .unwrap_err();
         assert_eq!(overlap_input(&error), "data dir");
         assert_eq!(overlap_rival_slug(&error), "(requested workspace)");
 
         // data dir vs the shared tree: two instances never share a tree.
-        let error = check_overlaps(&ws, &tree.join("nested"), &tree, &instances).unwrap_err();
+        let error = check_overlaps(
+            &ws,
+            &tree.join("nested"),
+            &tree,
+            &tree.join("team-a"),
+            &instances,
+        )
+        .unwrap_err();
         assert_eq!(overlap_input(&error), "data dir");
         assert_eq!(overlap_rival_slug(&error), "(instance tree)");
         assert_eq!(
@@ -908,26 +955,179 @@ mod tests {
 
         // Both request paths vs a registered workspace.
         let other_ws = root.path().join("other-ws");
-        let error = check_overlaps(&other_ws.join("x"), &dd, &tree, &instances).unwrap_err();
+        let error = check_overlaps(
+            &other_ws.join("x"),
+            &dd,
+            &tree,
+            &tree.join("team-a"),
+            &instances,
+        )
+        .unwrap_err();
         assert_eq!(overlap_input(&error), "workspace");
         assert_eq!(overlap_rival_slug(&error), "other");
-        let error = check_overlaps(&ws, &other_ws.join("x"), &tree, &instances).unwrap_err();
+        let error = check_overlaps(
+            &ws,
+            &other_ws.join("x"),
+            &tree,
+            &tree.join("team-a"),
+            &instances,
+        )
+        .unwrap_err();
         assert_eq!(overlap_input(&error), "data dir");
         assert_eq!(overlap_rival_slug(&error), "other");
 
         // data dir vs a registered data dir (the double-adoption shape).
-        let error = check_overlaps(&ws, &other_dd.join("x"), &tree, &instances).unwrap_err();
+        let error = check_overlaps(
+            &ws,
+            &other_dd.join("x"),
+            &tree,
+            &tree.join("team-a"),
+            &instances,
+        )
+        .unwrap_err();
         assert_eq!(overlap_input(&error), "data dir");
         assert_eq!(overlap_rival_slug(&error), "other");
 
         // workspace vs a registered data dir (both nestings): an
         // adopted instance's outside data dir is off the workspace map.
-        let error = check_overlaps(&managed, &dd, &tree, &instances).unwrap_err();
+        let error =
+            check_overlaps(&managed, &dd, &tree, &tree.join("team-a"), &instances).unwrap_err();
         assert_eq!(overlap_input(&error), "workspace");
         assert_eq!(overlap_rival_slug(&error), "other");
-        let error = check_overlaps(&other_dd.join("x"), &dd, &tree, &instances).unwrap_err();
+        let error = check_overlaps(
+            &other_dd.join("x"),
+            &dd,
+            &tree,
+            &tree.join("team-a"),
+            &instances,
+        )
+        .unwrap_err();
         assert_eq!(overlap_input(&error), "workspace");
         assert_eq!(overlap_rival_slug(&error), "other");
+    }
+
+    #[test]
+    fn the_canonical_position_passes_where_the_tree_still_refuses() {
+        let root = tempdir();
+        let tree = root.path().join("tree");
+        fs::create_dir_all(&tree).expect("tree");
+        let canonical = tree.join("team-a");
+        let ws = root.path().join("ws");
+        fs::create_dir_all(&ws).expect("ws");
+
+        // The slug's own place inside the tree is the one admission.
+        check_overlaps(&ws, &canonical, &tree, &canonical, &[])
+            .expect("the canonical position is the exception");
+
+        // A tree ancestor — the data dir containing the whole tree —
+        // still refuses: containment runs both ways. The workspace
+        // sits in its own tempdir so it does not contain, nor sit
+        // under, the refusing data dir (direction 2 must stay out).
+        let outside = tempdir();
+        let error =
+            check_overlaps(outside.path(), root.path(), &tree, &canonical, &[]).unwrap_err();
+        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_rival_slug(&error), "(instance tree)");
+
+        // The exception lives inside the direction-3 predicate only.
+        // A registered instance squatting on the very same path is
+        // still caught, by direction 7 — the shortcut is not a pass.
+        let squat = vec![reg("squat", None, &canonical)];
+        let error = check_overlaps(&ws, &canonical, &tree, &canonical, &squat).unwrap_err();
+        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_rival_slug(&error), "squat");
+    }
+
+    #[test]
+    fn a_workspace_containing_the_canonical_position_still_refuses() {
+        // A workspace containing the slug's canonical position nests
+        // against the tree itself (equal to it or an ancestor), so
+        // direction 1 refuses before the direction-3 exception is
+        // ever reached; the shortcut never admits workspace-over-tree.
+        let root = tempdir();
+        let tree = root.path().join("tree");
+        fs::create_dir_all(&tree).expect("tree");
+        let canonical = tree.join("team-a");
+        let error = check_overlaps(&tree, &canonical, &tree, &canonical, &[]).unwrap_err();
+        assert_eq!(overlap_input(&error), "workspace");
+        assert_eq!(overlap_rival_slug(&error), "(instance tree)");
+        let error = check_overlaps(root.path(), &canonical, &tree, &canonical, &[]).unwrap_err();
+        assert_eq!(overlap_input(&error), "workspace");
+        assert_eq!(overlap_rival_slug(&error), "(instance tree)");
+    }
+
+    #[test]
+    fn the_drop_to_identity_gets_its_own_canonical_position() {
+        // The canonical position is identity-relative: the same slug
+        // under a drop-to launch resolves inside that user's home.
+        let root = tempdir();
+        let tree = root.path().join("tree");
+        fs::create_dir_all(&tree).expect("tree");
+        let home = tempdir();
+        let identity = LaunchIdentity::DropTo(crate::spawn::ResolvedUser {
+            uid: 4242,
+            gid: 4242,
+            username: "dedicated".to_string(),
+            home: home.path().to_path_buf(),
+        });
+        let ws = tempdir();
+        let canonical = instance_data_dir(&identity, "team-a").unwrap();
+        assert!(canonical.starts_with(home.path()));
+        check_overlaps(ws.path(), &canonical, &tree, &canonical, &[])
+            .expect("the drop-to canonical position is admitted too");
+    }
+
+    #[test]
+    fn adopt_admits_the_canonical_position_and_stores_it_canonically() {
+        // The XDG data anchor is process-global: serialize the one
+        // test that redirects it. Other adopt tests only compare
+        // tree-external data dirs, so a displaced anchor cannot flip
+        // their verdicts.
+        static XDG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = XDG.lock().unwrap();
+        let previous = std::env::var("XDG_DATA_HOME").ok();
+        let home = tempdir();
+        // SAFETY: adopt tests touching the data home are serialized
+        // by the lock above; the previous value is restored below.
+        unsafe { std::env::set_var("XDG_DATA_HOME", home.path()) };
+        let slug = "canonical-test";
+        let canonical = home.path().join("kallipai").join("tagmata").join(slug);
+        fs::create_dir_all(&canonical).expect("canonical position");
+
+        // The shape gate does not bend for the canonical position:
+        // an empty directory there is still not an instance.
+        let ws = tempdir();
+        let error = adopt_at(ws.path(), slug, ws.path(), &canonical, &[]).unwrap_err();
+        assert!(error.to_string().contains("does not look like"), "{error}");
+
+        // A valid alias admits the adopt, and the record stores the
+        // canonical form, never the alias.
+        fs::write(canonical.join("runtime.json"), "{}").expect("runtime");
+        let alias = home.path().join("alias-to-canonical");
+        std::os::unix::fs::symlink(&canonical, &alias).expect("symlink");
+        let root = tempdir();
+        let state = adopt_at(root.path(), slug, ws.path(), &alias, &[]).expect("adopt");
+        assert!(matches!(state, InstanceState::Stopped), "{state:?}");
+        let stored = records::read_record(root.path(), slug).expect("record");
+        assert_eq!(stored.data_dir, canonical.canonicalize().unwrap());
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+    }
+
+    #[test]
+    fn adopt_rejects_a_dangling_symlink_data_dir_at_the_shape_gate() {
+        let root = tempdir();
+        let ws = tempdir();
+        let dangling = root.path().join("dangling");
+        std::os::unix::fs::symlink(root.path().join("gone"), &dangling).expect("symlink");
+        let error = adopt_at(root.path(), "slug-x", ws.path(), &dangling, &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("not an existing directory"),
+            "{error}"
+        );
     }
 
     // --- env ------------------------------------------------------------
