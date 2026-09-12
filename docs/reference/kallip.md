@@ -192,7 +192,7 @@ acting principal is the tagma named by the bearer token (the spawn env);
 `--space self` is its own region, `shared` the space's shared region.
 
 ```bash
-$ kallip file put <PATH> --file <FILE> [--json]
+$ kallip file put <PATH> --file <FILE> [--json]   # PATH may be relative for a tagma: it lands in its own region (e.g. images/x.png)
 $ kallip file get <ID> [--out <FILE>]
 $ kallip file send <ID> (--to-tagma <TAGMA> | --to-user <USER>) [--json]
 $ kallip file ls --space self|shared [--prefix <PREFIX>] [--limit <N>] [--json]
@@ -203,6 +203,24 @@ Credentials ride the spawn environment, never flags: `KALLIP_FILES_URL`
 bearer). `--json` prints successful responses as JSON; `get` buffers the
 content (capped by the service's max body size) and writes it to stdout
 (or `--out`) — content is never JSON-wrapped.
+
+### `image` — Read images into the conversation
+
+Ingest an image into this agent's live context (the tagma enforces the
+bound set's modalities and records the turn). The target is a local
+path — stored through the files service into the tagma's private
+region under `images/`, then ingested — or a files record id read
+as-is. A parseable UUID without path separators reads as a record id;
+`--id` and `--path` pin the interpretation. Stored bytes live in the
+files service's content-addressed blob store (keyed by their SHA-256
+hash), and the command reports the blob id, the space path, and the
+record id. The media type comes from `--media-type` or the file
+extension (default `image/png`; svg is refused as a non-raster image
+unless `--media-type` overrides it).
+
+```bash
+$ kallip image read <PATH-or-ID> [--id] [--path] [--media-type <TYPE>] [--caption <TEXT>]
+```
 
 ## Usage patterns
 

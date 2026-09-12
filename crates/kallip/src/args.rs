@@ -353,19 +353,28 @@ pub struct FileLsArgs {
     pub json: bool,
 }
 
-/// The `kallip image` family: read image records into the conversation.
+/// The `kallip image` family: read images into the conversation.
 #[derive(Subcommand)]
 pub enum ImageCommand {
-    /// Ingest an image record into this agent's live context.
+    /// Ingest an image into this agent's live context. The target is a local
+    /// path (stored through the files service first) or a files record id.
     Read(ImageReadArgs),
 }
 
 /// Args for `kallip image read`.
 #[derive(Args)]
 pub struct ImageReadArgs {
-    /// Files-service record id to ingest.
-    pub id: String,
-    /// Media type of the record (default `image/png`).
+    /// A local image path, or a files-service record id.
+    pub target: String,
+    /// Interpret the target as a record id.
+    #[arg(long, conflicts_with = "path")]
+    pub id: bool,
+    /// Interpret the target as a local path (e.g. a file literally named
+    /// like a UUID).
+    #[arg(long, conflicts_with = "id")]
+    pub path: bool,
+    /// Media type of the record (default: derived from the file extension
+    /// when storing, else `image/png`).
     #[arg(long, value_name = "TYPE")]
     pub media_type: Option<String>,
     /// Caption carried alongside the reference.

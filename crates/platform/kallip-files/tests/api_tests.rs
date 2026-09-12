@@ -274,6 +274,35 @@ async fn tagma_area_matrix() {
 }
 
 #[tokio::test]
+async fn relative_put_lands_in_the_caller_private_region() {
+    let world = TestWorld::new().await;
+
+    // A tagma's relative path resolves into its own private region.
+    let (record_id, _) = put_ok(&world, bearer(&world.t1_token), "images/pic.png", b"rel").await;
+    let response = get(&world, bearer(&world.t1_token), &record_id).await;
+    assert_eq!(bytes_of(response).await, b"rel");
+    let listing = respond(
+        &world.router,
+        axum::http::Method::GET,
+        "/v1/files?space=self&prefix=images/",
+        Some(bearer(&world.t1_token)),
+        Vec::new(),
+    )
+    .await;
+    let rows = json_of(listing).await;
+    let expected = format!("/users/{}/tagmas/{}/images/pic.png", world.user1, world.t1);
+    assert_eq!(rows[0]["path"], expected);
+
+    // A user has no private region to resolve into; relative is tagma-only.
+    let response = put(&world, cookie_for(&world, 1), "notes/a.txt", b"x").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // `..` never re-points.
+    let response = put(&world, bearer(&world.t1_token), "../escape.txt", b"x").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn admin_face_and_admin_content_pins() {
     let world = TestWorld::new().await;
     let path = user1_shared(&world, "a.txt");

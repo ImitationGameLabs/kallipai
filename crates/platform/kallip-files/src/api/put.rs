@@ -20,7 +20,10 @@ use kallip_common::protocol::ApiError;
 
 #[derive(Debug, Deserialize)]
 pub struct PutQuery {
-    /// Destination space path (e.g. `/users/{user}/shared/report.pdf`).
+    /// Destination space path (e.g. `/users/{user}/shared/report.pdf`). A
+    /// path without the leading `/` is relative to the caller's identity-
+    /// derived private region; relative paths are tagma-only, users pass
+    /// absolute space paths. Mirrors the list face's relative prefix.
     pub path: String,
 }
 
@@ -34,6 +37,44 @@ pub struct PutResponse {
     pub blob_id: String,
 }
 
+/// Resolve the query path to an absolute space path. An absolute path passes
+/// through unchanged; a relative one lands in the caller's identity-derived
+/// private region (the put-side twin of the list face's relative prefix).
+/// Relative paths are tagma-only, users pass absolute space paths. `..`
+/// segments are refused -- the client narrows and names, it never re-points.
+fn resolve_path(
+    raw: &str,
+    principal: &Principal,
+    facts: Option<&crate::acl::EnrollmentFacts>,
+) -> Result<String, ApiError> {
+    if raw.starts_with('/') {
+        return Ok(raw.to_owned());
+    }
+    if raw.is_empty() || raw.split('/').any(|seg| seg == "..") {
+        return Err(ApiError::bad_request(
+            "relative path must not be empty or contain .. segments",
+        ));
+    }
+    match principal {
+        // A user has no single private region to resolve into (their space
+        // root is not itself a valid area); relative paths are a
+        // tagma-region facility.
+        Principal::User(_) => Err(ApiError::bad_request(
+            "relative paths resolve for tagmas; pass an absolute space path",
+        )),
+        Principal::Tagma(tagma) => {
+            let facts = facts.ok_or_else(|| ApiError::forbidden("not allowed on this path"))?;
+            Ok(format!(
+                "/users/{}/tagmas/{}/{}",
+                facts.space_user,
+                tagma.as_ref(),
+                raw
+            ))
+        }
+        Principal::Admin => Err(ApiError::forbidden("admin cannot upload content")),
+    }
+}
+
 /// PUT /v1/files?path=...
 pub async fn put_file(
     State(state): State<AppState>,
@@ -41,7 +82,14 @@ pub async fn put_file(
     AuthPrincipal(principal): AuthPrincipal,
     body: Body,
 ) -> Result<Response, ApiError> {
-    let path = SpacePath::parse(&query.path).ok_or_else(|| {
+    // Tagma facts resolved once up front: a relative path needs the caller's
+    // enrollment to resolve against, and the grant check reuses them.
+    let facts = match &principal {
+        Principal::Tagma(tagma) => Some(super::tagma_facts(&state, tagma).await?),
+        _ => None,
+    };
+    let resolved = resolve_path(&query.path, &principal, facts.as_ref())?;
+    let path = SpacePath::parse(&resolved).ok_or_else(|| {
         ApiError::bad_request("path must be a space path like /users/{user}/shared/name")
     })?;
     let owner = match &principal {
@@ -52,8 +100,8 @@ pub async fn put_file(
             user.to_string()
         }
         Principal::Tagma(tagma) => {
-            let facts = super::tagma_facts(&state, tagma).await?;
-            if !crate::acl::tagma_can(tagma.as_ref(), &path, Action::Write, &facts) {
+            let facts = facts.as_ref().expect("tagma facts resolved above");
+            if !crate::acl::tagma_can(tagma.as_ref(), &path, Action::Write, facts) {
                 return Err(ApiError::forbidden("not allowed on this path"));
             }
             tagma.to_string()
@@ -96,16 +144,10 @@ pub async fn put_file(
         .ok_or_else(|| ApiError::internal("just-stored blob is missing"))?
         .size;
     let size = size as i64;
-    let record_id = crate::metadata::repo::register_upload(
-        &state.db,
-        &blob_id,
-        size,
-        &query.path,
-        &owner,
-        None,
-    )
-    .await
-    .map_err(ApiError::internal)?;
+    let record_id =
+        crate::metadata::repo::register_upload(&state.db, &blob_id, size, &resolved, &owner, None)
+            .await
+            .map_err(ApiError::internal)?;
 
     Ok((
         StatusCode::CREATED,
@@ -245,5 +287,75 @@ impl AsyncRead for CappedBody {
                 _ => Poll::Ready(Ok(())),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::acl::EnrollmentFacts;
+    use std::collections::BTreeSet;
+
+    fn facts(user: &str) -> EnrollmentFacts {
+        EnrollmentFacts {
+            space_user: user.to_owned(),
+            enrolled: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn absolute_path_passes_through_unchanged() {
+        let out = resolve_path(
+            "/users/u1/shared/a.png",
+            &Principal::User("u1".to_owned().into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out, "/users/u1/shared/a.png");
+    }
+
+    #[test]
+    fn relative_tagma_path_lands_in_its_own_region() {
+        let out = resolve_path(
+            "images/pic.png",
+            &Principal::Tagma("t1".to_owned().into()),
+            Some(&facts("u1")),
+        )
+        .unwrap();
+        assert_eq!(out, "/users/u1/tagmas/t1/images/pic.png");
+    }
+
+    #[test]
+    fn relative_user_path_is_refused() {
+        let err = resolve_path(
+            "notes/a.txt",
+            &Principal::User("u1".to_owned().into()),
+            None,
+        )
+        .expect_err("users have no private region to resolve into");
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn dot_dot_segments_are_refused() {
+        let facts = facts("u1");
+        for raw in ["../escape.png", "images/../escape.png"] {
+            let err = resolve_path(raw, &Principal::Tagma("t1".to_owned().into()), Some(&facts))
+                .expect_err(".. must be refused");
+            assert_eq!(err.status, 400);
+        }
+    }
+
+    #[test]
+    fn empty_relative_path_is_refused() {
+        let err = resolve_path("", &Principal::User("u1".to_owned().into()), None)
+            .expect_err("empty must be refused");
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn admin_relative_path_is_refused() {
+        let err = resolve_path("x.png", &Principal::Admin, None).expect_err("admin");
+        assert_eq!(err.status, 403);
     }
 }
