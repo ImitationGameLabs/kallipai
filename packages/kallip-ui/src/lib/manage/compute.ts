@@ -313,6 +313,24 @@ export function replaceSetProfiles(
   return updateSet(config, setName, { ...set, profiles: [...profiles] });
 }
 
+/** Replace the profile at (setName, profileIdx) (the set-member
+ * profile dialog Save path). Unknown set names or an out-of-range
+ * index leave the config unchanged.
+ */
+export function replaceSetProfile(
+  config: ProfileConfig,
+  setName: string,
+  profileIdx: number,
+  profile: ProfileModel,
+): ProfileConfig {
+  const set = config.sets[setName];
+  if (!set || set.profiles[profileIdx] === undefined) return config;
+  return updateSet(config, setName, {
+    ...set,
+    profiles: set.profiles.map((p, pi) => (pi === profileIdx ? profile : p)),
+  });
+}
+
 /** Move a profile from one set to another (drag-and-drop draft update).
  * The profile lands at the end of the target set; a move within the same
  * set reorders it to last. Unknown set names or an out-of-range index

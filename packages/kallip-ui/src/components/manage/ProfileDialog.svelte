@@ -1,20 +1,22 @@
 <script lang="ts" module>
-  // Parked-profile create/edit dialog for the Profiles page's parking
-  // section: a single-profile form (one field per block, vertical — the
-  // ProviderDialog pattern), deliberately NOT the SetDialog row editor
-  // (which edits a whole set at once). Prop-driven (CreateRoomDialog
-  // pattern): the dialog never touches a store; the page applies the
-  // result to its draft. In edit mode the id is locked — the id is the
+  // Single-profile create/edit dialog shared by the Profiles page's
+  // parking section and its set-member profile cards: one field per
+  // block, vertical (the ProviderDialog pattern), deliberately NOT
+  // the SetDialog row editor (which edits a whole set at once).
+  // Prop-driven (CreateRoomDialog pattern): the dialog never touches
+  // a store; the page applies the result to its draft. Title and
+  // description come from the call site — each context speaks with
+  // its own i18n keys. In edit mode the id is locked — the id is the
   // profile's identity in the sets ∪ parking uniqueness rule, and
   // renaming would dangle probe reports keyed by it.
   import type { ProfileModel, ReasoningEffort } from "@kallipai/kallip-client";
 
-  export interface ParkingDialogResult {
+  export interface ProfileDialogResult {
     readonly id: string;
     readonly endpoint: string;
     readonly model: string;
     readonly max_context_window: number;
-    /** Pass-through: the form has no inputs for these; edits keep the parked
+    /** Pass-through: the form has no inputs for these; edits keep the
      * profile's declared values so a save never silently resets them. */
     readonly store?: boolean;
     readonly effort?: ReasoningEffort;
@@ -29,15 +31,12 @@
     manage_profiles_id_placeholder,
     manage_profiles_max_context_placeholder,
     manage_profiles_model_placeholder,
-    manage_profiles_parking_dialog_desc,
-    manage_profiles_parking_dialog_edit_title,
-    manage_profiles_parking_dialog_endpoint_label,
-    manage_profiles_parking_dialog_id_duplicate,
-    manage_profiles_parking_dialog_invalid_window,
-    manage_profiles_parking_dialog_id_label,
-    manage_profiles_parking_dialog_max_context_label,
-    manage_profiles_parking_dialog_model_label,
-    manage_profiles_parking_dialog_new_title,
+    manage_profiles_profile_dialog_endpoint_label,
+    manage_profiles_profile_dialog_id_duplicate,
+    manage_profiles_profile_dialog_invalid_window,
+    manage_profiles_profile_dialog_id_label,
+    manage_profiles_profile_dialog_max_context_label,
+    manage_profiles_profile_dialog_model_label,
     manage_profiles_remove_profile,
     manage_profiles_test,
   } from "../../paraglide/messages.js";
@@ -53,6 +52,8 @@
     onCancel,
     onTest = null,
     onRemove = null,
+    title,
+    description,
   }: {
     open: boolean;
     mode: "new" | "edit";
@@ -65,12 +66,16 @@
     occupiedIds?: string[];
     /** Latest probe report for the in-form Test (rendered inline). */
     probeReport?: { status: string; detail: string | null } | null;
-    onSave: (result: ParkingDialogResult) => void;
+    onSave: (result: ProfileDialogResult) => void;
     onCancel: () => void;
     /** Probe the current form values without touching the draft. */
-    onTest?: ((values: ParkingDialogResult) => void) | null;
+    onTest?: ((values: ProfileDialogResult) => void) | null;
     /** Edit mode's danger action; hide the zone when absent. */
     onRemove?: (() => void) | null;
+    /** Dialog title text (the call site picks the i18n keys). */
+    title: string;
+    /** sr-only dialog description text (call-site i18n choice). */
+    description: string;
   } = $props();
 
   // Field drafts, reset on each open transition (plain latch, no
@@ -139,12 +144,10 @@
         class="card preset-tonal-surface w-full max-w-md p-6 flex flex-col gap-4"
       >
         <Dialog.Title class="text-lg font-semibold">
-          {mode === "new"
-            ? manage_profiles_parking_dialog_new_title()
-            : manage_profiles_parking_dialog_edit_title()}
+          {title}
         </Dialog.Title>
         <Dialog.Description class="sr-only">
-          {manage_profiles_parking_dialog_desc()}
+          {description}
         </Dialog.Description>
 
         <form
@@ -156,7 +159,7 @@
         >
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
-              {manage_profiles_parking_dialog_id_label()}
+              {manage_profiles_profile_dialog_id_label()}
               {#if mode === "new"}
                 <span class="text-error-500 dark:text-error-400">*</span>
               {/if}
@@ -170,14 +173,14 @@
             />
             {#if duplicateId}
               <span class="text-xs text-error-500 dark:text-error-400"
-                >{manage_profiles_parking_dialog_id_duplicate()}</span
+                >{manage_profiles_profile_dialog_id_duplicate()}</span
               >
             {/if}
           </label>
 
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
-              {manage_profiles_parking_dialog_endpoint_label()}
+              {manage_profiles_profile_dialog_endpoint_label()}
               <span class="text-error-500 dark:text-error-400">*</span>
             </span>
             <select class="select text-sm" bind:value={endpoint}>
@@ -189,7 +192,7 @@
 
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
-              {manage_profiles_parking_dialog_model_label()}
+              {manage_profiles_profile_dialog_model_label()}
               <span class="text-error-500 dark:text-error-400">*</span>
             </span>
             <input
@@ -202,7 +205,7 @@
 
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
-              {manage_profiles_parking_dialog_max_context_label()}
+              {manage_profiles_profile_dialog_max_context_label()}
               <span class="text-error-500 dark:text-error-400">*</span>
             </span>
             <input
@@ -214,7 +217,7 @@
             />
             {#if !validWindow}
               <span class="text-xs text-error-500 dark:text-error-400"
-                >{manage_profiles_parking_dialog_invalid_window()}</span
+                >{manage_profiles_profile_dialog_invalid_window()}</span
               >
             {/if}
           </label>

@@ -492,20 +492,20 @@ const SYNONYMS: string[][] = [
   [
     "manage_agent_provider",
     "manage_profiles_set_dialog_provider_label",
-    "manage_profiles_parking_dialog_endpoint_label",
+    "manage_profiles_profile_dialog_endpoint_label",
   ],
   ["manage_agent_retry_error_unknown", "shell_error"],
   [
     "manage_agent_model",
     "manage_profiles_set_dialog_model_label",
-    "manage_profiles_parking_dialog_model_label",
+    "manage_profiles_profile_dialog_model_label",
   ],
   [
-    "manage_profiles_parking_dialog_id_label",
+    "manage_profiles_profile_dialog_id_label",
     "manage_profiles_set_dialog_id_label",
   ],
   [
-    "manage_profiles_parking_dialog_max_context_label",
+    "manage_profiles_profile_dialog_max_context_label",
     "manage_profiles_set_dialog_max_context_label",
   ],
   ["manage_profiles_set_dialog_description_label", "rooms_description_label"],

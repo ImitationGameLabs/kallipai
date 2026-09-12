@@ -35,6 +35,7 @@ import {
   renameSet,
   replaceParkingProfiles,
   replaceSetProfiles,
+  replaceSetProfile,
   setDefaultSet,
   setEffectiveModalities,
   setHasShadowedMembers,
@@ -403,6 +404,42 @@ Deno.test(
 Deno.test("replaceSetProfiles: unknown set name is a no-op", () => {
   const base = addSet(emptyConfig);
   assertEquals(replaceSetProfiles(base, "ghost", []), base);
+});
+
+Deno.test("replaceSetProfile: swaps one profile in place", () => {
+  const base = addProfile(addSet(emptyConfig), "set-1");
+  const replacement: ProfileModel = {
+    id: "p9",
+    endpoint: "ep1",
+    model: "m9",
+    max_context_window: 1,
+    store: false,
+    effort: "high",
+  };
+  const r = replaceSetProfile(base, "set-1", 0, replacement);
+  assertEquals(r.sets["set-1"].profiles, [replacement]);
+});
+
+Deno.test("replaceSetProfile: out-of-range index is a no-op", () => {
+  const base = addProfile(addSet(emptyConfig), "set-1");
+  const replacement = {
+    id: "p9",
+    endpoint: "ep1",
+    model: "m9",
+    max_context_window: 1,
+  };
+  assertEquals(replaceSetProfile(base, "set-1", 5, replacement), base);
+});
+
+Deno.test("replaceSetProfile: unknown set name is a no-op", () => {
+  const base = addProfile(addSet(emptyConfig), "set-1");
+  const replacement = {
+    id: "p9",
+    endpoint: "ep1",
+    model: "m9",
+    max_context_window: 1,
+  };
+  assertEquals(replaceSetProfile(base, "ghost", 0, replacement), base);
 });
 Deno.test("profileConfigEqual: true for identical configs", () => {
   const a = addSet(emptyConfig);

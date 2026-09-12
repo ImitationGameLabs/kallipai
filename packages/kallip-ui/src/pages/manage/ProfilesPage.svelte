@@ -22,12 +22,13 @@
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
   import ProviderDialog from "../../components/manage/ProviderDialog.svelte";
   import SetDialog from "../../components/manage/SetDialog.svelte";
-  import ParkingDialog from "../../components/manage/ParkingDialog.svelte";
+  import ProfileDialog from "../../components/manage/ProfileDialog.svelte";
   import {
     moveProfile,
     moveFromParking,
     moveToParking,
     replaceSetProfiles,
+    replaceSetProfile,
     renameSet,
     setDefaultSet,
     updateSetDescription,
@@ -55,6 +56,11 @@
     common_remove,
     common_save,
     manage_profiles_apply,
+    manage_profiles_parking_dialog_desc,
+    manage_profiles_parking_dialog_edit_title,
+    manage_profiles_parking_dialog_new_title,
+    manage_profiles_profile_dialog_desc,
+    manage_profiles_profile_dialog_edit_title,
     manage_profiles_remove_provider,
     manage_profiles_remove_provider_desc,
     manage_profiles_dangling_desc,
@@ -373,8 +379,79 @@
     setDialog.open = false;
   }
 
-  // Parking dialog: single-profile form (see ParkingDialog). idx indexes the
-  // draft's parked list in edit mode.
+  // Set-member profile dialog: single-profile form (see ProfileDialog),
+  // positioned at (setName, idx) in the draft's set.
+  let profileDialog = $state<{
+    open: boolean;
+    setName: string;
+    idx: number;
+  }>({ open: false, setName: "", idx: 0 });
+  let profileProbeReport = $state<{
+    status: string;
+    detail: string | null;
+  } | null>(null);
+
+  function openProfileEdit(setName: string, idx: number) {
+    profileProbeReport = null;
+    profileDialog = { open: true, setName, idx };
+  }
+
+  function onProfileSave(values: {
+    id: string;
+    endpoint: string;
+    model: string;
+    max_context_window: number;
+    store?: boolean;
+    effort?: ReasoningEffort;
+  }) {
+    const draft = profilesStore.draft;
+    if (!draft) return;
+    profilesStore.draft = replaceSetProfile(
+      draft,
+      profileDialog.setName,
+      profileDialog.idx,
+      values,
+    );
+    profileDialog.open = false;
+  }
+
+  /** Probe the dialog's current form values without touching the draft:
+   * stage them into a throwaway copy and reuse the set-profile request
+   * builder (committed config passed for the masked-key rule). */
+  async function onProfileTest(values: {
+    id: string;
+    endpoint: string;
+    model: string;
+    max_context_window: number;
+    store?: boolean;
+    effort?: ReasoningEffort;
+  }) {
+    const draft = profilesStore.draft;
+    if (!draft) return;
+    const staged = replaceSetProfile(
+      draft,
+      profileDialog.setName,
+      profileDialog.idx,
+      values,
+    );
+    const body = singleProfileProbeRequest(
+      profilesStore.config,
+      staged,
+      profileDialog.setName,
+      profileDialog.idx,
+    );
+    if (!body) return;
+    const resp = await profilesStore.probeRaw(body);
+    if (!resp) return;
+    mergeProviderScope(providerReports, resp);
+    const p = resp.sets[0]?.profiles[0];
+    if (p) {
+      profileProbeReport = { status: p.status, detail: p.detail ?? null };
+    }
+  }
+
+  // Parking dialog: single-profile form (see ProfileDialog). idx indexes
+  // the draft's parked list in edit mode.
   let parkingDialog = $state<{
     open: boolean;
     mode: "new" | "edit";
@@ -550,6 +627,7 @@
         {onTestSet}
         {onTestProfile}
         onEditSet={(setName) => (setDialog = { open: true, name: setName })}
+        onEditProfile={openProfileEdit}
         onRemoveSet={(setName) => onSetRemoveRequested(setName)}
         onSetDefault={(setName) => {
           const draft = profilesStore.draft;
@@ -634,9 +712,13 @@
   onCancel={() => (setDialog.open = false)}
 />
 
-<ParkingDialog
+<ProfileDialog
   open={parkingDialog.open}
   mode={parkingDialog.mode}
+  description={manage_profiles_parking_dialog_desc()}
+  title={parkingDialog.mode === "new"
+    ? manage_profiles_parking_dialog_new_title()
+    : manage_profiles_parking_dialog_edit_title()}
   profile={profilesStore.draft?.parking?.[parkingDialog.idx] ?? null}
   {providerIds}
   {occupiedIds}
@@ -645,6 +727,22 @@
   onCancel={() => (parkingDialog.open = false)}
   onTest={onParkingTest}
   onRemove={parkingDialog.mode === "edit" ? onParkingRemove : null}
+/>
+<ProfileDialog
+  open={profileDialog.open}
+  mode="edit"
+  title={manage_profiles_profile_dialog_edit_title()}
+  description={manage_profiles_profile_dialog_desc()}
+  profile={profilesStore.draft?.sets[profileDialog.setName]?.profiles[
+    profileDialog.idx
+  ] ?? null}
+  {providerIds}
+  {occupiedIds}
+  probeReport={profileProbeReport}
+  onSave={onProfileSave}
+  onCancel={() => (profileDialog.open = false)}
+  onTest={onProfileTest}
+  onRemove={null}
 />
 
 <ConfirmDialog

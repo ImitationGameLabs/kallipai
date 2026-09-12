@@ -71,6 +71,7 @@
     onTestSet,
     onTestProfile,
     onEditSet,
+    onEditProfile,
     onRemoveSet,
     onSetDefault,
     onAddSet,
@@ -96,6 +97,7 @@
     onTestSet: (setName: string) => void;
     onTestProfile: (setName: string, profileIdx: number) => void;
     onEditSet: (setName: string) => void;
+    onEditProfile: (setName: string, profileIdx: number) => void;
     onRemoveSet: (setName: string) => void;
     onSetDefault: (setName: string) => void;
     onAddSet: () => void;
@@ -228,7 +230,7 @@
             onCardDragStart(setName, profileIdx, profile.id, e)}
           onDragEnd={onCardDragEnd}
           onTest={() => onTestProfile(setName, profileIdx)}
-          onEdit={() => onEditSet(setName)}
+          onEdit={() => onEditProfile(setName, profileIdx)}
           onRemove={() => onRemoveProfile(setName, profileIdx, profile.id)}
         />
       {/each}

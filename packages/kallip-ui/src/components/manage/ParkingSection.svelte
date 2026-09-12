@@ -2,7 +2,7 @@
   // Parking pool for the profiles page: profiles held out of rotation, same
   // card language as the sets above, but the container stays dashed (not a
   // rotation slot) and its add button opens the single-profile
-  // ParkingDialog. Drag state and drop mutations stay in the page.
+  // ProfileDialog. Drag state and drop mutations stay in the page.
   import type { SvelteMap } from "svelte/reactivity";
   import { Plus } from "@lucide/svelte";
   import type {
