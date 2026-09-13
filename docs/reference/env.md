@@ -329,8 +329,8 @@ administrator-pinned assets.
 | `KALLIP_FILES_GC_INTERVAL_SECS` | no | `60` | Delay between GC passes (sweep + reconcile), in seconds. |
 | `KALLIP_FILES_GC_GRACE_SECS` | no | `60` | How long a zero-refcount row must have been freed before the GC may reclaim it. |
 | `KALLIP_FILES_GC_BATCH` | no | `128` | Maximum catalog rows reclaimed per GC pass. |
-| `KALLIP_FILES_URL` | yes (CLI) | _(unset)_ | Files service base URL for the `kallip file` CLI (spawn env). |
-| `KALLIP_FILES_TOKEN` | yes (CLI) | _(unset)_ | The tagma's bearer token for the `kallip file` CLI (spawn env, `sk-tagma-…`). |
+| `KALLIP_FILES_URL` | yes (CLI) | _(unset)_ | Files service base URL: consumed by the `kallip file` CLI (spawn env) and by the tagma process for record media fetches (plain configuration, not a secret). |
+| `KALLIP_FILES_TOKEN` | yes (CLI) | _(unset)_ | Bearer for the `kallip file` CLI (`sk-tagma-…`). Not a tagma setting: the tagma authenticates with its registered enrollment credential and removes a leftover `KALLIP_FILES_TOKEN` from its own environment at boot. |
 
 Source:
 [`crates/platform/kallip-files/src/args.rs`](../../crates/platform/kallip-files/src/args.rs).

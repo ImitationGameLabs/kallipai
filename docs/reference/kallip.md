@@ -198,28 +198,40 @@ $ kallip file send <ID> (--to-tagma <TAGMA> | --to-user <USER>) [--json]
 $ kallip file ls --space self|shared [--prefix <PREFIX>] [--limit <N>] [--json]
 ```
 
-Credentials ride the spawn environment, never flags: `KALLIP_FILES_URL`
-(the service base URL) and `KALLIP_FILES_TOKEN` (the tagma's long-lived
-bearer). `--json` prints successful responses as JSON; `get` buffers the
-content (capped by the service's max body size) and writes it to stdout
-(or `--out`) — content is never JSON-wrapped.
+Credentials ride the environment, never flags: `KALLIP_FILES_URL`
+(the service base URL) and `KALLIP_FILES_TOKEN` (a tagma's long-lived
+bearer). Provision them where the CLI runs; agent shells inherit the
+tagma's environment as it stands at spawn time, and the boot sweep
+removes `KALLIP_FILES_TOKEN` first, so a provisioned token never
+reaches an agent shell
+(server-side file fetches authenticate with the tagma's registered
+enrollment credential). `--json` prints successful responses as
+JSON; `get` buffers the content (capped by the service's max body
+size) and writes it to stdout (or `--out`) — content is never
+JSON-wrapped.
 
 ### `image` — Read images into the conversation
 
 Ingest an image into this agent's live context (the tagma enforces the
-bound set's modalities and records the turn). The target is a local
-path — stored through the files service into the tagma's private
-region under `images/`, then ingested — or a files record id read
-as-is. A parseable UUID without path separators reads as a record id;
-`--id` and `--path` pin the interpretation. Stored bytes live in the
-files service's content-addressed blob store (keyed by their SHA-256
-hash), and the command reports the blob id, the space path, and the
-record id. The media type comes from `--media-type` or the file
+bound set's modalities and records the turn). Three target forms:
+
+- a local path: the bytes land in the tagma's own content-addressed
+  attachment store (keyed by their SHA-256 hash) and the turn records
+  them; the command prints the blob id and the turn id.
+- `--id`: a files record id, fetched by the tagma under its
+  own registered credential.
+- `--blob`: an already-stored attachment blob, re-ingested
+  by content address — no bytes travel.
+
+A parseable UUID without path separators reads as a record id;
+`--id` and `--path` pin the interpretation, and `--blob` is never
+guessed. The media type comes from `--media-type` or the file
 extension (default `image/png`; svg is refused as a non-raster image
-unless `--media-type` overrides it).
+unless `--media-type` overrides it). Path-form images must fit the
+tagma's request body limit — downsample large pictures first.
 
 ```bash
-$ kallip image read <PATH-or-ID> [--id] [--path] [--media-type <TYPE>] [--caption <TEXT>]
+$ kallip image read <PATH-or-ID> [--id] [--path] [--blob] [--media-type <TYPE>] [--caption <TEXT>]
 ```
 
 ## Usage patterns

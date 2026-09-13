@@ -112,7 +112,10 @@ Admin-only: the delivery log, newest first. Optional `blob_id` filter,
 ## CLI
 
 The `kallip file` family (put/get/send/ls) is a thin face over these
-routes; credentials ride the spawn environment (`KALLIP_FILES_URL` +
-`KALLIP_FILES_TOKEN`), never CLI flags. See [kallip.md](kallip.md).
+routes; credentials ride the environment (`KALLIP_FILES_URL` +
+`KALLIP_FILES_TOKEN`), never CLI flags. Server-side callers
+authenticate as themselves: the tagma presents its registered
+enrollment credential for record media fetches. See
+[kallip.md](kallip.md).
 
 Source: [`crates/platform/kallip-files/src/`](../../crates/platform/kallip-files/src/).

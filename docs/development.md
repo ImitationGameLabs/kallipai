@@ -180,6 +180,10 @@ publishes `7400` on the loopback interface only — it serves the `kallip file`
 CLI, not the browser (the host port is overridable via `KALLIP_ARION_FILES_PORT`): the `kallip file`
 CLI points `KALLIP_FILES_URL` at `http://127.0.0.1:7400` and presents a
 tagma bearer (`KALLIP_FILES_TOKEN`); see docs/reference/files-api.md.
+The tagma process itself authenticates to the files service with its
+registered enrollment credential — `KALLIP_FILES_TOKEN` provisions
+CLI shells, and the tagma removes a leftover copy from its own
+environment at boot.
 
 > **Passkey migration:** changing the WebAuthn RP id from the old `localhost`
 > topology to `kallipai.lan` invalidates every previously registered dev
