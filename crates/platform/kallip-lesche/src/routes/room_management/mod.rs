@@ -1,4 +1,4 @@
-//! Room lifecycle + membership management: the `/v1/rooms` management surface,
+//! Room lifecycle + membership management: the `/rooms` management surface,
 //! ported from the archeion registry into lesche (the chat domain owns its
 //! membership graph -- database-per-service).
 //!

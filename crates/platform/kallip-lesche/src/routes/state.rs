@@ -27,8 +27,8 @@ use crate::state::SharedConvState;
 
 pub fn router() -> Router<SharedConvState> {
     Router::new()
-        // Registered without the /v1 prefix: the app nests this router under
-        // /v1, so the final mounts are /v1/tagmata/{id}/* -- the shapes the
+        // Registered at the root: the bare resource mounts are
+        // /tagmata/{id}/* -- the shapes the
         // tagma pump and the browser client both dial.
         .route("/tagmata/{id}/state", get(state_events))
         .route("/tagmata/{id}/agents", get(read_agents))

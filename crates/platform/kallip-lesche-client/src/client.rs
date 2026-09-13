@@ -55,7 +55,7 @@ pub struct LescheClient {
 
 /// One stored room message row, as returned by
 /// [`LescheClient::fetch_room_messages`]. Mirrors the lesche `GET
-/// /v1/rooms/{room}/messages` `StoredMessageView` shape; the row payload is the
+/// /rooms/{room}/messages` `StoredMessageView` shape; the row payload is the
 /// plaintext `RoomMessage` JSON (rooms are server-readable).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RoomMessageView {
@@ -114,11 +114,11 @@ impl LescheClient {
     }
 
     /// Construct a client from environment variables: `KALLIP_LESCHE_URL`
-    /// (default: `http://127.0.0.1:7200/v1`) and `KALLIP_LESCHE_TAGMA_TOKEN`
+    /// (default: `http://127.0.0.1:7200`) and `KALLIP_LESCHE_TAGMA_TOKEN`
     /// (required).
     pub fn from_env() -> Result<Self> {
         let url = std::env::var("KALLIP_LESCHE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:7200/v1".to_string());
+            .unwrap_or_else(|_| "http://127.0.0.1:7200".to_string());
         let token = std::env::var("KALLIP_LESCHE_TAGMA_TOKEN")
             .context("KALLIP_LESCHE_TAGMA_TOKEN required")?;
         Self::builder(&url, token).build()
@@ -165,7 +165,7 @@ impl LescheClient {
         anyhow::bail!("lesche POST exhausted retries (app offline)")
     }
 
-    /// Post an agent envelope to a multi-member room: `/v1/rooms/{room_id}/
+    /// Post an agent envelope to a multi-member room: `/rooms/{room_id}/
     /// envelopes`. The room route stores the payload and fans to live members,
     /// returning 202 ACCEPTED regardless of who is online (offline members pull on
     /// reconnect). A 202 means durably stored, so the only failure worth riding
@@ -221,7 +221,7 @@ impl LescheClient {
         anyhow::bail!("lesche room POST exhausted retries (lesche unavailable)")
     }
 
-    /// Pull a room's message history: `GET /v1/rooms/{room_id}/messages?
+    /// Pull a room's message history: `GET /rooms/{room_id}/messages?
     /// after_seq=&limit=`. Member-only on the relay; returns the stored rows
     /// (payload = plaintext `RoomMessage` JSON). A non-member / unknown room is
     /// a [`LescheHttpError`] with status 404. Not retried: a history pull is
@@ -260,7 +260,7 @@ impl LescheClient {
     }
 
     /// List the calling tagma's rooms with each room's live membership + whether
-    /// THIS tagma is the creator (`GET /v1/tagmata/{tagma_id}/rooms`). The
+    /// THIS tagma is the creator (`GET /tagmata/{tagma_id}/rooms`). The
     /// tagma's room-membership pump polls this to refresh its joined-rooms
     /// routing cache. `tagma_id` should be the caller's own id (the route is
     /// self-only).
@@ -324,7 +324,7 @@ impl LescheClient {
     }
 
     /// Post a batch of plaintext metadata events to the single upstream
-    /// channel (`POST /v1/tagmata/{id}/upstream`): one authenticated request
+    /// channel (`POST /tagmata/{id}/upstream`): one authenticated request
     /// carries status, signal, and projection elements together, each
     /// demultiplexed server-side into the same fan logic the per-kind
     /// endpoints have always used. Best-effort like the per-kind calls it
@@ -394,7 +394,7 @@ impl LescheClient {
     // "not a member".
 
     /// Create-or-get the direct session between the calling tagma and
-    /// `peer` (`POST /v1/direct-sessions`). Idempotent: the same pair lands
+    /// `peer` (`POST /direct-sessions`). Idempotent: the same pair lands
     /// on the same derived session whichever side calls. A 404 means
     /// unknown / cross-owner / not-usable peer -- the existence-oracle, so
     /// the caller cannot tell which.
@@ -426,7 +426,7 @@ impl LescheClient {
     }
 
     /// List the calling tagma's direct sessions
-    /// (`GET /v1/direct-sessions`), each with the peer's identity.
+    /// (`GET /direct-sessions`), each with the peer's identity.
     pub async fn list_direct_sessions(&self) -> Result<Vec<DirectSessionView>> {
         let resp = self
             .inner
@@ -444,7 +444,7 @@ impl LescheClient {
     }
 
     /// Send a plaintext `DirectMessage` envelope into the session
-    /// (`POST /v1/direct-sessions/{id}/messages`), retrying on 503 with the
+    /// (`POST /direct-sessions/{id}/messages`), retrying on 503 with the
     /// room surface's bounded backoff. The channel is stamped from
     /// `session_id` here so no caller can address a session with a
     /// mismatched id (the route rejects any mismatch with a 400 anyway).
@@ -493,7 +493,7 @@ impl LescheClient {
     }
 
     /// Pull the session's message history
-    /// (`GET /v1/direct-sessions/{id}/messages?after_seq=&limit=`).
+    /// (`GET /direct-sessions/{id}/messages?after_seq=&limit=`).
     /// Member-only on the relay; rows carry the plaintext `DirectMessage`
     /// JSON as opaque bytes. A non-member / unknown session is a
     /// [`LescheHttpError`] with status 404. Not retried: a history pull is a
@@ -532,7 +532,7 @@ impl LescheClient {
     }
 
     /// Advance the calling tagma's read cursor in the session
-    /// (`PUT /v1/direct-sessions/{id}/read-cursor`). Clamp-on-write
+    /// (`PUT /direct-sessions/{id}/read-cursor`). Clamp-on-write
     /// server-side: a stale write never moves the watermark backwards.
     pub async fn put_direct_read_cursor(
         &self,

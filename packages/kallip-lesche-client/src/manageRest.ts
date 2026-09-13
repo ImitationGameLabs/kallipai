@@ -1,5 +1,5 @@
 // Manage-plane REST client for the lesche reverse proxy:
-// `/v1/tagmata/{id}/manage/{*path}`. Unlike the envelope path, manage
+// `/tagmata/{id}/manage/{*path}`. Unlike the envelope path, manage
 // metadata is plaintext by design (TLS + device-proof tunnel auth is the
 // trust base), so this client speaks plain credentialed HTTP and passes
 // the response status + body through untouched -- the caller decides how

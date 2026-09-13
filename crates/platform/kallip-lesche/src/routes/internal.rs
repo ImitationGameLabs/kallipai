@@ -1,5 +1,5 @@
 //! Service-to-service event push surface (`/internal/*`), consumed by the
-//! files service: a successful `POST /v1/files/{id}/send` delivery pushes a
+//! files service: a successful `POST /files/{id}/send` delivery pushes a
 //! `FileDelivered` event onto the recipient's app event stream, so the
 //! recipient's UI/agent learns a file arrived without polling. Mounted only
 //! when the internal token is configured, behind `internal_guard` (the same

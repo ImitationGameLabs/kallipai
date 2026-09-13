@@ -3,7 +3,7 @@
 // asserts against. A one-sided URL change now fails a test on both sides --
 // the original double-prefix bugs came from each end proving itself alone.
 // Dialled URLs arrive in the edge shape (/v1/lesche/...); they are
-// translated to the server shape (/v1/...) before matching the fixture.
+// translated to the server shape (bare paths) before matching the fixture.
 // (The /state SSE dial is pinned verbatim in projection.test.ts; this file
 // covers the parameterized templates.)
 
@@ -34,7 +34,7 @@ Deno.test(
     globalThis.fetch = ((url: string | URL, init?: RequestInit) => {
       const path = String(url)
         .replace("https://lesche.example", "")
-        .replace(/^\/v1\/lesche/, "/v1"); // edge shape -> server shape
+        .replace(/^\/v1\/lesche/, ""); // edge shape -> bare server shape
       seen.push([init?.method ?? "GET", path]);
       return Promise.resolve(Response.json({}));
     }) as typeof fetch;

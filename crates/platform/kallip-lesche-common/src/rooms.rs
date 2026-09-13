@@ -1,4 +1,4 @@
-//! Public wire types for the room domain: the `/v1/rooms` and room-discovery
+//! Public wire types for the room domain: the `/rooms` and room-discovery
 //! surfaces served by the `kallip-lesche` relay (the data plane that owns
 //! all room state and policy).
 //!
@@ -147,7 +147,7 @@ impl Visibility {
     }
 }
 
-/// One row of a tagma's room discovery (`GET /v1/tagmata/{id}/rooms`): the
+/// One row of a tagma's room discovery (`GET /tagmata/{id}/rooms`): the
 /// rooms a tagma belongs to, each with its live membership snapshot and whether
 /// THIS tagma is the room's creator. The creator is the strict total-order
 /// minimum `(joined_at ASC, member_id ASC)` among the room's live Agent
@@ -207,7 +207,7 @@ pub struct RoomMemberProfile {
     pub tagma_id: Option<TagmaId>,
 }
 
-/// A single room's live membership snapshot (`GET /v1/rooms/{id}`), the
+/// A single room's live membership snapshot (`GET /rooms/{id}`), the
 /// user-device analog of one [`TagmaRoomView`] row. Returned to a USER who is a
 /// current member of the room; a non-member gets 404. The browser consumes this
 /// to display the room's roster. `is_creator` is server-authoritative (the
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(Visibility::from_db("public-ish"), Visibility::Private);
     }
 
-    /// Pin the /v1/rooms wire shapes: exact key set, Option fields skipped
+    /// Pin the /rooms wire shapes: exact key set, Option fields skipped
     /// when None and present when Some. Any field rename/addition or a moved
     /// skip attribute turns a pinned key set red.
     #[test]

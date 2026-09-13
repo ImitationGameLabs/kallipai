@@ -52,12 +52,12 @@ pub fn router(
     app
 }
 
-/// The complete external route table: (verb, path) pairs the merged /v1
+/// The complete external route table: (verb, path) pairs the merged
 /// router serves, exactly as registered above -- the registration
 /// registry's mirror. Adding a route means adding
-/// a row here: the shape tests drive every row through the nested app and
-/// the CORS layer derives its preflight set from this table, so a stray
-/// /v1 in a registration, a singular alias, or an unadvertised verb fails
+/// a row here: the shape tests drive every row through the app and
+/// the CORS layer derives its preflight set from this table, so a stale
+/// /v1 prefix in a registration, or an unadvertised verb fails
 /// here instead of in production. `ANY` stands for the manage-proxy
 /// pass-through, which forwards every verb. Keep rows path-sorted.
 pub(crate) const ROUTE_TABLE: &[(&str, &str)] = &[
@@ -163,13 +163,12 @@ mod tests {
     use axum::Router;
 
     /// Route-shape nails: every ROUTE_TABLE row
-    /// must serve at its registered /v1 shape, the dead shapes (double
-    /// prefix, singular alias, projection segment) must stay gone, and a
+    /// must serve at its registered bare shape, and a
     /// wrong verb must answer 405. Status vocabulary: 401 = route reached
     /// (the auth extractor answers unauthenticated requests), 404 = no
     /// route mounted here, 405 = route exists, verb not served. The table
-    /// rows with `ANY` are covered by the singular-alias negative below
-    /// plus the proxy tests; concrete verbs go through the positive pass.
+    /// rows with `ANY` are covered by the proxy tests; concrete
+    /// verbs go through the positive pass.
     async fn shape_response(app: &axum::Router, verb: &str, path: &str) -> axum::http::StatusCode {
         let request = Request::builder()
             .method(verb)
@@ -181,51 +180,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_table_row_serves_at_its_nested_v1_shape() {
+    async fn every_table_row_serves_at_its_bare_shape() {
         let (state, _control) =
             crate::test_support::make_state(60, std::time::Duration::from_secs(10));
-        let app = axum::Router::new().nest("/v1", super::router(state, None));
+        let app = super::router(state, None);
         for (verb, path) in super::ROUTE_TABLE {
             if *verb == "ANY" {
                 continue; // covered by the manage-proxy tests
             }
-            let status = shape_response(&app, verb, &format!("/v1{path}")).await;
-            assert_eq!(
-                status,
-                StatusCode::UNAUTHORIZED,
-                "route missing or mis-shaped: {verb} /v1{path}",
-            );
-        }
-    }
-
-    /// The dead shapes stay dead: the double /v1 prefix, the singular
-    /// /tagma alias, and the projection segment (including the projection
-    /// events GET) must all 404 -- as must the two per-kind writers,
-    /// status POST and signal POST. A state PUT on the surviving route is
-    /// a 405 (wrong verb), not a 404.
-    #[tokio::test]
-    async fn dead_shapes_are_not_mounted() {
-        let (state, _control) =
-            crate::test_support::make_state(60, std::time::Duration::from_secs(10));
-        let app = axum::Router::new().nest("/v1", super::router(state, None));
-        let negatives = [
-            ("POST", "/v1/v1/tagmata/t-a/state"),
-            ("PUT", "/v1/v1/tagmata/t-a/state"),
-            ("GET", "/v1/v1/tagmata/t-a/agents"),
-            ("POST", "/v1/v1/tunnel/manage-reply"),
-            ("GET", "/v1/v1/tagma/t-a/manage/agents"),
-            ("GET", "/v1/tagma/t-a/manage/agents"),
-            ("POST", "/v1/tagmata/t-a/projection"),
-            ("POST", "/v1/tagmata/t-a/signal"),
-            ("GET", "/v1/tagmata/t-a/projection/events"),
-            ("POST", "/v1/tagmata/t-a/status"),
-        ];
-        for (verb, path) in negatives {
             let status = shape_response(&app, verb, path).await;
             assert_eq!(
                 status,
-                StatusCode::NOT_FOUND,
-                "shape came back: {verb} {path}"
+                StatusCode::UNAUTHORIZED,
+                "route missing or mis-shaped: {verb} {path}",
             );
         }
     }
@@ -237,13 +204,13 @@ mod tests {
     async fn wrong_verbs_answer_405() {
         let (state, _control) =
             crate::test_support::make_state(60, std::time::Duration::from_secs(10));
-        let app = axum::Router::new().nest("/v1", super::router(state, None));
+        let app = super::router(state, None);
         let wrong = [
-            ("POST", "/v1/tagmata/t-a/agents"),
-            ("DELETE", "/v1/tagmata/t-a/state"),
-            ("PUT", "/v1/tagmata/t-a/state"),
-            ("GET", "/v1/tunnel/manage-reply"),
-            ("DELETE", "/v1/conversations"),
+            ("POST", "/tagmata/t-a/agents"),
+            ("DELETE", "/tagmata/t-a/state"),
+            ("PUT", "/tagmata/t-a/state"),
+            ("GET", "/tunnel/manage-reply"),
+            ("DELETE", "/conversations"),
         ];
         for (verb, path) in wrong {
             let status = shape_response(&app, verb, path).await;
@@ -278,7 +245,7 @@ mod tests {
         fixture_routes.sort();
         let mut table: Vec<(String, String)> = super::ROUTE_TABLE
             .iter()
-            .map(|(verb, path)| (verb.to_string(), format!("/v1{path}")))
+            .map(|(verb, path)| (verb.to_string(), path.to_string()))
             .collect();
         table.sort();
         assert_eq!(

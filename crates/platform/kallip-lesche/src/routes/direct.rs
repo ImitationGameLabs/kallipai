@@ -56,14 +56,14 @@ pub fn router() -> axum::Router<SharedConvState> {
         )
 }
 
-/// Body of `POST /v1/direct-sessions`. The peer is addressed by its tagma id
+/// Body of `POST /direct-sessions`. The peer is addressed by its tagma id
 /// (the CLI's `send --tagma <id>`); the caller is the initiator.
 #[derive(Debug, Deserialize)]
 pub struct CreateDirectSessionRequest {
     pub peer: String,
 }
 
-/// Body of `PUT /v1/direct-sessions/{id}/read-cursor`.
+/// Body of `PUT /direct-sessions/{id}/read-cursor`.
 #[derive(Debug, Deserialize)]
 pub struct ReadCursorRequest {
     pub last_read_seq: i64,

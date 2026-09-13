@@ -1,11 +1,9 @@
-//! The single upstream channel: `POST /v1/tagmata/{tagma_id}/upstream`.
+//! The single upstream channel: `POST /tagmata/{tagma_id}/upstream`.
 //!
 //! One authenticated endpoint carries a batched `Vec<UpstreamEvent>` of the
 //! three plaintext metadata kinds (status / signal / state).
 //! The tagma's upstream flusher serializes its bus topics into the
-//! wire enum; here each element demultiplexes into its fan logic. The
-//! per-kind shapes are nailed dead by the route-shape negative legs in
-//! `routes.rs`.
+//! wire enum; here each element demultiplexes into its fan logic.
 //!
 //! Batch semantics: elements are applied in order; the first failing
 //! element aborts the batch with that element's error (earlier elements
@@ -30,7 +28,7 @@ pub fn router() -> Router<SharedConvState> {
     Router::new().route("/tagmata/{tagma_id}/upstream", post(post_upstream))
 }
 
-/// `POST /v1/tagmata/{tagma_id}/upstream` — apply a batch of plaintext
+/// `POST /tagmata/{tagma_id}/upstream` — apply a batch of plaintext
 /// metadata events on behalf of the authenticated tagma. The path `tagma_id`
 /// is authoritative (matched against the authenticated tagma, as on the
 /// per-kind endpoints); one check covers the whole batch.

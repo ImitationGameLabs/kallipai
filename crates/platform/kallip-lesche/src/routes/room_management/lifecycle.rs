@@ -50,7 +50,7 @@ impl RoomView {
     }
 }
 
-/// Body of `POST /v1/rooms`. `name` is required (validated non-empty by the
+/// Body of `POST /rooms`. `name` is required (validated non-empty by the
 /// handler); `description` and `visibility` default, so only the name is
 /// mandatory.
 #[derive(Deserialize)]

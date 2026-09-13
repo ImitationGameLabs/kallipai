@@ -21,7 +21,7 @@
 //!   (`tagma_profile`), as a raw `owner_user_id == caller` compare -- NOT
 //!   `bilateral_resolvable`, so a revoked/disabled tagma can still be pulled.
 //!   This leaks nothing: an owner already discovers their tagma's rooms via
-//!   `GET /v1/tagmata/{id}/rooms`.
+//!   `GET /tagmata/{id}/rooms`.
 //! - **creator** -- the room's `created_by_user_id` may remove any other member.
 //!
 //! Every other case collapses to one `404 "unknown room"` (the existence

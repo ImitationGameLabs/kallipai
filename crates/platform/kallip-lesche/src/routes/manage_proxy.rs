@@ -1,4 +1,4 @@
-//! Manage-plane reverse proxy: `/v1/tagmata/{id}/manage/{*path}`.
+//! Manage-plane reverse proxy: `/tagmata/{id}/manage/{*path}`.
 //!
 //! Bridges the plaintext manage surface: an
 //! authenticated operator session is checked against the tunnel's owner

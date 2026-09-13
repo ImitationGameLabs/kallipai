@@ -1,4 +1,4 @@
-//! The multiplexed app event stream (`GET /v1/me/events`). One connection per
+//! The multiplexed app event stream (`GET /me/events`). One connection per
 //! user carries envelope deliveries for all of their conversations plus presence
 //! transitions: `TagmaOnline`/`TagmaOffline` for the user's own tagmata, and
 //! `RoomMemberOnline`/`RoomMemberOffline` for peers in the user's rooms (fanned

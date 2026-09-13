@@ -1,7 +1,7 @@
 //! Wire types for the `kallip-lesche` relay (data plane): E2EE conversation
-//! envelopes, the tunnel inbound frames, the multiplexed `GET /v1/me/events`
+//! envelopes, the tunnel inbound frames, the multiplexed `GET /me/events`
 //! SSE union ([`event::LescheEvent`]), the 1-RTT key-exchange handshake, and
-//! the room-domain wire types ([`rooms`]: the `/v1/rooms` DTOs, the room
+//! the room-domain wire types ([`rooms`]: the `/rooms` DTOs, the room
 //! identity atoms, the membership snapshot).
 //!
 //! This crate depends on `kallip-archeion-common` for the foundation the data

@@ -1,4 +1,4 @@
-//! Events on the app's multiplexed SSE stream (`GET /v1/me/events`), plus the
+//! Events on the app's multiplexed SSE stream (`GET /me/events`), plus the
 //! signal vocabulary the tagma pushes to the relay for plaintext rebroadcast.
 //!
 //! A single per-user connection carries envelope deliveries for all of the
@@ -6,7 +6,7 @@
 //! aggregate status snapshots, multiplexed by `conversation_id` / `tagma_id`.
 //!
 //! Key exchange is NOT delivered here: it is a synchronous request/reply on
-//! `POST /v1/conversations/{id}/key-exchange/init`, whose response body carries
+//! `POST /conversations/{id}/key-exchange/init`, whose response body carries
 //! the tagma's signed key-exchange response directly.
 //!
 //! The presence variants (`TagmaOnline`, `TagmaOffline`) are emitted by the
@@ -46,11 +46,11 @@ pub enum LescheEvent {
     /// A tagma went offline (tunnel dropped, past the reconnect grace window).
     TagmaOffline { tagma_id: TagmaId },
     /// A file was delivered into this user's files space (the delivery side
-    /// of the files service's `POST /v1/files/{id}/send`), pushed by the
+    /// of the files service's `POST /files/{id}/send`), pushed by the
     /// files service via the lesche's internal surface. Plaintext operator
     /// metadata like the presence pair: where the file landed and who sent
     /// it are not conversation content. The recipient fetches the content
-    /// itself via `GET /v1/files/{record_id}`.
+    /// itself via `GET /files/{record_id}`.
     FileDelivered {
         /// The recipient's own record (the landing copy's id).
         record_id: uuid::Uuid,
@@ -142,7 +142,7 @@ pub enum LescheEvent {
 }
 
 /// The tagma's periodic runtime snapshot — the `UpstreamEvent::Status`
-/// element of the batched `POST /v1/tagmata/{tagma_id}/upstream` body,
+/// element of the batched `POST /tagmata/{tagma_id}/upstream` body,
 /// rebroadcast as an [`LescheEvent::TagmaStatus`] on the owner's stream.
 ///
 /// `tagma_id` is intentionally absent: the batch path is authoritative, and the
@@ -162,7 +162,7 @@ pub struct TagmaStatusPayload {
     pub token_budget_unlimited: bool,
 }
 
-/// `POST /v1/tagmata/{tagma_id}/upstream` request body element — one
+/// `POST /tagmata/{tagma_id}/upstream` request body element — one
 /// plaintext metadata event on the single upstream channel. The batch body
 /// is `Vec<UpstreamEvent>`; the lesche demultiplexes each element into the
 /// same fan logic the three per-kind endpoints (status POST / signal POST /

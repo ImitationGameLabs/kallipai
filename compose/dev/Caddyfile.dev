@@ -67,7 +67,6 @@
     reverse_proxy 127.0.0.1:7100
   }
   handle_path /v1/lesche/* {
-    rewrite * /v1{uri}
     reverse_proxy 127.0.0.1:7200 {
       # SSE is auto-detected (Content-Type: text/event-stream) and flushed
       # immediately regardless; this is a safety net for any future

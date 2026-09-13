@@ -85,9 +85,9 @@ async fn main() -> Result<()> {
     });
 
     // The relay routes carry `SharedConvState` (already applied inside
-    // `routes::router`); the result is a stateless `Router<()>`. Nest it under
-    // `/v1` so the data-plane paths keep their `/v1/...` contract, and apply the
-    // CSRF guard to the whole v1 surface (it gates the cookie-bearing
+    // `routes::router`); the result is a stateless `Router<()>`. Merge it in:
+    // mounted at the root, so the data-plane paths are bare resource paths;
+    // CSRF guard to the whole relay surface (it gates the cookie-bearing
     // `POST /conversations` and is a no-op for bearer/machine requests).
     let internal_token_hash = (!args.internal_token.is_empty())
         .then(|| kallip_common::authtoken::TokenHash::of(&args.internal_token));
@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .nest("/v1", v1)
+        .merge(v1)
         .layer(axum::extract::DefaultBodyLimit::max(body_size_bytes(
             args.max_body_size_kb,
         )))

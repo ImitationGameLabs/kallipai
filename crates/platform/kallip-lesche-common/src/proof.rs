@@ -1,4 +1,4 @@
-//! Data-plane signed proofs: the **tunnel** reconnect proof (`GET /v1/tunnel`)
+//! Data-plane signed proofs: the **tunnel** reconnect proof (`GET /tunnel`)
 //! and the **key-exchange** proof. The shared verification primitive
 //! ([`kallip_archeion_common::proof::verify`]), the [`framed`] length-prefix
 //! helper, and the [`ProofError`] type live in `kallip-archeion-common`; the

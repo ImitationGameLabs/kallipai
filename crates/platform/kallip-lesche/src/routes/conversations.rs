@@ -1,8 +1,8 @@
 //! Conversation resolution + envelope posting.
 //!
-//! `POST /v1/conversations` resolves (and, on first call, lazily provisions the
+//! `POST /conversations` resolves (and, on first call, lazily provisions the
 //! soft-state record for) the single conversation a tagma owns with its
-//! operator. `POST /v1/conversations/{id}/envelopes` routes an encrypted
+//! operator. `POST /conversations/{id}/envelopes` routes an encrypted
 //! envelope to the other endpoint. The relay validates routing metadata +
 //! sender-vs-auth and never decrypts. It is agent-free: an agent sender is
 //! attributed only to its tagma.
@@ -48,7 +48,7 @@ pub fn router() -> Router<SharedConvState> {
         )
 }
 
-/// `POST /v1/conversations { tagma_id }` - resolve the single conversation this
+/// `POST /conversations { tagma_id }` - resolve the single conversation this
 /// tagma owns with its operator. The tagma must be enrolled and owned by the
 /// caller (existence-oracle 404 otherwise). Idempotent: the conversation id is
 /// the deterministic `ConversationId::for_tagma` derivation.

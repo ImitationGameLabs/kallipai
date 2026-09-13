@@ -1,6 +1,6 @@
 //! Tagma signal relay fan: owner-stream rebroadcast of runtime signals.
 //!
-//! The batched `POST /v1/tagmata/{tagma_id}/upstream` channel demultiplexes
+//! The batched `POST /tagmata/{tagma_id}/upstream` channel demultiplexes
 //! Signal elements into [`relay_signal`], which rebroadcasts each event as
 //! a [`LescheEvent::TagmaSignal`] on the owner's app event stream. Like
 //! status and presence, the signal is plaintext and user-scoped, so the

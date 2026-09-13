@@ -44,17 +44,17 @@ export class LinearBackoff {
 export class ProjectionClient {
   constructor(private readonly baseUrl: string) {}
 
-  /** `GET /v1/tagmata/{id}/agents` -- cached roster + status. */
+  /** `GET /tagmata/{id}/agents` -- cached roster + status. */
   async agents(id: string): Promise<ProjectionAgentsResponse> {
     return (await this.get(id, "agents")) as ProjectionAgentsResponse;
   }
 
-  /** `GET /v1/tagmata/{id}/budget` -- cached budget snapshot. */
+  /** `GET /tagmata/{id}/budget` -- cached budget snapshot. */
   async budget(id: string): Promise<ProjectionBudgetResponse> {
     return (await this.get(id, "budget")) as ProjectionBudgetResponse;
   }
 
-  /** `GET /v1/tagmata/{id}/work-schedule` -- cached schedule. */
+  /** `GET /tagmata/{id}/work-schedule` -- cached schedule. */
   async workSchedule(id: string): Promise<ProjectionWorkScheduleResponse> {
     return (await this.get(
       id,
@@ -62,7 +62,7 @@ export class ProjectionClient {
     )) as ProjectionWorkScheduleResponse;
   }
 
-  /** `GET /v1/tagmata/{id}/state` -- the dirty-frame SSE: the tagma's
+  /** `GET /tagmata/{id}/state` -- the dirty-frame SSE: the tagma's
    * projection-state change channel. Each payload is a `ProjectionDirty`
    * nudge ({tagma_id, seq}, no content). A long-lived fetch parsed with
    * the shared `parseSseStream`; the caller owns reconnect/backoff; the

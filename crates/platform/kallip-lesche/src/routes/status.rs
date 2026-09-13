@@ -1,6 +1,6 @@
 //! Tagma status relay fan: presence-cache write + owner-stream broadcast.
 //!
-//! The batched `POST /v1/tagmata/{tagma_id}/upstream` channel demultiplexes
+//! The batched `POST /tagmata/{tagma_id}/upstream` channel demultiplexes
 //! Status elements into [`relay_status`], which rebroadcasts the snapshot as
 //! an [`LescheEvent::TagmaStatus`] on the owner's app event stream. Status is
 //! plaintext and user-scoped, so the lesche can read it -- agent counts and

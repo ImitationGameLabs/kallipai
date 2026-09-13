@@ -1,4 +1,4 @@
-//! The room-keyed envelope surface: `POST /v1/rooms/{room_id}/envelopes`.
+//! The room-keyed envelope surface: `POST /rooms/{room_id}/envelopes`.
 //!
 //! An envelope addressed to a room is:
 //!
@@ -204,7 +204,7 @@ struct StoredMessageView {
     created_at: OffsetDateTime,
 }
 
-/// Body of `PUT /v1/rooms/{id}/read-cursor`.
+/// Body of `PUT /rooms/{id}/read-cursor`.
 #[derive(Debug, Deserialize)]
 pub struct ReadCursorRequest {
     pub last_read_seq: i64,

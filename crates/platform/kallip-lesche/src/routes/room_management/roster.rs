@@ -250,7 +250,7 @@ fn set_online_flags(
     Ok(())
 }
 
-/// `GET /v1/rooms/{room_id}` -- a single room's live membership snapshot, for a
+/// `GET /rooms/{room_id}` -- a single room's live membership snapshot, for a
 /// USER who is a current member. A non-member gets 404 (existence is hidden).
 /// `is_creator` is server-authoritative: the room's `created_by_user_id`, so it
 /// survives a browser refresh.

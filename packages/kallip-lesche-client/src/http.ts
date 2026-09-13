@@ -37,7 +37,7 @@ const CSRF_HEADER_VALUE = "kallip";
  * covered -- see {@linkcode sseFetch}. */
 export const SSE_CONNECT_TIMEOUT_MS = 30_000;
 
-/** One frame of the `GET /v1/me/events` stream, shaped for cursor tracking.
+/** One frame of the `GET /me/events` stream, shaped for cursor tracking.
  *
  * - `stream`: the open marker — `event: stream` with
  *   `{ epoch, next_seq }` data. `nextSeq` is the seq of the first frame
@@ -137,13 +137,13 @@ abstract class BaseClient {
  * the synchronous key exchange, envelope posting, and the multiplexed app SSE.
  */
 export class LescheClient extends BaseClient {
-  /** `POST /v1/conversations { tagma_id }` — resolve the single conversation a
+  /** `POST /conversations { tagma_id }` — resolve the single conversation a
    * tagma owns with its operator (idempotent). */
   createConversation(tagmaId: string): Promise<CreateConversationResponse> {
     return this.json("/conversations", "POST", { tagma_id: tagmaId });
   }
 
-  /** `POST /v1/conversations/{id}/key-exchange/init` — synchronous request/reply
+  /** `POST /conversations/{id}/key-exchange/init` — synchronous request/reply
    * returning the responder's signed key-exchange response inline (200). 503 = the
    * tagma is offline, 409 = a key exchange is already in flight, 504 = timed
    * out. */
@@ -158,7 +158,7 @@ export class LescheClient extends BaseClient {
     );
   }
 
-  /** `POST /v1/conversations/{id}/envelopes` — route an encrypted envelope to
+  /** `POST /conversations/{id}/envelopes` — route an encrypted envelope to
    * the other endpoint. Returns on 202 Accepted. 503 = the peer is offline,
    * 409 = stale/duplicate sequence_n. */
   postEnvelope(conversationId: string, envelope: Envelope): Promise<void> {
@@ -171,7 +171,7 @@ export class LescheClient extends BaseClient {
 
   // -- rooms (multi-member data plane) ---------------------------------------
 
-  /** `POST /v1/rooms/{id}/envelopes` — store + fan a room envelope to the
+  /** `POST /rooms/{id}/envelopes` — store + fan a room envelope to the
    * room's other live members. Returns on 202; offline members pull the row via
    * `fetchRoomMessages`. The payload is the plaintext `RoomMessage` JSON (the
    * lesche stores it opaquely; member access is enforced server-side). 404 =
@@ -184,7 +184,7 @@ export class LescheClient extends BaseClient {
     );
   }
 
-  /** `GET /v1/rooms/{id}/messages` — the room's message history. `afterSeq` is
+  /** `GET /rooms/{id}/messages` — the room's message history. `afterSeq` is
    * exclusive (rows with `seq > afterSeq`); `limit` caps the page. 404 = not a
    * member. */
   fetchRoomMessages(
@@ -203,7 +203,7 @@ export class LescheClient extends BaseClient {
     );
   }
 
-  /** `GET /v1/me/events` — the multiplexed SSE stream of the user's conversation
+  /** `GET /me/events` — the multiplexed SSE stream of the user's conversation
    * deliveries plus tagma presence (`tagma_online` / `tagma_offline`, with an
    * initial presence snapshot on connect). A long-lived fetch parsed with the
    * shared `parseSseStream`. Yields {@linkcode MeEventFrame}: the marker
@@ -235,7 +235,7 @@ export class LescheClient extends BaseClient {
 
   // --- room management (relocated from archeion) -------------------------------
 
-  /** `POST /v1/rooms` -- create a room; the caller is the founding member.
+  /** `POST /rooms` -- create a room; the caller is the founding member.
    * `name` is required; `description` and `visibility` default to empty and
    * `private` respectively. All three fields are always sent so the server's
    * `Json<CreateRoomRequest>` extractor does not reject the body. */
@@ -251,25 +251,25 @@ export class LescheClient extends BaseClient {
     });
   }
 
-  /** `GET /v1/rooms` — the caller's rooms (current membership), newest-joined. */
+  /** `GET /rooms` — the caller's rooms (current membership), newest-joined. */
   listRooms(): Promise<RoomView[]> {
     return this.json("/rooms", "GET");
   }
 
-  /** `GET /v1/rooms/public` -- public (plaintext, open-access) rooms the caller
+  /** `GET /rooms/public` -- public (plaintext, open-access) rooms the caller
    * may join without an invite, newest-created. */
   listPublicRooms(): Promise<RoomView[]> {
     return this.json("/rooms/public", "GET");
   }
 
-  /** `POST /v1/rooms/{id}/join` -- join a public room without an invite
+  /** `POST /rooms/{id}/join` -- join a public room without an invite
    * (open-access). 403 if the room is private (use the invite flow); 204 on a
    * join or an idempotent re-join by an existing member. */
   joinRoom(roomId: string): Promise<void> {
     return this.json(`/rooms/${encodeURIComponent(roomId)}/join`, "POST");
   }
 
-  /** `PUT /v1/rooms/{id}/read-cursor` -- clamp-advance the caller's read
+  /** `PUT /rooms/{id}/read-cursor` -- clamp-advance the caller's read
    * watermark in a room (the unread backbone). Member-only; 204 on success
    * (the server fans a room_read_cursor_changed echo to the caller's other
    * live sessions). */
@@ -283,17 +283,17 @@ export class LescheClient extends BaseClient {
     );
   }
 
-  /** `GET /v1/rooms/{id}` — a room's live roster (member-only). */
+  /** `GET /rooms/{id}` — a room's live roster (member-only). */
   fetchRoomRoster(roomId: string): Promise<RoomRosterView> {
     return this.json(`/rooms/${encodeURIComponent(roomId)}`, "GET");
   }
 
-  /** `GET /v1/rooms/invites` — the caller's pending invites (the inbox). */
+  /** `GET /rooms/invites` — the caller's pending invites (the inbox). */
   listMyRoomInvites(): Promise<RoomInviteView[]> {
     return this.json("/rooms/invites", "GET");
   }
 
-  /** `POST /v1/rooms/{id}/invites` — invite a user by @username. 409 if one is
+  /** `POST /rooms/{id}/invites` — invite a user by @username. 409 if one is
    * already pending. The server strips a leading `@` and resolves the handle. */
   createRoomInvite(
     roomId: string,
@@ -307,7 +307,7 @@ export class LescheClient extends BaseClient {
     );
   }
 
-  /** `POST /v1/rooms/{id}/invites/{invite_id}/accept` — accept (invitee-only). */
+  /** `POST /rooms/{id}/invites/{invite_id}/accept` — accept (invitee-only). */
   acceptRoomInvite(roomId: string, inviteId: string): Promise<void> {
     return this.json(
       `/rooms/${encodeURIComponent(roomId)}/invites/${encodeURIComponent(inviteId)}/accept`,
@@ -316,7 +316,7 @@ export class LescheClient extends BaseClient {
     );
   }
 
-  /** `DELETE /v1/rooms/{id}/members/{member_id}` — remove a member
+  /** `DELETE /rooms/{id}/members/{member_id}` — remove a member
    * (self = leave). Keyed by the opaque derived member id (the identifier every
    * room surface already carries). Authorization is server-side: self, the
    * tagma's owner, or the room creator; anything else is a 404. */
@@ -328,7 +328,7 @@ export class LescheClient extends BaseClient {
     );
   }
 
-  /** `POST /v1/rooms/{id}/tagmata` — add a tagma (idempotent). */
+  /** `POST /rooms/{id}/tagmata` — add a tagma (idempotent). */
   addRoomTagma(roomId: string, tagmaId: string): Promise<void> {
     const body: AddTagmaRequest = { tagma_id: tagmaId };
     return this.json(
@@ -338,7 +338,7 @@ export class LescheClient extends BaseClient {
     );
   }
 
-  /** `GET /v1/me/tagmata/{id}/rooms` — the rooms one of the caller's tagmata
+  /** `GET /me/tagmata/{id}/rooms` — the rooms one of the caller's tagmata
    * has joined (the "Manage rooms" dialog source). The caller must own the
    * tagma (registry-attested server-side). Distinct from the tagma-self
    * discovery route, which the tagma polls from Rust, not from this client. */

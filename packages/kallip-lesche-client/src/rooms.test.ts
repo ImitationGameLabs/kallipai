@@ -5,8 +5,8 @@ import { LescheApiError } from "./types.ts";
 import { LescheClient } from "./http.ts";
 
 // HTTP-client contract tests for the rooms surface. The data-plane routes
-// (`/v1/rooms/{id}/envelopes`, `.../messages`) come first; the management
-// routes (`/v1/rooms`, `.../invites`, `.../participants`, `.../tagmata`, roster)
+// (`/rooms/{id}/envelopes`, `.../messages`) come first; the management
+// routes (`/rooms`, `.../invites`, `.../participants`, `.../tagmata`, roster)
 // follow. Same shape throughout: stub globalThis.fetch, pin the emitted request
 // (path, method, CSRF marker, JSON body / query) + the decoded response. A
 // wire-shape drift (a renamed field, a wrong method, a missing CSRF marker, a

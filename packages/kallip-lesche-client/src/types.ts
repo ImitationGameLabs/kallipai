@@ -1,4 +1,4 @@
-// Wire types for the `kallip-lesche` data-plane relay's `/v1` HTTP surface.
+// Wire types for the `kallip-lesche` data-plane relay's `/` HTTP surface.
 // These mirror the serde DTOs in
 // `crates/platform/kallip-lesche-common/src/{control,message,event}.rs` and the
 // lesche's `crates/platform/kallip-lesche/src/routes/conversations.rs`. The
@@ -28,7 +28,7 @@ import type {
   SignalEvent,
 } from "@kallipai/kallip-common";
 
-/** `POST /v1/conversations { tagma_id }` -- resolves the single conversation a
+/** `POST /conversations { tagma_id }` -- resolves the single conversation a
  * tagma owns with its operator (idempotent; id derived from the tagma). */
 export interface CreateConversationResponse {
   readonly conversation_id: string;
@@ -97,7 +97,7 @@ export interface KeyExchangeResponse {
 }
 
 /**
- * One message row from a room's history (`GET /v1/rooms/{id}/messages`). The
+ * One message row from a room's history (`GET /rooms/{id}/messages`). The
  * lesche stores room payloads opaquely; `ciphertext` (base64) is the plaintext
  * `RoomMessage` JSON bytes (rooms are server-readable). `seq` is per-room,
  * monotonic from 1 (the `after_seq` cursor); `created_at` is ISO8601.
@@ -150,7 +150,7 @@ export interface RoomMemberProfile {
   readonly tagma_id?: string;
 }
 
-/** `POST /v1/rooms` -> the new room; the caller is the founding member. */
+/** `POST /rooms` -> the new room; the caller is the founding member. */
 export interface RoomView {
   readonly room_id: string;
   readonly created_at: string;
@@ -163,7 +163,7 @@ export interface RoomView {
   readonly last_read_seq: number;
 }
 
-/** `GET /v1/rooms/{id}` -- a single room's live membership snapshot (member-only;
+/** `GET /rooms/{id}` -- a single room's live membership snapshot (member-only;
  * a non-member gets 404). `is_creator` is server-authoritative. `members` carry
  * server-resolved display identity. */
 export interface RoomRosterView {
@@ -182,7 +182,7 @@ export interface RoomMember {
   readonly kind: ParticipantKind;
 }
 
-/** `GET /v1/me/tagmata/{id}/rooms` -- one row of the owner's view of a tagma's
+/** `GET /me/tagmata/{id}/rooms` -- one row of the owner's view of a tagma's
  * joined rooms: each with its live membership snapshot and whether THIS tagma
  * is the room's creator. `name` lets an owner label a room they are not
  * themselves a member of when managing their agent's joined rooms. */
@@ -195,7 +195,7 @@ export interface TagmaRoomView {
   readonly name?: string;
 }
 
-/** `GET /v1/rooms/invites` -- one of the caller's PENDING invites. */
+/** `GET /rooms/invites` -- one of the caller's PENDING invites. */
 export interface RoomInviteView {
   readonly invite_id: string;
   readonly room_id: string;
@@ -205,7 +205,7 @@ export interface RoomInviteView {
   readonly expires_at: string;
 }
 
-/** `POST /v1/rooms/{id}/invites` body / 201 response. */
+/** `POST /rooms/{id}/invites` body / 201 response. */
 export interface CreateInviteRequest {
   readonly invitee_username: string;
 }
@@ -214,12 +214,12 @@ export interface CreateInviteResponse {
   readonly expires_at: string;
 }
 
-/** `POST /v1/rooms/{id}/tagmata` body. */
+/** `POST /rooms/{id}/tagmata` body. */
 export interface AddTagmaRequest {
   readonly tagma_id: string;
 }
 
-/** An event on the app's multiplexed SSE stream (`GET /v1/me/events`). serde
+/** An event on the app's multiplexed SSE stream (`GET /me/events`). serde
  * tag = `type`, snake_case. `envelope` carries E2EE conversation content. The
  * presence pair (`tagma_online`/`tagma_offline`), `tagma_status`, and
  * `tagma_signal` are plaintext operator metadata, user-scoped like presence.
@@ -288,7 +288,7 @@ export type LescheEvent =
 
 /**
  * One `ProjectionDirty` frame on the projection SSE stream
- * (`GET /v1/tagmata/{id}/state`). A liveness nudge only -- the
+ * (`GET /tagmata/{id}/state`). A liveness nudge only -- the
  * payload carries the tagma id and the store seq, never content; the
  * consumer re-pulls the projection GET when the seq is newer than its
  * local copy.
@@ -298,7 +298,7 @@ export interface ProjectionDirty {
   readonly seq: number;
 }
 
-/** `GET /v1/tagmata/{id}/agents` -- the stored projection's
+/** `GET /tagmata/{id}/agents` -- the stored projection's
  * roster and aggregate status, plus the seq/staleness bookkeeping.
  * `stale` is true when the tagma has no live presence (offline
  * tags keep serving the last known projection). */
@@ -336,7 +336,7 @@ export interface ProjectionAgentSummary {
   readonly profile_set?: string | null;
 }
 
-/** `GET /v1/tagmata/{id}/budget` -- the cached token budget
+/** `GET /tagmata/{id}/budget` -- the cached token budget
  * snapshot with the same seq/staleness bookkeeping. */
 export interface ProjectionBudgetResponse {
   readonly stale: boolean;
@@ -346,7 +346,7 @@ export interface ProjectionBudgetResponse {
   readonly consumed: number;
 }
 
-/** `GET /v1/tagmata/{id}/work-schedule` -- the cached
+/** `GET /tagmata/{id}/work-schedule` -- the cached
  * prompt-free schedule projection (same seq/staleness bookkeeping). */
 export interface ProjectionWorkScheduleResponse {
   readonly stale: boolean;
