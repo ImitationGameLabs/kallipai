@@ -2961,6 +2961,7 @@ dependencies = [
  "kallip-task",
  "kallip-testkit",
  "libc",
+ "percent-encoding",
  "reqwest",
  "sea-orm",
  "sea-orm-migration",

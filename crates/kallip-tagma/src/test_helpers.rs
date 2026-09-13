@@ -395,6 +395,73 @@ pub fn make_state_with_spawn(spawn_fn: crate::lifecycle::SpawnFn) -> SharedState
     Arc::new(state)
 }
 
+/// Like [`make_profile_bundle`], but the `default` set also serves
+/// image — for tests exercising the image-ingest gates' happy path.
+pub fn make_profile_bundle_image_set() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundle>> {
+    ensure_test_data_dir();
+    use just_llm_client::family;
+    use kallip_common::protocol::Modality;
+    use kallip_runtime::profile::{Profile, ProfileConfig, ProfileRegistry, ProfileSet, Provider};
+    use std::collections::{BTreeMap, HashMap};
+    let mut endpoints = HashMap::new();
+    endpoints.insert(
+        "test".into(),
+        Provider {
+            id: "test".into(),
+            family: family::DEEPSEEK.into(),
+            api_key: "test".into(),
+            base_url: None,
+        },
+    );
+    let cfg = ProfileConfig {
+        sets: BTreeMap::from([(
+            "default".to_string(),
+            ProfileSet {
+                name: "default".into(),
+                description: None,
+                profiles: vec![Profile {
+                    id: "test".into(),
+                    endpoint: "test".into(),
+                    model: "test".into(),
+                    max_context_window: 128_000,
+                    store: None,
+                    effort: None,
+                    modalities: vec![Modality::Text, Modality::Image],
+                }],
+            },
+        )]),
+        default: "default".into(),
+        endpoints,
+        parking: vec![],
+    };
+    let source = crate::backend::build_backends(
+        &cfg,
+        just_llm_client::client::BackendFactory::new(),
+        crate::backend::DEFAULT_USER_AGENT,
+    )
+    .expect("test backends build");
+    let registry =
+        Arc::new(ProfileRegistry::new(cfg.sets.clone(), source).expect("valid test registry"));
+    Arc::new(arc_swap::ArcSwap::from_pointee(
+        crate::state::ProfileBundle {
+            config: cfg,
+            registry,
+        },
+    ))
+}
+
+/// Like [`make_state_with_preset`], but over [`make_profile_bundle_image_set`].
+pub fn make_state_with_image_set() -> SharedState {
+    ensure_test_data_dir();
+    let mut state = AppState::new_with_preset(
+        TokenHash::of("op-token"),
+        make_profile_bundle_image_set(),
+        PolicyPreset::Default,
+    );
+    pin_test_budget(&mut state);
+    Arc::new(state)
+}
+
 /// Pin the tagma-wide budget for tests: a known finite starting point that
 /// budget assertions can lean on (the tagma binary itself resolves
 /// `KALLIP_TOKEN_BUDGET` at startup and passes the value in).

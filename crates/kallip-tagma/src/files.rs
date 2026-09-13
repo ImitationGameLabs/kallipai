@@ -80,8 +80,14 @@ pub(crate) async fn store_mirror(
 /// Everything else (credentials, 5xx, network) is transient the usual
 /// way -- the restore stays text-only for that reference and the next
 /// boot tries again.
+///
+/// A path-form reference (a local-blob ingest) carries the nil record
+/// id: there is no files record behind it, so once the local copy is
+/// missing too the verdict is `Gone` -- the files fetch would be a
+/// guaranteed 404 against the nil id.
 pub(crate) async fn fetch_local_first(
     blobs: Option<&std::sync::Arc<dyn kallip_blob_store::BlobStore>>,
+    record_id: uuid::Uuid,
     bytes_fetch: impl std::future::Future<Output = Result<Vec<u8>, ApiError>>,
     blob_id: Option<&str>,
 ) -> kallip_runtime::context::FetchedImage {
@@ -102,6 +108,12 @@ pub(crate) async fn fetch_local_first(
                 return FetchedImage::Transient(e.to_string());
             }
         }
+    }
+    // A path-form reference has no files record behind it: after a blob
+    // miss the verdict is Gone, and reaching the files service would be
+    // a guaranteed 404 against the nil id.
+    if record_id.is_nil() {
+        return FetchedImage::Gone;
     }
     match bytes_fetch.await {
         Ok(bytes) => {
@@ -145,6 +157,10 @@ mod tests {
         (dir, backend)
     }
 
+    fn some_record() -> uuid::Uuid {
+        uuid::Uuid::from_u128(42)
+    }
+
     #[tokio::test]
     async fn local_hit_serves_bytes_without_touching_files() {
         let (_dir, backend) = mirror_backend();
@@ -153,6 +169,7 @@ mod tests {
         // never reach it.
         let verdict = fetch_local_first(
             Some(&backend),
+            some_record(),
             async { panic!("files fetch must not run for a local hit") },
             Some(&id),
         )
@@ -171,8 +188,13 @@ mod tests {
         let anchor = kallip_blob_store::BlobId::for_bytes(&[9, 9])
             .as_str()
             .to_owned();
-        let verdict =
-            fetch_local_first(Some(&backend), async { Ok(vec![9, 9]) }, Some(&anchor)).await;
+        let verdict = fetch_local_first(
+            Some(&backend),
+            some_record(),
+            async { Ok(vec![9, 9]) },
+            Some(&anchor),
+        )
+        .await;
         match verdict {
             kallip_runtime::context::FetchedImage::Bytes(bytes) => {
                 assert_eq!(bytes, vec![9, 9]);
@@ -193,6 +215,7 @@ mod tests {
         let id = store_mirror(Some(&backend), &[4, 5]).await.unwrap();
         let verdict = fetch_local_first(
             Some(&backend),
+            some_record(),
             async {
                 Err(files_fetch_error(
                     uuid::Uuid::nil(),
@@ -215,6 +238,7 @@ mod tests {
         let (_dir, backend) = mirror_backend();
         let verdict = fetch_local_first(
             Some(&backend),
+            some_record(),
             async {
                 Err(files_fetch_error(
                     uuid::Uuid::nil(),
@@ -235,6 +259,7 @@ mod tests {
         let (_dir, backend) = mirror_backend();
         let verdict = fetch_local_first(
             Some(&backend),
+            some_record(),
             async {
                 Err(files_fetch_error(
                     uuid::Uuid::nil(),
@@ -255,7 +280,13 @@ mod tests {
         let (_dir, backend) = mirror_backend();
         // No blob id (a pre-mirror record): straight to files, and the
         // fetched bytes still land in the mirror.
-        let verdict = fetch_local_first(Some(&backend), async { Ok(vec![6, 6]) }, None).await;
+        let verdict = fetch_local_first(
+            Some(&backend),
+            some_record(),
+            async { Ok(vec![6, 6]) },
+            None,
+        )
+        .await;
         assert!(matches!(
             verdict,
             kallip_runtime::context::FetchedImage::Bytes(_)
@@ -288,6 +319,7 @@ mod tests {
         // the reference stays files-backed instead of failing the fetch.
         let verdict = fetch_local_first(
             Some(&backend),
+            some_record(),
             async { Ok(vec![7, 7]) },
             Some("sha256-not-hex"),
         )
@@ -305,7 +337,8 @@ mod tests {
         // No store installed (the store-less startup window): even a
         // well-formed anchor is unusable and the read goes to files.
         let anchor = format!("sha256-{}", "a".repeat(64));
-        let verdict = fetch_local_first(None, async { Ok(vec![8, 8]) }, Some(&anchor)).await;
+        let verdict =
+            fetch_local_first(None, some_record(), async { Ok(vec![8, 8]) }, Some(&anchor)).await;
         match verdict {
             kallip_runtime::context::FetchedImage::Bytes(bytes) => {
                 assert_eq!(bytes, vec![8, 8]);
@@ -322,12 +355,72 @@ mod tests {
         let blocker = dir.path().join("not-a-dir");
         std::fs::write(&blocker, b"x").unwrap();
         let backend = kallip_blob_store::LocalBackend::arc(blocker);
-        let verdict = fetch_local_first(Some(&backend), async { Ok(vec![3, 1]) }, None).await;
+        let verdict = fetch_local_first(
+            Some(&backend),
+            some_record(),
+            async { Ok(vec![3, 1]) },
+            None,
+        )
+        .await;
         match verdict {
             kallip_runtime::context::FetchedImage::Bytes(bytes) => {
                 assert_eq!(bytes, vec![3, 1]);
             }
             other => panic!("expected served bytes despite backfill failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn nil_record_blob_miss_is_gone_without_a_files_call() {
+        let (_dir, backend) = mirror_backend();
+        let anchor = kallip_blob_store::BlobId::for_bytes(&[1, 1, 1])
+            .as_str()
+            .to_owned();
+        let verdict = fetch_local_first(
+            Some(&backend),
+            uuid::Uuid::nil(),
+            async { panic!("a path-form reference must not reach files") },
+            Some(&anchor),
+        )
+        .await;
+        assert!(matches!(
+            verdict,
+            kallip_runtime::context::FetchedImage::Gone
+        ));
+    }
+
+    #[tokio::test]
+    async fn nil_record_without_a_blob_id_is_gone_without_a_files_call() {
+        let (_dir, backend) = mirror_backend();
+        let verdict = fetch_local_first(
+            Some(&backend),
+            uuid::Uuid::nil(),
+            async { panic!("a path-form reference must not reach files") },
+            None,
+        )
+        .await;
+        assert!(matches!(
+            verdict,
+            kallip_runtime::context::FetchedImage::Gone
+        ));
+    }
+
+    #[tokio::test]
+    async fn nil_record_with_a_local_hit_still_serves_bytes() {
+        let (_dir, backend) = mirror_backend();
+        let id = store_mirror(Some(&backend), &[8, 8]).await.unwrap();
+        let verdict = fetch_local_first(
+            Some(&backend),
+            uuid::Uuid::nil(),
+            async { panic!("a local hit must not reach files") },
+            Some(&id),
+        )
+        .await;
+        match verdict {
+            kallip_runtime::context::FetchedImage::Bytes(bytes) => {
+                assert_eq!(bytes, vec![8, 8]);
+            }
+            other => panic!("expected the local copy, got {other:?}"),
         }
     }
 }

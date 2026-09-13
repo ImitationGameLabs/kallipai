@@ -129,6 +129,7 @@ testcontainers-modules = { version = "0.15", default-features = false, features 
   "postgres",
 ] }
 url = "2.5"
+percent-encoding = "2.3.2"
 # Pinned to the first pure-Rust (crypto-glue) release; bump to stable release when out.
 webauthn-rs = { version = "=0.6.1-dev", features = [
   "danger-allow-state-serialisation",

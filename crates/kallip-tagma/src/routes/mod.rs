@@ -64,6 +64,10 @@ pub fn router() -> Router<SharedState> {
             axum::routing::post(ingest::ingest_attachment),
         )
         .route(
+            "/agents/{id}/attachments",
+            axum::routing::post(ingest::store_attachment),
+        )
+        .route(
             "/agents/{id}/lesche/messages",
             axum::routing::post(lesche::post_message),
         )
