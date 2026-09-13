@@ -4,7 +4,7 @@
 //! - **Public** ([`ArcheionClient::enroll`]): first-run tagma enrollment. Unsigned
 //!   at the HTTP layer; the device signs the enroll proof locally.
 //! - **Admin** (the `admin_*` methods): operator management driving
-//!   `/v1/admin/*` with an `sk-admin-` bearer token.
+//!   `/admin/*` with an `sk-admin-` bearer token.
 //!
 //! Tagma room discovery lives in `kallip-lesche-client` (the chat domain
 //! is lesche).
@@ -41,11 +41,11 @@ pub struct ArcheionClient {
 impl ArcheionClient {
     /// Start building an [`ArcheionClient`].
     ///
-    /// `base_url` is the archeion control-plane root: the /v1 prefix the
-    /// server nests its routes under, plus the /v1/archeion service
-    /// segment when reached through the platform edge (e.g.
-    /// `http://127.0.0.1:7100/v1` direct, `https://api.example.com/v1/archeion`
-    /// through the edge).
+    /// `base_url` is the archeion control-plane root: the bare origin in
+    /// direct mode (e.g. `http://127.0.0.1:7100`) or the edge service root
+    /// including the /v1/archeion service segment (e.g.
+    /// `https://api.example.com/v1/archeion`) through the platform edge.
+    /// The tails the methods append are bare.
     pub fn builder(base_url: &str) -> ArcheionClientBuilder {
         ArcheionClientBuilder {
             base_url: base_url.trim_end_matches('/').to_owned(),
@@ -56,14 +56,14 @@ impl ArcheionClient {
 
     /// Construct a client from environment variables.
     ///
-    /// Reads `KALLIP_ARCHEION_URL` (default: `http://127.0.0.1:7100/v1`, the
+    /// Reads `KALLIP_ARCHEION_URL` (default: `http://127.0.0.1:7100`, the
     /// `KALLIP_ARCHEION_ADMIN_TOKEN` (the `sk-admin-` token, required) -- the same
     /// variable the archeion server reads, so a deployment defines the admin token
     /// once. For a tokenless (enroll-only) client, build via [`Self::builder`]
     /// directly.
     pub fn from_env() -> Result<Self> {
         let url = std::env::var("KALLIP_ARCHEION_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:7100/v1".to_string());
+            .unwrap_or_else(|_| "http://127.0.0.1:7100".to_string());
         let token = std::env::var("KALLIP_ARCHEION_ADMIN_TOKEN")
             .context("KALLIP_ARCHEION_ADMIN_TOKEN required (the sk-admin- token)")?;
         Self::builder(&url).admin_token(token).build()
@@ -140,7 +140,7 @@ impl ArcheionClient {
         Ok(())
     }
 
-    /// Verify the admin credential: `GET /v1/admin` with the bearer. Unlike
+    /// Verify the admin credential: `GET /admin` with the bearer. Unlike
     /// [`Self::healthz`] (an unauthenticated reachability probe), this confirms
     /// the admin token is actually accepted, distinguishing "server down" from
     /// "wrong token".

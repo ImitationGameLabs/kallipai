@@ -1,7 +1,7 @@
 //! Admin (operator) endpoints, authenticated by the admin token. Mint a
 //! pending tagma (an enrollment code) on a user's behalf, and manage users +
 //! passkeys (list/disable/enable users, list/revoke passkeys). The user-facing
-//! self-service counterpart to the tagma mint is `POST /v1/tagmata`
+//! self-service counterpart to the tagma mint is `POST /tagmata`
 //! (`routes/tagmata.rs`); the admin mint here is retained for operator use.
 //!
 //! User accounts are created via open signup (passkey or OAuth), so there is no
@@ -44,7 +44,7 @@ pub fn router() -> Router<SharedState> {
         .route("/", get(admin_root))
 }
 
-/// `GET /v1/admin` -- admin-gated probe. Returns 200 only for a valid
+/// `GET /admin` -- admin-gated probe. Returns 200 only for a valid
 /// `sk-admin-` bearer; any other credential is rejected by the extractor
 /// (`AuthPrincipal`) or by `require_admin`.
 async fn admin_root(AuthPrincipal(principal): AuthPrincipal) -> Result<&'static str, ApiError> {
@@ -90,7 +90,7 @@ fn decode_cursor(s: &str) -> Result<(OffsetDateTime, String), ApiError> {
 
 // ---------------------------------------------------------------------------
 // enrollment codes (operator mint of a pending tagma on a user's behalf; users
-// self-mint via POST /v1/tagmata). Reuses the shared `mint_pending_tagma` so the
+// self-mint via POST /tagmata). Reuses the shared `mint_pending_tagma` so the
 // per-owner live-pending cap applies uniformly.
 // ---------------------------------------------------------------------------
 

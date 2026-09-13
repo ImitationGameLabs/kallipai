@@ -10,7 +10,7 @@ use crate::bytes::{Ed25519PublicKey, Ed25519Signature};
 use crate::ids::TagmaId;
 use serde::{Deserialize, Serialize};
 
-/// `POST /v1/tagmata/enroll` — enroll a tagma with a single-use code and its
+/// `POST /tagmata/enroll` — enroll a tagma with a single-use code and its
 /// device key, transitioning a pending tagma to enrolled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollRequest {

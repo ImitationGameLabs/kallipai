@@ -1,4 +1,4 @@
-//! The cookie-authenticated session surface: logout and the `/v1/me` profile
+//! The cookie-authenticated session surface: logout and the `/me` profile
 //! read, plus the router assembly that mounts the self-service passkey
 //! (`routes::passkeys`) and email (`routes::emails`) management routes.
 //!
@@ -27,7 +27,7 @@ use serde::Serialize;
 use time::OffsetDateTime;
 
 /// The cookie-authenticated session surface (no rate limiting): logout, the
-/// `/v1/me` profile read, and the self-service passkey (`routes::passkeys`) and
+/// `/me` profile read, and the self-service passkey (`routes::passkeys`) and
 /// email (`routes::emails`) management routes. The send-triggering
 /// `POST /me/emails` and the unauthenticated `POST /me/emails/verify` are
 /// layered with the per-IP rate limiter at router assembly (see `routes::router`)
@@ -136,7 +136,7 @@ struct MeResponse {
     passkey_count: i64,
 }
 
-/// A linked email address as returned by `/v1/me` and `/v1/me/emails`.
+/// A linked email address as returned by `/me` and `/me/emails`.
 #[derive(Serialize, Clone, Debug)]
 pub(crate) struct EmailSummary {
     pub id: String,
@@ -160,7 +160,7 @@ impl From<emails::Model> for EmailSummary {
 
 #[cfg(test)]
 mod tests {
-    //! Handler-level tests for `/v1/me`: the profile shape for a freshly seeded
+    //! Handler-level tests for `/me`: the profile shape for a freshly seeded
     //! user (no email) and for a user with a linked primary address.
 
     use axum::Json;
@@ -170,7 +170,7 @@ mod tests {
     use crate::auth::{AuthPrincipal, Principal};
     use crate::test_helpers::{make_state, seed_email, seed_user};
 
-    /// `/v1/me` returns the signed-in user's profile. A freshly seeded user
+    /// `/me` returns the signed-in user's profile. A freshly seeded user
     /// has no linked email, so `emails` is empty and `primary_email` is `None`.
     #[tokio::test]
     async fn me_returns_signed_in_user() {
@@ -198,7 +198,7 @@ mod tests {
         assert_eq!(passkey_count, 0);
     }
 
-    /// `/v1/me` reflects a linked, primary email when one is seeded.
+    /// `/me` reflects a linked, primary email when one is seeded.
     #[tokio::test]
     async fn me_lists_linked_email() {
         let state = make_state().await;

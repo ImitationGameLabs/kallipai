@@ -1,5 +1,5 @@
 //! Email management -- the self-service surface for the optional contact
-//! channel (`/v1/me/emails`).
+//! channel (`/me/emails`).
 //!
 //! Email is decoupled from login (username) and from the WebAuthn `user.id`.
 //! An authenticated user may link one or more addresses here; each starts

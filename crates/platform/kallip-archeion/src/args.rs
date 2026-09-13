@@ -79,7 +79,7 @@ pub struct Args {
     /// host-only (single-origin deploy).
     #[arg(long, env = "KALLIP_ARCHEION_SESSION_COOKIE_DOMAIN")]
     pub cookie_domain: Option<String>,
-    /// Capacity of the per-IP token bucket guarding `/v1/auth/*` (max burst).
+    /// Capacity of the per-IP token bucket guarding `/auth/*` (max burst).
     #[arg(long, env = "KALLIP_ARCHEION_AUTH_RATE_CAPACITY", default_value_t = 10)]
     pub auth_rate_capacity: u32,
     /// Refill rate of the per-IP auth rate bucket, in requests per second.
@@ -177,7 +177,7 @@ pub struct Args {
     /// it as state instead of asking the operator to ship it as config.
     #[arg(long, env = "KALLIP_ARCHEION_INTERNAL_TOKEN_FILE")]
     pub internal_token_file: Option<PathBuf>,
-    /// Mount POST /v1/auth/admin-login: exchange the admin token for a normal
+    /// Mount POST /auth/admin-login: exchange the admin token for a normal
     /// User session on a fixed local account (the local-platform login; see
     /// docs/reference/auth.md). Default off: the route is not mounted at
     /// all. When on, an operator-set KALLIP_ARCHEION_ADMIN_TOKEN shorter than

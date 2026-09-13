@@ -77,7 +77,7 @@ pub struct AppState {
     pub webauthn_core: Arc<WebauthnCore>,
     /// Session-cookie attrs + TTL.
     pub session_cfg: SessionCfg,
-    /// Per-IP token bucket guarding `/v1/auth/*`.
+    /// Per-IP token bucket guarding `/auth/*`.
     pub auth_rate_limiter: IpRateLimiter,
     /// Single shared token bucket capping aggregate throughput on the
     /// device-pairing begin endpoint (the real distributed brute-force bound on

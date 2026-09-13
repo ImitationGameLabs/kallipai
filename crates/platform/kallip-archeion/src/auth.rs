@@ -9,7 +9,7 @@
 //! `Tagma` principal is reached ONLY via an `sk-tagma-` bearer; the admin ONLY
 //! via the `sk-admin-` bearer. So the deputy threats a multi-origin design
 //! would face — a session cookie authenticating a tagma route, a tagma bearer
-//! reaching `/v1/me` — are already impossible by construction: `require_tagma`
+//! reaching `/me` — are already impossible by construction: `require_tagma`
 //! never sees a `User` and `require_user` never sees a `Tagma`. An
 //! `Origin { Bearer, Cookie }` tag on each principal is therefore not yet
 //! needed; it becomes relevant only when personal access tokens introduce a

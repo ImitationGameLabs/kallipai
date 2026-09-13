@@ -1,5 +1,5 @@
 //! Minimal per-IP token bucket, used to guard the unauthenticated,
-//! crypto-expensive `/v1/auth/*` begin endpoints against ceremony-spam and
+//! crypto-expensive `/auth/*` begin endpoints against ceremony-spam and
 //! username enumeration.
 //!
 //! One bucket per client IP, lazily created on first sighting. Buckets are

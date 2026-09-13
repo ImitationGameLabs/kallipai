@@ -98,7 +98,7 @@ pub struct VerifiedSession {
     pub local_admin: bool,
 }
 /// Marker-row constants for the fixed local-platform admin account (the one
-/// POST /v1/auth/admin-login binds). Shared by the login route and
+/// POST /auth/admin-login binds). Shared by the login route and
 /// `verify_session`'s `local_admin` flag so the two can never drift.
 pub const LOCAL_ADMIN_PROVIDER: &str = "local-admin";
 pub const LOCAL_ADMIN_SUBJECT: &str = "admin";

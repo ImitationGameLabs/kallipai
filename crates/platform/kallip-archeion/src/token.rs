@@ -20,7 +20,7 @@ pub const INTERNAL: TokenKind = TokenKind("sk-internal-");
 pub const TAGMA: TokenKind = TokenKind("sk-tagma-");
 
 /// Single-use, short-TTL enrollment token — minted by a user (self-service) and
-/// exchanged at `POST /v1/tagmata` for a tagma token. Hash-indexed; consumed on
+/// exchanged at `POST /tagmata` for a tagma token. Hash-indexed; consumed on
 /// first use.
 pub const ENROLLMENT: TokenKind = TokenKind("sk-enroll-");
 

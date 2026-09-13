@@ -60,7 +60,7 @@ pub fn router(
         .layer(pair_rate_limit);
     let enroll = tagmata::enroll_router().layer(rate_limit.clone());
     // The unauthenticated read surfaces share the per-IP limiter:
-    // `GET /v1/users/{username}` is otherwise a free username-enumeration
+    // `GET /users/{username}` is otherwise a free username-enumeration
     // sweep, the signup availability probe
     // (`GET /auth/username-availability`) is an even more explicit one, and
     // the OAuth provider discovery endpoint (`GET /auth/oauth/providers`)
@@ -112,7 +112,7 @@ pub fn router(
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .with_state(state.clone())
-        .nest("/v1", v1);
+        .merge(v1);
 
     // The service-to-service `/internal/*` surface: mounted only when the
     // shared secret is configured. The `internal_guard` middleware (layer state
@@ -172,7 +172,7 @@ pub(crate) fn cors_layer(origins: &str) -> CorsLayer {
         // `Access-Control-Allow-Credentials: true` together with a wildcard
         // (`Allow-Methods: *`), and tower-http panics at layer construction if
         // they're combined. Listed are exactly the methods the archeion routes use.
-        // PUT is the provider-vault replace (`PUT /v1/me/providers/{id}`, the
+        // PUT is the provider-vault replace (`PUT /me/providers/{id}`, the
         // web app's rename/key-rotation write); without it the browser
         // rejects the preflight and the write never lands.
         .allow_methods([

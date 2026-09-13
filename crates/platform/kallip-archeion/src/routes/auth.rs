@@ -45,7 +45,7 @@
 //! contact/recovery channel a user links later in settings, stored in the
 //! `emails` table (1:N, with a primary + verification state). WebAuthn
 //! `user.name` is the username; `display_name` surfaces only as the fallback
-//! WebAuthn `displayName` (when the client omits one) and in `/v1/me`. `user.id`
+//! WebAuthn `displayName` (when the client omits one) and in `/me`. `user.id`
 //! stays the opaque pre-generated `UserId` -- the only crypto binding.
 //!
 //! # Ceremonies
@@ -202,7 +202,7 @@ pub fn finish_router() -> Router<SharedState> {
 /// Unauthenticated (pre-signup callers hold no credential) and therefore an
 /// explicit, full username-enumeration oracle -- accepted pre-release and
 /// mounted with the same per-IP rate-limit family as the other
-/// unauthenticated reads, mirroring `GET /v1/users/{username}`'s posture
+/// unauthenticated reads, mirroring `GET /users/{username}`'s posture
 /// (see `routes::router` and `public_profiles`).
 pub fn availability_router() -> Router<SharedState> {
     Router::new().route("/auth/username-availability", get(username_availability))
@@ -363,7 +363,7 @@ async fn register_begin(
     };
     // NOTE: this fallback is ceremony-local ONLY. It is NOT persisted
     // (`users.display_name` stays NULL) and the data layer does no synthesis:
-    // `/v1/me` returns `display_name` verbatim and leaves any fallback
+    // `/me` returns `display_name` verbatim and leaves any fallback
     // rendering to the frontend. The two layers intentionally differ -- the
     // authenticator requires a non-empty label at ceremony time, while the API
     // represents stored data faithfully.
@@ -1077,7 +1077,7 @@ pub fn admin_login_router() -> Router<SharedState> {
     Router::new().route("/auth/admin-login", post(admin_login))
 }
 
-/// POST /v1/auth/admin-login: exchange the operator's `sk-admin-` token for a
+/// POST /auth/admin-login: exchange the operator's `sk-admin-` token for a
 /// normal User session on a fixed local account, creating that account on
 /// first use. This is the fifth auth ceremony and the local-platform
 /// deployment's operator entry: a User session lights up the whole

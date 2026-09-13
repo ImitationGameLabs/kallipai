@@ -1,7 +1,7 @@
 //! Signed-proof transcripts + public-key verifiers, shared by the archeion
 //! (verifier), the responder (signer), and the future app SDK (the initiator).
 //!
-//! This crate holds the **enroll** proof (verified at `POST /v1/tagmata`) plus
+//! This crate holds the **enroll** proof (verified at `POST /tagmata`) plus
 //! the shared verification primitive ([`verify`]) and error type
 //! ([`ProofError`]) that the tunnel and key-exchange proofs (in
 //! `kallip-lesche-common`) build on.

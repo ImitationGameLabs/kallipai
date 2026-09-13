@@ -53,7 +53,7 @@ async fn csrf_guard_blocks_cookie_post_without_marker() {
     let app = routes::router(state, None, false);
     let mut request = req(
         Method::POST,
-        "/v1/auth/login/begin",
+        "/auth/login/begin",
         r#"{"username":"someone"}"#,
     );
     request.headers_mut().append(
@@ -73,7 +73,7 @@ async fn csrf_guard_passes_cookie_post_with_marker() {
     let app = routes::router(state, None, false);
     let mut request = req(
         Method::POST,
-        "/v1/auth/login/begin",
+        "/auth/login/begin",
         r#"{"username":"someone"}"#,
     );
     request.headers_mut().append(
@@ -101,7 +101,7 @@ async fn csrf_guard_exempts_bearer() {
     let app = routes::router(state, None, false);
     let mut request = req(
         Method::POST,
-        "/v1/auth/login/begin",
+        "/auth/login/begin",
         r#"{"username":"someone"}"#,
     );
     request.headers_mut().append(
@@ -150,7 +150,7 @@ async fn seed_session(state: &crate::state::SharedState) -> String {
     session.secret().to_string()
 }
 
-/// `POST /v1/tagmata` (mint a pending tagma) is CSRF-gated: a cookie-bearing
+/// `POST /tagmata` (mint a pending tagma) is CSRF-gated: a cookie-bearing
 /// mint without the marker is 403.
 #[tokio::test]
 async fn csrf_guard_blocks_tagma_mint_without_marker() {
@@ -159,7 +159,7 @@ async fn csrf_guard_blocks_tagma_mint_without_marker() {
     // No `/internal` surface is needed for these control-plane middleware
     // tests.
     let app = routes::router(state, None, false);
-    let mut request = req(Method::POST, "/v1/tagmata", "{}");
+    let mut request = req(Method::POST, "/tagmata", "{}");
     request.headers_mut().append(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!("kallip_session={cookie}")).expect("cookie header"),
@@ -176,7 +176,7 @@ async fn tagma_mint_with_marker_returns_200() {
     // No `/internal` surface is needed for these control-plane middleware
     // tests.
     let app = routes::router(state, None, false);
-    let mut request = req(Method::POST, "/v1/tagmata", "{}");
+    let mut request = req(Method::POST, "/tagmata", "{}");
     request.headers_mut().append(
         axum::http::header::COOKIE,
         HeaderValue::from_str(&format!("kallip_session={cookie}")).expect("cookie header"),
@@ -188,7 +188,7 @@ async fn tagma_mint_with_marker_returns_200() {
     assert_eq!(run(app, request).await, StatusCode::OK);
 }
 
-/// `DELETE /v1/tagmata/{id}` (revoke) passes the CSRF guard with the marker and
+/// `DELETE /tagmata/{id}` (revoke) passes the CSRF guard with the marker and
 /// reaches the handler (404 for an unknown id -- not 403).
 #[tokio::test]
 async fn tagma_revoke_with_marker_reaches_handler() {
@@ -199,7 +199,7 @@ async fn tagma_revoke_with_marker_reaches_handler() {
     let app = routes::router(state, None, false);
     let mut request = req(
         Method::DELETE,
-        "/v1/tagmata/00000000-0000-0000-0000-000000000000",
+        "/tagmata/00000000-0000-0000-0000-000000000000",
         "",
     );
     request.headers_mut().append(
@@ -229,7 +229,7 @@ async fn rate_limit_begins_but_not_finishes() {
     for _ in 0..2 {
         let request = req(
             Method::POST,
-            "/v1/auth/login/begin",
+            "/auth/login/begin",
             r#"{"username":"someone"}"#,
         );
         assert_ne!(
@@ -240,7 +240,7 @@ async fn rate_limit_begins_but_not_finishes() {
     // The third begin trips the limiter.
     let request = req(
         Method::POST,
-        "/v1/auth/login/begin",
+        "/auth/login/begin",
         r#"{"username":"someone"}"#,
     );
     assert_eq!(
@@ -253,7 +253,7 @@ async fn rate_limit_begins_but_not_finishes() {
     for _ in 0..5 {
         let request = req(
             Method::POST,
-            "/v1/auth/login/finish",
+            "/auth/login/finish",
             r#"{"ceremony_id":"00000000-0000-0000-0000-000000000000"}"#,
         );
         assert_ne!(
@@ -264,7 +264,7 @@ async fn rate_limit_begins_but_not_finishes() {
     }
 }
 
-/// `POST /v1/tagmata/enroll` shares the begin bucket; the 3rd call is 429.
+/// `POST /tagmata/enroll` shares the begin bucket; the 3rd call is 429.
 #[tokio::test]
 async fn rate_limit_enroll() {
     let state = make_state_with(2, 0).await;
@@ -272,13 +272,13 @@ async fn rate_limit_enroll() {
     // tests.
     let app = routes::router(state, None, false);
     for _ in 0..2 {
-        let request = req(Method::POST, "/v1/tagmata/enroll", r#"{"code":"x"}"#);
+        let request = req(Method::POST, "/tagmata/enroll", r#"{"code":"x"}"#);
         assert_ne!(
             run(app.clone(), request).await,
             StatusCode::TOO_MANY_REQUESTS
         );
     }
-    let request = req(Method::POST, "/v1/tagmata/enroll", r#"{"code":"x"}"#);
+    let request = req(Method::POST, "/tagmata/enroll", r#"{"code":"x"}"#);
     assert_eq!(
         run(app.clone(), request).await,
         StatusCode::TOO_MANY_REQUESTS
@@ -423,7 +423,7 @@ async fn enrollment_lookup_guard_passes_correct_bearer() {
         "correct bearer reaches the handler (404 for unknown tagma)"
     );
 }
-/// The admin-root probe is mounted at the no-trailing-slash path `/v1/admin`:
+/// The admin-root probe is mounted at the no-trailing-slash path `/admin`:
 /// axum 0.8 serves a `nest` + inner `"/"` route without the trailing slash, and
 /// there is no normalization middleware. Pin both sides of that contract so the
 /// client (`admin_verify_token`) and the route table cannot drift apart -- the
@@ -436,7 +436,7 @@ async fn admin_probe_mounted_at_no_slash_path() {
     // Valid admin bearer: `make_state` stores `TokenHash::of("test-admin")`.
     let mut ok = Request::builder()
         .method(Method::GET)
-        .uri("/v1/admin")
+        .uri("/admin")
         .header(axum::http::header::AUTHORIZATION, "Bearer test-admin")
         .body(Body::empty())
         .expect("build request");
@@ -450,7 +450,7 @@ async fn admin_probe_mounted_at_no_slash_path() {
     // The trailing-slash form is NOT registered under axum 0.8 nest.
     let mut slash = Request::builder()
         .method(Method::GET)
-        .uri("/v1/admin/")
+        .uri("/admin/")
         .header(axum::http::header::AUTHORIZATION, "Bearer test-admin")
         .body(Body::empty())
         .expect("build request");

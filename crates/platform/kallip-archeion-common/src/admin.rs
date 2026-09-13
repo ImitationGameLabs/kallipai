@@ -61,7 +61,7 @@ pub struct UserSummary {
     pub disabled_at: Option<OffsetDateTime>,
 }
 
-/// PATCH body for `PATCH /v1/admin/users/{id}`. `disabled = true` disables the
+/// PATCH body for `PATCH /admin/users/{id}`. `disabled = true` disables the
 /// account; `false` re-enables it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateUserRequest {

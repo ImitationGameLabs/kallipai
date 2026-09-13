@@ -10,7 +10,7 @@
 //! [`control_plane::ControlPlane`]. Lesche-specific data-plane types (envelopes,
 //! tunnel frames, the me/events SSE union, the KEX handshake) live in
 //! `kallip-lesche-common`, not here.
-//! The room-domain wire types (`RoomId`, `MemberId`, the `/v1/rooms` DTOs, the
+//! The room-domain wire types (`RoomId`, `MemberId`, the `/rooms` DTOs, the
 //! membership snapshot) live there too; this crate keeps only the
 //! platform-wide foundation identities (`ParticipantId`, `ParticipantKind`,
 //! `TagmaId`, ...).

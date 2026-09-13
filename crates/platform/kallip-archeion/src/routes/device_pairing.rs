@@ -5,11 +5,11 @@
 //! session and no passkey cannot use it (passkey private keys are non-exportable;
 //! the new device can't reach the session-gated surface). Pairing bridges that:
 //!
-//! - **Issue** (`POST /v1/me/device-pairing`, session-authed + step-up): mint a
+//! - **Issue** (`POST /me/device-pairing`, session-authed + step-up): mint a
 //!   short-lived one-time code bound to the caller (see `PAIR_CODE_TTL`); the
 //!   logged-in device shows it (typed `XXXX-XXXX` and/or a QR encoding the same
 //!   code).
-//! - **Redeem** (`POST /v1/auth/device-pairing/{begin,finish}`,
+//! - **Redeem** (`POST /auth/device-pairing/{begin,finish}`,
 //!   unauthenticated): the new device submits the code → a WebAuthn
 //!   registration ceremony that binds a LOCAL passkey to the EXISTING account,
 //!   then mints a session. Device B is signed in with its own passkey.
@@ -117,7 +117,7 @@ struct AuthFinishResponse {
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/me/device-pairing (issue)
+// POST /me/device-pairing (issue)
 // ---------------------------------------------------------------------------
 
 async fn mint_pairing_code(
@@ -183,7 +183,7 @@ async fn mint_pairing_code(
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/auth/device-pairing/begin
+// POST /auth/device-pairing/begin
 // ---------------------------------------------------------------------------
 
 async fn pair_begin(
@@ -304,7 +304,7 @@ async fn consume_pairing_code(
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/auth/device-pairing/finish
+// POST /auth/device-pairing/finish
 // ---------------------------------------------------------------------------
 
 async fn pair_finish(

@@ -1,7 +1,7 @@
 //! Username normalization + validation. The username is BOTH the login id
 //! (`login_begin` resolves by `users.username`) AND the in-site display handle
 //! chosen at signup. It is a required, unique handle stored on the
-//! user row, surfaced in `/v1/me`, and used as the WebAuthn `user.name` (and as
+//! user row, surfaced in `/me`, and used as the WebAuthn `user.name` (and as
 //! the fallback `displayName` when the client omits one).
 //!
 //! Rules (GitHub-aligned): trim surrounding whitespace, fold to ASCII

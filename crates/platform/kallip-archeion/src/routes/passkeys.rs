@@ -1,15 +1,15 @@
 //! User self-service passkey management + the shared row-level helpers used by
 //! both this surface and the admin surface.
 //!
-//! - `GET /v1/me/passkeys` — list the caller's live passkeys.
-//! - `POST /v1/me/passkeys/register/{begin,finish}` — bind ANOTHER passkey to an
+//! - `GET /me/passkeys` — list the caller's live passkeys.
+//! - `POST /me/passkeys/register/{begin,finish}` — bind ANOTHER passkey to an
 //!   EXISTING account (a second-device ceremony, distinct from the invite-gated
 //!   initial registration that creates the account). Gated by a one-shot
 //!   step-up: the calling session must carry a fresh `authed_at` (set by
 //!   login/register finish), which the begin txn consumes — one device per
 //!   re-auth.
-//! - `PATCH /v1/me/passkeys/{id}` — rename (the device label).
-//! - `DELETE /v1/me/passkeys/{id}` — revoke (hard-delete + audit row).
+//! - `PATCH /me/passkeys/{id}` — rename (the device label).
+//! - `DELETE /me/passkeys/{id}` — revoke (hard-delete + audit row).
 //!
 //! The live `passkeys` table is filter-free; revoke deletes the row and appends
 //! to `passkey_revocations` (audit + denylist). The last-live-passkey guard
@@ -285,7 +285,7 @@ pub(crate) async fn revoke_passkey_row(
 }
 
 // ---------------------------------------------------------------------------
-// GET /v1/me/passkeys
+// GET /me/passkeys
 // ---------------------------------------------------------------------------
 
 async fn list_my_passkeys(
@@ -440,7 +440,7 @@ async fn add_passkey_begin(
     }))
 }
 
-/// `?discoverable=true` on `POST /v1/me/passkeys/register/begin` switches the
+/// `?discoverable=true` on `POST /me/passkeys/register/begin` switches the
 /// add-passkey ceremony to resident-key (discoverable) registration. Absent =>
 /// the regular non-discoverable add-passkey flow (byte-identical to pre-Phase-B).
 #[derive(Deserialize)]
@@ -585,7 +585,7 @@ async fn add_passkey_finish(
 }
 
 // ---------------------------------------------------------------------------
-// PATCH /v1/me/passkeys/{id}  +  DELETE /v1/me/passkeys/{id}
+// PATCH /me/passkeys/{id}  +  DELETE /me/passkeys/{id}
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]

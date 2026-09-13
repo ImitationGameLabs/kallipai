@@ -159,7 +159,7 @@ struct SignupCompleteBody {
     username: String,
 }
 
-/// A linked external identity as returned by `/v1/me`. Omits `subject` (the
+/// A linked external identity as returned by `/me`. Omits `subject` (the
 /// provider's stable id is not a secret but a list view has no need for it).
 #[derive(Serialize, Clone, Debug)]
 pub(crate) struct ExternalIdentitySummary {

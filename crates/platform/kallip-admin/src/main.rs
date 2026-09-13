@@ -1,5 +1,5 @@
 //! `kallip-admin`: a headless operator CLI for the archeion relay. It is an HTTP
-//! client authenticated with the `sk-admin-` bearer, driving the `/v1/admin/*`
+//! client authenticated with the `sk-admin-` bearer, driving the `/admin/*`
 //! surface (enrollment codes, users, passkeys).
 //!
 //! The admin token is read from the `KALLIP_ARCHEION_ADMIN_TOKEN` environment
@@ -28,12 +28,12 @@ use kallip_archeion_common::admin::{
                   ps, /proc/<pid>/cmdline, and shell history, while an env var does not."
 )]
 struct Args {
-    /// Archeion control-plane base URL (the /v1 root admin routes nest
-    /// under, e.g. http://127.0.0.1:7100/v1 for the standalone server).
+    /// Archeion control-plane base URL (e.g. http://127.0.0.1:7100
+    /// for the standalone server).
     #[arg(
         long,
         env = "KALLIP_ARCHEION_URL",
-        default_value = "http://127.0.0.1:7100/v1"
+        default_value = "http://127.0.0.1:7100"
     )]
     archeion_url: String,
     /// Emit raw JSON instead of human-readable tables.
@@ -45,7 +45,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Reachability + admin-token probe (GET /healthz, then GET /v1/admin).
+    /// Reachability + admin-token probe (GET /healthz, then GET /admin).
     Ping,
     /// User account management.
     #[command(subcommand)]

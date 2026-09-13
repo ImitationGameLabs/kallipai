@@ -1,4 +1,4 @@
-//! Saved AI provider credentials -- the `/v1/me/providers` self-service
+//! Saved AI provider credentials -- the `/me/providers` self-service
 //! surface for the mixed-mode provider vault.
 //!
 //! Each row is one provider credential entry (API key + optional base-URL

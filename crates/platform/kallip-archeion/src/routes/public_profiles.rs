@@ -3,8 +3,8 @@
 //! handle/id is shown). These are a deliberate, bounded extension of the
 //! existence-oracle surface -- see the policy notes below.
 //!
-//! - `GET /v1/users/{username}` -- `{ username, display_name, created_at }`.
-//! - `GET /v1/tagmata/{id}/profile` -- `{ tagma_id, label, created_at,
+//! - `GET /users/{username}` -- `{ username, display_name, created_at }`.
+//! - `GET /tagmata/{id}/profile` -- `{ tagma_id, label, created_at,
 //!    owner_username, owner_display_name }`.
 //!
 //! Both are public (no `AuthPrincipal`), per-IP rate-limited at the mount site,
@@ -13,9 +13,9 @@
 //! minimal set needed to render a profile card: never `email`, `user_id`,
 //! `pinned_public_key`, `owner_user_id`, or the enrolled/revoked flags.
 //!
-//! Policy (reversed/extended vs. the owner-only `GET /v1/tagmata/{id}`):
+//! Policy (reversed/extended vs. the owner-only `GET /tagmata/{id}`):
 //! - Usernames are already exposed to room peers via the `@handle`; this surface
-//!   extends that to any unauthenticated caller, so `GET /v1/users/{username}`
+//!   extends that to any unauthenticated caller, so `GET /users/{username}`
 //!   is a (rate-limited) username-enumeration oracle. Accepted pre-release; must
 //!   be re-reviewed before prod.
 //! - Tagma ids are 128-bit random UUIDs (unguessable); only a holder of a real

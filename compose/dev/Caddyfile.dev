@@ -61,10 +61,9 @@
 
 # The api.<domain> route table, shared by the https wildcard edge above and
 # the loopback plaintext edge below (one place to review the path map):
-# /v1/<service>/* -> each backend's existing internal prefix.
+# /v1/<service>/* -> the stripped remainder, forwarded as-is.
 (kallip-api-routes) {
   handle_path /v1/archeion/* {
-    rewrite * /v1{uri}
     reverse_proxy 127.0.0.1:7100
   }
   handle_path /v1/lesche/* {
