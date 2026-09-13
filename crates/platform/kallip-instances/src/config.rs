@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 /// Local instance management service for the kallip daemon: proxies
-/// `/api/instances/*` to the daemon's UDS socket.
+/// the bare resource paths to the daemon's UDS socket.
 #[derive(Debug, Parser)]
 #[command(version, about)]
 pub struct Config {
@@ -22,7 +22,7 @@ pub struct Config {
     #[arg(long, env = "KALLIP_DAEMON_SOCKET")]
     pub daemon_socket: Option<PathBuf>,
 
-    /// Standalone-mode bearer token for /api/instances/* (constant-time
+    /// Standalone-mode bearer token for the instances API (constant-time
     /// compared; the platform mode uses the archeion credentials below).
     #[arg(long, env = "KALLIP_INSTANCES_TOKEN")]
     pub token: Option<String>,

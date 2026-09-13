@@ -90,7 +90,7 @@ pub fn cors_layer(origins: &str) -> CorsLayer {
         ])
 }
 
-/// The `/api/instances` sub-router. The token guard and CORS layer are
+/// The instances resource router. The token guard and CORS layer are
 /// applied by the caller (`build_router`), not here, so tests can hit
 /// the handlers directly.
 pub fn api_routes() -> Router<AppState> {

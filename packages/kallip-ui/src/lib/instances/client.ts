@@ -1,6 +1,6 @@
 // Client for the local instances service (kallip-instances): the offline
-// home reads machine-level instance state through its /api/instances/* HTTP
-// face. Deliberately separate from manage/backend.ts — the instances
+// home reads machine-level instance state through its /v1/instances edge
+// prefix. Deliberately separate from manage/backend.ts — the instances
 // service is a third backend with its own uniform {code, message} error
 // shape, and instance lifecycle is not a tagma management concern.
 /** sessionStorage key holding the standalone-mode bearer token; when set,

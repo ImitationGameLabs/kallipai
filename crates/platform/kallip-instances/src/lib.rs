@@ -1,6 +1,6 @@
 //! Local instance management service for the kallip daemon.
 //!
-//! Proxies the four management verbs from `/api/instances/*` to the
+//! Proxies the four management verbs from the bare resource paths to the
 //! daemon's UDS socket. The daemon itself never grows an HTTP or token
 //! surface; this crate is the only networked door: a Host-header check
 //! on everything, plus one of three auth modes for the API —
@@ -30,9 +30,7 @@ pub fn build_router(state: AppState) -> Router {
         .layer(from_fn_with_state(state.clone(), guard::token_guard))
         .layer(axum::middleware::from_fn(middleware::csrf_guard))
         .layer(api::cors_layer(&state.cors_origins));
-    let app = Router::new()
-        .nest("/api/instances", api)
-        .fallback(not_found);
+    let app = Router::new().merge(api).fallback(not_found);
 
     // Layered last so the guard also wraps the fallback: a Router layer
     // only covers routes registered before it, and unknown paths must
@@ -47,7 +45,7 @@ async fn not_found() -> Response {
         StatusCode::NOT_FOUND,
         axum::Json(error::ApiFault {
             code: "not_found",
-            message: "no such path; the API lives under /api/instances".to_string(),
+            message: "no such path; the API lives at the root".to_string(),
         }),
     )
         .into_response()
@@ -147,7 +145,7 @@ mod tests {
         )));
         let response = app
             .oneshot(
-                Request::get("/api/instances/list")
+                Request::get("/list")
                     .header("host", "127.0.0.1:7300")
                     .body(Body::empty())
                     .unwrap(),
@@ -166,7 +164,7 @@ mod tests {
         )));
         let response = app
             .oneshot(
-                Request::get("/api/instances/list")
+                Request::get("/list")
                     .header("host", "127.0.0.1:7300")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
@@ -186,7 +184,7 @@ mod tests {
         )));
         let response = app
             .oneshot(
-                Request::get("/api/instances/list")
+                Request::get("/list")
                     .header("host", "127.0.0.1:7300")
                     .header("authorization", "Bearer wrong")
                     .body(Body::empty())
@@ -202,7 +200,7 @@ mod tests {
         let app = build_router(test_state(crate::guard::AuthMode::Open));
         let response = app
             .oneshot(
-                Request::get("/api/instances/list")
+                Request::get("/list")
                     .header("host", "127.0.0.1:7300")
                     .body(Body::empty())
                     .unwrap(),
@@ -221,7 +219,7 @@ mod tests {
         )));
         let response = app
             .oneshot(
-                Request::get("/api/instances/list")
+                Request::get("/list")
                     .header("host", "127.0.0.1:7300")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
@@ -241,7 +239,7 @@ mod tests {
         )));
         let response = app
             .oneshot(
-                Request::get("/api/instances/list")
+                Request::get("/list")
                     .header("host", "evil.example")
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
@@ -261,7 +259,7 @@ mod tests {
         )));
         let response = app
             .oneshot(
-                Request::post("/api/instances/spawn")
+                Request::post("/spawn")
                     .header("host", "127.0.0.1:7300")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")

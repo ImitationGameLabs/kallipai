@@ -20,7 +20,7 @@ use subtle::ConstantTimeEq;
 
 use crate::error::fault;
 
-/// How `/api/instances/*` requests are authenticated.
+/// How instances API requests are authenticated.
 #[derive(Clone)]
 pub enum AuthMode {
     /// Platform mode: every request's bearer is verified with the archeion;
@@ -60,7 +60,7 @@ pub struct AppState {
     pub cors_origins: String,
 }
 
-/// Credential guard for `/api/instances/*`. Static assets sit outside this
+/// Credential guard for the instances resource paths. Static assets sit outside this
 /// layer: the page loads first, then its API calls carry the credential.
 pub async fn token_guard(
     State(state): State<AppState>,

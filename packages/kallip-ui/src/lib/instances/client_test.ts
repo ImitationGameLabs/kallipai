@@ -40,7 +40,7 @@ Deno.test(
       );
     }) as typeof fetch;
     try {
-      const client = new InstancesClient("http://instances.test/api/instances");
+      const client = new InstancesClient("http://instances.test");
       await client.list();
       await client.stop("x");
     } finally {
@@ -83,7 +83,7 @@ Deno.test(
         ),
       )) as typeof fetch;
     try {
-      const client = new InstancesClient("http://instances.test/api/instances");
+      const client = new InstancesClient("http://instances.test");
       const instances = await client.list();
       assertEquals(instances[0].state, "unknown");
       // Liveness decisions key on `running`, which stays truthful.

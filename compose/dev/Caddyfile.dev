@@ -80,7 +80,6 @@
     reverse_proxy 127.0.0.1:7400
   }
   handle_path /v1/instances/* {
-    rewrite * /api/instances{uri}
     reverse_proxy 127.0.0.1:7300
   }
   # Unregistered /v1/* prefixes on the api face are a real 404.

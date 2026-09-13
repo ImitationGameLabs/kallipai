@@ -179,15 +179,15 @@ async fn full_management_round_trip_with_guards() {
     let app = build_router(state);
 
     // No token: 401.
-    let (status, body) = send(&app, "GET", "/api/instances/list", None, None).await;
+    let (status, body) = send(&app, "GET", "/list", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(body.contains("\"unauthorized\""), "{body}");
     // Capabilities sits behind the same guard: no token, no list.
-    let (status, _body) = send(&app, "GET", "/api/instances/capabilities", None, None).await;
+    let (status, _body) = send(&app, "GET", "/capabilities", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Foreign Host: 403, even with a valid token.
-    let request = Request::get("/api/instances/list")
+    let request = Request::get("/list")
         .header("host", "evil.example")
         .header("authorization", "Bearer itest-token")
         .body(Body::empty())
@@ -196,14 +196,7 @@ async fn full_management_round_trip_with_guards() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     // Health (daemon itself): 200.
-    let (status, body) = send(
-        &app,
-        "GET",
-        "/api/instances/health",
-        Some("itest-token"),
-        None,
-    )
-    .await;
+    let (status, body) = send(&app, "GET", "/health", Some("itest-token"), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("\"running\":true"), "{body}");
     assert!(body.contains("\"state\":\"running\""), "{body}");
@@ -229,7 +222,7 @@ async fn full_management_round_trip_with_guards() {
     let (status, body) = send(
         &app,
         "POST",
-        "/api/instances/spawn",
+        "/spawn",
         Some("itest-token"),
         Some(&spawn_body),
     )
@@ -240,14 +233,7 @@ async fn full_management_round_trip_with_guards() {
     assert!(body.contains("\"port\":"), "{body}");
     // An advertised-method fetch and an unsupported spawn method both
     // speak the capability vocabulary.
-    let (status, body) = send(
-        &app,
-        "GET",
-        "/api/instances/capabilities",
-        Some("itest-token"),
-        None,
-    )
-    .await;
+    let (status, body) = send(&app, "GET", "/capabilities", Some("itest-token"), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("designated-user"), "{body}");
     let bad_method = serde_json::json!({
@@ -259,7 +245,7 @@ async fn full_management_round_trip_with_guards() {
     let (status, body) = send(
         &app,
         "POST",
-        "/api/instances/spawn",
+        "/spawn",
         Some("itest-token"),
         Some(&bad_method),
     )
@@ -268,14 +254,7 @@ async fn full_management_round_trip_with_guards() {
     assert!(body.contains("unsupported_method"), "{body}");
 
     // List sees it.
-    let (status, body) = send(
-        &app,
-        "GET",
-        "/api/instances/list",
-        Some("itest-token"),
-        None,
-    )
-    .await;
+    let (status, body) = send(&app, "GET", "/list", Some("itest-token"), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("\"web-e2e\""), "{body}");
 
@@ -283,7 +262,7 @@ async fn full_management_round_trip_with_guards() {
     let (status, body) = send(
         &app,
         "GET",
-        "/api/instances/health?slug=web-e2e",
+        "/health?slug=web-e2e",
         Some("itest-token"),
         None,
     )
@@ -296,7 +275,7 @@ async fn full_management_round_trip_with_guards() {
     let (status, body) = send(
         &app,
         "GET",
-        "/api/instances/health?slug=missing",
+        "/health?slug=missing",
         Some("itest-token"),
         None,
     )
@@ -308,7 +287,7 @@ async fn full_management_round_trip_with_guards() {
     let (status, body) = send(
         &app,
         "POST",
-        "/api/instances/stop",
+        "/stop",
         Some("itest-token"),
         Some(r#"{"slug":"web-e2e"}"#),
     )
@@ -320,7 +299,7 @@ async fn full_management_round_trip_with_guards() {
     let (status, body) = send(
         &app,
         "POST",
-        "/api/instances/stop",
+        "/stop",
         Some("itest-token"),
         Some(r#"{"slug":"web-e2e"}"#),
     )
@@ -474,7 +453,7 @@ async fn spawn_without_user_key_still_parses_and_hits_guard() {
     let (status, body) = send(
         &app,
         "POST",
-        "/api/instances/spawn",
+        "/spawn",
         Some("itest-token"),
         Some(&spawn_body),
     )
@@ -571,24 +550,24 @@ async fn platform_mode_admin_only_and_fail_closed() {
 
     // Admin passes the gate (and dies at the daemon proxy: 503 proves the
     // guard let it through).
-    let (status, _) = send(&app, "GET", "/api/instances/list", Some("any"), None).await;
+    let (status, _) = send(&app, "GET", "/list", Some("any"), None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
     // A valid Tagma identity: 403.
-    let (status, body) = send(&app, "GET", "/api/instances/list", Some("any"), None).await;
+    let (status, body) = send(&app, "GET", "/list", Some("any"), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(body.contains("\"forbidden\""), "{body}");
 
     // A valid User identity: 403.
-    let (status, _) = send(&app, "GET", "/api/instances/list", Some("any"), None).await;
+    let (status, _) = send(&app, "GET", "/list", Some("any"), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     // An invalid token: 401.
-    let (status, body) = send(&app, "GET", "/api/instances/list", Some("any"), None).await;
+    let (status, body) = send(&app, "GET", "/list", Some("any"), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
 
     // Archeion unreachable: fail closed.
-    let (status, body) = send(&app, "GET", "/api/instances/list", Some("any"), None).await;
+    let (status, body) = send(&app, "GET", "/list", Some("any"), None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert!(body.contains("\"auth_backend_unavailable\""), "{body}");
 }
@@ -632,7 +611,7 @@ async fn platform_mode_session_channel_local_admin_only() {
     let response = app
         .clone()
         .oneshot(
-            Request::get("/api/instances/list")
+            Request::get("/list")
                 .header("host", "127.0.0.1:7300")
                 .header("cookie", "kallip_session=sk-sess-x")
                 .body(Body::empty())
@@ -646,7 +625,7 @@ async fn platform_mode_session_channel_local_admin_only() {
     let response = app
         .clone()
         .oneshot(
-            Request::get("/api/instances/list")
+            Request::get("/list")
                 .header("host", "127.0.0.1:7300")
                 .header("cookie", "kallip_session=sk-sess-x")
                 .body(Body::empty())
@@ -660,7 +639,7 @@ async fn platform_mode_session_channel_local_admin_only() {
     let response = app
         .clone()
         .oneshot(
-            Request::get("/api/instances/list")
+            Request::get("/list")
                 .header("host", "127.0.0.1:7300")
                 .header("cookie", "kallip_session=sk-sess-x")
                 .body(Body::empty())
@@ -711,7 +690,7 @@ async fn csrf_guard_cookie_channel() {
     let response = app
         .clone()
         .oneshot(
-            Request::post("/api/instances/spawn")
+            Request::post("/spawn")
                 .header("host", "127.0.0.1:7300")
                 .header("cookie", "kallip_session=sk-sess-x")
                 .header("content-type", "application/json")
@@ -726,7 +705,7 @@ async fn csrf_guard_cookie_channel() {
     let response = app
         .clone()
         .oneshot(
-            Request::post("/api/instances/stop")
+            Request::post("/stop")
                 .header("host", "127.0.0.1:7300")
                 .header("cookie", "kallip_session=sk-sess-x")
                 .header("x-requested-with", "kallip")
@@ -742,7 +721,7 @@ async fn csrf_guard_cookie_channel() {
     let response = app
         .clone()
         .oneshot(
-            Request::post("/api/instances/stop")
+            Request::post("/stop")
                 .header("host", "127.0.0.1:7300")
                 .header("authorization", "Bearer any")
                 .header("content-type", "application/json")
