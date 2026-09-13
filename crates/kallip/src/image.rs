@@ -117,6 +117,9 @@ async fn read_local_image(local: &str, args: &ImageReadArgs) -> Result<(Vec<u8>,
     if meta.is_dir() {
         anyhow::bail!("{local} is a directory; pass an image file");
     }
+    if meta.len() == 0 {
+        anyhow::bail!("{local} is empty");
+    }
     let name = file
         .file_name()
         .and_then(|n| n.to_str())
@@ -250,5 +253,15 @@ mod tests {
             disambiguate(&args_for("deadbeefdeadbeef")).unwrap(),
             Target::Path(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn an_empty_file_is_refused_before_the_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.png");
+        std::fs::write(&empty, b"").unwrap();
+        let path = empty.to_str().unwrap();
+        let err = read_local_image(path, &args_for(path)).await.unwrap_err();
+        assert!(err.to_string().contains("empty"), "got: {err}");
     }
 }

@@ -37,15 +37,7 @@ pub(crate) async fn ingest_attachment(
     Path(id): Path<AgentId>,
     Json(req): Json<AttachmentIngestRequest>,
 ) -> Result<Json<AttachmentIngestResponse>, ApiError> {
-    match auth.identity() {
-        Identity::Operator => {}
-        Identity::Agent { id: caller } if caller == &id => {}
-        Identity::Agent { .. } => {
-            return Err(ApiError::forbidden(
-                "agents may only ingest into their own context",
-            ));
-        }
-    }
+    ensure_self_or_operator(&auth, &id)?;
     // Image parts are the only assembly wired; audio and video arrive with
     // their own part shapes (and their own CLI subcommands).
     if req.modality != Modality::Image {
@@ -102,15 +94,7 @@ pub(crate) async fn store_attachment(
     Query(query): Query<AttachmentQuery>,
     body: axum::body::Bytes,
 ) -> Result<Json<AttachmentIngestLocalResponse>, ApiError> {
-    match auth.identity() {
-        Identity::Operator => {}
-        Identity::Agent { id: caller } if caller == &id => {}
-        Identity::Agent { .. } => {
-            return Err(ApiError::forbidden(
-                "agents may only ingest into their own context",
-            ));
-        }
-    }
+    ensure_self_or_operator(&auth, &id)?;
     // Only image parts are wired (the same posture as the record form).
     let media_type = match headers
         .get(CONTENT_TYPE)
@@ -151,6 +135,12 @@ pub(crate) async fn store_attachment(
             (bytes, blob_id)
         }
         None => {
+            // An empty inline body is a client mistake: the blob
+            // variant is chosen by the header, never by the absence
+            // of bytes.
+            if body.is_empty() {
+                return Err(ApiError::bad_request("attachment body is empty"));
+            }
             let blob_id = store_blob(&state, &body).await?;
             (body.to_vec(), blob_id)
         }
@@ -188,17 +178,37 @@ pub(crate) struct AttachmentQuery {
     caption: Option<String>,
 }
 
+/// The shared identity gate of the two ingest entrances: the operator
+/// acts on any context; an agent only on its own.
+fn ensure_self_or_operator(auth: &AuthIdentity, id: &AgentId) -> Result<(), ApiError> {
+    match auth.identity() {
+        Identity::Operator => Ok(()),
+        Identity::Agent { id: caller } if caller == id => Ok(()),
+        Identity::Agent { .. } => Err(ApiError::forbidden(
+            "agents may only ingest into their own context",
+        )),
+    }
+}
+
+/// The configured attachment blob backend, or the shared 503 both
+/// entrances return while the store is absent.
+fn blob_backend(
+    state: &SharedState,
+) -> Result<std::sync::Arc<dyn kallip_blob_store::BlobStore>, ApiError> {
+    state
+        .attachment_blobs
+        .get()
+        .cloned()
+        .ok_or_else(|| ApiError::unavailable("attachment blob store is not configured"))
+}
+
 /// The fail-closed blob write backing the path form: the attachment
 /// store must hold the bytes before the turn referencing them exists.
 async fn store_blob(
     state: &SharedState,
     bytes: &[u8],
 ) -> Result<kallip_blob_store::BlobId, ApiError> {
-    let Some(blobs) = state.attachment_blobs.get() else {
-        return Err(ApiError::unavailable(
-            "attachment blob store is not configured",
-        ));
-    };
+    let blobs = blob_backend(state)?;
     blobs
         .put(&mut std::io::Cursor::new(bytes))
         .await
@@ -214,11 +224,7 @@ async fn read_blob(
     state: &SharedState,
     blob_id: &kallip_blob_store::BlobId,
 ) -> Result<Vec<u8>, ApiError> {
-    let Some(blobs) = state.attachment_blobs.get() else {
-        return Err(ApiError::unavailable(
-            "attachment blob store is not configured",
-        ));
-    };
+    let blobs = blob_backend(state)?;
     blobs.get(blob_id).await.map_err(|e| match e {
         kallip_blob_store::Error::NotFound(_) => {
             ApiError::not_found(format!("blob {} does not exist", blob_id.as_str()))
@@ -894,6 +900,83 @@ mod tests {
         assert_eq!(err.status, 400);
         assert!(err.message.contains("sha256-"), "got: {err}");
         // The malformed reference never reached the ledger.
+        let registry = state.registry.read().await;
+        let entry = registry.get(&id).unwrap().as_live().unwrap();
+        assert!(entry.agent.store.lock().await.turns().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ingest_attachment_rejects_a_foreign_agent_identity() {
+        // The identity gate precedes every other step: a foreign
+        // agent is refused before any lookup or fetch.
+        let state = make_state();
+        let err = ingest_attachment(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent {
+                id: AgentId::random(),
+            }),
+            Path(AgentId::random()),
+            Json(AttachmentIngestRequest {
+                record_id: uuid::Uuid::nil(),
+                modality: Modality::Image,
+                media_type: None,
+                caption: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 403);
+        assert!(err.message.contains("agents may only ingest"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn store_attachment_rejects_a_foreign_agent_identity() {
+        let state = make_state();
+        let err = store_attachment(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent {
+                id: AgentId::random(),
+            }),
+            Path(AgentId::random()),
+            op_headers("image/png", None),
+            Query(AttachmentQuery { caption: None }),
+            axum::body::Bytes::from_static(&[1, 2, 3, 4]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 403);
+        assert!(err.message.contains("agents may only ingest"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn store_attachment_rejects_an_empty_inline_body() {
+        let state = make_state_with_image_set();
+        let dir = tempfile::tempdir().unwrap();
+        let mirror_dir = tempfile::tempdir().unwrap();
+        let backend = kallip_blob_store::LocalBackend::arc(mirror_dir.path().to_owned());
+        assert!(state.attachment_blobs.set(backend).is_ok());
+        let id = AgentId::random();
+        let mut entry = make_entry(None, "tok".to_owned());
+        entry.identity.agent_dir = Some(dir.path().to_owned());
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(id.clone(), RegistryEntry::Live(entry));
+        }
+        seed_default_snapshot(&state, &id);
+
+        let err = store_attachment(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(id.clone()),
+            op_headers("image/png", None),
+            Query(AttachmentQuery { caption: None }),
+            axum::body::Bytes::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert!(err.message.contains("empty"), "got: {err}");
+        // Nothing was recorded.
         let registry = state.registry.read().await;
         let entry = registry.get(&id).unwrap().as_live().unwrap();
         assert!(entry.agent.store.lock().await.turns().is_empty());
