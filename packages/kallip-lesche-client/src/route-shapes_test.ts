@@ -2,6 +2,8 @@
 // dial must exist in the shared route fixture the rust shape test also
 // asserts against. A one-sided URL change now fails a test on both sides --
 // the original double-prefix bugs came from each end proving itself alone.
+// Dialled URLs arrive in the edge shape (/v1/lesche/...); they are
+// translated to the server shape (/v1/...) before matching the fixture.
 // (The /state SSE dial is pinned verbatim in projection.test.ts; this file
 // covers the parameterized templates.)
 
@@ -30,17 +32,21 @@ Deno.test(
     const real = globalThis.fetch;
     const seen: Array<[string, string]> = [];
     globalThis.fetch = ((url: string | URL, init?: RequestInit) => {
-      const path = String(url).replace("https://lesche.example", "");
+      const path = String(url)
+        .replace("https://lesche.example", "")
+        .replace(/^\/v1\/lesche/, "/v1"); // edge shape -> server shape
       seen.push([init?.method ?? "GET", path]);
       return Promise.resolve(Response.json({}));
     }) as typeof fetch;
     try {
-      const manage = new ManageRestClient("https://lesche.example");
+      const manage = new ManageRestClient("https://lesche.example/v1/lesche");
       await manage.manage("t-a", "GET", "/agents");
       await manage.manage("t-a", "POST", "/budget", {});
       await manage.manage("t-a", "PUT", "/profiles", {});
       await manage.manage("t-a", "DELETE", "/profiles/9");
-      const projection = new ProjectionClient("https://lesche.example");
+      const projection = new ProjectionClient(
+        "https://lesche.example/v1/lesche",
+      );
       await projection.agents("t-a");
       await projection.budget("t-a");
       await projection.workSchedule("t-a");

@@ -140,7 +140,7 @@ export class LescheClient extends BaseClient {
   /** `POST /v1/conversations { tagma_id }` — resolve the single conversation a
    * tagma owns with its operator (idempotent). */
   createConversation(tagmaId: string): Promise<CreateConversationResponse> {
-    return this.json("/v1/conversations", "POST", { tagma_id: tagmaId });
+    return this.json("/conversations", "POST", { tagma_id: tagmaId });
   }
 
   /** `POST /v1/conversations/{id}/key-exchange/init` — synchronous request/reply
@@ -152,9 +152,7 @@ export class LescheClient extends BaseClient {
     init: KeyExchangeInit,
   ): Promise<KeyExchangeResponse> {
     return this.json(
-      `/v1/conversations/${encodeURIComponent(
-        conversationId,
-      )}/key-exchange/init`,
+      `/conversations/${encodeURIComponent(conversationId)}/key-exchange/init`,
       "POST",
       init,
     );
@@ -165,7 +163,7 @@ export class LescheClient extends BaseClient {
    * 409 = stale/duplicate sequence_n. */
   postEnvelope(conversationId: string, envelope: Envelope): Promise<void> {
     return this.json(
-      `/v1/conversations/${encodeURIComponent(conversationId)}/envelopes`,
+      `/conversations/${encodeURIComponent(conversationId)}/envelopes`,
       "POST",
       envelope,
     );
@@ -180,7 +178,7 @@ export class LescheClient extends BaseClient {
    * the caller is not a room member. */
   postRoomEnvelope(roomId: string, envelope: Envelope): Promise<void> {
     return this.json(
-      `/v1/rooms/${encodeURIComponent(roomId)}/envelopes`,
+      `/rooms/${encodeURIComponent(roomId)}/envelopes`,
       "POST",
       envelope,
     );
@@ -200,7 +198,7 @@ export class LescheClient extends BaseClient {
     if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
     const query = params.toString();
     return this.json(
-      `/v1/rooms/${encodeURIComponent(roomId)}/messages${query ? `?${query}` : ""}`,
+      `/rooms/${encodeURIComponent(roomId)}/messages${query ? `?${query}` : ""}`,
       "GET",
     );
   }
@@ -214,7 +212,7 @@ export class LescheClient extends BaseClient {
    * owns reconnect/backoff; the generator ends when the stream closes or
    * `signal` aborts. */
   async *meEvents(signal?: AbortSignal): AsyncGenerator<MeEventFrame> {
-    const resp = await sseFetch(this.baseUrl + "/v1/me/events", signal);
+    const resp = await sseFetch(this.baseUrl + "/me/events", signal);
     if (!resp.ok) {
       throw await lescheError(resp);
     }
@@ -246,7 +244,7 @@ export class LescheClient extends BaseClient {
     description?: string;
     visibility?: Visibility;
   }): Promise<RoomView> {
-    return this.json("/v1/rooms", "POST", {
+    return this.json("/rooms", "POST", {
       name: body.name,
       description: body.description ?? "",
       visibility: body.visibility ?? "private",
@@ -255,20 +253,20 @@ export class LescheClient extends BaseClient {
 
   /** `GET /v1/rooms` — the caller's rooms (current membership), newest-joined. */
   listRooms(): Promise<RoomView[]> {
-    return this.json("/v1/rooms", "GET");
+    return this.json("/rooms", "GET");
   }
 
   /** `GET /v1/rooms/public` -- public (plaintext, open-access) rooms the caller
    * may join without an invite, newest-created. */
   listPublicRooms(): Promise<RoomView[]> {
-    return this.json("/v1/rooms/public", "GET");
+    return this.json("/rooms/public", "GET");
   }
 
   /** `POST /v1/rooms/{id}/join` -- join a public room without an invite
    * (open-access). 403 if the room is private (use the invite flow); 204 on a
    * join or an idempotent re-join by an existing member. */
   joinRoom(roomId: string): Promise<void> {
-    return this.json(`/v1/rooms/${encodeURIComponent(roomId)}/join`, "POST");
+    return this.json(`/rooms/${encodeURIComponent(roomId)}/join`, "POST");
   }
 
   /** `PUT /v1/rooms/{id}/read-cursor` -- clamp-advance the caller's read
@@ -277,7 +275,7 @@ export class LescheClient extends BaseClient {
    * live sessions). */
   setRoomReadCursor(roomId: string, lastReadSeq: number): Promise<void> {
     return this.json(
-      `/v1/rooms/${encodeURIComponent(roomId)}/read-cursor`,
+      `/rooms/${encodeURIComponent(roomId)}/read-cursor`,
       "PUT",
       {
         last_read_seq: lastReadSeq,
@@ -287,12 +285,12 @@ export class LescheClient extends BaseClient {
 
   /** `GET /v1/rooms/{id}` — a room's live roster (member-only). */
   fetchRoomRoster(roomId: string): Promise<RoomRosterView> {
-    return this.json(`/v1/rooms/${encodeURIComponent(roomId)}`, "GET");
+    return this.json(`/rooms/${encodeURIComponent(roomId)}`, "GET");
   }
 
   /** `GET /v1/rooms/invites` — the caller's pending invites (the inbox). */
   listMyRoomInvites(): Promise<RoomInviteView[]> {
-    return this.json("/v1/rooms/invites", "GET");
+    return this.json("/rooms/invites", "GET");
   }
 
   /** `POST /v1/rooms/{id}/invites` — invite a user by @username. 409 if one is
@@ -303,7 +301,7 @@ export class LescheClient extends BaseClient {
   ): Promise<CreateInviteResponse> {
     const body: CreateInviteRequest = { invitee_username: inviteeUsername };
     return this.json(
-      `/v1/rooms/${encodeURIComponent(roomId)}/invites`,
+      `/rooms/${encodeURIComponent(roomId)}/invites`,
       "POST",
       body,
     );
@@ -312,7 +310,7 @@ export class LescheClient extends BaseClient {
   /** `POST /v1/rooms/{id}/invites/{invite_id}/accept` — accept (invitee-only). */
   acceptRoomInvite(roomId: string, inviteId: string): Promise<void> {
     return this.json(
-      `/v1/rooms/${encodeURIComponent(roomId)}/invites/${encodeURIComponent(inviteId)}/accept`,
+      `/rooms/${encodeURIComponent(roomId)}/invites/${encodeURIComponent(inviteId)}/accept`,
       "POST",
       undefined,
     );
@@ -324,7 +322,7 @@ export class LescheClient extends BaseClient {
    * tagma's owner, or the room creator; anything else is a 404. */
   removeRoomMember(roomId: string, memberId: string): Promise<void> {
     return this.json(
-      `/v1/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(memberId)}`,
+      `/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(memberId)}`,
       "DELETE",
       undefined,
     );
@@ -334,7 +332,7 @@ export class LescheClient extends BaseClient {
   addRoomTagma(roomId: string, tagmaId: string): Promise<void> {
     const body: AddTagmaRequest = { tagma_id: tagmaId };
     return this.json(
-      `/v1/rooms/${encodeURIComponent(roomId)}/tagmata`,
+      `/rooms/${encodeURIComponent(roomId)}/tagmata`,
       "POST",
       body,
     );
@@ -345,10 +343,7 @@ export class LescheClient extends BaseClient {
    * tagma (registry-attested server-side). Distinct from the tagma-self
    * discovery route, which the tagma polls from Rust, not from this client. */
   listMyTagmaRooms(tagmaId: string): Promise<TagmaRoomView[]> {
-    return this.json(
-      `/v1/me/tagmata/${encodeURIComponent(tagmaId)}/rooms`,
-      "GET",
-    );
+    return this.json(`/me/tagmata/${encodeURIComponent(tagmaId)}/rooms`, "GET");
   }
 }
 

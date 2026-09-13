@@ -34,7 +34,7 @@ export class ManageRestClient {
       if (body !== undefined) headers["content-type"] = "application/json";
     }
     const resp = await fetch(
-      `${this.baseUrl}/v1/tagmata/${encodeURIComponent(agent)}/manage${path}`,
+      `${this.baseUrl}/tagmata/${encodeURIComponent(agent)}/manage${path}`,
       {
         method,
         headers,

@@ -33,7 +33,7 @@ function stubFetch(
 }
 
 Deno.test(
-  "put uploads to PUT /v1/files?path= and maps the minted record",
+  "put uploads to PUT /files?path= and maps the minted record",
   async () => {
     stubFetch(
       () =>
@@ -45,7 +45,7 @@ Deno.test(
           { status: 201 },
         ),
     );
-    const client = new FilesClient("http://files.test");
+    const client = new FilesClient("http://files.test/v1/files");
     const out = await client.put(
       "/users/u1/shared/report.pdf",
       new Uint8Array([1, 2, 3]),
@@ -68,16 +68,14 @@ Deno.test(
           { status: 201 },
         ),
     );
-    const client = new FilesClient("http://files.test");
+    const client = new FilesClient("http://files.test/v1/files");
     const out = await client.send("01890a5d-ac96-774b-bcce-b302099a8057", {
       toTagma: "t1",
     });
     assertEquals(out.path, "/users/u1/tagmas/t1/inbox/report.pdf");
     assertEquals(seen[0].method, "POST");
     assert(
-      seen[0].url.endsWith(
-        "/v1/files/01890a5d-ac96-774b-bcce-b302099a8057/send",
-      ),
+      seen[0].url.endsWith("/files/01890a5d-ac96-774b-bcce-b302099a8057/send"),
     );
     assert(seen[0].headers.get("X-Requested-With") === CSRF_MARKER);
     const body = JSON.parse(String(seen[0].body)) as {
@@ -115,15 +113,13 @@ Deno.test("get returns the bytes and list maps the entries array", async () => {
 });
 
 Deno.test(
-  "delete issues DELETE /v1/files/{id} with the CSRF marker and maps 204",
+  "delete issues DELETE /files/{id} with the CSRF marker and maps 204",
   async () => {
     const seen = stubFetch(() => new Response(null, { status: 204 }));
-    const client = new FilesClient("http://files.test");
+    const client = new FilesClient("http://files.test/v1/files");
     await client.delete("01890a5d-ac96-774b-bcce-b302099a8057");
     assertEquals(seen[0].method, "DELETE");
-    assert(
-      seen[0].url.endsWith("/v1/files/01890a5d-ac96-774b-bcce-b302099a8057"),
-    );
+    assert(seen[0].url.endsWith("/files/01890a5d-ac96-774b-bcce-b302099a8057"));
     assert(seen[0].headers.get("X-Requested-With") === CSRF_MARKER);
   },
 );

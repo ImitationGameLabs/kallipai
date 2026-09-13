@@ -18,7 +18,7 @@ const here = import.meta.dirname;
 const devDomain = process.env.KALLIP_DOMAIN ?? "kallipai.com";
 const edgeTls = (process.env.KALLIP_EDGE_TLS ?? "on") === "on";
 const edgePort = Number(process.env.KALLIP_EDGE_PORT ?? "443");
-const webHost = `web.${devDomain}`;
+const appHost = `app.${devDomain}`;
 
 export default defineConfig({
   plugins: [
@@ -66,7 +66,7 @@ export default defineConfig({
   ],
   server: {
     // The dev stack is fronted by Caddy, which terminates TLS for *.devDomain
-    // and reverse-proxies web.<devDomain> to this dev server. Bind 0.0.0.0 so
+    // and reverse-proxies app.<devDomain> to this dev server. Bind 0.0.0.0 so
     // the Caddy container (reaching the host via the host gateway) can connect;
     // a loopback-only bind would be unreachable from inside the compose network.
     host: true,
@@ -81,15 +81,15 @@ export default defineConfig({
     // Caddy forwards the incoming Host header unchanged, and vite is plain HTTP
     // here (so the HTTPS host-check exemption does NOT apply). Without an
     // explicit allow entry for the proxied hostname, vite rejects the request.
-    allowedHosts: [webHost],
-    // HMR rides the edge: the browser reconnects to web.<devDomain> on
+    allowedHosts: [appHost],
+    // HMR rides the edge: the browser reconnects to app.<devDomain> on
     // the edge port (wss behind the https edge, ws behind the plain one;
     // caddy proxies the upgrade either way), while vite's own websocket
     // stays on 5173.
     ...(edgeTls
       ? {
-          ws: { protocol: "wss" as const, host: webHost, clientPort: edgePort },
+          ws: { protocol: "wss" as const, host: appHost, clientPort: edgePort },
         }
-      : { ws: { host: webHost, clientPort: edgePort } }),
+      : { ws: { host: appHost, clientPort: edgePort } }),
   },
 });

@@ -82,15 +82,15 @@ let
   # (Nix laziness), so a null domain never reaches the interpolation.
   platformDomain = config.services.kallipai.domain;
   platformTls = config.services.kallipai.tls;
-  webScheme = if platformTls then "https" else "http";
-  webOrigin = "${webScheme}://web.${platformDomain}";
+  appScheme = if platformTls then "https" else "http";
+  appOrigin = "${appScheme}://app.${platformDomain}";
 in
 {
   options.services.kallipai = {
     domain = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Sibling-subdomain root (archeion.<domain> ...); every web-facing default derives from it.";
+      description = "Deployment domain; the web app lives at app.<domain> and the API edge at api.<domain>; every web-facing default derives from it.";
     };
 
     tls = lib.mkOption {
@@ -156,23 +156,19 @@ in
         '';
       };
 
-      relayArchUrl = lib.mkOption {
-        type = lib.types.str;
-        default = "http://127.0.0.1:${toString polisPorts.archeion}";
+      polisUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
         description = ''
-          Archeion URL the daemon fills into relay-intent spawns that
-          omit it (KALLIP_DAEMON_RELAY_ARCHEION_URL). The default
-          follows the configured polis port, not the binary's
-          compiled-in 7100 (the files NOTIFY_URL pattern).
-        '';
-      };
-
-      relayLescheUrl = lib.mkOption {
-        type = lib.types.str;
-        default = "http://127.0.0.1:${toString polisPorts.lesche}";
-        description = ''
-          Lesche counterpart of `relayArchUrl`
-          (KALLIP_DAEMON_RELAY_LESCHE_URL; tunnel + envelopes).
+          Platform edge origin (e.g. "https://api.example.com") the daemon
+          fills into relay-intent spawns that omit it (KALLIP_POLIS_URL).
+          null injects nothing: a spawn carrying an enrollment code but
+          no origin then fails loudly at boot (credentials are never
+          sent to an assumed deployment), so set this whenever relay
+          enrollment is in play. Derive it from
+          services.kallipai.domain (api.<domain>) rather than a service
+          port -- tagma clients append /v1/<service>, which only the
+          edge routes.
         '';
       };
 
@@ -455,12 +451,12 @@ in
         corsOrigins = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
-          description = "Comma-separated CORS allow-list origins; the web bundle calls this service cross-origin (web.<domain> to instances.<domain>), so a proxied deployment serving the web app lists that origin here.";
+          description = "Comma-separated CORS allow-list origins; the web bundle calls this service cross-origin (app.<domain> against the api.<domain> edge), so a proxied deployment serving the web app lists that origin here.";
         };
         allowedHosts = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
-          description = "Comma-separated extra Host values the host guard admits (IP literals and localhost always pass). The proxied shape receives instances.<domain>; a direct-connect LAN shape names the domain browsers use.";
+          description = "Comma-separated extra Host values the host guard admits (IP literals and localhost always pass). The proxied shape receives api.<domain>; a direct-connect LAN shape names the domain browsers use.";
         };
       };
     };
@@ -483,17 +479,17 @@ in
             domain = lib.mkOption {
               type = lib.types.nullOr lib.types.str;
               default = null;
-              description = "Sibling-subdomain root (archeion.<domain> ...); defaults to services.kallipai.domain when that is set.";
+              description = "Deployment domain (the app face is app.<domain>); defaults to services.kallipai.domain when that is set.";
             };
             offlineLogin = lib.mkOption {
               type = lib.types.nullOr lib.types.bool;
               default = null;
               description = "True = show the operator-key login branch.";
             };
-            services = lib.mkOption {
-              type = lib.types.nullOr (lib.types.attrsOf lib.types.str);
+            apiBase = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
               default = null;
-              description = "Full URL overrides, one per backend service.";
+              description = "Platform-edge-origin override (e.g. \"https://api.example.com\"); every service base becomes <apiBase>/v1/<service>; an empty string counts as unset.";
             };
           };
         };
@@ -502,10 +498,10 @@ in
           Values for the web app's runtime config (/config.js), baked
           into the site root as a window.KALLIP_CONFIG assignment. Keys
           mirror the app's Window.KALLIP_CONFIG type: domain,
-          offlineLogin, services; an unknown key fails evaluation. The
+          offlineLogin, apiBase; an unknown key fails evaluation. The
           empty default keeps the shipped config.js defaults. Set
           offlineLogin = false to hide the operator-key login branch (a
-          cloud-facing deployment), or add domain/services to pin values
+          cloud-facing deployment), or add domain/apiBase to pin values
           the app would otherwise derive from the browser location;
           domain already defaults to services.kallipai.domain. The file
           is baked into the site root and served publicly, so anything
@@ -671,12 +667,12 @@ in
           # NixOS has no /bin/bash; the login-environment harvest needs a
           # fixed administrative bash, never the caller's shell.
           KALLIP_HARVEST_BASH = "${pkgs.bash}/bin/bash";
-          # Relay defaults the daemon fills into relay-intent spawns that
-          # omit them (before the record snapshot is written, so restarts
-          # replay the filled env).
-          KALLIP_DAEMON_RELAY_ARCHEION_URL = cfg.relayArchUrl;
-          KALLIP_DAEMON_RELAY_LESCHE_URL = cfg.relayLescheUrl;
-        };
+          # Relay default: the platform edge origin the daemon fills into
+          # relay-intent spawns that omit it (before the record snapshot
+          # is written, so restarts replay the filled env). null injects
+          # nothing -- see the polisUrl option.
+        }
+        // envOpt "KALLIP_POLIS_URL" cfg.polisUrl;
 
         serviceConfig = {
           ExecStart = "${cfg.package}/bin/kallip-daemon";
@@ -997,17 +993,17 @@ in
       services.kallipai = {
         polis = {
           archeion = {
-            corsOrigins = lib.mkDefault webOrigin;
+            corsOrigins = lib.mkDefault appOrigin;
             cookieDomain = lib.mkDefault platformDomain;
             webauthnRpId = lib.mkDefault platformDomain;
-            webauthnRpOrigin = lib.mkDefault webOrigin;
-            oauthRedirectBase = lib.mkDefault webOrigin;
+            webauthnRpOrigin = lib.mkDefault appOrigin;
+            oauthRedirectBase = lib.mkDefault appOrigin;
           };
-          lesche.corsOrigins = lib.mkDefault webOrigin;
-          files.corsOrigins = lib.mkDefault webOrigin;
+          lesche.corsOrigins = lib.mkDefault appOrigin;
+          files.corsOrigins = lib.mkDefault appOrigin;
           instances = {
-            corsOrigins = lib.mkDefault webOrigin;
-            allowedHosts = lib.mkDefault "instances.${platformDomain}";
+            corsOrigins = lib.mkDefault appOrigin;
+            allowedHosts = lib.mkDefault "api.${platformDomain}";
           };
         };
         web.runtimeConfig.domain = lib.mkDefault platformDomain;

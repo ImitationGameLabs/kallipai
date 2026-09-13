@@ -12,7 +12,7 @@ import { LescheClient } from "./http.ts";
 // wire-shape drift (a renamed field, a wrong method, a missing CSRF marker, a
 // malformed query) fails here, not at runtime.
 
-const BASE = "https://lesche.test";
+const BASE = "https://lesche.test/v1/lesche";
 
 /** Swap globalThis.fetch for the test, restore it after. */
 function withFetch(
@@ -35,7 +35,7 @@ const ENVELOPE: Envelope = {
   ciphertext: "AAAA",
 };
 
-Deno.test("postRoomEnvelope POSTs /v1/rooms/{id}/envelopes", async () => {
+Deno.test("postRoomEnvelope POSTs /rooms/{id}/envelopes", async () => {
   const captured: {
     url: string;
     method: string;
@@ -59,7 +59,7 @@ Deno.test("postRoomEnvelope POSTs /v1/rooms/{id}/envelopes", async () => {
   });
   assertEquals(
     captured[0]!.url,
-    "https://lesche.test/v1/rooms/room-1/envelopes",
+    "https://lesche.test/v1/lesche/rooms/room-1/envelopes",
   );
   assertEquals(captured[0]!.method, "POST");
   assertEquals(captured[0]!.headers["X-Requested-With"], "kallip");
@@ -97,7 +97,7 @@ Deno.test(
     });
     assertEquals(
       captured[0]!.url,
-      "https://lesche.test/v1/rooms/room-1/messages?after_seq=3&limit=50",
+      "https://lesche.test/v1/lesche/rooms/room-1/messages?after_seq=3&limit=50",
     );
     assertEquals(captured[0]!.method, "GET");
     assertEquals(out!, [
@@ -126,13 +126,13 @@ Deno.test("fetchRoomMessages omits the query when no opts given", async () => {
   });
   assertEquals(
     captured[0]!.url,
-    "https://lesche.test/v1/rooms/room-1/messages",
+    "https://lesche.test/v1/lesche/rooms/room-1/messages",
   );
 });
 
 // -- management surface (create / list / invite / members / tagmata / roster) --
 
-Deno.test("createRoom POSTs /v1/rooms and decodes RoomView", async () => {
+Deno.test("createRoom POSTs /rooms and decodes RoomView", async () => {
   const captured: {
     url: string;
     method: string;
@@ -172,7 +172,7 @@ Deno.test("createRoom POSTs /v1/rooms and decodes RoomView", async () => {
       last_read_seq: 0,
     });
   });
-  assertEquals(captured[0]!.url, "https://lesche.test/v1/rooms");
+  assertEquals(captured[0]!.url, "https://lesche.test/v1/lesche/rooms");
   assertEquals(captured[0]!.method, "POST");
   assertEquals(captured[0]!.headers["X-Requested-With"], "kallip");
   // All three fields are always sent (name required; description + visibility
@@ -217,7 +217,7 @@ Deno.test("createRoom(public) sends the visibility body", async () => {
   );
 });
 
-Deno.test("listPublicRooms GETs /v1/rooms/public", async () => {
+Deno.test("listPublicRooms GETs /rooms/public", async () => {
   const captured: string[] = [];
   const stub: typeof fetch = (input) => {
     captured.push(typeof input === "string" ? input : input.toString());
@@ -239,10 +239,10 @@ Deno.test("listPublicRooms GETs /v1/rooms/public", async () => {
     assertEquals(out.length, 1);
     assertEquals(out[0]!.visibility, "public");
   });
-  assertEquals(captured[0], "https://lesche.test/v1/rooms/public");
+  assertEquals(captured[0], "https://lesche.test/v1/lesche/rooms/public");
 });
 
-Deno.test("joinRoom POSTs /v1/rooms/{id}/join", async () => {
+Deno.test("joinRoom POSTs /rooms/{id}/join", async () => {
   const captured: { url: string; method: string }[] = [];
   const stub: typeof fetch = (input, init) => {
     captured.push({
@@ -254,12 +254,15 @@ Deno.test("joinRoom POSTs /v1/rooms/{id}/join", async () => {
   await withFetch(stub, async () => {
     await new LescheClient(BASE).joinRoom("room-pub");
   });
-  assertEquals(captured[0]!.url, "https://lesche.test/v1/rooms/room-pub/join");
+  assertEquals(
+    captured[0]!.url,
+    "https://lesche.test/v1/lesche/rooms/room-pub/join",
+  );
   assertEquals(captured[0]!.method, "POST");
 });
 
 Deno.test(
-  "setRoomReadCursor PUTs /v1/rooms/{id}/read-cursor with the CSRF marker",
+  "setRoomReadCursor PUTs /rooms/{id}/read-cursor with the CSRF marker",
   async () => {
     const captured: {
       url: string;
@@ -281,7 +284,7 @@ Deno.test(
     });
     assertEquals(
       captured[0]!.url,
-      "https://lesche.test/v1/rooms/room-1/read-cursor",
+      "https://lesche.test/v1/lesche/rooms/room-1/read-cursor",
     );
     assertEquals(captured[0]!.method, "PUT");
     assertEquals(captured[0]!.body, { last_read_seq: 42 });
@@ -289,7 +292,7 @@ Deno.test(
   },
 );
 
-Deno.test("listRooms GETs /v1/rooms with no CSRF marker", async () => {
+Deno.test("listRooms GETs /rooms with no CSRF marker", async () => {
   const captured: string[] = [];
   const stub: typeof fetch = (input) => {
     captured.push(
@@ -308,10 +311,10 @@ Deno.test("listRooms GETs /v1/rooms with no CSRF marker", async () => {
     assertEquals(out.length, 1);
     assertEquals(out[0]!.room_id, "r");
   });
-  assertEquals(captured, ["https://lesche.test/v1/rooms"]);
+  assertEquals(captured, ["https://lesche.test/v1/lesche/rooms"]);
 });
 
-Deno.test("listMyRoomInvites GETs /v1/rooms/invites", async () => {
+Deno.test("listMyRoomInvites GETs /rooms/invites", async () => {
   const captured: string[] = [];
   const stub: typeof fetch = (input) => {
     captured.push(typeof input === "string" ? input : input.toString());
@@ -335,7 +338,7 @@ Deno.test("listMyRoomInvites GETs /v1/rooms/invites", async () => {
     const out = await c.listMyRoomInvites();
     assertEquals(out[0]!.invite_id, "inv-1");
   });
-  assertEquals(captured, ["https://lesche.test/v1/rooms/invites"]);
+  assertEquals(captured, ["https://lesche.test/v1/lesche/rooms/invites"]);
 });
 
 Deno.test(
@@ -365,7 +368,7 @@ Deno.test(
     });
     assertEquals(
       captured[0]!.url,
-      "https://lesche.test/v1/rooms/room-1/invites",
+      "https://lesche.test/v1/lesche/rooms/room-1/invites",
     );
     assertEquals(captured[0]!.method, "POST");
     assertEquals(
@@ -392,7 +395,7 @@ Deno.test(
       assertEquals(out, undefined);
     });
     assertEquals(captured[0]!, {
-      url: "https://lesche.test/v1/rooms/room-1/invites/inv-1/accept",
+      url: "https://lesche.test/v1/lesche/rooms/room-1/invites/inv-1/accept",
       method: "POST",
     });
   },
@@ -414,7 +417,7 @@ Deno.test(
       await c.removeRoomMember("room-1", "mid-1");
     });
     assertEquals(captured[0]!, {
-      url: "https://lesche.test/v1/rooms/room-1/members/mid-1",
+      url: "https://lesche.test/v1/lesche/rooms/room-1/members/mid-1",
       method: "DELETE",
     });
   },
@@ -475,7 +478,7 @@ Deno.test("listMyTagmaRooms GETs the owner tagma-rooms path", async () => {
     assertEquals(out[1]!.name, undefined);
   });
   assertEquals(captured[0]!, {
-    url: "https://lesche.test/v1/me/tagmata/tagma-9/rooms",
+    url: "https://lesche.test/v1/lesche/me/tagmata/tagma-9/rooms",
     method: "GET",
   });
 });
@@ -505,7 +508,7 @@ Deno.test(
 );
 
 Deno.test(
-  "fetchRoomRoster GETs /v1/rooms/{id} and decodes the roster",
+  "fetchRoomRoster GETs /rooms/{id} and decodes the roster",
   async () => {
     const captured: { url: string; method: string }[] = [];
     const stub: typeof fetch = (input, init) => {
@@ -540,7 +543,10 @@ Deno.test(
     await withFetch(stub, async () => {
       out = await new LescheClient(BASE).fetchRoomRoster("room-1");
     });
-    assertEquals(captured[0]!.url, "https://lesche.test/v1/rooms/room-1");
+    assertEquals(
+      captured[0]!.url,
+      "https://lesche.test/v1/lesche/rooms/room-1",
+    );
     assertEquals(captured[0]!.method, "GET");
     assertEquals(out!, {
       room_id: "room-1",

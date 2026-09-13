@@ -31,9 +31,9 @@ Deno.test("projection agents GET hits the per-tagma agents path", async () => {
     return Promise.resolve(Response.json(AGENTS_BODY));
   });
   try {
-    const client = new ProjectionClient("http://lesche.test");
+    const client = new ProjectionClient("http://lesche.test/v1/lesche");
     const resp = await client.agents("t-a");
-    assertEquals(seen, ["http://lesche.test/v1/tagmata/t-a/agents"]);
+    assertEquals(seen, ["http://lesche.test/v1/lesche/tagmata/t-a/agents"]);
     assertEquals(resp.seq, 7);
     assertEquals(resp.stale, false);
     assertEquals(resp.agents.length, 1);
@@ -47,7 +47,7 @@ Deno.test("projection GET failure surfaces the status", async () => {
     Promise.resolve(new Response("no projection", { status: 404 })),
   );
   try {
-    const client = new ProjectionClient("http://lesche.test");
+    const client = new ProjectionClient("http://lesche.test/v1/lesche");
     await assertRejects(() => client.agents("gone"), Error, "404");
   } finally {
     restore();
@@ -61,7 +61,7 @@ Deno.test(
       'data: {"tagma_id":"t-a","seq":1}\n\n' +
       'data: {"tagma_id":"t-a","seq":2}\n\n';
     const restore = withFetch((url) => {
-      assertEquals(url, "http://lesche.test/v1/tagmata/t-a/state");
+      assertEquals(url, "http://lesche.test/v1/lesche/tagmata/t-a/state");
       return Promise.resolve(
         new Response(sseBody, {
           status: 200,
@@ -70,7 +70,7 @@ Deno.test(
       );
     });
     try {
-      const client = new ProjectionClient("http://lesche.test");
+      const client = new ProjectionClient("http://lesche.test/v1/lesche");
       const frames: number[] = [];
       for await (const dirty of client.state("t-a")) {
         frames.push(dirty.seq);

@@ -72,7 +72,7 @@ export class ProjectionClient {
     signal?: AbortSignal,
   ): AsyncGenerator<ProjectionDirty> {
     const resp = await sseFetch(
-      `${this.baseUrl}/v1/tagmata/${encodeURIComponent(id)}/state`,
+      `${this.baseUrl}/tagmata/${encodeURIComponent(id)}/state`,
       signal,
     );
     if (!resp.ok) throw new Error(`projection state: ${resp.status}`);
@@ -89,7 +89,7 @@ export class ProjectionClient {
 
   private async get(id: string, tail: string): Promise<unknown> {
     const resp = await fetch(
-      `${this.baseUrl}/v1/tagmata/${encodeURIComponent(id)}/${tail}`,
+      `${this.baseUrl}/tagmata/${encodeURIComponent(id)}/${tail}`,
       { method: "GET", credentials: "include" },
     );
     if (!resp.ok) throw new Error(`projection ${tail}: ${resp.status}`);

@@ -136,7 +136,7 @@ Deno.test(
     globalThis.fetch = ((url: string | URL | Request) => {
       const u = String(url);
       seen.push(u);
-      if (u.endsWith("/v1/tagmata/t-a/agents")) {
+      if (u.endsWith("/v1/lesche/tagmata/t-a/agents")) {
         return Promise.resolve(
           Response.json({
             stale: false,
@@ -171,12 +171,12 @@ Deno.test(
       const backend = new OnlineBackend(
         {} as unknown as ManageRestClient, // the manage relay stays untouched
         "t-a",
-        new ProjectionClient("http://lesche.test"),
+        new ProjectionClient("http://lesche.test/v1/lesche"),
       );
       const agents = await backend.listAgents();
       assertEquals(agents.agents[0]!.id, "root");
       assertEquals(
-        seen.some((u) => u.endsWith("/v1/tagmata/t-a/agents")),
+        seen.some((u) => u.endsWith("/v1/lesche/tagmata/t-a/agents")),
         true,
       );
 

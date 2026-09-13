@@ -36,22 +36,21 @@
   // gated on Tauri webview origin support.
   initShell(goto);
   // Desktop-surface boundary: this app runs in the Tauri webview on the
-  // user's own machine, so falling back to localhost direct ports is
-  // the dev-local default here (VITE_*_URL overrides point it
-  // elsewhere). This is not a browser fallback: the web app served
-  // from a deployment derives its sibling-subdomain URLs from the
-  // page location and never reaches these defaults.
+  // user's own machine, so same-origin rules do not apply: the app dials
+  // the platform API directly. KALLIP_POLIS_URL (baked at build time,
+  // exposed via vite's envPrefix) names the platform edge origin; the
+  // dev-local default is the local edge. This is not a browser
+  // fallback: the web app served from a deployment derives its
+  // api.<domain> URLs from the page location and never reaches it.
   //
-  // Service URLs on this surface: explicit VITE_*_URL build-time
-  // overrides, then localhost direct ports.
-  initArcheion(import.meta.env.VITE_ARCHEION_URL ?? "http://localhost:7100");
-  initLesche(import.meta.env.VITE_LESCHE_URL ?? "http://localhost:7200");
-  initFiles(import.meta.env.VITE_FILES_URL ?? "http://localhost:7400");
+  // Service URLs on this surface: {KALLIP_POLIS_URL}/v1/<service>.
+  const polis = import.meta.env.KALLIP_POLIS_URL ?? "http://localhost:8080";
+  initArcheion(`${polis}/v1/archeion`);
+  initLesche(`${polis}/v1/lesche`);
+  initFiles(`${polis}/v1/files`);
   initConfigStorage(localStorageConfigStorage);
   initNotificationBackend(tauriNotificationBackend);
-  initInstances(
-    import.meta.env.VITE_INSTANCES_URL ?? "http://localhost:7300/api/instances",
-  );
+  initInstances(`${polis}/v1/instances`);
 
   const icons: NavIcons = {
     chat: MessageSquare,

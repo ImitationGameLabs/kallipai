@@ -124,7 +124,7 @@ Deno.test("content-type rides only when a JSON body is present", async () => {
 });
 
 Deno.test("the agent segment is URL-encoded in the request path", async () => {
-  const client = new ManageRestClient("https://lesche.example");
+  const client = new ManageRestClient("https://lesche.example/v1/lesche");
   let url = "";
   await withFetch(
     (input) => {
@@ -137,6 +137,6 @@ Deno.test("the agent segment is URL-encoded in the request path", async () => {
   );
   assertEquals(
     url,
-    "https://lesche.example/v1/tagmata/ag%2Fent%201/manage/budget",
+    "https://lesche.example/v1/lesche/tagmata/ag%2Fent%201/manage/budget",
   );
 });

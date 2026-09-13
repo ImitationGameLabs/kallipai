@@ -54,6 +54,9 @@ export default defineConfig({
   // strictPort: a busy port must error, not silently drift off devUrl.
   // watch: ignore the Rust src-tauri tree so editing it doesn't restart Vite.
   clearScreen: false,
+  // Expose KALLIP_* vars to import.meta.env (default is VITE_-prefixed
+  // only): the app bakes the platform edge origin at build time.
+  envPrefix: ["VITE_", "KALLIP_"],
   server: {
     port: 8080,
     strictPort: true,
