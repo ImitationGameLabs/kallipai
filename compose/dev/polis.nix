@@ -43,10 +43,10 @@ let
   # KALLIP_EDGE_TLS=off; KALLIP_EDGE_PORT moves its listen port (a
   # deployed system caddy keeps the host's real 443). The session
   # cookie carries `Domain=<devDomain>` (see the archeion service env)
-  # so it is shared across the sibling subdomains. archeion and lesche
-  # still publish 7100/7200 for host-side tooling (kallip-admin, curl)
-  # AND for the dev tagma (compose/dev/tagma.nix, host network), which
-  # reaches them at 127.0.0.1:7100 / :7200 rather than via compose DNS.
+  # so it is shared across the sibling subdomains (app. and api.). archeion and lesche
+  # still publish 7100/7200 for host-side tooling (kallip-admin, curl);
+  # AND for the dev tagma (compose/dev/tagma.nix, host network), which rides the edge's
+  # loopback plaintext face (KALLIP_POLIS_URL=http://127.0.0.1:7443) instead.
   # files publishes 7400 and instances 7300 on the loopback interface
   # for the same host-side tooling; the browser path for both rides
   # the edge.
@@ -69,17 +69,17 @@ let
       v = builtins.getEnv "KALLIP_DOMAIN";
     in
     if v == "" then "kallipai.com" else v;
-  # The browser-facing web origin: the edge's web.<devDomain> face.
+  # The browser-facing app origin: the edge's app.<devDomain> face.
   # The port rides along except on its protocol's default (443 for
   # https, 80 for http), matching what the browser's address bar
   # shows -- CORS and OAuth origins compare verbatim.
-  webOrigin =
+  appOrigin =
     let
       scheme = if edgeTls then "https" else "http";
       defaultPort = if edgeTls then "443" else "80";
       port = if edgePort == defaultPort then "" else ":${edgePort}";
     in
-    "${scheme}://web.${devDomain}${port}";
+    "${scheme}://app.${devDomain}${port}";
   # The site-address scheme the Caddyfile sees: empty for the https
   # edge (the tls snippet carries the certificate), http:// for the
   # plain edge (keeps caddy's auto-https out of a non-public TLD).
@@ -181,12 +181,12 @@ in
   config = {
     project.name = projectName;
 
-    # The files service's CORS gate: the browser (web origin) talks to
-    # files.<devDomain> cross-origin for uploads/downloads; allowlist the
+    # The files service's CORS gate: the browser (app origin) talks to
+    # api.<devDomain> cross-origin for uploads/downloads; allowlist the
     # same app origin the archeion uses. Set here (not in files.nix) so
-    # webOrigin stays defined in one place; the extra `.service` hop
+    # appOrigin stays defined in one place; the extra `.service` hop
     # merges with the compose-style env the files module declares.
-    services.files.service.environment.KALLIP_FILES_CORS_ORIGINS = webOrigin;
+    services.files.service.environment.KALLIP_FILES_CORS_ORIGINS = appOrigin;
     # Named volumes must be declared at the compose top level (compose rejects
     # a reference to an undeclared named volume). The project name
     # (`kallipai-dev` by default) prefixes every volume, so the internal
@@ -224,7 +224,7 @@ in
     # subdomain vhosts in both shapes. https (default) terminates TLS
     # with the mkcert leaf cert; plain http drops the cert mount and
     # serves the same routes scheme-less. Host-routes the subdomains to
-    # 127.0.0.1: web.<devDomain> -> the host vite dev server (:5173);
+    # 127.0.0.1: app.<devDomain> -> the host vite dev server (:5173);
     # archeion/lesche -> their host-published ports (:7100/:7200).
     # Runs on the host network (`network_mode: host`) so it can reach the
     # host's vite directly -- under rootless docker the bridge cannot reach
@@ -297,20 +297,20 @@ in
         KALLIP_ARCHEION_DATABASE_URL = "postgres://kallip:kallip@archeion-postgres:5432/kallip";
         # WebAuthn RP: the id is the registrable domain <devDomain> (an
         # IPv4 literal host degrades to the code-default prod pair --
-        # the builder rejects IP RP ids). The origin is webOrigin (the
-        # edge's web face, port and all when non-default; ALLOW_ANY_PORT
+        # the builder rejects IP RP ids). The origin is appOrigin (the
+        # edge's app face, port and all when non-default; ALLOW_ANY_PORT
         # stays false).
         KALLIP_ARCHEION_WEBAUTHN_RP_ID = if isIpHost then "kallipai.com" else devDomain;
-        KALLIP_ARCHEION_WEBAUTHN_RP_ORIGIN = if isIpHost then "https://web.kallipai.com" else webOrigin;
+        KALLIP_ARCHEION_WEBAUTHN_RP_ORIGIN = if isIpHost then "https://app.kallipai.com" else appOrigin;
         KALLIP_ARCHEION_WEBAUTHN_RP_NAME = "kallipai";
         KALLIP_ARCHEION_WEBAUTHN_ALLOW_ANY_PORT = "false";
         # The session cookie is Secure behind the https edge; the plain
         # http edge needs it off.
         KALLIP_ARCHEION_COOKIE_SECURE = if edgeTls then "true" else "false";
-        KALLIP_ARCHEION_CORS_ORIGINS = webOrigin;
-        # Share the session cookie across archeion.<devDomain> and
-        # lesche.<devDomain>: the edge topology serves every service on a
-        # sibling subdomain in both shapes, so the Domain attribute is
+        KALLIP_ARCHEION_CORS_ORIGINS = appOrigin;
+        # Share the session cookie across app.<devDomain> and api.<devDomain>: the
+        # edge serves the app face and the path-routed api face on sibling
+        # subdomains in both shapes, so the Domain attribute is
         # what stitches the session across them.
         KALLIP_ARCHEION_SESSION_COOKIE_DOMAIN = devDomain;
         # Caddy runs on the host network and proxies to archeion at 127.0.0.1,
@@ -334,9 +334,9 @@ in
         # fixture, paired with the compliant token above; prod leaves it off.
         KALLIP_ARCHEION_ADMIN_USER_LOGIN = "true";
         RUST_LOG = "info";
-        # OAuth callback URLs build from the browser-facing web origin;
+        # OAuth callback URLs build from the browser-facing app origin;
         # explicit so the value matches CORS verbatim.
-        KALLIP_ARCHEION_OAUTH_REDIRECT_BASE = webOrigin;
+        KALLIP_ARCHEION_OAUTH_REDIRECT_BASE = appOrigin;
       };
     };
 
@@ -375,9 +375,9 @@ in
         # Read the archeion-provisioned internal secret (shared volume).
         KALLIP_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
         KALLIP_LESCHE_INTERNAL_TOKEN = "dev-notify-secret";
-        # Allow the web app origin (https://web.<devDomain> via Caddy) to
-        # make credentialed cross-origin calls to lesche.<devDomain>.
-        KALLIP_LESCHE_CORS_ORIGINS = webOrigin;
+        # Allow the web app origin (https://app.<devDomain> via Caddy) to
+        # make credentialed cross-origin calls to api.<devDomain>.
+        KALLIP_LESCHE_CORS_ORIGINS = appOrigin;
         RUST_LOG = "info";
       };
     };
@@ -391,8 +391,8 @@ in
     # 127.0.0.1:7300. Platform mode: the archeion's internal root + shared
     # secret verify the SPA's sk-admin- bearer (the local-platform
     # login key), replacing the standalone token. API-only: the SPA is
-    # served by the host vite dev server (Caddy @web -> :5173); the
-    # browser calls this service cross-origin from the web origin
+    # served by the host vite dev server (Caddy @app -> :5173); the
+    # browser calls this service cross-origin from the app origin
     # (KALLIP_INSTANCES_CORS_ORIGINS below).
     services.instances = {
       service.useHostStore = true;
@@ -424,8 +424,8 @@ in
         # internal token (shared volume, read-only here).
         KALLIP_INSTANCES_ARCHEION_URL = "http://archeion:7100";
         KALLIP_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
-        KALLIP_INSTANCES_ALLOWED_HOSTS = "instances.${devDomain}";
-        KALLIP_INSTANCES_CORS_ORIGINS = webOrigin;
+        KALLIP_INSTANCES_ALLOWED_HOSTS = "api.${devDomain}";
+        KALLIP_INSTANCES_CORS_ORIGINS = appOrigin;
         RUST_LOG = "info";
       };
     };

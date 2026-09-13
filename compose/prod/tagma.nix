@@ -8,10 +8,9 @@
 # This is a single-purpose file: every service is declared directly, no mode
 # switch or mkIf/mkMerge. The .env at the repo root supplies KALLIP_AUTH_TOKEN (the tagma
 # operator token), KALLIP_TAGMA_RELAY_ENROLLMENT_CODE (first boot only),
-# KALLIP_TAGMA_RELAY_ARCHEION_URL (the prod-archeion deploy's public HTTPS URL;
-# ENROLLMENT ONLY -- the stored tagma token is reused thereafter), and
-# KALLIP_TAGMA_RELAY_LESCHE_URL (the prod-lesche deploy's public HTTPS URL; the tagma
-# holds its tunnel here and posts envelopes / key-exchange responses here), and
+# KALLIP_POLIS_URL (the platform's public API origin, e.g.
+# https://api.kallipai.com -- enrollment, the lesche tunnel, envelopes and
+# key-exchange responses all derive from it), and
 # the LLM provider credentials. See docs/reference/container.md.
 { lib, ... }:
 let
@@ -79,11 +78,11 @@ in
         KALLIP_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT = "1";
         RUST_LOG = "info";
         # KALLIP_AUTH_TOKEN (operator token), KALLIP_TAGMA_RELAY_ENROLLMENT_CODE
-        # (first run only), KALLIP_TAGMA_RELAY_ARCHEION_URL (enroll-only), and
-        # KALLIP_TAGMA_RELAY_LESCHE_URL (tunnel + envelopes + KEX responses) come from
-        # .env. Per the per-service subdomain topology the archeion and lesche are
-        # two distinct origins (e.g. https://archeion.kallipai.com and
-        # https://lesche.kallipai.com) sharing the parent domain.
+        # (first run only), and KALLIP_POLIS_URL (the platform API origin:
+        # enrollment at the archeion, the lesche tunnel, envelopes and KEX
+        # responses all derive from it) come from .env. The api face serves
+        # every service under https://api.<domain>/v1/<service>/... on one
+        # origin sharing the parent domain with app.<domain>.
       };
     };
   };

@@ -13,9 +13,10 @@
 # start this. On a missing/empty enrollment code the tagma degrades to
 # local-only and keeps serving local agents.
 #
-# Runs on the host network (`network_mode: host`) and reaches the archeion/lesche
-# at 127.0.0.1:7100 / :7200 -- the host-published ports of arion-compose.nix --
-# mirroring how the caddy service reaches them. KALLIP_TAGMA_ADDR binds host
+# Runs on the host network (`network_mode: host`) and reaches the platform through
+# the edge's loopback plaintext face (KALLIP_POLIS_URL=http://127.0.0.1:7443, the
+# Caddyfile.dev dev-tagma edge) rather than compose DNS.
+# KALLIP_TAGMA_ADDR binds host
 # :<tagmaPort> directly (no `ports:` mapping; ignored under host net anyway). The
 # landlock/seccomp shell sandbox still needs SYS_ADMIN + seccomp=unconfined.
 #
@@ -128,12 +129,12 @@ in
         # (ensure_workspace_disjoint rejects the overlap).
         KALLIP_WORKSPACE_ROOT = "/workspace";
         KALLIP_TAGMA_ADDR = "0.0.0.0:${tagmaPort}";
-        # In-process relay connector: enroll at the archeion, tunnel to the lesche
-        # -- both via the host-published ports (host network), not compose DNS.
-        # KALLIP_TAGMA_RELAY_ENROLLMENT_CODE comes from .env (minted after
-        # signup); until then the tagma runs local-only.
-        KALLIP_TAGMA_RELAY_ARCHEION_URL = "http://127.0.0.1:7100";
-        KALLIP_TAGMA_RELAY_LESCHE_URL = "http://127.0.0.1:7200";
+        # In-process relay connector: enroll at the archeion and tunnel to the
+        # lesche through the edge's loopback plaintext face (host network;
+        # KALLIP_POLIS_URL=http://127.0.0.1:7443, the Caddyfile.dev dev-tagma
+        # edge -- not compose DNS). KALLIP_TAGMA_RELAY_ENROLLMENT_CODE comes
+        # from .env (minted after signup); until then the tagma runs local-only.
+        KALLIP_POLIS_URL = "http://127.0.0.1:7443";
         # Seed source for <data_dir>/skills/ on first boot (read-only bundled
         # defaults). Set here rather than baked into the image because dev
         # builds its image ad-hoc via image.contents/useHostStore (not

@@ -1,7 +1,10 @@
 # Dev edge proxy (see arion-compose.nix services.caddy). The one entry
-# point for the dev stack: host-routes the *.{$KALLIP_DOMAIN} subdomains
-# to the dev services on 127.0.0.1 (caddy runs on the host network). The
-# same vhosts serve both edge shapes: https (default) terminates TLS with
+# point for the dev stack: host-routes the app.{$KALLIP_DOMAIN} (web app) and
+# api.{$KALLIP_DOMAIN} (platform, path-routed /v1/<service>) vhosts to the dev
+# services on 127.0.0.1 (caddy runs on the host network). A loopback
+# plaintext edge (http://127.0.0.1:7443) mirrors the api route table for the
+# dev tagma, whose webpki-roots reqwest cannot trust the mkcert edge.
+# The same vhosts serve both edge shapes: https (default) terminates TLS with
 # the mkcert leaf cert mounted at /certs; KALLIP_EDGE_TLS=off serves the
 # identical routes plain http -- the {$KALLIP_EDGE_SCHEME} prefix on the
 # site address (set to http://) keeps Caddy's auto-https out of a
@@ -23,69 +26,74 @@
 # prod topology decision. Re-enable here once the h3 streaming path is verified
 # end-to-end in Firefox.
 {
-	servers {
-		protocols h1 h2
-	}
+  servers {
+    protocols h1 h2
+  }
 }
 
 {$KALLIP_EDGE_SCHEME}*.{$KALLIP_DOMAIN}:{$KALLIP_EDGE_PORT} {
-	import tls.caddy
+  import tls.caddy
 
-	@web host web.{$KALLIP_DOMAIN}
-	handle @web {
-		# the host vite dev server (packages/kallip-web `deno task dev`,
-		# allowedHosts/webHost in its vite.config) serves the SPA with HMR;
-		# kallip-instances is API-only (the @instances host below).
-		reverse_proxy 127.0.0.1:5173
-	}
+  @app host app.{$KALLIP_DOMAIN}
+  handle @app {
+    # the host vite dev server (packages/kallip-web `deno task dev`,
+    # appHost in its vite.config) serves the SPA with HMR.
+    reverse_proxy 127.0.0.1:5173
+  }
 
-	@archeion host archeion.{$KALLIP_DOMAIN}
-	handle @archeion {
-		# archeion is published on the host at :7100
-		reverse_proxy 127.0.0.1:7100
-	}
+  @api host api.{$KALLIP_DOMAIN}
+  handle @api {
+    # The platform's single API face, path-routed by service segment.
+    # handle_path strips /v1/<service>; each rewrite adds back
+    # that service's internal prefix, so the backends keep their current
+    # route shapes (zero server changes). files passes through untouched:
+    # its internal paths already start with /v1/files (service name ==
+    # resource segment, identity mapping).
+    import kallip-api-routes
+  }
 
-	@lesche host lesche.{$KALLIP_DOMAIN}
-	handle @lesche {
-		# lesche is published on the host at :7200
-		reverse_proxy 127.0.0.1:7200 {
-			# SSE is auto-detected (Content-Type: text/event-stream) and flushed
-			# immediately regardless; this is a safety net for any future
-			# non-SSE streaming endpoint so responses are never buffered.
-			flush_interval -1
-		}
-	}
+  # Any other *.<devDomain> host (typo, or the bare apex) matched the wildcard
+  # site block's SNI but no route above -- surface it as a real 404 rather
+  # than Caddy's default empty 200, so misroutes are obvious.
+  handle {
+    respond 404
+  }
+}
 
+# The api.<domain> route table, shared by the https wildcard edge above and
+# the loopback plaintext edge below (one place to review the path map):
+# /v1/<service>/* -> each backend's existing internal prefix.
+(kallip-api-routes) {
+  handle_path /v1/archeion/* {
+    rewrite * /v1{uri}
+    reverse_proxy 127.0.0.1:7100
+  }
+  handle_path /v1/lesche/* {
+    rewrite * /v1{uri}
+    reverse_proxy 127.0.0.1:7200 {
+      # SSE is auto-detected (Content-Type: text/event-stream) and flushed
+      # immediately regardless; this is a safety net for any future
+      # non-SSE streaming endpoint so responses are never buffered.
+      flush_interval -1
+    }
+  }
+  @files path /v1/files /v1/files/*
+  handle @files {
+    reverse_proxy 127.0.0.1:7400
+  }
+  handle_path /v1/instances/* {
+    rewrite * /api/instances{uri}
+    reverse_proxy 127.0.0.1:7300
+  }
+  # Unregistered /v1/* prefixes on the api face are a real 404.
+  respond 404
+}
 
-	@archeion2 host archeion2.{$KALLIP_DOMAIN}
-	handle @archeion2 {
-		# second dev archeion instance (dual-archeion tagma acceptance)
-		reverse_proxy 127.0.0.1:7101
-	}
-
-	@lesche2 host lesche2.{$KALLIP_DOMAIN}
-	handle @lesche2 {
-		# second dev lesche instance, paired with archeion2
-		reverse_proxy 127.0.0.1:7201 {
-			flush_interval -1
-		}
-	}
-
-	@instances host instances.{$KALLIP_DOMAIN}
-	handle @instances {
-		# local instance management service (published 127.0.0.1:7300)
-		reverse_proxy 127.0.0.1:7300
-	}
-
-	@files host files.{$KALLIP_DOMAIN}
-	handle @files {
-		# files transfer service (published 127.0.0.1:7400)
-		reverse_proxy 127.0.0.1:7400
-	}
-	# Any other *.<devDomain> host (typo, or the bare apex) matched the wildcard
-	# site block's SNI but no route above -- surface it as a real 404 rather than
-	# Caddy's default empty 200, so misroutes are obvious.
-	handle {
-		respond 404
-	}
+# Loopback plaintext edge for the dev tagma (host network): the tagma's
+# reqwest uses webpki-roots, so the mkcert https edge is untrusted from
+# inside the container; the tagma rides the same route table over plain
+# HTTP on loopback instead (KALLIP_POLIS_URL points here). Dev-only --
+# prod tagmas reach the public https api.<domain> face directly.
+http://127.0.0.1:7443 {
+  import kallip-api-routes
 }
