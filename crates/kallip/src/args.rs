@@ -373,6 +373,10 @@ pub struct ImageReadArgs {
     /// like a UUID).
     #[arg(long, conflicts_with = "id")]
     pub path: bool,
+    /// Re-ingest an already-stored blob by its content address. A blob
+    /// id is never guessed from a bare target: this flag pins the form.
+    #[arg(long, conflicts_with_all = ["id", "path"])]
+    pub blob: bool,
     /// Media type of the record (default: derived from the file extension
     /// when storing, else `image/png`).
     #[arg(long, value_name = "TYPE")]

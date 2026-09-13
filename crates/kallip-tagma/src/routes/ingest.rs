@@ -85,6 +85,10 @@ pub(crate) async fn ingest_attachment(
 /// the blob is the master copy of a path-form reference, so a store
 /// failure fails the ingest (fail closed) instead of recording a
 /// reference whose bytes can never be re-assembled.
+///
+/// `X-Kallip-Blob-Id` switches to the reference variant: the request
+/// carries no bytes and the stored master copy is read back from the
+/// same store under the same gate order.
 pub(crate) async fn store_attachment(
     State(state): State<SharedState>,
     auth: AuthIdentity,
@@ -131,14 +135,29 @@ pub(crate) async fn store_attachment(
     // blob write any more than the record form spends a files fetch.
     enforce(&state, &target, Modality::Image).await?;
 
-    let blob_id = store_blob(&state, &body).await?;
+    let (bytes, blob_id) = match headers
+        .get("x-kallip-blob-id")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(anchor) => {
+            let blob_id = kallip_blob_store::BlobId::parse(anchor)
+                .map_err(|_| ApiError::bad_request("blob id must be a sha256- digest"))?;
+            let bytes = read_blob(&state, &blob_id).await?;
+            (bytes, blob_id)
+        }
+        None => {
+            let blob_id = store_blob(&state, &body).await?;
+            (body.to_vec(), blob_id)
+        }
+    };
+    let size = bytes.len();
     let turn_id = record_ingest(
         &target,
         Modality::Image,
         media_type.clone(),
         query.caption.clone(),
         uuid::Uuid::nil(),
-        body.to_vec(),
+        bytes,
         Some(blob_id.as_str().to_owned()),
     )
     .await?;
@@ -148,7 +167,7 @@ pub(crate) async fn store_attachment(
         turn_id,
         blob_id = blob_id.as_str(),
         media_type = %media_type,
-        size = body.len(),
+        size,
         file_name = file_name.as_deref().unwrap_or(""),
         "attachment stored from inline bytes"
     );
@@ -182,6 +201,28 @@ async fn store_blob(
             tracing::warn!("attachment blob store write failed: {e}");
             ApiError::unavailable(format!("attachment blob store write failed: {e}"))
         })
+}
+
+/// The reference variant's byte source: read the stored master copy
+/// back from the attachment store (404 when the address is unknown).
+async fn read_blob(
+    state: &SharedState,
+    blob_id: &kallip_blob_store::BlobId,
+) -> Result<Vec<u8>, ApiError> {
+    let Some(blobs) = state.attachment_blobs.get() else {
+        return Err(ApiError::unavailable(
+            "attachment blob store is not configured",
+        ));
+    };
+    blobs.get(blob_id).await.map_err(|e| match e {
+        kallip_blob_store::Error::NotFound(_) => {
+            ApiError::not_found(format!("blob {} does not exist", blob_id.as_str()))
+        }
+        e => {
+            tracing::warn!("attachment blob read failed: {e}");
+            ApiError::unavailable(format!("attachment blob store read failed: {e}"))
+        }
+    })
 }
 
 /// The registry lookup both entrances share: resolve the target
@@ -709,5 +750,147 @@ mod tests {
         .unwrap();
         // Same bytes, same content address.
         assert_eq!(first.blob_id, second.blob_id);
+    }
+
+    #[tokio::test]
+    async fn store_attachment_blob_variant_records_the_pre_stored_blob() {
+        let state = make_state_with_image_set();
+        let dir = tempfile::tempdir().unwrap();
+        let mirror_dir = tempfile::tempdir().unwrap();
+        let backend = kallip_blob_store::LocalBackend::arc(mirror_dir.path().to_owned());
+        assert!(state.attachment_blobs.set(backend.clone()).is_ok());
+        let id = AgentId::random();
+        let mut entry = make_entry(None, "tok".to_owned());
+        entry.identity.agent_dir = Some(dir.path().to_owned());
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(id.clone(), RegistryEntry::Live(entry));
+        }
+        seed_default_snapshot(&state, &id);
+
+        // Pre-store the master copy the header will point at; the
+        // request body stays empty.
+        let mut bytes: &[u8] = &[3, 1, 4];
+        let stored = backend.put(&mut bytes).await.unwrap();
+
+        let mut headers = op_headers("image/png", None);
+        headers.insert("x-kallip-blob-id", stored.as_str().parse().unwrap());
+        let response = store_attachment(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(id.clone()),
+            headers,
+            Query(AttachmentQuery {
+                caption: Some("from blob".to_owned()),
+            }),
+            axum::body::Bytes::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.blob_id, stored.as_str());
+
+        // The assembled image comes from the blob, not the body.
+        let registry = state.registry.read().await;
+        let target = IngestTarget::of(registry.get(&id).unwrap().as_live().unwrap());
+        let store = target.store.lock().await;
+        assert_eq!(store.turns().len(), 1);
+        let parts = store.turns()[0].messages[0].content_parts().unwrap();
+        match &parts[1] {
+            ContentPart::Image {
+                source: ImageSource::Base64 { data, .. },
+                ..
+            } => {
+                assert_eq!(
+                    data,
+                    &base64::engine::general_purpose::STANDARD.encode([3, 1, 4])
+                );
+            }
+            other => panic!("expected a base64 image part, got {other:?}"),
+        }
+        drop(store);
+
+        // History: the sidecar pins the nil record id plus the blob id.
+        let file = std::fs::read_dir(dir.path().join("history"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let line = std::fs::read_to_string(&file).unwrap();
+        let record: kallip_runtime::history::HistoryRecord =
+            serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert_eq!(record.attachments.len(), 1);
+        assert_eq!(record.attachments[0].record_id, uuid::Uuid::nil());
+        assert_eq!(
+            record.attachments[0].blob_id.as_deref(),
+            Some(stored.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn store_attachment_blob_variant_404s_an_unknown_blob_without_recording() {
+        let state = make_state_with_image_set();
+        let mirror_dir = tempfile::tempdir().unwrap();
+        let backend = kallip_blob_store::LocalBackend::arc(mirror_dir.path().to_owned());
+        assert!(state.attachment_blobs.set(backend.clone()).is_ok());
+        let id = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &id);
+        }
+        seed_default_snapshot(&state, &id);
+
+        let mut headers = op_headers("image/png", None);
+        let missing = kallip_blob_store::BlobId::for_bytes(b"never stored");
+        headers.insert("x-kallip-blob-id", missing.as_str().parse().unwrap());
+        let err = store_attachment(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(id.clone()),
+            headers,
+            Query(AttachmentQuery { caption: None }),
+            axum::body::Bytes::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 404);
+        assert!(err.message.contains("does not exist"), "got: {err}");
+        // Nothing was recorded: no turn, no sidecar.
+        let registry = state.registry.read().await;
+        let entry = registry.get(&id).unwrap().as_live().unwrap();
+        assert!(entry.agent.store.lock().await.turns().is_empty());
+    }
+
+    #[tokio::test]
+    async fn store_attachment_blob_variant_rejects_a_malformed_blob_id() {
+        let state = make_state_with_image_set();
+        let mirror_dir = tempfile::tempdir().unwrap();
+        let backend = kallip_blob_store::LocalBackend::arc(mirror_dir.path().to_owned());
+        assert!(state.attachment_blobs.set(backend.clone()).is_ok());
+        let id = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &id);
+        }
+        seed_default_snapshot(&state, &id);
+
+        let mut headers = op_headers("image/png", None);
+        headers.insert("x-kallip-blob-id", "not-a-digest".parse().unwrap());
+        let err = store_attachment(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(id.clone()),
+            headers,
+            Query(AttachmentQuery { caption: None }),
+            axum::body::Bytes::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert!(err.message.contains("sha256-"), "got: {err}");
+        // The malformed reference never reached the ledger.
+        let registry = state.registry.read().await;
+        let entry = registry.get(&id).unwrap().as_live().unwrap();
+        assert!(entry.agent.store.lock().await.turns().is_empty());
     }
 }

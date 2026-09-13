@@ -1,9 +1,9 @@
 //! `kallip image read` — the agent-side image ingest entrance.
-//!
+
 //! Self-scoped: the target agent id comes from `KALLIP_ID` (the command
-//! runs in the agent shell). The tagma enforces the bound set's
-//! modalities, fetches the bytes from the files service, and records the
-//! turn; this face reports the outcome.
+//! runs in the agent shell). A local path stores the bytes in the
+//! tagma's local blob store; `--blob` re-ingests a stored copy; `--id`
+//! keeps reading a files record. The tagma enforces the modalities.
 
 use anyhow::{Context, Result};
 use kallip_client::TagmaClient;
@@ -19,37 +19,60 @@ pub(crate) async fn run_image(client: &TagmaClient, cmd: &ImageCommand) -> Resul
 
 async fn run_read(client: &TagmaClient, args: &ImageReadArgs) -> Result<()> {
     let agent_id = crate::agent_id_from_env()?;
-    let (record_id, media_type) = match disambiguate(args)? {
-        Target::Id(id) => (id, args.media_type.clone()),
-        Target::Path(local) => {
-            let stored = store_local_image(local, args).await?;
-            println!(
-                "Stored through the files service into the local content-addressed store (blob {}); recorded at space path {}.",
-                stored.blob_id, stored.space_path
-            );
-            println!("Saved as record {}.", stored.record_id);
-            println!(
-                "Read it again later with `kallip image read {}`.",
-                stored.record_id
-            );
-            (stored.record_id, Some(stored.media_type))
+    match disambiguate(args)? {
+        Target::Id(id) => {
+            let req = AttachmentIngestRequest {
+                record_id: id,
+                modality: Modality::Image,
+                media_type: args.media_type.clone(),
+                caption: args.caption.clone(),
+            };
+            let response = client.attachment_ingest(&agent_id, &req).await?;
+            println!("Ingested {id} into turn {}.", response.turn_id);
         }
-    };
-    let req = AttachmentIngestRequest {
-        record_id,
-        modality: Modality::Image,
-        media_type,
-        caption: args.caption.clone(),
-    };
-    let response = client.attachment_ingest(&agent_id, &req).await?;
-    println!("Ingested {record_id} into turn {}.", response.turn_id);
+        Target::Path(local) => {
+            let (bytes, media_type, name) = read_local_image(local, args).await?;
+            let response = client
+                .attachment_store(
+                    &agent_id,
+                    bytes,
+                    &media_type,
+                    &name,
+                    args.caption.as_deref(),
+                )
+                .await?;
+            println!(
+                "Stored locally as blob {} and recorded at turn {}.",
+                response.blob_id, response.turn_id
+            );
+            println!(
+                "Read it again later with `kallip image read --blob {}`.",
+                response.blob_id
+            );
+        }
+        Target::Blob(hash) => {
+            let media_type = args
+                .media_type
+                .clone()
+                .unwrap_or_else(|| "image/png".to_owned());
+            let response = client
+                .attachment_store_blob(&agent_id, hash, &media_type, args.caption.as_deref())
+                .await?;
+            println!(
+                "Re-ingested blob {} into turn {}.",
+                response.blob_id, response.turn_id
+            );
+        }
+    }
     Ok(())
 }
 
-/// The resolved form of `image read`'s target: a files record id or a local path.
+/// The resolved form of `image read`'s target: a local path, a blob
+/// content address, or a files record id.
 enum Target<'a> {
     Id(uuid::Uuid),
     Path(&'a str),
+    Blob(&'a str),
 }
 
 /// `--id` and `--path` pin the form; otherwise a parseable UUID without path
@@ -57,6 +80,9 @@ enum Target<'a> {
 fn disambiguate(args: &ImageReadArgs) -> Result<Target<'_>> {
     if args.target.is_empty() {
         anyhow::bail!("no target given; pass a record id or a local image path");
+    }
+    if args.blob {
+        return Ok(Target::Blob(&args.target));
     }
     if args.id {
         return Ok(Target::Id(parse_record_id(&args.target)?));
@@ -78,22 +104,14 @@ fn parse_record_id(raw: &str) -> Result<uuid::Uuid> {
         .context("record id must be a UUID (see `kallip file ls`)")
 }
 
-/// A file stored through the files service, ready to ingest.
-struct StoredImage {
-    record_id: uuid::Uuid,
-    blob_id: String,
-    space_path: String,
-    media_type: String,
-}
-
-/// Store a local file under the caller's private `images/` region (the files
-/// service resolves the identity prefix for relative paths). The media type
-/// comes from --media-type or the file extension.
-async fn store_local_image(local: &str, args: &ImageReadArgs) -> Result<StoredImage> {
+/// Read a local image file and resolve its media type, from
+/// `--media-type` or the file extension. Returns the bytes, the
+/// media type, and the file name (for the tracing header).
+async fn read_local_image(local: &str, args: &ImageReadArgs) -> Result<(Vec<u8>, String, String)> {
     let file = std::path::Path::new(local);
     let meta = tokio::fs::metadata(file).await.map_err(|e| {
         anyhow::anyhow!(
-            "cannot read {local} ({e}); pass a record id to read an already-stored image"
+            "cannot read {local} ({e}); pass --id or --blob to read an already-stored image"
         )
     })?;
     if meta.is_dir() {
@@ -107,15 +125,10 @@ async fn store_local_image(local: &str, args: &ImageReadArgs) -> Result<StoredIm
         Some(mt) => mt,
         None => media_type_for(name)?.to_owned(),
     };
-    let space_path = space_path_for(name);
-    let files = kallip::file::FilesClient::from_env()?;
-    let put = files.put_file(&space_path, file).await?;
-    Ok(StoredImage {
-        record_id: put.record_id,
-        blob_id: put.blob_id,
-        space_path,
-        media_type,
-    })
+    let bytes = tokio::fs::read(file)
+        .await
+        .context("failed to read the image file")?;
+    Ok((bytes, media_type, name.to_owned()))
 }
 
 /// The media type for a stored image file, from its extension. Unknown
@@ -143,13 +156,6 @@ fn media_type_for(name: &str) -> anyhow::Result<&'static str> {
     }
 }
 
-/// The space path a stored image lands at: the caller's private `images/`
-/// region plus the original file name (the files service resolves the
-/// identity prefix for relative paths).
-fn space_path_for(name: &str) -> String {
-    format!("images/{name}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +164,7 @@ mod tests {
         ImageReadArgs {
             target: target.to_owned(),
             id: false,
+            blob: false,
             path: false,
             media_type: None,
             caption: None,
@@ -229,7 +236,19 @@ mod tests {
     }
 
     #[test]
-    fn space_path_lands_in_the_private_images_region() {
-        assert_eq!(space_path_for("shot.png"), "images/shot.png");
+    fn blob_flag_pins_the_blob_form() {
+        let mut args = args_for("sha256-deadbeef");
+        args.blob = true;
+        assert!(matches!(disambiguate(&args).unwrap(), Target::Blob(_)));
+    }
+
+    #[test]
+    fn a_bare_blob_hash_is_never_guessed() {
+        // No separators and not a UUID: the auto rule reads a path. A
+        // blob id is only used when --blob pins the form.
+        assert!(matches!(
+            disambiguate(&args_for("deadbeefdeadbeef")).unwrap(),
+            Target::Path(_)
+        ));
     }
 }

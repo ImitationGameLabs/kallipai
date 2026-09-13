@@ -2570,6 +2570,7 @@ dependencies = [
  "futures-util",
  "just-llm-client",
  "kallip-common",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
