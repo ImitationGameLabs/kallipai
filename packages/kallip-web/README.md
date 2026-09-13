@@ -10,7 +10,7 @@ The kallipai web app: a SvelteKit SPA (adapter-static) built on the shared
 From this directory (`deno task` merges the root tasks with this
 package's scripts and resolves the closest match):
 
-- `deno task dev` — vite dev server (:5173, the `web.` edge in the dev Caddyfile)
+- `deno task dev` — vite dev server (:5173, the `app.` edge in the dev Caddyfile)
 - `deno task build` — production build into `build/` (adapter-static SPA)
 - `deno task check` — svelte-check
 - `deno task sync` — resolves to the root sync task, which runs this
@@ -27,7 +27,12 @@ project.inlang directory, so three levels up reaches the repo root).
 
 ## Deployment
 
-- **Dev**: the host vite dev server behind the dev Caddyfile (`web.<domain>`).
+kallip-web is the browser app — it owns the `app.<domain>` web origin.
+[`packages/kallip-app`](../kallip-app) is the native release shape (Tauri
+installers): no web origin, no subdomain — it bakes `KALLIP_POLIS_URL` at
+build time and talks to `api.<domain>/v1/*` directly.
+
+- **Dev**: the host vite dev server behind the dev Caddyfile (`app.<domain>`).
 - **NixOS**: the flake's `packages.kallip-web-dist` builds the bundle (two
   derivations: a networked deps build and an offline vite build), and the
   module's `web.distWithRuntimeConfig` option derives the site root that

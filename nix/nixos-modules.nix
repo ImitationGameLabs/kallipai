@@ -162,9 +162,10 @@ in
         description = ''
           Platform edge origin (e.g. "https://api.example.com") the daemon
           fills into relay-intent spawns that omit it (KALLIP_POLIS_URL).
-          null injects nothing: the daemon's fill treats an unset or
-          empty origin as unconfigured, so a spawn carrying only an
-          enrollment code stays local-only. Derive it from
+          null injects nothing: a spawn carrying an enrollment code but
+          no origin then fails loudly at boot (credentials are never
+          sent to an assumed deployment), so set this whenever relay
+          enrollment is in play. Derive it from
           services.kallipai.domain (api.<domain>) rather than a service
           port -- tagma clients append /v1/<service>, which only the
           edge routes.
@@ -488,7 +489,7 @@ in
             apiBase = lib.mkOption {
               type = lib.types.nullOr lib.types.str;
               default = null;
-              description = "Whole-API-origin override (e.g. \"https://api.example.com\"); replaces the derived api.<domain> base for every service.";
+              description = "Platform-edge-origin override (e.g. \"https://api.example.com\"); every service base becomes <apiBase>/v1/<service>; an empty string counts as unset.";
             };
           };
         };

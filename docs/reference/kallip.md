@@ -198,9 +198,10 @@ $ kallip file send <ID> (--to-tagma <TAGMA> | --to-user <USER>) [--json]
 $ kallip file ls --space self|shared [--prefix <PREFIX>] [--limit <N>] [--json]
 ```
 
-Credentials ride the environment, never flags: `KALLIP_FILES_URL`
-(the service base URL) and `KALLIP_FILES_TOKEN` (a tagma's long-lived
-bearer). Provision them where the CLI runs; agent shells inherit the
+Credentials ride the environment, never flags: `KALLIP_POLIS_URL`
+(the platform edge origin — the CLI derives `<origin>/v1/files` from it,
+defaulting to the public deployment) and `KALLIP_FILES_TOKEN` (a tagma's
+long-lived bearer). Provision them where the CLI runs; agent shells inherit the
 tagma's environment as it stands at spawn time, and the boot sweep
 removes `KALLIP_FILES_TOKEN` first, so a provisioned token never
 reaches an agent shell

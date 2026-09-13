@@ -32,7 +32,7 @@ and no DNS-trust setup. Keep `KALLIP_DOMAIN=localhost` (the default is
 the prod domain; the quick start pins localhost) and move the edge off
 the privileged default port: `KALLIP_EDGE_PORT=8080`. Then `arion up -d`
 
-- `deno task dev` and open `http://web.localhost:8080` — browsers
+- `deno task dev` and open `http://app.localhost:8080` — browsers
 resolve every `*.localhost` name to the loopback interface, so no
 hosts-file entry is needed. Login surface: admin key + GitHub oauth;
 passkeys work on localhost out of the box (a browser secure-context
@@ -112,7 +112,7 @@ read none of them: they derive at runtime from the browser location
      `/etc/hosts`:
 
      ```text
-     192.168.1.7  web.kallipai.lan archeion.kallipai.lan lesche.kallipai.lan
+     192.168.1.7  app.kallipai.lan api.kallipai.lan
      ```
 
      `/etc/hosts` does not support wildcard entries, so list each subdomain
@@ -151,7 +151,7 @@ read none of them: they derive at runtime from the browser location
 
 The stack comes up in two phases because the tagma's relay connector cannot
 enroll with the archeion until a real user signs up in the web UI and mints an
-enrollment code -- starting it with `KALLIP_TAGMA_RELAY_ARCHEION_URL` set but no code
+enrollment code -- starting it with `KALLIP_POLIS_URL` set but no code
 degrades the tagma to local-only (it logs an error and keeps serving local
 agents; the lesche message route returns 503).
 
@@ -162,23 +162,21 @@ arion up -d                # caddy + archeion + lesche + files + archeion-postgr
 ```
 
 Dev is fronted by Caddy (see the one-time setup above): the browser loads the
-web app at `https://web.kallipai.lan` and reaches the archeion at
-`https://archeion.kallipai.lan` and the lesche at `https://lesche.kallipai.lan`,
-all TLS-terminated by Caddy. The session cookie carries `Domain=kallipai.lan`
-so it is shared across the archeion/lesche subdomains. The web app (`deno task dev`
-so it is shared across the archeion/lesche subdomains. The web app (`deno task dev`
-from `packages/kallip-web`) derives its API origins in the browser from the
-origin it runs on: `https://web.kallipai.lan` yields the
-`https://archeion.kallipai.lan` / `https://lesche.kallipai.lan` /
-`https://files.kallipai.lan` siblings. The derived URLs already match the
+web app at `https://app.kallipai.lan` and calls the platform at
+`https://api.kallipai.lan`, all TLS-terminated by Caddy. Everything shares
+the one origin pair, so the session cookie stays first-party. The web app
+(`deno task dev` from `packages/kallip-web`) derives its API base in the
+browser from the origin it runs on: `https://app.kallipai.lan` yields
+`https://api.kallipai.lan`, and every client hangs its templates off the
+`/v1/<service>` paths under that base. The derived URLs already match the
 Caddy topology, so no `.env` override is needed for normal LAN dev;
 
 archeion and lesche also publish `7100` / `7200` to the host for plain-HTTP
 tooling — `kallip-admin` and curl keep using `http://localhost:7100` /
 `http://localhost:7200` directly, bypassing Caddy. The files service
-publishes `7400` on the loopback interface only — it serves the `kallip file`
-CLI, not the browser (the host port is overridable via `KALLIP_ARION_FILES_PORT`): the `kallip file`
-CLI points `KALLIP_FILES_URL` at `http://127.0.0.1:7400` and presents a
+publishes `7400` on the loopback interface only — the browser reaches files
+only through the edge (`/v1/files` passes through untouched), while the `kallip file`
+CLI points `KALLIP_POLIS_URL` at the dev edge (`https://api.kallipai.lan`) and presents a
 tagma bearer (`KALLIP_FILES_TOKEN`); see docs/reference/files-api.md.
 The tagma process itself authenticates to the files service with its
 registered enrollment credential — `KALLIP_FILES_TOKEN` provisions
@@ -204,13 +202,13 @@ If `users list` already shows a row, a test account exists -- skip to minting
 the enrollment code below. If the table is empty (fresh volume, or after a
 `down -v` reset), sign up at the web app:
 
-Open the web app at `https://web.kallipai.lan` and sign up with a username +
+Open the web app at `https://app.kallipai.lan` and sign up with a username +
 passkey (or "Continue with GitHub/Google" once OAuth is configured). Once signed
 in, mint a `sk-enroll-...` enrollment code in the web UI and paste it into
 `.env` as `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE`, and set `KALLIP_AUTH_TOKEN` to
-the tagma's operator token. (The tagma's archeion/lesche relay URLs are wired to
-compose DNS by arion -- `http://archeion:7100` / `http://lesche:7200` -- so they
-need no `.env` override.)
+the tagma's operator token. (The tagma's platform edge origin is wired by arion
+to the loopback edge -- `http://127.0.0.1:7443` -- so it
+needs no `.env` override.)
 
 Faster alternative without touching a browser: the dev stack enables the
 local-platform admin-login, so a plain curl exchanges the admin token for a
@@ -258,50 +256,50 @@ The fixture is dev-only; prod must set a strong secret.
 
 The tagma (agent host + in-process relay connector) is a separate composition
 (`compose/dev/tagma.nix`) so its lifecycle does not entangle with the archeion
-side. It runs on the host network and reaches the archeion/lesche at
-`127.0.0.1:7100` / `:7200`, so bring the archeion side up first, then:
+side. It runs on the host network and reaches the platform edge at
+`http://127.0.0.1:7443` (the loopback plaintext face), so bring the archeion side up first, then:
 
 ```sh
 arion -f compose/dev/tagma.nix up -d   # tagma; enrolls its relay
 ```
 
-### Dual-archeion tagma (multi-relay)
+### Multi-edge tagma (multi-relay)
 
-The tagma can hold one identity per archeion simultaneously (e.g. the local
-dev archeion plus a remote one). Declare the entries in
+The tagma can hold one identity per platform deployment simultaneously (e.g. the local
+dev edge plus a remote one). Declare the entries in
 `<data-root>/relays.toml`:
 
 ```toml
 [[relay]]
 name    = "main"                # slug: [a-z0-9][a-z0-9-]*; keys the
-                                # credentials/<name>/ dir (stable across URL changes)
-archeion_url    = "http://127.0.0.1:7100"
-lesche_url   = "http://127.0.0.1:7200"   # optional; defaults to the archeion origin
+                                # credentials/<name>/ dir (stable across origin changes)
+polis_url = "https://api.kallipai.com"   # the platform edge origin
 # enrollment_code = "sk-enroll-..."      # first run only; afterwards the stored token is reused
 
 [[relay]]
 name     = "second"
-archeion_url = "http://127.0.0.1:7101"
+polis_url = "https://relay2.example.com"
 ```
 
-Rules: a `relays.toml` entry and the legacy single-relay env vars
-(`KALLIP_TAGMA_RELAY_*`) are mutually exclusive -- unset the env vars or
-delete the file (the env vars keep working as one implicit `default` entry
-when the file is absent). Each entry enrolls with its own archeion identity
+Rules: a `relays.toml` entry and the env-configured single relay
+(`KALLIP_POLIS_URL`, optionally with `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE`)
+are mutually exclusive -- unset the env vars or delete the file (the env
+vars keep working as one implicit `default` entry when the file is
+absent). Each entry enrolls with its own edge identity
 (`credentials/<name>/tagma.id` + `tagma.token`); the Ed25519 `device.key`
-at the credentials root is shared (one device, many identities). A
-pre-multi-archeion flat `credentials/tagma.id` is migrated into the single
+at the credentials root is shared (one device, many identities). A flat
+`credentials/tagma.id` (single-entry layouts) is migrated into the
 entry's directory on the first boot; anything ambiguous fails fast with
-both exits named. Outbound frames fan out to every online relay; the first
-entry with stored credentials is the "primary" archeion (frontend cache
-key).
+both origins named. Outbound frames fan out to every online relay; the
+first entry with stored credentials is the "primary" edge (frontend
+cache key).
 
-Dual-archeion acceptance runs on a second, parallel stack: the same compose
+Multi-edge acceptance runs on a second, parallel stack: the same compose
 file parameterized by env vars:
 `KALLIP_ARION_PROJECT_NAME=kallipai-dev2 KALLIP_ARION_ARCHEION_PORT=7101 KALLIP_ARION_LESCHE_PORT=7201 arion up -d archeion lesche`
--- with its own containers and volumes, reachable where the old inline
-pair was (caddy routes the archeion2./lesche2. subdomains to those host
-ports). Enroll a code on each side, fill `relays.toml`, and watch the
+-- with its own containers, volumes, and edge: the second stack's caddy
+routes its own `api.` host to those ports, giving the tagma a second
+platform origin. Enroll a code on each side, fill `relays.toml`, and watch the
 tagma log for two `relay connector active` lines (one per entry name); a
 message sent on either side must arrive on both.
 
@@ -313,9 +311,9 @@ receiving) is a manual residual item. Verify it by hand once per dual-archeion
 setup:
 
 1. Bring the archeion side and the web dev server up (`deno task dev` from
-   `packages/kallip-web`), open `https://web.kallipai.lan/register`, and
+   `packages/kallip-web`), open `https://app.kallipai.lan/register`, and
    create a user (username + passkey).
-2. Open `https://web.kallipai.lan/tagmata`, pick the enrolled tagma, send a
+2. Open `https://app.kallipai.lan/tagmata`, pick the enrolled tagma, send a
    message, and wait for the agent reply.
 3. Confirm the exchange landed on both lesche instances. Message bodies
    are E2E ciphertext, so compare rows, not content:
@@ -382,7 +380,7 @@ pure JSON API under `/api/instances/*`, proxying the daemon over its
 UDS socket. Platform mode: the archeion's internal face
 verifies the SPA's `sk-admin-` key (the operator-key login). The SPA
 itself is served by the host vite dev server (Caddy routes
-`web.<devDomain>` to `:5173`) and calls the API cross-origin from the
+`app.<devDomain>` to `:5173`) and calls the API cross-origin from the
 web origin. The operator-key login branch is runtime-config gated: the
 shipped `config.js` factory default is `offlineLogin = true` (the
 self-hosted posture), and a cloud-facing deployment hides the branch by

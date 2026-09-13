@@ -75,7 +75,7 @@ up without an in-compose bake; postgres uses the official `postgres:17.5` image.
 The dev tagma lives in a separate composition (`compose/dev/tagma.nix`), so a
 plain `arion up` brings up only the archeion side; bring the tagma up with
 `arion -f compose/dev/tagma.nix up -d`. It runs on the host network and reaches
-archeion/lesche at `127.0.0.1:7100` / `:7200`. Its relay connector enrolls on first
+the platform edge at `KALLIP_POLIS_URL` (`http://127.0.0.1:7443`, Caddy's loopback plaintext face). Its relay connector enrolls on first
 boot and needs a code that cannot exist until a user signs up — with
 `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` unset it degrades to local-only (logs an
 error, keeps serving local agents; see [Relay bootstrap](#relay-bootstrap)).
@@ -88,18 +88,18 @@ browsers only allow WebAuthn in a secure context, so the previous plain-HTTP
 code default for `KALLIP_DOMAIN` is the prod domain (`kallipai.com`), which
 `.env.example` overrides to `kallipai.lan` for local dev (copied into `.env`,
 loaded into the shell by direnv's `dotenv`) so dev never clashes with
-production. Caddy runs on the host network and proxies the dev subdomains to
-`127.0.0.1`: `web.kallipai.lan` -> the host vite dev server (`:5173`);
-`archeion.kallipai.lan` / `lesche.kallipai.lan` -> the host-published `:7100` /
-`:7200`; `files.kallipai.lan` -> the host-published `:7400` (browser-direct, the lesche pattern). The session cookie carries `Domain=kallipai.lan`
-(`KALLIP_ARCHEION_SESSION_COOKIE_DOMAIN`), so the cookie set at login on the archeion
-is sent to the lesche too — both subdomains share the registrable domain
-`kallipai.lan` (same-site under `SameSite=Strict`) — and CORS on each service
-allows the `https://web.kallipai.lan` origin with credentials. One-time host
+production. Caddy runs on the host network and host-routes two vhosts to
+`127.0.0.1`: `app.kallipai.lan` -> the host vite dev server (`:5173`), and
+`api.kallipai.lan` -> the platform's single API face, path-routed by
+service under `/v1/<service>` (archeion `:7100`, lesche `:7200`, files
+`:7400` pass-through, instances `:7300`). Everything a browser calls
+lives on the one `api.` origin, so the session cookie needs no `Domain`
+attribute and CORS collapses to the `https://app.kallipai.lan` origin
+with credentials. One-time host
 setup (mkcert cert + LAN DNS) and client CA trust are covered in
-[development.md](../development.md). The tagma container reaches the two
-services via compose DNS (`http://archeion:7100`, `http://lesche:7200`), not via
-Caddy.
+[development.md](../development.md). The tagma container reaches the
+edge's loopback plaintext face (`http://127.0.0.1:7443`), not the
+certificate-backed vhosts.
 
 ## Production
 
@@ -111,22 +111,17 @@ resolves):
 
 Brings up the tagma (agent host + in-process relay connector) from
 `packages.kallip-tagma-image`. The relay connector talks to the prod-deployed
-services over the public internet: the archeion subdomain
-(`KALLIP_TAGMA_RELAY_ARCHEION_URL`, e.g. `https://archeion.kallipai.com`) for
-enrollment only — the stored tagma token is reused thereafter — and the lesche
-subdomain (`KALLIP_TAGMA_RELAY_LESCHE_URL`, e.g. `https://lesche.kallipai.com`)
-for its tunnel,
-envelope POSTs, and key-exchange responses (the per-service subdomain
-topology).
+platform over the public internet through one origin (`KALLIP_POLIS_URL`,
+e.g. `https://api.kallipai.com`): enrollment posts to `{origin}/v1/archeion`
+— the stored tagma token is reused thereafter — and the tunnel, envelope
+POSTs, and key-exchange responses go to `{origin}/v1/lesche`.
 
 > **Note**: the data-plane relay (`kallip-lesche`) is a separate service from
-> the archeion, reached over its `/internal/*` ControlPlane API guarded by a shared
-> secret (the archeion-provisioned internal token on both). The operator's edge
-> HOST-routes the two subdomains to the two
-> services and the session cookie carries `Domain=<parent>`
-> (`KALLIP_ARCHEION_SESSION_COOKIE_DOMAIN`) so login on `archeion.<d>` is recognized on
-> `lesche.<d>`. `/internal` is reached by the lesche over the private network,
-> never via the public edge.
+> the archeion, reached over its `/internal/*` ControlPlane API guarded by a
+> shared secret (the archeion-provisioned internal token on both). The
+> operator's edge path-routes `/v1/archeion` and `/v1/lesche` on the single
+> `api.<d>` host to the two services; `/internal` is reached by the lesche
+> over the private network, never via the public edge.
 
 ```sh
 arion -f compose/prod/tagma.nix up -d
@@ -143,14 +138,27 @@ Brings up the archeion (from `packages.kallip-archeion-image`) + lesche (from
 `archeion-postgres` / `lesche-postgres` / `files-postgres` (official
 `postgres:17.5` image) — co-located on one host. **None of the three services
 is published** — all sit behind the operator's TLS-terminating edge
-proxy, which HOST-routes `archeion.<d>` → `archeion:7100`, `lesche.<d>` →
-`lesche:7200`, and `files.<d>` → `files:7400` (per-service subdomains) and
+proxy, which path-routes the single `api.<d>` host by service (`/v1/archeion/*` →
+`archeion:7100`, `/v1/lesche/*` → `lesche:7200`, `/v1/files/*` → `files:7400`,
+`/v1/instances/*` → `instances:7300`) and
 sets `X-Forwarded-For`; configure
 `KALLIP_ARCHEION_TRUSTED_PROXIES` to the proxy's CIDR. Secret-bearing env (DB
 url, WebAuthn RP, CORS, cookie domain, admin token, the internal shared
 secret) and the postgres credentials come from `.env`; each service's
 operational env (listen addr, files blob root, internal hop URL) is
 pinned inline in `service.environment`, which overrides `env_file`.
+The operator edge route table (Caddy) for the `api.<d>` host — the formal
+prod edge spec (dev's `Caddyfile.dev` mirrors it on the loopback face;
+unlisted `/v1/*` prefixes are a real 404):
+
+```caddy
+api.<d> {
+	handle_path /v1/archeion/*  { rewrite * /v1{uri}              reverse_proxy archeion:7100 }
+	handle_path /v1/lesche/*    { rewrite * /v1{uri}              reverse_proxy lesche:7200 } # flush_interval -1 for SSE
+	handle /v1/files/*          { reverse_proxy files:7400 }
+	handle_path /v1/instances/* { rewrite * /api/instances{uri}   reverse_proxy instances:7300 }
+}
+```
 
 ```sh
 arion -f compose/prod/polis.nix up -d
@@ -375,8 +383,7 @@ Relay connector (dev / the prod-tagma composition) — activate + enroll via `.e
 
 | Variable                             | Required             | Notes                                                                                                                                                        |
 | ------------------------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `KALLIP_TAGMA_RELAY_ARCHEION_URL`       | **yes** (prod-tagma) | The prod-archeion deploy's public HTTPS URL, for enrollment only. Setting any value activates the relay. (Dev hardcodes `http://archeion:7100`.)                   |
-| `KALLIP_TAGMA_RELAY_LESCHE_URL`      | no                   | The prod-lesche deploy's public HTTPS URL (tunnel + envelopes + KEX). Defaults to the `KALLIP_TAGMA_RELAY_ARCHEION_URL` origin; set it for the subdomain split. |
+| `KALLIP_POLIS_URL`                   | **yes** (prod-tagma) | The platform edge origin (e.g. `https://api.kallipai.com`); enrollment, tunnel, and envelope posts all derive from it. (Dev sets `http://127.0.0.1:7443`, the loopback edge.) |
 | `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` | first boot only      | A `sk-enroll-...` minted via the archeion dashboard. Remove after the first successful enroll.                                                                  |
 
 Archeion + lesche + their two postgres services (the prod-archeion composition) —
@@ -440,7 +447,7 @@ nix build .#kallip-archeion-image
 docker load < result
 docker run --rm \
   -e KALLIP_ARCHEION_DATABASE_URL=postgres://kallip:...@postgres:5432/kallip \
-  -e KALLIP_ARCHEION_WEBAUTHN_RP_ID=archeion.example.com \
+  -e KALLIP_ARCHEION_WEBAUTHN_RP_ID=app.example.com \
   -e KALLIP_ARCHEION_WEBAUTHN_RP_ORIGIN=https://app.example.com \
   -e KALLIP_ARCHEION_CORS_ORIGINS=https://app.example.com \
   kallip-archeion:latest

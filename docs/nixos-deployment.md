@@ -12,8 +12,8 @@ the authoritative reference for everything this guide summarizes.
 
 - A NixOS host with flakes enabled
   (`nix.settings.experimental-features = [ "nix-command" "flakes" ]`).
-- For the proxied shape: DNS records pointing the subdomains (`archeion.`,
-  `lesche.`, `files.`, `instances.`, and optionally `web.`) at the host.
+- For the proxied shape: DNS records pointing `app.<domain>` and
+  `api.<domain>` at the host.
   On a public domain with ports 80 and 443 reachable, Caddy obtains
   certificates automatically; on a private domain like the `kallipai.lan`
   example below, ACME cannot issue — use `tls internal` in your site
@@ -90,21 +90,7 @@ them.
 { config, ... }:
 let
   domain = "kallipai.lan";
-  # The lesche streams event payloads, so its proxy disables response
-  # buffering; the other backends proxy bare.
-  backendExtra = {
-    lesche = ''
-      reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.ports.lesche} {
-        flush_interval -1
-      }
-    '';
-  };
-  backendVhost = svc: {
-    name = "http://${svc}.${domain}";
-    value.extraConfig = backendExtra.${svc} or ''
-      reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.ports.${svc}}
-    '';
-  };
+  ports = config.services.kallipai.polis.ports;
 in
 {
   services.kallipai = {
@@ -117,17 +103,34 @@ in
   services.caddy = {
     enable = true;
     virtualHosts = {
-      "http://web.${domain}".extraConfig = ''
+      # The web app: the SPA with the runtime config baked in.
+      "http://app.${domain}".extraConfig = ''
         root * ${config.services.kallipai.web.distWithRuntimeConfig}
         try_files {path} /index.html
         file_server
       '';
-    } // builtins.listToAttrs (map backendVhost [
-      "archeion"
-      "lesche"
-      "files"
-      "instances"
-    ]);
+      # The platform's single API face: path-routed per service.
+      "http://api.${domain}".extraConfig = ''
+        handle_path /v1/archeion/* {
+          rewrite * /v1{uri}
+          reverse_proxy 127.0.0.1:${toString ports.archeion}
+        }
+        handle_path /v1/lesche/* {
+          rewrite * /v1{uri}
+          reverse_proxy 127.0.0.1:${toString ports.lesche} {
+            flush_interval -1
+          }
+        }
+        @files path /v1/files /v1/files/*
+        handle @files {
+          reverse_proxy 127.0.0.1:${toString ports.files}
+        }
+        handle_path /v1/instances/* {
+          rewrite * /api/instances{uri}
+          reverse_proxy 127.0.0.1:${toString ports.instances}
+        }
+      '';
+    };
   };
 }
 ```
@@ -193,10 +196,10 @@ internal-token section describes.
 ## The reverse proxy (your edge)
 
 The Minimal configuration block above is the complete edge: one Caddy
-site per public name reverse-proxying to the localhost listeners, plus
-one static site for the web app. What each piece does:
+site for the `api.` face path-routing the four services to the localhost
+listeners, plus one static site for the web app. What each piece does:
 
-- The four polis subdomains proxy to the localhost ports listed in the
+- The `api.` site path-routes the four services to the localhost ports in the
   Ports section below. The lesche route flushes immediately
   (`flush_interval -1`) so the event stream does not buffer behind the
   proxy; the other three are plain request/response.
@@ -230,13 +233,13 @@ must be distinct — the module fails evaluation otherwise). The proxy
 blocks above read these ports from the module, so a changed port
 re-targets its site block on the next rebuild.
 
-Serving the web app direct-connect instead — browsers reaching the
-polis services by plain port rather than through same-domain
-subdomains — is a valid shape, but nothing pins it for you: pin each
-service URL under `services.kallipai.web.runtimeConfig.services`, and
-set the archeion's CORS allow-list (`corsOrigins`) to the origins the
-browser actually uses. Prefer the proxy shape unless you have a reason
-not to.
+Pointing the web app at a different platform face — browsers reaching
+the platform through an origin other than the derived `api.` host — is
+one override: set that origin under
+`services.kallipai.web.runtimeConfig.apiBase` (every service base
+becomes `<apiBase>/v1/<service>`), and set the archeion's CORS
+allow-list (`corsOrigins`) to the origins the browser actually uses.
+Prefer the proxy shape unless you have a reason not to.
 
 ## HTTPS on a LAN or home network
 
@@ -249,14 +252,14 @@ Add `tls internal` to each site block in the Minimal configuration —
 a host's block then reads, for example:
 
 ```nix
-services.caddy.virtualHosts."archeion.kallipai.lan".extraConfig = ''
-  reverse_proxy 127.0.0.1:7100
+services.caddy.virtualHosts."http://api.kallipai.lan".extraConfig = ''
+  # ...the api handle blocks from the Minimal configuration...
   tls internal
 '';
 ```
 
-Repeat for the other subdomains — `lesche.`, `files.`, `instances.`,
-and `web.` — if every subdomain is to serve https. The internal CA's
+Repeat for the other host — `app.` —
+if both names are to serve https. The internal CA's
 root certificate appears after Caddy's first start at
 `/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt`
 (confirm it with `ls` on the target host). Distribute trust from there:
@@ -296,11 +299,11 @@ systemctl status kallip-daemon kallip-archeion kallip-lesche \
   kallip-files kallip-instances
 ```
 
-Then confirm each subdomain answers — `archeion.kallipai.lan`
-for sign-up and login, `web.kallipai.lan` for the app, and the lesche,
-files, and instances subdomains through the same proxy. A healthy
-deployment: the app loads, you can sign up and sign in, and you can
-create a first agent.
+Then confirm the two hosts answer — `api.kallipai.lan` for the
+platform (sign-up and login ride `/v1/archeion`; files and instances
+ride their `/v1/*` prefixes through the same host), and
+`app.kallipai.lan` for the web app. A healthy deployment: the app
+loads, you can sign up and sign in, and you can create a first agent.
 
 A missing internal-token file is not an error on the archeion's first
 boot — it generates one. The lesche, files, and instances units require

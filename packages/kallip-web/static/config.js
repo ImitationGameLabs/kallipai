@@ -12,7 +12,6 @@
 window.KALLIP_CONFIG = {
   // domain: "example.com", // deployment domain; the API face is api.<domain>
   offlineLogin: true, // true = show the operator-key login branch
-  // apiBase: "https://api.example.com", // whole API origin; overrides the derived api.<domain>
-  // Uncomment only with real values: an empty string is not "unset" —
-  // the override is returned as-is, never re-derived.
+  // apiBase: "https://api.example.com", // platform edge origin; every service base becomes <apiBase>/v1/<service>
+  // An empty string counts as unset (the api.<domain> derivation applies).
 };

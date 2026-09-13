@@ -116,15 +116,12 @@ tagma metadata, attests identity facts, and advances the tunnel-proof replay
 guard through a narrow `ControlPlane` trait, reached over the archeion's non-public
 `/internal/*` HTTP API.
 
-The two services are addressed on their own subdomains (`archeion.<d>` /
-`lesche.<d>` — e.g. `archeion.kallipai.lan` / `lesche.kallipai.lan` in dev,
-`archeion.kallipai.com` / `lesche.kallipai.com` in prod). The web app and the tagma
-talk to each by its own subdomain. The session cookie carries a configurable
-`Domain` attribute (`KALLIP_ARCHEION_SESSION_COOKIE_DOMAIN`, the parent domain) so
-the cookie set on login at `archeion.<d>` is also sent to `lesche.<d>`; the two
-subdomains share a registrable domain (same-site under `SameSite=Strict`), and
-each service's CORS allowlist authorizes the web origin with credentials. A
-single-origin deploy leaves the cookie host-only (the attribute unset).
+Both services are addressed on the single platform origin: the web app and
+the tagma call `https://api.<d>/v1/archeion` and `https://api.<d>/v1/lesche`
+(e.g. `api.kallipai.lan` in dev, `api.kallipai.com` in prod). Same-origin by
+construction, the session cookie stays host-only (no `Domain` attribute),
+and each service's CORS allowlist authorizes the app origin with
+credentials.
 
 That `/internal/*` surface is guarded by a shared-secret bearer
 (the archeion-provisioned internal token, the same value on the archeion and the

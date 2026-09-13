@@ -1,42 +1,30 @@
-# KallipAI
+# kallip-app
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+The kallipai native app: the SvelteKit source that Tauri wraps into the
+mobile/desktop installers. Part of the JS/TS workspace under `packages/`;
+see `docs/frontend-development.md` for the toolchain — everything runs
+through `deno task`, never npm/npx.
 
-## Creating a project
+kallip-app is the **native release shape** of the web experience, not a
+second website: it has no web origin and no subdomain. The backend base
+is baked at build time from `KALLIP_POLIS_URL` (exposed to the bundle via
+the vite `envPrefix`), and every client talks to `<origin>/v1/<service>`
+directly. The browser deployment of the same UI is
+[`packages/kallip-web`](../kallip-web) — it owns the `app.<domain>` web
+origin.
 
-If you're seeing this, you've probably already done this step. Congrats!
+## Commands
 
-```sh
-# create a new project
-npx sv create my-app
-```
+From this directory (`deno task` merges the root tasks with this
+package's scripts and resolves the closest match):
 
-To recreate this project with the same configuration:
+- `deno task dev` — vite dev server for the Tauri webview
+- `deno task build` — production build (consumed by the Tauri packaging)
+- `deno task check` — svelte-check
+- `deno task tauri` — the Tauri CLI (desktop dev/build flows)
 
-```sh
-# recreate this project
-deno run npm:sv@0.16.3 create --template demo --types ts --add tailwindcss="plugins:forms,typography" sveltekit-adapter="adapter:auto" --install deno kallip-frontend
-```
+## i18n
 
-## Developing
-
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
-
-```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
-```
-
-## Building
-
-To create a production version of your app:
-
-```sh
-npm run build
-```
-
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+Messages live in `../kallip-ui/i18n/project.inlang/messages/<locale>/*.json`.
+After adding or changing keys, regenerate the paraglide output from the repo
+root with `deno task i18n` (the compiled output is gitignored).
