@@ -41,7 +41,11 @@ pub struct ArcheionClient {
 impl ArcheionClient {
     /// Start building an [`ArcheionClient`].
     ///
-    /// `base_url` is the archeion's HTTP root (e.g. `http://127.0.0.1:7100`).
+    /// `base_url` is the archeion control-plane root: the /v1 prefix the
+    /// server nests its routes under, plus the /v1/archeion service
+    /// segment when reached through the platform edge (e.g.
+    /// `http://127.0.0.1:7100/v1` direct, `https://api.example.com/v1/archeion`
+    /// through the edge).
     pub fn builder(base_url: &str) -> ArcheionClientBuilder {
         ArcheionClientBuilder {
             base_url: base_url.trim_end_matches('/').to_owned(),
@@ -52,14 +56,14 @@ impl ArcheionClient {
 
     /// Construct a client from environment variables.
     ///
-    /// Reads `KALLIP_ARCHEION_URL` (default: `http://127.0.0.1:7100`) and
+    /// Reads `KALLIP_ARCHEION_URL` (default: `http://127.0.0.1:7100/v1`, the
     /// `KALLIP_ARCHEION_ADMIN_TOKEN` (the `sk-admin-` token, required) -- the same
     /// variable the archeion server reads, so a deployment defines the admin token
     /// once. For a tokenless (enroll-only) client, build via [`Self::builder`]
     /// directly.
     pub fn from_env() -> Result<Self> {
         let url = std::env::var("KALLIP_ARCHEION_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:7100".to_string());
+            .unwrap_or_else(|_| "http://127.0.0.1:7100/v1".to_string());
         let token = std::env::var("KALLIP_ARCHEION_ADMIN_TOKEN")
             .context("KALLIP_ARCHEION_ADMIN_TOKEN required (the sk-admin- token)")?;
         Self::builder(&url).admin_token(token).build()
@@ -143,7 +147,7 @@ impl ArcheionClient {
     pub async fn admin_verify_token(&self) -> Result<()> {
         self.require_admin_token()?;
         let resp = self
-            .with_admin_auth(self.inner.http.get(self.url("/v1/admin")))
+            .with_admin_auth(self.inner.http.get(self.url("/admin")))
             .send()
             .await
             .context("admin ping failed")?;
@@ -169,7 +173,7 @@ impl ArcheionClient {
             .handle_response(
                 self.inner
                     .http
-                    .post(self.url("/v1/tagmata/enroll"))
+                    .post(self.url("/tagmata/enroll"))
                     .json(&req)
                     .send()
                     .await
@@ -190,15 +194,10 @@ impl ArcheionClient {
     ) -> Result<CreateEnrollmentCodeResponse> {
         self.require_admin_token()?;
         self.handle_response(
-            self.with_admin_auth(
-                self.inner
-                    .http
-                    .post(self.url("/v1/admin/tagmata"))
-                    .json(&body),
-            )
-            .send()
-            .await
-            .context("create enrollment code failed")?,
+            self.with_admin_auth(self.inner.http.post(self.url("/admin/tagmata")).json(&body))
+                .send()
+                .await
+                .context("create enrollment code failed")?,
             "decode enrollment code response",
         )
         .await
@@ -208,15 +207,10 @@ impl ArcheionClient {
     pub async fn admin_list_users(&self, query: &PageQuery) -> Result<Page<UserSummary>> {
         self.require_admin_token()?;
         self.handle_response(
-            self.with_admin_auth(
-                self.inner
-                    .http
-                    .get(self.url("/v1/admin/users"))
-                    .query(query),
-            )
-            .send()
-            .await
-            .context("list users failed")?,
+            self.with_admin_auth(self.inner.http.get(self.url("/admin/users")).query(query))
+                .send()
+                .await
+                .context("list users failed")?,
             "decode user page",
         )
         .await
@@ -234,7 +228,7 @@ impl ArcheionClient {
             self.with_admin_auth(
                 self.inner
                     .http
-                    .patch(self.url(&format!("/v1/admin/users/{user_id}")))
+                    .patch(self.url(&format!("/admin/users/{user_id}")))
                     .json(&body),
             )
             .send()
@@ -252,7 +246,7 @@ impl ArcheionClient {
             self.with_admin_auth(
                 self.inner
                     .http
-                    .get(self.url(&format!("/v1/admin/users/{user_id}/passkeys"))),
+                    .get(self.url(&format!("/admin/users/{user_id}/passkeys"))),
             )
             .send()
             .await
@@ -270,7 +264,7 @@ impl ArcheionClient {
             self.with_admin_auth(
                 self.inner
                     .http
-                    .delete(self.url(&format!("/v1/admin/passkeys/{passkey_id}"))),
+                    .delete(self.url(&format!("/admin/passkeys/{passkey_id}"))),
             )
             .send()
             .await
@@ -370,7 +364,7 @@ mod tests {
     async fn admin_list_users_paginates() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/v1/admin/users"))
+            .and(path("/admin/users"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "items": [{
                     "id": "u1",
@@ -397,7 +391,7 @@ mod tests {
     async fn admin_revoke_passkey_is_empty_204() {
         let server = MockServer::start().await;
         Mock::given(method("DELETE"))
-            .and(path("/v1/admin/passkeys/some-id"))
+            .and(path("/admin/passkeys/some-id"))
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
@@ -411,7 +405,7 @@ mod tests {
     async fn admin_error_envelope_is_parsed() {
         let server = MockServer::start().await;
         Mock::given(method("PATCH"))
-            .and(path("/v1/admin/users/nope"))
+            .and(path("/admin/users/nope"))
             .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
                 "error": { "message": "unknown user" }
             })))
@@ -443,7 +437,7 @@ mod tests {
     async fn enroll_decodes_response() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/tagmata/enroll"))
+            .and(path("/tagmata/enroll"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "tagma_id": "tagma-1",
                 "tagma_token": "sk-tagma-x",
@@ -463,7 +457,7 @@ mod tests {
     async fn admin_create_enrollment_code_round_trips() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/admin/tagmata"))
+            .and(path("/admin/tagmata"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(serde_json::json!({ "code": "sk-enroll-z" })),

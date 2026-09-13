@@ -60,22 +60,8 @@ Deno.test("config.domain overrides the hostname-derived domain", () => {
 
 Deno.test("explicit apiBase override wins over derivation", () => {
   assertEquals(
-    serviceUrl("archeion", { apiBase: "http://10.0.0.7:8080" }, page),
-    "http://10.0.0.7:8080/v1/archeion",
-  );
-});
-
-Deno.test("apiBase override trims a trailing slash", () => {
-  assertEquals(
-    serviceUrl("files", { apiBase: "https://edge.example.com/" }, page),
-    "https://edge.example.com/v1/files",
-  );
-});
-
-Deno.test("an empty apiBase counts as unset", () => {
-  assertEquals(
-    serviceUrl("archeion", { apiBase: "" }, page),
-    "https://api.kallipai.com/v1/archeion",
+    serviceUrl("archeion", { apiBase: "http://10.0.0.7:7100" }, page),
+    "http://10.0.0.7:7100",
   );
 });
 

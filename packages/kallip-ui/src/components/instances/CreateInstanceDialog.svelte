@@ -12,9 +12,8 @@
   export interface AdvancedSpawnFields {
     slug: string;
     workspace: string;
-    archeionUrl: string;
+    polisUrl: string;
     enrollmentCode: string;
-    lescheUrl: string;
     instanceToken: string;
     llmProvider: string;
     llmModel: string;
@@ -53,9 +52,8 @@
     manage_instances_method_cloud_title,
     manage_instances_method_local_desc,
     manage_instances_method_local_title,
-    manage_instances_spawn_archeion_label,
+    manage_instances_spawn_polis_label,
     manage_instances_spawn_enrollment_label,
-    manage_instances_spawn_lesche_label,
     manage_instances_spawn_llm_api_key_label,
     manage_instances_spawn_llm_model_label,
     manage_instances_spawn_llm_provider_label,
@@ -109,9 +107,8 @@
   let fields = $state<AdvancedSpawnFields>({
     slug: "",
     workspace: "",
-    archeionUrl: "",
+    polisUrl: "",
     enrollmentCode: "",
-    lescheUrl: "",
     instanceToken: "",
     llmProvider: "",
     llmModel: "",
@@ -130,9 +127,8 @@
       fields = {
         slug: "",
         workspace: "",
-        archeionUrl: "",
+        polisUrl: "",
         enrollmentCode: "",
-        lescheUrl: "",
         instanceToken: "",
         llmProvider: "",
         llmModel: "",
@@ -182,9 +178,8 @@
       void onSpawn({
         slug: fields.slug.trim(),
         workspace: fields.workspace.trim(),
-        archeionUrl: fields.archeionUrl,
+        polisUrl: fields.polisUrl,
         enrollmentCode: fields.enrollmentCode,
-        lescheUrl: fields.lescheUrl,
         instanceToken: fields.instanceToken,
         llmProvider: fields.llmProvider,
         llmModel: fields.llmModel,
@@ -358,12 +353,9 @@
                 </label>
                 <label class="flex flex-col gap-1 sm:col-span-2">
                   <span class="text-sm opacity-70">
-                    {manage_instances_spawn_archeion_label()}
+                    {manage_instances_spawn_polis_label()}
                   </span>
-                  <input
-                    class="input text-sm"
-                    bind:value={fields.archeionUrl}
-                  />
+                  <input class="input text-sm" bind:value={fields.polisUrl} />
                 </label>
                 <label class="flex flex-col gap-1 sm:col-span-2">
                   <span class="text-sm opacity-70">
@@ -373,12 +365,6 @@
                     class="input text-sm"
                     bind:value={fields.enrollmentCode}
                   />
-                </label>
-                <label class="flex flex-col gap-1 sm:col-span-2">
-                  <span class="text-sm opacity-70">
-                    {manage_instances_spawn_lesche_label()}
-                  </span>
-                  <input class="input text-sm" bind:value={fields.lescheUrl} />
                 </label>
                 <label class="flex flex-col gap-1 sm:col-span-2">
                   <span class="text-sm opacity-70">

@@ -100,8 +100,10 @@ pub struct LescheHttpError {
 }
 
 impl LescheClient {
-    /// Start building a [`LescheClient`]. `tagma_token` is the `sk-tagma-`
-    /// bearer used on every data-plane call.
+    /// Start building a [`LescheClient`]. `base_url` is the lesche service
+    /// root (including the /v1/lesche service segment through the platform
+    /// edge). `tagma_token` is the `sk-tagma-` bearer used on every
+    /// data-plane call.
     pub fn builder(base_url: &str, tagma_token: impl Into<String>) -> LescheClientBuilder {
         LescheClientBuilder {
             base_url: base_url.trim_end_matches('/').to_owned(),
@@ -112,11 +114,11 @@ impl LescheClient {
     }
 
     /// Construct a client from environment variables: `KALLIP_LESCHE_URL`
-    /// (default: `http://127.0.0.1:7200`) and `KALLIP_LESCHE_TAGMA_TOKEN`
+    /// (default: `http://127.0.0.1:7200/v1`) and `KALLIP_LESCHE_TAGMA_TOKEN`
     /// (required).
     pub fn from_env() -> Result<Self> {
         let url = std::env::var("KALLIP_LESCHE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:7200".to_string());
+            .unwrap_or_else(|_| "http://127.0.0.1:7200/v1".to_string());
         let token = std::env::var("KALLIP_LESCHE_TAGMA_TOKEN")
             .context("KALLIP_LESCHE_TAGMA_TOKEN required")?;
         Self::builder(&url, token).build()
@@ -139,7 +141,7 @@ impl LescheClient {
             Duration::from_secs(8),
             Duration::from_secs(16),
         ];
-        let url = self.url(&format!("/v1/conversations/{conv_id}/envelopes"));
+        let url = self.url(&format!("/conversations/{conv_id}/envelopes"));
         for wait in BACKOFF {
             let resp = self
                 .inner
@@ -190,7 +192,7 @@ impl LescheClient {
         // system will not catch it (both are UUID-string newtypes).
         let mut envelope = envelope.clone();
         envelope.channel_id = ChannelId::from(room_id.as_ref().to_string());
-        let url = self.url(&format!("/v1/rooms/{room_id}/envelopes"));
+        let url = self.url(&format!("/rooms/{room_id}/envelopes"));
         for wait in BACKOFF {
             let resp = self
                 .inner
@@ -240,7 +242,7 @@ impl LescheClient {
         let resp = self
             .inner
             .http_post
-            .get(self.url(&format!("/v1/rooms/{room_id}/messages")))
+            .get(self.url(&format!("/rooms/{room_id}/messages")))
             .query(&query)
             .bearer_auth(&self.inner.tagma_token)
             .send()
@@ -266,7 +268,7 @@ impl LescheClient {
         let resp = self
             .inner
             .http_post
-            .get(self.url(&format!("/v1/tagmata/{tagma_id}/rooms")))
+            .get(self.url(&format!("/tagmata/{tagma_id}/rooms")))
             .bearer_auth(&self.inner.tagma_token)
             .send()
             .await
@@ -284,9 +286,7 @@ impl LescheClient {
         conv_id: &ConversationId,
         response: &KeyExchangeResponse,
     ) -> Result<()> {
-        let url = self.url(&format!(
-            "/v1/conversations/{conv_id}/key-exchange/response"
-        ));
+        let url = self.url(&format!("/conversations/{conv_id}/key-exchange/response"));
         let resp = self
             .inner
             .http_post
@@ -307,7 +307,7 @@ impl LescheClient {
     /// lesche side times out and surfaces a 504 to the proxy caller, so a
     /// dropped reply degrades to an error, never to stale data.
     pub async fn post_manage_reply(&self, payload: &ManageRestReply) -> Result<()> {
-        let url = self.url("/v1/tunnel/manage-reply");
+        let url = self.url("/tunnel/manage-reply");
         let resp = self
             .inner
             .http_post
@@ -336,7 +336,7 @@ impl LescheClient {
         tagma_id: &TagmaId,
         events: &[UpstreamEvent],
     ) -> Result<UpstreamAck> {
-        let url = self.url(&format!("/v1/tagmata/{tagma_id}/upstream"));
+        let url = self.url(&format!("/tagmata/{tagma_id}/upstream"));
         let resp = self
             .inner
             .http_post
@@ -365,7 +365,7 @@ impl LescheClient {
         device: &DeviceKey,
         tagma_id: &TagmaId,
     ) -> Result<impl futures_core::Stream<Item = Result<TunnelInbound>> + use<>> {
-        let url = self.url("/v1/tunnel");
+        let url = self.url("/tunnel");
         let unix_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -406,7 +406,7 @@ impl LescheClient {
         let resp = self
             .inner
             .http_post
-            .post(self.url("/v1/direct-sessions"))
+            .post(self.url("/direct-sessions"))
             .bearer_auth(&self.inner.tagma_token)
             .json(&Body {
                 peer: peer.as_ref(),
@@ -431,7 +431,7 @@ impl LescheClient {
         let resp = self
             .inner
             .http_post
-            .get(self.url("/v1/direct-sessions"))
+            .get(self.url("/direct-sessions"))
             .bearer_auth(&self.inner.tagma_token)
             .send()
             .await
@@ -463,7 +463,7 @@ impl LescheClient {
         ];
         let mut envelope = envelope.clone();
         envelope.channel_id = ChannelId::from(session_id.as_ref().to_string());
-        let url = self.url(&format!("/v1/direct-sessions/{session_id}/messages"));
+        let url = self.url(&format!("/direct-sessions/{session_id}/messages"));
         for wait in BACKOFF {
             let resp = self
                 .inner
@@ -514,7 +514,7 @@ impl LescheClient {
         let resp = self
             .inner
             .http_post
-            .get(self.url(&format!("/v1/direct-sessions/{session_id}/messages")))
+            .get(self.url(&format!("/direct-sessions/{session_id}/messages")))
             .query(&query)
             .bearer_auth(&self.inner.tagma_token)
             .send()
@@ -546,7 +546,7 @@ impl LescheClient {
         let resp = self
             .inner
             .http_post
-            .put(self.url(&format!("/v1/direct-sessions/{session_id}/read-cursor")))
+            .put(self.url(&format!("/direct-sessions/{session_id}/read-cursor")))
             .bearer_auth(&self.inner.tagma_token)
             .json(&Body { last_read_seq })
             .send()
@@ -719,14 +719,14 @@ mod tests {
         let server = MockServer::start().await;
         let conv = conv();
         Mock::given(method("POST"))
-            .and(path(format!("/v1/conversations/{conv}/envelopes")))
+            .and(path(format!("/conversations/{conv}/envelopes")))
             .and(header("authorization", "Bearer sk-tagma-test"))
             .respond_with(ResponseTemplate::new(503))
             .up_to_n_times(1)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path(format!("/v1/conversations/{conv}/envelopes")))
+            .and(path(format!("/conversations/{conv}/envelopes")))
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
@@ -741,7 +741,7 @@ mod tests {
         let server = MockServer::start().await;
         let conv = conv();
         Mock::given(method("POST"))
-            .and(path(format!("/v1/conversations/{conv}/envelopes")))
+            .and(path(format!("/conversations/{conv}/envelopes")))
             .respond_with(ResponseTemplate::new(401))
             .mount(&server)
             .await;
@@ -759,7 +759,7 @@ mod tests {
         let server = MockServer::start().await;
         let room = RoomId::from("room-1".to_string());
         Mock::given(method("POST"))
-            .and(path(format!("/v1/rooms/{room}/envelopes")))
+            .and(path(format!("/rooms/{room}/envelopes")))
             .and(header("authorization", "Bearer sk-tagma-test"))
             .respond_with(ResponseTemplate::new(202))
             .mount(&server)
@@ -775,7 +775,7 @@ mod tests {
         let server = MockServer::start().await;
         let room = RoomId::from("room-1".to_string());
         Mock::given(method("POST"))
-            .and(path(format!("/v1/rooms/{room}/envelopes")))
+            .and(path(format!("/rooms/{room}/envelopes")))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
@@ -796,7 +796,7 @@ mod tests {
         let server = MockServer::start().await;
         let room = RoomId::from("room-1".to_string());
         Mock::given(method("POST"))
-            .and(path(format!("/v1/rooms/{room}/envelopes")))
+            .and(path(format!("/rooms/{room}/envelopes")))
             .and(body_partial_json(
                 serde_json::json!({ "channel_id": "room-1" }),
             ))
@@ -825,7 +825,7 @@ mod tests {
             "created_at": "2026-08-02T00:00:00Z",
         }]);
         Mock::given(method("GET"))
-            .and(path("/v1/rooms/room-1/messages"))
+            .and(path("/rooms/room-1/messages"))
             .and(query_param("after_seq", "2"))
             .and(query_param("limit", "10"))
             .and(header("authorization", "Bearer sk-tagma-test"))
@@ -848,7 +848,7 @@ mod tests {
         let server = MockServer::start().await;
         let peer = TagmaId::from("tagma-2".to_string());
         Mock::given(method("POST"))
-            .and(path("/v1/direct-sessions"))
+            .and(path("/direct-sessions"))
             .and(header("authorization", "Bearer sk-tagma-test"))
             .and(body_partial_json(serde_json::json!({ "peer": "tagma-2" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -870,7 +870,7 @@ mod tests {
     async fn list_direct_sessions_decodes_the_view_list() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/v1/direct-sessions"))
+            .and(path("/direct-sessions"))
             .and(header("authorization", "Bearer sk-tagma-test"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {
@@ -895,7 +895,7 @@ mod tests {
         let server = MockServer::start().await;
         let session = DirectSessionId::from("s-1".to_string());
         Mock::given(method("POST"))
-            .and(path(format!("/v1/direct-sessions/{session}/messages")))
+            .and(path(format!("/direct-sessions/{session}/messages")))
             .and(body_partial_json(
                 serde_json::json!({ "channel_id": "s-1" }),
             ))
@@ -915,7 +915,7 @@ mod tests {
     async fn post_direct_session_envelope_retries_on_503_then_succeeds() {
         let server = MockServer::start().await;
         let session = DirectSessionId::from("s-1".to_string());
-        let url = format!("/v1/direct-sessions/{session}/messages");
+        let url = format!("/direct-sessions/{session}/messages");
         Mock::given(method("POST"))
             .and(path(url.clone()))
             .and(header("authorization", "Bearer sk-tagma-test"))
@@ -939,7 +939,7 @@ mod tests {
         let server = MockServer::start().await;
         let session = DirectSessionId::from("s-1".to_string());
         Mock::given(method("POST"))
-            .and(path(format!("/v1/direct-sessions/{session}/messages")))
+            .and(path(format!("/direct-sessions/{session}/messages")))
             .respond_with(ResponseTemplate::new(401))
             .mount(&server)
             .await;
@@ -964,7 +964,7 @@ mod tests {
             "created_at": "2026-08-02T00:00:00Z",
         }]);
         Mock::given(method("GET"))
-            .and(path("/v1/direct-sessions/s-1/messages"))
+            .and(path("/direct-sessions/s-1/messages"))
             .and(query_param("after_seq", "3"))
             .and(query_param("limit", "10"))
             .and(header("authorization", "Bearer sk-tagma-test"))
@@ -989,7 +989,7 @@ mod tests {
         let server = MockServer::start().await;
         let session = DirectSessionId::from("s-1".to_string());
         Mock::given(method("PUT"))
-            .and(path(format!("/v1/direct-sessions/{session}/read-cursor")))
+            .and(path(format!("/direct-sessions/{session}/read-cursor")))
             .and(header("authorization", "Bearer sk-tagma-test"))
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
@@ -1005,7 +1005,7 @@ mod tests {
         let server = MockServer::start().await;
         let tagma_id = TagmaId::from("tagma-1".to_string());
         Mock::given(method("POST"))
-            .and(path(format!("/v1/tagmata/{tagma_id}/upstream")))
+            .and(path(format!("/tagmata/{tagma_id}/upstream")))
             .and(header("authorization", "Bearer sk-tagma-test"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
                 serde_json::json!({"applied": 2, "faces": {"status": 1, "projection": 0}}),
@@ -1045,7 +1045,7 @@ mod tests {
         // The tunnel body: one SSE event carrying a KeyExchange TunnelInbound.
         let body = "data: {\"kind\":\"key_exchange\",\"conversation_id\":\"c1\",\"init\":{\"ephemeral_public\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}}\n\n";
         Mock::given(method("GET"))
-            .and(path("/v1/tunnel"))
+            .and(path("/tunnel"))
             .and(header("authorization", "Bearer sk-tagma-test"))
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&server)
@@ -1084,7 +1084,7 @@ mod tests {
         // A malformed event followed by a valid one.
         let body = format!("data: not-json\n\n{good}");
         Mock::given(method("GET"))
-            .and(path("/v1/tunnel"))
+            .and(path("/tunnel"))
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&server)
             .await;
@@ -1115,7 +1115,7 @@ mod tests {
         // Comment block first, then a real event.
         let body = format!(": keepalive\n\n{good}");
         Mock::given(method("GET"))
-            .and(path("/v1/tunnel"))
+            .and(path("/tunnel"))
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&server)
             .await;

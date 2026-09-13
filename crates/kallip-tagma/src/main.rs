@@ -753,14 +753,14 @@ fn sweep_legacy_files_token() -> bool {
     true
 }
 
-/// One configured relay entry: one archeion identity. `name` is the stable slug
+/// One configured relay entry: one platform identity. `name` is the stable slug
 /// that keys the credentials subdirectory and the AppState relay slot (so a
-/// URL change never moves the identity directory).
+/// URL change never moves the identity directory). `polis_url` is the
+/// platform edge origin the entry enrolls against.
 #[derive(Debug, Clone, PartialEq)]
 struct RelayEntry {
     name: String,
-    archeion_url: String,
-    lesche_url: Option<String>,
+    polis_url: String,
     enrollment_code: Option<String>,
 }
 
@@ -772,10 +772,10 @@ struct RelaysFile {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RelaysTomlEntry {
     name: String,
-    archeion_url: String,
-    lesche_url: Option<String>,
+    polis_url: String,
     enrollment_code: Option<String>,
 }
 
@@ -789,26 +789,57 @@ fn valid_entry_name(name: &str) -> bool {
 }
 
 /// Resolve the configured relay entries: `<data_root>/relays.toml` when
-/// present, else the legacy single-entry sugar (`KALLIP_TAGMA_RELAY_*` env /
-/// `--relay-*` flags → one implicit entry named "default"). Fail-fast cases
-/// (all configuration errors):
+/// present, else the single-entry sugar (`KALLIP_POLIS_URL` /
+/// `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` → one implicit entry named
+/// "default"). Fail-fast cases (all configuration errors):
 ///
-/// - the file and any legacy relay env/flag are both set (which source
+/// - the file and any relay env/flag are both set (which source
 ///   wins must never be implicit);
 /// - the file exists but declares zero `[[relay]]` entries;
 /// - a name fails the slug grammar or repeats.
+///
+/// Reject the retired per-service relay env (`KALLIP_TAGMA_RELAY_ARCHEION_URL`
+/// / `KALLIP_TAGMA_RELAY_LESCHE_URL`). A record snapshotted before the one
+/// polis origin replays them on restart, and the new tagma would otherwise
+/// read nothing relay-shaped and boot local-only -- silently dropping the
+/// relay. The old values were per-service URLs and do not mechanically
+/// derive the origin, so the recoverable move is a fresh enroll against
+/// the configured `KALLIP_POLIS_URL`, and this fails loudly pointing
+/// there.
+fn ensure_no_retired_relay_env() -> Result<()> {
+    const RETIRED: &[&str] = &[
+        "KALLIP_TAGMA_RELAY_ARCHEION_URL",
+        "KALLIP_TAGMA_RELAY_LESCHE_URL",
+    ];
+    let found: Vec<&str> = RETIRED
+        .iter()
+        .copied()
+        .filter(|key| std::env::var_os(key).is_some())
+        .collect();
+    anyhow::ensure!(
+        found.is_empty(),
+        concat!(
+            "retired relay environment variable(s) {} present; the per-service",
+            " relay env was replaced by the single KALLIP_POLIS_URL origin --",
+            " remove the retired variables and re-enroll the relay against",
+            " KALLIP_POLIS_URL"
+        ),
+        found.join(", ")
+    );
+    Ok(())
+}
+
 fn resolve_relay_entries(args: &args::Args) -> Result<Vec<RelayEntry>> {
+    ensure_no_retired_relay_env()?;
     let toml_path = data_root()?.join("relays.toml");
-    let legacy_set = args.relay_archeion_url.is_some()
-        || args.relay_lesche_url.is_some()
-        || args.relay_enrollment_code.is_some();
+    let sugar_set = args.polis_url.is_some() || args.relay_enrollment_code.is_some();
     if toml_path.exists() {
         anyhow::ensure!(
-            !legacy_set,
+            !sugar_set,
             concat!(
-                "conflicting relay configuration: {} exists but KALLIP_TAGMA_RELAY_*",
-                " env vars / --relay-* flags are also set; move the entries into the",
-                " file or unset the legacy vars"
+                "conflicting relay configuration: {} exists but KALLIP_POLIS_URL",
+                " / KALLIP_TAGMA_RELAY_ENROLLMENT_CODE are also set; move the",
+                " entries into the file or unset them"
             ),
             toml_path.display()
         );
@@ -839,23 +870,20 @@ fn resolve_relay_entries(args: &args::Args) -> Result<Vec<RelayEntry>> {
             );
             entries.push(RelayEntry {
                 name: e.name,
-                archeion_url: e.archeion_url,
-                lesche_url: e.lesche_url,
+                polis_url: kallip_runtime::polis::polis_origin(Some(e.polis_url))?,
                 enrollment_code: e.enrollment_code,
             });
         }
         Ok(entries)
-    } else if legacy_set {
-        // Single-entry sugar: the pre-multi-archeion deployment keeps working
-        // untouched, as one entry named "default".
-        let archeion_url = args
-            .relay_archeion_url
-            .clone()
-            .context("KALLIP_TAGMA_RELAY_LESCHE_URL / _ENROLLMENT_CODE set without KALLIP_TAGMA_RELAY_ARCHEION_URL; set the archeion url too")?;
+    } else if sugar_set {
+        // Single-entry sugar: one platform identity, as one entry named
+        // "default". An unset or blank KALLIP_POLIS_URL is an error here:
+        // the sugar arm only runs when a relay is wanted, and a relay
+        // enrollment carries credentials, so there is no deployment to
+        // assume.
         Ok(vec![RelayEntry {
             name: "default".to_string(),
-            archeion_url,
-            lesche_url: args.relay_lesche_url.clone(),
+            polis_url: kallip_runtime::polis::polis_origin(args.polis_url.clone())?,
             enrollment_code: args.relay_enrollment_code.clone(),
         }])
     } else {
@@ -879,9 +907,8 @@ fn resolve_relay_plan(args: &args::Args) -> Result<Vec<(RelayEntry, EnrollEntry)
         let stored = credentials::load_tagma(&dir);
         let boot = resolve_enroll_entry(
             stored.as_ref(),
-            &entry.archeion_url,
+            &entry.polis_url,
             entry.enrollment_code.as_deref(),
-            &dir,
         )?;
         plan.push((entry, boot));
     }
@@ -939,6 +966,13 @@ enum EnrollEntry {
     /// the boot — consumed material left in the environment must not
     /// brick restarts.
     StoredIgnoringCode { address_recorded: bool },
+    /// Stored credentials enrolled at a different platform origin than
+    /// the configured one: the configured origin wins and the recorded
+    /// origin is overwritten while the token is kept -- the platform
+    /// rename migrates enrollments without re-enrolling. `had_code`
+    /// reports whether an enrollment code was present (it is ignored,
+    /// as in the same-origin shape).
+    StoredReorigin { had_code: bool },
     /// No stored credentials: redeem `code` for a fresh enrollment.
     Fresh { code: String },
 }
@@ -950,9 +984,10 @@ enum EnrollEntry {
 /// silently ignored stale token pointed at a new archeion loops 401
 /// reconnects forever):
 ///
-/// - stored credentials + enrollment code at a *different* archeion: the code
-///   would mint a second identity while the stored one points at the old
-///   archeion, so both exits are named;
+/// - stored credentials whose recorded origin differs from the configured
+///   one: the configured origin wins, the recorded origin is overwritten,
+///   and the token is kept (the platform rename migrates enrollments
+///   without re-enrolling);
 /// - neither credentials nor code: there is nothing to connect with.
 ///
 /// Stored credentials + a code at the *same* archeion (or with the enrollment
@@ -963,7 +998,6 @@ fn resolve_enroll_entry(
     stored: Option<&credentials::StoredTagma>,
     configured_archeion_url: &str,
     code: Option<&str>,
-    credentials_dir: &std::path::Path,
 ) -> Result<EnrollEntry> {
     match (stored, code) {
         (Some(stored), Some(_)) => {
@@ -973,23 +1007,20 @@ fn resolve_enroll_entry(
                 None | Some(true) => Ok(EnrollEntry::StoredIgnoringCode {
                     address_recorded: compared.is_some(),
                 }),
-                Some(false) => Err(anyhow::anyhow!(
-                    "conflicting relay configuration: stored credentials in {} were \
-                     enrolled at {} but KALLIP_TAGMA_RELAY_ENROLLMENT_CODE is set and \
-                     the archeion is now {}; delete the credentials directory to \
-                     re-enroll, or unset the code to reuse the stored identity",
-                    credentials_dir.display(),
-                    stored.archeion_url.as_deref().unwrap_or("<unrecorded>"),
-                    configured_archeion_url
-                )),
+                Some(false) => Ok(EnrollEntry::StoredReorigin { had_code: true }),
             }
         }
-        (Some(_), None) => Ok(EnrollEntry::Stored),
+        (Some(stored), None) => {
+            match origin_comparison(stored.archeion_url.as_deref(), configured_archeion_url) {
+                Some(false) => Ok(EnrollEntry::StoredReorigin { had_code: false }),
+                _ => Ok(EnrollEntry::Stored),
+            }
+        }
         (None, Some(code)) => Ok(EnrollEntry::Fresh {
             code: code.to_owned(),
         }),
         (None, None) => Err(anyhow::anyhow!(
-            "incomplete relay configuration: KALLIP_TAGMA_RELAY_ARCHEION_URL is \
+            "incomplete relay configuration: KALLIP_POLIS_URL is \
              set but there are no stored credentials and no \
              KALLIP_TAGMA_RELAY_ENROLLMENT_CODE; either set the code for a \
              first-run enrollment, or unset the URL to run local-only"
@@ -1055,6 +1086,15 @@ async fn activate_relay(
             ignored_code_warning(&entry_dir, address_recorded)
         );
     }
+    if let EnrollEntry::StoredReorigin { had_code } = boot {
+        warn!(
+            relay = %entry.name,
+            "relay: stored credentials were enrolled at a different platform \
+             origin; keeping the token and rebinding to {}{}",
+            entry.polis_url,
+            if had_code { " (the enrollment code is ignored)" } else { "" }
+        );
+    }
     // One device, many identities: the Ed25519 device key is shared across
     // archeions (it proves "same physical tagma"), so it lives at the
     // credentials root, while each archeion's (tagma.id, tagma.token) pair
@@ -1064,15 +1104,17 @@ async fn activate_relay(
     // The boot decision (reuse stored credentials vs first-run enroll) was
     // made by the caller via `resolve_enroll_entry`; this only executes it.
     let (tagma_id, tagma_token) = match boot {
-        EnrollEntry::Stored | EnrollEntry::StoredIgnoringCode { .. } => {
+        EnrollEntry::Stored
+        | EnrollEntry::StoredIgnoringCode { .. }
+        | EnrollEntry::StoredReorigin { .. } => {
             let stored = credentials::load_tagma(&entry_dir)
                 .context("stored credentials missing at relay activation (deleted after boot?)")?;
-            // Both stored arms converge here, so the origin backfill runs on
-            // every stored-credential boot: credentials from before origin
-            // recording get the configured origin recorded once (a mislabel
-            // behaves exactly like the unknown path; the next address change
-            // regains the precise verdict).
-            credentials::backfill_archeion_url(&entry_dir, &entry.archeion_url);
+            // Every stored arm converges here, so the origin rebind runs on
+            // every stored-credential boot: a record that predates origin
+            // recording gets the configured origin written, and a record
+            // naming the pre-rename origin is overwritten to the configured
+            // one (the StoredReorigin verdict above already logged it).
+            credentials::backfill_archeion_url(&entry_dir, &entry.polis_url);
             info!(relay = %entry.name, tagma = %stored.id, "relay: loaded stored tagma credentials");
             (
                 kallip_archeion_common::ids::TagmaId::from(stored.id),
@@ -1080,12 +1122,14 @@ async fn activate_relay(
             )
         }
         EnrollEntry::Fresh { code } => {
-            let (tagma_id, token) =
-                kallip_archeion_client::ArcheionClient::builder(&entry.archeion_url)
-                    .build()?
-                    .enroll(&code, &device)
-                    .await?;
-            credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.archeion_url);
+            let (tagma_id, token) = kallip_archeion_client::ArcheionClient::builder(&format!(
+                "{}/v1/archeion",
+                entry.polis_url
+            ))
+            .build()?
+            .enroll(&code, &device)
+            .await?;
+            credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url);
             info!(relay = %entry.name, tagma = %tagma_id, "relay: enrolled with archeion");
             // First-run enroll boot: the projector's write-once ids are
             // claimed by the first successful enrollee — the primary-archeion
@@ -1113,20 +1157,15 @@ async fn activate_relay(
         id.clone()
     };
 
-    // Default lesche URL to the archeion origin if unset (same-origin only).
-    let lesche_url = match entry.lesche_url.clone() {
-        Some(u) => u,
-        None => {
-            let parsed = url::Url::parse(&entry.archeion_url).context("parse archeion url")?;
-            parsed.origin().ascii_serialization()
-        }
-    };
-
     // The data-plane client: tagma tunnel, envelope/KEX POSTs, room discovery
     // (the chat domain lives in lesche now). Built once and shared by the room
     // routes and the relay orchestrator (a cheap clone of the shared reqwest
     // pool + bearer).
-    let lesche = kallip_lesche_client::LescheClient::builder(&lesche_url, &tagma_token).build()?;
+    let lesche = kallip_lesche_client::LescheClient::builder(
+        &kallip_runtime::polis::service_base(&entry.polis_url, "lesche"),
+        &tagma_token,
+    )
+    .build()?;
 
     let handle = relay::RelayHandle::new(
         lesche,
@@ -1142,8 +1181,7 @@ async fn activate_relay(
     info!(
         relay = %entry.name,
         tagma = %handle.tagma_id(),
-        archeion_url = %entry.archeion_url,
-        lesche_url = %lesche_url,
+        polis_url = %entry.polis_url,
         "relay connector active"
     );
 
@@ -1220,8 +1258,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let entry = |name: &str| RelayEntry {
             name: name.to_owned(),
-            archeion_url: "http://archeion".to_owned(),
-            lesche_url: None,
+            polis_url: "http://archeion".to_owned(),
             enrollment_code: None,
         };
         let entries = [entry("alpha"), entry("beta")];
@@ -1328,7 +1365,6 @@ mod tests {
             Some(&stored("tagma-test", Some("https://archeion.example.com"))),
             "https://archeion.example.com",
             None,
-            std::path::Path::new("/tmp/credentials"),
         )
         .expect("stored entry resolves");
         assert_eq!(entry, EnrollEntry::Stored);
@@ -1420,13 +1456,9 @@ mod tests {
     /// No stored credentials and a code: first-run enrollment.
     #[test]
     fn fresh_code_enrolls_when_no_credentials_stored() {
-        let entry = resolve_enroll_entry(
-            None,
-            "https://archeion.example.com",
-            Some("sk-enroll-test"),
-            std::path::Path::new("/tmp/credentials"),
-        )
-        .expect("fresh entry resolves");
+        let entry =
+            resolve_enroll_entry(None, "https://archeion.example.com", Some("sk-enroll-test"))
+                .expect("fresh entry resolves");
         assert_eq!(
             entry,
             EnrollEntry::Fresh {
@@ -1459,7 +1491,6 @@ mod tests {
                 Some(&stored("tagma-test", Some(recorded))),
                 configured,
                 Some("sk-spent"),
-                std::path::Path::new("/tmp/credentials"),
             )
             .expect("same-archeion entry resolves");
             assert_eq!(
@@ -1486,7 +1517,6 @@ mod tests {
                 Some(&stored("tagma-test", recorded)),
                 configured,
                 Some("sk-spent"),
-                std::path::Path::new("/tmp/credentials"),
             )
             .expect("unknown-origin entry resolves");
             assert_eq!(
@@ -1499,42 +1529,30 @@ mod tests {
         }
     }
 
-    /// Stored credentials + code at a different archeion: the true conflict
-    /// fails fast, both exits named and both addresses shown.
+    /// Stored credentials enrolled at a different platform origin: the
+    /// configured origin wins and the token is kept (the rename
+    /// migration), with and without a code. Both spell the reorigin.
     #[test]
-    fn different_archeion_code_conflict_fails_fast() {
-        let err = resolve_enroll_entry(
-            Some(&stored("tagma-test", Some("https://old.example.com"))),
-            "https://new.example.com",
-            Some("sk-enroll-test"),
-            std::path::Path::new("/tmp/credentials"),
-        )
-        .expect_err("conflict must fail");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("KALLIP_TAGMA_RELAY_ENROLLMENT_CODE"), "{msg}");
-        assert!(msg.contains("https://old.example.com"), "{msg}");
-        assert!(msg.contains("https://new.example.com"), "{msg}");
-        assert!(msg.contains("/tmp/credentials"), "{msg}");
-        assert!(msg.contains("re-enroll"), "{msg}");
-        assert!(msg.contains("unset"), "{msg}");
-        // Mutual exclusion: distinguishable from the incomplete message.
-        assert!(!msg.contains("local-only"), "{msg}");
-        assert!(!msg.contains("first-run"), "{msg}");
+    fn different_origin_reorigins_instead_of_failing() {
+        for (code, had_code) in [(Some("sk-enroll-test"), true), (None, false)] {
+            let entry = resolve_enroll_entry(
+                Some(&stored("tagma-test", Some("https://old.example.com"))),
+                "https://new.example.com",
+                code,
+            )
+            .expect("reorigin entry resolves");
+            assert_eq!(entry, EnrollEntry::StoredReorigin { had_code });
+        }
     }
 
     /// Neither credentials nor code: the message names the URL env var and
     /// both exits, distinct from the conflict message.
     #[test]
     fn neither_credentials_nor_code_fails_fast() {
-        let err = resolve_enroll_entry(
-            None,
-            "https://archeion.example.com",
-            None,
-            std::path::Path::new("/tmp/credentials"),
-        )
-        .expect_err("incomplete must fail");
+        let err = resolve_enroll_entry(None, "https://archeion.example.com", None)
+            .expect_err("incomplete must fail");
         let msg = format!("{err:#}");
-        assert!(msg.contains("KALLIP_TAGMA_RELAY_ARCHEION_URL"), "{msg}");
+        assert!(msg.contains("KALLIP_POLIS_URL"), "{msg}");
         assert!(msg.contains("first-run enrollment"), "{msg}");
         assert!(msg.contains("local-only"), "{msg}");
         // Mirror of the conflict test: no conflict markers.
@@ -1566,8 +1584,8 @@ mod tests {
 
     /// save/load roundtrip carries the enrollment origin; a pre-origin
     /// credential (id + token only) loads with the origin absent; the
-    /// backfill records the configured origin exactly once and never
-    /// overwrites a recorded origin.
+    /// backfill writes the configured origin when absent and rebinds
+    /// (overwrites) it when the recorded origin disagrees.
     #[test]
     fn credential_origin_roundtrip_and_backfill() {
         let dir = tempfile::tempdir().expect("credentials tempdir");
@@ -1598,8 +1616,8 @@ mod tests {
         );
         credentials::backfill_archeion_url(legacy.path(), "https://other.example.com");
         assert_eq!(
-            std::fs::read_to_string(legacy.path().join("archeion.url")).expect("unchanged"),
-            "https://archeion.example.com"
+            std::fs::read_to_string(legacy.path().join("archeion.url")).expect("rebound"),
+            "https://other.example.com"
         );
     }
 

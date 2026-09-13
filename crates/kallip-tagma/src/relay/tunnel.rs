@@ -325,7 +325,9 @@ mod manage_frame_tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
         let lesche_url = format!("http://{addr}");
-        let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
+        let client = LescheClient::builder(&format!("{lesche_url}/v1"), "tok")
+            .build()
+            .unwrap();
         let handle = RelayHandle::new(
             client,
             "test".to_string(),

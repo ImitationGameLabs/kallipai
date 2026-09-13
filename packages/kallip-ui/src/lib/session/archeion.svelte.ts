@@ -86,13 +86,25 @@ function client(): ArcheionClient {
 export function archeionClientOrFail(): ArcheionClient {
   return client();
 }
-/** The injected archeion base URL; the one-click instance spawn relays it to
- * the new tagma as bootstrap environment. Throws pre-init. */
+/** The injected archeion base URL. Throws pre-init. */
 export function archeionBaseUrlOrFail(): string {
   if (!archeionBaseUrl) {
     throw new Error("initArcheion(url) must be called at app bootstrap");
   }
   return archeionBaseUrl;
+}
+/** The polis edge origin behind the injected archeion base URL (the
+ * base with its /v1/archeion tail stripped) -- what one-click instance
+ * spawn relays to the new tagma as its KALLIP_POLIS_URL bootstrap env.
+ * Throws pre-init, or on a base without the expected tail (a bootstrap
+ * wiring bug, not a runtime condition). */
+export function archeionPolisOriginOrFail(): string {
+  const base = archeionBaseUrlOrFail();
+  const tail = "/v1/archeion";
+  if (!base.endsWith(tail)) {
+    throw new Error(`archeion base URL ${base} lacks the ${tail} tail`);
+  }
+  return base.slice(0, base.length - tail.length);
 }
 
 // The lesche (data-plane) client lives on a separate origin from the archeion; its

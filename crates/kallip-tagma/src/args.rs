@@ -39,18 +39,11 @@ pub struct Args {
     /// User-Agent sent on outbound LLM HTTP calls. Unset = `kallip/<tagma-version>`.
     #[arg(long, env = "KALLIP_LLM_API_USER_AGENT")]
     pub llm_api_user_agent: Option<String>,
-    /// Activate the online-mode relay connector by enrolling with this archeion
-    /// control-plane URL. Unset = local-only (no relay; the lesche message
-    /// route returns 503). Replaces the former standalone connector's
-    /// control-plane env var.
-    #[arg(long, env = "KALLIP_TAGMA_RELAY_ARCHEION_URL")]
-    pub relay_archeion_url: Option<String>,
-    /// Lesche (data-plane relay) base URL the relay connector tunnels to. A full
-    /// URL. If unset, defaults to the archeion URL's origin (scheme + host + port),
-    /// which is correct only for same-origin archeion/lesche deployments — set it
-    /// explicitly otherwise. Replaces the former standalone connector's data-plane env var.
-    #[arg(long, env = "KALLIP_TAGMA_RELAY_LESCHE_URL")]
-    pub relay_lesche_url: Option<String>,
+    /// Platform API edge origin (`https://api.<domain>`): enrolls there and
+    /// reaches every backend service through it. Unset = local-only (no
+    /// relay; the lesche message route returns 503).
+    #[arg(long, env = "KALLIP_POLIS_URL")]
+    pub polis_url: Option<String>,
     /// Single-use archeion enrollment code (first run only; thereafter the stored
     /// tagma token is reused). Replaces the former standalone connector's
     /// enrollment-code env var.

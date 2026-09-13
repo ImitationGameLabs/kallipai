@@ -28,11 +28,12 @@ use kallip_archeion_common::admin::{
                   ps, /proc/<pid>/cmdline, and shell history, while an env var does not."
 )]
 struct Args {
-    /// Archeion base URL.
+    /// Archeion control-plane base URL (the /v1 root admin routes nest
+    /// under, e.g. http://127.0.0.1:7100/v1 for the standalone server).
     #[arg(
         long,
         env = "KALLIP_ARCHEION_URL",
-        default_value = "http://127.0.0.1:7100"
+        default_value = "http://127.0.0.1:7100/v1"
     )]
     archeion_url: String,
     /// Emit raw JSON instead of human-readable tables.

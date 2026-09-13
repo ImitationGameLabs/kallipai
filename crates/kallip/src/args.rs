@@ -57,7 +57,7 @@ pub enum Commands {
     ProfileSet(ProfileSetCommand),
     /// Transfer files through the files service (direct HTTP; no tagma
     /// daemon connection). Credentials come from the spawn env:
-    /// KALLIP_FILES_URL + KALLIP_FILES_TOKEN.
+    /// KALLIP_POLIS_URL (edge origin; /v1/files is derived) + KALLIP_FILES_TOKEN.
     #[command(subcommand)]
     File(FileCommand),
     /// Read an image record into this agent's conversation. Self-scoped:

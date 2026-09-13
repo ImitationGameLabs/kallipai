@@ -13,6 +13,10 @@ import type {
 } from "./types.ts";
 
 export class FilesClient {
+  /** `base` is the files service root, /v1/files included (the edge passes
+   * the /v1/files prefix through untouched -- the service name is the
+   * resource segment). Paths here are pure tails: `/{id}`, `/{id}/send`,
+   * `?query`. */
   private readonly base: string;
 
   constructor(base = "") {
@@ -27,7 +31,7 @@ export class FilesClient {
     blob: Blob | ArrayBuffer | Uint8Array,
   ): Promise<PutResponse> {
     const query = new URLSearchParams({ path });
-    const response = await filesFetch(this.base, `/files?${query}`, {
+    const response = await filesFetch(this.base, `?${query}`, {
       method: "PUT",
       body: blob as Blob,
     });
@@ -37,7 +41,7 @@ export class FilesClient {
   /** Download the record's bytes. The server streams and honors a single
    * range; the browser client reads the whole body. */
   async get(id: string): Promise<ArrayBuffer> {
-    const response = await filesFetch(this.base, `/files/${id}`, {
+    const response = await filesFetch(this.base, `/${id}`, {
       method: "GET",
     });
     return response.arrayBuffer();
@@ -46,7 +50,7 @@ export class FilesClient {
   /** Metadata probe: true when the record exists and is readable (the ACL
    * decision rides the same route). */
   async head(id: string): Promise<boolean> {
-    const response = await filesFetch(this.base, `/files/${id}`, {
+    const response = await filesFetch(this.base, `/${id}`, {
       method: "HEAD",
     });
     return response.ok;
@@ -57,7 +61,7 @@ export class FilesClient {
     const query = new URLSearchParams({ space: options.space });
     if (options.prefix !== undefined) query.set("prefix", options.prefix);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
-    const response = await filesFetch(this.base, `/files?${query}`, {
+    const response = await filesFetch(this.base, `?${query}`, {
       method: "GET",
     });
     return response.json();
@@ -70,7 +74,7 @@ export class FilesClient {
     id: string,
     target: { toUser?: string; toTagma?: string },
   ): Promise<SendResponse> {
-    const response = await filesFetch(this.base, `/files/${id}/send`, {
+    const response = await filesFetch(this.base, `/${id}/send`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -85,7 +89,7 @@ export class FilesClient {
    * refcount only stamps `freed_at`; the GC unlinks later). 204 with no
    * body on success. */
   async delete(id: string): Promise<void> {
-    await filesFetch(this.base, `/files/${id}`, {
+    await filesFetch(this.base, `/${id}`, {
       method: "DELETE",
     });
   }

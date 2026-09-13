@@ -16,8 +16,8 @@ pub(crate) async fn fetch_record_bytes(
     let token = token.ok_or_else(|| {
         ApiError::unavailable("no registered files credential; the tagma cannot fetch media")
     })?;
-    let base = std::env::var("KALLIP_FILES_URL").map_err(|_| {
-        ApiError::unavailable("KALLIP_FILES_URL is not set; the tagma cannot fetch media")
+    let base = std::env::var("KALLIP_POLIS_URL").map_err(|_| {
+        ApiError::unavailable("KALLIP_POLIS_URL is not set; the tagma cannot fetch media")
     })?;
     let response = http
         .get(format!("{base}/v1/files/{record_id}"))
@@ -432,11 +432,11 @@ mod tests {
     async fn fetch_without_a_registered_credential_is_unavailable() {
         // The credential check precedes the URL read, so the credential
         // error is independent of the environment.
-        let prior_url = std::env::var("KALLIP_FILES_URL").ok();
+        let prior_url = std::env::var("KALLIP_POLIS_URL").ok();
         // SAFETY: test-only env edit; this test is the only reader and
-        // writer of KALLIP_FILES_URL in the suite.
+        // writer of KALLIP_POLIS_URL in the suite.
         unsafe {
-            std::env::remove_var("KALLIP_FILES_URL");
+            std::env::remove_var("KALLIP_POLIS_URL");
         }
         let err = fetch_record_bytes(&reqwest::Client::new(), None, uuid::Uuid::nil())
             .await
@@ -449,12 +449,12 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.status, 503);
-        assert!(err.message.contains("KALLIP_FILES_URL is not set"));
+        assert!(err.message.contains("KALLIP_POLIS_URL is not set"));
         // SAFETY: restore-the-prior-value counterpart of the edit above.
         unsafe {
             match prior_url {
-                Some(value) => std::env::set_var("KALLIP_FILES_URL", value),
-                None => std::env::remove_var("KALLIP_FILES_URL"),
+                Some(value) => std::env::set_var("KALLIP_POLIS_URL", value),
+                None => std::env::remove_var("KALLIP_POLIS_URL"),
             }
         }
     }

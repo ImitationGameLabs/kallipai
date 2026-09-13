@@ -399,7 +399,7 @@ fn start_filters_consumed_enrollment_code() {
         serde_json::from_str(&std::fs::read_to_string(&record_path).expect("record"))
             .expect("parse record");
     let env = record["env"].as_array_mut().expect("env array");
-    env.push("KALLIP_TAGMA_RELAY_ARCHEION_URL=http://127.0.0.1:9".into());
+    env.push("KALLIP_POLIS_URL=http://127.0.0.1:9".into());
     env.push("KALLIP_TAGMA_RELAY_ENROLLMENT_CODE=sk-spent".into());
     std::fs::write(
         &record_path,
@@ -435,9 +435,7 @@ fn start_filters_consumed_enrollment_code() {
             .expect("parse record after");
     let env = after["env"].as_array().expect("env array after");
     assert!(env.contains(&serde_json::json!("KALLIP_OPERATOR_TOKEN=test-op-token")));
-    assert!(env.contains(&serde_json::json!(
-        "KALLIP_TAGMA_RELAY_ARCHEION_URL=http://127.0.0.1:9"
-    )));
+    assert!(env.contains(&serde_json::json!("KALLIP_POLIS_URL=http://127.0.0.1:9")));
     assert!(!env.iter().any(|pair| {
         pair.as_str()
             .is_some_and(|p| p.starts_with("KALLIP_TAGMA_RELAY_ENROLLMENT_CODE="))
@@ -682,11 +680,10 @@ fn manual_boot_with_slug_publishes_runtime_json() {
         .env("KALLIP_LLM_MODEL", "test-model")
         .env("KALLIP_LLM_DEEPSEEK_API_KEY", "test-key")
         // Test-env isolation: a machine running inside the kallipai
-        // stack (e.g. an agent) carries ambient KALLIP_TAGMA_RELAY_*
-        // vars; leaked into the child they trip the tagma relay
-        // fail-fast and this local-only boot never listens.
-        .env_remove("KALLIP_TAGMA_RELAY_ARCHEION_URL")
-        .env_remove("KALLIP_TAGMA_RELAY_LESCHE_URL")
+        // stack (e.g. an agent) carries an ambient KALLIP_POLIS_URL;
+        // leaked into the child it trips the tagma relay fail-fast
+        // and this local-only boot never listens.
+        .env_remove("KALLIP_POLIS_URL")
         .env_remove("KALLIP_TAGMA_RELAY_ENROLLMENT_CODE")
         .env_remove("KALLIP_TAGMA_DATA_DIR")
         .stdout(std::process::Stdio::null())

@@ -398,7 +398,9 @@ mod tests {
         let state = make_state();
         let root = kallip_common::agentid::AgentId::from("root".to_string());
         let url = spawn_upstream_lesche(capture, fail_nth).await;
-        let client = LescheClient::builder(&url, "tok").build().unwrap();
+        let client = LescheClient::builder(&format!("{url}/v1"), "tok")
+            .build()
+            .unwrap();
         let handle = RelayHandle::new(
             client,
             "test".to_string(),
@@ -744,7 +746,9 @@ mod tests {
         .await;
         let state = make_state();
         let root = kallip_common::agentid::AgentId::from("root".to_string());
-        let client = LescheClient::builder(&url, "tok").build().unwrap();
+        let client = LescheClient::builder(&format!("{url}/v1"), "tok")
+            .build()
+            .unwrap();
         let handle = RelayHandle::new(
             client,
             "test".to_string(),

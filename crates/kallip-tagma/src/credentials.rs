@@ -76,15 +76,16 @@ pub(crate) fn save_tagma(
     }
 }
 
-/// Record the configured origin for credentials enrolled before origin
-/// recording, exactly once — never overwriting a recorded origin. Called
-/// from both stored boot arms so any stored-credential boot closes the
-/// window.
+/// Rebind the recorded enrollment origin to the configured one: write when
+/// absent (credentials that predate origin recording), overwrite when the
+/// recorded origin disagrees (the platform-origin rename migrates stored
+/// enrollments without re-enrolling), no-op when equal.
 pub(crate) fn backfill_archeion_url(credentials_dir: &Path, archeion_url: &str) {
     let path = credentials_dir.join("archeion.url");
-    if !path.exists() {
-        let _ = std::fs::write(&path, archeion_url);
+    if std::fs::read_to_string(&path).is_ok_and(|prev| prev.trim() == archeion_url) {
+        return;
     }
+    let _ = std::fs::write(&path, archeion_url);
 }
 
 /// Write a secret (device key, tagma token) with mode `0o600` so other local

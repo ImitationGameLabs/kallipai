@@ -26,13 +26,13 @@
 # prod topology decision. Re-enable here once the h3 streaming path is verified
 # end-to-end in Firefox.
 {
-  servers {
-    protocols h1 h2
-  }
+	servers {
+		protocols h1 h2
+	}
 }
 
 {$KALLIP_EDGE_SCHEME}*.{$KALLIP_DOMAIN}:{$KALLIP_EDGE_PORT} {
-  import tls.caddy
+	import tls.caddy
 
   @app host app.{$KALLIP_DOMAIN}
   handle @app {
@@ -43,8 +43,8 @@
 
   @api host api.{$KALLIP_DOMAIN}
   handle @api {
-    # The platform's single API face, path-routed by service segment.
-    # handle_path strips /v1/<service>; each rewrite adds back
+    # The platform's single API face: path-routed per the consolidation
+    # plan (§4). handle_path strips /v1/<service>; each rewrite adds back
     # that service's internal prefix, so the backends keep their current
     # route shapes (zero server changes). files passes through untouched:
     # its internal paths already start with /v1/files (service name ==
@@ -62,7 +62,7 @@
 
 # The api.<domain> route table, shared by the https wildcard edge above and
 # the loopback plaintext edge below (one place to review the path map):
-# /v1/<service>/* -> each backend's existing internal prefix.
+# /v1/<service>/* -> each backend's existing internal prefix (§4 map).
 (kallip-api-routes) {
   handle_path /v1/archeion/* {
     rewrite * /v1{uri}
@@ -77,8 +77,7 @@
       flush_interval -1
     }
   }
-  @files path /v1/files /v1/files/*
-  handle @files {
+  handle /v1/files/* {
     reverse_proxy 127.0.0.1:7400
   }
   handle_path /v1/instances/* {

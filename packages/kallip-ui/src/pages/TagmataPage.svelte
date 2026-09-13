@@ -12,7 +12,7 @@
   // discipline). The AppShell expects the page root to scroll itself
   // (h-full overflow-y-auto).
   import {
-    archeionBaseUrlOrFail,
+    archeionPolisOriginOrFail,
     archeionClientOrFail,
     archeionSession,
     lescheBaseUrlOrFail,
@@ -173,9 +173,8 @@
       }
       const slug = instanceSlugFor(minted.id);
       const env = [
-        `KALLIP_TAGMA_RELAY_ARCHEION_URL=${archeionBaseUrlOrFail()}`,
+        `KALLIP_POLIS_URL=${archeionPolisOriginOrFail()}`,
         `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE=${minted.code}`,
-        `KALLIP_TAGMA_RELAY_LESCHE_URL=${lescheBaseUrlOrFail()}`,
       ];
       try {
         const result = await instancesStore.spawn({
@@ -305,14 +304,11 @@
     spawnResult = null;
     createError = null;
     const env: string[] = [];
-    if (f.archeionUrl.trim()) {
-      env.push("KALLIP_TAGMA_RELAY_ARCHEION_URL=" + f.archeionUrl.trim());
+    if (f.polisUrl.trim()) {
+      env.push("KALLIP_POLIS_URL=" + f.polisUrl.trim());
     }
     if (f.enrollmentCode.trim()) {
       env.push("KALLIP_TAGMA_RELAY_ENROLLMENT_CODE=" + f.enrollmentCode.trim());
-    }
-    if (f.lescheUrl.trim()) {
-      env.push("KALLIP_TAGMA_RELAY_LESCHE_URL=" + f.lescheUrl.trim());
     }
     if (f.instanceToken.trim()) {
       env.push("KALLIP_AUTH_TOKEN=" + f.instanceToken.trim());

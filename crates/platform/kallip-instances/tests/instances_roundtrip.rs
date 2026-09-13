@@ -63,11 +63,10 @@ fn start_daemon() -> DaemonProc {
         // derivation would follow the host HOME); the XDG data anchor
         // isolates the instance trees.
         .env("KALLIP_DAEMON_RECORD_DIR", state_dir.path().join("records"))
-        // The daemon owns the relay-URL defaults: the unit env carries
-        // these, so the relay-intent e2e exercises the daemon-side fill
-        // against them.
-        .env("KALLIP_DAEMON_RELAY_ARCHEION_URL", "http://localhost:7100")
-        .env("KALLIP_DAEMON_RELAY_LESCHE_URL", "http://localhost:7200")
+        // The daemon owns the platform-origin default: the unit env carries
+        // it, so the relay-intent e2e exercises the daemon-side fill
+        // against it.
+        .env("KALLIP_POLIS_URL", "http://localhost:8080")
         .env("XDG_DATA_HOME", data_dir.path())
         .env(
             "KALLIP_BIN_DIR",
@@ -373,24 +372,15 @@ async fn relay_intent_spawn_persists_filled_urls() {
         serde_json::from_str(&std::fs::read_to_string(&record_path).expect("record"))
             .expect("parse record");
     let env = record["env"].as_array().expect("env array");
-    assert!(env.contains(&serde_json::json!(
-        "KALLIP_TAGMA_RELAY_ARCHEION_URL=http://localhost:7100"
-    )));
-    assert!(env.contains(&serde_json::json!(
-        "KALLIP_TAGMA_RELAY_LESCHE_URL=http://localhost:7200"
-    )));
-    for key in [
-        "KALLIP_TAGMA_RELAY_ARCHEION_URL",
-        "KALLIP_TAGMA_RELAY_LESCHE_URL",
-    ] {
-        assert_eq!(
-            env.iter()
-                .filter(|e| e.as_str().is_some_and(|s| s.starts_with(key)))
-                .count(),
-            1,
-            "exactly one {key} entry"
-        );
-    }
+    assert_eq!(
+        env.iter()
+            .filter(|e| e
+                .as_str()
+                .is_some_and(|s| s.starts_with("KALLIP_POLIS_URL")))
+            .count(),
+        1,
+        "exactly one KALLIP_POLIS_URL entry"
+    );
 
     let _ = backend.stop("relay-e2e".into()).await;
 }
@@ -431,8 +421,12 @@ async fn local_spawn_meta_stays_free_of_relay_keys() {
         env.iter().all(|e| !e
             .as_str()
             .unwrap_or_default()
-            .starts_with("KALLIP_TAGMA_RELAY_")),
-        "no relay keys injected: {env:?}"
+            .starts_with("KALLIP_TAGMA_RELAY_")
+            && !e
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("KALLIP_POLIS_URL=")),
+        "no relay or origin keys injected: {env:?}"
     );
 
     let _ = backend.stop("local-e2e".into()).await;

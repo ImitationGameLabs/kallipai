@@ -46,7 +46,9 @@ fn room_view(id: &str) -> TagmaRoomView {
 async fn setup(rooms: Rooms) -> (RelayHandle, SharedState) {
     let state = make_state();
     let lesche_url = spawn_lesche(rooms).await;
-    let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
+    let client = LescheClient::builder(&format!("{lesche_url}/v1"), "tok")
+        .build()
+        .unwrap();
     let handle = RelayHandle::new(
         client,
         "test".to_string(),
@@ -194,7 +196,9 @@ async fn setup_full(
 ) -> (RelayHandle, SharedState) {
     let state = make_state();
     let lesche_url = spawn_full_lesche(rooms, sessions, fail_direct).await;
-    let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
+    let client = LescheClient::builder(&format!("{lesche_url}/v1"), "tok")
+        .build()
+        .unwrap();
     let handle = RelayHandle::new(
         client,
         "test".to_string(),

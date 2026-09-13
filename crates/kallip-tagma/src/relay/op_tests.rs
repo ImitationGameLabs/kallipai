@@ -186,7 +186,9 @@ async fn setup_inner(
     let capture: Capture = Arc::new(Mutex::new(Vec::new()));
     let signals: SignalCapture = Arc::new(Mutex::new(Vec::new()));
     let lesche_url = spawn_lesche(capture.clone(), signals.clone()).await;
-    let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
+    let client = LescheClient::builder(&format!("{lesche_url}/v1"), "tok")
+        .build()
+        .unwrap();
     let device = DeviceKey::generate();
     let tagma_id = TagmaId::from("tagma".to_string());
     let conversation_id = ConversationId::for_tagma(&tagma_id);

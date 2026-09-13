@@ -1039,21 +1039,17 @@ pub fn spawn(
     request_user: Option<&str>,
 ) -> Result<(u32, u16), SpawnError> {
     // Relay-intent default injection (the daemon-side fill): a request
-    // env signaling relay intent (any `KALLIP_TAGMA_RELAY_*` entry) gets
-    // missing URL filled from the daemon's own environment; explicit
-    // values pass through; an unset -- or empty (the kallip-runtime's
-    // persistence.rs `filter(!is_empty)` precedent) -- daemon value
-    // means unconfigured:
-    // nothing is filled for that URL. This runs before the record
-    // snapshot is written, so the record stores the filled env: a restart
-    // replays relay-complete env, and the fill cannot be lost between a
+    // env signaling relay intent (a `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` or
+    // explicit `KALLIP_POLIS_URL` entry) gets a missing origin filled from
+    // the daemon's own environment; explicit values pass through; an unset
+    // -- or empty (the kallip-runtime's persistence.rs `filter(!is_empty)`
+    // precedent) -- daemon value means unconfigured: nothing is filled
+    // for that origin. This runs before the record snapshot is written,
+    // so the record stores the filled env: a restart replays the
+    // relay-complete env, and the fill cannot be lost between a
     // successful spawn and the first restart (the local-only detection
     // only covers the request moment).
-    let user_env = fill_relay_defaults(
-        user_env,
-        daemon_relay_url("KALLIP_DAEMON_RELAY_ARCHEION_URL").as_deref(),
-        daemon_relay_url("KALLIP_DAEMON_RELAY_LESCHE_URL").as_deref(),
-    );
+    let user_env = fill_relay_defaults(user_env, daemon_env_value("KALLIP_POLIS_URL").as_deref());
     // --- validate ---------------------------------------------------------
     if !valid_slug(slug) {
         return Err(SpawnError::Invalid(format!(
@@ -1226,32 +1222,30 @@ pub fn spawn(
 /// `filter(!is_empty)` precedent
 /// so a stray empty value cannot silently switch the fill off -- value
 /// counts as unconfigured.
-fn daemon_relay_url(key: &str) -> Option<String> {
+fn daemon_env_value(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-/// Fill the relay-URL entries for a relay-intent request env.
+/// Fill the relay-origin entry for a relay-intent request env.
 ///
-/// Fires only when the env signals relay intent (any
-/// `KALLIP_TAGMA_RELAY_*` entry): each URL key survives exactly
-/// once, with its explicit value or -- when absent and the daemon has
-/// one configured -- the default. A URL the daemon has not configured
-/// is left untouched (an explicit empty entry then dies in
-/// `validate_user_env`, the same fail-loud end an empty default
-/// reached before the fill moved here); no relay signal at all
-/// returns the env unchanged -- local-only spawns must not carry a
-/// URL the tagma boot would fail on.
-fn fill_relay_defaults(
-    env: &[String],
-    archeion: Option<&str>,
-    lesche: Option<&str>,
-) -> Vec<String> {
+/// Fires only when the env signals relay intent (a
+/// `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` or an explicit `KALLIP_POLIS_URL`
+/// entry): the origin key survives exactly once, with its explicit value
+/// or -- when absent and the daemon has one configured -- the default. An
+/// origin the daemon has not configured is left untouched (an explicit
+/// empty entry then dies in `validate_user_env`, the same fail-loud end
+/// an empty default reached before the fill moved here); no relay
+/// signal at all returns the env unchanged -- local-only spawns must not
+/// carry an origin that would flip them online.
+fn fill_relay_defaults(env: &[String], polis: Option<&str>) -> Vec<String> {
     let mut env = env.to_vec();
-    if !env.iter().any(|e| e.starts_with("KALLIP_TAGMA_RELAY_")) {
+    if !env
+        .iter()
+        .any(|e| e.starts_with("KALLIP_TAGMA_RELAY_") || e.starts_with("KALLIP_POLIS_URL="))
+    {
         return env;
     }
-    fill_one(&mut env, "KALLIP_TAGMA_RELAY_ARCHEION_URL=", archeion);
-    fill_one(&mut env, "KALLIP_TAGMA_RELAY_LESCHE_URL=", lesche);
+    fill_one(&mut env, "KALLIP_POLIS_URL=", polis);
     env
 }
 
@@ -2669,153 +2663,84 @@ mod tests {
     }
 
     // --- fill_relay_defaults --------------------------------------------
-    // The daemon's own URL env is a parameter here, so the branches
+    // The daemon's own origin env is a parameter here, so the branches
     // test without process-global env mutation.
 
-    const ARCHEION: &str = "http://localhost:7100";
-    const LESCHE: &str = "http://localhost:7200";
+    const POLIS: &str = "http://localhost:8080";
 
     fn has(env: &[String], prefix: &str) -> bool {
         env.iter().any(|e| e.starts_with(prefix))
     }
 
-    /// Relay intent without URLs -- both configured defaults are filled.
+    /// Relay intent via the code: the configured origin is filled.
     #[test]
-    fn relay_intent_code_only_fills_both_urls() {
+    fn relay_intent_code_only_fills_the_origin() {
         let out = fill_relay_defaults(
             &["KALLIP_TAGMA_RELAY_ENROLLMENT_CODE=sk-x".into()],
-            Some(ARCHEION),
-            Some(LESCHE),
+            Some(POLIS),
         );
-        assert!(has(
-            &out,
-            "KALLIP_TAGMA_RELAY_ARCHEION_URL=http://localhost:7100"
-        ));
-        assert!(has(
-            &out,
-            "KALLIP_TAGMA_RELAY_LESCHE_URL=http://localhost:7200"
-        ));
+        assert!(has(&out, "KALLIP_POLIS_URL=http://localhost:8080"));
+    }
+
+    /// Relay intent via an explicit origin: it survives as-is.
+    #[test]
+    fn explicit_origin_passes_through() {
+        let out = fill_relay_defaults(
+            &["KALLIP_POLIS_URL=https://api.example.com".into()],
+            Some(POLIS),
+        );
+        assert!(has(&out, "KALLIP_POLIS_URL=https://api.example.com"));
+        assert_eq!(out.len(), 1);
     }
 
     /// No relay signal -- nothing is injected.
     #[test]
     fn local_only_env_stays_untouched() {
-        let out = fill_relay_defaults(
-            &["KALLIP_LLM_PROVIDER=deepseek".into()],
-            Some(ARCHEION),
-            Some(LESCHE),
-        );
+        let out = fill_relay_defaults(&["KALLIP_LLM_PROVIDER=deepseek".into()], Some(POLIS));
+        assert!(!has(&out, "KALLIP_POLIS_URL="));
         assert!(!has(&out, "KALLIP_TAGMA_RELAY_"));
         assert_eq!(out.len(), 1);
     }
 
-    /// Explicit values win; empty entries count as missing and are
-    /// replaced in place (no duplicate keys).
+    /// An empty explicit origin counts as missing and is filled in
+    /// place (no duplicate keys).
     #[test]
-    fn explicit_values_win_and_empty_is_filled_in_place() {
-        let out = fill_relay_defaults(
-            &[
-                "KALLIP_TAGMA_RELAY_ARCHEION_URL=https://archeion.example.com".into(),
-                "KALLIP_TAGMA_RELAY_LESCHE_URL=".into(),
-            ],
-            Some(ARCHEION),
-            Some(LESCHE),
-        );
-        assert!(has(
-            &out,
-            "KALLIP_TAGMA_RELAY_ARCHEION_URL=https://archeion.example.com"
-        ));
-        assert!(has(
-            &out,
-            "KALLIP_TAGMA_RELAY_LESCHE_URL=http://localhost:7200"
-        ));
-        assert_eq!(out.len(), 2);
+    fn empty_origin_is_filled_in_place() {
+        let out = fill_relay_defaults(&["KALLIP_POLIS_URL=".into()], Some(POLIS));
+        assert!(has(&out, "KALLIP_POLIS_URL=http://localhost:8080"));
+        assert_eq!(out.len(), 1);
     }
 
-    /// Duplicate entries collapse to the single explicit value
-    /// regardless of order: an empty duplicate must neither gain
-    /// the default (an order-sensitive consumer could let it
-    /// win) nor survive (the daemon's env validation rejects
-    /// empty values).
+    /// Duplicate origins collapse to the single explicit value.
     #[test]
-    fn duplicate_keys_collapse_to_the_explicit_value() {
+    fn duplicate_origins_collapse_to_the_explicit_value() {
         let out = fill_relay_defaults(
             &[
-                "KALLIP_TAGMA_RELAY_ARCHEION_URL=".into(),
-                "KALLIP_TAGMA_RELAY_ENROLLMENT_CODE=sk-x".into(),
-                "KALLIP_TAGMA_RELAY_ARCHEION_URL=https://archeion.example.com".into(),
+                "KALLIP_POLIS_URL=".into(),
+                "KALLIP_POLIS_URL=https://api.example.com".into(),
             ],
-            Some(ARCHEION),
-            Some(LESCHE),
+            Some(POLIS),
         );
-        assert!(has(
-            &out,
-            "KALLIP_TAGMA_RELAY_ARCHEION_URL=https://archeion.example.com"
-        ));
+        assert!(has(&out, "KALLIP_POLIS_URL=https://api.example.com"));
         assert_eq!(
             out.iter()
-                .filter(|e| e.starts_with("KALLIP_TAGMA_RELAY_ARCHEION_URL"))
+                .filter(|e| e.starts_with("KALLIP_POLIS_URL"))
                 .count(),
             1
         );
-        // Reversed order: an empty duplicate ahead of the explicit one.
-        let out = fill_relay_defaults(
-            &[
-                "KALLIP_TAGMA_RELAY_LESCHE_URL=".into(),
-                "KALLIP_TAGMA_RELAY_LESCHE_URL=https://lesche.example.com".into(),
-            ],
-            Some(ARCHEION),
-            Some(LESCHE),
-        );
-        assert!(has(
-            &out,
-            "KALLIP_TAGMA_RELAY_LESCHE_URL=https://lesche.example.com"
-        ));
-        assert_eq!(
-            out.iter()
-                .filter(|e| e.starts_with("KALLIP_TAGMA_RELAY_LESCHE_URL"))
-                .count(),
-            1
-        );
-        // Two empties fill once, never duplicate.
-        let out = fill_relay_defaults(
-            &[
-                "KALLIP_TAGMA_RELAY_ARCHEION_URL=".into(),
-                "KALLIP_TAGMA_RELAY_ARCHEION_URL=".into(),
-            ],
-            Some(ARCHEION),
-            Some(LESCHE),
-        );
-        assert_eq!(out.len(), 2, "archeion collapsed plus the lesche default");
-        assert!(has(
-            &out,
-            "KALLIP_TAGMA_RELAY_ARCHEION_URL=http://localhost:7100"
-        ));
     }
 
-    /// An unconfigured daemon URL (unset, or empty -- the
-    /// kallip-runtime's persistence.rs `filter(!is_empty)` precedent)
-    /// means nothing is
-    /// filled for it: an absent key stays absent, and an empty request
-    /// entry stays as-is to fail env validation downstream -- the same
-    /// fail-loud end an empty configured default reached before the
-    /// fill moved to the daemon.
+    /// An unconfigured daemon origin (unset, or empty) means nothing
+    /// is filled: an absent key stays absent, and an empty request
+    /// entry stays as-is to fail env validation downstream.
     #[test]
-    fn unconfigured_daemon_url_fills_nothing() {
-        let out = fill_relay_defaults(
-            &["KALLIP_TAGMA_RELAY_ENROLLMENT_CODE=sk-x".into()],
-            None,
-            Some(LESCHE),
-        );
-        assert!(!has(&out, "KALLIP_TAGMA_RELAY_ARCHEION_URL"));
-        assert!(has(
-            &out,
-            "KALLIP_TAGMA_RELAY_LESCHE_URL=http://localhost:7200"
-        ));
-        let out = fill_relay_defaults(&["KALLIP_TAGMA_RELAY_ARCHEION_URL=".into()], None, None);
+    fn unconfigured_daemon_origin_fills_nothing() {
+        let out = fill_relay_defaults(&["KALLIP_TAGMA_RELAY_ENROLLMENT_CODE=sk-x".into()], None);
+        assert!(!has(&out, "KALLIP_POLIS_URL="));
+        let out = fill_relay_defaults(&["KALLIP_POLIS_URL=".into()], None);
         assert_eq!(
             out,
-            vec!["KALLIP_TAGMA_RELAY_ARCHEION_URL=".to_string()],
+            vec!["KALLIP_POLIS_URL=".to_string()],
             "an empty entry stays for env validation to reject"
         );
     }

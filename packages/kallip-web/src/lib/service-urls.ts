@@ -1,8 +1,8 @@
 /**
  * Service URL derivation for the web app, in two layers:
  *
- * 1. Explicit override — `config.apiBase` when set (non-empty): the
- *    platform edge origin (e.g. "https://api.example.com"), the same
+ * 1. Explicit override — `config.apiBase` when the runtime config carries
+ *    a value (the whole API origin, e.g. "https://api.example.com").
  * 2. Derivation — the api.<domain> origin, following the page's own
  *    protocol and port: an https page on the default port reaches
  *    `https://api.example.com/v1/<service>`, while a page on a non-default
@@ -23,7 +23,7 @@ export type ServiceName = "archeion" | "lesche" | "files" | "instances";
 /** The subset of `window.KALLIP_CONFIG` this derivation consumes. */
 export interface DerivationConfig {
   domain?: string;
-  /** Platform-edge-origin override; empty string counts as unset. */
+  /** Whole-API-origin override; returned as-is (empty string included). */
   apiBase?: string;
 }
 
@@ -41,8 +41,8 @@ export function serviceUrl(
   page: PageLocation,
 ): string {
   const override = config.apiBase;
-  if (override !== undefined && override !== "") {
-    return `${override.replace(/\/+$/, "")}/v1/${name}`;
+  if (override !== undefined) {
+    return override;
   }
   const domain = config.domain ?? page.hostname.replace(/^app\./, "");
   const defaultPort = page.protocol === "https:" ? "443" : "80";

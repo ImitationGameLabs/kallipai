@@ -1,9 +1,10 @@
 //! The files-service client behind `kallip file *`: a thin reqwest face
 //! over `PUT|GET /v1/files`, `GET /v1/files/{id}` and
 //! `POST /v1/files/{id}/send`. Credentials ride the spawn env
-//! (`KALLIP_FILES_URL` base plus `KALLIP_FILES_TOKEN` bearer) -- the
-//! enrollment-code channel shape, so the secret reaches the agent's
-//! environment without any CLI flag ever carrying it.
+//! (`KALLIP_POLIS_URL` origin, deriving the /v1/files base, plus
+//! `KALLIP_FILES_TOKEN` bearer) -- the enrollment-code channel shape, so
+//! the secret reaches the agent's environment without any CLI flag
+//! ever carrying it.
 
 use std::path::Path;
 
@@ -61,12 +62,13 @@ pub struct FilesClient {
 }
 
 impl FilesClient {
-    /// Read the base URL and bearer token from the environment. A missing
-    /// variable is a caller-environment error naming the variable, so the
-    /// fix is obvious from the message alone.
+    /// Read the configuration from the environment: `KALLIP_POLIS_URL`
+    /// names the platform edge origin (required -- a files token is
+    /// credentials, so there is no deployment to assume), and
+    /// `KALLIP_FILES_TOKEN` carries the bearer.
     pub fn from_env() -> anyhow::Result<Self> {
-        let base_url = std::env::var("KALLIP_FILES_URL")
-            .map_err(|_| anyhow::anyhow!("KALLIP_FILES_URL env var not set"))?;
+        let origin = kallip_runtime::polis::polis_origin_from_env()?;
+        let base_url = format!("{origin}/v1/files");
         let token = std::env::var("KALLIP_FILES_TOKEN")
             .map_err(|_| anyhow::anyhow!("KALLIP_FILES_TOKEN env var not set"))?;
         Ok(Self::new(base_url, token))
@@ -100,7 +102,7 @@ impl FilesClient {
         let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(handle));
         let response = self
             .http
-            .put(format!("{}/v1/files", self.base_url))
+            .put(self.base_url.clone())
             .query(&[("path", path)])
             .header("authorization", format!("Bearer {}", self.token))
             .header(reqwest::header::CONTENT_LENGTH, metadata.len())
@@ -118,7 +120,7 @@ impl FilesClient {
     pub async fn get_file(&self, id: Uuid) -> anyhow::Result<Vec<u8>> {
         let response = self
             .http
-            .get(format!("{}/v1/files/{id}", self.base_url))
+            .get(format!("{}/{}", self.base_url, id))
             .header("authorization", format!("Bearer {}", self.token))
             .send()
             .await?;
@@ -144,7 +146,7 @@ impl FilesClient {
         }
         let response = self
             .http
-            .post(format!("{}/v1/files/{id}/send", self.base_url))
+            .post(format!("{}/{}/send", self.base_url, id))
             .header("authorization", format!("Bearer {}", self.token))
             .json(&SendRequest { to_user, to_tagma })
             .send()
@@ -171,7 +173,7 @@ impl FilesClient {
         }
         let response = self
             .http
-            .get(format!("{}/v1/files", self.base_url))
+            .get(self.base_url.clone())
             .query(&query)
             .header("authorization", format!("Bearer {}", self.token))
             .send()
