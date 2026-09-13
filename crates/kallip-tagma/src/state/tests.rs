@@ -688,6 +688,7 @@ fn with_limits_sets_max_agents() {
         make_profile_bundle(),
         PolicyPreset::Default,
         kallip_runtime::token_budget::TokenBudget::unlimited(),
+        None,
     );
     assert_eq!(state.max_agents, 50);
     assert_eq!(state.max_subagents, 20);

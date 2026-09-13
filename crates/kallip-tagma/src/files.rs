@@ -4,18 +4,20 @@
 
 use kallip_common::protocol::ApiError;
 
-/// Fetch the record's bytes from the files service (the tagma process's
-/// own credentials). Whole-body: the service caps uploads, so a stream
-/// would add plumbing without changing the memory story.
+/// Fetch the record's bytes from the files service under the tagma's
+/// own registered credential (`token`, the primary entry's stored
+/// enrollment). Whole-body: the service caps uploads, so a stream would
+/// add plumbing without changing the memory story.
 pub(crate) async fn fetch_record_bytes(
     http: &reqwest::Client,
+    token: Option<&str>,
     record_id: uuid::Uuid,
 ) -> Result<Vec<u8>, ApiError> {
+    let token = token.ok_or_else(|| {
+        ApiError::unavailable("no registered files credential; the tagma cannot fetch media")
+    })?;
     let base = std::env::var("KALLIP_FILES_URL").map_err(|_| {
         ApiError::unavailable("KALLIP_FILES_URL is not set; the tagma cannot fetch media")
-    })?;
-    let token = std::env::var("KALLIP_FILES_TOKEN").map_err(|_| {
-        ApiError::unavailable("KALLIP_FILES_TOKEN is not set; the tagma cannot fetch media")
     })?;
     let response = http
         .get(format!("{base}/v1/files/{record_id}"))
@@ -48,10 +50,12 @@ pub(crate) fn files_fetch_error(record_id: uuid::Uuid, status: reqwest::StatusCo
     }
 }
 
-/// Mirror write-through: a hash-addressed copy of media bytes in the
-/// tagma data area's attachment store. Fail-open by design -- a mirror
-/// write failure never blocks the ingest; the reference then carries no
-/// blob id and restore falls back to the files service.
+/// Mirror write-through (record-id form only): a hash-addressed copy of
+/// media bytes in the tagma data area's attachment store. Fail-open by
+/// design -- the record form's master copy lives in the files service, so
+/// a mirror failure never blocks the ingest; the reference then carries
+/// no blob id and restore falls back to the files service. (The path
+/// form is the opposite: its blob is the master copy, fail-closed.)
 pub(crate) async fn store_mirror(
     blobs: Option<&std::sync::Arc<dyn kallip_blob_store::BlobStore>>,
     bytes: &[u8],
@@ -421,6 +425,37 @@ mod tests {
                 assert_eq!(bytes, vec![8, 8]);
             }
             other => panic!("expected the local copy, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_without_a_registered_credential_is_unavailable() {
+        // The credential check precedes the URL read, so the credential
+        // error is independent of the environment.
+        let prior_url = std::env::var("KALLIP_FILES_URL").ok();
+        // SAFETY: test-only env edit; this test is the only reader and
+        // writer of KALLIP_FILES_URL in the suite.
+        unsafe {
+            std::env::remove_var("KALLIP_FILES_URL");
+        }
+        let err = fetch_record_bytes(&reqwest::Client::new(), None, uuid::Uuid::nil())
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 503);
+        assert!(err.message.contains("no registered files credential"));
+        // A registered token still takes the URL from the environment
+        // (non-secret process configuration).
+        let err = fetch_record_bytes(&reqwest::Client::new(), Some("tok"), uuid::Uuid::nil())
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 503);
+        assert!(err.message.contains("KALLIP_FILES_URL is not set"));
+        // SAFETY: restore-the-prior-value counterpart of the edit above.
+        unsafe {
+            match prior_url {
+                Some(value) => std::env::set_var("KALLIP_FILES_URL", value),
+                None => std::env::remove_var("KALLIP_FILES_URL"),
+            }
         }
     }
 }

@@ -2185,6 +2185,7 @@ mod tests {
                 profiles,
                 PolicyPreset::Default,
                 kallip_runtime::token_budget::TokenBudget::unlimited(),
+                None,
             ));
         let root = body("root");
         let declaration = declaration(

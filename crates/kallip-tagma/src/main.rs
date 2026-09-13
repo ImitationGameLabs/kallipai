@@ -148,6 +148,21 @@ async fn run(args: Args) -> Result<()> {
     // panic with a backtrace. Unset boots unlimited; `0` boots paused.
     let token_budget = AppState::startup_token_budget(std::env::var("KALLIP_TOKEN_BUDGET").ok())
         .context("invalid KALLIP_TOKEN_BUDGET")?;
+    // The files-service token comes from the tagma's own registered
+    // credential (the primary relay entry's stored enrollment), never
+    // from the environment: agent shells inherit this process env
+    // wholesale, so a token there would leak into every agent — a
+    // legacy one is swept below. The scan must precede
+    // `restore_agents`, whose re-assembly fetches record bytes through
+    // the token. Two-phase by design: this build-time scan runs before
+    // the relay plan resolves, so on a first-registration boot
+    // (enrollment happens in the plan phase) the slot stays `None` for
+    // that session — nothing to fetch yet — and the next boot picks
+    // the credential up.
+    let files_token = resolve_files_token(&args)?;
+    if sweep_legacy_files_token() {
+        info!("removed legacy KALLIP_FILES_TOKEN from the process environment");
+    }
     let state = Arc::new(AppState::with_limits(
         operator.hash().clone(),
         args.max_agents,
@@ -156,6 +171,7 @@ async fn run(args: Args) -> Result<()> {
         profiles,
         kallip_runtime::config::policy_preset_from_env(),
         token_budget,
+        files_token,
     ));
 
     // The typed topic bus registered inline at construction; surface the
@@ -698,6 +714,45 @@ fn resolve_primary_identity(
     Ok((None, None))
 }
 
+/// The files-service token: the primary relay entry's stored enrollment
+/// token (same config-order scan as [`resolve_primary_identity`], whose
+/// first entry owns the tagma identity). `None` when no entry has stored
+/// credentials — record fetches then degrade to 503, while the path form
+/// (local blobs) is unaffected. Runs at `SharedState` build time, before
+/// `restore_agents` (re-assembly fetches through this token); the relay
+/// plan re-walks the same entries later in boot (two small directory
+/// reads, intentionally unshared).
+fn resolve_files_token(args: &args::Args) -> Result<Option<String>> {
+    let entries = resolve_relay_entries(args)?;
+    let root = credentials_dir()?;
+    Ok(files_token_from_entries(&entries, &root))
+}
+
+/// First stored enrollment token in config order, or `None` — the same
+/// "primary archeion" order [`resolve_primary_identity`] scans in.
+fn files_token_from_entries(entries: &[RelayEntry], root: &std::path::Path) -> Option<String> {
+    entries
+        .iter()
+        .find_map(|entry| credentials::load_tagma(&root.join(&entry.name)).map(|s| s.token))
+}
+
+/// Remove a legacy `KALLIP_FILES_TOKEN` from the process environment, if
+/// present: the token source is the registered credential, and an env
+/// token is dead weight that still leaks into every spawned agent shell
+/// (they inherit this process env wholesale). Returns whether anything
+/// was removed.
+fn sweep_legacy_files_token() -> bool {
+    if std::env::var_os("KALLIP_FILES_TOKEN").is_none() {
+        return false;
+    }
+    // SAFETY: single-threaded boot path (no agent or serving threads
+    // exist yet); this is the process's only mutation of the variable.
+    unsafe {
+        std::env::remove_var("KALLIP_FILES_TOKEN");
+    }
+    true
+}
+
 /// One configured relay entry: one archeion identity. `name` is the stable slug
 /// that keys the credentials subdirectory and the AppState relay slot (so a
 /// URL change never moves the identity directory).
@@ -1120,6 +1175,83 @@ async fn shutdown_signal(token: CancellationToken) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn files_token_scan_precedes_restore_agents() {
+        // Source-order pin: restore re-assembly fetches record bytes
+        // through the boot-time token slot, so a boot that restored
+        // before filling the slot would 503 every files fallback.
+        // Swapping the two regions (or dropping the scan) must fail
+        // here.
+        let src = include_str!("main.rs");
+        let scan = src
+            .find("let files_token = resolve_files_token(&args)")
+            .expect("token scan call site present");
+        let restore = src
+            .find("lifecycle::restore_agents(&state)")
+            .expect("restore call site present");
+        assert!(scan < restore);
+    }
+
+    #[test]
+    fn sweep_removes_a_legacy_files_token_exactly_once() {
+        let prior = std::env::var_os("KALLIP_FILES_TOKEN");
+        // SAFETY: test-only env edit; this test is the only reader and
+        // writer of KALLIP_FILES_TOKEN in the suite (the same accepted
+        // race shape as the test_helpers data-dir bootstrapping).
+        unsafe {
+            std::env::set_var("KALLIP_FILES_TOKEN", "legacy-token");
+        }
+        assert!(sweep_legacy_files_token());
+        assert!(std::env::var_os("KALLIP_FILES_TOKEN").is_none());
+        // Idempotent: a clean environment sweeps nothing.
+        assert!(!sweep_legacy_files_token());
+        // SAFETY: restore-the-prior-value counterpart of the edit above.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("KALLIP_FILES_TOKEN", value),
+                None => std::env::remove_var("KALLIP_FILES_TOKEN"),
+            }
+        }
+    }
+
+    #[test]
+    fn files_token_follows_the_primary_entry_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let entry = |name: &str| RelayEntry {
+            name: name.to_owned(),
+            archeion_url: "http://archeion".to_owned(),
+            lesche_url: None,
+            enrollment_code: None,
+        };
+        let entries = [entry("alpha"), entry("beta")];
+        // No stored credentials anywhere: no token.
+        assert_eq!(files_token_from_entries(&entries, root.path()), None);
+        // The first entry in config order holding stored credentials
+        // wins.
+        std::fs::create_dir_all(root.path().join("beta")).unwrap();
+        credentials::save_tagma(
+            &root.path().join("beta"),
+            "b-id",
+            "b-token",
+            "http://archeion",
+        );
+        assert_eq!(
+            files_token_from_entries(&entries, root.path()).as_deref(),
+            Some("b-token")
+        );
+        std::fs::create_dir_all(root.path().join("alpha")).unwrap();
+        credentials::save_tagma(
+            &root.path().join("alpha"),
+            "a-id",
+            "a-token",
+            "http://archeion",
+        );
+        assert_eq!(
+            files_token_from_entries(&entries, root.path()).as_deref(),
+            Some("a-token")
+        );
+    }
 
     #[test]
     fn boot_refuses_to_start_without_a_slug() {

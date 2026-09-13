@@ -60,7 +60,12 @@ pub(crate) async fn ingest_attachment(
     // files round-trip.
     enforce(&state, &target, req.modality).await?;
 
-    let bytes = crate::files::fetch_record_bytes(&state.files_http, req.record_id).await?;
+    let bytes = crate::files::fetch_record_bytes(
+        &state.files_http,
+        state.files_token.as_deref(),
+        req.record_id,
+    )
+    .await?;
     let blob_id = crate::files::store_mirror(state.attachment_blobs.get(), &bytes).await;
     let turn_id = record_ingest(
         &target,

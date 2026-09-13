@@ -267,7 +267,11 @@ async fn restore_one(
             crate::files::fetch_local_first(
                 shared.attachment_blobs.get(),
                 record_id,
-                crate::files::fetch_record_bytes(&shared.files_http, record_id),
+                crate::files::fetch_record_bytes(
+                    &shared.files_http,
+                    shared.files_token.as_deref(),
+                    record_id,
+                ),
                 blob_id.as_deref(),
             )
             .await

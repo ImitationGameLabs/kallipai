@@ -209,6 +209,14 @@ pub struct AppState {
     /// media fetch): one client reuses its connection pool across requests,
     /// and clones are cheap (an internal `Arc`).
     pub files_http: reqwest::Client,
+    /// The files-service bearer token, taken from the tagma's own
+    /// registered credential (the primary relay entry's stored
+    /// enrollment) at boot. `None` on a never-enrolled tagma: record
+    /// fetches then fail with 503 (the path form, local blobs, is
+    /// unaffected). Never read from the environment: agent shells
+    /// inherit this process env wholesale, so a token there would leak
+    /// into every agent.
+    pub files_token: Option<String>,
     /// Tagma-wide directory write-lock coordinator. Shared across all agents so
     /// one agent holding a dir's write-lock blocks another. The tagma build
     /// enforces locks via landlock on Linux (mandatory); advisory elsewhere.
@@ -681,10 +689,12 @@ impl AppState {
             profiles,
             preset,
             kallip_runtime::token_budget::TokenBudget::unlimited(),
+            None,
         )
     }
 
     /// Production constructor with resource limits from CLI args.
+    #[allow(clippy::too_many_arguments)] // the boot hands each knob separately
     pub fn with_limits(
         operator_token_hash: TokenHash,
         max_agents: usize,
@@ -693,6 +703,7 @@ impl AppState {
         profiles: Arc<ArcSwap<ProfileBundle>>,
         preset: PolicyPreset,
         token_budget: kallip_runtime::token_budget::TokenBudget,
+        files_token: Option<String>,
     ) -> Self {
         let (invalidations, _) = tokio::sync::watch::channel(0u64);
         Self {
@@ -706,6 +717,7 @@ impl AppState {
             max_subagents,
             prompt_queue_size,
             token_budget,
+            files_token,
             profiles,
             // Bounded so a wedged files connection cannot hang the boot
             // path (restore re-assembly awaits this client).
