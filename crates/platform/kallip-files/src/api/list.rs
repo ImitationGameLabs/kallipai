@@ -1,4 +1,4 @@
-//! GET /v1/files: the listing face (the CLI `file ls` dependency). The SQL
+//! GET /: the listing face (the CLI `file ls` dependency). The SQL
 //! prefix is derived from the caller's identity alone, matched literally
 //! (the LIKE metacharacters are escaped), and only narrows the candidate
 //! set; authorization itself is the per-row matrix decision -- the
@@ -75,7 +75,7 @@ pub fn clamp_limit(requested: Option<u64>) -> u64 {
     requested.unwrap_or(DEFAULT_LIMIT).min(MAX_LIST_LIMIT)
 }
 
-/// GET /v1/files?space=self|shared&prefix=&limit=
+/// GET /?space=self|shared&prefix=&limit=
 pub async fn list_files(
     State(state): State<AppState>,
     AuthPrincipal(principal): AuthPrincipal,
@@ -145,7 +145,7 @@ pub async fn list_files(
         // The per-row decision is the same matrix call the single-record
         // routes make. With a correctly derived prefix it never filters
         // anything; it exists so the listing can only ever narrow, never
-        // widen, what GET /v1/files/{id} would serve.
+        // widen, what GET /{id} would serve.
         let allowed = match (&principal, facts.as_ref()) {
             (Principal::User(user), _) => acl::user_can(user.as_ref(), &path, Action::Read),
             (Principal::Tagma(tagma), Some(row_facts)) => {

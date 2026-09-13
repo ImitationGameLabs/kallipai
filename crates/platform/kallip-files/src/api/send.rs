@@ -1,4 +1,4 @@
-//! POST /v1/files/{id}/send: server-side delivery (the send semantics of
+//! POST /{id}/send: server-side delivery (the send semantics of
 //! delivery, not access). The caller needs read
 //! right on the source; the target is validated against the enrollment
 //! facts; the landing write happens as the service, never through a path
@@ -45,7 +45,7 @@ pub struct SendResponse {
     pub path: String,
 }
 
-/// POST /v1/files/{id}/send
+/// POST /{id}/send
 pub async fn send_file(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,

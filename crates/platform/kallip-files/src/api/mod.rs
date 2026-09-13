@@ -127,7 +127,7 @@ pub(crate) async fn authorize(
     }
 }
 
-/// DELETE /v1/files/{id}: load the record, decide by row 1-5 plus the
+/// DELETE /{id}: load the record, decide by row 1-5 plus the
 /// shared-region owner-field refinement, then release the reference. The
 /// blob itself is never unlinked here -- a zeroed refcount only stamps
 /// `freed_at`; the GC owns unlinking.

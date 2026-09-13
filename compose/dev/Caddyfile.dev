@@ -44,11 +44,10 @@
   @api host api.{$KALLIP_DOMAIN}
   handle @api {
     # The platform's single API face, path-routed by service segment.
-    # handle_path strips /v1/<service>; each rewrite adds back
-    # that service's internal prefix, so the backends keep their current
-    # route shapes (zero server changes). files passes through untouched:
-    # its internal paths already start with /v1/files (service name ==
-    # resource segment, identity mapping).
+    # handle_path strips /v1/<service> and forwards the remainder as-is:
+    # all four backends serve bare resource paths, so the strip is the
+    # whole story - no rewrites, and no identity-mapping exception for files
+    # (its named matcher below covers the bare /v1/files prefix too).
     import kallip-api-routes
   }
 
@@ -79,6 +78,7 @@
   }
   @files path /v1/files /v1/files/*
   handle @files {
+    uri strip_prefix /v1/files
     reverse_proxy 127.0.0.1:7400
   }
   handle_path /v1/instances/* {

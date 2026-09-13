@@ -202,7 +202,7 @@ async fn spawn_world() -> World {
             .expect("serve");
     });
     World {
-        files_url: format!("http://{addr}/v1/files"),
+        files_url: format!("http://{addr}"),
         user1,
         t1,
         t2,

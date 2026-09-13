@@ -1,4 +1,4 @@
-//! Integration pins for the listing route (GET /v1/files): the grant
+//! Integration pins for the listing route (GET /): the grant
 //! prefix derives from the caller's identity, the per-row matrix decision
 //! is the same one the single-record routes make, the prefix matches
 //! verbatim (the LIKE metacharacters included), the page cap is pinned,
@@ -69,7 +69,7 @@ async fn put_ok(world: &TestWorld, auth: &str, path: &str, body: &[u8]) -> Strin
     let response = respond(
         &world.router,
         axum::http::Method::PUT,
-        &format!("/v1/files?path={path}"),
+        &format!("/?path={path}"),
         Some(auth.to_owned()),
         body.to_vec(),
     )
@@ -85,12 +85,12 @@ async fn list_ok(world: &TestWorld, auth: &str, query: &str) -> Vec<serde_json::
     let response = respond(
         &world.router,
         axum::http::Method::GET,
-        &format!("/v1/files?{query}"),
+        &format!("/?{query}"),
         Some(auth.to_owned()),
         Vec::new(),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK, "GET /v1/files?{query}");
+    assert_eq!(response.status(), StatusCode::OK, "GET /?{query}");
     let value: serde_json::Value =
         serde_json::from_slice(&body_of(response).await).expect("json body");
     value.as_array().expect("array").clone()
@@ -100,7 +100,7 @@ async fn list_ok(world: &TestWorld, auth: &str, query: &str) -> Vec<serde_json::
 async fn send_to_tagma_ok(world: &TestWorld, auth: &str, record_id: &str, tagma: &str) {
     let request = Request::builder()
         .method(axum::http::Method::POST)
-        .uri(format!("/v1/files/{record_id}/send"))
+        .uri(format!("/{record_id}/send"))
         .header("content-type", "application/json")
         .header("cookie", auth)
         .body(axum::body::Body::from(
@@ -236,7 +236,7 @@ async fn admin_listing_is_refused_like_every_content_face() {
     let response = respond(
         &world.router,
         axum::http::Method::GET,
-        "/v1/files?space=shared",
+        "/?space=shared",
         Some(bearer(&world.admin_token)),
         Vec::new(),
     )
@@ -252,7 +252,7 @@ async fn bad_space_or_absolute_prefix_is_a_400() {
         let response = respond(
             &world.router,
             axum::http::Method::GET,
-            &format!("/v1/files?{query}"),
+            &format!("/?{query}"),
             Some(u1.clone()),
             Vec::new(),
         )

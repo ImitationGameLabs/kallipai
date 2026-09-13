@@ -86,21 +86,18 @@ pub fn router(state: AppState) -> Router {
     let cors = cors_layer(&state.config.cors_origins);
     Router::new()
         .route(
-            "/v1/files",
+            "/",
             axum::routing::put(api::put::put_file).get(api::list::list_files),
         )
         .route(
-            "/v1/files/{id}",
+            "/{id}",
             axum::routing::get(api::get::get_file)
                 .head(api::get::head_file)
                 .delete(api::delete_file),
         )
+        .route("/{id}/send", axum::routing::post(api::send::send_file))
         .route(
-            "/v1/files/{id}/send",
-            axum::routing::post(api::send::send_file),
-        )
-        .route(
-            "/v1/admin/delivery-events",
+            "/admin/delivery-events",
             axum::routing::get(api::admin::list_events),
         )
         .route("/health", axum::routing::get(api::health))

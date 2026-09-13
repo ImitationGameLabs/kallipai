@@ -81,7 +81,7 @@ async fn put(
     respond(
         &world.router,
         axum::http::Method::PUT,
-        &format!("/v1/files?path={path}"),
+        &format!("/?path={path}"),
         Some(auth),
         body.to_vec(),
     )
@@ -107,7 +107,7 @@ async fn get(
     respond(
         &world.router,
         axum::http::Method::GET,
-        &format!("/v1/files/{record_id}"),
+        &format!("/{record_id}"),
         Some(auth),
         Vec::new(),
     )
@@ -123,7 +123,7 @@ async fn send(
     let request = with_auth(
         Request::builder()
             .method(axum::http::Method::POST)
-            .uri(format!("/v1/files/{record_id}/send"))
+            .uri(format!("/{record_id}/send"))
             .header("content-type", "application/json"),
         auth,
     )
@@ -145,7 +145,7 @@ async fn admin_events(world: &TestWorld, blob_id: Option<&str>) -> serde_json::V
     let response = respond(
         &world.router,
         axum::http::Method::GET,
-        &format!("/v1/admin/delivery-events{suffix}"),
+        &format!("/admin/delivery-events{suffix}"),
         Some(bearer(&world.admin_token)),
         Vec::new(),
     )
@@ -157,7 +157,7 @@ async fn admin_events(world: &TestWorld, blob_id: Option<&str>) -> serde_json::V
 #[tokio::test]
 async fn unauthenticated_requests_are_rejected() {
     let world = TestWorld::new().await;
-    let uri = format!("/v1/files?path={}", user1_shared(&world, "a.txt"));
+    let uri = format!("/?path={}", user1_shared(&world, "a.txt"));
 
     let response = respond(
         &world.router,
@@ -202,7 +202,7 @@ async fn three_credential_faces_authenticate() {
     let response = respond(
         &world.router,
         axum::http::Method::GET,
-        "/v1/admin/delivery-events",
+        "/admin/delivery-events",
         Some(bearer(&world.admin_token)),
         Vec::new(),
     )
@@ -223,7 +223,7 @@ async fn user_reads_and_writes_own_space() {
     let head = respond(
         &world.router,
         axum::http::Method::HEAD,
-        &format!("/v1/files/{record_id}"),
+        &format!("/{record_id}"),
         Some(cookie_for(&world, 1)),
         Vec::new(),
     )
@@ -240,7 +240,7 @@ async fn user_reads_and_writes_own_space() {
     let response = respond(
         &world.router,
         axum::http::Method::DELETE,
-        &format!("/v1/files/{record_id}"),
+        &format!("/{record_id}"),
         Some(cookie_for(&world, 2)),
         Vec::new(),
     )
@@ -284,7 +284,7 @@ async fn relative_put_lands_in_the_caller_private_region() {
     let listing = respond(
         &world.router,
         axum::http::Method::GET,
-        "/v1/files?space=self&prefix=images/",
+        "/?space=self&prefix=images/",
         Some(bearer(&world.t1_token)),
         Vec::new(),
     )
@@ -316,7 +316,7 @@ async fn admin_face_and_admin_content_pins() {
     let response = respond(
         &world.router,
         axum::http::Method::DELETE,
-        &format!("/v1/files/{record_id}"),
+        &format!("/{record_id}"),
         Some(bearer(&world.admin_token)),
         Vec::new(),
     )
@@ -328,7 +328,7 @@ async fn admin_face_and_admin_content_pins() {
         let response = respond(
             &world.router,
             axum::http::Method::GET,
-            "/v1/admin/delivery-events",
+            "/admin/delivery-events",
             Some(auth),
             Vec::new(),
         )
@@ -351,7 +351,7 @@ async fn delete_removes_the_record_only() {
     let response = respond(
         &world.router,
         axum::http::Method::DELETE,
-        &format!("/v1/files/{record_id}"),
+        &format!("/{record_id}"),
         Some(cookie_for(&world, 1)),
         Vec::new(),
     )
@@ -363,7 +363,7 @@ async fn delete_removes_the_record_only() {
     let response = respond(
         &world.router,
         axum::http::Method::DELETE,
-        &format!("/v1/files/{record_id}"),
+        &format!("/{record_id}"),
         Some(cookie_for(&world, 1)),
         Vec::new(),
     )
@@ -602,7 +602,7 @@ async fn range_requests_serve_slices() {
         b"0123456789",
     )
     .await;
-    let uri = format!("/v1/files/{record_id}");
+    let uri = format!("/{record_id}");
 
     let slice = |range: &'static str| {
         let request = with_auth(
@@ -693,7 +693,7 @@ async fn dedup_keeps_sibling_records_readable() {
     let response = respond(
         &world.router,
         axum::http::Method::DELETE,
-        &format!("/v1/files/{first}"),
+        &format!("/{first}"),
         Some(cookie_for(&world, 1)),
         Vec::new(),
     )

@@ -1,4 +1,4 @@
-//! PUT /v1/files: stream the request body straight into the content store
+//! PUT /: stream the request body straight into the content store
 //! (one pass, hashing en route) and register the record with a bumped blob
 //! reference, atomically. The body is never buffered: the cap is enforced
 //! by a reading wrapper, so memory stays bounded by the ingest chunk size
@@ -75,7 +75,7 @@ fn resolve_path(
     }
 }
 
-/// PUT /v1/files?path=...
+/// PUT /?path=...
 pub async fn put_file(
     State(state): State<AppState>,
     Query(query): Query<PutQuery>,

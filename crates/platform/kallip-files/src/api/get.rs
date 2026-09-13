@@ -1,4 +1,4 @@
-//! GET / HEAD /v1/files/{id}: authorize on the record's space path, then
+//! GET / HEAD /{id}: authorize on the record's space path, then
 //! stream the blob through windowed `get_range` calls. Large blobs are
 //! never read whole: the response body is a sequence of fixed-size windows,
 //! so peak memory is one window regardless of file size.
@@ -23,7 +23,7 @@ use kallip_common::protocol::ApiError;
 /// bytes at a time, and the response body is built from these windows.
 const STREAM_WINDOW: u64 = 128 * 1024;
 
-/// GET /v1/files/{id}, honoring a single-range `Range` header.
+/// GET /{id}, honoring a single-range `Range` header.
 pub async fn get_file(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -54,7 +54,7 @@ pub async fn get_file(
     }
 }
 
-/// HEAD /v1/files/{id}: the same authorization and metadata as GET, no
+/// HEAD /{id}: the same authorization and metadata as GET, no
 /// body.
 pub async fn head_file(
     State(state): State<AppState>,

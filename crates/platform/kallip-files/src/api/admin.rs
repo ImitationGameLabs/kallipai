@@ -1,4 +1,4 @@
-//! GET /v1/admin/delivery-events: the admin management face (matrix row 8).
+//! GET /admin/delivery-events: the admin management face (matrix row 8).
 //! The query reads the append-only delivery log; blob content stays closed
 //! to the admin principal -- `authorize` denies every content operation for
 //! `Principal::Admin`, which is what keeps row 8's "management only" shape.
@@ -36,7 +36,7 @@ pub struct DeliveryEventView {
 /// The server-side page cap: a client can ask for fewer, never more.
 const MAX_LIMIT: u64 = 1000;
 
-/// GET /v1/admin/delivery-events?blob_id=&limit=
+/// GET /admin/delivery-events?blob_id=&limit=
 pub async fn list_events(
     State(state): State<AppState>,
     AuthPrincipal(principal): AuthPrincipal,
