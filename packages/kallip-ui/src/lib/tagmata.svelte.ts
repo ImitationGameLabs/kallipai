@@ -55,7 +55,7 @@ export interface TagmaStatusSummary {
   readonly tokenConsumed: number;
 }
 
-/** Props for one enrolled-tagma card (`GET /v1/tagmata` row). */
+/** Props for one enrolled-tagma card (`GET /v1/lesche/tagmata` row). */
 export interface TagmaCardProps {
   readonly tagmaId: string;
   readonly label: string | null;
@@ -112,7 +112,7 @@ export interface TagmaDeviceRow {
   };
 }
 
-/** Join enrolled identities (archeion `/v1/tagmata`) with hosted processes
+/** Join enrolled identities (archeion `/v1/lesche/tagmata`) with hosted processes
  * (instances list) into panel rows. Key preference: the process-reported
  * `tagma_id` (the daemon scan reads the tagma's own persisted id — manual
  * slugs and enroll-after-spawn join here), falling back to the one-click

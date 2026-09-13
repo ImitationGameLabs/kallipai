@@ -7,7 +7,7 @@ import { getLocale } from "../paraglide/runtime.js";
 /** Load phase of the passkeys section. */
 export type PasskeyPhase = "loading" | "loaded" | "error";
 
-/** Props for one passkey row (`GET /v1/me/passkeys` entry). The label may be
+/** Props for one passkey row (`GET /v1/archeion/me/passkeys` entry). The label may be
  *  empty (the initial passkey is unnamed until the user renames it); the card
  *  renders a fallback. `lastUsedAt` is seeded to the enrollment instant. */
 export interface PasskeyCardProps {

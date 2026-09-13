@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn kex_signature_binds_conversation_and_verifies_against_pinned_key() {
         // The initiator side: it knows the responder's pinned public key
-        // (fetched via GET /v1/tagmata) and reconstructs the transcript to
+        // (fetched via GET /tagmata) and reconstructs the transcript to
         // verify the response signature, then derives the same key.
         let device = DeviceKey::generate();
         let pinned = device.public_bytes();

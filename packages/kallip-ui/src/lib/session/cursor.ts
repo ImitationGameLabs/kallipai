@@ -1,4 +1,4 @@
-// Client-side cursor tracking for the `GET /v1/me/events` stream.
+// Client-side cursor tracking for the `GET /v1/lesche/me/events` stream.
 // The lesche stamps every payload frame with an SSE `id` of `<epoch>:<seq>` and
 // opens each connection with a marker carrying `{ epoch, next_seq }` (wire
 // contract). This module turns those numbers into resync decisions — pure and

@@ -323,7 +323,7 @@ in
         authRateCapacity = lib.mkOption {
           type = lib.types.nullOr lib.types.ints.unsigned;
           default = null;
-          description = "Per-IP token-bucket capacity guarding /v1/auth/*.";
+          description = "Per-IP token-bucket capacity guarding /v1/archeion/auth/*.";
         };
         authRateRefillPerSec = lib.mkOption {
           type = lib.types.nullOr lib.types.ints.unsigned;
@@ -383,7 +383,7 @@ in
         adminUserLogin = lib.mkOption {
           type = lib.types.nullOr lib.types.bool;
           default = null;
-          description = "Mount POST /v1/auth/admin-login (admin token exchanged for a local session). When on, a hand-set admin token shorter than 32 chars fails at boot.";
+          description = "Mount POST /v1/archeion/auth/admin-login (admin token exchanged for a local session). When on, a hand-set admin token shorter than 32 chars fails at boot.";
         };
       };
 

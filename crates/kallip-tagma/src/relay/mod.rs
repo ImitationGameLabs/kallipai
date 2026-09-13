@@ -309,7 +309,7 @@ impl RelayHandle {
 
     /// The data-plane relay client (cheap clone -- `Arc` inside). Exposed so a
     /// route that bypasses the bilateral projector (the room send, which posts
-    /// the plaintext straight to `/v1/rooms/{room}/envelopes`) can reach the
+    /// the plaintext straight to `/rooms/{room}/envelopes`) can reach the
     /// relay without going through the projector's frame bus.
     pub fn lesche_client(&self) -> LescheClient {
         self.inner.client.clone()

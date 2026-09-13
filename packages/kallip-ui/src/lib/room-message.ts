@@ -121,7 +121,7 @@ export interface ParsedHandle {
  *
  * Frontend profile routes are deliberately SINGULAR (`/user/`, `/tagma/`) — the
  * user-facing-URL convention — while the backing API stays RESTful plural
- * (`/v1/users`, `/v1/tagmata`); the two namespaces are independent. */
+ * (`/v1/lesche/users`, `/v1/lesche/tagmata`); the two namespaces are independent. */
 export function profileHref(
   kind: "human" | "agent",
   handle: string,

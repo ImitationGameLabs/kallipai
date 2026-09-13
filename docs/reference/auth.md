@@ -143,7 +143,7 @@ ever needed.
 
 ### Admin-token login (local platform)
 
-The fifth auth ceremony, `POST /v1/auth/admin-login`, exists for the
+The fifth auth ceremony, `POST /v1/archeion/auth/admin-login`, exists for the
 local-platform deployment: it exchanges the operator's `sk-admin-` token
 for a normal User session on a fixed local account (the username is
 hardcoded `admin` via `LOCAL_ADMIN_USERNAME`; the account is created on
@@ -154,7 +154,7 @@ holding the name fails fast with a conflict that points at the admin
 surface). The session mints through the same `mint_session_row` path as
 every other login, so the whole user-scoped surface (profiles, tagma
 mint/enroll) works unchanged; the true admin principal keeps
-`/v1/admin` and the CLI. The session also carries instance rights:
+`/v1/archeion/admin` and the CLI. The session also carries instance rights:
 `verify-session` reports `local_admin: true` for the marker account,
 and the instances service's platform mode admits that session on its
 cookie channel (next section), so the admin login IS the instances
@@ -172,7 +172,7 @@ account, so `KALLIP_ARCHEION_SIGNUP_ENABLED` does not gate it.
 
 ### Username availability probe (public, pre-release)
 
-`GET /v1/auth/username-availability?username=<handle>` tells a signup
+`GET /v1/archeion/auth/username-availability?username=<handle>` tells a signup
 form whether a handle may be attempted, before any credential exists.
 It is an explicit, full username-enumeration oracle -- accepted
 pre-release for the closed beta -- mounted with the same per-IP

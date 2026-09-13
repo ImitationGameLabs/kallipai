@@ -312,7 +312,7 @@ mod manage_frame_tests {
     ) -> (RelayHandle, crate::state::SharedState) {
         let state = make_state();
         let app = axum::Router::new().route(
-            "/v1/tunnel/manage-reply",
+            "/tunnel/manage-reply",
             axum::routing::post(move |axum::Json(reply): axum::Json<serde_json::Value>| {
                 let replies = replies.clone();
                 async move {
@@ -325,9 +325,7 @@ mod manage_frame_tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
         let lesche_url = format!("http://{addr}");
-        let client = LescheClient::builder(&format!("{lesche_url}/v1"), "tok")
-            .build()
-            .unwrap();
+        let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
         let handle = RelayHandle::new(
             client,
             "test".to_string(),

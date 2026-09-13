@@ -13,8 +13,8 @@ import type {
 } from "./types.ts";
 
 export class FilesClient {
-  /** `base` is the files service root, /v1/files included (the edge passes
-   * the /v1/files prefix through untouched -- the service name is the
+  /** `base` is the full edge base, /v1/files included (the edge strips
+   * the /v1/files prefix before proxying -- the service name is the
    * resource segment). Paths here are pure tails: `/{id}`, `/{id}/send`,
    * `?query`. */
   private readonly base: string;

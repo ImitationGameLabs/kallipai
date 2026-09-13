@@ -1,5 +1,5 @@
 //! Tests for the slim room-membership poll pump: a mock lesche serving
-//! `GET /v1/tagmata/{tagma}/rooms`, driven by a real `AppState`. Proves the
+//! `GET /tagmata/{tagma}/rooms`, driven by a real `AppState`. Proves the
 //! pump refreshes the joined-rooms cache and tolerates a poll failure.
 
 use super::*;
@@ -22,7 +22,7 @@ type Rooms = Arc<Mutex<Vec<TagmaRoomView>>>;
 async fn spawn_lesche(rooms: Rooms) -> String {
     let app = Router::new()
         .route(
-            "/v1/tagmata/{_tagma}/rooms",
+            "/tagmata/{_tagma}/rooms",
             get(|State(rooms): State<Rooms>| async move { Json(rooms.lock().await.clone()) }),
         )
         .with_state(rooms);
@@ -46,9 +46,7 @@ fn room_view(id: &str) -> TagmaRoomView {
 async fn setup(rooms: Rooms) -> (RelayHandle, SharedState) {
     let state = make_state();
     let lesche_url = spawn_lesche(rooms).await;
-    let client = LescheClient::builder(&format!("{lesche_url}/v1"), "tok")
-        .build()
-        .unwrap();
+    let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
     let handle = RelayHandle::new(
         client,
         "test".to_string(),
@@ -158,11 +156,11 @@ type MockState = (Rooms, Sessions, FailDirect);
 async fn spawn_full_lesche(rooms: Rooms, sessions: Sessions, fail: FailDirect) -> String {
     let app = Router::new()
         .route(
-            "/v1/tagmata/{_tagma}/rooms",
+            "/tagmata/{_tagma}/rooms",
             get(|State(state): State<MockState>| async move { Json(state.0.lock().await.clone()) }),
         )
         .route(
-            "/v1/direct-sessions",
+            "/direct-sessions",
             get(|State(state): State<MockState>| async move {
                 if state.2.load(Ordering::SeqCst) {
                     StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -196,9 +194,7 @@ async fn setup_full(
 ) -> (RelayHandle, SharedState) {
     let state = make_state();
     let lesche_url = spawn_full_lesche(rooms, sessions, fail_direct).await;
-    let client = LescheClient::builder(&format!("{lesche_url}/v1"), "tok")
-        .build()
-        .unwrap();
+    let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
     let handle = RelayHandle::new(
         client,
         "test".to_string(),

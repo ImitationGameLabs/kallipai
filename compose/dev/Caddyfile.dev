@@ -20,7 +20,7 @@
 # host trust, LAN DNS).
 #
 # Global options: HTTP/3 is disabled in dev. Caddy advertises `alt-svc: h3`
-# otherwise, and Firefox upgrades the cross-subdomain SSE (`/v1/me/events`) to
+# otherwise, and Firefox upgrades the cross-subdomain SSE (`/v1/lesche/me/events`) to
 # h3, where the long-lived stream wedges (curl h3 works; Firefox's h3 stack
 # does not). Pinning h1/h2 keeps the app SSE flowing without changing the
 # prod topology decision. Re-enable here once the h3 streaming path is verified

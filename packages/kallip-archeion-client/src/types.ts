@@ -39,7 +39,7 @@ export interface AuthFinishResponse {
 }
 
 /** The four outcomes of the signup availability probe (`GET
- * /v1/auth/username-availability`). Always delivered as a 200 body status:
+ * /auth/username-availability`). Always delivered as a 200 body status:
  * every outcome, invalid shape included, is an answer, not an error path. */
 export type UsernameAvailabilityStatus =
   | "available"
@@ -55,7 +55,7 @@ export interface UsernameAvailabilityResponse {
   readonly status: UsernameAvailabilityStatus;
 }
 
-/** `GET /v1/auth/oauth/providers` — one enabled OAuth provider, for rendering
+/** `GET /auth/oauth/providers` — one enabled OAuth provider, for rendering
  * the login/settings buttons. */
 export interface ProviderInfo {
   /** Stable provider id: `"github"` | `"google"`. */
@@ -64,7 +64,7 @@ export interface ProviderInfo {
   readonly label: string;
 }
 
-/** A linked OAuth identity, as surfaced by `/v1/me`. */
+/** A linked OAuth identity, as surfaced by `/me`. */
 export interface ExternalIdentitySummary {
   readonly id: string;
   /** `"github"` | `"google"`. */
@@ -80,7 +80,7 @@ export interface OAuthBeginResponse {
   readonly authorize_url: string;
 }
 
-/** `POST /v1/auth/oauth/{provider}/finish` body: the provider's `code` + the
+/** `POST /auth/oauth/{provider}/finish` body: the provider's `code` + the
  * single-use `state` token it echoed back. */
 export interface OAuthFinishRequest {
   readonly state: string;
@@ -97,7 +97,7 @@ export interface OAuthNeedsUsernameResponse {
   readonly provider: string;
 }
 
-/** `POST /v1/auth/oauth/signup/complete` body: the single-use token from a
+/** `POST /auth/oauth/signup/complete` body: the single-use token from a
  * 202 needs-username finish, plus the user-chosen username. Account creation +
  * session minting happen here. */
 export interface OAuthSignupCompleteRequest {
@@ -105,7 +105,7 @@ export interface OAuthSignupCompleteRequest {
   readonly username: string;
 }
 
-/** `GET /v1/me/passkeys` — one of the caller's live passkeys. The archeion's
+/** `GET /me/passkeys` — one of the caller's live passkeys. The archeion's
  * `passkeys` table holds only live credentials (revoked history lives in a
  * separate audit table), so there is no status field. `label` is the user-
  * supplied device name ("" for the initial passkey until the user names it). */
@@ -128,12 +128,12 @@ export interface AddPasskeyFinishRequest {
   readonly label: string;
 }
 
-/** `PATCH /v1/me/passkeys/{id}` body. */
+/** `PATCH /me/passkeys/{id}` body. */
 export interface RenamePasskeyRequest {
   readonly label: string;
 }
 
-/** `POST /v1/me/device-pairing` — a freshly minted, short-lived pairing code
+/** `POST /me/device-pairing` — a freshly minted, short-lived pairing code
  * (TTL is server-defined; see `expires_at`). `code` is the plaintext, returned
  * ONCE; only its hash is retained. */
 export interface MintPairingCodeResponse {
@@ -154,7 +154,7 @@ export interface PairFinishRequest {
   readonly label: string;
 }
 
-/** One linked email address, as returned by `/v1/me` and `/v1/me/emails`.
+/** One linked email address, as returned by `/me` and `/me/emails`.
  * `verified_at` is null until the user completes the verification flow. */
 export interface EmailSummary {
   readonly id: string;
@@ -163,7 +163,7 @@ export interface EmailSummary {
   readonly verified_at: string | null;
 }
 
-/** `GET /v1/me`. Email is an optional contact channel, decoupled from login
+/** `GET /me`. Email is an optional contact channel, decoupled from login
  * (which resolves by username): `emails` is empty until the user links one in
  * settings, and `primary_email` is null then. `display_name` is nullable (null
  * when unset) -- the archeion returns `users.display_name` verbatim with no
@@ -182,13 +182,13 @@ export interface MeResponse {
   readonly passkey_count: number;
 }
 
-/** `POST /v1/me/emails` body. The address starts unverified; a verification
+/** `POST /me/emails` body. The address starts unverified; a verification
  * link is delivered out-of-band. */
 export interface AddEmailRequest {
   readonly address: string;
 }
 
-/** `POST /v1/me/emails/verify` body. `token` is the single-use secret from the
+/** `POST /me/emails/verify` body. `token` is the single-use secret from the
  * verification link. */
 export interface VerifyEmailRequest {
   readonly token: string;
@@ -200,7 +200,7 @@ export interface VerifyEmailRequest {
  * decrypt (the service is blind to encrypted rows by design). */
 export type ProviderKeyMode = "plaintext" | "encrypted";
 
-/** One entry of the caller's provider vault (`GET /v1/me/providers`).
+/** One entry of the caller's provider vault (`GET /me/providers`).
  * `name` is unique per account; collisions on create/replace are 409.
  * `key_material` returns as stored -- the vault never transforms it. */
 export interface ProviderSummary {
@@ -215,7 +215,7 @@ export interface ProviderSummary {
   readonly updated_at: string;
 }
 
-/** Create/replace body for `/v1/me/providers`. Replace sends EVERY field
+/** Create/replace body for `/me/providers`. Replace sends EVERY field
  * (metadata edit, key rotation, and mode flip share one explicit shape). */
 export interface ProviderRequest {
   readonly name: string;
@@ -225,7 +225,7 @@ export interface ProviderRequest {
   readonly mode: ProviderKeyMode;
 }
 
-/** `GET /v1/users/{username}` -- a public user profile card. Minimal disclosure:
+/** `GET /users/{username}` -- a public user profile card. Minimal disclosure:
  * never `email`, `user_id`, or `passkey_count`. An unknown/disabled username and
  * a malformed input both 404 (existence-oracle; no shape leak). */
 export interface PublicUserProfile {
@@ -240,9 +240,9 @@ export interface PublicUserProfile {
 export type TagmaState = "pending" | "enrolled";
 
 /**
- * `GET /v1/tagmata`. One tagma across its lifecycle. This is the registry
+ * `GET /tagmata`. One tagma across its lifecycle. This is the registry
  * view only -- it carries NO liveness signal. Whether a tagma tunnel is
- * currently open arrives via the data plane: the lesche's `GET /v1/me/events`
+ * currently open arrives via the data plane: the lesche's `GET /me/events`
  * SSE stream emits `tagma_online` / `tagma_offline` events (plus an initial
  * presence snapshot on connect). The pending-phase fields `code_masked` and
  * `expires_at` are present only while `state === "pending"` (the archeion omits
@@ -259,7 +259,7 @@ export interface TagmaView {
   readonly expires_at?: string;
 }
 
-/** `POST /v1/tagmata` (mint a pending tagma). `code` is the plaintext, returned
+/** `POST /tagmata` (mint a pending tagma). `code` is the plaintext, returned
  * ONCE; only its hash is retained. `id` is the tagma id, stable across the enroll
  * transition. */
 export interface MintTagmaResponse {
@@ -269,12 +269,12 @@ export interface MintTagmaResponse {
   readonly expires_at: string;
 }
 
-/** `PATCH /v1/tagmata/{id}` body. `null` (or empty/whitespace) clears the label. */
+/** `PATCH /tagmata/{id}` body. `null` (or empty/whitespace) clears the label. */
 export interface RenameTagmaRequest {
   readonly label: string | null;
 }
 
-/** `GET /v1/tagmata/{id}` -- the tagma's pinned Ed25519 device key (TOFU). The
+/** `GET /tagmata/{id}` -- the tagma's pinned Ed25519 device key (TOFU). The
  * app verifies the lesche's key-exchange signature against it. `pinned_public_key`
  * is a 32-byte Ed25519 public key as standard base64; the caller passes this
  * string verbatim to `openRelayChannel` in `@kallipai/kallip-lesche-client`. */
@@ -283,7 +283,7 @@ export interface TagmaInfo {
   readonly pinned_public_key: string;
 }
 
-/** `GET /v1/tagmata/{id}/profile` -- a public tagma profile card. Minimal
+/** `GET /tagmata/{id}/profile` -- a public tagma profile card. Minimal
  * disclosure: never `pinned_public_key`, `owner_user_id`, or the enrolled/
  * revoked flags. Unknown/pending/revoked tagmas and a tagma whose owner is
  * disabled all 404 (existence-oracle; no state leak). */

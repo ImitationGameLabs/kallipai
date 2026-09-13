@@ -112,21 +112,19 @@ in
       # The platform's single API face: path-routed per service.
       "http://api.${domain}".extraConfig = ''
         handle_path /v1/archeion/* {
-          rewrite * /v1{uri}
           reverse_proxy 127.0.0.1:${toString ports.archeion}
         }
         handle_path /v1/lesche/* {
-          rewrite * /v1{uri}
           reverse_proxy 127.0.0.1:${toString ports.lesche} {
             flush_interval -1
           }
         }
         @files path /v1/files /v1/files/*
         handle @files {
+          uri strip_prefix /v1/files
           reverse_proxy 127.0.0.1:${toString ports.files}
         }
         handle_path /v1/instances/* {
-          rewrite * /api/instances{uri}
           reverse_proxy 127.0.0.1:${toString ports.instances}
         }
       '';

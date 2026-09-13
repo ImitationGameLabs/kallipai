@@ -2,7 +2,7 @@
 // projector (the channelsStore / ExternalProjector / chat_history path is
 // 1:1-only, per the mellow-baking-taco decision): a room's transcript is
 // rendered from the lesche's payload store (`fetchRoomMessages`) + live inbound
-// room envelopes, and outbound chat is posted to `/v1/rooms/{id}/envelopes`.
+// room envelopes, and outbound chat is posted to `/v1/lesche/rooms/{id}/envelopes`.
 // Rooms are plaintext server-readable -- the lesche stores + relays the payload
 // opaquely and enforces member access; `private` means invite-only, `public`
 // means open-access. Both carry the same plaintext `RoomMessage` codec.

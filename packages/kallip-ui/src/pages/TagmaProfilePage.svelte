@@ -1,6 +1,6 @@
 <script lang="ts">
   // A public tagma profile card, keyed by tagma_id (carried on every room agent
-  // sender). Backed by the unauthenticated `GET /v1/tagmata/{id}/profile`
+  // sender). Backed by the unauthenticated `GET /v1/lesche/tagmata/{id}/profile`
   // endpoint (minimal disclosure: label + owner + created_at; never the pinned
   // key or flags). Reached by clicking an agent sender's header in a room. A
   // protected app-shell route (logged-out deep links redirect to /login?next=).

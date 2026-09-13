@@ -92,7 +92,7 @@ in
   daemon = buildCrate "cargo build --release -p kallip-daemon";
   ctl = buildCrate "cargo build --release -p kallipctl";
   daemon-spawn = buildCrate "cargo build --release -p kallip-daemon-spawn";
-  # The HTTP front door of the daemon family: proxies /api/instances/*
+  # The HTTP front door of the daemon family: proxies the bare resource
   # to the daemon's UDS socket -- the only networked door the family
   # exposes, with its own host guard and auth modes.
   instances = buildCrate "cargo build --release -p kallip-instances";

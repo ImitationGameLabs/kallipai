@@ -128,14 +128,14 @@ export class ArcheionClient extends BaseClient {
   loginFinish(body: LoginFinishRequest): Promise<AuthFinishResponse> {
     return this.json("/auth/login/finish", "POST", body);
   }
-  /** `POST /v1/auth/admin-login` — exchange the operator's `sk-admin-` key
+  /** `POST /auth/admin-login` — exchange the operator's `sk-admin-` key
    * for a User session on the fixed local account. The route is mounted only
    * where the deployment's boot flag set it; elsewhere this 404s. */
   adminLogin(key: string): Promise<AuthFinishResponse> {
     return this.json("/auth/admin-login", "POST", undefined, key);
   }
 
-  /** `GET /v1/auth/username-availability` — the signup form's availability
+  /** `GET /auth/username-availability` — the signup form's availability
    * probe. Always a 200 whose body carries the status (available / taken /
    * reserved / invalid); the server per-IP rate-limits this oracle. */
   usernameAvailability(
@@ -147,7 +147,7 @@ export class ArcheionClient extends BaseClient {
     );
   }
 
-  /** `POST /v1/auth/login/discoverable/begin` — start a usernameless login. No
+  /** `POST /auth/login/discoverable/begin` — start a usernameless login. No
    * identifier: the authenticator resolves the user at finish via the
    * assertion's userHandle. The server returns conditional-mediation options
    * with an empty allowList. */
@@ -155,7 +155,7 @@ export class ArcheionClient extends BaseClient {
     return this.json("/auth/login/discoverable/begin", "POST", undefined);
   }
 
-  /** `POST /v1/auth/login/discoverable/finish` — verify the discoverable
+  /** `POST /auth/login/discoverable/finish` — verify the discoverable
    * assertion (the credential carries the userHandle the server identifies the
    * account by). */
   loginDiscoverableFinish(
@@ -170,13 +170,13 @@ export class ArcheionClient extends BaseClient {
 
   // -- oauth ----------------------------------------------------------------
 
-  /** `GET /v1/auth/oauth/providers` — which OAuth providers this deploy has
+  /** `GET /auth/oauth/providers` — which OAuth providers this deploy has
    * configured (unauthenticated; for rendering the login/settings buttons). */
   listOAuthProviders(): Promise<ProviderInfo[]> {
     return this.json("/auth/oauth/providers", "GET");
   }
 
-  /** `POST /v1/auth/oauth/{provider}/begin` — start a signin ceremony
+  /** `POST /auth/oauth/{provider}/begin` — start a signin ceremony
    * (anonymous). The SPA navigates to the returned `authorize_url`; the
    * provider redirects back to the SPA callback with `code`+`state`. */
   oauthSignInBegin(
@@ -190,7 +190,7 @@ export class ArcheionClient extends BaseClient {
     );
   }
 
-  /** `POST /v1/me/oauth/{provider}/begin` — start a link ceremony (cookie-
+  /** `POST /me/oauth/{provider}/begin` — start a link ceremony (cookie-
    * authed, step-up gated). Binds the next provider identity to the signed-in
    * account. */
   oauthLinkBegin(
@@ -204,7 +204,7 @@ export class ArcheionClient extends BaseClient {
     );
   }
 
-  /** `POST /v1/auth/oauth/{provider}/finish` — complete the OAuth ceremony. The
+  /** `POST /auth/oauth/{provider}/finish` — complete the OAuth ceremony. The
    * same endpoint serves BOTH actions (the opaque `state` selects which): a
    * signin returns 200/201 with `{user_id, return_path?}` (and sets the session
    * cookie); a link returns 204 with no body (the caller is already signed in);
@@ -222,7 +222,7 @@ export class ArcheionClient extends BaseClient {
     );
   }
 
-  /** `POST /v1/auth/oauth/signup/complete` — finish a held OAuth signup by
+  /** `POST /auth/oauth/signup/complete` — finish a held OAuth signup by
    * submitting the chosen username against the single-use token from a 202
    * needs-username finish. Creates the account, binds the identity, and sets
    * the session cookie; returns `{user_id, return_path?}`. */
@@ -232,7 +232,7 @@ export class ArcheionClient extends BaseClient {
     return this.json("/auth/oauth/signup/complete", "POST", body);
   }
 
-  /** The signed-in user's linked OAuth identities. Fetches `GET /v1/me` and
+  /** The signed-in user's linked OAuth identities. Fetches `GET /me` and
    * projects `external_identities` (no dedicated list route). */
   listExternalIdentities(): Promise<readonly ExternalIdentitySummary[]> {
     return this.json<MeResponse>("/me", "GET").then(
@@ -240,7 +240,7 @@ export class ArcheionClient extends BaseClient {
     );
   }
 
-  /** `DELETE /v1/me/external-identities/{id}` — unlink an identity (hard-delete;
+  /** `DELETE /me/external-identities/{id}` — unlink an identity (hard-delete;
    * 409 if it is the account's last sign-in method). */
   unlinkExternalIdentity(id: string): Promise<void> {
     return this.json(
@@ -258,29 +258,29 @@ export class ArcheionClient extends BaseClient {
 
   // -- emails (self-service contact-channel management) ---------------------
 
-  /** `GET /v1/me/emails` — the caller's linked addresses (oldest first). */
+  /** `GET /me/emails` — the caller's linked addresses (oldest first). */
   listEmails(): Promise<EmailSummary[]> {
     return this.json("/me/emails", "GET");
   }
 
-  /** `POST /v1/me/emails` — link a new address (starts unverified; a
+  /** `POST /me/emails` — link a new address (starts unverified; a
    * verification link is sent out-of-band). */
   addEmail(body: AddEmailRequest): Promise<EmailSummary> {
     return this.json("/me/emails", "POST", body);
   }
 
-  /** `POST /v1/me/emails/verify` — consume a verification token, marking the
+  /** `POST /me/emails/verify` — consume a verification token, marking the
    * address verified. */
   verifyEmail(body: VerifyEmailRequest): Promise<EmailSummary> {
     return this.json("/me/emails/verify", "POST", body);
   }
 
-  /** `POST /v1/me/emails/{id}` — promote a verified address to primary. */
+  /** `POST /me/emails/{id}` — promote a verified address to primary. */
   makeEmailPrimary(id: string): Promise<EmailSummary> {
     return this.json(`/me/emails/${encodeURIComponent(id)}`, "POST", {});
   }
 
-  /** `DELETE /v1/me/emails/{id}` — unlink an address. Returns the remaining
+  /** `DELETE /me/emails/{id}` — unlink an address. Returns the remaining
    * addresses (a different one is promoted to primary if the primary was
    * removed). */
   removeEmail(id: string): Promise<EmailSummary[]> {
@@ -289,23 +289,23 @@ export class ArcheionClient extends BaseClient {
 
   // -- providers (self-service API-key vault) -------------------------------
 
-  /** `GET /v1/me/providers` — the caller's stored providers (oldest first). */
+  /** `GET /me/providers` — the caller's stored providers (oldest first). */
   listProviders(): Promise<ProviderSummary[]> {
     return this.json("/me/providers", "GET");
   }
 
-  /** `POST /v1/me/providers` — store one entry; a duplicate name is 409. */
+  /** `POST /me/providers` — store one entry; a duplicate name is 409. */
   createProvider(body: ProviderRequest): Promise<ProviderSummary> {
     return this.json("/me/providers", "POST", body);
   }
 
-  /** `PUT /v1/me/providers/{id}` — full replacement (rename, key rotation,
+  /** `PUT /me/providers/{id}` — full replacement (rename, key rotation,
    * or mode flip); renaming onto a sibling's name is 409 like create. */
   replaceProvider(id: string, body: ProviderRequest): Promise<ProviderSummary> {
     return this.json(`/me/providers/${encodeURIComponent(id)}`, "PUT", body);
   }
 
-  /** `DELETE /v1/me/providers/{id}` — forget one entry; returns the remaining
+  /** `DELETE /me/providers/{id}` — forget one entry; returns the remaining
    * providers (mirrors removeEmail). */
   deleteProvider(id: string): Promise<ProviderSummary[]> {
     return this.json(`/me/providers/${encodeURIComponent(id)}`, "DELETE");
@@ -313,12 +313,12 @@ export class ArcheionClient extends BaseClient {
 
   // -- passkeys (self-service management of the caller's own devices) -------
 
-  /** `GET /v1/me/passkeys` — the caller's live passkeys (oldest first). */
+  /** `GET /me/passkeys` — the caller's live passkeys (oldest first). */
   listPasskeys(): Promise<PasskeySummary[]> {
     return this.json("/me/passkeys", "GET");
   }
 
-  /** `POST /v1/me/passkeys/register/begin` — start binding ANOTHER passkey to
+  /** `POST /me/passkeys/register/begin` — start binding ANOTHER passkey to
    * the signed-in account. Gated by a one-shot step-up; returns 403
    * `reauth-required` if the session's freshness is stale/consumed (run
    * `loginWithPasskey` then retry). With `discoverable: true` the ceremony
@@ -330,18 +330,18 @@ export class ArcheionClient extends BaseClient {
     return this.json(`/me/passkeys/register/begin${query}`, "POST", {});
   }
 
-  /** `POST /v1/me/passkeys/register/finish` — verify + bind the new passkey. */
+  /** `POST /me/passkeys/register/finish` — verify + bind the new passkey. */
   addPasskeyFinish(body: AddPasskeyFinishRequest): Promise<PasskeySummary> {
     return this.json("/me/passkeys/register/finish", "POST", body);
   }
 
-  /** `PATCH /v1/me/passkeys/{id}` — rename (the device label). */
+  /** `PATCH /me/passkeys/{id}` — rename (the device label). */
   renamePasskey(id: string, label: string): Promise<PasskeySummary> {
     const body: RenamePasskeyRequest = { label };
     return this.json(`/me/passkeys/${encodeURIComponent(id)}`, "PATCH", body);
   }
 
-  /** `DELETE /v1/me/passkeys/{id}` — revoke (hard-delete + audit row). The last
+  /** `DELETE /me/passkeys/{id}` — revoke (hard-delete + audit row). The last
    * live passkey cannot be revoked (409). Returns on 204. */
   revokePasskey(id: string): Promise<void> {
     return this.json(
@@ -353,7 +353,7 @@ export class ArcheionClient extends BaseClient {
 
   // -- device pairing (cross-device enrollment via a short-lived code) --------
 
-  /** `POST /v1/me/device-pairing` (session-authed + step-up) — mint a
+  /** `POST /me/device-pairing` (session-authed + step-up) — mint a
    * short-lived pairing code shown on this device for a new device to redeem.
    * Returns 403 `reauth-required` if the session's step-up is stale (run
    * `loginWithPasskey` then retry). */
@@ -361,14 +361,14 @@ export class ArcheionClient extends BaseClient {
     return this.json("/me/device-pairing", "POST", {});
   }
 
-  /** `POST /v1/auth/device-pairing/begin` (unauthenticated, rate-limited) —
+  /** `POST /auth/device-pairing/begin` (unauthenticated, rate-limited) —
    * start enrolling a LOCAL passkey on this new device onto an existing account
    * referenced by the code. */
   pairBegin(body: PairBeginRequest): Promise<RegisterBeginResponse> {
     return this.json("/auth/device-pairing/begin", "POST", body);
   }
 
-  /** `POST /v1/auth/device-pairing/finish` (unauthenticated) — verify + bind
+  /** `POST /auth/device-pairing/finish` (unauthenticated) — verify + bind
    * the new passkey; mints a session for this device. */
   pairFinish(body: PairFinishRequest): Promise<AuthFinishResponse> {
     return this.json("/auth/device-pairing/finish", "POST", body);
@@ -376,45 +376,45 @@ export class ArcheionClient extends BaseClient {
 
   // -- tagmata (unified pending + enrolled lifecycle) -----------------------
 
-  /** `POST /v1/tagmata` — mint a pending tagma (an enrollment code). The
+  /** `POST /tagmata` — mint a pending tagma (an enrollment code). The
    * plaintext `code` is returned once. */
   mintTagma(): Promise<MintTagmaResponse> {
     return this.json("/tagmata", "POST", {});
   }
 
-  /** `GET /v1/tagmata` — the caller's tagmata (pending + enrolled, not revoked),
+  /** `GET /tagmata` — the caller's tagmata (pending + enrolled, not revoked),
    * newest first. Registry view only; liveness is NOT included (it arrives via
    * the lesche's `meEvents`). */
   listTagmata(): Promise<TagmaView[]> {
     return this.json("/tagmata", "GET");
   }
 
-  /** `PATCH /v1/tagmata/{id}` — set or clear the label (pending or enrolled).
+  /** `PATCH /tagmata/{id}` — set or clear the label (pending or enrolled).
    * Returns on 204. */
   renameTagma(id: string, label: string | null): Promise<void> {
     const body: RenameTagmaRequest = { label };
     return this.json(`/tagmata/${encodeURIComponent(id)}`, "PATCH", body);
   }
 
-  /** `DELETE /v1/tagmata/{id}` — revoke (pending or enrolled). For an enrolled
+  /** `DELETE /tagmata/{id}` — revoke (pending or enrolled). For an enrolled
    * tagma the archeion cuts the tagma off on its next request. Returns on 204. */
   revokeTagma(id: string): Promise<void> {
     return this.json(`/tagmata/${encodeURIComponent(id)}`, "DELETE", undefined);
   }
 
-  /** `GET /v1/tagmata/{id}` — the tagma's pinned Ed25519 device key (TOFU). The
+  /** `GET /tagmata/{id}` — the tagma's pinned Ed25519 device key (TOFU). The
    * app verifies the lesche's key-exchange signature against it. */
   getTagma(id: string): Promise<TagmaInfo> {
     return this.json(`/tagmata/${encodeURIComponent(id)}`, "GET");
   }
 
-  /** `GET /v1/users/{username}` — a public user profile card. Public + per-IP
+  /** `GET /users/{username}` — a public user profile card. Public + per-IP
    * rate-limited; an unknown/disabled/malformed username 404s. */
   getUserProfile(username: string): Promise<PublicUserProfile> {
     return this.json(`/users/${encodeURIComponent(username)}`, "GET");
   }
 
-  /** `GET /v1/tagmata/{id}/profile` — a public tagma profile card. Public +
+  /** `GET /tagmata/{id}/profile` — a public tagma profile card. Public +
    * per-IP rate-limited; an unknown/pending/revoked tagma (or one whose owner
    * is disabled) 404s. */
   getTagmaProfile(id: string): Promise<PublicTagmaProfile> {

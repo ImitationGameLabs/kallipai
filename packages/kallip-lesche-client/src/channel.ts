@@ -41,7 +41,7 @@ import type {
  * Open an E2EE channel to `tagmaId` for `userId`: resolve the conversation + run
  * the 1-RTT key exchange on the lesche, verify the responder's signature
  * against the archeion-pinned key (`pinnedKeyB64`, the standard-base64 Ed25519
- * public key the archeion's `GET /v1/tagmata/{id}` returns verbatim), and derive
+ * public key the archeion's `GET /v1/archeion/tagmata/{id}` returns verbatim), and derive
  * the session key. The pinned key is fetched from the archeion by the caller (the
  * control-plane client is not a dependency of this package); the caller passes
  * the base64 string as-is so no base64 helper leaks across the boundary.

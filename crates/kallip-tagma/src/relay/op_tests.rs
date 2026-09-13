@@ -58,8 +58,8 @@ fn initiator_decrypt(key: &[u8; 32], seq: u64, ct: &[u8]) -> Option<Vec<u8>> {
 
 async fn spawn_lesche(capture: Capture, signals: SignalCapture) -> String {
     let app = Router::new()
-        .route("/v1/conversations/{conv}/envelopes", post(capture_handler))
-        .route("/v1/tagmata/{_tagma}/upstream", post(signal_handler))
+        .route("/conversations/{conv}/envelopes", post(capture_handler))
+        .route("/tagmata/{_tagma}/upstream", post(signal_handler))
         .with_state((capture, signals));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -186,9 +186,7 @@ async fn setup_inner(
     let capture: Capture = Arc::new(Mutex::new(Vec::new()));
     let signals: SignalCapture = Arc::new(Mutex::new(Vec::new()));
     let lesche_url = spawn_lesche(capture.clone(), signals.clone()).await;
-    let client = LescheClient::builder(&format!("{lesche_url}/v1"), "tok")
-        .build()
-        .unwrap();
+    let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
     let device = DeviceKey::generate();
     let tagma_id = TagmaId::from("tagma".to_string());
     let conversation_id = ConversationId::for_tagma(&tagma_id);

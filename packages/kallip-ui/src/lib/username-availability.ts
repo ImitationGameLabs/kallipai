@@ -2,7 +2,7 @@
 // archeion probe's status into a render state, gating on the local shape
 // check so an invalid handle never hits the network. Pure logic only --
 // the component owns the debounce timer and the probe call, and the
-// archeion (`GET /v1/auth/username-availability`) stays the authority.
+// archeion (`GET /v1/lesche/auth/username-availability`) stays the authority.
 
 import { isValidUsername } from "./username.ts";
 

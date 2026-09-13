@@ -1,5 +1,5 @@
 // RoomsStore: reactive ($state) wrapper for the multi-member room registry
-// (`/v1/rooms`). A peer singleton to `archeionSession` (rooms are a separate
+// (`/v1/lesche/rooms`). A peer singleton to `archeionSession` (rooms are a separate
 // concern from identity + the owner's tagmata), refreshed from a `$effect` in
 // RootLayout keyed on the signed-in user.
 //

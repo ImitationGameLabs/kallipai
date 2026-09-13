@@ -153,10 +153,11 @@ unlisted `/v1/*` prefixes are a real 404):
 
 ```caddy
 api.<d> {
-	handle_path /v1/archeion/*  { rewrite * /v1{uri}              reverse_proxy archeion:7100 }
-	handle_path /v1/lesche/*    { rewrite * /v1{uri}              reverse_proxy lesche:7200 } # flush_interval -1 for SSE
-	handle /v1/files/*          { reverse_proxy files:7400 }
-	handle_path /v1/instances/* { rewrite * /api/instances{uri}   reverse_proxy instances:7300 }
+	handle_path /v1/archeion/*  { reverse_proxy archeion:7100 }
+	handle_path /v1/lesche/*    { reverse_proxy lesche:7200 } # flush_interval -1 for SSE
+	@files path /v1/files /v1/files/*
+	handle @files               { uri strip_prefix /v1/files    reverse_proxy files:7400 }
+	handle_path /v1/instances/* { reverse_proxy instances:7300 }
 }
 ```
 

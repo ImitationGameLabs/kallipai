@@ -2,7 +2,7 @@
 //! metadata uplink.
 //!
 //! One task subscribes the status, projection, and signal bus topics and
-//! serializes drained frames into batched `POST /v1/tagmata/{id}/upstream`
+//! serializes drained frames into batched `POST /tagmata/{id}/upstream`
 //! requests. This is where the drivers' former per-driver POST/PUT arms
 //! converged: the drivers publish typed snapshots, the flusher alone speaks
 //! `UpstreamEvent` on the wire (the enum never enters the bus).
@@ -356,7 +356,7 @@ mod tests {
             (axum::http::StatusCode::OK, axum::Json(body)).into_response()
         }
         let app = axum::Router::new()
-            .route("/v1/tagmata/{tagma}/upstream", axum::routing::post(handler))
+            .route("/tagmata/{tagma}/upstream", axum::routing::post(handler))
             .with_state((capture, attempts, fail_nth, Arc::new(bodies)));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -398,9 +398,7 @@ mod tests {
         let state = make_state();
         let root = kallip_common::agentid::AgentId::from("root".to_string());
         let url = spawn_upstream_lesche(capture, fail_nth).await;
-        let client = LescheClient::builder(&format!("{url}/v1"), "tok")
-            .build()
-            .unwrap();
+        let client = LescheClient::builder(&url, "tok").build().unwrap();
         let handle = RelayHandle::new(
             client,
             "test".to_string(),
@@ -746,9 +744,7 @@ mod tests {
         .await;
         let state = make_state();
         let root = kallip_common::agentid::AgentId::from("root".to_string());
-        let client = LescheClient::builder(&format!("{url}/v1"), "tok")
-            .build()
-            .unwrap();
+        let client = LescheClient::builder(&url, "tok").build().unwrap();
         let handle = RelayHandle::new(
             client,
             "test".to_string(),

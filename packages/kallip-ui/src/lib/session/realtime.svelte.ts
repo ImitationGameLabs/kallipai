@@ -1,7 +1,7 @@
 // RealtimeStore: the online-mode realtime feed. Owns the single multiplexed
-// SSE subscription to the lesche's `GET /v1/me/events` and demuxes its two
+// SSE subscription to the lesche's `GET /v1/lesche/me/events` and demuxes its two
 // concerns: tagma presence (`tagma_online` / `tagma_offline`, the SOLE liveness
-// signal -- the archeion's `/v1/tagmata` no longer carries an `online` field) and
+// signal -- the archeion's `/v1/lesche/tagmata` no longer carries an `online` field) and
 // inbound conversation `envelope` delivery (handed to channelsStore via a
 // shell-wired sink).
 //

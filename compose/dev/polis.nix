@@ -330,7 +330,7 @@ in
         # KALLIP_ARCHEION_ADMIN_TOKEN a legacy .env may still carry).
         KALLIP_ARCHEION_ADMIN_TOKEN = "sk-admin-dev-0123456789abcdef0123456789abcdef";
         # Local-platform operator login: exchange the admin token for a User
-        # session (POST /v1/auth/admin-login) on a fixed local account. Dev
+        # session (POST /v1/archeion/auth/admin-login) on a fixed local account. Dev
         # fixture, paired with the compliant token above; prod leaves it off.
         KALLIP_ARCHEION_ADMIN_USER_LOGIN = "true";
         RUST_LOG = "info";

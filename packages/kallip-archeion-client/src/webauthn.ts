@@ -127,7 +127,7 @@ export function optionsForGet(
 // ---------------------------------------------------------------------------
 
 /**
- * The `POST /v1/auth/register/finish` body. Note `authenticatorData` is
+ * The `POST /auth/register/finish` body. Note `authenticatorData` is
  * absent: the archeion's passkey register flow surfaces only `attestationObject`
  * + `clientDataJSON` (the `none` attestation path). A future richer-attestation
  * flow would add it here.
@@ -145,7 +145,7 @@ export interface RegisterPublicKeyCredentialJson {
   readonly clientExtensionResults: AuthenticationExtensionsClientOutputs;
 }
 
-/** The `POST /v1/auth/login/finish` body. */
+/** The `POST /auth/login/finish` body. */
 export interface PublicKeyCredentialJson {
   readonly id: string;
   readonly rawId: string;

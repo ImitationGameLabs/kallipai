@@ -175,7 +175,7 @@ archeion and lesche also publish `7100` / `7200` to the host for plain-HTTP
 tooling — `kallip-admin` and curl keep using `http://localhost:7100` /
 `http://localhost:7200` directly, bypassing Caddy. The files service
 publishes `7400` on the loopback interface only — the browser reaches files
-only through the edge (`/v1/files` passes through untouched), while the `kallip file`
+only through the edge (the edge strips `/v1/files`), while the `kallip file`
 CLI points `KALLIP_POLIS_URL` at the dev edge (`https://api.kallipai.lan`) and presents a
 tagma bearer (`KALLIP_FILES_TOKEN`); see docs/reference/files-api.md.
 The tagma process itself authenticates to the files service with its
@@ -216,13 +216,13 @@ User session on a fixed `admin` account (created on first use) and that
 session mints enrollment codes like any user:
 
 ```sh
-curl -si -X POST http://localhost:7100/v1/auth/admin-login \
+curl -si -X POST http://localhost:7100/auth/admin-login \
   -H 'Authorization: Bearer sk-admin-dev-0123456789abcdef0123456789abcdef'
 ```
 
 The `Set-Cookie: kallip_session=...` header is the session (see
 docs/reference/auth.md); pass it as `-b kallip_session=...` to mint an
-enrollment code at `POST /v1/tagmata` without signing up.
+enrollment code at `POST /v1/archeion/tagmata` without signing up.
 
 ##### The admin token
 
@@ -376,7 +376,7 @@ files, the last 7 kept. Set `KALLIP_TAGMA_LOG_TO_STDERR=1`
 debugging a managed data dir; any other value keeps the file default, and
 a log directory that cannot be resolved or created falls back to stderr.
 The web management face lives in `crates/platform/kallip-instances`: a
-pure JSON API under `/api/instances/*`, proxying the daemon over its
+pure JSON API at the root, proxying the daemon over its
 UDS socket. Platform mode: the archeion's internal face
 verifies the SPA's `sk-admin-` key (the operator-key login). The SPA
 itself is served by the host vite dev server (Caddy routes

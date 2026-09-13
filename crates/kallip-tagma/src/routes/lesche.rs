@@ -37,7 +37,7 @@ use kallip_common::agentid::AgentId;
 pub(crate) struct LescheMessageRequest {
     pub text: String,
     /// Optional room id. Present when the agent is sending into a multi-member
-    /// room (the tagma posts the plaintext to `/v1/rooms/{room}/envelopes`);
+    /// room (the tagma posts the plaintext to `/rooms/{room}/envelopes`);
     /// absent for the bilateral 1:1 send. A raw string parsed into a
     /// [`RoomId`] so this route owns the id-type boundary (the `kallip` CLI /
     /// `kallip-client` stay archeion-id-free).
@@ -298,7 +298,7 @@ pub async fn post_message(
 /// Send a message into a room (the `kallip lesche send --room <room>` path).
 /// This is the outbound room counterpart of the bilateral `record_outbound`:
 /// it shares the per-tagma burst cap (one agent voice = one rate limit), then
-/// posts the plaintext `RoomMessage` to `/v1/rooms/{room}/envelopes`. It
+/// posts the plaintext `RoomMessage` to `/rooms/{room}/envelopes`. It
 /// deliberately does NOT touch the bilateral projector -- no `chat_history` row
 /// (lesche is the room's store of record), no bilateral frame, no `emit`.
 /// (Named `send_` to distinguish it from the inbound
@@ -370,7 +370,7 @@ async fn send_room_message(
 /// a cold entry -- a first-ever send or a not-yet-ticked poll -- runs the
 /// create-or-get on the first installed relay, which a single-relay
 /// deployment makes identical) and posts the plaintext `DirectMessage`
-/// envelope to `/v1/direct-sessions/{id}/messages`. Like the room path it
+/// envelope to `/direct-sessions/{id}/messages`. Like the room path it
 /// does NOT touch the bilateral projector -- no `chat_history` row (the
 /// lesche is the session's store of record), no bilateral frame, no `emit`.
 async fn send_direct_message(

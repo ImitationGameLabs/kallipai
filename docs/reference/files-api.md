@@ -17,7 +17,7 @@ principal:
 
 - `sk-tagma-…` (an enrolled tagma) — the `kallip file` CLI's principal.
 - `sk-admin-…` (operator) — management surface only
-  (`GET /v1/admin/delivery-events`); the admin principal is refused on
+  (`GET /v1/files/admin/delivery-events`); the admin principal is refused on
   every content operation.
 - User session tokens verify on the web face, not the bearer path — a User
   bearer resolves nowhere here.
@@ -103,7 +103,7 @@ Policy stays server-side: same-space requirement, the Tagma-to-User
 refusal, and the landing path are ACL decisions the CLI only surfaces.
 Every accepted delivery appends a row to the delivery log (below).
 
-### `GET /v1/admin/delivery-events?blob_id=&limit=`
+### `GET /v1/files/admin/delivery-events?blob_id=&limit=`
 
 Admin-only: the delivery log, newest first. Optional `blob_id` filter,
 `limit` page cap. Each event carries `id`, `happened_at`, `from_principal`,
