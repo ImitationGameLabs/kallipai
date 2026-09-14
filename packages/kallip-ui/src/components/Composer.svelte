@@ -19,6 +19,8 @@
     disabledNotice,
     fileButton,
     attachmentBar,
+    onSubmitted,
+    onResized,
   }: {
     composer: ComposerModel;
     disabled: boolean;
@@ -37,6 +39,16 @@
     // semantics where file sending is out of scope). The page owns the
     // picked files and the upload flow; the composer only opens the picker.
     fileButton?: { onFilesPicked: (files: File[]) => void };
+    // Optional submit-side hook: fired synchronously when the user
+    // triggers a send, before the model submit's transport await. The
+    // host wires it to its auto-scroll controller so an outbound send
+    // returns the transcript to the tail.
+    onSubmitted?: () => void;
+    // Fired after each auto-height settle: the host routes it to the
+    // scroll controller so a following transcript re-anchors (the
+    // measure-collapse below can clamp a pinned scrollTop against
+    // the transient layout).
+    onResized?: () => void;
   } = $props();
 
   let area: HTMLTextAreaElement | undefined = $state();
@@ -88,15 +100,28 @@
         Number.parseFloat(style.paddingTop) +
         Number.parseFloat(style.paddingBottom);
     area.style.height = `${Math.min(area.scrollHeight, cap)}px`;
+    onResized?.();
   }
 
+  // The single submit entry: the hook lands in the synchronous segment
+  // (before submit()'s internal await), so a conversation switch inside
+  // the transport window cannot be dragged by a late scroll from the
+  // old conversation -- the reset the switch runs always wins.
+  function submitAtTail(): void {
+    // The button's disabled gate, applied to every trigger route: a keystroke
+    // that would leave the button disabled is not a send, so the hook must
+    // not drag the transcript to the tail for a no-op.
+    if (!composer.canSend || composer.sending) return;
+    onSubmitted?.();
+    void composer.submit();
+  }
   // Enter submits at md+ (the desktop IM convention); below md Enter inserts
   // a newline instead and the send button is the only way to submit (mobile
   // keyboards pair Enter with a newline habit, so submit-on-Enter mistypes).
   function onKeydown(event: KeyboardEvent) {
     if (desktop && event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      void composer.submit();
+      submitAtTail();
     }
   }
 </script>
@@ -104,7 +129,7 @@
 {#snippet sendButton()}
   <button
     type="button"
-    onclick={() => void composer.submit()}
+    onclick={() => submitAtTail()}
     disabled={!composer.canSend || composer.sending}
     aria-label={composer_send_aria()}
     aria-busy={composer.sending}

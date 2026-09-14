@@ -3,9 +3,8 @@
   // visible (vertical scroll, no fold), and a live active/total summary
   // plus the compact budget bar up top. Purely presentational: the
   // store lives with the host.
-  import { agentStateIcon, agentStateLabel } from "../lib/agentState.ts";
-  import { Avatar } from "@skeletonlabs/skeleton-svelte";
-  import { pillLabel } from "../lib/agentPillLayout.ts";
+  import { agentStateLabel } from "../lib/agentState.ts";
+  import AgentStateIcon from "./AgentStateIcon.svelte";
   import { parkedReasonText } from "../lib/session/parkedReason.ts";
   import {
     contextOccupancy,
@@ -87,22 +86,9 @@
   </div>
   <div class="flex-1 min-h-0 overflow-y-auto touch-pan-y px-2 py-1">
     {#each rows as row, i (row.id)}
-      {@const icon = agentStateIcon(row.state)}
       <div class="py-1.5 px-2 rounded-base">
         <div class="flex items-center gap-2 min-w-0">
-          <Avatar class="size-6 shrink-0 rounded-full">
-            <Avatar.Fallback class="text-xs font-semibold"
-              >{pillLabel(row, 2)}</Avatar.Fallback
-            >
-          </Avatar>
-          <span
-            class="shrink-0 leading-none"
-            role="img"
-            aria-label={agentStateLabel(row.state)}
-            title={agentStateLabel(row.state)}
-          >
-            <icon.comp class="size-5 {icon.className}" aria-hidden="true" />
-          </span>
+          <AgentStateIcon state={row.state} />
           <span class="font-medium truncate">{row.role || row.id}</span>
           {#if i === 0 && rootRow}
             <span

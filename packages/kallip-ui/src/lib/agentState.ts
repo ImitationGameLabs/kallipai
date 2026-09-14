@@ -1,6 +1,7 @@
-// Six-state presentation table shared by every state-bearing surface: the
-// manage list + detail header (StateDot, word), and the status card's agent
-// rows. The union mirrors the tagma's `AgentState` wire enum (see
+// Six-state presentation table shared by every state-bearing surface --
+// the manage list + detail header (StateDot), the top-bar pills, the
+// detail layer, and the status card's agent rows and drawer. The union
+// mirrors the tagma's `AgentState` wire enum (see
 // @kallipai/kallip-client/src/types.ts) — copied, not imported, so this
 // module stays transport-free like tagmata.svelte.ts.
 
@@ -28,57 +29,51 @@ export type AgentLifecycleState =
   | "parked"
   | "faulted";
 
-/** Textured glyph for a state dot (manage list + detail header): shape +
- * color (never color alone), with `waiting` breathing so a stalled-looking
- * agent still reads as alive. Dots sit on the page background (white/
- * 950), where the stock 600-400 semantic pairs hold contrast; `waiting`
- * draws primary because the theme ships no info ramp — the old
- * text-info-500 class resolved to nothing (icons silently inherited the
- * body color). */
-export interface StateGlyph {
-  readonly char: "◌" | "●" | "▲" | "✕";
-  readonly className: string;
-}
-
-const GLYPHS: Record<AgentLifecycleState, StateGlyph> = {
-  idle: { char: "◌", className: "text-surface-400-600" },
-  busy: { char: "●", className: "text-success-600-400" },
-  waiting: { char: "●", className: "text-primary-600-400 animate-pulse" },
-  retrying: { char: "●", className: "text-warning-600-400" },
-  parked: { char: "▲", className: "text-warning-600-400" },
-  faulted: { char: "✕", className: "text-error-600-400" },
-};
-
-export function agentStateGlyph(state: AgentLifecycleState): StateGlyph {
-  return GLYPHS[state];
-}
-
-/** Lucide icon for the agent rows: shape + motion + color (never color
- * alone, colorblind-safe). The rows sit on the status bar's 200-800 tone,
- * not the page bg — stock 600-400 pairs nearly vanish there (warning-600
- * is ~2 ΔL oklab on the light bar) — so these draw the stock deeper
- * pairs (700-300; warning 800-200), already defined by the Skeleton
- * base theme. idle inverts the glyph's 400-600 so each mode draws the
- * half further from the bar tone (600 off the light bar, 400 off the
- * dark). */
+/** Lucide icon for every state-bearing surface: shape + motion + color
+ * (never color alone, colorblind-safe). Rows and the drawer sit on the
+ * status bar's 200-800 tone, not the page bg — stock 600-400 pairs
+ * nearly vanish there (warning-600 is ~2 ΔL oklab on the light bar) —
+ * so these draw the stock deeper pairs (700-300; warning 800-200),
+ * already defined by the Skeleton base theme. idle inverts the 400-600
+ * pair so each mode draws the half further from the bar tone (600 off
+ * the light bar, 400 off the dark). On top of motion, the three live
+ * states stay shape-distinct when motion-reduce pauses the animation:
+ * busy draws a solid ring, waiting a dashed one, retrying a ring with
+ * the centered mark. */
 export interface StateIconSpec {
   readonly comp: typeof Circle;
-  readonly className: string;
+  /** Optional centered overlay mark: retrying draws "!" inside the
+   * spinning ring, the same shape language as the parked glyph, so
+   * motion-reduce environments can still tell it apart from busy's
+   * plain ring (solid) and waiting's dashed one. */
+  readonly center?: string;
+  /** Tone-pair classes; shared by the icon and its centered overlay. */
+  readonly colorClassName: string;
+  /** Motion classes for the icon itself; the overlay never takes them
+   * (retrying's "!" must stay still inside the spinning ring). */
+  readonly motionClassName?: string;
 }
 
 const ICONS: Record<AgentLifecycleState, StateIconSpec> = {
-  idle: { comp: Circle, className: "text-surface-600-400" },
-  busy: { comp: LoaderCircle, className: "animate-spin text-success-700-300" },
+  idle: { comp: Circle, colorClassName: "text-surface-600-400" },
+  busy: {
+    comp: LoaderCircle,
+    colorClassName: "text-success-700-300",
+    motionClassName: "animate-spin",
+  },
   waiting: {
     comp: CircleDashed,
-    className: "animate-pulse text-primary-700-300",
+    colorClassName: "text-primary-700-300",
+    motionClassName: "animate-pulse",
   },
   retrying: {
     comp: LoaderCircle,
-    className: "animate-spin text-warning-800-200",
+    colorClassName: "text-warning-800-200",
+    motionClassName: "animate-spin",
+    center: "!",
   },
-  parked: { comp: TriangleAlert, className: "text-warning-800-200" },
-  faulted: { comp: CircleX, className: "text-error-700-300" },
+  parked: { comp: TriangleAlert, colorClassName: "text-warning-800-200" },
+  faulted: { comp: CircleX, colorClassName: "text-error-700-300" },
 };
 
 export function agentStateIcon(state: AgentLifecycleState): StateIconSpec {

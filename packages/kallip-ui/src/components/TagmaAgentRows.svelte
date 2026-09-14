@@ -10,11 +10,8 @@
 
   import { parkedReasonText } from "../lib/session/parkedReason.ts";
   import { type StatusCardRow } from "../lib/session/statusCard.svelte.ts";
-  import {
-    agentStateIcon,
-    agentStateLabel,
-    type AgentLifecycleState,
-  } from "../lib/agentState.ts";
+  import { type AgentLifecycleState } from "../lib/agentState.ts";
+  import AgentStateIcon from "./AgentStateIcon.svelte";
   import { formatTokenCount } from "../lib/tagmata.svelte.ts";
   import { tagma_status_root } from "../paraglide/messages.js";
 
@@ -51,18 +48,8 @@
 </script>
 
 {#snippet stateIcon(state: AgentLifecycleState)}
-  <!-- The wrapper span owns the tooltip and the a11y name: @lucide/svelte
-       does not forward its title prop to the DOM (hand-tested), so the
-       native tooltip must live on a plain element. -->
-  {@const spec = agentStateIcon(state)}
-  <span
-    class="shrink-0 leading-none"
-    title={agentStateLabel(state)}
-    role="img"
-    aria-label={agentStateLabel(state)}
-  >
-    <spec.comp class="size-5 {spec.className}" aria-hidden="true" />
-  </span>
+  <!-- The shared rendering owns the tooltip and the a11y name. -->
+  <AgentStateIcon {state} />
 {/snippet}
 
 {#if rootRow || subRows.length > 0}

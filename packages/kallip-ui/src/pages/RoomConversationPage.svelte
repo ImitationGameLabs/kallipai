@@ -136,6 +136,14 @@
     void conv?.lines.length;
     scroll.stick(conv?.lines.length ?? 0, conv?.lines.at(-1)?.seq);
   });
+  // Layout-driven resizes (composer auto-grow, window resize) shrink the
+  // container without a scroll event; while following, re-anchor to the
+  // tail so a send never visually drags it out of view.
+  $effect(() => {
+    const vp = scroll.viewport;
+    if (!vp) return;
+    return scroll.observe(vp);
+  });
 
   // The viewing line tick: lines rendered on the open conversation count as
   // read and coalesce the cursor write into the 5s throttle window: a
@@ -253,8 +261,12 @@
     </div>
   {:else}
     <div class="flex-1 min-h-0 flex relative">
+      <!-- UA scroll anchoring is retired here: the controller owns the
+           anchoring (stick/observe), and an anchor adjustment racing the
+           flex reflow could ship a scroll event with a large
+           distance-from-bottom, detaching follow on a mere keystroke. -->
       <div
-        class="flex-1 min-h-0 overflow-auto"
+        class="flex-1 min-h-0 overflow-auto [overflow-anchor:none]"
         bind:this={scroll.viewport}
         onscroll={scroll.onScroll}
       >
@@ -326,7 +338,7 @@
         <!-- No z-index on purpose: the members panel (z-10, a later
           sibling) must win when open. -->
         <div
-          class="absolute inset-x-0 bottom-4 flex justify-center pointer-events-none"
+          class="absolute inset-x-0 bottom-4 mx-auto flex max-w-[80rem] justify-end px-4 pointer-events-none"
         >
           <ScrollToBottomButton
             missed={scroll.missed}
@@ -383,6 +395,8 @@
       {disabled}
       pendingCount={0}
       disabledNotice={room_unavailable()}
+      onSubmitted={() => scroll.forceBottom()}
+      onResized={() => scroll.reanchorIfFollowing()}
     />
   {/if}
 </div>

@@ -518,7 +518,6 @@
     {pathname}
     {isActive}
     {back}
-    onMenu={() => (agentsDrawerOpen = true)}
     topRow={back && !mobileTitle ? topRowSnippet : undefined}
     title={mobileTitle}
     error={errorView}

@@ -4,12 +4,13 @@
   // pinned right. Chips use the Skeleton chip utility with the
   // filter-chip pattern shared with the schedule editor (outlined with
   // a filled hover at rest, filled-primary while the pill's detail
-  // popover is open). State marks come from the shared glyph table --
-  // the badge-dot container paints the glyph's color; the shape rides
-  // the chip's text and the detail layer. Purely presentational: rows
+  // popover is open). State marks come from the shared icon rendering
+  // (AgentStateIcon); the state word rides the chip's title/aria and
+  // the detail layer. Purely presentational: rows
   // come from the status card store via the page; the overflow hands
   // back to the parent's roster dialog.
-  import { agentStateGlyph, agentStateLabel } from "../lib/agentState.ts";
+  import { agentStateLabel } from "../lib/agentState.ts";
+  import AgentStateIcon from "./AgentStateIcon.svelte";
   import {
     formatTokenCount,
     type TagmaStatusSummary,
@@ -46,7 +47,6 @@
 
 <div class="flex items-center gap-1.5 min-w-0" aria-label={tagma_status_aria()}>
   {#each pills.visible as row (row.id)}
-    {@const glyph = agentStateGlyph(row.state)}
     <Popover
       open={openId === row.id}
       onOpenChange={(e) => (openId = e.open ? row.id : null)}
@@ -62,11 +62,9 @@
           aria-expanded={openId === row.id}
           onclick={() => (openId = openId === row.id ? null : row.id)}
         >
-          <span
-            class="badge {glyph.className}"
-            title={agentStateLabel(row.state)}
-            aria-hidden="true">{glyph.char}</span
-          >
+          <span class="badge" aria-hidden="true">
+            <AgentStateIcon state={row.state} size="size-3" label={false} />
+          </span>
           <span class="truncate">{row.role || row.id}</span>
         </button>
       </Popover.Anchor>

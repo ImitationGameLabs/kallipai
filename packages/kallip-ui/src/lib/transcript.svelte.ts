@@ -27,9 +27,18 @@ export interface AutoScroll {
   stick: (contentLength: number, tailKey?: string | number) => void;
   /** Unconditional jump to the tail: resume following, drop the count. */
   forceBottom: () => void;
+  /** Re-anchor to the tail right now if following; a no-op while
+   *  detached (user intent wins). The composer calls this after its
+   *  height settles: the measure-collapse in resize() can clamp a
+   *  bottom-pinned scrollTop against the transient layout, a net-zero
+   *  resize the observer never sees. */
+  reanchorIfFollowing: () => void;
   /** Return to fresh-mount state (follow, zero count, empty tail); the
    *  viewport binding survives. Call when the feeding session changes. */
   reset: () => void;
+  /** Re-anchor to the tail on layout-driven viewport resizes (composer
+   *  auto-grow, window resizes) while following. Returns its detacher. */
+  observe: (target: HTMLElement) => () => void;
 }
 
 /** The tail snapshot one stick() call observes. */
@@ -92,6 +101,22 @@ export function createAutoScroll(options: AutoScrollOptions = {}): AutoScroll {
     missed = 0;
     lastTail = { length: 0, key: undefined };
   }
+  function reanchorIfFollowing(): void {
+    if (viewport && follow) viewport.scrollTop = viewport.scrollHeight;
+  }
+  // Layout shifts (composer auto-grow, window resizes) shrink the scroll
+  // container without firing a scroll event, so a following transcript
+  // would visually drift off the tail and the next wheel tick would
+  // then read as the user leaving. While following, re-anchor on any
+  // container resize; while detached the observer is inert -- user
+  // intent wins. Programmatic re-anchoring lands exactly on the tail,
+  // so the follow-on scroll event re-affirms follow rather than
+  // competing with it.
+  function observe(target: HTMLElement): () => void {
+    const ro = new ResizeObserver(reanchorIfFollowing);
+    ro.observe(target);
+    return () => ro.disconnect();
+  }
 
   return {
     get viewport() {
@@ -109,7 +134,9 @@ export function createAutoScroll(options: AutoScrollOptions = {}): AutoScroll {
     onScroll,
     stick,
     forceBottom,
+    reanchorIfFollowing,
     reset,
+    observe,
   };
 }
 

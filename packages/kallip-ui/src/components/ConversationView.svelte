@@ -100,6 +100,14 @@
     void lines.length;
     scroll.stick(lines.length, lines.at(-1)?.historyId);
   });
+  // Layout-driven resizes (composer auto-grow, window resize) shrink the
+  // container without a scroll event; while following, re-anchor to the
+  // tail so a send never visually drags it out of view.
+  $effect(() => {
+    const vp = scroll.viewport;
+    if (!vp) return;
+    return scroll.observe(vp);
+  });
 
   // One scroll-pin controller for the whole transcript (a single active
   // ResizeObserver across all bubbles); each <MessageBubble> hands its box +
@@ -166,8 +174,12 @@
 </script>
 
 <div class="relative flex-1 min-h-0 flex">
+  <!-- UA scroll anchoring is retired here: the controller owns the
+       anchoring (stick/observe), and an anchor adjustment racing the
+       flex reflow could ship a scroll event with a large
+       distance-from-bottom, detaching follow on a mere keystroke. -->
   <div
-    class="flex-1 min-h-0 overflow-auto"
+    class="flex-1 min-h-0 overflow-auto [overflow-anchor:none]"
     bind:this={scroll.viewport}
     onscroll={scroll.onScroll}
   >
@@ -248,7 +260,7 @@
     <!-- z-10: a hosting page may append absolute siblings after this one;
       later siblings stack above by DOM order unless outranked. -->
     <div
-      class="absolute inset-x-0 bottom-4 z-10 flex justify-center pointer-events-none"
+      class="absolute inset-x-0 bottom-4 z-10 mx-auto flex max-w-[80rem] justify-end px-4 pointer-events-none"
     >
       <ScrollToBottomButton
         missed={scroll.missed}
@@ -258,5 +270,13 @@
   {/if}
 </div>
 {#if composer}
-  <Composer {composer} {disabled} {pendingCount} {attachmentBar} {fileButton} />
+  <Composer
+    {composer}
+    {disabled}
+    {pendingCount}
+    {attachmentBar}
+    {fileButton}
+    onSubmitted={() => scroll.forceBottom()}
+    onResized={() => scroll.reanchorIfFollowing()}
+  />
 {/if}
