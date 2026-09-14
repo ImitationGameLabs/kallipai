@@ -1,6 +1,6 @@
 // Six-state presentation table shared by every state-bearing surface --
-// the manage list + detail header (StateDot), the top-bar pills, the
-// detail layer, and the status card's agent rows and drawer. The union
+// the manage list + detail header (StateDot), the top-bar pills,
+// and the status card's agent rows and drawer. The union
 // mirrors the tagma's `AgentState` wire enum (see
 // @kallipai/kallip-client/src/types.ts) — copied, not imported, so this
 // module stays transport-free like tagmata.svelte.ts.

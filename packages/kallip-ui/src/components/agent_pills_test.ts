@@ -1,13 +1,11 @@
-// Source-read pins for the three new status surfaces (same rationale as
+// Source-read pins for the status surfaces (same rationale as
 // scroll_to_bottom_button_test: the contracts are presentation wiring a
-// typecheck cannot see). The pill row, the detail layer, and the drawer
-// list must all draw their state marks from the shared tables, never a
-// private mapping.
+// typecheck cannot see). The pill row and the drawer list must both
+// draw their state marks from the shared tables, never a private mapping.
 
 import { assert, assertEquals } from "@std/assert";
 
 const PILLS = new URL("./AgentPills.svelte", import.meta.url);
-const DETAIL = new URL("./AgentDetailPanel.svelte", import.meta.url);
 const DRAWER = new URL("./AgentDrawerList.svelte", import.meta.url);
 
 function source(url: URL): string {
@@ -21,7 +19,7 @@ Deno.test(
     const src = source(PILLS);
     // State marks come from the shared table (never a private mapping):
     // the badge nests the shared AgentStateIcon rendering (decorative
-    // there), and the full state word rides tooltip+aria.
+    // there), and the full state word rides the tooltip.
     assert(
       src.includes(
         '<AgentStateIcon state={row.state} size="size-3" label={false} />',
@@ -29,46 +27,46 @@ Deno.test(
     );
     assert(src.includes('class="badge"'));
     assert(src.includes("agentStateLabel(row.state)"));
-    // Chips use the Skeleton chip utility with the filter-chip
-    // selected pattern; the detail popover anchors to the chip.
+    // Pills are non-interactive labels: the tooltip carries the full
+    // name plus the state word; no popover and no aria-label remain.
+    assert(!src.includes('aria-label="{row.role'), "no pill aria-label");
     assert(src.includes("chip "));
-    assert(src.includes("preset-filled-primary-200-800"));
+    assert(src.includes("preset-outlined-surface-500"));
+    assert(!src.includes("<Popover"));
+    assert(!src.includes("openId"));
+    assert(!src.includes("aria-expanded"), "pills carry no open state");
     assert(
       src.includes(
-        "preset-outlined-surface-500 hover:preset-filled-surface-500",
+        'title="{row.role || row.id} - {agentStateLabel(row.state)}"',
       ),
     );
-    assert(src.includes("<Popover"));
-    assert(src.includes("<Popover.Anchor>"));
     // The overflow pill carries the count and hands the click back.
     assert(src.includes("pills.overflow > 0"));
     assert(src.includes("tagma_status_more({ count: pills.overflow })"));
     assert(src.includes("onOverflow?.()"));
-    // The budget indicator pins right: native progress + tabular
-    // numbers from the live aggregate.
-    assert(src.includes("ms-auto"));
+    // The row wraps to at most two measured rows: the cap is read off
+    // a hidden mirror that always renders the full roster, so the
+    // visible row never flashes an uncapped layout mid-measure. The
+    // budget indicator pins right out of the wrap flow: native
+    // progress + tabular numbers from the live aggregate.
+    assert(src.includes("flex flex-wrap"));
+    assert(src.includes("bind:this={mirror}"));
+    assert(src.includes("invisible pointer-events-none"));
+    assert(
+      !src.includes("cap = Number.POSITIVE_INFINITY;"),
+      "no uncapped reset flash",
+    );
+    assert(src.includes("visibleCountWithinRows"));
+    // One style string, exactly two render sites: the visible row
+    // and the hidden mirror must stay in lockstep, so a one-sided
+    // class drift trips this count instead of silently diverging.
+    assertEquals(
+      src.split("chip preset-outlined-surface-500 max-w-[10rem]").length - 1,
+      2,
+    );
+    assert(src.includes('class="flex items-center gap-1.5 shrink-0"'));
     assert(src.includes('class="progress h-1.5'));
     assert(src.includes("formatTokenCount(budget.tokenConsumed)"));
-  },
-);
-
-Deno.test(
-  "the detail layer announces the full state word and the parked reason",
-  { permissions: { read: [DETAIL] } },
-  () => {
-    const src = source(DETAIL);
-    // The mark is the shared AgentStateIcon rendering (which owns the
-    // accessible name); the full state word rides the body line.
-    assert(src.includes("<AgentStateIcon state={row.state} />"));
-    assert(src.includes(">{agentStateLabel(row.state)}<"));
-    // Context occupancy and the structured parked reason render.
-    assert(src.includes("tagma_agent_detail_context()"));
-    assert(src.includes("parkedReasonText(row.parkedReason)"));
-    // The panel root carries the detail aria-label (the i18n key the
-    // shell announces when a pill opens the layer).
-    assert(src.includes("tagma_agent_detail_aria()"));
-    // Positioning and dismissal belong to the Popover shell: the card
-    // is pure content (no close button, no absolute anchor).
   },
 );
 
@@ -129,7 +127,7 @@ const DOT = new URL("./manage/StateDot.svelte", import.meta.url);
 
 Deno.test(
   "every state-bearing surface renders through AgentStateIcon",
-  { permissions: { read: [ICON, PILLS, DETAIL, DRAWER, ROWS, DOT] } },
+  { permissions: { read: [ICON, PILLS, DRAWER, ROWS, DOT] } },
   () => {
     const icon = source(ICON);
     // The one rendering site: the shared comp, its classes, and the
@@ -141,7 +139,6 @@ Deno.test(
     assert(icon.includes("label = true"));
     for (const [name, src] of [
       ["pills", source(PILLS)],
-      ["detail", source(DETAIL)],
       ["drawer", source(DRAWER)],
       ["rows", source(ROWS)],
       ["state dot", source(DOT)],

@@ -1,10 +1,11 @@
 <script lang="ts">
-  // Full-width chrome bar above the transcript. The top-bar form is one
-  // horizontal pill row: one short pill per agent -- root first --
-  // folding into an overflow pill, with the compact budget indicator
-  // pinned right; tapping a pill opens the per-agent detail layer, and
-  // the overflow pill opens the full roster in a dialog. py-3 +
-  // min-h-14 keep the bar's breathing height.
+  // Full-width chrome bar above the transcript. The top-bar form is a
+  // pill row wrapping to at most two rows: one short pill per agent --
+  // root first -- folding into an overflow chip, with the compact
+  // budget indicator pinned right; pills are non-interactive labels
+  // whose tooltip carries the full name and state, and the overflow
+  // chip opens the agent panel as a transient right-side overlay.
+  // py-3 + min-h-14 keep the bar's breathing height.
   //
   // Layering: surface-200-800 sits one shade above the sidebar's
   // 100-900 (the Navigation root paints that) -- the same shade would
@@ -31,12 +32,12 @@
   // Below the bar, inside the same header element, the sidebar
   // placement's agent-rows section (TagmaAgentRows) extends the same
   // tone. The top bar renders no standing rows section: the
-  // pills and the detail layer carry per-agent state.
+  // pill labels and the transient panel carry per-agent state.
   import {
     formatTokenCount,
     type TagmaStatusSummary,
   } from "../lib/tagmata.svelte.ts";
-  import { ChevronDown, ChevronUp, PanelRight, PanelTop } from "@lucide/svelte";
+  import { PanelRight, PanelTop } from "@lucide/svelte";
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import {
     tagma_status_active_total,
@@ -45,11 +46,9 @@
     tagma_status_layout_toggle,
     tagma_status_subagents,
     tagma_status_waiting,
-    tagma_status_show_details,
   } from "../paraglide/messages.js";
   import TagmaAgentRows from "./TagmaAgentRows.svelte";
   import AgentPills from "./AgentPills.svelte";
-  import AgentDrawerList from "./AgentDrawerList.svelte";
   import type { StatusCardRow } from "../lib/session/statusCard.svelte.ts";
 
   let {
@@ -69,14 +68,11 @@
     /** Flips the wanted placement (state owned and persisted by the page). */
     onToggleSide?: () => void;
   } = $props();
+  // The sidebar placement is gated to lg+ by the page (matchMedia);
+  // this header only renders md+ (below md the shell's own mobile
+  // status line owns the area), so the wrapping pill row is the one
+  // form the top bar has.
 
-  // Small-viewport collapse: below lg the pill row overflows a 375px
-  // viewport, so the whole status area collapses to one summary line;
-  // tapping it restores the pill row for the session. The sidebar
-  // placement is lg+ by definition, so it never collapses. The local
-  // route shows this header md+ only (below md the shell's own mobile
-  // status line owns the area); the collapse serves the online chat
-  // path and the local route's md..lg band.
   const lgQuery = matchMedia("(min-width: 64rem)");
   let lgMatches = $state(lgQuery.matches);
   $effect(() => {
@@ -85,12 +81,10 @@
     lgQuery.addEventListener("change", onChange);
     return () => lgQuery.removeEventListener("change", onChange);
   });
-  let expandedSmall = $state(false);
-  const collapsedSmall = $derived(!sideLayout && !lgMatches && !expandedSmall);
 
-  // The overflow pill's full-roster dialog (the drawer body shared with
-  // the mobile agents panel).
-  let rosterOpen = $state(false);
+  // The transient side panel behind the overflow chip: the same agent
+  // rows the persistent sidebar shows, as a right-side overlay.
+  let overflowOpen = $state(false);
 
   // Budget fill width, clamped to [0, 100]. 0 budget -> 0% (avoids div-by-zero).
   const budgetPct = $derived(
@@ -104,7 +98,7 @@
   <!-- Sidebar summary segment: subagents, always shown (even 0/0). -->
   <div
     class="flex items-center gap-1.5"
-    title={tagma_status_subagents() + " — " + tagma_status_active_total()}
+    title={tagma_status_subagents() + " - " + tagma_status_active_total()}
   >
     <span class="text-base opacity-60">{tagma_status_subagents()}</span>
     <span
@@ -201,71 +195,93 @@
       {/if}
     </div>
   {:else}
-    {#if collapsedSmall}
-      <!-- Collapsed summary line: liveness dot + active/total. The
-           size-10 chevron is anchored to the row's right edge, the same
-           anchor the expanded toggle uses, so the control does not shift
-           between states. -->
-      <div
-        class="relative mx-auto w-full max-w-[56rem] px-4 min-h-10 flex items-center gap-3 text-base"
-      >
-        {#if status}
-          <span
-            class="size-2 rounded-full shrink-0 {status.subagentsActive > 0
-              ? 'bg-success-500'
-              : 'bg-surface-400-600'}"
-            aria-hidden="true"
-          ></span>
-          <span class="tabular-nums whitespace-nowrap"
-            >{status.subagentsActive}/{status.subagentsTotal}</span
-          >
-        {:else}
-          <span
-            class="size-2 rounded-full bg-surface-400-600 animate-pulse"
-            aria-hidden="true"
-          ></span>
-          <span class="opacity-50">{tagma_status_waiting()}</span>
-        {/if}
-        <button
-          type="button"
-          onclick={() => (expandedSmall = true)}
-          class="size-10 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0 absolute right-2 top-1/2 -translate-y-1/2"
-          aria-label={tagma_status_show_details()}
-          aria-expanded="false"
-        >
-          <ChevronDown class="size-4" aria-hidden="true" />
-        </button>
-      </div>
-    {:else}
-      <!-- Top bar placement: the single pill row -- agents,
+    <!-- Top bar placement: the wrapping pill row -- agents,
            overflow, budget pinned right. The relative wrapper hosts the
-           detail layer (anchored below the bar) and the layout toggle on
-           the bar's right edge. -->
-      <div class="relative w-full">
-        <div class="mx-auto w-full max-w-[56rem] px-4 py-3 min-h-14 text-lg">
-          {#if agentRows && (agentRows.rootRow || agentRows.subRows.length > 0)}
-            <AgentPills
-              rootRow={agentRows.rootRow}
-              subRows={agentRows.subRows}
-              budget={status}
-              onOverflow={() => (rosterOpen = true)}
-            />
-          {:else if status}
-            <!-- Rows not attached (or empty): keep the aggregate line so
+           transient panel (opened from the overflow chip) and the layout
+           toggle on the bar's right edge. -->
+    <div class="relative w-full">
+      <div class="mx-auto w-full max-w-[56rem] px-4 py-3 min-h-14 text-lg">
+        {#if agentRows && (agentRows.rootRow || agentRows.subRows.length > 0)}
+          <AgentPills
+            rootRow={agentRows.rootRow}
+            subRows={agentRows.subRows}
+            budget={status}
+            onOverflow={() => (overflowOpen = true)}
+          />
+        {:else if status}
+          <!-- Rows not attached (or empty): keep the aggregate line so
                  the bar still says something real. -->
-            <div class="flex items-center gap-1.5">
-              <span
-                class="size-2 rounded-full {status.subagentsActive > 0
-                  ? 'bg-success-500'
-                  : 'bg-surface-400-600'}"
-                aria-hidden="true"
-              ></span>
-              <span class="tabular-nums whitespace-nowrap"
-                >{status.subagentsActive}/{status.subagentsTotal}</span
+          <div class="flex items-center gap-1.5">
+            <span
+              class="size-2 rounded-full {status.subagentsActive > 0
+                ? 'bg-success-500'
+                : 'bg-surface-400-600'}"
+              aria-hidden="true"
+            ></span>
+            <span class="tabular-nums whitespace-nowrap"
+              >{status.subagentsActive}/{status.subagentsTotal}</span
+            >
+          </div>
+        {:else}
+          <!-- No snapshot yet: keep the bar's height with a muted placeholder. -->
+          <div class="flex items-center gap-1.5 text-base opacity-50">
+            <span
+              class="size-2 rounded-full bg-surface-400-600 animate-pulse"
+              aria-hidden="true"
+            ></span>
+            <span>{tagma_status_waiting()}</span>
+          </div>
+        {/if}
+      </div>
+      {#if lgMatches}
+        {@render layoutToggle()}
+      {/if}
+    </div>
+  {/if}
+  {#if sideLayout && agentRows}
+    <TagmaAgentRows rootRow={agentRows.rootRow} subRows={agentRows.subRows} />
+  {/if}
+</svelte:element>
+
+<!-- The transient side panel behind the overflow chip: the same agent
+     rows the persistent sidebar renders, sliding in over the right
+     edge. The mirrored twin of the mobile drawer's entrance (rotateY
+     from the right; reduced-motion users get the plain slide). Always
+     mounted with `open` controlled, so the close transition plays. -->
+<Dialog open={overflowOpen} onOpenChange={(e) => (overflowOpen = e.open)}>
+  <Portal>
+    <Dialog.Backdrop
+      class="fixed inset-0 bg-surface-50-950/60 z-50 transition transition-discrete opacity-0 data-[state=open]:opacity-100"
+    />
+    <Dialog.Positioner
+      class="fixed inset-0 z-50 grid justify-end items-stretch [perspective:1200px]"
+    >
+      <Dialog.Content
+        class="card preset-tonal-surface h-dvh w-80 max-w-[85%] rounded-none rounded-l-base p-0 overflow-hidden flex flex-col overscroll-contain origin-left transition transition-discrete duration-200 motion-safe:[transform:translateX(100%)_rotateY(10deg)] motion-safe:data-[state=open]:[transform:translateX(0)_rotateY(0deg)] motion-safe:starting:data-[state=open]:[transform:translateX(100%)_rotateY(10deg)] motion-reduce:[transform:translateX(100%)] motion-reduce:data-[state=open]:[transform:translateX(0)] motion-reduce:starting:data-[state=open]:[transform:translateX(100%)]"
+      >
+        <Dialog.Title class="sr-only">{tagma_status_aria()}</Dialog.Title>
+        <div class="px-4 py-3 flex flex-col gap-2.5 text-lg">
+          {#if status}
+            <div class="flex items-center justify-between gap-2">
+              {@render subagentsSegment(status)}
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <div class="flex items-center gap-2">
+                <span class="text-base opacity-60">{tagma_status_budget()}</span
+                >
+                <span class="flex-1"></span>
+                {@render budgetNumbers(status)}
+              </div>
+              <div
+                class="h-2 w-full rounded-full bg-surface-400-600 overflow-hidden"
               >
+                <div
+                  class="h-full rounded-full bg-primary-500 transition-[width] duration-500"
+                  style="width: {budgetPct}%"
+                ></div>
+              </div>
             </div>
           {:else}
-            <!-- No snapshot yet: keep the bar's height with a muted placeholder. -->
             <div class="flex items-center gap-1.5 text-base opacity-50">
               <span
                 class="size-2 rounded-full bg-surface-400-600 animate-pulse"
@@ -275,47 +291,12 @@
             </div>
           {/if}
         </div>
-        {#if lgMatches}
-          {@render layoutToggle()}
-        {:else}
-          <!-- Small expanded: the panel toggle is a dead click below lg, so
-             this slot collapses back to the summary line instead. -->
-          <button
-            type="button"
-            onclick={() => (expandedSmall = false)}
-            class="size-10 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0 absolute right-2 top-1/2 -translate-y-1/2"
-            aria-label={tagma_status_show_details()}
-            aria-expanded="true"
-          >
-            <ChevronUp class="size-4" aria-hidden="true" />
-          </button>
+        {#if agentRows}
+          <TagmaAgentRows
+            rootRow={agentRows.rootRow}
+            subRows={agentRows.subRows}
+          />
         {/if}
-      </div>
-    {/if}
-  {/if}
-  {#if sideLayout && agentRows && !collapsedSmall}
-    <TagmaAgentRows rootRow={agentRows.rootRow} subRows={agentRows.subRows} />
-  {/if}
-</svelte:element>
-
-<!-- The full roster behind the overflow pill: the same drawer body the
-     mobile agents panel uses (one list, one source of marks). Always
-     mounted with `open` controlled, so the close transition plays. -->
-<Dialog open={rosterOpen} onOpenChange={(e) => (rosterOpen = e.open)}>
-  <Portal>
-    <Dialog.Backdrop
-      class="fixed inset-0 bg-surface-50-950/60 z-50 transition transition-discrete opacity-0 data-[state=open]:opacity-100"
-    />
-    <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
-      <Dialog.Content
-        class="card preset-tonal-surface w-full max-w-sm rounded-base p-2 max-h-[70dvh] overflow-hidden flex flex-col transition transition-discrete duration-200 opacity-0 data-[state=open]:opacity-100 starting:data-[state=open]:opacity-0"
-      >
-        <Dialog.Title class="sr-only">{tagma_status_aria()}</Dialog.Title>
-        <AgentDrawerList
-          rootRow={agentRows?.rootRow ?? null}
-          subRows={agentRows?.subRows ?? []}
-          budget={status}
-        />
       </Dialog.Content>
     </Dialog.Positioner>
   </Portal>

@@ -32,7 +32,7 @@
       row.description,
       row.parkedReason ? parkedReasonText(row.parkedReason) : undefined,
     ].filter((p): p is string => !!p);
-    return parts.length > 0 ? parts.join(" — ") : undefined;
+    return parts.length > 0 ? parts.join(" - ") : undefined;
   }
 
   // Right-edge context column: "used / window" once the slow poll lands

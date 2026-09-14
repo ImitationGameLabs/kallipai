@@ -2,7 +2,7 @@
   // The one rendering site for an agent's state mark: the shared table in
   // lib/agentState.ts supplies the Lucide component, its color/motion
   // classes, and an optional centered overlay (retrying's "!"), so every
-  // surface -- top-bar pills, detail layer, manage table, agent rows,
+  // surface -- top-bar pills, manage table, agent rows,
   // drawer -- draws identical shapes. `label` renders the accessible
   // name (role="img" + tooltip); decorative callers nested inside an
   // already-labelled control pass false.
