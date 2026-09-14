@@ -16,6 +16,7 @@
     error = null,
     topPanel = undefined,
     children,
+    onMenu = undefined,
   }: {
     links: NavSection[];
     /** The current pathname: the trail table (lib/shell/breadcrumbs.ts)
@@ -36,6 +37,8 @@
     error?: ErrorView | null;
     topPanel?: Snippet;
     children: Snippet;
+    /** Opens the mobile agents drawer (the top-corner button). */
+    onMenu?: () => void;
   } = $props();
 
   // The single structural fork: one matchMedia at the Tailwind md
@@ -74,6 +77,7 @@
     error,
     topPanel,
     children,
+    onMenu,
   });
 </script>
 

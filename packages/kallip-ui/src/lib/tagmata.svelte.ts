@@ -209,6 +209,19 @@ export function formatTokenCount(n: number): string {
   return String(n);
 }
 
+/** Context occupancy readout for one agent row: `12k / 50k`, `12k / —`
+ * while the registry pull is pending, or `—` when the agent has no live
+ * context read (faulted/parked agents). Shared by the detail card and
+ * the drawer list, which render the same triple inline otherwise. */
+export function contextOccupancy(
+  used: number | null,
+  max: number | null,
+): string {
+  if (used === null) return "—";
+  if (max === null) return `${formatTokenCount(used)} / —`;
+  return `${formatTokenCount(used)} / ${formatTokenCount(max)}`;
+}
+
 /** One-line status summary for a tagma card: `2/4 agents · 12k/50k tokens`.
  * Aggregate (root + subagents) — the dashboard card stays a glanceable summary;
  * the channel-chat header is where root/sub are shown separately. The root

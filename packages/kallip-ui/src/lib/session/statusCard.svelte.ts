@@ -15,6 +15,7 @@
 import type { AgentState, WireParkedReason } from "@kallipai/kallip-client";
 import { type ManagementBackend } from "../manage/backend.ts";
 import { startVisibleInterval } from "../visibleInterval.ts";
+import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
 
 /** One rendered row. `contextTokens` is null until the slow poll lands (or
  * forever, for faulted/parked agents). */
@@ -59,6 +60,12 @@ const STATE_ORDER: Record<AgentState, number> = {
 class StatusCardStore {
   rootRow = $state<StatusCardRow | null>(null);
   subRows = $state<readonly StatusCardRow[]>([]);
+  // Aggregate mirror: the latest TagmaStatusSummary the transports pushed
+  // (the relay SSE via the shell's status sink, the direct drain via the
+  // conversation). Undefined until the first push; kept across suspend()
+  // like the rows, so a drawer opened on any route reads the last known
+  // truth instead of a waiting placeholder.
+  summary = $state<TagmaStatusSummary | undefined>(undefined);
 
   private backend: ManagementBackend | null = null;
   private rosterStop: (() => void) | null = null;
@@ -113,6 +120,7 @@ class StatusCardStore {
     this.suspend();
     this.rootRow = null;
     this.subRows = [];
+    this.summary = undefined;
     this.contexts.clear();
     this.profileWindows.clear();
     this.profileIds.clear();
@@ -176,6 +184,12 @@ class StatusCardStore {
    * nudges; the interval remains the dropped-frame backstop. */
   nudge(): void {
     void this.refreshRoster();
+  }
+  /** Mirror write for the aggregate snapshot. Both transports call this
+   * at their dispatch boundary; `undefined` (offline eviction, no data
+   * yet) flips the drawer summary to its waiting placeholder. */
+  setSummary(s: TagmaStatusSummary | undefined): void {
+    this.summary = s;
   }
 
   private async refreshRoster(): Promise<void> {

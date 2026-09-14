@@ -1,53 +1,43 @@
 <script lang="ts">
-  // Full-width chrome bar above the transcript. One centered row
-  // of two segments -- subagents / budget -- separated by a vertical
-  // rule; justify-center clusters the content mid-bar on
-  // ultra-wide screens instead of pinning the segments apart
-  // across the void. The inner block centers at max-w-[56rem] --
-  // tighter than the transcript column: the status-card area
-  // clusters instead of stretching with the chat.
-  // The agent rows below center at their own 40rem -- tighter still
-  // (dense list); bar and rows widths are deliberately different.
-  // The bar spans the full main area as chrome (the old centered
-  // max-w-2xl card read as floating content). py-3 + min-h-14 give
-  // the bar breathing height.
+  // Full-width chrome bar above the transcript. The top-bar form is one
+  // horizontal pill row: one short pill per agent -- root first --
+  // folding into an overflow pill, with the compact budget indicator
+  // pinned right; tapping a pill opens the per-agent detail layer, and
+  // the overflow pill opens the full roster in a dialog. py-3 +
+  // min-h-14 keep the bar's breathing height.
   //
   // Layering: surface-200-800 sits one shade above the sidebar's
-  // 100-900 (the Navigation root paints that) — the same shade would
+  // 100-900 (the Navigation root paints that) -- the same shade would
   // weld bar and sidebar into one region, and the original two-shade
   // drop read too heavy; one shade up is the operator's call. border-b
   // 400-600 keeps the seam legible in both modes (300-700 dips to ~4
-  // ΔL oklab on dark); Skeleton's -contrast tokens are text-on-fill
+  // delta-L oklab on dark); Skeleton's -contrast tokens are text-on-fill
   // tools, not this panel-on-page shade, so the pairing stays numeric.
-  // The sidebar placement reuses 200-800 by the same chrome
-  // precedent; its neighbour comparison differs from the bar's (a panel
-  // on the page beside the transcript, not a bar beside the navigation),
-  // so the shared tone is what ties the two forms to one area.
+  // The sidebar placement reuses 200-800 by the same chrome precedent.
   //
-  // Root state lives in the agent rows below -- its former bar segment
-  // duplicated the root row (operator feedback). Pure/
-  // presentational: takes the snapshot as a prop, so it is
+  // Pure/presentational: takes the snapshot as a prop, so it is
   // transport-agnostic (the conversation owns the snapshot). Sits above
-  // the transcript's scroll container, so it never scrolls away. Without a
-  // snapshot (freshly connected, or an offline tagma) a slim waiting row
-  // keeps the bar's height stable until the first tick (<= STATUS_INTERVAL,
-  // ~2s).
+  // the transcript's scroll container, so it never scrolls away. Without
+  // a snapshot (freshly connected, or an offline tagma) a slim waiting
+  // row keeps the bar's height stable until the first tick.
   //
   // `sideLayout` renders the same status area as a right sidebar (aside)
   // beside the transcript instead of the top bar, gated to lg+ by the
   // page (matchMedia); a toggle in the area's corner swaps placements at
-  // runtime, and the page persists the user's choice across reloads.
+  // runtime, and the page persists the user's choice across reloads. The
+  // sidebar keeps its stacked summary and the full agent rows (the
+  // narrow roster never folds -- the panel scrolls instead).
   //
-  // Below the bar, inside the same header element, the agent-rows
-  // section (TagmaAgentRows) extends the same tone: one line per agent,
-  // root included (the bar keeps counts and budget only). It renders
-  // only when the page supplies rows (a backend-attached conversation);
-  // the bar stands alone otherwise.
+  // Below the bar, inside the same header element, the sidebar
+  // placement's agent-rows section (TagmaAgentRows) extends the same
+  // tone. The top bar renders no standing rows section: the
+  // pills and the detail layer carry per-agent state.
   import {
     formatTokenCount,
     type TagmaStatusSummary,
   } from "../lib/tagmata.svelte.ts";
   import { ChevronDown, ChevronUp, PanelRight, PanelTop } from "@lucide/svelte";
+  import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import {
     tagma_status_active_total,
     tagma_status_aria,
@@ -58,6 +48,8 @@
     tagma_status_show_details,
   } from "../paraglide/messages.js";
   import TagmaAgentRows from "./TagmaAgentRows.svelte";
+  import AgentPills from "./AgentPills.svelte";
+  import AgentDrawerList from "./AgentDrawerList.svelte";
   import type { StatusCardRow } from "../lib/session/statusCard.svelte.ts";
 
   let {
@@ -78,15 +70,13 @@
     onToggleSide?: () => void;
   } = $props();
 
-  // Small-viewport collapse: below lg the top bar's two segments
-  // wrap and the agent-rows list renders unbounded -- together they eat half
-  // a 375px viewport (operator-visible failure). The whole status area then
-  // collapses to one summary line; tapping it restores the familiar bar +
-  // rows for the session. The sidebar placement is lg+ by definition, so it
-  // never collapses. Since the Line/Panel split the local route shows
-  // this header md+ only (below md the shell's Line/Panel own the
-  // status area); the collapse serves the online chat path and the
-  // local route's md..lg band.
+  // Small-viewport collapse: below lg the pill row overflows a 375px
+  // viewport, so the whole status area collapses to one summary line;
+  // tapping it restores the pill row for the session. The sidebar
+  // placement is lg+ by definition, so it never collapses. The local
+  // route shows this header md+ only (below md the shell's own mobile
+  // status line owns the area); the collapse serves the online chat
+  // path and the local route's md..lg band.
   const lgQuery = matchMedia("(min-width: 64rem)");
   let lgMatches = $state(lgQuery.matches);
   $effect(() => {
@@ -98,6 +88,10 @@
   let expandedSmall = $state(false);
   const collapsedSmall = $derived(!sideLayout && !lgMatches && !expandedSmall);
 
+  // The overflow pill's full-roster dialog (the drawer body shared with
+  // the mobile agents panel).
+  let rosterOpen = $state(false);
+
   // Budget fill width, clamped to [0, 100]. 0 budget -> 0% (avoids div-by-zero).
   const budgetPct = $derived(
     status && status.tokenBudget > 0
@@ -107,8 +101,7 @@
 </script>
 
 {#snippet subagentsSegment(s: TagmaStatusSummary)}
-  <!-- Segment 1: subagents, always shown (even 0/0). Shared verbatim by
-       both placements. -->
+  <!-- Sidebar summary segment: subagents, always shown (even 0/0). -->
   <div
     class="flex items-center gap-1.5"
     title={tagma_status_subagents() + " — " + tagma_status_active_total()}
@@ -209,12 +202,10 @@
     </div>
   {:else}
     {#if collapsedSmall}
-      <!-- Collapsed summary line (see the script note): liveness dot +
-           active/total -- the same first line the expanded bar leads with
-           (budget only appears expanded, on its own row). The size-10
-           chevron is anchored to the row's right edge, the same anchor the
-           expanded toggle uses, so the control does not shift between
-           states. -->
+      <!-- Collapsed summary line: liveness dot + active/total. The
+           size-10 chevron is anchored to the row's right edge, the same
+           anchor the expanded toggle uses, so the control does not shift
+           between states. -->
       <div
         class="relative mx-auto w-full max-w-[56rem] px-4 min-h-10 flex items-center gap-3 text-base"
       >
@@ -246,31 +237,32 @@
         </button>
       </div>
     {:else}
-      <!-- Top bar placement: the first line mirrors the collapsed summary;
-           budget rides a second centred row. The relative wrapper exists so
-           the toggle can ride the bar's right edge (full width) rather than
-           the 56rem cluster's edge. -->
+      <!-- Top bar placement: the single pill row -- agents,
+           overflow, budget pinned right. The relative wrapper hosts the
+           detail layer (anchored below the bar) and the layout toggle on
+           the bar's right edge. -->
       <div class="relative w-full">
-        <div
-          class="mx-auto w-full max-w-[56rem] px-4 py-3 flex flex-col items-center gap-y-2 min-h-14 text-lg"
-        >
-          {#if status}
-            {@render subagentsSegment(status)}
-            <!-- Budget on its own centred row: the first line then matches
-                 the collapsed summary (dot + counts) in both states. Track
-                 is 400-600 because it must clear the bar's tone in both
-                 modes. -->
-            <div class="flex items-center gap-2">
-              <span class="text-base opacity-60">{tagma_status_budget()}</span>
-              <div
-                class="h-2 w-56 shrink-0 rounded-full bg-surface-400-600 overflow-hidden"
+        <div class="mx-auto w-full max-w-[56rem] px-4 py-3 min-h-14 text-lg">
+          {#if agentRows && (agentRows.rootRow || agentRows.subRows.length > 0)}
+            <AgentPills
+              rootRow={agentRows.rootRow}
+              subRows={agentRows.subRows}
+              budget={status}
+              onOverflow={() => (rosterOpen = true)}
+            />
+          {:else if status}
+            <!-- Rows not attached (or empty): keep the aggregate line so
+                 the bar still says something real. -->
+            <div class="flex items-center gap-1.5">
+              <span
+                class="size-2 rounded-full {status.subagentsActive > 0
+                  ? 'bg-success-500'
+                  : 'bg-surface-400-600'}"
+                aria-hidden="true"
+              ></span>
+              <span class="tabular-nums whitespace-nowrap"
+                >{status.subagentsActive}/{status.subagentsTotal}</span
               >
-                <div
-                  class="h-full rounded-full bg-primary-500 transition-[width] duration-500"
-                  style="width: {budgetPct}%"
-                ></div>
-              </div>
-              {@render budgetNumbers(status)}
             </div>
           {:else}
             <!-- No snapshot yet: keep the bar's height with a muted placeholder. -->
@@ -301,11 +293,30 @@
       </div>
     {/if}
   {/if}
-  {#if agentRows && !collapsedSmall}
-    <TagmaAgentRows
-      rootRow={agentRows.rootRow}
-      subRows={agentRows.subRows}
-      narrow={sideLayout}
-    />
+  {#if sideLayout && agentRows && !collapsedSmall}
+    <TagmaAgentRows rootRow={agentRows.rootRow} subRows={agentRows.subRows} />
   {/if}
 </svelte:element>
+
+<!-- The full roster behind the overflow pill: the same drawer body the
+     mobile agents panel uses (one list, one source of marks). Always
+     mounted with `open` controlled, so the close transition plays. -->
+<Dialog open={rosterOpen} onOpenChange={(e) => (rosterOpen = e.open)}>
+  <Portal>
+    <Dialog.Backdrop
+      class="fixed inset-0 bg-surface-50-950/60 z-50 transition transition-discrete opacity-0 data-[state=open]:opacity-100"
+    />
+    <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
+      <Dialog.Content
+        class="card preset-tonal-surface w-full max-w-sm rounded-base p-2 max-h-[70dvh] overflow-hidden flex flex-col transition transition-discrete duration-200 opacity-0 data-[state=open]:opacity-100 starting:data-[state=open]:opacity-0"
+      >
+        <Dialog.Title class="sr-only">{tagma_status_aria()}</Dialog.Title>
+        <AgentDrawerList
+          rootRow={agentRows?.rootRow ?? null}
+          subRows={agentRows?.subRows ?? []}
+          budget={status}
+        />
+      </Dialog.Content>
+    </Dialog.Positioner>
+  </Portal>
+</Dialog>

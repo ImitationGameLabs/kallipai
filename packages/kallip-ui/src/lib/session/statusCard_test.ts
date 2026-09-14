@@ -306,3 +306,31 @@ Deno.test("suspend stops the feed backstop timer", async () => {
     "suspend must stop the backstop interval",
   );
 });
+
+Deno.test(
+  "the aggregate mirror follows setSummary and clears on detach",
+  () => {
+    statusCardStore.setSummary({
+      rootState: "busy",
+      subagentsTotal: 2,
+      subagentsActive: 1,
+      tokenBudget: 50_000,
+      tokenConsumed: 12_345,
+    });
+    assertEquals(statusCardStore.summary?.tokenConsumed, 12_345);
+    assertEquals(statusCardStore.summary?.subagentsActive, 1);
+    // An `undefined` write (offline eviction, no data yet) clears it.
+    statusCardStore.setSummary(undefined);
+    assertEquals(statusCardStore.summary, undefined);
+    statusCardStore.setSummary({
+      rootState: "idle",
+      subagentsTotal: 0,
+      subagentsActive: 0,
+      tokenBudget: 50_000,
+      tokenConsumed: 0,
+    });
+    // detach() clears every cached value, the mirror included.
+    statusCardStore.detach();
+    assertEquals(statusCardStore.summary, undefined);
+  },
+);

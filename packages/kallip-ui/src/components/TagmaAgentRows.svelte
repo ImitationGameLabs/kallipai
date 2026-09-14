@@ -1,17 +1,12 @@
 <script lang="ts">
-  // Agent rows under the status bar: the roster the bar only summarizes
-  // (subagent counts, budget) -- root's state lives here, not in the bar,
-  // its per-state Lucide icons keeping shape + color (colorblind-safe).
-  // Root first (the conversation owner anchors the roster), then subs in
-  // attention order with idle folding away beyond five visible rows. The
-  // fold row doubles as the toggle; expanded, the container scrolls with
-  // root sticky so the root agent stays in view. Purely presentational:
-  // the store (and its debounced row identity) lives in the page.
-  //
-  // The `narrow` variant renders inside the sidebar placement
-  // (TagmaStatusHeader side layout): rows go two-line so live activity
-  // survives the width, and the section itself becomes the panel's scroll
-  // region.
+  // Agent rows inside the sidebar placement (TagmaStatusHeader side
+  // layout): the roster the summary only counts -- root's state lives
+  // here, its per-state Lucide icons keeping shape + color
+  // (colorblind-safe). Root first (the conversation owner anchors the
+  // roster), then subs in attention order. Every row stays visible: the
+  // section is the panel's scroll region (no fold in a column
+  // this tall). Purely presentational: the store (and its debounced row
+  // identity) lives in the page.
 
   import { parkedReasonText } from "../lib/session/parkedReason.ts";
   import { type StatusCardRow } from "../lib/session/statusCard.svelte.ts";
@@ -21,37 +16,15 @@
     type AgentLifecycleState,
   } from "../lib/agentState.ts";
   import { formatTokenCount } from "../lib/tagmata.svelte.ts";
-  import {
-    tagma_status_collapse,
-    tagma_status_idle_hidden,
-    tagma_status_more,
-    tagma_status_root,
-  } from "../paraglide/messages.js";
+  import { tagma_status_root } from "../paraglide/messages.js";
 
   let {
     rootRow,
     subRows,
-    narrow = false,
   }: {
     rootRow: StatusCardRow | null;
     subRows: readonly StatusCardRow[];
-    /** Sidebar variant: the status panel is a narrow right column. */
-    narrow?: boolean;
   } = $props();
-
-  const VISIBLE_SUBS = 5;
-
-  let expanded = $state(false);
-
-  const visibleSubs = $derived(
-    expanded ? subRows : subRows.slice(0, VISIBLE_SUBS),
-  );
-  const hiddenCount = $derived(subRows.length - visibleSubs.length);
-  // The fold row reads differently when everything hidden is idle:
-  // "nothing interesting down there" instead of a count of unknowns.
-  const hiddenAllIdle = $derived(
-    subRows.slice(VISIBLE_SUBS).every((r) => r.state === "idle"),
-  );
 
   // Row hover tooltip: the wire's description first (the human words), the
   // parked reason appended when present (why it stopped still matters);
@@ -93,36 +66,19 @@
 {/snippet}
 
 {#if rootRow || subRows.length > 0}
-  <!-- the bar/rows seam: same 400-600 as the header's border (border-b top
-       bar / border-l sidebar). In the narrow variant this section is also
-       the panel's scroll region: flex-1 min-h-0 takes the leftover panel
-       height and actually scrolls (nested-flex min-content trap). The
-       max-w centring below is a top-bar-only idea -- the sidebar is
-       its own tight container (see TagmaStatusHeader). The top-bar row
-       block centers at 40rem, deliberately narrower than the bar's
-       56rem (a dense list reads better tight; operator call) -- the two
-       widths are each their own, not a drift. -->
-  <div
-    class="border-t border-surface-400-600 {narrow
-      ? 'flex-1 min-h-0 overflow-y-auto'
-      : ''}"
-  >
-    <div
-      class="{narrow
-        ? 'px-4'
-        : 'mx-auto w-full max-w-[40rem] px-4'} text-base {expanded && !narrow
-        ? 'max-h-[50vh] overflow-y-auto'
-        : ''}"
-    >
+  <!-- the bar/rows seam: same 400-600 as the header's border (border-l
+       sidebar). This section is also the panel's scroll region:
+       flex-1 min-h-0 takes the leftover panel height and actually
+       scrolls (nested-flex min-content trap). Rows go two-line so live
+       activity survives the width; a quiet row stays single-line. -->
+  <div class="border-t border-surface-400-600 flex-1 min-h-0 overflow-y-auto">
+    <div class="px-4 text-base">
       {#if rootRow}
         <!-- sticky bg = header bar tone (200-800); keeps scrolled rows
-             hidden beneath. Unconditional in the narrow variant:
-             there the section itself is the scroll region, so root must
-             ride it; the top-bar variant scrolls only when expanded. -->
+             hidden beneath. Unconditional: the section itself is the
+             scroll region, so root must ride it. -->
         <div
-          class="flex items-center gap-2 py-1.5 {expanded || narrow
-            ? 'sticky top-0 bg-surface-200-800'
-            : ''}"
+          class="flex items-center gap-2 py-1.5 sticky top-0 bg-surface-200-800"
           title={rowTooltip(rootRow) ?? tagma_status_root()}
         >
           {@render stateIcon(rootRow.state)}
@@ -133,53 +89,21 @@
           </span>
         </div>
       {/if}
-      {#each visibleSubs as row (row.id)}
-        {#if narrow}
-          <!-- Sidebar rows go two-line: name + context up front, live
-               activity below (roster convention); a quiet row stays
-               single-line. -->
-          <div class="py-1.5" title={rowTooltip(row)}>
-            <div class="flex items-center gap-2">
-              {@render stateIcon(row.state)}
-              <span class="font-medium truncate">{row.role || row.id}</span>
-              <span class="flex-1"></span>
-              <span class="tabular-nums whitespace-nowrap text-sm opacity-80">
-                {contextText(row)}
-              </span>
-            </div>
-            {#if row.activity}
-              <div class="truncate text-sm opacity-60 ps-7">{row.activity}</div>
-            {/if}
-          </div>
-        {:else}
-          <div class="flex items-center gap-2 py-1.5" title={rowTooltip(row)}>
+      {#each subRows as row (row.id)}
+        <div class="py-1.5" title={rowTooltip(row)}>
+          <div class="flex items-center gap-2">
             {@render stateIcon(row.state)}
             <span class="font-medium truncate">{row.role || row.id}</span>
-            {#if row.activity}
-              <span class="truncate opacity-60">{row.activity}</span>
-            {/if}
             <span class="flex-1"></span>
             <span class="tabular-nums whitespace-nowrap text-sm opacity-80">
               {contextText(row)}
             </span>
           </div>
-        {/if}
+          {#if row.activity}
+            <div class="truncate text-sm opacity-60 ps-7">{row.activity}</div>
+          {/if}
+        </div>
       {/each}
-      {#if hiddenCount > 0 || expanded}
-        <button
-          type="button"
-          class="flex w-full items-center gap-2 py-1.5 cursor-pointer opacity-70 hover:opacity-100"
-          onclick={() => (expanded = !expanded)}
-        >
-          <span class="text-sm"
-            >{expanded
-              ? tagma_status_collapse()
-              : hiddenAllIdle
-                ? tagma_status_idle_hidden({ count: hiddenCount })
-                : tagma_status_more({ count: hiddenCount })}</span
-          >
-        </button>
-      {/if}
     </div>
   </div>
 {/if}

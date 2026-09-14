@@ -1,11 +1,15 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import { Dialog, Navigation, Portal } from "@skeletonlabs/skeleton-svelte";
-  import { Ellipsis, User, ChevronLeft } from "@lucide/svelte";
+  import { Ellipsis, User, ChevronLeft, Menu } from "@lucide/svelte";
   import type { NavSection } from "./links.ts";
   import type { ErrorView } from "../errors.ts";
   import { navSlots } from "./navSlots.ts";
-  import { account_menu, nav_more } from "../../paraglide/messages.js";
+  import {
+    account_menu,
+    nav_more,
+    tagma_drawer_open,
+  } from "../../paraglide/messages.js";
   import Banner from "../../components/Banner.svelte";
   import NavLink from "../../components/NavLink.svelte";
 
@@ -18,7 +22,9 @@
     error = null,
     topPanel = undefined,
     children,
+    onMenu = undefined,
   }: {
+    onMenu?: () => void;
     links: NavSection[];
     isActive: (href: string) => boolean;
     // The back affordance: when set, the top row renders the chevron and
@@ -73,7 +79,7 @@
            keeps the centre column truly centred whether or not a back
            button exists. -->
       <div
-        class="grid grid-cols-[auto_1fr_auto] items-center px-2 pt-[env(safe-area-inset-top)] min-h-10"
+        class="grid grid-cols-[auto_auto_1fr_auto] items-center px-2 pt-[env(safe-area-inset-top)] min-h-10"
       >
         {#if back}
           <a
@@ -83,6 +89,21 @@
           >
             <ChevronLeft class="size-4" aria-hidden="true" />
           </a>
+        {:else}
+          <span class="size-8"></span>
+        {/if}
+        {#if onMenu}
+          <!-- The agents drawer entry: permanent top-corner button, both
+               platforms (the edge swipe is app-only; this is universal). -->
+          <button
+            type="button"
+            onclick={onMenu}
+            aria-haspopup="dialog"
+            aria-label={tagma_drawer_open()}
+            class="size-8 grid place-items-center rounded-base opacity-70 hover:opacity-100 hover:preset-filled-surface-500"
+          >
+            <Menu class="size-5" aria-hidden="true" />
+          </button>
         {:else}
           <span class="size-8"></span>
         {/if}

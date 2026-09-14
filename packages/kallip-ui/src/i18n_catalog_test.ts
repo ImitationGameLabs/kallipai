@@ -520,6 +520,8 @@ const SYNONYMS: string[][] = [
     "manage_profiles_provider_base_url_label",
     "settings_provider_base_url_label",
   ],
+  ["tagma_drawer_title", "nav_breadcrumb_agents"],
+  ["tagma_agent_detail_context", "manage_agent_context_label"],
 ];
 
 Deno.test("catalog: same-value keys are all deliberate synonyms", () => {

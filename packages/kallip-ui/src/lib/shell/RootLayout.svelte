@@ -3,9 +3,10 @@
   import type { Snippet } from "svelte";
   import AppShell from "../../components/AppShell.svelte";
   import AccountMenu from "../../components/AccountMenu.svelte";
-  import TagmaStatusHeader from "../../components/TagmaStatusHeader.svelte";
   import TagmaStatusLine from "../../components/TagmaStatusLine.svelte";
-  import TagmaStatusPanel from "../../components/TagmaStatusPanel.svelte";
+  import AgentDrawerList from "../../components/AgentDrawerList.svelte";
+  import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import { attachEdgeSwipe } from "./edgeSwipe.ts";
   import { classifyError } from "../errors.ts";
   import { archeionSession } from "../session/archeion.svelte";
   import { channelsStore } from "../session/channels.svelte";
@@ -44,6 +45,7 @@
     nav_manage,
     room_label_fallback,
     settings_heading,
+    tagma_status_aria,
   } from "../../paraglide/messages.js";
 
   let {
@@ -120,9 +122,14 @@
     // the owning channel's `statusSnapshot`, so the chat header reads one
     // uniform source (the direct path drains its own SSE status). Same
     // shell-binding discipline.
-    realtimeStore.setStatusSink((tagmaId, snapshot) =>
-      channelsStore.deliverStatus(tagmaId, snapshot),
-    );
+    realtimeStore.setStatusSink((tagmaId, snapshot) => {
+      channelsStore.deliverStatus(tagmaId, snapshot);
+      // The agents drawer lives on every route, not just the chat page:
+      // mirror each push into the status-card store so its summary bar
+      // has data before the chat page is ever opened. The `undefined`
+      // eviction (an offline tagma) flows through the same sink.
+      statusCardStore.setSummary(snapshot);
+    });
     // Wire the cached-status backfill: a freshly-opened relay channel seeds its
     // `statusSnapshot` from realtime's in-session cache so the header shows at
     // once (otherwise it waits for the next status push). Same shell-binding
@@ -466,13 +473,22 @@
     "/account": account_menu,
   };
   const mobileTitle = $derived(mobileTitles[pathname]?.());
-  // Mobile status expansion owned by the shell's topPanel pair (chat only).
-  let statusExpanded = $state(false);
-  // Hoisted state survives navigation; reset on route change so returning
-  // to chat starts collapsed like the old in-page header did.
+  // The mobile agents drawer: opened from the chat top-row summary
+  // or a left-edge swipe; hoisted state survives navigation, reset on
+  // route change so returning to chat starts closed.
+  let agentsDrawerOpen = $state(false);
+  // Reset on route change so returning to chat starts closed.
   $effect(() => {
     pathname;
-    statusExpanded = false;
+    agentsDrawerOpen = false;
+  });
+  // Left-edge swipe opens the drawer -- app surface only (the operator's
+  // platform fork: the Tauri app gets the gesture, mobile web gets the
+  // top-corner button). Component-level: attached once, detacher on
+  // unmount.
+  $effect(() => {
+    if (appKind !== "app") return;
+    return attachEdgeSwipe(() => (agentsDrawerOpen = true));
   });
 </script>
 
@@ -481,29 +497,15 @@
   <AccountMenu />
 {/snippet}
 
-<!-- Mobile top row for the chat deep pages: a one-line status
-     summary (TagmaStatusLine) rides beside the back chevron; the
-     expanded half (budget + agent rows) renders as the shell's
-     topPanel below the row, so the row stays one line tall in both
-     states. -->
+<!-- Mobile top row for the chat deep pages: a one-line status summary
+     (TagmaStatusLine) rides beside the back chevron; tapping it opens
+     the agents drawer. -->
 {#snippet topRowSnippet()}
   {#if chatId}
     <TagmaStatusLine
       status={channelsStore.get(chatId)?.statusSnapshot}
-      expanded={statusExpanded}
-      onToggle={() => (statusExpanded = !statusExpanded)}
-    />
-  {/if}
-{/snippet}
-
-{#snippet topPanelSnippet()}
-  {#if chatId && statusExpanded}
-    <TagmaStatusPanel
-      status={channelsStore.get(chatId)?.statusSnapshot}
-      agentRows={{
-        rootRow: statusCardStore.rootRow,
-        subRows: statusCardStore.subRows,
-      }}
+      onOpen={() => (agentsDrawerOpen = true)}
+      expanded={agentsDrawerOpen}
     />
   {/if}
 {/snippet}
@@ -516,8 +518,8 @@
     {pathname}
     {isActive}
     {back}
+    onMenu={() => (agentsDrawerOpen = true)}
     topRow={back && !mobileTitle ? topRowSnippet : undefined}
-    topPanel={back && !mobileTitle ? topPanelSnippet : undefined}
     title={mobileTitle}
     error={errorView}
     status={statusSnippet}
@@ -531,3 +533,32 @@
        Never a protected AppShell, so no gated content flashes. -->
   <div class="p-4"><p class="opacity-60">Loading…</p></div>
 {/if}
+
+<!-- The mobile agents drawer: a left-anchored panel over the
+       page; Escape and backdrop tap dismiss (zag Dialog defaults).
+       Always mounted with `open` controlled, so the close transition
+       (the rotate-out half) actually plays. -->
+<Dialog
+  open={agentsDrawerOpen}
+  onOpenChange={(e) => (agentsDrawerOpen = e.open)}
+>
+  <Portal>
+    <Dialog.Backdrop
+      class="fixed inset-0 bg-surface-50-950/60 z-50 transition transition-discrete opacity-0 data-[state=open]:opacity-100"
+    />
+    <Dialog.Positioner
+      class="fixed inset-0 z-50 grid justify-start items-stretch [perspective:1200px]"
+    >
+      <Dialog.Content
+        class="card preset-tonal-surface h-dvh w-[85%] max-w-[20rem] rounded-none rounded-r-base p-0 overflow-hidden flex flex-col overscroll-contain origin-right transition transition-discrete duration-200 motion-reduce:transition-none max-md:[transform:translateX(-100%)_rotateY(10deg)] max-md:data-[state=open]:[transform:translateX(0)_rotateY(0deg)] max-md:starting:data-[state=open]:[transform:translateX(-100%)_rotateY(10deg)] md:[transform:translateX(-100%)] md:data-[state=open]:[transform:translateX(0)] md:starting:data-[state=open]:[transform:translateX(-100%)]"
+      >
+        <Dialog.Title class="sr-only">{tagma_status_aria()}</Dialog.Title>
+        <AgentDrawerList
+          rootRow={statusCardStore.rootRow}
+          subRows={statusCardStore.subRows}
+          budget={statusCardStore.summary}
+        />
+      </Dialog.Content>
+    </Dialog.Positioner>
+  </Portal>
+</Dialog>

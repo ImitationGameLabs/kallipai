@@ -58,6 +58,7 @@ import { LescheApiError } from "@kallipai/kallip-lesche-client";
 import { KallipError } from "@kallipai/kallip-common";
 import { chat_send_failed } from "../../paraglide/messages.js";
 import { tagmaKey, unreadStore } from "./unread.svelte.ts";
+import { statusCardStore } from "./statusCard.svelte.ts";
 import { notify } from "./notify.ts";
 
 /** The lazy-window page size: how many lines a hydrate, a catch-up batch,
@@ -500,6 +501,10 @@ export abstract class ConversationBase {
         for await (const snapshot of t.status()) {
           if (!this.isLive()) return;
           this.statusSnapshot = snapshot;
+          // The direct drain is the drawer summary's only source on the
+          // offline shell (the relay path mirrors via the shell's status
+          // sink), so each snapshot lands in the store here.
+          statusCardStore.setSummary(snapshot);
         }
       } catch {
         // Same as signals: a status-drain failure coincides with the reply
