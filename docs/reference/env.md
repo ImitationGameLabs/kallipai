@@ -428,13 +428,19 @@ environment: a spawn signals relay intent with an enrollment code or an
 explicit `KALLIP_POLIS_URL` entry; when the origin is omitted the daemon
 fills `KALLIP_POLIS_URL` from its own env, explicit values in the spawn
 env always win, a spawn with no relay signal at all gets nothing, and an
-unset (or empty) daemon value means nothing is filled. The fill happens
-before the record snapshot is written, so a restart replays the filled
-env.
+unset (or empty) daemon value means nothing is filled. Under the
+NixOS module the daemon value itself defaults to
+`<scheme>://api.<services.kallipai.domain>` when polis is enabled
+and a domain is set (the scheme following `services.kallipai.tls`);
+with polis on but no domain set the value stays null. The default
+platform shape has relay fill wired out of the box; an explicit
+`polisUrl` override wins, and with polis disabled nothing is
+derived. The fill happens before the record snapshot is written, so
+a restart replays the filled env.
 
 | Variable           | Default                             | Purpose                                                            |
 | ------------------ | ----------------------------------- | ------------------------------------------------------------------ |
-| `KALLIP_POLIS_URL` | `services.kallipai.daemon.polisUrl` | Platform edge origin filled into relay-intent spawns that omit it. |
+| `KALLIP_POLIS_URL` | `services.kallipai.daemon.polisUrl` (derived when polis is on and a domain is set) | Platform edge origin filled into relay-intent spawns that omit it. |
 
 ## Dev stack shape
 

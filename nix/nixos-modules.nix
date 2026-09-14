@@ -162,13 +162,17 @@ in
         description = ''
           Platform edge origin (e.g. "https://api.example.com") the daemon
           fills into relay-intent spawns that omit it (KALLIP_POLIS_URL).
-          null injects nothing: a spawn carrying an enrollment code but
-          no origin then fails loudly at boot (credentials are never
-          sent to an assumed deployment), so set this whenever relay
-          enrollment is in play. Derive it from
-          services.kallipai.domain (api.<domain>) rather than a service
-          port -- tagma clients append /v1/<service>, which only the
-          edge routes.
+          With polis enabled and a domain set this derives by
+          default from services.kallipai.domain
+          (<scheme>://api.<domain>, the scheme following
+          services.kallipai.tls); an explicit value always
+          wins. Set it explicitly on split deployments where the daemon
+          host cannot reach api.<domain>. With polis disabled nothing is
+          derived: null injects nothing, and a spawn carrying an
+          enrollment code but no origin then fails loudly at boot
+          (credentials are never sent to an assumed deployment). The
+          api.<domain> form beats a service port -- tagma clients append
+          /v1/<service>, which only the edge routes.
         '';
       };
 
@@ -1008,6 +1012,12 @@ in
         };
         web.runtimeConfig.domain = lib.mkDefault platformDomain;
       };
+    })
+    # Module default: derive the daemon's relay fill origin from the
+    # platform domain. Gated on polis itself -- the option only feeds
+    # the daemon unit, and with polis disabled nothing is derived.
+    (lib.mkIf (platformDomain != null && polisCfg.enable) {
+      services.kallipai.daemon.polisUrl = lib.mkDefault "${appScheme}://api.${platformDomain}";
     })
     # Cookie security tracks the tls knob only downward: https leaves
     # the option null (the code default already sends Secure), plain
