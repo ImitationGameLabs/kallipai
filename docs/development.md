@@ -267,21 +267,21 @@ arion -f compose/dev/tagma.nix up -d   # tagma; enrolls its relay
 
 The tagma can hold one identity per platform deployment simultaneously (e.g. the local
 dev edge plus a remote one). Declare the entries in
-`<data-root>/relays.toml`:
+`<data-root>/polis.toml`:
 
 ```toml
-[[relay]]
+[[polis]]
 name    = "main"                # slug: [a-z0-9][a-z0-9-]*; keys the
                                 # credentials/<name>/ dir (stable across origin changes)
-polis_url = "https://api.kallipai.com"   # the platform edge origin
+url = "https://api.kallipai.com"   # the platform edge origin
 # enrollment_code = "sk-enroll-..."      # first run only; afterwards the stored token is reused
 
-[[relay]]
+[[polis]]
 name     = "second"
-polis_url = "https://relay2.example.com"
+url = "https://relay2.example.com"
 ```
 
-Rules: a `relays.toml` entry and the env-configured single relay
+Rules: a `polis.toml` entry and the env-configured single relay
 (`KALLIP_POLIS_URL`, optionally with `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE`)
 are mutually exclusive -- unset the env vars or delete the file (the env
 vars keep working as one implicit `default` entry when the file is
@@ -299,7 +299,7 @@ file parameterized by env vars:
 `KALLIP_ARION_PROJECT_NAME=kallipai-dev2 KALLIP_ARION_ARCHEION_PORT=7101 KALLIP_ARION_LESCHE_PORT=7201 arion up -d archeion lesche`
 -- with its own containers, volumes, and edge: the second stack's caddy
 routes its own `api.` host to those ports, giving the tagma a second
-platform origin. Enroll a code on each side, fill `relays.toml`, and watch the
+platform origin. Enroll a code on each side, fill `polis.toml`, and watch the
 tagma log for two `relay connector active` lines (one per entry name); a
 message sent on either side must arrive on both.
 

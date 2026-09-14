@@ -302,7 +302,7 @@ pub enum ErrorCode {
 
 /// An instance slug must be a DNS-label-like lowercase slug
 /// (`[a-z0-9][a-z0-9-]*`): it is a directory name in the instance tree and a
-/// log key, exactly like the relay-entry names inside `relays.toml`
+/// log key, exactly like the relay-entry names inside `polis.toml`
 /// (kallip-tagma `valid_entry_name`). Duplicated grammar on purpose — the
 /// daemon stays independent of kallip-tagma; unifying the two into one shared
 /// helper is a tracked follow-up, not something this crate reaches for now.

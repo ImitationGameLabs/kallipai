@@ -764,18 +764,19 @@ struct RelayEntry {
     enrollment_code: Option<String>,
 }
 
-/// The `[[relay]]` array of `relays.toml`.
+/// The `[[polis]]` array of `polis.toml`.
 #[derive(serde::Deserialize)]
-struct RelaysFile {
+#[serde(deny_unknown_fields)]
+struct PolisFile {
     #[serde(default)]
-    relay: Vec<RelaysTomlEntry>,
+    polis: Vec<PolisTomlEntry>,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RelaysTomlEntry {
+struct PolisTomlEntry {
     name: String,
-    polis_url: String,
+    url: String,
     enrollment_code: Option<String>,
 }
 
@@ -788,14 +789,14 @@ fn valid_entry_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Resolve the configured relay entries: `<data_root>/relays.toml` when
+/// Resolve the configured relay entries: `<data_root>/polis.toml` when
 /// present, else the single-entry sugar (`KALLIP_POLIS_URL` /
 /// `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` → one implicit entry named
 /// "default"). Fail-fast cases (all configuration errors):
 ///
 /// - the file and any relay env/flag are both set (which source
 ///   wins must never be implicit);
-/// - the file exists but declares zero `[[relay]]` entries;
+/// - the file exists but declares zero `[[polis]]` entries;
 /// - a name fails the slug grammar or repeats.
 ///
 /// Reject the retired per-service relay env (`KALLIP_TAGMA_RELAY_ARCHEION_URL`
@@ -831,13 +832,13 @@ fn ensure_no_retired_relay_env() -> Result<()> {
 
 fn resolve_relay_entries(args: &args::Args) -> Result<Vec<RelayEntry>> {
     ensure_no_retired_relay_env()?;
-    let toml_path = data_root()?.join("relays.toml");
+    let toml_path = data_root()?.join("polis.toml");
     let sugar_set = args.polis_url.is_some() || args.relay_enrollment_code.is_some();
     if toml_path.exists() {
         anyhow::ensure!(
             !sugar_set,
             concat!(
-                "conflicting relay configuration: {} exists but KALLIP_POLIS_URL",
+                "conflicting polis configuration: {} exists but KALLIP_POLIS_URL",
                 " / KALLIP_TAGMA_RELAY_ENROLLMENT_CODE are also set; move the",
                 " entries into the file or unset them"
             ),
@@ -845,16 +846,16 @@ fn resolve_relay_entries(args: &args::Args) -> Result<Vec<RelayEntry>> {
         );
         let raw = std::fs::read_to_string(&toml_path)
             .with_context(|| format!("read {}", toml_path.display()))?;
-        let file: RelaysFile =
+        let file: PolisFile =
             toml::from_str(&raw).with_context(|| format!("parse {}", toml_path.display()))?;
         anyhow::ensure!(
-            !file.relay.is_empty(),
-            "{} declares no [[relay]] entries; add one or delete the file",
+            !file.polis.is_empty(),
+            "{} declares no [[polis]] entries; add one or delete the file",
             toml_path.display()
         );
         let mut seen = std::collections::HashSet::new();
-        let mut entries = Vec::with_capacity(file.relay.len());
-        for e in file.relay {
+        let mut entries = Vec::with_capacity(file.polis.len());
+        for e in file.polis {
             anyhow::ensure!(
                 valid_entry_name(&e.name),
                 concat!(
@@ -870,7 +871,7 @@ fn resolve_relay_entries(args: &args::Args) -> Result<Vec<RelayEntry>> {
             );
             entries.push(RelayEntry {
                 name: e.name,
-                polis_url: kallip_runtime::polis::polis_origin(Some(e.polis_url))?,
+                polis_url: kallip_runtime::polis::polis_origin(Some(e.url))?,
                 enrollment_code: e.enrollment_code,
             });
         }
@@ -1213,6 +1214,19 @@ async fn shutdown_signal(token: CancellationToken) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn polis_toml_rejects_the_relay_table_name() {
+        // Rename guard: a file kept from the old relays.toml shape
+        // must fail loudly naming the rename point, not parse as an
+        // empty config (deny_unknown_fields at both levels).
+        let err = toml::from_str::<PolisFile>(
+            "[[relay]]\nname = \"main\"\nurl = \"https://api.example.com\"\n",
+        )
+        .err()
+        .expect("the old table name must be rejected");
+        assert!(format!("{err}").contains("unknown field `relay`"), "{err}");
+    }
 
     #[test]
     fn files_token_scan_precedes_restore_agents() {

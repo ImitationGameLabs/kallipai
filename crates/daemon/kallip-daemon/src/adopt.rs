@@ -217,11 +217,11 @@ pub fn adopt(
     // instance that relied on env-sugar relays, adopted without any
     // relay configuration, would silently degrade to local-only on
     // the first start — the record replays a relay-less env and there
-    // is no relays.toml to fall back to, and nothing errors. Demand
+    // is no polis.toml to fall back to, and nothing errors. Demand
     // the choice explicitly instead of letting it happen by default.
     if !accept_local_only
         && stored_credentials_in_any_entry(&data_dir_canon)
-        && !data_dir_canon.join("relays.toml").exists()
+        && !data_dir_canon.join("polis.toml").exists()
         && !user_env
             .iter()
             .any(|pair| pair.starts_with("KALLIP_TAGMA_RELAY_"))
@@ -1431,11 +1431,11 @@ mod tests {
         assert!(publish_authorized(1000, None, 1000));
     }
     #[test]
-    fn a_relays_toml_neutralizes_the_probe() {
+    fn a_polis_toml_neutralizes_the_probe() {
         let root = tempdir();
         let ws = tempdir();
         let dd = mk_enrolled_data_dir(root.path(), "dd");
-        write(&dd.join("relays.toml"), "grandfathered config");
+        write(&dd.join("polis.toml"), "grandfathered config");
         adopt_at(root.path(), "team-a", ws.path(), &dd, &[])
             .expect("an existing relay plan is its own answer");
     }
