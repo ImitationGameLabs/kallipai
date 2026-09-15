@@ -20,12 +20,13 @@
     readonly endpoint: string;
     readonly model: string;
     readonly max_context_window: number;
-    /** Pass-through: the form has no inputs for these; edits keep the
-     * profile's declared values so a save never silently resets them. */
+    /** Pass-through: the form has no input for it; edits keep the
+     * profile's declared value so a save never silently resets it. */
     readonly store?: boolean;
+    /** Edited by the form; effort and a text-only modalities selection
+     * ride as absent (the server default) when cleared, so an untouched
+     * form never dirties the draft. */
     readonly effort?: ReasoningEffort;
-    /** Edited by the form; a text-only selection rides as absent (the
-     * server default) so an untouched form never dirties the draft. */
     readonly modalities?: readonly Modality[];
   }
 </script>
@@ -44,6 +45,8 @@
     manage_profiles_max_context_placeholder,
     manage_profiles_model_placeholder,
     manage_profiles_profile_dialog_endpoint_label,
+    manage_profiles_profile_dialog_effort_label,
+    manage_profiles_profile_dialog_effort_unset,
     manage_profiles_profile_dialog_id_duplicate,
     manage_profiles_profile_dialog_invalid_window,
     manage_profiles_profile_dialog_id_label,
@@ -98,6 +101,7 @@
   let model = $state("");
   let maxContext = $state("128000");
   let selected = $state<Modality[]>([]);
+  let effort = $state<ReasoningEffort | "">("");
   let lastOpen = false;
   $effect(() => {
     if (open && !lastOpen) {
@@ -105,6 +109,7 @@
       endpoint = profile?.endpoint ?? providerIds[0] ?? "";
       model = profile?.model ?? "";
       maxContext = String(profile?.max_context_window ?? 128000);
+      effort = profile?.effort ?? "";
       // text is a permanent, locked selection: a stored profile may
       // declare no text — the latch unions it in, so the selection
       // always carries text and saves the union back.
@@ -154,9 +159,9 @@
       model: trimmedModel,
       max_context_window: Number(maxContext),
       store: profile?.store,
-      effort: profile?.effort,
-      // Text-only rides as absent (the server default), so an
-      // untouched form never marks the draft dirty.
+      // Effort and a text-only modalities selection ride as absent (the
+      // server default), so an untouched form never dirties the draft.
+      ...(effort ? { effort } : {}),
       ...(modalities ? { modalities } : {}),
     });
   }
@@ -260,6 +265,21 @@
             {/if}
           </label>
 
+          <label class="flex flex-col gap-1">
+            <span class="text-sm font-medium">
+              {manage_profiles_profile_dialog_effort_label()}
+            </span>
+            <select class="select text-sm" bind:value={effort}>
+              <option value="">
+                {manage_profiles_profile_dialog_effort_unset()}
+              </option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+              <option value="max">max</option>
+            </select>
+          </label>
           <div class="flex flex-col gap-1">
             <span class="text-sm font-medium">
               {manage_profiles_profile_modalities_label()}

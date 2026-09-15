@@ -18,6 +18,7 @@
     common_remove,
     manage_profiles_max_context_label,
     manage_profiles_profile_actions_aria,
+    manage_profiles_profile_effort_label,
     manage_profiles_profile_model_label,
     manage_profiles_profile_provider_label,
     manage_profiles_test,
@@ -126,6 +127,14 @@
       </dt>
       <dd class="font-mono">{profile.max_context_window}</dd>
     </div>
+    {#if profile.effort}
+      <div class="flex gap-2">
+        <dt class="opacity-60">
+          {manage_profiles_profile_effort_label()}:
+        </dt>
+        <dd class="font-mono">{profile.effort}</dd>
+      </div>
+    {/if}
   </dl>
   {#if report}
     <div class="text-xs">
