@@ -3,10 +3,10 @@
 //! send/read/list routes can distinguish a room conversation from the bilateral
 //! 1:1 one.
 //!
-//! Extracted from `mod.rs`. This is a child module of `relay`, so `use
+//! This is a child module of `relay`, so `use
 //! super::*` reuses the parent's private imports and grants access to
 //! [`RelayHandle`]'s private fields and methods (Rust's descendant-privacy
-//! rule). The state it touches -- the room-pump slot -- lives in `mod.rs`; only
+//! rule). The state it touches -- the room-pump slot -- lives in the relay module root; only
 //! the methods move. `poll_rooms` and the pump lifecycle (`start/stop_room_pump`)
 //! are `pub(super)`: the first two driven by `tunnel`, the pump exercised
 //! directly by the descendant test module.

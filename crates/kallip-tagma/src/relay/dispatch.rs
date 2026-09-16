@@ -2,7 +2,7 @@
 //! the op, emitting the reply, replaying history batches, and the root-agent
 //! interrupt (its sole caller is `execute_op`, in this module).
 //!
-//! Extracted from `mod.rs`. A child module of `relay`, so `use super::*` reuses
+//! A child module of `relay`, so `use super::*` reuses
 //! the parent's private imports and grants access to [`RelayHandle`]'s private
 //! fields/methods. The entry points (`handle_relay_message`, `handle_agent_op`,
 //! `handle_history`) are `pub(super)` because the bilateral path

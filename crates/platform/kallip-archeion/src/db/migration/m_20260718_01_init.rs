@@ -15,7 +15,7 @@
 //!
 //! First DB introduction: each table is created with its original column set,
 //! and nothing is guarded by `if_not_exists`. Schema changes after this initial
-//! creation are separate `m_*` migration files (see `mod.rs`) that `ALTER` the
+//! creation are separate `m_*` migration files (see `migration.rs`) that `ALTER` the
 //! tables -- so an existing dev DB picks them up on the next boot instead of
 //! needing a drop-and-recreate. A dev DB that predates a migration records it in
 //! `seaql_migrations` once applied.

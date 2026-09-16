@@ -271,7 +271,7 @@ differs from the externally reachable URL.
 
 Source:
 [`crates/kallip-runtime/src/persistence.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/kallip-runtime/src/persistence.rs),
-[`crates/kallip-runtime/src/tools/skill/mod.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/kallip-runtime/src/tools/skill/mod.rs).
+[`crates/kallip-runtime/src/tools/skill.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/kallip-runtime/src/tools/skill.rs).
 
 ### Logging
 

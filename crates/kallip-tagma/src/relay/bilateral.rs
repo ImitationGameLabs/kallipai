@@ -1,7 +1,7 @@
 //! The bilateral (1:1) path: KEX handling, inbound envelope decryption + op
 //! routing, and the encrypted/plaintext emit tails.
 //!
-//! Extracted from `mod.rs`. A child module of `relay`, so `use super::*` reuses
+//! A child module of `relay`, so `use super::*` reuses
 //! the parent's private imports and grants access to [`RelayHandle`]'s private
 //! fields/methods. Every method here is `pub(super)`: `handle_kex` and
 //! `handle_user_op` are driven by `tunnel::dispatch`; `emit` is driven by

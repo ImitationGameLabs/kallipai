@@ -1,7 +1,7 @@
 //! The lesche tunnel: the SSE stream reader + reconnect loop, and the inbound
 //! dispatch fan-out.
 //!
-//! Extracted from `mod.rs`. A child module of `relay`, so `use super::*` reuses
+//! A child module of `relay`, so `use super::*` reuses
 //! the parent's private imports and grants access to [`RelayHandle`]'s private
 //! fields/methods. The pump lifecycle methods it drives (`start/stop_pump`,
 //! `start/stop_status_pump`, `start/stop_room_pump`) live in sibling child
