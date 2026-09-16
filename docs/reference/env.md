@@ -1,10 +1,16 @@
-# Environment variable reference
+---
+title: Environment variable reference
+description: Every KALLIP environment variable and what it configures.
+order: 10
+---
+
+## Environment variable reference
 
 All configuration is done through environment variables. Copy `.env.example` to
 `.env` and fill in the required values. If you use `direnv`, it loads `.env`
 automatically via `.envrc`.
 
-## LLM Provider
+### LLM Provider
 
 These variables select and configure the LLM backend. They are **required** when
 no [model profiles](#model-profiles) config file is present.
@@ -20,7 +26,7 @@ The env path supports `deepseek` and `openai-compatible` only; the `openai-respo
 | `KALLIP_LLM_OPENAI_COMPAT_API_KEY`  | conditional | —                | API key for the OpenAI-compatible provider. Required when `KALLIP_LLM_PROVIDER=openai-compatible`.          |
 | `KALLIP_LLM_OPENAI_COMPAT_BASE_URL` | conditional | `""`             | Override the default OpenAI-compatible API endpoint. Required when `KALLIP_LLM_PROVIDER=openai-compatible`. |
 
-## Model Profiles
+### Model Profiles
 
 A profile binds a model to an endpoint and its declared capabilities
 (`max_context_window`), grouped into named sets. With a profiles config
@@ -82,7 +88,7 @@ description = "cheap delegation"
 - The config file should be `chmod 600` (the tagma warns if
   group/other-readable, since it may hold API keys).
 
-### Set selection
+#### Set selection
 
 Sets are addressed by name: the root agent is bound to the config's `default`
 set, and each subagent spawn declares its set explicitly via `profile_set`
@@ -136,9 +142,9 @@ record keeps the name, restore tolerates it as a placeholder, but prompt
 delivery rejects with `409` until the set returns under that name.
 
 Source:
-[`crates/kallip-runtime/src/profile/`](../../crates/kallip-runtime/src/profile).
+[`crates/kallip-runtime/src/profile/`](https://github.com/ImitationGameLabs/kallipai/tree/main/crates/kallip-runtime/src/profile).
 
-## Agent Core
+### Agent Core
 
 Runtime tuning parameters. All are optional with sensible defaults. (The
 identity vars `KALLIP_ID` / `KALLIP_SUPERVISOR_AGENT_ID` /
@@ -179,7 +185,7 @@ identity vars `KALLIP_ID` / `KALLIP_SUPERVISOR_AGENT_ID` /
 | `KALLIP_TOKEN_BUDGET_WARNINGS`                 | `80,95`                               | Comma-separated `1`–`99`, sorted ascending, ≥ 1 value  | Token budget usage thresholds (percentage) at which the agent receives a warning message.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 Source:
-[`crates/kallip-runtime/src/config.rs`](../../crates/kallip-runtime/src/config.rs).
+[`crates/kallip-runtime/src/config.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/kallip-runtime/src/config.rs).
 
 > **Client-side cache (not env-configurable).** The app keeps a per-device
 > IndexedDB cache (`kallip-relay` DB) of already-rendered chat lines so a
@@ -188,7 +194,7 @@ Source:
 > stored **plaintext** under the same device/host-trust model as the tagma's
 > SQLite store, and cleared on logout. It has no environment variable.
 
-### Inter-variable constraints
+#### Inter-variable constraints
 
 Some variables have cross-validation rules enforced at startup for the
 implicit-profile window (a config-file profile's window is checked per-profile
@@ -208,7 +214,7 @@ windows were never validated at tagma startup.
 - `TOKEN_BUDGET_WARNINGS` must have at least 1 value, sorted ascending, each in
   `1`–`99`.
 
-## Tagma
+### Tagma
 
 These variables control the tagma server.
 
@@ -225,9 +231,9 @@ These variables control the tagma server.
 | `KALLIP_LLM_API_USER_AGENT` | no       | `kallip/<tagma-version>`   | User-Agent header sent on outbound LLM chat completion requests. Override verbatim (leading/trailing whitespace preserved); illegal header chars (e.g. newlines) fail fast (at startup for the active set, lazily on first failover).             |
 
 Source:
-[`crates/kallip-tagma/src/args.rs`](../../crates/kallip-tagma/src/args.rs).
+[`crates/kallip-tagma/src/args.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/kallip-tagma/src/args.rs).
 
-### Variables injected into agent shell sessions
+#### Variables injected into agent shell sessions
 
 The tagma injects these into each agent's shell environment so that CLI commands
 run inside an agent's shell can communicate with the tagma. They are not set by
@@ -241,7 +247,7 @@ the operator — the tagma provides them automatically.
 | `KALLIP_SUPERVISOR_AGENT_ID` | Per-agent shell (`routes/agent.rs`) | The agent's supervisor id (the direct `created_by` delegator). Injected for subagents only — **unset for the root agent** (absent, not empty), so root-ness is detectable by env absence. Surfaces the id so the agent can address its supervisor (e.g. `kallip message <id>`); the CLI takes the id as a positional arg and does not read this var. |
 | `KALLIP_ROOT_AGENT_ID`       | Per-agent shell (`routes/agent.rs`) | The tagma root agent id (the agent itself for the root). Injected into every agent's shell. Surfaces the id so the agent can escalate to the root (e.g. `kallip message <id>`); the CLI takes the id as a positional arg and does not read this var.                                                                                                 |
 
-### `ADVERTISE_URL` vs `TAGMA_URL`
+#### `ADVERTISE_URL` vs `TAGMA_URL`
 
 These serve related but distinct purposes:
 
@@ -255,7 +261,7 @@ In the common case (everything on localhost) they have the same value. They
 diverge in container or reverse-proxy setups where the internal listen address
 differs from the externally reachable URL.
 
-## Data and Skills
+### Data and Skills
 
 | Variable             | Required | Default                              | Description                                                                                                                                                                                                                                                                                                                                                                        |
 | -------------------- | -------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -264,10 +270,10 @@ differs from the externally reachable URL.
 | `KALLIP_SKILLS_SEED` | no       | _(unset; nix wrapper)_              | Read-only tree of bundled skill defaults (a nix store path). On the tagma's first boot, when the shared skill directory is empty, its contents are copied into it. The target is `KALLIP_SKILLS_ROOT` if set, else the instance data root's `skills/` — `KALLIP_SKILLS_ROOT` only relocates the target, it does not disable seeding. Skipped when the target is already non-empty (never clobber). Under a nix install the workspace build ships this default already via its `kallip-tagma` wrapper (`--set-default`: it applies only when the variable is unset, so an explicit env value or the container image Env still wins). An explicitly empty value disables seeding: the wrapper keeps it as-is and the tagma filters it out. |
 
 Source:
-[`crates/kallip-runtime/src/persistence.rs`](../../crates/kallip-runtime/src/persistence.rs),
-[`crates/kallip-runtime/src/tools/skill/mod.rs`](../../crates/kallip-runtime/src/tools/skill/mod.rs).
+[`crates/kallip-runtime/src/persistence.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/kallip-runtime/src/persistence.rs),
+[`crates/kallip-runtime/src/tools/skill/mod.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/kallip-runtime/src/tools/skill/mod.rs).
 
-## Logging
+### Logging
 
 | Variable   | Required | Default | Description
 | ---------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------
@@ -276,7 +282,7 @@ Source:
 | `KALLIP_LESCHE_LOG_DIR` | no | _(unset — stdout only)_ | Opt-in rolling file log for the lesche, identical semantics to `KALLIP_ARCHEION_LOG_DIR` (double-write, daily rotation, seven files kept, `lesche.log.` prefix).
 | `KALLIP_FILES_LOG_DIR` | no | _(unset — stdout only)_ | Opt-in rolling file log for the files service, identical semantics to `KALLIP_ARCHEION_LOG_DIR` (double-write, daily rotation, seven files kept, `files.log.` prefix).
 
-## Cron
+### Cron
 
 The timer/notification daemon (`kallip-cron-daemon`) and its management CLI
 (`kallip-cron`). The daemon fires schedules and injects them into agent
@@ -298,10 +304,10 @@ own schedules.
 | `KALLIP_AUTH_TOKEN`      | yes       | _(unset)_                        | The daemon's operator secret for delivery (fired reminders render `[From: operator]`); the CLI's agent bearer for management requests. Reused from the tagma client.     |
 
 Source:
-[`crates/time/kallip-cron-daemon/src/args.rs`](../../crates/time/kallip-cron-daemon/src/args.rs),
-[`crates/time/kallip-cron-client/src/client.rs`](../../crates/time/kallip-cron-client/src/client.rs).
+[`crates/time/kallip-cron-daemon/src/args.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/time/kallip-cron-daemon/src/args.rs),
+[`crates/time/kallip-cron-client/src/client.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/time/kallip-cron-client/src/client.rs).
 
-## Files service
+### Files service
 
 The file transfer service (`kallip-files`) and its `kallip file` CLI
 client. The service owns content-addressed blob storage and record
@@ -331,9 +337,9 @@ administrator-pinned assets.
 | `KALLIP_FILES_TOKEN` | yes (CLI) | _(unset)_ | Bearer for the `kallip file` CLI (`sk-tagma-…`). Not a tagma setting: the tagma authenticates with its registered enrollment credential and removes a leftover `KALLIP_FILES_TOKEN` from its own environment at boot. |
 
 Source:
-[`crates/platform/kallip-files/src/args.rs`](../../crates/platform/kallip-files/src/args.rs).
+[`crates/platform/kallip-files/src/args.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/platform/kallip-files/src/args.rs).
 
-## System environment variables
+### System environment variables
 
 The shell backend reads these from the process environment and passes them into
 every spawned `bash`:
@@ -346,7 +352,7 @@ every spawned `bash`:
 The backend also hardcodes `TERM=dumb`, `NO_COLOR=1`, `LS_COLORS=""`,
 `CLICOLOR="0"` into every spawned `bash` to suppress color output.
 
-## Local daemon
+### Local daemon
 
 Variables read by `kallip-daemon` itself; `kallipctl` mirrors the state
 and socket resolution.
@@ -359,7 +365,7 @@ and socket resolution.
 | `KALLIP_HARVEST_BASH` | no | `/bin/bash` | Bash used for the login-environment harvest (both launch forms; on drop-to launches it runs as the target user). An administrative constant: deployments without `/bin/bash` (NixOS) point it at a managed bash; nothing a request or a user environment supplies can move it. |
 | `KALLIP_DAEMON_SOCKET_GROUP` | no | — | Control-socket access group: when set, the daemon hands the socket to this group (resolved through the group database at bind time) and widens the mode to 0660, so group members can drive the daemon. |
 
-### Control-socket resolution order
+#### Control-socket resolution order
 
 The daemon and its clients (`kallipctl`, the instances service) share one
 candidate list, walked in the same order on both sides:
@@ -385,7 +391,7 @@ one-shot env overlay (same allowlist as spawn: KALLIP_*, RUST_LOG, PATH);
 the overlay is never written to the record, so the next
 start returns to the recorded env.
 
-### Instance identity and the record area
+#### Instance identity and the record area
 
 The daemon keeps one registration record per managed instance:
 `<state root>/kallipai/daemon/instances/<slug>.json` (override with
@@ -419,9 +425,9 @@ live instance (slug taken) — stop first, then start re-spawns and
 re-anchors.
 
 Source:
-[`crates/daemon/kallip-daemon/src/main.rs`](../../crates/daemon/kallip-daemon/src/main.rs).
+[`crates/daemon/kallip-daemon/src/main.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/daemon/kallip-daemon/src/main.rs).
 
-## Daemon relay fill
+### Daemon relay fill
 
 The daemon fills a relay-intent spawn's missing origin from its own
 environment: a spawn signals relay intent with an enrollment code or an
@@ -442,7 +448,7 @@ a restart replays the filled env.
 | ------------------ | ----------------------------------- | ------------------------------------------------------------------ |
 | `KALLIP_POLIS_URL` | `services.kallipai.daemon.polisUrl` (derived when polis is on and a domain is set) | Platform edge origin filled into relay-intent spawns that omit it. |
 
-## Dev stack shape
+### Dev stack shape
 
 Three variables drive the dev compose (`compose/dev/polis.nix`) and the web dev
 server together (both flow from the root `.env` via direnv):

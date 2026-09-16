@@ -1,4 +1,10 @@
-# `kallip-cron` HTTP API
+---
+title: kallip-cron HTTP API
+description: HTTP endpoints exposed by the kallip-cron service.
+order: 60
+---
+
+## kallip-cron HTTP API
 
 The timer/notification daemon `kallip-cron-daemon` hosts a small management HTTP
 API (loopback only, default `127.0.0.1:3010`) consumed by the `kallip-cron` CLI.
@@ -6,7 +12,7 @@ When a schedule fires, the daemon injects its `message` into the target agent
 conversation via the tagma HTTP API (`POST /agents/{id}/message`), not through
 this API.
 
-## Auth — agent-token verification (self-scoped)
+### Auth — agent-token verification (self-scoped)
 
 There is **no cron-specific token**. The daemon is loopback-only (it refuses a
 non-loopback bind at startup); the boundary is per-request agent-token
@@ -29,7 +35,7 @@ mutate its own schedules; an operator bearer is rejected (no agent match).
 All errors are `{"error":{"message":"..."}}` with the status on the response
 line.
 
-## Precision contract
+### Precision contract
 
 Times are UTC, second-precision. `tick_ms` is `>= 1000`; a sub-second `In`
 duration is rejected. Recurring (`Every`) intervals must be `>= 180` seconds (3
@@ -38,13 +44,13 @@ agent's processing loop with no practical value. Recurrence is a pure rolling
 interval (each `next_fire` is advanced by `duration_seconds` from the fire
 time); there is no calendar-anchored "daily at 09:00" mode.
 
-## Endpoints
+### Endpoints
 
-### `GET /health`
+#### `GET /health`
 
 Returns `OK` (plain text). Unauthenticated.
 
-### `GET /status?agent=`
+#### `GET /status?agent=`
 
 Status scoped to `agent`: that agent's active count, pending-triggered count,
 next fire time.
@@ -53,7 +59,7 @@ next fire time.
 { "healthy": true, "active_schedules": 3, "pending_triggered": 0, "next_fire": "2025-12-25T09:00:00Z" }
 ```
 
-### `POST /schedules`
+#### `POST /schedules`
 
 Create a schedule owned by (and targeting) `agent_id`. The server mints the id
 (UUID v4) and the initial `next_fire`. `201` returns the schedule.
@@ -77,7 +83,7 @@ Trigger shapes:
 - `{ "type": "every", "duration_seconds": 10800 }` — recurring interval (whole
   seconds, `>= 180`); each fire advances `next_fire` by this much.
 
-### `GET /schedules?agent=&status=&tag=`
+#### `GET /schedules?agent=&status=&tag=`
 
 List `agent`'s schedules, optionally filtered by status (`active`/`paused`/
 `completed`/`triggered`) and/or tag.
@@ -86,16 +92,16 @@ List `agent`'s schedules, optionally filtered by status (`active`/`paused`/
 { "schedules": [ { "id": "...", ... } ], "total": 1 }
 ```
 
-### `GET /schedules/next?agent=`
+#### `GET /schedules/next?agent=`
 
 `agent`'s earliest-fire active schedule, or `null`.
 
-### `GET /schedules/{id}?agent=`
+#### `GET /schedules/{id}?agent=`
 
 One of `agent`'s schedules, or `404`. Cross-owner is indistinguishable from
 not-found (uniform `404` — no ownership oracle).
 
-### `PATCH /schedules/{id}?agent=`
+#### `PATCH /schedules/{id}?agent=`
 
 Status-only update (pause/resume). `next_fire`/`last_fire` are never
 client-mutable — this is what prevents a fired one-timer from being re-armed.
@@ -105,11 +111,11 @@ Cross-owner → `404`.
 { "status": "paused" }
 ```
 
-### `DELETE /schedules/{id}?agent=`
+#### `DELETE /schedules/{id}?agent=`
 
 `204` on success, `404` if not found or owned by another agent.
 
-## Delivery semantics
+### Delivery semantics
 
 At-least-once. tagma's `post_message` does not dedup, so a daemon crash in the
 post → ack window can double-deliver one row; per-id ack + persisted 503-backoff

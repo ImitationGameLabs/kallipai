@@ -1,6 +1,12 @@
-# Architecture
+---
+title: Architecture
+description: How KallipAI's tagma-centric runtime is structured and why.
+order: 10
+---
 
-kallipai is a **tagma-centric** agent runtime. Unlike most coding agents
+## Architecture
+
+KallipAI is a **tagma-centric** agent runtime. Unlike most coding agents
 where the UI process _is_ the agent, here the tagma is the long-lived host and
 all clients are thin surfaces.
 
@@ -13,7 +19,7 @@ behind an HTTP API. Clients — the headless CLI (`kallip`), the runner
 and SSE, send messages, stream events,
 and disconnect without affecting running agents.
 
-## Why a tagma?
+### Why a tagma?
 
 Most coding agents are single-process: the UI hosts the LLM loop directly. This
 works for single-session coding but breaks down when you need:
@@ -28,7 +34,7 @@ The tagma makes these possible. Each agent is an isolated unit behind a stable
 HTTP API. Clients connect, send messages, stream events, and disconnect without
 affecting running agents.
 
-## Agent instances
+### Agent instances
 
 Each agent is a pair of tokio tasks with completely isolated state:
 
@@ -46,7 +52,7 @@ Each agent is a pair of tokio tasks with completely isolated state:
 Agents do not share any runtime state. The tagma holds them in a `Vec` behind
 an `RwLock`; lookup is by UUID.
 
-### Lifecycle
+#### Lifecycle
 
 1. **Create** — `POST /agents` spawns both tasks, returns the agent ID.
 2. **Interact** — send messages, stream events, approve or deny pending actions.
@@ -58,7 +64,7 @@ The tagma exposes an HTTP API for managing agents and approvals. For the full
 endpoint reference, see [tagma-api.md](reference/tagma-api.md). For
 authentication and the authorization matrix, see [auth.md](reference/auth.md).
 
-## Online relay and chat history
+### Online relay and chat history
 
 The tagma optionally participates in the public-internet relay (archeion control
 plane + lesche data plane) so a user's app can reach it from anywhere and hold
@@ -89,7 +95,7 @@ The app keeps a per-device IndexedDB cache of already-rendered authored lines
 asks the tagma for an incremental delta. It is a disposable derived mirror
 (re-pulled on demand), also plaintext, cleared on logout.
 
-### Multi-member rooms (plaintext server-readable)
+#### Multi-member rooms (plaintext server-readable)
 
 Multi-member rooms are a **plaintext server-readable** surface by design. The
 lesche is the room's store of record: it stores and relays the `RoomMessage`
@@ -102,7 +108,7 @@ deployments can audit it. It does **not** extend to the bilateral 1:1 path —
 user-device ↔ own-tagma traffic still crosses the relay as AEAD ciphertext
 (`kallip-e2ee`), with the relay seeing only routing metadata.
 
-#### Room identity: `MemberId` vs `ParticipantId`
+##### Room identity: `MemberId` vs `ParticipantId`
 
 Two newtypes share one derived UUID, on purpose, at different layers:
 
@@ -127,7 +133,7 @@ On the TS side the ids are unbranded `string`, so there is no `MemberId` alias -
 derived string flows through both roles and `participantIdForUser`/`participantIdForTagma`
 results double as member ids by value equality.
 
-## External chat-room API (authored vs signal)
+### External chat-room API (authored vs signal)
 
 The tagma exposes two event surfaces (see [tagma-api.md](reference/tagma-api.md)).
 The **internal** stream carries the full rich event vocabulary for the CLI.
@@ -146,7 +152,7 @@ The direct (offline) path serves the same external vocabulary with no relay and
 no E2EE. Streaming deltas, tool events, retry/failover telemetry, and approvals
 stay internal-only — they never reach the frontend.
 
-## Request flow
+### Request flow
 
 1. Client sends `POST /agents/{id}/message` with the message text.
 2. Tagma forwards the text as a `String` to the agent's `mpsc` channel.
@@ -161,7 +167,7 @@ stay internal-only — they never reach the frontend.
    external chat-room stream instead, where the tagma splits each event into the
    authored + signal channels above (and persists the authored half).
 
-## Agent loop
+### Agent loop
 
 The core loop (`run_agent_rounds` in `kallip-runtime`) iterates up to
 `max_tool_rounds` (default: unlimited, bounded by token budget) per message:
@@ -192,7 +198,7 @@ re-arms the wait timer as a zero-cost recovery probe. Messages to the
 user are decoupled from all of this: the agent addresses the user by running the
 `kallip lesche send` CLI through `bash_exec`, not by ending a turn.
 
-## Policy and approval
+### Policy and approval
 
 Only `bash_exec` is gated — it is the arbitrary-execution surface. Every other
 tool is the agent's own self-management (context, skills, background tasks,
@@ -245,7 +251,7 @@ mapping layer. It is fail-closed: unparseable or empty input is `Deny`.
 > `AgentPolicy::evaluate` is the place to re-introduce per-tool routing. Today
 > the assumption "only `bash_exec` is gated" is structural, not configured.
 
-### Approval flow
+#### Approval flow
 
 1. Agent calls `bash_exec` and the classifier returns `Ask`.
 2. `ApprovalStore.enqueue()` stores the call and returns a deferred JSON to the LLM.
@@ -255,7 +261,7 @@ mapping layer. It is fail-closed: unparseable or empty input is `Deny`.
 6. On the next agent round, the notification is drained into context.
 7. The LLM calls `approval_redeem` to execute the stored tool action.
 
-### Classify presets
+#### Classify presets
 
 The classify rule-set is tagma-global, chosen once at startup by the
 `KALLIP_POLICY_PRESET` env var (see `docs/reference/env.md`) and immutable for
@@ -276,7 +282,7 @@ runtime-mutable via `PUT /exec-policy`, inherited monotonically). An explicit
 override `Deny`/`Ask` is authoritative and not relaxed by the `auto` preset; a
 deliberate supervisor decision stays meaningful under every preset.
 
-## Data-area blob stores
+### Data-area blob stores
 
 The tagma data area holds two content-addressed blob stores under `blobs/`,
 both `kallip-blob-store` local backends addressed by `sha256-<hex>` and
@@ -295,7 +301,7 @@ existed have no `blob_id` and restore from the files service. These stores
 are the agent's own retained copy of its data, not a cache: no eviction,
 no revalidation against the files service.
 
-## Crate responsibilities
+### Crate responsibilities
 
 | Crate            | Role                                                                                                                                                                                                      |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

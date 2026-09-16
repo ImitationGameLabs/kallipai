@@ -1,11 +1,17 @@
-# Roadmap
+---
+title: Roadmap
+description: Planned direction for the platform, milestone by milestone.
+order: 20
+---
 
-kallipai is a tagma-centric agent runtime aimed at cross-project, multi-agent
+## Roadmap
+
+KallipAI is a tagma-centric agent runtime aimed at cross-project, multi-agent
 coordination - early stage, not yet ready for production use. This document
 captures where the project is headed; see [architecture.md](architecture.md)
 for how it works today.
 
-## P1 - Production-grade local agent team
+### P1 - Production-grade local agent team
 
 _Goal: a local agent team that meets basic agent needs, like coding - built on
 agentic design._
@@ -23,7 +29,7 @@ agentic design._
 - **Production hardening** - reliability, persistence, observability,
   cost/usage tracking, test coverage
 
-## P2 - Scalable, remotely-managed agent team
+### P2 - Scalable, remotely-managed agent team
 
 _Goal: agent teams that deploy and scale fast, manageable on the go via mobile
 and cloud._
@@ -32,7 +38,7 @@ and cloud._
 - **Mobile app** - manage agent teams from your mobile device
 - **Cloud control** - bridge mobile clients to teams across instances
 
-## P3 - Agent company
+### P3 - Agent company
 
 _Goal: a zero-employee company - run entirely by agents, serving its own
 customers and taking on work as one entity._
@@ -46,7 +52,7 @@ customers and taking on work as one entity._
 - **Organizational memory** - roles, hierarchy, and knowledge persist as the
   company's, beyond any single agent
 
-## Technical considerations
+### Technical considerations
 
 - **Sandbox breadth** - the dynamic FS scoping and per-directory write-mutex
   core (a read/write lock so only one agent may hold write access to a

@@ -1,6 +1,12 @@
-# Authentication and authorization
+---
+title: Authentication and authorization
+description: Token types and the authorization model across KallipAI services.
+order: 20
+---
 
-## Token types
+## Authentication and authorization
+
+### Token types
 
 All endpoints require a `Bearer` token in the `Authorization` header. The tagma
 generates two categories of token:
@@ -20,7 +26,7 @@ variable comparison/lookup time over hashes leaks nothing about the secret — t
 not a practical vector even off-localhost (e.g. a `0.0.0.0` bind). The single operator
 comparison additionally uses a constant-time compare.
 
-## Roles
+### Roles
 
 - **Supervisor** — the direct parent: the agent whose `created_by` field points to
   the caller.
@@ -31,9 +37,9 @@ comparison additionally uses a constant-time compare.
   tagma-managed (eagerly created at startup from env vars), never created or
   removed over HTTP.
 
-## Authorization matrix
+### Authorization matrix
 
-### Agent management
+#### Agent management
 
 | Endpoint                      | Operator | Supervisor | Superior | Any agent | Self |
 | ----------------------------- | -------- | ---------- | -------- | --------- | ---- |
@@ -55,7 +61,7 @@ supervisor. Metadata (`role`/`description`) is edited by the **direct
 supervisor**; activity is **self**-reported (the agent itself, not its
 supervisor).
 
-#### Permission class (FS-access downgrade)
+##### Permission class (FS-access downgrade)
 
 A subagent spawn (`POST /agents` with `created_by`) requires a
 `permission_class` field (`"normal"` / `"guest"`) that explicitly **downgrades**
@@ -67,7 +73,7 @@ own root takes its class at startup from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`
 (see [env.md](env.md)). The granted class is reported by
 `GET /agents/{id}/permissions` (see [tagma-api.md](tagma-api.md)).
 
-### Profile sets
+#### Profile sets
 
 | Endpoint                       | Operator | Supervisor | Superior | Any agent | Self |
 | ------------------------------ | -------- | ---------- | -------- | --------- | ---- |
@@ -78,7 +84,7 @@ own root takes its class at startup from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`
 Rebinding an agent follows the remove/interrupt pattern (any superior); the
 config-level endpoints are operator-only.
 
-### Context and policy
+#### Context and policy
 
 | Endpoint                       | Operator | Superior | Any agent |
 | ------------------------------ | -------- | -------- | --------- |
@@ -89,7 +95,7 @@ Read-only context endpoints are accessible to any authenticated identity. The
 classify preset is tagma-global and immutable; per-command `bash_exec` overrides
 (`PUT /agents/{id}/exec-policy`) require operator or superior.
 
-### Approvals
+#### Approvals
 
 | Endpoint               | Operator | Superior | Any agent | Notes                                |
 | ---------------------- | -------- | -------- | --------- | ------------------------------------ |
@@ -104,7 +110,7 @@ prevents superiors from using subordinates as proxies to run a command their own
 policy would gate. The operator identity is exempt. **Deny** decisions have no
 gate.
 
-## Archeion / lesche service-to-service boundary
+### Archeion / lesche service-to-service boundary
 
 The cloud relay is split into two services: the **archeion** (control plane:
 identity, WebAuthn, tagma lifecycle, the durable identity Postgres store) and
@@ -141,7 +147,7 @@ reconnects). This is the v1 revocation contract; a JWT migration (local
 validation, zero per-request RPC) is the future step if tighter coupling is
 ever needed.
 
-### Admin-token login (local platform)
+#### Admin-token login (local platform)
 
 The fifth auth ceremony, `POST /v1/archeion/auth/admin-login`, exists for the
 local-platform deployment: it exchanges the operator's `sk-admin-` token
@@ -170,7 +176,7 @@ resets the account -- the next admin-login recreates both. Mounting the
 route is an explicit operator act that pre-provisions an operator
 account, so `KALLIP_ARCHEION_SIGNUP_ENABLED` does not gate it.
 
-### Username availability probe (public, pre-release)
+#### Username availability probe (public, pre-release)
 
 `GET /v1/archeion/auth/username-availability?username=<handle>` tells a signup
 form whether a handle may be attempted, before any credential exists.
@@ -186,7 +192,7 @@ refusal order: `invalid` (shape/length/charset, or a missing param),
 row holding the name still reports `reserved`), `taken` (a live or
 disabled user row), `available`.
 
-### Instances service auth (platform mode)
+#### Instances service auth (platform mode)
 
 The instances service mirrors the lesche's dual-channel auth: a bearer
 token verifies via `/internal/verify-bearer` (only `Principal::Admin`

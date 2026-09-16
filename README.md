@@ -1,4 +1,4 @@
-# Kallip AI
+# KallipAI
 
 > **Early stage.** Not ready for production use.
 

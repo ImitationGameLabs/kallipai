@@ -1,13 +1,19 @@
-# Naming
+---
+title: Naming
+description: The kallip/kallipai naming split and the rules behind it.
+order: 70
+---
+
+## Naming
 
 This document records how the project's name evolved and why each name was
 chosen. It exists so the rationale behind `kallipai` / `kallip` is not lost,
 and so future contributors can tell the brand surface from the technical stem.
 
 For the rule that governs where each name is used today, see the
-[Naming](../AGENTS.md#naming) section of `AGENTS.md`.
+[Naming](https://github.com/ImitationGameLabs/kallipai/blob/main/AGENTS.md#naming) section of `AGENTS.md`.
 
-## just-llm-libs
+### just-llm-libs
 
 Before there was an agent, there was frustration. Across earlier agent work we
 tried one LLM library and framework after another, and kept hitting the same
@@ -21,7 +27,7 @@ instead of a runtime that combines them for you and walls them off. The goal
 was to keep the agent in control of every decision the framework had been
 silently making on its behalf.
 
-## just-agent
+### just-agent
 
 `just-agent` started life as a single example inside `just-llm-libs` - one way
 to compose those libraries into an actual agent. It carried the same `just`
@@ -35,7 +41,7 @@ the clients, the multi-agent shape. At that point the `just-` prefix was no
 longer doing descriptive work; it was the name of an upstream library, not a
 product.
 
-## kallipai
+### kallipai
 
 The rename marked a real shift in ambition: from a library example to a
 production-grade agent harness, designed for multi-agent systems from the very
@@ -56,7 +62,7 @@ type, free of the `-olis` that does no technical work - and add **AI** as a
 suffix to make the project's nature unambiguous. Read together, `kallipai` is
 literally `kallip` + `ai`.
 
-### Service names: archeion and polis
+#### Service names: archeion and polis
 
 The platform's service names follow the same Greek-city framing. **archeion**
 (ἀρχεῖον) was the ancient record office - the building that kept the citizen
@@ -89,7 +95,7 @@ historical record.
 | `--agora-url` / `--relay-agora-url` CLI flags | `--archeion-url` / `--relay-archeion-url` |
 | `agora.url` credentials file | `archeion.url` (absent old file backfills) |
 
-### The two-stem rule
+#### The two-stem rule
 
 The name is split into **two stems** that serve different audiences. The split
 is deliberate and is enforced in `AGENTS.md`:
@@ -105,16 +111,16 @@ The rule exists to stop drift: a brand name that leaks into identifiers
 becomes a renaming cost later, and a technical stem in prose makes the project
 sound like a CLI flag. Keeping the two stems separate keeps both readable.
 
-The brand stem itself has **two written forms** - pick whichever reads better
-in context:
+The brand stem has **one written form**: **KallipAI** - used on every
+human-facing surface: the README and doc H1, the site wordmark, prose brand
+mentions.
 
-- **`kallipai`** - one word, no space. The canonical token, used wherever a
-  single identifier reads better: URLs, package names, logos, in-prose brand
-  mentions.
-- **Kallip AI** - two words. A visual / human-readable form, used as the H1 of
-  the README and any doc title, and anywhere the eye should parse two words.
-  The space is visual only; it does not split the spoken name.
+The operator consolidated the brand's written forms on 2026-09-15: until
+then the stem had two written forms, the lowercase identifier `kallipai`
+and the two-word `Kallip AI`, and prose picked whichever read better; a
+single mark keeps the wordmark and doc titles consistent.
 
-Both forms refer to the same brand. The recommended pronunciation is
-**kallipai** (/ˈkælɪpaɪ/), regardless of how it is written. Neither form is
-the technical stem.
+The lowercase token `kallipai` survives as an identifier only: repository,
+package names, URLs, and domains. The recommended pronunciation is
+**kallipai** (/ˈkælɪpaɪ/), regardless of how the brand is written. Neither
+the brand form nor the identifier is the technical stem.

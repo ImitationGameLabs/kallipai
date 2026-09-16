@@ -4,7 +4,7 @@ AI Agent working guide. This document provides code structure and decision rules
 
 ## Naming
 
-The project brand is `kallipai` (literally `kallip` + `ai`); the technical stem is `kallip`. Use the `Kallip AI` / `kallipai` brand forms only for human-facing surfaces (README and doc H1, prose where the brand reads better). Use `kallip` for every technical surface: crate names, binaries, Rust module paths, env var prefixes (`KALLIP_*`), on-disk paths, container paths/volumes, Nix attrs, Cargo/flake `description` strings, User-Agent, Harbor `name()`. When a sentence is mixed, prefer `kallip`. For the history and rationale behind these names, see [naming.md](docs/naming.md).
+The project name is `kallipai` (literally `kallip` + `ai`) and its technical stem is `kallip`. The brand has one written form, `KallipAI`; use it on every human-facing surface: the README and doc H1, and prose where the brand appears. Use `kallip` for every technical surface: crate names, binaries, Rust module paths, env var prefixes (`KALLIP_*`), on-disk paths, container paths/volumes, Nix attrs, Cargo/flake `description` strings, User-Agent, Harbor `name()`. When a sentence is mixed, prefer `kallip`. For the history and rationale behind these names, see [naming.md](docs/naming.md).
 
 ## Comments
 
@@ -51,7 +51,6 @@ Code and test comments are self-contained: do not reference out-of-repo document
 ├── docs/                      # Project documentation
 │   ├── architecture.md       # System architecture, tagma design, policy
 │   ├── context-management.md # Agentic context management design
-│   ├── agent-wizards/        # Step-by-step guides for common agent tasks
 │   └── reference/            # Reference documentation
 │       ├── auth.md           # Authentication and authorization
 │       ├── tagma-api.md     # HTTP API endpoints
@@ -68,10 +67,6 @@ Code and test comments are self-contained: do not reference out-of-repo document
 ## Frontend development
 
 When working on anything under `packages/`, read [frontend-development.md](docs/frontend-development.md) first. It defines the Deno-first toolchain: every action (dev, build, check, fmt, lint, installing deps) goes through `deno task`. Do not drop down to `npm`/`npx`/`pnpm`/`yarn` or hand-invoke `node_modules/.bin/*`; if a workflow is missing, add a `scripts` entry and call it via `deno task`.
-
-## Common Tasks
-
-For adding workspace members, see [add-workspace-member.md](docs/agent-wizards/add-workspace-member.md).
 
 ## Dependency Management
 

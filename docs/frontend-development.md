@@ -1,4 +1,10 @@
-# Frontend package development
+---
+title: Frontend package development
+description: Tooling and conventions for working in the packages/ JS workspace.
+order: 40
+---
+
+## Frontend package development
 
 This guide covers the JS/TS workspace packages under `packages/`
 (`kallip-common`, `kallip-client`, `kallip-archeion-client`,
@@ -19,7 +25,7 @@ The short version: **everything goes through `deno task`. Never drop down to
 — and that includes one-off formatting fixes: `deno task fmt`, not
 `npx prettier` on a single file (it bypasses the repo's fmt script).
 
-## Why Deno only
+### Why Deno only
 
 - `deno.lock` is the source of truth for versions. Another installer (`npm i`,
   `pnpm install`, …) rewrites lockfiles and drifts the tree.
@@ -28,12 +34,12 @@ The short version: **everything goes through `deno task`. Never drop down to
 - Calling a binary straight from `node_modules/.bin/*` also bypasses the
   per-package Prettier config (see below), so formatting silently drops plugins.
 
-## Prerequisites
+### Prerequisites
 
 Deno `>= 2.9.2`. Deno 2 reads each `package.json`'s `scripts` as tasks, so
 `deno task <name>` works in any package directory and at the repo root.
 
-## Tasks
+### Tasks
 
 Run tasks **from the repo root**. Workspace filtering and plugin resolution
 assume it.
@@ -51,20 +57,20 @@ assume it.
 | `deno task fmt:check`       | Prettier `--check .` + rumdl `fmt --check .` (CI-style, no writes)     |
 | `deno task lint`            | `deno lint`                                                            |
 
-### Single package (run inside the package directory)
+#### Single package (run inside the package directory)
 
 Each package's own `scripts` are available as `deno task <name>` — e.g. inside
 `packages/kallip-web`: `deno task dev`, `deno task check`, `deno task build`,
 `deno task prepare`. Use these for a tight edit loop on one package; use the
 root tasks when a change spans packages.
 
-## Message catalogs (i18n)
+### Message catalogs (i18n)
 
 UI copy lives in per-domain paraglide catalogs under
 `packages/kallip-ui/i18n/project.inlang/messages/`. Key naming, the guard test,
 and the edit workflow are documented in [docs/i18n.md](./i18n.md).
 
-## Form-to-URL map
+### Form-to-URL map
 
 Which form renders each URL, and where the other form lands. The twin
 hosts share one route tree; the gate owns mode and auth redirects, the
@@ -81,7 +87,7 @@ root route owns the small-screen handoff:
 `/files` (user-scope file management) lands with its own batch and
 inherits the same contract then.
 
-## Tauri Android app (`kallip-app`)
+### Tauri Android app (`kallip-app`)
 
 `kallip-app` is the Tauri Android target (desktop is intentionally not built;
 use `kallip-web` in a browser). Its SvelteKit frontend is a normal package, but
@@ -110,13 +116,13 @@ tree.
 the cross std targets directly and has no `rustup`, so `build` (unlike `dev`)
 re-shells out to `rustup target add` and fails unless the target is named
 explicitly. The full toolchain rationale lives in
-[nix/devshells/tauri.nix](../nix/devshells/tauri.nix).
+[nix/devshells/tauri.nix](https://github.com/ImitationGameLabs/kallipai/blob/main/nix/devshells/tauri.nix).
 
 Gradle writes through `user.home` (inside the sandbox that is the read-only
 `/root`), so the wrapper lock fails until `GRADLE_USER_HOME` points at a
 writable directory, e.g. `export GRADLE_USER_HOME=$PWD/.gradle`.
 
-## Offline direct shell (`kallip-direct`)
+### Offline direct shell (`kallip-direct`)
 
 `kallip-direct` is the developer fallback for reaching a tagma when the web
 stack is down: it mounts the offline product (the `/local/*` routes plus the
@@ -144,7 +150,7 @@ the single navigation primitive this repo consumes: components call it
 after the host's bootstrap `initShell(goto)` injection, and host
 wrappers use it too so route changes flow through one choke point.
 
-## Formatting
+### Formatting
 
 Two formatters, split by file type:
 
@@ -182,7 +188,7 @@ tooling); the per-package config only declares which plugins apply where.
 `.prettierignore` excludes `node_modules`, `.svelte-kit`, `build`, `dist`,
 `deno.lock`, `target`, `crates`, and `**/*.md` (rumdl's domain).
 
-## Looking up package versions
+### Looking up package versions
 
 Deno has no equivalent of `npm view` / `npm search` for the npm registry
 (`deno search` is JSR-only). Read registry metadata via its HTTP API:
@@ -195,7 +201,7 @@ Or just set a `^` range in `package.json`, run `deno install`, and read the
 resolved version from its output or `deno.lock`. Do not use `npm view` /
 `npm info`.
 
-## Adding a dependency
+### Adding a dependency
 
 1. Add the package and version to the target package's `package.json`
    (`dependencies` or `devDependencies`).
@@ -206,14 +212,14 @@ resolved version from its output or `deno.lock`. Do not use `npm view` /
 (without it Deno resolves JSR and writes to `deno.json`); add `-D` for
 devDependencies. Do not use `npm install` / `npm i`.
 
-## If a workflow isn't covered
+### If a workflow isn't covered
 
 Add a script to the root `package.json` `scripts` (or the relevant package's)
 and call it through `deno task`. This keeps the toolchain uniform and
 discoverable for every agent, instead of each one hand-rolling a
 `node_modules/.bin/...` invocation.
 
-## Before committing changes in `packages/`
+### Before committing changes in `packages/`
 
 - `deno task check` — types / svelte checks for the touched package(s).
 - `deno task fmt:file <paths>` (or `deno task fmt`) — formatting.

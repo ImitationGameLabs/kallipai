@@ -1,6 +1,12 @@
-# NixOS deployment
+---
+title: NixOS deployment
+description: Deploying KallipAI hosts with the provided NixOS modules.
+order: 80
+---
 
-This guide walks through deploying the kallipai platform form on a NixOS
+## NixOS deployment
+
+This guide walks through deploying the KallipAI platform form on a NixOS
 host: the daemon as a system service, the four polis services behind the
 host's reverse proxy, and the web app. The container-based deployments
 (arion compose) are covered in [container.md](reference/container.md);
@@ -8,7 +14,7 @@ this guide is the step-by-step bring-up for the NixOS module form. The
 module itself is `nix/nixos-modules.nix`, and its option descriptions are
 the authoritative reference for everything this guide summarizes.
 
-## Prerequisites
+### Prerequisites
 
 - A NixOS host with flakes enabled
   (`nix.settings.experimental-features = [ "nix-command" "flakes" ]`).
@@ -21,7 +27,7 @@ the authoritative reference for everything this guide summarizes.
 - Root access (to rebuild the host and to read the generated admin
   token at first login).
 
-## Import the module
+### Import the module
 
 The module ships as the flake output `nixosModules.kallipai` (also
 exported as `nixosModules.default`). Add the repository as a flake input
@@ -43,7 +49,7 @@ and import the module into your host:
 }
 ```
 
-## The internal token (self-managed)
+### The internal token (self-managed)
 
 The polis services authenticate to each other with one shared secret,
 and the archeion owns its lifecycle: on first boot it generates the
@@ -66,7 +72,7 @@ file, start the archeion (a fresh value is generated), then start the
 other three. The group restart keeps every service on the same
 generation.
 
-## Minimal configuration
+### Minimal configuration
 
 A minimal full-platform configuration — the daemon, the four polis
 services, and the web site behind Caddy. One module function is the
@@ -168,7 +174,7 @@ file instead (the `adminTokenFile` option description covers the file
 format and the OAuth client secrets it can carry) — pin for a stable
 token, leave unset to accept a short-lived one.
 
-## Users, launch identities, and the real-root guard
+### Users, launch identities, and the real-root guard
 
 The module's daemon unit runs as `root` — a system service that reads
 every declared user's passwd entry — while the declared `tagmaUsers`
@@ -191,7 +197,7 @@ stores and the internal token) stays under `/var/lib/kallipai`,
 separate from the per-user homes — the same lifetime split the
 internal-token section describes.
 
-## The reverse proxy (your edge)
+### The reverse proxy (your edge)
 
 The Minimal configuration block above is the complete edge: one Caddy
 site for the `api.` face path-routing the four services to the localhost
@@ -222,7 +228,7 @@ Two upgrades from the plain-http block above:
   `services.caddy.email`; with ports 80 and 443 reachable, Caddy
   obtains real certificates automatically.
 
-## Ports
+### Ports
 
 The four listeners bind localhost on 7100 (archeion), 7200 (lesche),
 7400 (files), and 7300 (instances). Override any of them under
@@ -239,7 +245,7 @@ becomes `<apiBase>/v1/<service>`), and set the archeion's CORS
 allow-list (`corsOrigins`) to the origins the browser actually uses.
 Prefer the proxy shape unless you have a reason not to.
 
-## HTTPS on a LAN or home network
+### HTTPS on a LAN or home network
 
 Without reachable ports 80 and 443, ACME cannot issue certificates. On
 a private network, Caddy's `tls internal` directive issues certificates
@@ -282,7 +288,7 @@ The copy exists because the CA generates its root at runtime, while
 `security.pki.certificateFiles` is read while the system trust bundle
 is built — a direct reference to the `/var/lib` path cannot resolve.
 
-## Deploy and verify
+### Deploy and verify
 
 Switch into the new generation:
 
@@ -311,7 +317,7 @@ short grace window the unit refuses to start, and
 token file fails every reader explicitly — delete the file to
 re-provision rather than editing it by hand.
 
-## Further options
+### Further options
 
 The full option surface — per-service tuning, `adminTokenFile` and
 `notifyTokenFile` — is described in the option declarations in

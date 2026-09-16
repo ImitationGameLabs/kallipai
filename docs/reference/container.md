@@ -1,4 +1,10 @@
-# Container images
+---
+title: Container images
+description: Published container images and how to run them.
+order: 30
+---
+
+## Container images
 
 The kallip services ship as **scratch-based** container images built with
 `nixpkgs.dockerTools` — no Dockerfiles. Each image embeds the nix store closure
@@ -49,7 +55,7 @@ The polis services can alternatively deploy on the NixOS host through `services.
 user signs up and mints a code); see [development.md](../development.md) for the
 bring-up commands and flow.
 
-## Prerequisites
+### Prerequisites
 
 Arion and a Docker (or Podman with docker socket) daemon. On NixOS:
 
@@ -61,7 +67,7 @@ virtualisation.docker.enable = true;   # or podman + dockerSocket
 Copy `.env.example` to `.env` and fill in the LLM provider credentials. Arion
 reads `.env` via `service.env_file`.
 
-## Dev: `arion up` (default)
+### Dev: `arion up` (default)
 
 The bring-up flow (two-phase, because the relay connector needs an enrollment
 code) and the iteration loop are documented in
@@ -101,13 +107,13 @@ setup (mkcert cert + LAN DNS) and client CA trust are covered in
 edge's loopback plaintext face (`http://127.0.0.1:7443`), not the
 certificate-backed vhosts.
 
-## Production
+### Production
 
 Production is split into two standalone compositions under `compose/prod/`.
 Each is a flat, single-mode file; invoke it from the **repo root** (so `.env`
 resolves):
 
-### tagma — `arion -f compose/prod/tagma.nix up -d`
+#### tagma — `arion -f compose/prod/tagma.nix up -d`
 
 Brings up the tagma (agent host + in-process relay connector) from
 `packages.kallip-tagma-image`. The relay connector talks to the prod-deployed
@@ -131,7 +137,7 @@ arion -f compose/prod/tagma.nix logs -f
 Secure the tagma's published `3000` port (the operator API) — do not expose it
 on a public host without a firewall / TLS reverse proxy in front.
 
-### archeion — `arion -f compose/prod/polis.nix up -d`
+#### archeion — `arion -f compose/prod/polis.nix up -d`
 
 Brings up the archeion (from `packages.kallip-archeion-image`) + lesche (from
 `packages.kallip-lesche-image`) + files (from `packages.kallip-files-image`) +
@@ -166,7 +172,7 @@ arion -f compose/prod/polis.nix up -d
 arion -f compose/prod/polis.nix logs -f
 ```
 
-### polis services — the NixOS module
+#### polis services — the NixOS module
 
 For a step-by-step walkthrough of a full host deployment — module import,
 token file, and verification — see
@@ -210,7 +216,7 @@ proxy section in [nixos-deployment.md](../nixos-deployment.md) for a
 copy-paste `services.caddy` example (the lesche route should flush
 immediately so the event stream never buffers behind the proxy).
 
-### web — the site root
+#### web — the site root
 
 On NixOS, `config.services.kallipai.web.distWithRuntimeConfig` is the
 site root your edge serves with a plain `file_server` block: the
@@ -233,7 +239,7 @@ bundle itself is deployment-independent (the flake's
 build and an offline vite build). The dev form of the same site is the
 host vite server behind the dev Caddyfile (see the dev section above).
 
-## Relay bootstrap
+### Relay bootstrap
 
 Applies to both dev and the prod-tagma composition (the only compositions that
 run the tagma with a relay configured). The tagma's relay connector enrolls on
@@ -248,7 +254,7 @@ lesche message route returns 503). The tagma service is
 back once the code is supplied / the archeion is reachable (check
 `arion logs tagma`).
 
-## Integration tests: `arion -f compose/dev/test.nix up`
+### Integration tests: `arion -f compose/dev/test.nix up`
 
 Test mode runs the workspace's integration tests (`[[test]]` targets) **inside
 the container** to confirm the sandbox and shell backends behave correctly in
@@ -285,7 +291,7 @@ landlock/userns skip guards:
 cargo test --workspace --all-targets --all-features
 ```
 
-## Run-time privileges (tagma modes)
+### Run-time privileges (tagma modes)
 
 The tagma enables the `landlock` and `seccomp` sandbox features for agent
 shells. Its shell backend sets up an isolated mount namespace (user namespace +
@@ -318,7 +324,7 @@ The grant lives on the compose `service.environment` line, not in
 explicit `service.environment` entry wins -- so the consent is
 granted and revoked by editing the compose file, never the env file.
 
-## Volumes and workspaces
+### Volumes and workspaces
 
 In dev and the prod-tagma composition, tagma data and the agent workspace are
 **docker named volumes** — no host directories are created and the project tree
@@ -362,7 +368,7 @@ Each agent needs a `workspace_root` that exists in the container and is
 creating an agent via the [tagma API](tagma-api.md); the tagma rejects a
 workspace that contains or is contained by the data dir.
 
-## Environment
+### Environment
 
 The compose sets the per-service defaults (the tagma's `KALLIP_TAGMA_ADDR`,
 `HOME`, `PATH`, `RUST_LOG`, `KALLIP_WORKSPACE_ROOT`; the dev archeion's WebAuthn
@@ -418,7 +424,7 @@ Do not override `KALLIP_ADVERTISE_URL`; its default `http://127.0.0.1:3000` is
 correct because the tagma and agent shells share the container's network
 namespace.
 
-## Without Arion (plain Docker)
+### Without Arion (plain Docker)
 
 If you cannot use Arion, build and load the image(s) directly. The tagma runs
 from `kallip-tagma-image`:

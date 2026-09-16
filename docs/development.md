@@ -1,4 +1,10 @@
-# Development
+---
+title: Development
+description: Workspace layout, build commands, and the verification workflow for contributors.
+order: 30
+---
+
+## Development
 
 Local development runs the full kallip stack under
 [Arion](https://docs.hercules-ci.com/arion/) (a Nix-native docker-compose). The
@@ -13,7 +19,7 @@ images, the production split, and the integration-test mode, see
 For the NixOS host deployment, see
 [nixos-deployment.md](nixos-deployment.md).
 
-## Prerequisites
+### Prerequisites
 
 - Arion + a Docker (or Podman with the docker socket) daemon. Under rootless
   docker, the Caddy service uses host networking and binds the edge port
@@ -25,7 +31,7 @@ For the NixOS host deployment, see
 - Copy `.env.example` to `.env` and fill in the LLM provider credentials. Arion
   reads `.env` via `service.env_file`.
 
-### Plain-http quick start (KALLIP_EDGE_TLS=off)
+#### Plain-http quick start (KALLIP_EDGE_TLS=off)
 
 Set `KALLIP_EDGE_TLS=off` in `.env` for a plain-http edge with no mkcert
 and no DNS-trust setup. Keep `KALLIP_DOMAIN=localhost` (the default is
@@ -50,7 +56,7 @@ Gotchas on this shape:
 - The host you browse must match `KALLIP_DOMAIN` (`localhost` here);
   any other host is rejected.
 
-### TLS + DNS setup (the default https edge, one-time)
+#### TLS + DNS setup (the default https edge, one-time)
 
 The dev edge terminates TLS for `*.<devDomain>` so the stack is reachable
 cross-machine on the LAN (browsers only allow WebAuthn in a secure
@@ -147,7 +153,7 @@ read none of them: they derive at runtime from the browser location
 > defaults to `http://localhost:7100` / `:7200` and is not wired to the
 > `*.kallipai.lan` dev cert — see [frontend-development.md](frontend-development.md).
 
-## Bring-up
+### Bring-up
 
 The stack comes up in two phases because the tagma's relay connector cannot
 enroll with the archeion until a real user signs up in the web UI and mints an
@@ -155,7 +161,7 @@ enrollment code -- starting it with `KALLIP_POLIS_URL` set but no code
 degrades the tagma to local-only (it logs an error and keeps serving local
 agents; the lesche message route returns 503).
 
-### Archeion side
+#### Archeion side
 
 ```sh
 arion up -d                # caddy + archeion + lesche + files + archeion-postgres + lesche-postgres + files-postgres (arion builds the workspace via the flake)
@@ -188,7 +194,7 @@ environment at boot.
 > passkey. On first bring-up after this change, reset the archeion volume
 > (`arion down -v`) and re-register.
 
-#### Register a test user (first bring-up only)
+##### Register a test user (first bring-up only)
 
 Signup is open (no invite code): a fresh database just needs someone to sign
 up. The `archeion_pgdata` volume persists across `arion down` / `up`, so this
@@ -224,7 +230,7 @@ The `Set-Cookie: kallip_session=...` header is the session (see
 docs/reference/auth.md); pass it as `-b kallip_session=...` to mint an
 enrollment code at `POST /v1/archeion/tagmata` without signing up.
 
-##### The admin token
+###### The admin token
 
 `kallip-admin` authenticates with the archeion's admin token. The clean path is to
 pin it **before** first boot so the same known value works on every run: make
@@ -252,7 +258,7 @@ KALLIP_ARCHEION_ADMIN_TOKEN="$TOK" cargo run -q -p kallip-admin -- --archeion-ur
 
 The fixture is dev-only; prod must set a strong secret.
 
-### Tagma side
+#### Tagma side
 
 The tagma (agent host + in-process relay connector) is a separate composition
 (`compose/dev/tagma.nix`) so its lifecycle does not entangle with the archeion
@@ -263,7 +269,7 @@ side. It runs on the host network and reaches the platform edge at
 arion -f compose/dev/tagma.nix up -d   # tagma; enrolls its relay
 ```
 
-### Multi-edge tagma (multi-relay)
+#### Multi-edge tagma (multi-relay)
 
 The tagma can hold one identity per platform deployment simultaneously (e.g. the local
 dev edge plus a remote one). Declare the entries in
@@ -303,7 +309,7 @@ platform origin. Enroll a code on each side, fill `polis.toml`, and watch the
 tagma log for two `relay connector active` lines (one per entry name); a
 message sent on either side must arrive on both.
 
-### Manual KEX round-trip acceptance
+#### Manual KEX round-trip acceptance
 
 The automated acceptance chain covers fanout and dual identity; the
 user-agent KEX round-trip itself (message in, agent reply out, both sides
@@ -329,7 +335,7 @@ setup:
 Both sides must list the new rows: `human` for the user's message,
 `agent` for the reply.
 
-### Local daemon management (kallipctl)
+#### Local daemon management (kallipctl)
 
 The daemon family (`crates/daemon/`) manages multiple local tagma
 instances. The daemon keeps one registration record per instance in
@@ -388,7 +394,7 @@ setting `services.kallipai.web.runtimeConfig.offlineLogin = false` —
 baked into the served site root — or by editing the file directly on a
 non-NixOS deployment.
 
-## Iterating
+### Iterating
 
 `arion up` re-evaluates the flake each time, so Rust changes are picked up just
 by running it again -- arion builds the workspace transitively (via the image
@@ -403,7 +409,7 @@ Tail logs with `arion logs -f <service>` (`archeion`, `archeion-postgres`,
 `lesche-postgres`); for the tagma use `arion -f compose/dev/tagma.nix logs -f
 tagma`.
 
-## Optional bind overrides
+### Optional bind overrides
 
 By default the tagma data, the agent workspace, and shared skills live in
 docker volumes. Set these env vars (absolute, colon-free host paths) to
@@ -418,7 +424,7 @@ bind-mount them on the host instead:
 Leave `KALLIP_SKILLS_ROOT` unset when using `KALLIP_ARION_SKILLS_PATH` -- the
 former redirects `skill_dir()` away from the bind-mount target.
 
-## Integration tests
+### Integration tests
 
 Runs the workspace's `[[test]]` targets **inside the container** to confirm the
 sandbox and shell backends behave in the containerized environment the tagma
@@ -430,7 +436,7 @@ arion -f compose/dev/test.nix up
 
 See [container.md](reference/container.md) for which suites run.
 
-## Reset (clean slate)
+### Reset (clean slate)
 
 When the backend changes in a way that invalidates existing data (a schema
 reset, an incompatible wire format, or you simply want to start over), tear down

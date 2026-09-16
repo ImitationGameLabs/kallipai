@@ -1,16 +1,22 @@
-# Agentic Context Management
+---
+title: Agentic Context Management
+description: How agent context is assembled, compressed, and persisted.
+order: 50
+---
 
-The most experimental design decision in kallipai: context management is not
+## Agentic Context Management
+
+The most experimental design decision in KallipAI: context management is not
 a hidden heuristic — the agent controls its own attention explicitly through
 tools.
 
-## Design philosophy
+### Design philosophy
 
 Traditional agents manage context opaquely: when the context window fills, older
 turns are silently summarized or dropped. The agent has no say in what stays or
 goes.
 
-kallipai takes a different approach: the agent gets **tools** to manage its
+KallipAI takes a different approach: the agent gets **tools** to manage its
 own context. It decides what to keep (`pin`), what to drop (`evict`), and what
 to let go of (`unpin`). The traditional `/compact` operation becomes a special
 case of this model, not the only option.
@@ -19,7 +25,7 @@ We openly acknowledge this approach is **unproven**. It may or may not
 outperform traditional summarization-only strategies. But it enables patterns
 that aren't possible when context management is opaque.
 
-## Context layers
+### Context layers
 
 The `ContextStore` holds two layers, composed in priority order:
 
@@ -37,7 +43,7 @@ pointing at the spilled original, while the request-time compaction stays
 the budget-management layer. The two guards compose; neither replaces the
 other.
 
-## The four context tools
+### The four context tools
 
 | Tool             | What it does                                                                                |
 | ---------------- | ------------------------------------------------------------------------------------------- |
@@ -49,14 +55,14 @@ other.
 These tools go through the same policy system as shell tools. By default, they
 are auto-allowed (no human approval needed).
 
-## `/compact` as a special case
+### `/compact` as a special case
 
 The `/compact` command found in most coding agents maps directly to
 `context_evict`: the agent writes a summary preserving key facts, and the tool
 atomically pins the summary and evicts all turns. The agent decides what to
 preserve — compaction is not a hidden heuristic but an explicit agent action.
 
-## Compaction
+### Compaction
 
 When the token budget is exceeded (automatically checked each agent round),
 compaction triggers using a summarize strategy:
@@ -69,7 +75,7 @@ all processed turns are dropped.
 The maximum summary token count is configured via the
 `KALLIP_SUMMARY_MAX_TOKENS` environment variable (default: 1200).
 
-## Automatic compaction in the agent loop
+### Automatic compaction in the agent loop
 
 At the start of each agent round:
 
@@ -86,7 +92,7 @@ budget shape are global env policy.
 
 If summarize_and_evict fails, the store is unchanged — no data loss on failure.
 
-## Emergent skills
+### Emergent skills
 
 Skills are a natural consequence of agentic context management:
 
@@ -114,7 +120,7 @@ No dedicated skill system is needed. File read + pin naturally forms skill
 management — the same primitives the agent already uses for any other context
 content.
 
-### Skill file format
+#### Skill file format
 
 ```text
 <data-dir>/skills/
@@ -132,7 +138,7 @@ Skill content here — tips, patterns, pitfalls.
 
 The YAML frontmatter is stripped on load; only the body is pinned into context.
 
-### Meta-skill
+#### Meta-skill
 
 A built-in meta-skill called `bootstrap` is compiled into the binary and
 appended to the system prompt at agent spawn time. It is a thin "floor" with

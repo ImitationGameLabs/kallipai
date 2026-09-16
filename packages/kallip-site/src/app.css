@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+/* Skeleton v5 is CSS-first: the import brings the token layer and utility
+   classes; the theme file sets the design tokens via [data-theme]. The
+   brand theme slot stays "rocket" until a kallipai theme lands. */
+@import "@skeletonlabs/skeleton";
+@import "@skeletonlabs/skeleton/themes/rocket";

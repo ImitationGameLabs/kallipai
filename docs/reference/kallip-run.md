@@ -1,4 +1,10 @@
-# `kallip-run` Reference
+---
+title: kallip-run Reference
+description: CLI reference for the kallip-run runner.
+order: 80
+---
+
+## kallip-run Reference
 
 Posts a prompt to a tagma agent and observes its run, streaming the agent's
 procedure to stderr and exiting with a semantic exit code when the agent goes
@@ -25,7 +31,7 @@ kallip-run [OPTIONS] --prompt <PROMPT>
 Uses `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_TAGMA_URL`
 (env, default `http://127.0.0.1:3000`).
 
-## Options
+### Options
 
 | Flag                | Description                                                    |
 | ------------------- | -------------------------------------------------------------- |
@@ -34,7 +40,7 @@ Uses `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_TAGMA_URL`
 | `--json`            | Emit a single JSON object on stdout (see Output)               |
 | `--verbose`         | Stream the agent's procedure (reasoning, tool calls) to stderr |
 
-## Exit codes
+### Exit codes
 
 | Code | Meaning                             |
 | ---- | ----------------------------------- |
@@ -45,7 +51,7 @@ Uses `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_TAGMA_URL`
 | 4    | Token budget exceeded               |
 | 5    | Failover chain exhausted            |
 
-## Output
+### Output
 
 The output shape is driven by `--json` and `--verbose` (there is no TTY-based
 auto-detection). The tagma already persists the agent's full execution history,
@@ -85,7 +91,7 @@ error is printed to stderr and the exit code is `1`.
 kallip-run --json --prompt "Refactor the config loader"
 ```
 
-## Continuing a session
+### Continuing a session
 
 The target agent persists after the run. Its id is printed in the completion
 hint, and you can continue the same session:

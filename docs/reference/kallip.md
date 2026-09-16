@@ -1,4 +1,10 @@
-# `kallip` Reference
+---
+title: kallip Reference
+description: CLI reference for the headless kallip client.
+order: 70
+---
+
+## kallip Reference
 
 This is the CLI an agent uses to coordinate with other agents and manage its own
 subagents and runtime concerns.
@@ -6,9 +12,9 @@ subagents and runtime concerns.
 All subcommands use `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_TAGMA_URL`
 (env, default `http://127.0.0.1:3000`).
 
-## Subcommands
+### Subcommands
 
-### `message` — Send a message to an agent
+#### `message` — Send a message to an agent
 
 ```bash
 kallip message <ID>
@@ -48,7 +54,7 @@ EOF
 $ echo 'List all TODO comments in src/' | kallip message "$AGENT_ID"
 ```
 
-### `status` — Show agent context usage
+#### `status` — Show agent context usage
 
 ```bash
 kallip status <ID>
@@ -56,7 +62,7 @@ kallip status <ID>
 
 Prints context token usage and recent retry history for the agent.
 
-### `subagent` — Manage direct subagents
+#### `subagent` — Manage direct subagents
 
 ```bash
 kallip subagent <subcommand> [args]
@@ -102,7 +108,7 @@ The spawn reads an optional initial prompt from stdin: `< /dev/null` above
 means "no prompt" and keeps the spawn from swallowing a surrounding script's
 stdin when the id is captured. Pipe or heredoc the prompt instead.
 
-### `profile-set` — Manage named profile sets
+#### `profile-set` — Manage named profile sets
 
 Inspects and rewires the named profile sets of `profiles.toml` at runtime
 (see [env.md](env.md)):
@@ -128,12 +134,12 @@ bindings and `--force` is absent; with `--force` every binder is
 interrupted (faulted binders skip straight to the dangling state) and the
 output names them (by role when the record has one, else by id).
 
-### `approval` — Manage approvals
+#### `approval` — Manage approvals
 
 Subcommands for listing, inspecting, and responding to approvals
 (tool actions that require supervisor approval before execution).
 
-#### `approval list` — List approvals
+##### `approval list` — List approvals
 
 ```bash
 kallip approval list [--offset <N>] [--limit <N>] [--requested-by <ID>] [--status <STATUS>] [--all] [--reverse]
@@ -148,7 +154,7 @@ Default shows committed actions (awaiting approval); use `--all` to see every st
 $ kallip approval list --limit 5 --status committed
 ```
 
-#### `approval get` — Show approval details
+##### `approval get` — Show approval details
 
 ```bash
 kallip approval get <APPROVAL_ID>
@@ -160,7 +166,7 @@ Shows full details for a single approval.
 $ kallip approval get "ap_a1b2c3d4..."
 ```
 
-#### `approval approve` — Approve a committed action
+##### `approval approve` — Approve a committed action
 
 ```bash
 kallip approval approve <APPROVAL_ID>
@@ -172,7 +178,7 @@ Approve a committed approval. The agent will be notified and can redeem the acti
 $ kallip approval approve "ap_a1b2c3d4..."
 ```
 
-#### `approval deny` — Deny a committed action
+##### `approval deny` — Deny a committed action
 
 ```bash
 kallip approval deny <APPROVAL_ID> [REASON]
@@ -184,7 +190,7 @@ Deny a committed approval with an optional reason.
 $ kallip approval deny "ap_a1b2c3d4..." "too risky"
 ```
 
-### `file` — Content transfer against the files service
+#### `file` — Content transfer against the files service
 
 Upload, download, deliver, and list records on the files service
 (`kallip-files`; HTTP reference in [files-api.md](files-api.md)). The
@@ -211,7 +217,7 @@ JSON; `get` buffers the content (capped by the service's max body
 size) and writes it to stdout (or `--out`) — content is never
 JSON-wrapped.
 
-### `image` — Read images into the conversation
+#### `image` — Read images into the conversation
 
 Ingest an image into this agent's live context (the tagma enforces the
 bound set's modalities and records the turn). Three target forms:
@@ -235,9 +241,9 @@ tagma's request body limit — downsample large pictures first.
 $ kallip image read <PATH-or-ID> [--id] [--path] [--blob] [--media-type <TYPE>] [--caption <TEXT>]
 ```
 
-## Usage patterns
+### Usage patterns
 
-### Delegate work to a subagent
+#### Delegate work to a subagent
 
 ```bash
 # Spawn a subordinate, then send it work and poll its progress
@@ -251,12 +257,12 @@ EOF
 kallip status "$CHILD"
 ```
 
-## Multi-agent orchestration
+### Multi-agent orchestration
 
 Agents use this CLI to manage their own subagents. A single tagma can host
 agents across multiple projects simultaneously.
 
-### Parallel subagents
+#### Parallel subagents
 
 ```bash
 # Spawn two subagents for different scopes
@@ -275,7 +281,7 @@ EOF
 wait
 ```
 
-### Inspect and control subagents
+#### Inspect and control subagents
 
 ```bash
 # List your direct subagents
@@ -288,11 +294,11 @@ kallip status $CHILD
 kallip subagent interrupt $CHILD
 ```
 
-## Environment variables
+### Environment variables
 
 `KALLIP_AUTH_TOKEN` (required) and `KALLIP_TAGMA_URL` (default `http://127.0.0.1:3000`) are the primary variables. For the complete reference including LLM provider configuration and agent tuning parameters, see [env.md](env.md).
 
-## Client library
+### Client library
 
 For Rust programs that need more control than the CLI offers, the
 `kallip-client` crate provides the CLI operations as async methods, plus a
