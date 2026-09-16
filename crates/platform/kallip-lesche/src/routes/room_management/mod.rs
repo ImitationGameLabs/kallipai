@@ -34,7 +34,6 @@ mod roster;
 mod shared;
 
 #[cfg(test)]
-#[path = "tests.rs"]
 mod tests;
 
 use axum::Router;
