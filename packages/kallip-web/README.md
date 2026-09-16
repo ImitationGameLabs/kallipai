@@ -2,7 +2,7 @@
 
 The kallipai web app: a SvelteKit SPA (adapter-static) built on the shared
 `kallip-ui` package. Part of the JS/TS workspace under `packages/`; see
-`docs/frontend-development.md` for the toolchain — everything runs through
+`docs/en/development/frontend.md` for the toolchain — everything runs through
 `deno task`, never npm/npx.
 
 ## Commands
@@ -36,4 +36,4 @@ build time and talks to `api.<domain>/v1/*` directly.
 - **NixOS**: the flake's `packages.kallip-web-dist` builds the bundle (two
   derivations: a networked deps build and an offline vite build), and the
   module's `web.distWithRuntimeConfig` option derives the site root that
-  the deployment's own edge serves. See `docs/reference/container.md`.
+  the deployment's own edge serves. See `docs/en/reference/container.md`.

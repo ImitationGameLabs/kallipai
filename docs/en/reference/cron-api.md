@@ -2,6 +2,7 @@
 title: kallip-cron HTTP API
 description: HTTP endpoints exposed by the kallip-cron service.
 order: 60
+internal: true
 ---
 
 ## kallip-cron HTTP API

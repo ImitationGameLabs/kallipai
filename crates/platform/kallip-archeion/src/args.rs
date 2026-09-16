@@ -179,7 +179,7 @@ pub struct Args {
     pub internal_token_file: Option<PathBuf>,
     /// Mount POST /auth/admin-login: exchange the admin token for a normal
     /// User session on a fixed local account (the local-platform login; see
-    /// docs/reference/auth.md). Default off: the route is not mounted at
+    /// docs/en/reference/auth.md). Default off: the route is not mounted at
     /// all. When on, an operator-set KALLIP_ARCHEION_ADMIN_TOKEN shorter than
     /// 32 chars fails at boot (the generated 256-bit token is exempt).
     #[arg(

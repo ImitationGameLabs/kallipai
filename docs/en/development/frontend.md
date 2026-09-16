@@ -2,6 +2,7 @@
 title: Frontend package development
 description: Tooling and conventions for working in the packages/ JS workspace.
 order: 40
+internal: true
 ---
 
 ## Frontend package development
@@ -68,7 +69,7 @@ root tasks when a change spans packages.
 
 UI copy lives in per-domain paraglide catalogs under
 `packages/kallip-ui/i18n/project.inlang/messages/`. Key naming, the guard test,
-and the edit workflow are documented in [docs/i18n.md](./i18n.md).
+and the edit workflow are documented in [i18n.md](./i18n.md).
 
 ### Form-to-URL map
 

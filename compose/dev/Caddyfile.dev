@@ -15,7 +15,7 @@
 #
 # The substitutions come from the caddy service environment, sourced from
 # the same nix bindings the archeion/lesche env use (code default
-# kallipai.com; .env sets kallipai.lan for dev). See docs/development.md
+# kallipai.com; .env sets kallipai.lan for dev). See docs/en/development/setup.md
 # for the one-time host setup (mkcert cert into <repo>/compose/dev/.certs,
 # host trust, LAN DNS).
 #

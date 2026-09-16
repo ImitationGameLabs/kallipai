@@ -14,7 +14,7 @@ Instead of a top-down orchestration layer, kallip is driven through a
 headless CLI: the agent itself decides when to spawn, switch between, and
 coordinate multiple agent instances across projects.
 
-For planned direction, see the [roadmap](docs/roadmap.md).
+For planned direction, see the [roadmap](docs/en/roadmap.md).
 
 ## Architecture
 

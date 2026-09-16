@@ -2,6 +2,7 @@
 title: Naming
 description: The kallip/kallipai naming split and the rules behind it.
 order: 70
+internal: true
 ---
 
 ## Naming

@@ -1,5 +1,6 @@
 <script lang="ts">
   import DocArticle from "$lib/components/DocArticle.svelte";
+  import { zhDocs } from "$lib/docs";
 
   let { data } = $props();
 </script>
@@ -15,6 +16,7 @@
   doc={data.doc}
   prev={data.prev}
   next={data.next}
+  entries={zhDocs}
   base="/zh-cn"
   labels={{
     groups: {

@@ -71,7 +71,7 @@ is the reference monitor: a value above the supervisor's class is rejected with
 spawn a read-only `guest` reviewer. This field is subagent-only; the tagma's
 own root takes its class at startup from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`
 (see [env.md](env.md)). The granted class is reported by
-`GET /agents/{id}/permissions` (see [tagma-api.md](tagma-api.md)).
+`GET /agents/{id}/permissions` (see the tagma API reference).
 
 #### Profile sets
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   // Remote-manage profiles page. The unsaved-changes leave guard lives in
-  // this host wrapper (see frontend-development.md): the store is the same
+  // this host wrapper (see docs/en/development/frontend.md): the store is the same
   // singleton both shells use, so dirty state and the dangling-confirm
   // handoff behave identically to the direct shell.
   import { beforeNavigate } from "$app/navigation";

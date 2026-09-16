@@ -4,7 +4,7 @@ AI Agent working guide. This document provides code structure and decision rules
 
 ## Naming
 
-The project name is `kallipai` (literally `kallip` + `ai`) and its technical stem is `kallip`. The brand has one written form, `KallipAI`; use it on every human-facing surface: the README and doc H1, and prose where the brand appears. Use `kallip` for every technical surface: crate names, binaries, Rust module paths, env var prefixes (`KALLIP_*`), on-disk paths, container paths/volumes, Nix attrs, Cargo/flake `description` strings, User-Agent, Harbor `name()`. When a sentence is mixed, prefer `kallip`. For the history and rationale behind these names, see [naming.md](docs/naming.md).
+The project name is `kallipai` (literally `kallip` + `ai`) and its technical stem is `kallip`. The brand has one written form, `KallipAI`; use it on every human-facing surface: the README and doc H1, and prose where the brand appears. Use `kallip` for every technical surface: crate names, binaries, Rust module paths, env var prefixes (`KALLIP_*`), on-disk paths, container paths/volumes, Nix attrs, Cargo/flake `description` strings, User-Agent, Harbor `name()`. When a sentence is mixed, prefer `kallip`. For the history and rationale behind these names, see [naming.md](docs/en/naming.md).
 
 ## Comments
 
@@ -49,14 +49,19 @@ Code and test comments are self-contained: do not reference out-of-repo document
 │   ├── kallip-web/            # SvelteKit web app
 │   └── kallip-app/            # Tauri (Android) app shell
 ├── docs/                      # Project documentation
-│   ├── architecture.md       # System architecture, tagma design, policy
-│   ├── context-management.md # Agentic context management design
-│   └── reference/            # Reference documentation
-│       ├── auth.md           # Authentication and authorization
-│       ├── tagma-api.md     # HTTP API endpoints
-│       ├── env.md            # Environment variable reference
-│       ├── kallip.md     # `kallip` headless CLI for agent
-│       └── kallip-run.md # `kallip-run` agent runner for scripting
+│   └── en/                   # Documentation tree the site renders
+│       ├── architecture.md       # System architecture, tagma design, policy
+│       ├── context-management.md # Agentic context management design
+│       ├── development/      # Contributor guides
+│       │   ├── setup.md      # Workspace bring-up and verification
+│       │   ├── frontend.md   # Deno-first frontend toolchain
+│       │   └── i18n.md       # Message catalogs (i18n)
+│       └── reference/        # Reference documentation
+│           ├── auth.md       # Authentication and authorization
+│           ├── tagma-api.md  # HTTP API endpoints
+│           ├── env.md        # Environment variable reference
+│           ├── kallip.md     # `kallip` headless CLI for agent
+│           └── kallip-run.md # `kallip-run` agent runner for scripting
 └── nix/
       ├── common.nix           # Core config (crate paths, dependencies)
       ├── checks.nix           # CI checks
@@ -66,7 +71,7 @@ Code and test comments are self-contained: do not reference out-of-repo document
 
 ## Frontend development
 
-When working on anything under `packages/`, read [frontend-development.md](docs/frontend-development.md) first. It defines the Deno-first toolchain: every action (dev, build, check, fmt, lint, installing deps) goes through `deno task`. Do not drop down to `npm`/`npx`/`pnpm`/`yarn` or hand-invoke `node_modules/.bin/*`; if a workflow is missing, add a `scripts` entry and call it via `deno task`.
+When working on anything under `packages/`, read [frontend.md](docs/en/development/frontend.md) first. It defines the Deno-first toolchain: every action (dev, build, check, fmt, lint, installing deps) goes through `deno task`. Do not drop down to `npm`/`npx`/`pnpm`/`yarn` or hand-invoke `node_modules/.bin/*`; if a workflow is missing, add a `scripts` entry and call it via `deno task`.
 
 ## Dependency Management
 

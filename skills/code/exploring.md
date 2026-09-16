@@ -11,7 +11,7 @@ what serves *understanding* — README, explanatory docs, and the code
 that illustrates how the project works — at whatever depth the goal
 requires. It does not read contributor-only material (AGENTS.md,
 CONTRIBUTING.md, and development guides — how-to-build and
-how-to-contribute docs such as docs/development.md), because that
+how-to-contribute docs such as docs/en/development/setup.md), because that
 serves changing the code, not understanding it. If you are preparing to change code, load
 `code/onboarding` instead.
 
@@ -64,7 +64,7 @@ into `aifed read`.
 Understanding a project often requires reading past the README; the rule
 is to read what serves understanding, not what serves contribution.
 Contributor-only documents (AGENTS.md, CONTRIBUTING.md, and development
-guides such as docs/development.md) are for people changing the code and
+guides such as docs/en/development/setup.md) are for people changing the code and
 add no value to a reader.
 Done when:
 

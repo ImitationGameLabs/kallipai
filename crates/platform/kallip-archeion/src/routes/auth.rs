@@ -1083,7 +1083,7 @@ pub fn admin_login_router() -> Router<SharedState> {
 /// deployment's operator entry: a User session lights up the whole
 /// user-scoped surface (profiles, tagma mint/enroll) with no browser passkey
 /// ceremony, which is exactly the online management experience a local stack
-/// needs (see docs/reference/auth.md for the security boundary).
+/// needs (see docs/en/reference/auth.md for the security boundary).
 ///
 /// Not gated by `signup_enabled`: mounting the route is an explicit operator
 /// act that pre-provisions an operator account -- the same position as the

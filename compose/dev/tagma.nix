@@ -143,7 +143,7 @@ in
         KALLIP_SKILLS_SEED = skillsSeed;
         # A rootful container has no uid mapping, so the tagma would run as the
         # host's real root -- which the real-root boot guard refuses by default
-        # (docs/reference/env.md). This flag is the explicit, documented escape:
+        # (docs/en/reference/env.md). This flag is the explicit, documented escape:
         # instances inherit the container's root. Rootless or userns-remap
         # deployments remain the preferred shapes.
         KALLIP_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT = "1";

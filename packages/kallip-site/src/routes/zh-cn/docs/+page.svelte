@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { docGroups } from "$lib/docs";
+  import { docGroups, zhDocs } from "$lib/docs";
 
-  const groups = docGroups();
+  const groups = docGroups(zhDocs);
 </script>
 
 <svelte:head>

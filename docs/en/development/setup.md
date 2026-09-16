@@ -2,6 +2,7 @@
 title: Development
 description: Workspace layout, build commands, and the verification workflow for contributors.
 order: 30
+internal: true
 ---
 
 ## Development
@@ -14,10 +15,10 @@ auto-discovery, so a plain `arion up` brings it up.
 
 This doc covers the day-1 bring-up and the iteration loop. For the container
 images, the production split, and the integration-test mode, see
-[container.md](reference/container.md); for the frontend workspace, see
-[frontend-development.md](frontend-development.md).
+[container.md](../reference/container.md); for the frontend workspace, see
+[frontend.md](frontend.md).
 For the NixOS host deployment, see
-[nixos-deployment.md](nixos-deployment.md).
+[nixos-deployment.md](../nixos-deployment.md).
 
 ### Prerequisites
 
@@ -151,7 +152,7 @@ read none of them: they derive at runtime from the browser location
 > **Scope:** this topology covers the **web** app (`packages/kallip-web`). The
 > Tauri Android shell (`packages/kallip-app`) is a separate target that still
 > defaults to `http://localhost:7100` / `:7200` and is not wired to the
-> `*.kallipai.lan` dev cert — see [frontend-development.md](frontend-development.md).
+> `*.kallipai.lan` dev cert — see [frontend.md](frontend.md).
 
 ### Bring-up
 
@@ -183,7 +184,7 @@ tooling — `kallip-admin` and curl keep using `http://localhost:7100` /
 publishes `7400` on the loopback interface only — the browser reaches files
 only through the edge (the edge strips `/v1/files`), while the `kallip file`
 CLI points `KALLIP_POLIS_URL` at the dev edge (`https://api.kallipai.lan`) and presents a
-tagma bearer (`KALLIP_FILES_TOKEN`); see docs/reference/files-api.md.
+tagma bearer (`KALLIP_FILES_TOKEN`); see docs/en/reference/files-api.md.
 The tagma process itself authenticates to the files service with its
 registered enrollment credential — `KALLIP_FILES_TOKEN` provisions
 CLI shells, and the tagma removes a leftover copy from its own
@@ -227,7 +228,7 @@ curl -si -X POST http://localhost:7100/auth/admin-login \
 ```
 
 The `Set-Cookie: kallip_session=...` header is the session (see
-docs/reference/auth.md); pass it as `-b kallip_session=...` to mint an
+docs/en/reference/auth.md); pass it as `-b kallip_session=...` to mint an
 enrollment code at `POST /v1/archeion/tagmata` without signing up.
 
 ###### The admin token
@@ -434,7 +435,7 @@ ships in; the service exits with the overall verdict (`arion ps -a`).
 arion -f compose/dev/test.nix up
 ```
 
-See [container.md](reference/container.md) for which suites run.
+See [container.md](../reference/container.md) for which suites run.
 
 ### Reset (clean slate)
 

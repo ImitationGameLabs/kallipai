@@ -193,7 +193,7 @@ $ kallip approval deny "ap_a1b2c3d4..." "too risky"
 #### `file` — Content transfer against the files service
 
 Upload, download, deliver, and list records on the files service
-(`kallip-files`; HTTP reference in [files-api.md](files-api.md)). The
+(`kallip-files`; HTTP reference in `docs/en/reference/files-api.md`). The
 acting principal is the tagma named by the bearer token (the spawn env);
 `--space self` is its own region, `shared` the space's shared region.
 

@@ -40,7 +40,7 @@ in
     rumdl
 
     # Local CA + leaf cert generation for the Caddy-fronted dev topology (see
-    # the mkcert step in docs/development.md); used by arion-compose.nix +
+    # the mkcert step in docs/en/development/setup.md); used by arion-compose.nix +
     # compose/dev/Caddyfile.dev.
     mkcert
 

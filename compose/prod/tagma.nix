@@ -11,7 +11,7 @@
 # KALLIP_POLIS_URL (the platform's public API origin, e.g.
 # https://api.kallipai.com -- enrollment, the lesche tunnel, envelopes and
 # key-exchange responses all derive from it), and
-# the LLM provider credentials. See docs/reference/container.md.
+# the LLM provider credentials. See docs/en/reference/container.md.
 { lib, ... }:
 let
   # Resolve the workspace flake. `toString ../..` is the repo root (two levels
@@ -38,7 +38,7 @@ in
     };
 
     # The tagma's landlock/seccomp shell sandbox needs these privileges (see
-    # docs/reference/container.md). No typed option for security_opt; out.service
+    # docs/en/reference/container.md). No typed option for security_opt; out.service
     # is the documented escape hatch (attrsOf, merges with the computed spec).
     services.tagma = {
       service.capabilities.SYS_ADMIN = true;
@@ -72,7 +72,7 @@ in
         KALLIP_TAGMA_ADDR = "0.0.0.0:3000";
         # A rootful container has no uid mapping, so the tagma would run as the
         # host's real root -- which the real-root boot guard refuses by default
-        # (docs/reference/env.md). This flag is the explicit, documented escape:
+        # (docs/en/reference/env.md). This flag is the explicit, documented escape:
         # instances inherit the container's root. Rootless or userns-remap
         # deployments remain the preferred shapes.
         KALLIP_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT = "1";

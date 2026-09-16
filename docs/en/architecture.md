@@ -61,7 +61,7 @@ an `RwLock`; lookup is by UUID.
    registry entry.
 
 The tagma exposes an HTTP API for managing agents and approvals. For the full
-endpoint reference, see [tagma-api.md](reference/tagma-api.md). For
+endpoint reference, see the tagma API reference. For
 authentication and the authorization matrix, see [auth.md](reference/auth.md).
 
 ### Online relay and chat history
@@ -135,7 +135,7 @@ results double as member ids by value equality.
 
 ### External chat-room API (authored vs signal)
 
-The tagma exposes two event surfaces (see [tagma-api.md](reference/tagma-api.md)).
+The tagma exposes two event surfaces (see the tagma API reference).
 The **internal** stream carries the full rich event vocabulary for the CLI.
 The **external chat-room API** is the frontend's conversation surface. The tagma
 projects each internal event into two channels with different destinations:
@@ -264,7 +264,7 @@ mapping layer. It is fail-closed: unparseable or empty input is `Deny`.
 #### Classify presets
 
 The classify rule-set is tagma-global, chosen once at startup by the
-`KALLIP_POLICY_PRESET` env var (see `docs/reference/env.md`) and immutable for
+`KALLIP_POLICY_PRESET` env var (see `docs/en/reference/env.md`) and immutable for
 the tagma's lifetime. Every agent — root and subagent — runs under the same
 preset. The preset _is_ the rule bundle (there is no separate "mode" type):
 

@@ -2,6 +2,7 @@
 title: Tagma HTTP API
 description: HTTP endpoints exposed by the kallip-tagma host.
 order: 40
+internal: true
 ---
 
 ## Tagma HTTP API
@@ -555,7 +556,7 @@ Auth: any authenticated identity. See [auth.md](auth.md).
   "token_budget": 100000000,
   "token_consumed": 23500000,
   "token_budget_unlimited": false,
-  "activity": "reading docs/architecture.md"
+  "activity": "reading docs/en/architecture.md"
 }
 ```
 
@@ -604,7 +605,7 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 
 **`preset`** — the tagma-global `bash_exec` classify rule-set in effect for
 this agent (read-only; it is set once at tagma startup from
-`KALLIP_POLICY_PRESET`). See _Classify presets_ in `docs/architecture.md`.
+`KALLIP_POLICY_PRESET`). See _Classify presets_ in `docs/en/architecture.md`.
 
 **`permission_class`** — the FS-access permission class actually granted to
 this agent (lowercase `"normal"` / `"guest"`): the value the tagma clamped at
@@ -698,7 +699,7 @@ Status: `204 No Content`
 > **Policy:** an agent reports activity by running `kallip activity` through
 > `bash_exec`. `kallip` is allow-listed in the command classifier, so this
 > classifies as `Allow` under every preset — same as every other `kallip`
-> management command. See _Classify presets_ in `docs/architecture.md`.
+> management command. See _Classify presets_ in `docs/en/architecture.md`.
 
 ### Token Budget
 

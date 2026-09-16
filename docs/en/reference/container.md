@@ -52,7 +52,7 @@ the archeion over its public HTTPS URL.
 The polis services can alternatively deploy on the NixOS host through `services.kallipai.polis` (see the polis section below).
 
 `dev` is a **two-phase** flow (the tagma's relay connector cannot enroll until a
-user signs up and mints a code); see [development.md](../development.md) for the
+user signs up and mints a code); see development setup for the
 bring-up commands and flow.
 
 ### Prerequisites
@@ -71,7 +71,7 @@ reads `.env` via `service.env_file`.
 
 The bring-up flow (two-phase, because the relay connector needs an enrollment
 code) and the iteration loop are documented in
-[development.md](../development.md). This section covers the dev-only mechanics.
+development setup. This section covers the dev-only mechanics.
 
 Dev skips the image bake for the kallip services. `useHostStore` bind-mounts the
 host `/nix/store` read-only into the tagma/archeion/files containers, so they run
@@ -103,7 +103,7 @@ lives on the one `api.` origin, so the session cookie needs no `Domain`
 attribute and CORS collapses to the `https://app.kallipai.lan` origin
 with credentials. One-time host
 setup (mkcert cert + LAN DNS) and client CA trust are covered in
-[development.md](../development.md). The tagma container reaches the
+development setup. The tagma container reaches the
 edge's loopback plaintext face (`http://127.0.0.1:7443`), not the
 certificate-backed vhosts.
 
@@ -365,7 +365,7 @@ path (default `/workspace`); a host bind does not change what the tagma sees.
 
 Each agent needs a `workspace_root` that exists in the container and is
 **disjoint** from `/var/lib/kallipai/tagmata/main`. Pass `workspace_root: /workspace` when
-creating an agent via the [tagma API](tagma-api.md); the tagma rejects a
+creating an agent via the tagma API; the tagma rejects a
 workspace that contains or is contained by the data dir.
 
 ### Environment
@@ -460,5 +460,5 @@ docker run --rm \
   kallip-archeion:latest
 ```
 
-Then create an agent via the [tagma API](tagma-api.md) with
+Then create an agent via the tagma API with
 `workspace_root: /workspace`.

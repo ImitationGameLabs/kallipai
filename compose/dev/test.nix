@@ -36,7 +36,7 @@ in
 
     services.tagma = {
       # The tagma's landlock/seccomp shell sandbox needs these privileges
-      # (see docs/reference/container.md). No typed option for security_opt;
+      # (see docs/en/reference/container.md). No typed option for security_opt;
       # out.service is the documented escape hatch (attrsOf, merges with the
       # computed spec).
       service.capabilities.SYS_ADMIN = true;

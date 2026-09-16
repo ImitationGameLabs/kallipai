@@ -45,7 +45,7 @@ let
       # rust-overlay and cannot write the read-only nix store. This is why
       # `tauri android init` needs `--skip-targets-install` and `tauri android
       # build` needs an explicit `--target` (unlike `dev`); see
-      # docs/frontend-development.md for the commands.
+      # docs/en/development/frontend.md for the commands.
       targets = [
         # Android ABIs are restricted to arm64 + x86_64 via the
         # ORG_GRADLE_PROJECT_abiList/archList/targetList env vars below (read

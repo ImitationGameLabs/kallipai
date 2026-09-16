@@ -2,7 +2,7 @@
 
 The kallipai native app: the SvelteKit source that Tauri wraps into the
 mobile/desktop installers. Part of the JS/TS workspace under `packages/`;
-see `docs/frontend-development.md` for the toolchain — everything runs
+see `docs/en/development/frontend.md` for the toolchain — everything runs
 through `deno task`, never npm/npx.
 
 kallip-app is the **native release shape** of the web experience, not a

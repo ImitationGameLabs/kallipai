@@ -3,7 +3,7 @@
 //! Owns the scheduler (advances due schedules to `Triggered`) and the deliverer
 //! (injects fired schedules into agent conversations via the tagma HTTP API),
 //! plus a small management HTTP API for the CLI/operator. SQLite-backed
-//! (sea-orm). See `AGENTS.md` and `docs/reference/cron-api.md`.
+//! (sea-orm). See `AGENTS.md` and `docs/en/reference/cron-api.md`.
 
 mod args;
 mod auth;

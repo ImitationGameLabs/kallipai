@@ -2,6 +2,7 @@
 title: kallip-files HTTP API
 description: HTTP endpoints exposed by the kallip-files service.
 order: 50
+internal: true
 ---
 
 ## kallip-files HTTP API

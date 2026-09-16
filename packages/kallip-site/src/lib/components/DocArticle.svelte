@@ -4,6 +4,7 @@
   import type { TocLink } from "comark/plugins/toc";
   import type { MarkdownDocument as ComarkDocument } from "comark";
   import { docGroups } from "$lib/docs";
+  import type { DocEntry } from "$lib/docs";
 
   interface DocBrief {
     slug: string;
@@ -16,6 +17,8 @@
     doc: DocBrief;
     prev: DocBrief | null;
     next: DocBrief | null;
+    // Which view (en canon or zh-cn overrides) feeds the sidebar and pager.
+    entries: DocEntry[];
     // '' for the en segment, '/zh-cn' for the zh-cn segment.
     base: string;
     labels: {
@@ -27,10 +30,11 @@
     };
   }
 
-  let { document, tocLinks, doc, prev, next, base, labels }: Props = $props();
+  let { document, tocLinks, doc, prev, next, base, labels, entries }: Props =
+    $props();
 
   // Sidebar links keep the locale prefix so group navigation stays in-segment.
-  const groups = $derived(docGroups());
+  const groups = $derived(docGroups(entries));
   const docHref = $derived((slug: string) => `${base}/docs/${slug}/`);
   const isActive = $derived(
     (slug: string) => page.url.pathname === docHref(slug),

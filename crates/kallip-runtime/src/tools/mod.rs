@@ -95,7 +95,7 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
     // - **Normal**: writable = its task workspace write-lock plus `$HOME`
     //   (home broad-write) and `/dev/shm` (Chromium and similar need writable
     //   POSIX shared memory); secrets readable (a secret-proxy mitigation is
-    //   planned in docs/roadmap.md, not yet built). See `normal_extra_writable`
+    //   planned in docs/en/roadmap.md, not yet built). See `normal_extra_writable`
     //   for the tradeoffs.
     // - **Guest**: read-only — no write-locks granted; secret dirs are hidden by
     //   mount-ns tmpfs overlays so a broad-read Guest can read source/caches
@@ -184,7 +184,7 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
 /// private keys) — so home broad-write opens no new capability class beyond
 /// the trusted-UID boundary. The residual risk is cross-session persistence
 /// (e.g. planting `~/.bashrc`), to be addressed by the planned secret-proxy
-/// mitigation (docs/roadmap.md) rather than a cache-leaf allowlist. Note
+/// mitigation (docs/en/roadmap.md) rather than a cache-leaf allowlist. Note
 /// [`guest_hide_holes`] is Guest-only, so Normal gets no sandbox-side secret
 /// masking on either read or write.
 ///
@@ -211,7 +211,7 @@ fn normal_extra_writable() -> Vec<PathBuf> {
 /// Secret directories a Guest agent's `bash` must not see — overlaid by empty
 /// read-only tmpfs (hide-holes) so a broad-read Guest can read source/caches
 /// without reaching keys/tokens. Normal agents get no hide-holes (their secret
-/// use is via proxy tools, planned in docs/roadmap.md, not yet built). The
+/// use is via proxy tools, planned in docs/en/roadmap.md, not yet built). The
 /// returned paths populate
 /// [`kallip_shell::landlock::AccessDecision::hide_holes`], which
 /// `kallip-shell::landlock::apply` realizes via libsandbox's

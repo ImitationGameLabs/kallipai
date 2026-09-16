@@ -15,7 +15,7 @@
 # Consumes the flake's pre-built `packages.default` directly -- arion does no
 # Rust/crane building. `useHostStore` shares the host /nix/store into the
 # containers, so a rebuild is picked up without an in-compose bake. See
-# docs/development.md for the bring-up commands and flow.
+# docs/en/development/setup.md for the bring-up commands and flow.
 { pkgs, lib, ... }:
 let
   # Load via git+file URL (not a bare path) so getFlake applies fetchGit's VCS
@@ -97,11 +97,11 @@ let
   isIpHost = builtins.match "[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+" devDomain != null;
 
   # Path to the mkcert leaf cert dir (cert.pem + key.pem). Defaults to
-  # <repo>/compose/dev/.certs -- where the mkcert command in docs/development.md
+  # <repo>/compose/dev/.certs -- where the mkcert command in docs/en/development/setup.md
   # writes -- so no env var is needed for the common case; override
   # KALLIP_ARION_CERT_PATH only to point elsewhere (e.g. a shared dir across
   # worktrees). If the dir is missing, Caddy fails at runtime with a clear "cert
-  # not found" -- the mkcert step in docs/development.md is the prerequisite.
+  # not found" -- the mkcert step in docs/en/development/setup.md is the prerequisite.
   certDir =
     let
       v = builtins.getEnv "KALLIP_ARION_CERT_PATH";
