@@ -9,8 +9,17 @@ mod team;
 
 use anyhow::Result;
 use args::{
-    AgentCommand, AgentDirCommand, ApprovalCommand, BudgetCommand, Cli, Commands, FileCommand,
-    InboxCommand, LescheCommand, PolicyCommand, ProfileSetCommand, SkillCommand, SubagentCommand,
+    Cli, Commands,
+    agent::{AgentCommand, AgentDirCommand},
+    approval::ApprovalCommand,
+    budget::BudgetCommand,
+    file::FileCommand,
+    inbox::InboxCommand,
+    lesche::LescheCommand,
+    policy::PolicyCommand,
+    profile::ProfileSetCommand,
+    skill::SkillCommand,
+    subagent::SubagentCommand,
 };
 use clap::{CommandFactory, Parser};
 use kallip::file::FilesClient;

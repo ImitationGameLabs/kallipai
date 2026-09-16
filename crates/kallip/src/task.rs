@@ -13,7 +13,7 @@ use kallip_common::protocol::{
     TaskDispatchRequest, TaskExport, TaskForceRequest, TaskListQuery, TaskNoteRequest, TaskStatus,
 };
 
-use crate::args::{TaskChainOpType, TaskCloseReason, TaskCommand, TaskStartArgs};
+use crate::args::task::{TaskChainOpType, TaskCloseReason, TaskCommand, TaskStartArgs};
 
 pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
     match cmd {

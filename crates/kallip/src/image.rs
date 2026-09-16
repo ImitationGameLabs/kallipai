@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use kallip_client::TagmaClient;
 use kallip_common::protocol::{AttachmentIngestRequest, Modality};
 
-use crate::args::{ImageCommand, ImageReadArgs};
+use crate::args::image::{ImageCommand, ImageReadArgs};
 
 pub(crate) async fn run_image(client: &TagmaClient, cmd: &ImageCommand) -> Result<()> {
     match cmd {

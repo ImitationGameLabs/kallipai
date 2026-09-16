@@ -22,7 +22,7 @@ use kallip_common::protocol::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::args::{TeamCommand, TeamConvergeArgs, TeamLockRebuildArgs, TeamStatusArgs};
+use crate::args::team::{TeamCommand, TeamConvergeArgs, TeamLockRebuildArgs, TeamStatusArgs};
 
 /// One record of `tagma.lock`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
