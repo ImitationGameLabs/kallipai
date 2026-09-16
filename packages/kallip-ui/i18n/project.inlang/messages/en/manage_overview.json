@@ -10,5 +10,9 @@
   "manage_overview_100m_budget": "+100M budget",
   "manage_overview_configuration": "Configuration",
   "manage_overview_profiles_link": "Profiles →",
-  "manage_overview_schedules_link": "Schedules →"
+  "manage_overview_schedules_link": "Schedules →",
+  "manage_overview_usage_heading": "Token Usage",
+  "manage_overview_usage_cache_read": "Cache read (all agents): {count}",
+  "manage_overview_usage_hit_rate": "Cache hit rate (all agents): {rate}%",
+  "manage_overview_usage_scope_hint": "Counters since the tagma process started"
 }

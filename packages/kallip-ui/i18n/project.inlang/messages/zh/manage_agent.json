@@ -54,5 +54,8 @@
   "manage_agent_retry_error_unknown": "错误",
   "manage_agent_retry_retried": "已重试",
   "manage_agent_retry_exhausted": "已耗尽",
-  "manage_agent_toggle_duty": "切换值勤"
+  "manage_agent_toggle_duty": "切换值勤",
+  "manage_agent_usage_heading": "Token 用量（本次启动）",
+  "manage_agent_usage_cache_read": "缓存读取",
+  "manage_agent_usage_hit_rate": "缓存命中率"
 }

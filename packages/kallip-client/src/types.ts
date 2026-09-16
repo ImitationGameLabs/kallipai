@@ -184,6 +184,29 @@ export interface ActiveProfile {
    * meaningful model string. */
   readonly model: string;
 }
+
+/** One agent's single-launch token usage (`AgentStatusResponse.usage`):
+ * in-memory counters scoped to the tagma process lifetime. The hit rate is
+ * computed server-side; consume it rather than re-deriving it. */
+export interface AgentUsageStats {
+  readonly prompt_tokens: number;
+  readonly completion_tokens: number;
+  readonly cache_read_tokens: number;
+  /** `cache_read_tokens / prompt_tokens`; 0.0 when no prompt tokens were
+   * recorded. */
+  readonly cache_hit_rate: number;
+}
+
+/** Tagma-wide single-launch usage totals (`AgentStatusResponse.usage_totals`):
+ * sums over every recorded agent; the rate divides the sums, it is never an
+ * average of per-agent ratios. */
+export interface TagmaUsageTotals {
+  readonly prompt_tokens: number;
+  readonly completion_tokens: number;
+  readonly cache_read_tokens: number;
+  readonly cache_hit_rate: number;
+}
+
 /** `GET /agents/{id}/status` response. token_budget/token_consumed are tagma-wide. */
 export interface AgentStatusResponse {
   readonly state: AgentState;
@@ -198,6 +221,13 @@ export interface AgentStatusResponse {
   readonly retrying?: WireTransientRetryInfo | null;
   /** Omitted only by a tagma that predates the field. */
   readonly profile?: ActiveProfile;
+  /** This agent's single-launch token usage. Absent on responses from tagma
+   * versions that predate the field, and for agents with nothing recorded
+   * this launch. */
+  readonly usage?: AgentUsageStats;
+  /** Tagma-wide single-launch usage totals. Absent only on responses from
+   * tagma versions that predate the field. */
+  readonly usage_totals?: TagmaUsageTotals;
 }
 
 /** `PUT /agents/{id}/metadata` request body. */

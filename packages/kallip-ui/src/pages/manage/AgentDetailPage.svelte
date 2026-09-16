@@ -20,6 +20,7 @@
   import StateDot from "../../components/manage/StateDot.svelte";
   import CurrentProfileCard from "../../components/manage/CurrentProfileCard.svelte";
   import AgentStatusCard from "../../components/manage/AgentStatusCard.svelte";
+  import AgentUsageCard from "../../components/manage/AgentUsageCard.svelte";
   import RetryListCard from "../../components/manage/RetryListCard.svelte";
 
   import {
@@ -345,6 +346,9 @@
 
     {#if status}
       <AgentStatusCard {status} {windowTokens} {contextWindow} />
+      {#if status.usage}
+        <AgentUsageCard usage={status.usage} />
+      {/if}
       {#if status.recent_retries.length > 0}
         <RetryListCard {status} />
       {/if}

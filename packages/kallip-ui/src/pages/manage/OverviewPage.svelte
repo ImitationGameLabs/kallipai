@@ -1,6 +1,7 @@
 <script lang="ts">
   import { budgetStore } from "../../lib/manage/budget.svelte.ts";
   import { agentsStore } from "../../lib/manage/agents.svelte.ts";
+  import { usageStore } from "../../lib/manage/usage.svelte.ts";
   import { formatTokenCount } from "../../lib/tagmata.svelte.ts";
   import BudgetBar from "../../components/manage/BudgetBar.svelte";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
@@ -22,15 +23,35 @@
     manage_overview_configuration,
     manage_overview_profiles_link,
     manage_overview_schedules_link,
+    manage_overview_usage_heading,
+    manage_overview_usage_cache_read,
+    manage_overview_usage_hit_rate,
+    manage_overview_usage_scope_hint,
   } from "../../paraglide/messages.js";
 
   $effect(() => {
     budgetStore.startPolling(30_000);
     agentsStore.startPolling(30_000);
+    // The totals ride on any agent status response; the roster's first
+    // live agent is only the request carrier. Faulted agents reject the
+    // status endpoint (409 "agent is faulted; no status"), so they
+    // cannot carry; with no live agent the totals stay null and the
+    // usage rows hide.
+    usageStore.startPolling(
+      () => agentsStore.agents.find((a) => a.state !== "faulted")?.id,
+      30_000,
+    );
     return () => {
       budgetStore.stopPolling();
       agentsStore.stopPolling();
+      usageStore.stopPolling();
     };
+  });
+
+  // Kick the totals fetch once the roster first arrives: startPolling's
+  // immediate refresh runs before the roster exists and no-ops then.
+  $effect(() => {
+    if (agentsStore.agents.length > 0) usageStore.refresh();
   });
 
   let { basePath = "/local/manage" }: { basePath?: string } = $props();
@@ -111,6 +132,31 @@
           {/if}
         </div>
       </a>
+
+      <!-- Token usage: tagma-wide, this launch. The numbers ride on one
+           status request (the roster's first non-faulted agent as
+           carrier); the usage rows stay hidden until the first totals
+           arrive. -->
+      <div class="card preset-tonal-surface p-5 space-y-2">
+        <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+          {manage_overview_usage_heading()}
+        </h2>
+        {#if usageStore.totals}
+          <div class="text-sm space-y-1">
+            <div>
+              {manage_overview_usage_cache_read({
+                count: formatTokenCount(usageStore.totals.cache_read_tokens),
+              })}
+            </div>
+            <div>
+              {manage_overview_usage_hit_rate({
+                rate: (usageStore.totals.cache_hit_rate * 100).toFixed(1),
+              })}
+            </div>
+          </div>
+        {/if}
+        <p class="text-xs opacity-50">{manage_overview_usage_scope_hint()}</p>
+      </div>
 
       <!-- Quick actions -->
       <div class="card preset-tonal-surface p-5 space-y-3">

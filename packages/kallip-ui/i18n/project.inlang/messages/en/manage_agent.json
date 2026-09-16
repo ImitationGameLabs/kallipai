@@ -54,5 +54,8 @@
   "manage_agent_retry_error_unknown": "error",
   "manage_agent_retry_retried": "retried",
   "manage_agent_retry_exhausted": "exhausted",
-  "manage_agent_toggle_duty": "Toggle Duty"
+  "manage_agent_toggle_duty": "Toggle Duty",
+  "manage_agent_usage_heading": "Token Usage (this launch)",
+  "manage_agent_usage_cache_read": "Cache read",
+  "manage_agent_usage_hit_rate": "Cache hit rate"
 }
