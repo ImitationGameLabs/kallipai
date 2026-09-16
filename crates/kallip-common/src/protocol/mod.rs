@@ -15,12 +15,12 @@ pub mod team;
 // Downstream `use kallip_common::protocol::*` continues to work unchanged.
 pub use agent::{
     ActiveProfile, AgentPermissionsResponse, AgentState, AgentStatusResponse, AgentSummary,
-    AttachmentIngestLocalResponse, AttachmentIngestRequest, AttachmentIngestResponse,
-    CreateAgentRequest, CreateAgentResponse, DELEGATION_CARVE_OUT, DELEGATION_FULL_HANDOFF,
-    DeleteSetResponse, DeliveryMode, DutyStatus, ListAgentsQuery, ListAgentsResponse, LockState,
-    MaxToolRounds, MessageRequest, MessageResponse, Modality, ParkedReason,
-    ProfileSetUpdateRequest, SetDefaultRequest, SetReference, UpdateActivityRequest,
-    UpdateAgentMetadataRequest,
+    AgentUsageStats, AttachmentIngestLocalResponse, AttachmentIngestRequest,
+    AttachmentIngestResponse, CreateAgentRequest, CreateAgentResponse, DELEGATION_CARVE_OUT,
+    DELEGATION_FULL_HANDOFF, DeleteSetResponse, DeliveryMode, DutyStatus, ListAgentsQuery,
+    ListAgentsResponse, LockState, MaxToolRounds, MessageRequest, MessageResponse, Modality,
+    ParkedReason, ProfileSetUpdateRequest, SetDefaultRequest, SetReference, TagmaUsageTotals,
+    UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 pub use approval::{
     ApprovalDecisionBody, ApprovalEntry, ListApprovalsQuery, ListApprovalsResponse,

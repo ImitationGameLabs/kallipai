@@ -5,7 +5,8 @@ use axum::response::IntoResponse;
 use kallip_common::agentid::AgentId;
 use kallip_common::policy::ExecPolicy;
 use kallip_common::protocol::{
-    ActiveProfile, AgentPermissionsResponse, AgentStatusResponse, ApiError,
+    ActiveProfile, AgentPermissionsResponse, AgentStatusResponse, AgentUsageStats, ApiError,
+    TagmaUsageTotals,
 };
 use kallip_runtime::context::AgenticContext;
 use kallip_runtime::persistence;
@@ -40,6 +41,23 @@ pub async fn agent_status(
         .cloned()
         .collect::<Vec<_>>();
     let snap = state.token_budget.snapshot();
+    // Single-launch usage: the per-agent counters this agent recorded, plus
+    // tagma-wide totals. Both hit rates are computed here so clients never
+    // re-derive (and can never mis-derive) the sum-then-divide ratio.
+    let usage_entry = state.usage_stats.agent(id);
+    let usage = usage_entry.map(|u| AgentUsageStats {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+        cache_read_tokens: u.cache_read_tokens,
+        cache_hit_rate: u.cache_hit_rate(),
+    });
+    let totals = state.usage_stats.totals();
+    let usage_totals = TagmaUsageTotals {
+        prompt_tokens: totals.prompt_tokens,
+        completion_tokens: totals.completion_tokens,
+        cache_read_tokens: totals.cache_read_tokens,
+        cache_hit_rate: totals.cache_hit_rate(),
+    };
     Ok(Json(AgentStatusResponse {
         state: live.agent.get_state(),
         context,
@@ -56,6 +74,8 @@ pub async fn agent_status(
             provider: profile_snap.provider,
             model: profile_snap.model,
         }),
+        usage,
+        usage_totals: Some(usage_totals),
     }))
 }
 

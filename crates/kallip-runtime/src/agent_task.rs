@@ -169,6 +169,10 @@ pub struct AgentContext {
     /// Tagma-wide token budget shared by all agents.
     /// Cloned from `AppState` — same underlying Arc counters across all agents.
     pub token_budget: crate::token_budget::TokenBudget,
+    /// Per-agent, single-launch token usage shared process-wide.
+    /// Cloned from `AppState` — same underlying map across all agents;
+    /// the two accounting points record into one shared view.
+    pub usage_stats: crate::usage_stats::UsageStats,
     /// Pending profile-reset cell: the tagma's apply handler writes a
     /// [`ProfileReset`](crate::failover::ProfileReset) here; the agent task drains it at the top of
     /// [`run_and_report`] and rebuilds its failover state + client. Shared

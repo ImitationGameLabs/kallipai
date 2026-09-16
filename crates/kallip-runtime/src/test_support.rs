@@ -152,6 +152,7 @@ pub(crate) async fn ctx_from_source(
         wait_notify: Arc::new(tokio::sync::Notify::new()),
         wait_armed_secs: 0,
         token_budget: TokenBudget::new(1_000_000, 0),
+        usage_stats: crate::usage_stats::UsageStats::default(),
         pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
         message_puller: None,
         persist_failures: Default::default(),

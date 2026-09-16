@@ -687,6 +687,7 @@ fn with_limits_sets_max_agents() {
         5,
         make_profile_bundle(),
         PolicyPreset::Default,
+        kallip_runtime::usage_stats::UsageStats::default(),
         kallip_runtime::token_budget::TokenBudget::unlimited(),
         None,
     );

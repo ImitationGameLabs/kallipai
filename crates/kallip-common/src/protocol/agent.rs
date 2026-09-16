@@ -345,6 +345,31 @@ pub struct ActiveProfile {
     pub model: String,
 }
 
+/// One agent's single-launch token usage: in-memory counters scoped to the
+/// tagma process lifetime. The hit rate is computed server-side; clients
+/// consume it rather than re-deriving it from the raw counts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentUsageStats {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_read_tokens: u64,
+    /// `cache_read_tokens / prompt_tokens`; 0.0 when no prompt tokens were
+    /// recorded.
+    pub cache_hit_rate: f64,
+}
+
+/// Tagma-wide single-launch usage totals: sums over every recorded agent.
+/// The hit rate divides total cache reads by total prompt tokens (sum
+/// first, then divide — never an average of per-agent ratios).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagmaUsageTotals {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_read_tokens: u64,
+    /// See [`AgentUsageStats::cache_hit_rate`]; computed from the sums.
+    pub cache_hit_rate: f64,
+}
+
 /// Combined agent status: lifecycle state + context usage + recent retry history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStatusResponse {
@@ -373,6 +398,14 @@ pub struct AgentStatusResponse {
     /// predate the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<ActiveProfile>,
+    /// This agent's single-launch token usage; see [`AgentUsageStats`]. Absent
+    /// on responses from tagma versions that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AgentUsageStats>,
+    /// Tagma-wide single-launch totals; see [`TagmaUsageTotals`]. Absent on
+    /// responses from tagma versions that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_totals: Option<TagmaUsageTotals>,
 }
 
 /// The input modality a model profile accepts or a file attachment carries.
@@ -666,5 +699,49 @@ mod tests {
         assert!(json.contains("\"state_since\":1700000000"));
         let back: super::AgentSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.state_since, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn agent_status_usage_fields_wire_compat() {
+        // Pre-field responses parse with both usage levels absent and
+        // reserialize without the keys; responses carrying them round-trip
+        // with the server-computed hit rates intact.
+        let base = r#"{"state":"idle","context":{"pinned_items":[],
+            "turn_count":0,"turn_tokens":0,"last_prompt_tokens":null},
+            "recent_retries":[],"token_budget":1000,"token_consumed":0}"#;
+        let old: super::AgentStatusResponse = serde_json::from_str(base).unwrap();
+        assert!(old.usage.is_none());
+        assert!(old.usage_totals.is_none());
+        let old_line = serde_json::to_string(&old).unwrap();
+        assert!(!old_line.contains("\"usage\":"));
+        assert!(!old_line.contains("\"usage_totals\""));
+
+        let with_usage = r#"{"state":"idle","context":{"pinned_items":[],
+            "turn_count":0,"turn_tokens":0,"last_prompt_tokens":null},
+            "recent_retries":[],"token_budget":1000,"token_consumed":0,
+            "usage":{"prompt_tokens":900,"completion_tokens":10,
+            "cache_read_tokens":810,"cache_hit_rate":0.9},
+            "usage_totals":{"prompt_tokens":1000,"completion_tokens":12,
+            "cache_read_tokens":890,"cache_hit_rate":0.89}}"#;
+        let parsed: super::AgentStatusResponse = serde_json::from_str(with_usage).unwrap();
+        let usage = parsed.usage.as_ref().unwrap();
+        assert_eq!(usage.prompt_tokens, 900);
+        assert_eq!(usage.cache_read_tokens, 810);
+        assert!((usage.cache_hit_rate - 0.9).abs() < 1e-9);
+        assert_eq!(parsed.usage_totals.as_ref().unwrap().cache_read_tokens, 890);
+
+        let line = serde_json::to_string(&parsed).unwrap();
+        assert!(line.contains("\"usage\":"));
+        assert!(line.contains("\"cache_hit_rate\":0.9"));
+        assert!(line.contains("\"cache_hit_rate\":0.89"));
+        let back: super::AgentStatusResponse = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            back.usage.as_ref().unwrap().cache_hit_rate,
+            usage.cache_hit_rate
+        );
+        assert_eq!(
+            back.usage_totals.as_ref().unwrap().cache_read_tokens,
+            parsed.usage_totals.as_ref().unwrap().cache_read_tokens,
+        );
     }
 }

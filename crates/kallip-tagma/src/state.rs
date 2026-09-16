@@ -202,6 +202,9 @@ pub struct AppState {
     pub prompt_queue_size: usize,
     /// Tagma-wide token budget shared by all agents.
     pub token_budget: kallip_runtime::token_budget::TokenBudget,
+    /// Per-agent, single-launch token usage shared process-wide. In-memory
+    /// only (resets at boot); cloned into every spawned agent's context.
+    pub usage_stats: kallip_runtime::usage_stats::UsageStats,
     /// Profile registry loaded once at startup (config file or implicit env profile).
     /// Shared so the pre-built backends survive across agents.
     pub profiles: Arc<ArcSwap<ProfileBundle>>,
@@ -688,6 +691,7 @@ impl AppState {
             5,
             profiles,
             preset,
+            kallip_runtime::usage_stats::UsageStats::default(),
             kallip_runtime::token_budget::TokenBudget::unlimited(),
             None,
         )
@@ -702,6 +706,7 @@ impl AppState {
         prompt_queue_size: usize,
         profiles: Arc<ArcSwap<ProfileBundle>>,
         preset: PolicyPreset,
+        usage_stats: kallip_runtime::usage_stats::UsageStats,
         token_budget: kallip_runtime::token_budget::TokenBudget,
         files_token: Option<String>,
     ) -> Self {
@@ -716,6 +721,7 @@ impl AppState {
             max_agents,
             max_subagents,
             prompt_queue_size,
+            usage_stats,
             token_budget,
             files_token,
             profiles,

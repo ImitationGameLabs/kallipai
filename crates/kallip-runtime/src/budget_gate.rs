@@ -87,6 +87,9 @@ pub(crate) async fn enforce_post_stream_budget(
         ctx.store.lock().await.accumulate_usage(usage);
         ctx.token_budget
             .record_usage(usage.prompt_tokens as u64, usage.completion_tokens as u64);
+        if let Some(agent_id) = ctx.config.agent_id.as_ref() {
+            ctx.usage_stats.record(agent_id, usage);
+        }
     }
 
     // Reload budget — the operator may have increased it via API mid-round.

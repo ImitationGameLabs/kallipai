@@ -190,6 +190,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     let summarizer = ContextSummarizer::new(args.config.summary_max_tokens);
 
     let token_budget = args.shared_state.token_budget.clone();
+    let usage_stats = args.shared_state.usage_stats.clone();
 
     let pending_profile_reset = Arc::new(std::sync::Mutex::new(None));
     // The active-profile snapshot cell: created here so both holders share
@@ -242,6 +243,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         wait_notify: Arc::new(tokio::sync::Notify::new()),
         wait_armed_secs: 0,
         token_budget: token_budget.clone(),
+        usage_stats: usage_stats.clone(),
         pending_profile_reset: pending_profile_reset.clone(),
         message_puller,
         persist_failures: Default::default(),

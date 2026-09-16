@@ -2184,6 +2184,7 @@ mod tests {
                 5,
                 profiles,
                 PolicyPreset::Default,
+                kallip_runtime::usage_stats::UsageStats::default(),
                 kallip_runtime::token_budget::TokenBudget::unlimited(),
                 None,
             ));

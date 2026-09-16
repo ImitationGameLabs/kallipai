@@ -29,6 +29,7 @@ mod text_slice;
 pub mod token_budget;
 pub(crate) mod tool_execution;
 pub mod tools;
+pub mod usage_stats;
 
 // Re-exported so the tagma (another crate) can construct `AgentContext.failover` and share
 // its profile-snapshot cell. The failover-chain accessors stay `pub(crate)` — only the

@@ -170,6 +170,7 @@ async fn run(args: Args) -> Result<()> {
         args.prompt_queue_size,
         profiles,
         kallip_runtime::config::policy_preset_from_env(),
+        kallip_runtime::usage_stats::UsageStats::default(),
         token_budget,
         files_token,
     ));
