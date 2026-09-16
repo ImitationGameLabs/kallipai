@@ -18,6 +18,7 @@
     tagma_status_budget,
     tagma_status_root,
     tagma_status_waiting,
+    tagma_status_unlimited,
   } from "../paraglide/messages.js";
 
   let {
@@ -64,16 +65,22 @@
         >
         <span class="flex-1"></span>
         <span class="text-sm opacity-60">{tagma_status_budget()}</span>
-        <div class="h-1.5 w-20 rounded-full bg-surface-400-600 overflow-hidden">
+        {#if !budget.tokenBudgetUnlimited}
           <div
-            class="h-full rounded-full bg-primary-500 transition-[width] duration-500"
-            style="width: {budgetPct}%"
-          ></div>
-        </div>
+            class="h-1.5 w-20 rounded-full bg-surface-400-600 overflow-hidden"
+          >
+            <div
+              class="h-full rounded-full bg-primary-500 transition-[width] duration-500"
+              style="width: {budgetPct}%"
+            ></div>
+          </div>
+        {/if}
         <span class="tabular-nums whitespace-nowrap text-sm">
           {formatTokenCount(budget.tokenConsumed)}
           /
-          {formatTokenCount(budget.tokenBudget)}
+          {budget.tokenBudgetUnlimited
+            ? tagma_status_unlimited()
+            : formatTokenCount(budget.tokenBudget)}
         </span>
       {:else}
         <span

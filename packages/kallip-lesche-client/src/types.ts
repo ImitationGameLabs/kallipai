@@ -246,6 +246,9 @@ export type LescheEvent =
       readonly subagents_active: number;
       readonly token_budget: number;
       readonly token_consumed: number;
+      // Unlimited budget (enforcement off, consumption still tracked);
+      // absent from older tagmas (serde default false).
+      readonly token_budget_unlimited?: boolean;
     }
   | {
       readonly type: "tagma_signal";

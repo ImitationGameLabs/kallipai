@@ -15,6 +15,7 @@ import {
   tagma_presence_checking,
   tagma_presence_offline,
   tagma_presence_online,
+  tagma_status_unlimited,
   tagmata_expired_badge,
 } from "../paraglide/messages.js";
 /** Liveness of an enrolled tagma, as shown by the dashboard dot. `checking`
@@ -53,6 +54,9 @@ export interface TagmaStatusSummary {
   readonly tokenBudget: number;
   /** Cumulative tokens consumed against the budget. */
   readonly tokenConsumed: number;
+  /** Budget is unlimited (enforcement off): render the denominator as
+   * the localized "Unlimited" label instead of a number. */
+  readonly tokenBudgetUnlimited: boolean;
 }
 
 /** Props for one enrolled-tagma card (`GET /v1/lesche/tagmata` row). */
@@ -238,7 +242,9 @@ export function formatTagmaStatusLine(s: TagmaStatusSummary): string {
       : shell_status_agents_other({ count: active, total });
   const tokens = shell_status_tokens({
     consumed: formatTokenCount(s.tokenConsumed),
-    total: formatTokenCount(s.tokenBudget),
+    total: s.tokenBudgetUnlimited
+      ? tagma_status_unlimited()
+      : formatTokenCount(s.tokenBudget),
   });
   return `${agents} · ${tokens}`;
 }

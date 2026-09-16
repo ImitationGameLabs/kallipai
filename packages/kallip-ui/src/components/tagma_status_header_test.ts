@@ -56,3 +56,16 @@ Deno.test(
     assert(!header.includes("<AgentDrawerList"));
   },
 );
+
+Deno.test(
+  "the budget numbers render the localized label when unlimited",
+  { permissions: { read: [HEADER] } },
+  () => {
+    const src = source(HEADER);
+    // The shared budgetNumbers snippet swaps the denominator for the
+    // localized Unlimited label; the track's budgetPct degrades to 0
+    // on its own (budget is 0 while unlimited), so no fill shows.
+    assert(src.includes("s.tokenBudgetUnlimited"));
+    assert(src.includes("? tagma_status_unlimited()"));
+  },
+);

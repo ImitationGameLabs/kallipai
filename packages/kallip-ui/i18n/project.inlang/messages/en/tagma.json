@@ -22,6 +22,7 @@
   "tagma_status_root": "root",
   "tagma_status_subagents": "subagents",
   "tagma_status_budget": "budget",
+  "tagma_status_unlimited": "Unlimited",
   "tagma_status_active_total": "active / total",
   "tagma_status_waiting": "waiting…",
   "tagma_status_more": "+{count} more",

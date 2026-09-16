@@ -24,6 +24,7 @@
     tagma_status_aria,
     tagma_status_budget,
     tagma_status_more,
+    tagma_status_unlimited,
   } from "../paraglide/messages.js";
 
   let {
@@ -130,15 +131,19 @@
       title={tagma_status_budget()}
       aria-label={tagma_status_budget()}
     >
-      <progress
-        class="progress h-1.5 w-16"
-        value={budget.tokenConsumed}
-        max={budget.tokenBudget || 1}
-      ></progress>
+      {#if !budget.tokenBudgetUnlimited}
+        <progress
+          class="progress h-1.5 w-16"
+          value={budget.tokenConsumed}
+          max={budget.tokenBudget || 1}
+        ></progress>
+      {/if}
       <span class="tabular-nums whitespace-nowrap text-sm">
         {formatTokenCount(budget.tokenConsumed)}
         /
-        {formatTokenCount(budget.tokenBudget)}
+        {budget.tokenBudgetUnlimited
+          ? tagma_status_unlimited()
+          : formatTokenCount(budget.tokenBudget)}
       </span>
     </div>
   {/if}

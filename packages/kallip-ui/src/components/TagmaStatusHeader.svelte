@@ -45,6 +45,7 @@
     tagma_status_budget,
     tagma_status_layout_toggle,
     tagma_status_subagents,
+    tagma_status_unlimited,
     tagma_status_waiting,
   } from "../paraglide/messages.js";
   import TagmaAgentRows from "./TagmaAgentRows.svelte";
@@ -115,7 +116,9 @@
 
 {#snippet budgetNumbers(s: TagmaStatusSummary)}
   <span class="tabular-nums whitespace-nowrap text-base">
-    {formatTokenCount(s.tokenConsumed)} / {formatTokenCount(s.tokenBudget)}
+    {formatTokenCount(s.tokenConsumed)} / {s.tokenBudgetUnlimited
+      ? tagma_status_unlimited()
+      : formatTokenCount(s.tokenBudget)}
   </span>
 {/snippet}
 

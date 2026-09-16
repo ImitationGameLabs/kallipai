@@ -316,6 +316,7 @@ Deno.test(
       subagentsActive: 1,
       tokenBudget: 50_000,
       tokenConsumed: 12_345,
+      tokenBudgetUnlimited: false,
     });
     assertEquals(statusCardStore.summary?.tokenConsumed, 12_345);
     assertEquals(statusCardStore.summary?.subagentsActive, 1);
@@ -328,7 +329,9 @@ Deno.test(
       subagentsActive: 0,
       tokenBudget: 50_000,
       tokenConsumed: 0,
+      tokenBudgetUnlimited: true,
     });
+    assertEquals(statusCardStore.summary?.tokenBudgetUnlimited, true);
     // detach() clears every cached value, the mirror included.
     statusCardStore.detach();
     assertEquals(statusCardStore.summary, undefined);

@@ -431,6 +431,7 @@ class RealtimeStore {
           subagentsActive: ev.subagents_active,
           tokenBudget: ev.token_budget,
           tokenConsumed: ev.token_consumed,
+          tokenBudgetUnlimited: ev.token_budget_unlimited ?? false,
         });
         this.statusSink?.(ev.tagma_id, this.status.get(ev.tagma_id));
         break;

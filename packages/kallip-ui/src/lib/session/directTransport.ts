@@ -41,6 +41,9 @@ export interface DirectStatusPayload {
   readonly subagents_active: number;
   readonly token_budget: number;
   readonly token_consumed: number;
+  // Unlimited budget (enforcement off, consumption still tracked); absent
+  // from older tagmas (serde default false).
+  readonly token_budget_unlimited?: boolean;
 }
 
 /** The `authored` SSE data payload: the sender paired with the content reply
@@ -69,6 +72,7 @@ function toSummary(p: DirectStatusPayload): TagmaStatusSummary {
     subagentsActive: p.subagents_active,
     tokenBudget: p.token_budget,
     tokenConsumed: p.token_consumed,
+    tokenBudgetUnlimited: p.token_budget_unlimited ?? false,
   };
 }
 

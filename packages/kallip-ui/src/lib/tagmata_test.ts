@@ -24,8 +24,26 @@ Deno.test(
         subagentsActive: 1,
         tokenBudget: 50_000,
         tokenConsumed: 12_345,
+        tokenBudgetUnlimited: false,
       }),
       "2/4 agents · 12.3k/50k tokens",
+    );
+  },
+);
+
+Deno.test(
+  "formatTagmaStatusLine: unlimited budget renders the localized label",
+  () => {
+    assertEquals(
+      formatTagmaStatusLine({
+        rootState: "idle",
+        subagentsTotal: 0,
+        subagentsActive: 0,
+        tokenBudget: 0,
+        tokenConsumed: 12_345,
+        tokenBudgetUnlimited: true,
+      }),
+      "0/1 agent · 12.3k/Unlimited tokens",
     );
   },
 );

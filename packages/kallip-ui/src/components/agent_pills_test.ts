@@ -67,6 +67,10 @@ Deno.test(
     assert(src.includes('class="flex items-center gap-1.5 shrink-0"'));
     assert(src.includes('class="progress h-1.5'));
     assert(src.includes("formatTokenCount(budget.tokenConsumed)"));
+    // Unlimited budget: the native progress is gated off (the BudgetBar
+    // unlimited precedent) and the denominator is the localized label.
+    assert(src.includes("{#if !budget.tokenBudgetUnlimited}"));
+    assert(src.includes("? tagma_status_unlimited()"));
   },
 );
 
@@ -88,6 +92,10 @@ Deno.test(
     // The summary line mirrors the status line aggregation.
     assert(src.includes('budget.rootState === "busy"'));
     assert(src.includes("tagma_status_waiting()"));
+    // Unlimited budget: the fill track is gated off and the denominator
+    // renders the localized label (BudgetBar unlimited precedent).
+    assert(src.includes("{#if !budget.tokenBudgetUnlimited}"));
+    assert(src.includes("? tagma_status_unlimited()"));
   },
 );
 

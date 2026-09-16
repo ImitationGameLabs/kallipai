@@ -144,7 +144,7 @@ const signal = (ev: SignalEvent): { event: string; data: string } => ({
   data: JSON.stringify(ev),
 });
 
-const status = (): { event: string; data: string } => ({
+const status = (unlimited?: boolean): { event: string; data: string } => ({
   event: "status",
   data: JSON.stringify({
     root_state: "idle",
@@ -152,8 +152,27 @@ const status = (): { event: string; data: string } => ({
     subagents_active: 0,
     token_budget: 0,
     token_consumed: 0,
+    // Absent when unset (the serde skip_serializing_if shape): the
+    // plain fixture exercises the ?? false default path.
+    ...(unlimited === undefined ? {} : { token_budget_unlimited: unlimited }),
   }),
 });
+
+Deno.test(
+  "DirectTransport maps the unlimited flag through the status drain",
+  async () => {
+    const t = new DirectTransport(
+      fakeClient([status(true)]),
+      "root",
+      localSender,
+    );
+    const [statuses] = await Promise.all([collectN(t.status(), 1)]);
+    t.close();
+    // The unlimited flag survives the snake_case -> camelCase mapping;
+    // the plain fixture above (field absent) covers the default path.
+    assertEquals(statuses[0]!.tokenBudgetUnlimited, true);
+  },
+);
 
 // --- DirectTransport ---
 
@@ -194,6 +213,7 @@ Deno.test(
     // not dropped: the chat header reads it off the conversation.
     assertEquals(statuses.length, 1);
     assertEquals(statuses[0]!.rootState, "idle");
+    assertEquals(statuses[0]!.tokenBudgetUnlimited, false);
   },
 );
 
