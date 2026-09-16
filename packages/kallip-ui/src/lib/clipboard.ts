@@ -28,7 +28,19 @@ function legacyCopy(text: string): boolean {
   area.style.position = "fixed";
   area.style.left = "-9999px";
   area.style.opacity = "0";
-  document.body.appendChild(area);
+  // A modal dialog's focus trap listens for focusin in the capture phase
+  // and refocuses the dialog inside area.focus() when focus lands outside
+  // its container, so a body-mounted textarea ends up unfocused and
+  // execCommand("copy") fails. Mounting inside the open dialog keeps the
+  // focus contained; body remains the mount point everywhere else.
+  const active = document.activeElement;
+  const scope =
+    (active instanceof Element
+      ? active.closest("[role='dialog'], dialog")
+      : null) ??
+    document.querySelector("[role='dialog'], dialog") ??
+    document.body;
+  scope.appendChild(area);
   area.focus();
   area.select();
   let copied = false;

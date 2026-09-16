@@ -444,7 +444,7 @@
                 >
                 <button
                   type="button"
-                  class="btn btn-sm preset-tonal-surface"
+                  class="btn min-w-24 preset-outlined-primary-500 hover:preset-filled-primary-500"
                   onclick={() => void copy()}
                 >
                   {copied ? common_copied() : common_copy()}
