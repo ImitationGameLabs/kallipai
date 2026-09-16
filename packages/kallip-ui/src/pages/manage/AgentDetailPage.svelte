@@ -1,6 +1,7 @@
 <script lang="ts">
   import type {
     AgentStatusResponse,
+    AgentUsageStats,
     ProfileConfig,
     WireAgentManagementSummary,
   } from "@kallipai/kallip-client";
@@ -145,6 +146,15 @@
     return null;
   });
 
+  // Rendered even when the tagma reports no usage yet (nothing
+  // recorded, or an older tagma without the field): zeros read as
+  // "no records" — the same convention as the numeric counters beside it.
+  const noUsage: AgentUsageStats = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    cache_read_tokens: 0,
+    cache_hit_rate: 0,
+  };
   function updateRow(
     fn: (a: WireAgentManagementSummary) => WireAgentManagementSummary,
   ): void {
@@ -346,9 +356,7 @@
 
     {#if status}
       <AgentStatusCard {status} {windowTokens} {contextWindow} />
-      {#if status.usage}
-        <AgentUsageCard usage={status.usage} />
-      {/if}
+      <AgentUsageCard usage={status.usage ?? noUsage} />
       {#if status.recent_retries.length > 0}
         <RetryListCard {status} />
       {/if}

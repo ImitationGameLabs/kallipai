@@ -24,6 +24,7 @@
     manage_overview_profiles_link,
     manage_overview_schedules_link,
     manage_overview_usage_heading,
+    manage_overview_usage_prompt_tokens,
     manage_overview_usage_cache_read,
     manage_overview_usage_hit_rate,
     manage_overview_usage_scope_hint,
@@ -143,6 +144,11 @@
         </h2>
         {#if usageStore.totals}
           <div class="text-sm space-y-1">
+            <div>
+              {manage_overview_usage_prompt_tokens({
+                count: formatTokenCount(usageStore.totals.prompt_tokens),
+              })}
+            </div>
             <div>
               {manage_overview_usage_cache_read({
                 count: formatTokenCount(usageStore.totals.cache_read_tokens),

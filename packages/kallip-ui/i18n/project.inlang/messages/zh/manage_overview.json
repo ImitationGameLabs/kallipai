@@ -12,6 +12,7 @@
   "manage_overview_profiles_link": "模型配置 →",
   "manage_overview_schedules_link": "日程管理 →",
   "manage_overview_usage_heading": "Token 用量",
+  "manage_overview_usage_prompt_tokens": "累计输入（全部智能体）：{count}",
   "manage_overview_usage_cache_read": "缓存读取（全部智能体）：{count}",
   "manage_overview_usage_hit_rate": "缓存命中率（全部智能体）：{rate}%",
   "manage_overview_usage_scope_hint": "计数自 tagma 进程启动起累计"
