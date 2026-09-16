@@ -120,7 +120,9 @@
         </Tabs>
 
         <div class="flex justify-end">
-          <Dialog.CloseTrigger class="btn btn-sm preset-tonal-surface">
+          <Dialog.CloseTrigger
+            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+          >
             {common_done()}
           </Dialog.CloseTrigger>
         </div>

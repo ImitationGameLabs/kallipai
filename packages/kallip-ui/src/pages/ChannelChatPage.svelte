@@ -298,7 +298,7 @@
             <p class="text-sm opacity-80">{chat_opening()}</p>
             <button
               type="button"
-              class="btn preset-tonal-surface self-center"
+              class="btn preset-outlined-surface-500 hover:preset-filled-surface-500 self-center"
               onclick={() => navigate("/tagmata")}
             >
               {chat_go_tagmata()}

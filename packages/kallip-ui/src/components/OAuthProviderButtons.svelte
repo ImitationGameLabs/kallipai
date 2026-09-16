@@ -44,7 +44,7 @@
     {#each providers as p (p.id)}
       <button
         type="button"
-        class="btn btn-sm preset-tonal-surface w-full"
+        class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500 w-full"
         onclick={() => begin(p.id)}
       >
         {auth_continue_with({ label: p.label })}

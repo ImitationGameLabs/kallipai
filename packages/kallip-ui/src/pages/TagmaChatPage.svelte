@@ -73,7 +73,7 @@
           <p class="text-sm opacity-80">{tagma_chat_not_enrolled()}</p>
           <button
             type="button"
-            class="btn preset-tonal-surface self-center"
+            class="btn preset-outlined-surface-500 hover:preset-filled-surface-500 self-center"
             onclick={() => navigate("/tagmata")}
           >
             {chat_go_tagmata()}
@@ -92,7 +92,7 @@
           </p>
           <button
             type="button"
-            class="btn btn-sm preset-tonal-surface"
+            class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
             onclick={() => channelsStore.retryTagma(tagmaId)}
           >
             {common_retry()}
@@ -115,7 +115,7 @@
           </p>
           <button
             type="button"
-            class="btn preset-tonal-surface self-center"
+            class="btn preset-outlined-primary-500 hover:preset-filled-primary-500 self-center"
             onclick={() => channelsStore.retryTagma(tagmaId)}
           >
             {common_retry()}
@@ -129,7 +129,7 @@
           <p class="text-sm opacity-60">{chat_opening()}</p>
           <button
             type="button"
-            class="btn preset-tonal-surface self-center"
+            class="btn preset-outlined-surface-500 hover:preset-filled-surface-500 self-center"
             onclick={() => navigate("/tagmata")}
           >
             {chat_go_tagmata()}

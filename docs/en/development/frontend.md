@@ -213,6 +213,18 @@ resolved version from its output or `deno.lock`. Do not use `npm view` /
 (without it Deno resolves JSR and writes to `deno.json`); add `-D` for
 devDependencies. Do not use `npm install` / `npm i`.
 
+### Styling presets
+
+Interactive elements use outlined-at-rest presets with a filled hover
+(`preset-outlined-{color}-500 hover:preset-filled-{color}-500`). Two blessed
+exceptions keep tonal at rest with a filled hover: the shared icon-button
+family (`TONAL_ICON_*` in `packages/kallip-ui/src/lib/classes.ts`) and
+inactive nav items (`NavLink`, `MobileShell`). Segmented toggles and tabs
+mark the selected state with a filled preset (`preset-filled-primary-200-800`
+or `-500`) and leave the unselected state `preset-tonal-surface`. Elsewhere
+`preset-tonal-*` is for static surfaces only (cards, badges, menu and dialog
+containers, chat bubbles) -- never a bare button.
+
 ### If a workflow isn't covered
 
 Add a script to the root `package.json` `scripts` (or the relevant package's)

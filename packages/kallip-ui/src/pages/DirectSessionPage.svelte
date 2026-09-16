@@ -152,7 +152,7 @@
           <div class="flex justify-center py-4">
             <button
               type="button"
-              class="btn btn-sm preset-tonal-surface"
+              class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
               onclick={() => {
                 phase = "loading";
                 void refresh().catch(() => {

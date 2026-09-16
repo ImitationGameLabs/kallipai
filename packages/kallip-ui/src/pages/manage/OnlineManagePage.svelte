@@ -134,7 +134,7 @@
           </p>
           <button
             type="button"
-            class="btn preset-tonal-surface self-center"
+            class="btn preset-outlined-primary-500 hover:preset-filled-primary-500 self-center"
             onclick={() => channelsStore.retryTagma(tagmaId)}
           >
             {common_retry()}

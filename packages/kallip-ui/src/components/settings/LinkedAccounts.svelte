@@ -110,7 +110,7 @@
             </span>
             <button
               type="button"
-              class="btn btn-sm preset-tonal-surface shrink-0"
+              class="btn btn-sm preset-outlined-error-500 hover:preset-filled-error-500 shrink-0"
               disabled={busy}
               onclick={() => unlink(ident.id)}>{settings_unlink()}</button
             >
@@ -130,7 +130,7 @@
         {#each linkable as p (p.id)}
           <button
             type="button"
-            class="btn btn-sm preset-tonal-surface"
+            class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
             disabled={busy}
             onclick={() => link(p.id)}
             >{settings_link_provider({ provider: p.label })}</button

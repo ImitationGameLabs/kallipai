@@ -57,7 +57,7 @@
       <InfoBadge text={settings_provider_intro()} />
     </div>
     <button
-      class="btn btn-sm preset-tonal-surface"
+      class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
       onclick={() => (formOpen = !formOpen)}
     >
       {formOpen ? "–" : settings_provider_add()}

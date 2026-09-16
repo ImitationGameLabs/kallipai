@@ -102,7 +102,10 @@
         {settings_pair_expires({ seconds: remaining })}
       </div>
     </div>
-    <button class="btn btn-sm preset-tonal-surface" onclick={copy}>
+    <button
+      class="btn min-w-24 preset-outlined-primary-500 hover:preset-filled-primary-500"
+      onclick={copy}
+    >
       {copied ? common_copied() : settings_copy_code()}
     </button>
   </div>

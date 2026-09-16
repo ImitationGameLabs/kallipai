@@ -181,7 +181,7 @@
         ></video>
         <button
           type="button"
-          class="btn btn-sm preset-tonal-surface"
+          class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
           onclick={stopScan}>{pair_cancel_scan()}</button
         >
         {#if scanError}

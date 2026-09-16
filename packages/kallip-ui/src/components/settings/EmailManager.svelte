@@ -159,7 +159,7 @@
               {#if !e.is_primary && e.verified_at}
                 <button
                   type="button"
-                  class="btn btn-sm preset-tonal-surface"
+                  class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
                   disabled={busy}
                   onclick={() => makePrimary(e)}
                   >{settings_email_make_primary()}</button
@@ -167,7 +167,7 @@
               {/if}
               <button
                 type="button"
-                class="btn btn-sm preset-tonal-surface"
+                class="btn btn-sm preset-outlined-error-500 hover:preset-filled-error-500"
                 disabled={busy}
                 onclick={() => remove(e)}>{common_remove()}</button
               >
@@ -234,7 +234,7 @@
         />
         <button
           type="submit"
-          class="btn preset-tonal-surface shrink-0"
+          class="btn preset-outlined-primary-500 hover:preset-filled-primary-500 shrink-0"
           disabled={busy || !token.trim()}>{common_verify()}</button
         >
       </form>

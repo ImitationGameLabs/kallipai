@@ -81,11 +81,14 @@
         bind:value={draft}
         onkeydown={(e) => e.key === "Enter" && saveRename()}
       />
-      <button class="btn btn-sm preset-tonal-surface" onclick={saveRename}>
+      <button
+        class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
+        onclick={saveRename}
+      >
         {common_save()}
       </button>
       <button
-        class="btn btn-sm preset-tonal-surface"
+        class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
         onclick={() => (editing = false)}>{common_cancel()}</button
       >
     </div>
@@ -121,8 +124,9 @@
         </div>
       </div>
       <div class="flex gap-2">
-        <button class="btn btn-sm preset-tonal-surface" onclick={beginRename}
-          >{common_rename()}</button
+        <button
+          class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+          onclick={beginRename}>{common_rename()}</button
         >
         {#if confirming}
           <button
@@ -130,12 +134,12 @@
             onclick={confirmRevoke}>{settings_confirm_remove()}</button
           >
           <button
-            class="btn btn-sm preset-tonal-surface"
+            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
             onclick={() => (confirming = false)}>{common_cancel()}</button
           >
         {:else}
           <button
-            class="btn btn-sm preset-tonal-surface"
+            class="btn btn-sm preset-outlined-error-500 hover:preset-filled-error-500"
             onclick={() => {
               revokeError = null;
               confirming = true;
