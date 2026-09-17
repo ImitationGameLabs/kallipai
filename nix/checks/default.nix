@@ -99,10 +99,10 @@ in
   # );
 
   # The NixOS module evaluation check moved verbatim to
-  # ./module-eval-check.nix (file split per operator 2026-09-17;
+  # ./module-eval.nix (file split per operator 2026-09-17;
   # the returned attrset is selected by the check's dynamic name).
   "${project}-nixos-module-eval" =
-    (import ./module-eval-check.nix {
+    (import ./module-eval.nix {
       inherit
         pkgs
         lib

@@ -42,7 +42,7 @@
             ]
         );
       };
-      kallipaiModule = import ./nixos-modules.nix {
+      kallipaiModule = import ../nixos-modules.nix {
         packages = stubPackages;
         aifedOverlay = aifed.overlays.default;
       };
@@ -115,7 +115,7 @@
       polisInstancesUnit =
         pkgs.writeText "kallip-instances-test"
           webDerived.config.systemd.units."kallip-instances.service".text;
-      inherit (import ./lib.nix) bakeRuntimeConfig;
+      inherit (import ../lib.nix) bakeRuntimeConfig;
       stubDist = stubPackages.${pkgs.stdenv.hostPlatform.system}."kallip-web-dist";
       # No runtime keys: the site root is the bundle itself.
       webPlain = evalHost {
@@ -194,33 +194,40 @@
       test "${toString (builtins.length aligned.config.warnings)}" = "0"
       test "${toString workspaceOnPath}" = "1"
       test "${toString aifedOnPath}" = "1"
+
       # The daemon unit rides the system path on PATH: bare-name
       # helper resolution depends on it (see daemonUnitFile).
       grep -q "${aligned.config.system.path}/bin" "${daemonUnitFile}"
+
       # The daemon socket literal lives in two places: the module
       # binding (unit env) and the client constant (the probe chain's
       # last leg). Pin both definition lines: editing either side
       # alone turns this check red.
-      grep -q 'daemonSocket = "/run/kallipai/daemon.sock";' "${./nixos-modules.nix}"
-      grep -q 'SYSTEM_DAEMON_SOCKET: &str = "/run/kallipai/daemon.sock";' "${../crates/daemon/kallip-daemon-common/src/socket.rs}"
+      grep -q 'daemonSocket = "/run/kallipai/daemon.sock";' "${../nixos-modules.nix}"
+      grep -q 'SYSTEM_DAEMON_SOCKET: &str = "/run/kallipai/daemon.sock";' "${../../crates/daemon/kallip-daemon-common/src/socket.rs}"
+
       # A drifted polis-only host stays warning-free: no drift warning
       # exists since the subdomain shape hides ports behind the edge.
       test "${toString (builtins.length (failedAssertions drifted))}" = "0"
       test "${toString (builtins.length drifted.config.warnings)}" = "0"
+
       # No runtime keys: the stub bundle passes straight through, shell
       # config.js and page sentinel both untouched.
       plain="${webPlain.config.services.kallipai.web.distWithRuntimeConfig}"
       test "$plain" = "${stubDist}"
       grep -q bundle-shell "$plain/config.js"
       grep -q bundle-page "$plain/index.html"
+
       # Custom runtime keys bake over the shell, user keys only; the
       # page sentinel still comes through.
       custom="${webCustom.config.services.kallipai.web.distWithRuntimeConfig}"
       grep -q '"offlineLogin":false' "$custom/config.js"
       grep -q '"domain":"kallipai.lan"' "$custom/config.js"
       grep -q bundle-page "$custom/index.html"
+
       # An unknown runtimeConfig key failed the evaluation itself.
       test "${toString bogusRejected}" = "1"
+
       # The domain knob drives the derived defaults; tls off flips the
       # scheme and the cookie; an explicit option beats the derivation.
       test "${webDerived.config.services.kallipai.polis.archeion.corsOrigins}" = "https://app.kallipai.com"
@@ -228,6 +235,7 @@
       test "${webTlsOff.config.services.kallipai.polis.archeion.corsOrigins}" = "http://app.kallipai.com"
       test "${webTlsOff.config.services.kallipai.polis.archeion.webauthnRpId}" = "kallipai.com"
       test "${webOverride.config.services.kallipai.polis.archeion.corsOrigins}" = "https://custom.example"
+
       # The derived defaults must reach the process env: the rp origin
       # names the web page (the passkey ceremony runs there and the
       # archeion admits exactly that origin), tls-on leaves the cookie
@@ -238,6 +246,7 @@
       test -z "$(grep KALLIP_ARCHEION_COOKIE_SECURE '${webDerivedUnit}')"
       grep -q 'KALLIP_ARCHEION_COOKIE_SECURE=false' '${webTlsOffUnit}'
       test "${lib.boolToString webOverride.config.services.kallipai.polis.archeion.cookieSecure}" = "false"
+
       # The gate-group handoff is single-tracked: the archeion unit runs
       # with the gate group as primary (systemd keeps the state tree
       # group-owned), consumers hold membership at the user layer, and
