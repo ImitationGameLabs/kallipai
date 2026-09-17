@@ -223,18 +223,18 @@
       test "${toString bogusRejected}" = "1"
       # The domain knob drives the derived defaults; tls off flips the
       # scheme and the cookie; an explicit option beats the derivation.
-      test "${webDerived.config.services.kallipai.polis.archeion.corsOrigins}" = "https://web.kallipai.com"
+      test "${webDerived.config.services.kallipai.polis.archeion.corsOrigins}" = "https://app.kallipai.com"
       test "${lib.boolToString webTlsOff.config.services.kallipai.polis.archeion.cookieSecure}" = "false"
-      test "${webTlsOff.config.services.kallipai.polis.archeion.corsOrigins}" = "http://web.kallipai.com"
+      test "${webTlsOff.config.services.kallipai.polis.archeion.corsOrigins}" = "http://app.kallipai.com"
       test "${webTlsOff.config.services.kallipai.polis.archeion.webauthnRpId}" = "kallipai.com"
       test "${webOverride.config.services.kallipai.polis.archeion.corsOrigins}" = "https://custom.example"
       # The derived defaults must reach the process env: the rp origin
       # names the web page (the passkey ceremony runs there and the
       # archeion admits exactly that origin), tls-on leaves the cookie
       # flag to the code default, and tls-off forces it non-Secure.
-      grep -q 'KALLIP_ARCHEION_WEBAUTHN_RP_ORIGIN=https://web.kallipai.com' '${webDerivedUnit}'
-      grep -q 'KALLIP_ARCHEION_CORS_ORIGINS=https://web.kallipai.com' '${webDerivedUnit}'
-      grep -q 'KALLIP_ARCHEION_OAUTH_REDIRECT_BASE=https://web.kallipai.com' '${webDerivedUnit}'
+      grep -q 'KALLIP_ARCHEION_WEBAUTHN_RP_ORIGIN=https://app.kallipai.com' '${webDerivedUnit}'
+      grep -q 'KALLIP_ARCHEION_CORS_ORIGINS=https://app.kallipai.com' '${webDerivedUnit}'
+      grep -q 'KALLIP_ARCHEION_OAUTH_REDIRECT_BASE=https://app.kallipai.com' '${webDerivedUnit}'
       test -z "$(grep KALLIP_ARCHEION_COOKIE_SECURE '${webDerivedUnit}')"
       grep -q 'KALLIP_ARCHEION_COOKIE_SECURE=false' '${webTlsOffUnit}'
       test "${lib.boolToString webOverride.config.services.kallipai.polis.archeion.cookieSecure}" = "false"
