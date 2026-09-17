@@ -33,29 +33,40 @@ pub(super) async fn relay_status(
     // is live, so presence is guaranteed present; a missing entry means the
     // tunnel is gone -- surface 404 rather than silently masking a routing
     // gap. Guard is dropped before any await (lock discipline).
-    let app_stream = {
+    let (app_stream, meaningful) = {
         // WRITE lock: the cache write mutates `latest_status` (lock discipline
         // discipline still holds -- no awaits inside this CS).
         let mut reg = state.write()?;
         let entry = reg
             .presence_by_tagma_mut(&tagma_id)
             .ok_or_else(|| ApiError::not_found("no live tunnel for tagma"))?;
-        // Unconditional cache write: the snapshot must land even with no live
-        // subscribers, or a reconnect's flush starts from the pre-gap value.
+        // Broadcast throttle: only meaningful transitions fan out to the
+        // owner's app stream (see
+        // `TagmaStatusPayload::meaningful_transition_from`); the cache
+        // write stays unconditional so `GET /tagmata/{id}/status` and
+        // the connect flush always serve the freshest relayed values.
+        let meaningful = payload.meaningful_transition_from(entry.last_broadcast_status.as_ref());
+        if meaningful {
+            entry.last_broadcast_status = Some(payload.clone());
+        }
+        // Unconditional cache write: the snapshot must land even with no
+        // live subscribers, or a reconnect's flush starts from the
+        // pre-gap value.
         entry.latest_status = Some(payload.clone());
         let owner = entry.owner.clone();
-        reg.app_stream(&owner)
+        (reg.app_stream(&owner), meaningful)
     };
 
     // Ordering: the cache write above completes before this fan-out (the
     // write guard drops at the end of the critical section). The connect
     // flush sends outside the lock, so a flush that read a pre-write
     // snapshot may land after this send and briefly bury the newer
-    // frame; the bury is bounded and transient -- the next pump
-    // snapshot supersedes it within one heartbeat (last-wins).
+    // frame; the bury is bounded and transient -- the next pump wake
+    // supersedes it (last-wins).
     // No live app stream -> silent drop (best-effort). Still 202 so the tagma
     // does not retry; the next periodic snapshot supersedes this one.
-    if let Some(stream) = app_stream
+    if meaningful
+        && let Some(stream) = app_stream
         && stream
             .deliver(LescheEvent::TagmaStatus {
                 tagma_id: tagma_id.clone(),

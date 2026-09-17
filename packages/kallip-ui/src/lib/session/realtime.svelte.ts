@@ -22,6 +22,7 @@ import {
   type LescheEvent,
   type Envelope,
   type SignalEvent,
+  type TagmaStatusPayload,
 } from "@kallipai/kallip-lesche-client";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import { reverifySession, type SessionVerifier } from "./realtimeReverify.ts";
@@ -167,6 +168,28 @@ class RealtimeStore {
    * Both the dashboard card and the channel-chat header read from here. */
   statusFor(tagmaId: string): TagmaStatusSummary | undefined {
     return this.status.get(tagmaId);
+  }
+
+  /** Ingest a wire status payload: both the `tagma_status` SSE case and
+   * the chat page's focus-refresh GET route here. Maps the snake_case wire
+   * fields to the camelCase internal shape at this single dispatch
+   * boundary, stores it, and fans to the sink. `null` (the GET's
+   * never-broadcast answer) is a no-op -- keep-last, never evict. */
+  ingestStatusSnapshot(
+    tagmaId: string,
+    payload: TagmaStatusPayload | null,
+  ): void {
+    if (payload === null) return;
+    const summary: TagmaStatusSummary = {
+      rootState: payload.root_state,
+      subagentsTotal: payload.subagents_total,
+      subagentsActive: payload.subagents_active,
+      tokenBudget: payload.token_budget,
+      tokenConsumed: payload.token_consumed,
+      tokenBudgetUnlimited: payload.token_budget_unlimited ?? false,
+    };
+    this.status.set(tagmaId, summary);
+    this.statusSink?.(tagmaId, summary);
   }
 
   /** True once presence has been resolved for this session -- either the first
@@ -425,15 +448,7 @@ class RealtimeStore {
       case "tagma_status":
         // Map the snake_case wire fields to the camelCase internal shape at
         // this single dispatch boundary, so consumers read idiomatic TS.
-        this.status.set(ev.tagma_id, {
-          rootState: ev.root_state,
-          subagentsTotal: ev.subagents_total,
-          subagentsActive: ev.subagents_active,
-          tokenBudget: ev.token_budget,
-          tokenConsumed: ev.token_consumed,
-          tokenBudgetUnlimited: ev.token_budget_unlimited ?? false,
-        });
-        this.statusSink?.(ev.tagma_id, this.status.get(ev.tagma_id));
+        this.ingestStatusSnapshot(ev.tagma_id, ev);
         break;
       case "tagma_signal":
         // A per-event runtime signal (busy/idle presence, turn terminals,

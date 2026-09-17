@@ -100,7 +100,7 @@ async fn me_events(
                 });
                 // Initial status flush: late-connecting clients get the latest
                 // cached snapshot immediately instead of waiting for the next
-                // pump heartbeat. Idempotent with the live fan (status.set).
+                // pump wake. Idempotent with the live fan (status.set).
                 if let Some(st) = &entry.latest_status {
                     initial.push(LescheEvent::TagmaStatus {
                         tagma_id: entry.tagma_id.clone(),
@@ -497,5 +497,86 @@ mod tests {
                 "ids must be dense and ascending across the burst"
             );
         }
+    }
+
+    /// The status fan's meaningful-transition throttle (end-to-end
+    /// through the me/events stream): a consumption-only drift updates
+    /// the presence cache but fans no frame; a meaningful transition
+    /// (active-subagent move) fans immediately.
+    #[tokio::test]
+    async fn relay_status_broadcasts_only_meaningful_transitions() {
+        let (state, _control) = make_state(60, std::time::Duration::from_secs(2));
+        let owner = user("owner");
+        let tagma = TagmaId::from("tagma-1".to_string());
+        let (_t_tx, _id) = seed_presence(&state, &tagma, owner.clone());
+        let sse = me_events(
+            State(state.clone()),
+            AuthPrincipal(Principal::User(owner.clone())),
+        )
+        .await
+        .expect("owner opens the app stream");
+        let mut stream = axum::response::IntoResponse::into_response(sse)
+            .into_body()
+            .into_data_stream();
+        let marker = read_frame(&mut stream).await;
+        let _ = parse_marker(&marker);
+        let online = read_frame(&mut stream).await;
+        assert!(online.contains("\"type\":\"tagma_online\""));
+
+        // First observation: always broadcast.
+        let base = TagmaStatusPayload {
+            root_state: AgentState::Busy,
+            subagents_total: 3,
+            subagents_active: 2,
+            token_budget: 50_000,
+            token_consumed: 100,
+            token_budget_unlimited: false,
+        };
+        crate::routes::status::relay_status(&state, tagma.clone(), base.clone())
+            .await
+            .expect("relay ok");
+        let first = read_frame(&mut stream).await;
+        assert!(
+            first.contains("\"type\":\"tagma_status\"") && first.contains("\"token_consumed\":100"),
+            "first observation must broadcast: {first:?}"
+        );
+
+        // Consumption-only drift: the cache refreshes, no frame fans.
+        let drift = TagmaStatusPayload {
+            token_consumed: 200,
+            ..base.clone()
+        };
+        crate::routes::status::relay_status(&state, tagma.clone(), drift)
+            .await
+            .expect("relay ok");
+        let cached = state
+            .read()
+            .unwrap()
+            .presence_by_tagma(&tagma)
+            .and_then(|e| e.latest_status.clone())
+            .expect("cache updated");
+        assert_eq!(cached.token_consumed, 200, "cache stays fresh");
+        let quiet = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            tokio_stream::StreamExt::next(&mut stream),
+        )
+        .await;
+        assert!(quiet.is_err(), "consumption drift must not broadcast");
+
+        // Meaningful transition: active-subagent move fans immediately.
+        let move_active = TagmaStatusPayload {
+            subagents_active: 3,
+            token_consumed: 300,
+            ..base
+        };
+        crate::routes::status::relay_status(&state, tagma, move_active)
+            .await
+            .expect("relay ok");
+        let second = read_frame(&mut stream).await;
+        assert!(
+            second.contains("\"type\":\"tagma_status\"")
+                && second.contains("\"subagents_active\":3"),
+            "meaningful transition must broadcast: {second:?}"
+        );
     }
 }

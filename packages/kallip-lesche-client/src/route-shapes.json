@@ -29,6 +29,7 @@
     ["GET", "/tagmata/{id}/budget"],
     ["ANY", "/tagmata/{id}/manage/{*path}"],
     ["GET", "/tagmata/{id}/state"],
+    ["GET", "/tagmata/{id}/status"],
     ["GET", "/tagmata/{id}/work-schedule"],
     ["GET", "/tagmata/{tagma_id}/rooms"],
     ["POST", "/tagmata/{tagma_id}/upstream"],

@@ -50,6 +50,7 @@ Deno.test(
       await projection.agents("t-a");
       await projection.budget("t-a");
       await projection.workSchedule("t-a");
+      await projection.status("t-a");
       for (const [verb, path] of seen) {
         if (verb === undefined || path === undefined) continue;
         if (!dialledRouteExists(verb, path)) {

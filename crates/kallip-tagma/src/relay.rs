@@ -247,6 +247,10 @@ struct Inner {
     /// Fallback tick cadence for the projection pump, in milliseconds
     /// (30000 in production; tests shorten it).
     projection_fallback_ms: std::sync::atomic::AtomicU64,
+    /// Fallback tick cadence for the status pump, in milliseconds. The
+    /// status pump is otherwise event-driven; the tick only bounds
+    /// staleness. Seeded from `STATUS_FALLBACK`.
+    status_fallback_ms: std::sync::atomic::AtomicU64,
     /// Retry cadence for the upstream flusher's retained snapshot events,
     /// in milliseconds (2000 in production; tests shorten it).
     flusher_retry_ms: std::sync::atomic::AtomicU64,
@@ -289,6 +293,9 @@ impl RelayHandle {
                 status_gate_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
                 projection_push_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 projection_fallback_ms: std::sync::atomic::AtomicU64::new(30_000),
+                status_fallback_ms: std::sync::atomic::AtomicU64::new(
+                    status_pump::STATUS_FALLBACK.as_millis() as u64,
+                ),
                 flusher_retry_ms: std::sync::atomic::AtomicU64::new(2_000),
                 dispatch: Mutex::new(tokio::task::JoinSet::new()),
                 state,

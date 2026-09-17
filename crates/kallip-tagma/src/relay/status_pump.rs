@@ -1,21 +1,22 @@
 //! The status pump: snapshots the tagma's aggregate runtime state (agent
-//! counts + token budget) on the 2 s ticker and on registry invalidations,
-//! and the upstream flusher serializes it to the lesche, which rebroadcasts
-//! it as a `LescheEvent::TagmaStatus` on the owner's app event stream.
-//! event stream. Unlike the event [`pump`](super::pump), it is bounded to the
-//! session (not the KEX epoch): status is plaintext and key-independent, so it
-//! needs none of the pump's drain-before-rotation semantics.
+//! counts + token budget) and publishes it onto the bus's status topic for
+//! the upstream flusher, which serializes it to the lesche. The pump is
+//! event-driven: it wakes on registry invalidations (roster and budget-limit
+//! mutations, plus the bridge's agent state-transition bumps) and on turn
+//! signals, coalesces bursts through a short debounce, and re-checks on a
+//! low-frequency fallback ticker as the staleness bound. Unlike the event
+//! [`pump`](super::pump), it is bounded to the session (not the KEX epoch):
+//! status is plaintext and key-independent, so it needs none of the pump's
+//! drain-before-rotation semantics.
 //!
 //! Status is a periodic full snapshot, not a delta log: a dropped frame just
-//! means slightly-stale data until the next tick, so there is no sequence
-//! tracking and no replay path.
-//! An unchanged snapshot is not re-published until FORCED_RESEND (30s)
-//! has elapsed since the last publish: the periodic full snapshot doubles
-//! as a catch-up heartbeat, because the lesche drops a frame with no live
-//! owner stream -- plain suppression would starve subscribers that
-//! connect after the last change.
+//! means slightly-stale data until the next wake, so there is no sequence
+//! tracking and no replay path. An unchanged snapshot is never re-published:
+//! the lesche caches every delivered snapshot and flushes it to a connecting
+//! subscriber, and `GET /tagmata/{id}/status` serves the cache on demand.
 
 use std::sync::Weak;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use kallip_common::protocol::AgentState;
@@ -25,35 +26,26 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::RelayHandle;
-use crate::bus::StatusSnapshot;
+use crate::bus::{SignalFrame, StatusSnapshot};
 use crate::pump_driver::{
     SnapshotPumpConfig, SnapshotPumpWakes, SnapshotSink, SnapshotSource, run_snapshot_pump,
 };
 use crate::state::AgentRegistry;
 
-/// The snapshot cadence. Source-tunable; not exposed as an env knob until an
-/// operator asks for it.
-const STATUS_INTERVAL: Duration = Duration::from_secs(2);
-/// How long an unchanged snapshot may stay silent. Upper bound on the
-/// catch-up window for a subscriber that connects after the last change:
-/// lesche acknowledges a frame even when it drops it (no live owner
-/// stream), so suppression alone would never re-arm a late subscriber.
-const FORCED_RESEND: Duration = Duration::from_secs(30);
+/// Coalesce bursts of wakes (a turn's signal and its state-flip bumps land
+/// together) into one capture. Implementation constant, not protocol.
+pub(crate) const STATUS_DEBOUNCE: Duration = Duration::from_secs(1);
+/// Fallback tick cadence for the status pumps: the staleness bound for
+/// both faces. Single source -- the relay seeds `status_fallback_ms`
+/// from this const.
+pub(crate) const STATUS_FALLBACK: Duration = Duration::from_secs(30);
 
 /// The suppression decision, factored out pure (the status family's
 /// differential policy — relay and direct instantiate it identically):
-/// publish when nothing has been published yet, when the payload changed,
-/// or when the last publish is older than FORCED_RESEND (the catch-up
-/// heartbeat). Keys on publish, not wire ack: the flusher owns retention.
-pub(crate) fn needs_post(
-    last: Option<(&TagmaStatusPayload, std::time::Instant)>,
-    payload: &TagmaStatusPayload,
-    now: std::time::Instant,
-) -> bool {
-    match last {
-        None => true,
-        Some((posted, at)) => posted != payload || now.duration_since(at) >= FORCED_RESEND,
-    }
+/// publish when nothing has been published yet or when the payload
+/// changed. Keys on publish, not wire ack: the flusher owns retention.
+pub(crate) fn needs_post(last: Option<&TagmaStatusPayload>, fresh: &TagmaStatusPayload) -> bool {
+    last != Some(fresh)
 }
 
 /// Build a status payload from the current registry + token budget. Pure
@@ -150,38 +142,46 @@ impl RelayHandle {
     }
 
     /// Snapshot total/active agent counts + the token budget: the driver loop
-    /// wakes on the 2 s ticker and on registry invalidations (roster and
-    /// budget-limit classes), gates by [`needs_post`] (unchanged suppression +
-    /// catch-up heartbeat), and publishes each fresh snapshot onto the bus
-    /// for the upstream flusher to drain.
+    /// wakes on registry invalidations (roster and budget-limit mutations,
+    /// plus the bridge's state-transition bumps) and on turn signals,
+    /// coalesces bursts through [`STATUS_DEBOUNCE`], re-checks on the
+    /// fallback ticker, gates by [`needs_post`] (unchanged suppression), and
+    /// publishes each fresh snapshot onto the bus for the upstream flusher
+    /// to drain.
     ///
     /// `Weak::upgrade() == None` (AppState dropped) ends the loop: the tagma
     /// is shutting down. The registry read-guard drops inside the capture,
     /// before the publish, so no `.await` is held under the lock (lock
-    /// discipline); `state_for_summary` and
-    /// `token_budget.snapshot` are lock-free (atomics).
+    /// discipline); capture is lock-free (atomics).
     async fn run_status_pump(self, cancel: CancellationToken) {
         info!(tagma = %self.inner.tagma_id, "relay status pump started");
         let Some(state) = self.inner.state.upgrade() else {
             return; // the tagma is shutting down
         };
+        let signals = Some(
+            state
+                .bus
+                .subscribe::<SignalFrame>()
+                .expect("signal topic is registered"),
+        );
         let invalidations = state.subscribe_invalidations();
         drop(state); // the source re-upgrades per capture; no strong ref held
         let mut sink = StatusRelaySink(self.inner.state.clone());
         let source = StatusSource(self.inner.state.clone());
+        let fallback = Duration::from_millis(self.inner.status_fallback_ms.load(Ordering::Relaxed));
         let config = SnapshotPumpConfig {
-            ticker: STATUS_INTERVAL,
-            debounce: None,
+            ticker: fallback,
+            debounce: Some(STATUS_DEBOUNCE),
             activity: None,
             first_shot: false,
         };
         let wakes = SnapshotPumpWakes {
             cancel,
-            signals: None,
+            signals,
             invalidations,
         };
-        run_snapshot_pump(config, wakes, source, &mut sink, |last, fresh, now| {
-            needs_post(last.map(|(s, at)| (&s.0, *at)), &fresh.0, now)
+        run_snapshot_pump(config, wakes, source, &mut sink, |last, fresh, _| {
+            needs_post(last.map(|(s, _)| &s.0), &fresh.0)
         })
         .await;
     }
@@ -235,15 +235,16 @@ mod tests {
     }
 
     /// The pump publishes a snapshot on its first tick (tokio interval
-    /// fires at t=0); `stop_status_pump` cleanly reaps the task.
+    /// fires at t=0; the debounce window defers the capture ~1s);
+    /// `stop_status_pump` cleanly reaps the task.
     #[tokio::test]
     async fn status_pump_posts_snapshot_on_first_tick() {
         let (handle, state) = setup_pump().await;
         let mut rx = state.bus.subscribe::<StatusSnapshot>().expect("topic");
         handle.start_status_pump().await;
-        let frame = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        let frame = tokio::time::timeout(Duration::from_millis(2000), rx.recv())
             .await
-            .expect("first tick within 500ms")
+            .expect("first tick within 2s (debounced)")
             .expect("topic open");
         handle.stop_status_pump().await;
         assert_eq!(frame.0.root_state, AgentState::Idle, "root is idle");
@@ -255,18 +256,18 @@ mod tests {
     }
 
     /// Watch invalidation (per-class leg, roster class, end-to-end
-    /// through the driver): a roster mutation wakes the pump between ticks
-    /// — the second publish lands well inside the 2 s cadence, which the
-    /// ticker alone could not have produced.
+    /// through the driver): a roster mutation wakes the pump between
+    /// fallback ticks — the second publish lands well inside the 30 s
+    /// cadence, which the ticker alone could not have produced.
     #[tokio::test]
     async fn status_pump_wakes_on_a_roster_invalidation() {
         let (handle, state) = setup_pump().await;
         let mut rx = state.bus.subscribe::<StatusSnapshot>().expect("topic");
         handle.start_status_pump().await;
-        // First tick (t=0).
-        let first = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        // First tick (t=0, capture deferred by the debounce window).
+        let first = tokio::time::timeout(Duration::from_millis(2000), rx.recv())
             .await
-            .expect("first tick")
+            .expect("first tick within 2s (debounced)")
             .expect("topic open");
         assert_eq!(first.0.subagents_total, 0, "no subs yet");
         // A roster mutation: the watch wake drives an immediate re-snapshot
@@ -276,9 +277,9 @@ mod tests {
             let mut registry = state.registry.write().await;
             add_sub(&mut registry, &AgentId::from("late".to_string()), &root);
         }
-        let second = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        let second = tokio::time::timeout(Duration::from_millis(2000), rx.recv())
             .await
-            .expect("invalidation wake within 500ms")
+            .expect("invalidation wake within 2s (debounced)")
             .expect("topic open");
         handle.stop_status_pump().await;
         assert_eq!(
@@ -286,6 +287,7 @@ mod tests {
             "the new sub is in the snapshot"
         );
     }
+
     /// The root is reported separately from subagents. `subagents_total`
     /// counts Live + Faulted subs (matching `list_agents`); `subagents_active`
     /// counts only subs whose `state_for_summary` is `Busy`. `root_state`
@@ -361,37 +363,37 @@ mod tests {
         assert_eq!(payload.root_state, AgentState::Faulted);
         assert_eq!((payload.subagents_total, payload.subagents_active), (0, 0));
     }
-    /// Change suppression: with an idle registry the second tick's
-    /// identical snapshot is skipped, so no second frame arrives in the
-    /// two-tick window. Before suppression this produced one frame per
-    /// tick (two here).
+    /// Silence: with no invalidation wake and no fallback tick in the
+    /// window, the pump captures nothing and publishes nothing -- the
+    /// 30s fallback, not a fixed interval, schedules the next look.
+    ///
     #[tokio::test]
-    async fn status_pump_skips_unchanged_snapshot_on_second_tick() {
+    async fn status_pump_stays_silent_without_wakes() {
         let (handle, state) = setup_pump().await;
         let mut rx = state.bus.subscribe::<StatusSnapshot>().expect("topic");
         handle.start_status_pump().await;
-        let _ = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        let _ = tokio::time::timeout(Duration::from_millis(2000), rx.recv())
             .await
-            .expect("first tick")
+            .expect("first tick within 2s (debounced)")
             .expect("topic open");
-        // Two ticks (immediate + 2s) plus slack for scheduler delay.
+        // No event wake and no fallback tick inside the window.
         let second = tokio::time::timeout(Duration::from_millis(2500), rx.recv()).await;
         handle.stop_status_pump().await;
-        assert!(second.is_err(), "identical second tick must be skipped");
+        assert!(second.is_err(), "no wake means no capture: silence");
     }
 
-    /// A registry change alters the payload, so the next tick publishes
-    /// again — the flip-to-visible contract (<= 2s) is what the
+    /// A registry change alters the payload, so the invalidation wake
+    /// publishes again — the flip-to-visible contract is what the
     /// suppression must keep.
     #[tokio::test]
     async fn status_pump_posts_again_after_a_change() {
         let (handle, state) = setup_pump().await;
         let mut rx = state.bus.subscribe::<StatusSnapshot>().expect("topic");
         handle.start_status_pump().await;
-        // The first tick is immediate; wait for it to land.
-        let _ = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        // The first tick is immediate; the debounce defers its landing.
+        let _ = tokio::time::timeout(Duration::from_millis(2000), rx.recv())
             .await
-            .expect("first tick")
+            .expect("first tick within 2s (debounced)")
             .expect("topic open");
         {
             let registry = state.registry.read().await;
@@ -404,18 +406,22 @@ mod tests {
                 .state
                 .store(AgentState::BUSY, Ordering::Relaxed);
         }
+        // Production wiring: the bridge bumps invalidations on state
+        // flips; mirror that here (the raw atomic write alone is
+        // invisible to the pump).
+        state.invalidate();
         let second = tokio::time::timeout(Duration::from_millis(2500), rx.recv())
             .await
-            .expect("changed snapshot must publish within a tick")
+            .expect("changed snapshot must publish on the wake")
             .expect("topic open");
         handle.stop_status_pump().await;
         assert_eq!(second.0.root_state, AgentState::Busy, "changed snapshot");
     }
 
-    /// Unit test for the suppression decision: only a fresh (within
-    /// FORCED_RESEND) unchanged payload suppresses the POST.
+    /// Unit test for the suppression decision: an unchanged payload
+    /// suppresses; a changed payload (or a first observation) publishes.
     #[test]
-    fn needs_post_suppresses_only_fresh_unchanged_snapshots() {
+    fn needs_post_suppresses_only_unchanged_snapshots() {
         let payload = TagmaStatusPayload {
             root_state: AgentState::Idle,
             subagents_total: 0,
@@ -424,19 +430,12 @@ mod tests {
             token_consumed: 0,
             token_budget_unlimited: false,
         };
-        let now = std::time::Instant::now();
-        assert!(needs_post(None, &payload, now), "nothing posted yet");
-        let fresh = Some((&payload, now - Duration::from_secs(5)));
-        assert!(!needs_post(fresh, &payload, now), "fresh duplicate");
-        let stale = Some((&payload, now - Duration::from_secs(31)));
-        assert!(needs_post(stale, &payload, now), "stale heartbeat");
+        assert!(needs_post(None, &payload), "nothing posted yet");
+        assert!(!needs_post(Some(&payload), &payload), "unchanged duplicate");
         let changed = TagmaStatusPayload {
             token_consumed: 1,
             ..payload.clone()
         };
-        assert!(
-            needs_post(Some((&payload, now)), &changed, now),
-            "changed payload"
-        );
+        assert!(needs_post(Some(&payload), &changed), "changed payload");
     }
 }

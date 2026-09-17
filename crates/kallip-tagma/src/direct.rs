@@ -2,26 +2,22 @@
 //! where they belong — at the local SSE endpoint, which merges the three bus
 //! topics over [`crate::sse::merge_direct_frames`]. Status is a snapshot
 //! pump driver instance publishing `StatusSnapshot` onto the bus under the
-//! same differential policy as the relay pump (the declared
-//! unification): an unchanged snapshot is suppressed until the 30 s
-//! catch-up heartbeat, instead of the legacy every-2 s unconditional push.
+//! same event-driven policy as the relay pump (the declared unification):
+//! wakes on registry invalidations and turn signals with a short debounce,
+//! and the fallback ticker only bounds staleness.
 //! The projector (see [`crate::external`]) is the sole writer of chat
 //! content; this module owns no `chat_history` and stamps nothing.
 
 use std::sync::Weak;
-use std::time::Duration;
 
 use tracing::{debug, info};
 
-use crate::bus::StatusSnapshot;
+use crate::bus::{SignalFrame, StatusSnapshot};
 use crate::pump_driver::{
     SnapshotPumpConfig, SnapshotPumpWakes, SnapshotSink, SnapshotSource, run_snapshot_pump,
 };
-use crate::relay::status_pump::{needs_post, snapshot_status};
+use crate::relay::status_pump::{STATUS_DEBOUNCE, STATUS_FALLBACK, needs_post, snapshot_status};
 use crate::state::AppState;
-
-/// The SSE cadence for status snapshots, aligned with the relay status pump.
-const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Captures the aggregate status snapshot (the shared pure function).
 /// `None` when the `AppState` is gone: the tagma is shutting down.
@@ -64,26 +60,31 @@ pub(crate) fn start(state: &Weak<AppState>) {
     let Some(app) = state.upgrade() else {
         return; // startup raced shutdown: nothing to serve
     };
+    let signals = Some(
+        app.bus
+            .subscribe::<SignalFrame>()
+            .expect("signal topic is registered"),
+    );
     let invalidations = app.subscribe_invalidations();
     let cancel = app.shutdown.child_token();
     drop(app);
     let config = SnapshotPumpConfig {
-        ticker: STATUS_INTERVAL,
-        debounce: None,
+        ticker: STATUS_FALLBACK,
+        debounce: Some(STATUS_DEBOUNCE),
         activity: None,
         first_shot: false,
     };
     let wakes = SnapshotPumpWakes {
         cancel,
-        signals: None,
+        signals,
         invalidations,
     };
     tokio::spawn(async move {
         info!("direct status pump started");
         let mut sink = DirectStatusSink(state.clone());
         let source = DirectStatusSource(state.clone());
-        run_snapshot_pump(config, wakes, source, &mut sink, |last, fresh, now| {
-            needs_post(last.map(|(s, at)| (&s.0, *at)), &fresh.0, now)
+        run_snapshot_pump(config, wakes, source, &mut sink, |last, fresh, _| {
+            needs_post(last.map(|(s, _)| &s.0), &fresh.0)
         })
         .await;
     });

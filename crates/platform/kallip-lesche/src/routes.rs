@@ -87,6 +87,7 @@ pub(crate) const ROUTE_TABLE: &[(&str, &str)] = &[
     ("PUT", "/rooms/{room_id}/read-cursor"),
     ("GET", "/tagmata/{id}/agents"),
     ("GET", "/tagmata/{id}/budget"),
+    ("GET", "/tagmata/{id}/status"),
     ("ANY", "/tagmata/{id}/manage/{*path}"),
     ("GET", "/tagmata/{id}/state"),
     ("GET", "/tagmata/{id}/work-schedule"),

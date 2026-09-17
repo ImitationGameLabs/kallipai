@@ -294,8 +294,13 @@ pub struct PresenceEntry {
     pub owner: UserId,
     pub tagma_id: TagmaId,
     pub id: Arc<()>,
-    /// Latest aggregate status snapshot relayed over this tunnel; written unconditionally on every status POST (with or without live subscribers). Tunnel-scoped: a reconnect starts the cache empty until the next pump tick (bounded self-heal, <= one heartbeat period).
+    /// Latest aggregate status snapshot relayed over this tunnel; written unconditionally on every status POST (with or without live subscribers). Tunnel-scoped: a reconnect starts the cache empty until the next pump tick (bounded self-heal, <= one fallback tick).
     pub latest_status: Option<TagmaStatusPayload>,
+    /// The last payload this tunnel's status fan actually broadcast to
+    /// the owner's app stream (the meaningful-transition base). Also
+    /// tunnel-scoped: a reconnect resets the throttle, and the next
+    /// snapshot broadcasts unconditionally.
+    pub last_broadcast_status: Option<TagmaStatusPayload>,
 }
 /// One tagma's stored projection: the latest accepted push plus the
 /// bookkeeping the accept/replay logic needs. `generation` records which
@@ -624,6 +629,7 @@ impl Registry {
                 tagma_id: tagma.clone(),
                 id,
                 latest_status: None,
+                last_broadcast_status: None,
             },
         );
     }

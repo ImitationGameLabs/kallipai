@@ -23,6 +23,7 @@
   import { managementBackend } from "../lib/manage/client.ts";
   import { convDraftKey, tagmaDraftKey } from "../lib/session/drafts.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
+  import { realtimeStore } from "../lib/session/realtime.svelte";
   import {
     filesClientOrFail,
     archeionSession,
@@ -268,6 +269,35 @@
   $effect(() => {
     void conv?.statusSnapshot;
     statusCardStore.nudge();
+  });
+
+  // Focus refresh (relay path): the aggregate counters ride meaningful
+  // pushes and the 30s reconciliation; a tab-visible restore catches up
+  // immediately with the cache GET instead of waiting for either. The
+  // wire payload routes through the realtime store's single dispatch
+  // boundary, so the header, the status card, and the dashboard map all
+  // see the same snapshot. Transient failures just wait for the next
+  // push or focus.
+  $effect(() => {
+    if (!(conv instanceof RelayConversation)) return;
+    const tagmaId = conv.relayTransport.relayChannel.tagmaId;
+    let client: ProjectionClient;
+    try {
+      client = new ProjectionClient(lescheBaseUrlOrFail());
+    } catch {
+      return; // no lesche base URL: nothing to refresh
+    }
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      client
+        .status(tagmaId)
+        .then((resp) =>
+          realtimeStore.ingestStatusSnapshot(tagmaId, resp.status),
+        )
+        .catch(() => {});
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   });
 
   const disabled = $derived(!conv || conv.status !== "open");

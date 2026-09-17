@@ -162,6 +162,27 @@ pub struct TagmaStatusPayload {
     pub token_budget_unlimited: bool,
 }
 
+impl TagmaStatusPayload {
+    /// Whether `self` differs from `prev` in a way the owner's app stream
+    /// should announce: the root's lifecycle flipped, the active-subagent
+    /// count moved, or the budget limit itself changed. Per-turn
+    /// consumption drift and roster-size drift are deliberately not
+    /// meaningful -- they change on every turn and would re-arm the
+    /// notification churn the broadcast throttle exists to prevent;
+    /// readers get fresh counters from `GET /tagmata/{id}/status`
+    /// instead. A first observation (no `prev`) is always meaningful:
+    /// the subscriber has nothing on screen yet.
+    pub fn meaningful_transition_from(&self, prev: Option<&Self>) -> bool {
+        let Some(prev) = prev else {
+            return true;
+        };
+        self.root_state != prev.root_state
+            || self.subagents_active != prev.subagents_active
+            || self.token_budget != prev.token_budget
+            || self.token_budget_unlimited != prev.token_budget_unlimited
+    }
+}
+
 /// `POST /tagmata/{tagma_id}/upstream` request body element — one
 /// plaintext metadata event on the single upstream channel. The batch body
 /// is `Vec<UpstreamEvent>`; the lesche demultiplexes each element into the
@@ -242,4 +263,43 @@ mod upstream_shape_tests {
         assert!(matches!(event, UpstreamEvent::Projection(_)));
         assert_eq!(serde_json::to_value(&event).expect("serializes"), json);
     }
+}
+
+/// The broadcast throttle contract: only root-state flips, active
+/// subagent moves, and budget-limit changes are meaningful; per-turn
+/// consumption drift and roster-size drift are not.
+#[test]
+fn meaningful_transition_follows_broadcast_contract() {
+    let base = TagmaStatusPayload {
+        root_state: AgentState::Idle,
+        subagents_total: 3,
+        subagents_active: 1,
+        token_budget: 50_000,
+        token_consumed: 1_000,
+        token_budget_unlimited: false,
+    };
+    // First observation is always meaningful.
+    assert!(base.meaningful_transition_from(None));
+    // The four meaningful legs.
+    let mut root_flip = base.clone();
+    root_flip.root_state = AgentState::Busy;
+    assert!(root_flip.meaningful_transition_from(Some(&base)));
+    let mut active_move = base.clone();
+    active_move.subagents_active = 2;
+    assert!(active_move.meaningful_transition_from(Some(&base)));
+    let mut limit_move = base.clone();
+    limit_move.token_budget = 60_000;
+    assert!(limit_move.meaningful_transition_from(Some(&base)));
+    let mut unlimited = base.clone();
+    unlimited.token_budget_unlimited = true;
+    assert!(unlimited.meaningful_transition_from(Some(&base)));
+    // Consumption drift and roster-size drift are suppressed.
+    let mut consumed_drift = base.clone();
+    consumed_drift.token_consumed = 2_000;
+    assert!(!consumed_drift.meaningful_transition_from(Some(&base)));
+    let mut roster_drift = base.clone();
+    roster_drift.subagents_total = 4;
+    assert!(!roster_drift.meaningful_transition_from(Some(&base)));
+    // Identical payloads are not meaningful.
+    assert!(!base.meaningful_transition_from(Some(&base)));
 }

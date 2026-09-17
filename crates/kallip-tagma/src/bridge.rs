@@ -104,7 +104,7 @@ pub async fn bridge_task(
                                 // a spent retry budget (last armed attempt ==
                                 // max) from a chain with retries disabled.
                                 let mut cell = parked.lock().unwrap_or_else(|e| e.into_inner());
-                                transition_state(state, state_since, AgentState::BUSY);
+                                transition_and_invalidate(&shared_state, state, state_since, AgentState::BUSY);
                                 *cell = None;
                             }
                             AgentEvent::Retrying { .. } | AgentEvent::StreamReset { .. } => {
@@ -113,7 +113,7 @@ pub async fn bridge_task(
                                 // is still open; this is display state, not a
                                 // terminal transition. Any other in-flight
                                 // event below ends the overlay.
-                                transition_state(state, state_since, AgentState::RETRYING);
+                                transition_and_invalidate(&shared_state, state, state_since, AgentState::RETRYING);
                             }
                             ev if ev.is_terminal() => {
                                 // Fatal-error observability BEFORE the state mark:
@@ -259,7 +259,7 @@ pub async fn bridge_task(
                                 // parked payload (the retrying cell stays —
                                 // see the Busy arm).
                                 if state.load(Ordering::Relaxed) == AgentState::RETRYING {
-                                    transition_state(state, state_since, AgentState::BUSY);
+                                    transition_and_invalidate(&shared_state, state, state_since, AgentState::BUSY);
                                 }
                                 *parked.lock().unwrap_or_else(|e| e.into_inner()) = None;
                             }
@@ -280,7 +280,7 @@ pub async fn bridge_task(
                     }
                 },
                 None => {
-                    mark_idle(state, state_since, activity, parked, retrying);
+                    mark_idle(&shared_state, state, state_since, activity, parked, retrying);
                     info!("bridge task: agent channel closed, exiting");
                     break;
                 }
@@ -290,7 +290,7 @@ pub async fn bridge_task(
             // still queued before exiting. Per-agent cancellation reaches the
             // bridge via the channel-closed path above — see the lifecycle note.
             _ = cancel.cancelled() => {
-                mark_idle(state, state_since, activity, parked, retrying);
+                mark_idle(&shared_state, state, state_since, activity, parked, retrying);
                 while let Ok(event) = agent_rx.try_recv() {
                     if let Some(sse) = convert_event(event) {
                         events_tx.send(sse).ok();
@@ -303,6 +303,20 @@ pub async fn bridge_task(
     }
 }
 
+/// Mark an agent state transition and wake the snapshot pumps: the state
+/// byte lives on the bridge-owned atomics, so without this bump the
+/// aggregate status consumers would only see busy/idle flips on the
+/// fallback tick.
+fn transition_and_invalidate(
+    shared_state: &SharedState,
+    state: &AtomicU8,
+    state_since: &AtomicU64,
+    new_state: u8,
+) {
+    transition_state(state, state_since, new_state);
+    shared_state.invalidate();
+}
+
 /// Mark the agent gone: drop state to [`AgentState::IDLE`], clear the ephemeral
 /// activity string so a stale "reading docs" doesn't persist, and drop any
 /// parked/retrying payloads — the bridge only takes this path when the agent
@@ -310,13 +324,14 @@ pub async fn bridge_task(
 /// cannot be parked or retrying. Shared by the shutdown paths in
 /// [`bridge_task`]; live turn-ends go through [`mark_and_snapshot`].
 fn mark_idle(
+    shared_state: &SharedState,
     state: &std::sync::atomic::AtomicU8,
     state_since: &AtomicU64,
     activity: &std::sync::Mutex<String>,
     parked: &std::sync::Mutex<Option<ParkedSnapshot>>,
     retrying: &std::sync::Mutex<Option<TransientRetryInfo>>,
 ) {
-    transition_state(state, state_since, AgentState::IDLE);
+    transition_and_invalidate(shared_state, state, state_since, AgentState::IDLE);
     activity.lock().unwrap_or_else(|e| e.into_inner()).clear();
     *parked.lock().unwrap_or_else(|e| e.into_inner()) = None;
     *retrying.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -545,7 +560,7 @@ async fn mark_and_snapshot(
         retrying,
     } = cells;
     let registry = shared_state.registry.write().await;
-    transition_state(state, state_since, new_state);
+    transition_and_invalidate(shared_state, state, state_since, new_state);
     activity.lock().unwrap_or_else(|e| e.into_inner()).clear();
     *parked.lock().unwrap_or_else(|e| e.into_inner()) =
         parked_reason.map(|reason| ParkedSnapshot {

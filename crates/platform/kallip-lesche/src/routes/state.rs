@@ -34,6 +34,7 @@ pub fn router() -> Router<SharedConvState> {
         .route("/tagmata/{id}/agents", get(read_agents))
         .route("/tagmata/{id}/budget", get(read_budget))
         .route("/tagmata/{id}/work-schedule", get(read_work_schedule))
+        .route("/tagmata/{id}/status", get(read_status))
 }
 
 /// Owner gate for the read/SSE plane, offline-safe: the owner recorded on the stored
@@ -147,6 +148,38 @@ async fn read_agents(
         "seq": entry.seq,
         "updated_at": entry.updated_at,
         "agents": entry.snapshot.agents,
+        "status": entry.snapshot.status,
+    }))
+    .into_response()
+}
+
+/// `GET /tagmata/{id}/status` -- the status face's on-demand full fetch:
+/// the presence cache's latest relayed snapshot, no tagma round-trip.
+/// Owner-gated like the other read planes; an offline tagma falls back
+/// to its stored projection (marked `stale`), mirroring `/agents`.
+async fn read_status(
+    State(state): State<SharedConvState>,
+    AuthPrincipal(principal): AuthPrincipal,
+    Path(id): Path<String>,
+) -> Response {
+    let tagma_id = TagmaId::from(id);
+    if let Err(resp) = require_owner(&principal, &state, &tagma_id) {
+        return resp;
+    }
+    let registry = state.registry.read().expect("registry lock");
+    if let Some(entry) = registry.presence.get(&ParticipantId::for_tagma(&tagma_id)) {
+        return axum::Json(serde_json::json!({
+            "stale": false,
+            "status": entry.latest_status,
+        }))
+        .into_response();
+    }
+    let entry = match registry.projection(&tagma_id) {
+        Some(p) => p,
+        None => return (StatusCode::NOT_FOUND, "no projection").into_response(),
+    };
+    axum::Json(serde_json::json!({
+        "stale": true,
         "status": entry.snapshot.status,
     }))
     .into_response()
@@ -837,5 +870,118 @@ mod generation_tests {
         assert!(text.contains(": ping"), "ping comment expected: {text:?}");
         assert!(!text.contains("data:"), "no dirty payload: {text:?}");
         assert!(!text.contains("event:"), "no event type: {text:?}");
+    }
+
+    /// `GET /tagmata/{id}/status`: a live tunnel serves the presence cache
+    /// (stale=false, cache value verbatim); with the tunnel gone and no
+    /// projection stored, the route answers 404.
+    #[tokio::test]
+    async fn read_status_serves_cache_then_404_without_projection() {
+        use crate::test_support::{make_state, seed_presence};
+        use kallip_archeion_common::ids::ParticipantId;
+        use kallip_archeion_common::principal::Principal;
+        use kallip_common::protocol::AgentState;
+        use kallip_lesche_common::event::TagmaStatusPayload;
+        let (state, _control) = make_state(60, std::time::Duration::from_secs(2));
+        let owner = uid("owner");
+        let tagma = TagmaId::from("tagma-1".to_string());
+        let (_t_tx, _id) = seed_presence(&state, &tagma, owner.clone());
+        let payload = TagmaStatusPayload {
+            root_state: AgentState::Busy,
+            subagents_total: 1,
+            subagents_active: 1,
+            token_budget: 50_000,
+            token_consumed: 7,
+            token_budget_unlimited: false,
+        };
+        {
+            let mut reg = state.write().unwrap();
+            let pid = ParticipantId::for_tagma(&tagma);
+            reg.presence.get_mut(&pid).unwrap().latest_status = Some(payload);
+        }
+        let response = read_status(
+            State(state.clone()),
+            AuthPrincipal(Principal::User(owner.clone())),
+            Path("tagma-1".to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(text.contains("\"stale\":false"), "{text:?}");
+        assert!(text.contains("\"token_consumed\":7"), "{text:?}");
+        // Tunnel gone and no projection stored: 404.
+        {
+            let mut reg = state.write().unwrap();
+            let pid = ParticipantId::for_tagma(&tagma);
+            reg.presence.remove(&pid);
+        }
+        let response = read_status(
+            State(state),
+            AuthPrincipal(Principal::User(owner)),
+            Path("tagma-1".to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `GET /tagmata/{id}/status`: with the tunnel gone, the stored
+    /// projection still answers -- `stale: true` with the projection's
+    /// status counters (the GET contract's offline half).
+    #[tokio::test]
+    async fn read_status_serves_stale_projection_after_tunnel_loss() {
+        use crate::test_support::{make_state, seed_presence};
+        use kallip_archeion_common::principal::Principal;
+        use kallip_common::protocol::AgentState;
+        use kallip_lesche_common::event::TagmaStatusPayload;
+        use kallip_lesche_common::projection::ProjectionSnapshot;
+        let (state, _control) = make_state(60, std::time::Duration::from_secs(2));
+        let owner = uid("owner");
+        let tagma = TagmaId::from("tagma-1".to_string());
+        let (_t_tx, generation) = seed_presence(&state, &tagma, owner.clone());
+        let payload = TagmaStatusPayload {
+            root_state: AgentState::Idle,
+            subagents_total: 2,
+            subagents_active: 0,
+            token_budget: 90_000,
+            token_consumed: 11,
+            token_budget_unlimited: false,
+        };
+        {
+            let mut reg = state.write().unwrap();
+            reg.accept_projection(
+                &tagma,
+                &generation,
+                1,
+                owner.clone(),
+                ProjectionSnapshot {
+                    agents: Vec::new(),
+                    status: payload,
+                    push_seq: 1,
+                    work_schedule: None,
+                },
+            );
+        }
+        // The tunnel drops: presence is gone, the projection stays.
+        {
+            let mut reg = state.write().unwrap();
+            assert!(reg.take_presence_if_owned(&tagma, &generation));
+        }
+        let response = read_status(
+            State(state.clone()),
+            AuthPrincipal(Principal::User(owner.clone())),
+            Path("tagma-1".to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(text.contains("\"stale\":true"), "{text:?}");
+        assert!(text.contains("\"token_consumed\":11"), "{text:?}");
+        assert!(text.contains("\"root_state\":\"idle\""), "{text:?}");
     }
 }

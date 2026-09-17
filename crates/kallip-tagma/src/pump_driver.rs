@@ -3,15 +3,15 @@
 //! The three pumps differ only in policy,
 //! and the policy is explicit per instantiation:
 //!
-//! - relay status: ticker + watch invalidations; `needs_post` differential
-//!   (suppression + catch-up heartbeat); publishes `StatusSnapshot` and
-//!   POSTs upstream;
+//! - relay status: signal wakes + watch invalidations + a fallback ticker;
+//!   `needs_post` differential (suppress unchanged captures); publishes
+//!   `StatusSnapshot` and POSTs upstream;
 //! - projection: signals + watch invalidations + demoted fallback ticker,
 //!   1 s debounce, subscription-hint activity gate, tunnel-up first shot;
 //!   publishes `ProjectionSnapshot` and PUTs upstream;
-//! - direct status: ticker + watch invalidations; the same `needs_post`
-//!   differential as relay (the declared unification); publishes
-//!   `StatusSnapshot` only.
+//! - direct status: signal wakes + watch invalidations + a fallback ticker;
+//!   the same `needs_post` differential as relay (the declared unification);
+//!   publishes `StatusSnapshot` only.
 //!
 //! Complexity guard (same family as the bus core): this module is a
 //! loop and two traits, not a framework — no middleware, no priorities, no
@@ -92,7 +92,7 @@ pub(crate) trait SnapshotSink: Send + 'static {
 
 /// The one loop. `gate` is the differential policy, explicit per consumer
 /// (friction E): the status pumps pass a `needs_post`-style gate (suppress
-/// unchanged, force a resend past the catch-up window); the projection
+/// unchanged snapshots); the projection
 /// passes `|_, _, _| true` — every wake emits. Bookkeeping: `last` updates
 /// only when `emit` reports success, so a failed POST keeps the old value
 /// and the next wake retries.
@@ -109,8 +109,8 @@ pub(crate) async fn run_snapshot_pump<S, Src, Snk, G>(
     G: Fn(Option<&(S, Instant)>, &S, Instant) -> bool + Send,
 {
     // Last successfully emitted snapshot + its instant: the differential
-    // gate reads it; a wake whose capture equals it is suppressed (or
-    // force-resent past the catch-up window) by policy.
+    // gate reads it; a wake whose capture equals it is suppressed by
+    // policy.
     let mut last: Option<(S, Instant)> = None;
     if config.first_shot {
         match source.capture().await {

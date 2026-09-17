@@ -46,7 +46,9 @@ export type {
   ProjectionAgentsResponse,
   ProjectionBudgetResponse,
   ProjectionDirty,
+  ProjectionStatusResponse,
   ProjectionWorkScheduleResponse,
+  TagmaStatusPayload,
 } from "./types.ts";
 // Room management (relocated from the archeion client).
 export type {

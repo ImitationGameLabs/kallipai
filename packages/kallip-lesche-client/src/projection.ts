@@ -10,6 +10,7 @@ import type {
   ProjectionAgentsResponse,
   ProjectionBudgetResponse,
   ProjectionDirty,
+  ProjectionStatusResponse,
   ProjectionWorkScheduleResponse,
 } from "./types.ts";
 
@@ -60,6 +61,12 @@ export class ProjectionClient {
       id,
       "work-schedule",
     )) as ProjectionWorkScheduleResponse;
+  }
+
+  /** `GET /tagmata/{id}/status` -- the presence cache's latest relayed
+   * snapshot; an offline tagma serves its stored projection (`stale`). */
+  async status(id: string): Promise<ProjectionStatusResponse> {
+    return (await this.get(id, "status")) as ProjectionStatusResponse;
   }
 
   /** `GET /tagmata/{id}/state` -- the dirty-frame SSE: the tagma's

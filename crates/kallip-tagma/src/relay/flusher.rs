@@ -24,8 +24,9 @@
 //! - status / projection: keep-last. A failed POST retains the newest
 //!   snapshot per topic and retries on a short tick — snapshots are
 //!   idempotent latest-wins server-side, so a retained retry can never
-//!   resurrect stale state. The 30 s FORCED_RESEND publish upstream of the
-//!   bus keeps flowing regardless, bounding staleness exactly as before.
+//!   resurrect stale state. Upstream republication is change-gated (the
+//!   pump posts only when a capture differs from the last); the pump's
+//!   fallback ticker, not a forced resend, bounds staleness.
 //! - signal: fire-and-forget, never retained. A signal is a transient
 //!   transition the next event supersedes; retrying one after a failure
 //!   would replay a stale presence flip.

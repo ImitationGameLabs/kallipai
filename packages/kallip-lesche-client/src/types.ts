@@ -219,6 +219,32 @@ export interface AddTagmaRequest {
   readonly tagma_id: string;
 }
 
+/** The aggregate status payload carried by the `tagma_status` SSE event and
+ * `GET /tagmata/{id}/status` (one wire shape, two transports). */
+export interface TagmaStatusPayload {
+  readonly root_state:
+    | "idle"
+    | "busy"
+    | "waiting"
+    | "retrying"
+    | "parked"
+    | "faulted";
+  readonly subagents_total: number;
+  readonly subagents_active: number;
+  readonly token_budget: number;
+  readonly token_consumed: number;
+  // Unlimited budget (enforcement off, consumption still tracked);
+  // absent from older tagmas (serde default false).
+  readonly token_budget_unlimited?: boolean;
+}
+
+/** `GET /tagmata/{id}/status` -- the presence cache's latest relayed snapshot
+ * (`stale: false`), or an offline tagma's stored projection (`stale: true`).
+ * `status` is `null` when the tagma has never broadcast a snapshot. */
+export interface ProjectionStatusResponse {
+  readonly stale: boolean;
+  readonly status: TagmaStatusPayload | null;
+}
 /** An event on the app's multiplexed SSE stream (`GET /me/events`). serde
  * tag = `type`, snake_case. `envelope` carries E2EE conversation content. The
  * presence pair (`tagma_online`/`tagma_offline`), `tagma_status`, and
@@ -232,24 +258,10 @@ export type LescheEvent =
   | { readonly type: "envelope"; readonly envelope: Envelope }
   | { readonly type: "tagma_online"; readonly tagma_id: string }
   | { readonly type: "tagma_offline"; readonly tagma_id: string }
-  | {
+  | ({
       readonly type: "tagma_status";
       readonly tagma_id: string;
-      readonly root_state:
-        | "idle"
-        | "busy"
-        | "waiting"
-        | "retrying"
-        | "parked"
-        | "faulted";
-      readonly subagents_total: number;
-      readonly subagents_active: number;
-      readonly token_budget: number;
-      readonly token_consumed: number;
-      // Unlimited budget (enforcement off, consumption still tracked);
-      // absent from older tagmas (serde default false).
-      readonly token_budget_unlimited?: boolean;
-    }
+    } & TagmaStatusPayload)
   | {
       readonly type: "tagma_signal";
       readonly tagma_id: string;
