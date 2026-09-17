@@ -4,9 +4,14 @@
 //! directory, not the log tree. A stopped instance reads exactly like
 //! a running one: the logs are output residue on disk.
 //!
-//! Log placement is the state-tree pointer shared with reconcile
-//! (`logs_pointer`) and mirrored by the tagma's own `logs_target` in
-//! kallip-tagma — the shapes move together by hand. The files are
+//! Log placement is owner-aware: the tree lives in the instance's
+//! TARGET USER's state home (`<home>/.local/state/kallipai/tagmata/<slug>/logs`),
+//! resolved from the record's `target_uid` through the passwd database
+//! (`reconcile::instance_logs_dir`) — the daemon may run as root while
+//! instances run as their own users, so the daemon's own state home
+//! would name the wrong tree. The shape is mirrored by the tagma's
+//! `logs_target` in kallip-tagma; the shapes move together by hand.
+//! The files are
 //! tracing-appender daily rolls (`instance.<date>.log`, seven
 //! retained), so the file name sorts in date order and the merged
 //! tail concatenates oldest → newest; cross-day crash context is the
@@ -58,12 +63,21 @@ pub struct LogOutcome {
 pub enum LogError {
     #[error("no instance named {0}")]
     NotFound(String),
+    /// The record names a target uid the passwd database does not
+    /// know, so the log directory cannot be placed. A hard error,
+    /// not a fallback: the daemon's own state home would read
+    /// another user's tree.
+    #[error("uid {0} has no passwd entry; cannot place the log directory")]
+    LogsHome(u32),
 }
 
 impl From<&LogError> for ErrorCode {
     fn from(error: &LogError) -> Self {
         match error {
             LogError::NotFound(_) => ErrorCode::NotFound,
+            // Not a client mistake and not recoverable here: the
+            // system's passwd database lacks the record's target uid.
+            LogError::LogsHome(_) => ErrorCode::Internal,
         }
     }
 }

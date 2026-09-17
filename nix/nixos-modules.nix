@@ -694,6 +694,15 @@ in
           # A crash-looping unit must not slam the start-rate limit
           # and lock itself out of restarting (archeion precedent).
           RestartSec = "5s";
+          # Tagmata are forked+setsid'd by kallip-daemon-spawn: they
+          # leave the session but stay in this unit's cgroup, so the
+          # default control-group kill would sweep every live instance
+          # whenever the daemon restarts - an upgrade would kill
+          # running work. "process" kills only the daemon; instances
+          # keep running and adopt the new binary at their next
+          # deliberate kallipctl stop/start, and a daemon crash with
+          # Restart = "on-failure" does not cascade either.
+          KillMode = "process";
         };
       };
     })

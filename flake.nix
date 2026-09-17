@@ -94,7 +94,7 @@
           inherit (builds) workspace;
 
           checks = import ./nix/checks.nix {
-            inherit pkgs common workspace;
+            inherit pkgs common;
             inherit (inputs) advisory-db;
             inherit (inputs) aifed;
             inherit (inputs.nixpkgs) lib;

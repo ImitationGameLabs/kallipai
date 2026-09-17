@@ -275,14 +275,29 @@ impl Daemon {
                 file,
                 cursor,
             } => {
-                // Read-only, but still file I/O plus the passwd read
-                // behind authorization: same blocking profile as the
-                // other verbs.
+                // Read-only, but still file I/O plus the passwd
+                // lookup behind the owner-aware log placement: the
+                // same blocking profile as the other verbs.
                 match tokio::task::spawn_blocking({
                     let record_root = self.record_root.clone();
                     move || {
-                        let logs_dir =
-                            crate::reconcile::logs_pointer(dirs::state_dir().as_deref(), &slug);
+                        // Placement follows the RECORD's target user:
+                        // the daemon may run as root while the instance
+                        // runs as someone else, so the daemon's own
+                        // state home would read the wrong tree. A
+                        // missing record stays NotFound before any
+                        // passwd work; an unresolvable uid is an
+                        // explicit error, never a fallback.
+                        let logs_dir = crate::records::read_record(&record_root, &slug)
+                            .ok_or_else(|| crate::log::LogError::NotFound(slug.clone()))
+                            .and_then(|record| {
+                                crate::reconcile::instance_logs_dir(
+                                    record.target_uid,
+                                    &slug,
+                                    crate::reconcile::passwd_home,
+                                )
+                                .map_err(|error| crate::log::LogError::LogsHome(error.uid))
+                            })?;
                         crate::log::tail(
                             &record_root,
                             &logs_dir,

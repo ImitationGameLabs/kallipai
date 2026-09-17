@@ -104,7 +104,7 @@ enum Command {
     /// Tail an instance's log files (read-only diagnostic): the
     /// merged tail across retained daily files, one file with
     /// --file, or live with --follow.
-    Log {
+    Logs {
         /// Instance slug: same grammar as spawn's.
         slug: String,
         /// Lines from the tail (default 20, capped at 1000).
@@ -142,7 +142,7 @@ async fn main() -> Result<()> {
         Command::Spawn { slug, .. }
         | Command::Start { slug, .. }
         | Command::Adopt { slug, .. }
-        | Command::Log { slug, .. }
+        | Command::Logs { slug, .. }
         | Command::Stop { slug } => Some(slug),
         _ => None,
     };
@@ -198,13 +198,13 @@ async fn main() -> Result<()> {
         },
         Command::List => RequestBody::List,
         Command::Health { slug } => RequestBody::Health { slug },
-        Command::Log {
+        Command::Logs {
             slug,
             lines,
             file,
             follow,
         } => {
-            return run_log(&client, &slug, lines, file.as_deref(), follow).await;
+            return run_logs(&client, &slug, lines, file.as_deref(), follow).await;
         }
     };
     let response = client
@@ -225,14 +225,14 @@ fn adopt_line(slug: &str, state: InstanceState) -> String {
 const DEFAULT_LINES: u32 = 20;
 const MAX_LINES: u32 = 1000;
 
-/// The log verb's own loop: one request per beat (the wire has no
+/// The logs verb's own loop: one request per beat (the wire has no
 /// streaming), printing each increment. The first beat carries the
 /// tail (the `--lines` first screen); later beats carry only what
 /// the cursor has not seen. A rotated or emptied log set comes back
 /// with a changed file name, a regressed offset, or no next cursor
 /// at all — warn and adopt the daemon's rebased cursor instead of
 /// silently stalling at a dead position.
-async fn run_log(
+async fn run_logs(
     client: &DaemonClient,
     slug: &str,
     lines: Option<u32>,
@@ -293,7 +293,7 @@ fn print_log_text(text: &str) {
 }
 
 /// The stable error vocabulary scripts match on, shared by the
-/// plain verbs and the log loop.
+/// plain verbs and the logs loop.
 fn error_prefix(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::SlugTaken => "instance conflict",

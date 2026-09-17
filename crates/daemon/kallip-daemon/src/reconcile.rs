@@ -38,10 +38,24 @@ pub async fn run(record_root: PathBuf) {
             .map(|i| (i.slug.clone(), i.state(), i.pid))
             .collect();
         for (slug, pid) in edge_reports(&mut seen, now) {
+            // The log tree lives in the target user's state home, not
+            // the daemon's: re-read the record on this (rare) edge to
+            // name the right tree; the scan tuples stay (slug, state,
+            // pid) so the diff keeps its pure shape. A record that
+            // vanished between ticks, or a uid the passwd database
+            // does not know, renders the failure explicitly — never
+            // a plausible-looking wrong path.
+            let log_field = match crate::records::read_record(&record_root, &slug) {
+                Some(record) => match instance_logs_dir(record.target_uid, &slug, passwd_home) {
+                    Ok(dir) => dir.display().to_string(),
+                    Err(error) => format!("<unresolved: {error}>"),
+                },
+                None => "<unresolved: record gone>".to_string(),
+            };
             tracing::warn!(
                 slug = %slug,
                 pid = ?pid,
-                log = %logs_pointer(dirs::state_dir().as_deref(), &slug).display(),
+                log = %log_field,
                 "instance died: recorded pid is no longer a live kallip-tagma"
             );
         }
@@ -49,25 +63,57 @@ pub async fn run(record_root: PathBuf) {
     }
 }
 
-/// Where an instance's log files live: always the state tree
-/// (`<state_home>/kallipai/tagmata/<slug>/logs`) — mirroring the tagma's
-/// own placement, since logs are pure output residue kept outside the
-/// instance data tree and the slug names the tree on both sides. The
-/// `None` arm is defensive only — the daemon's own startup already
-/// requires the platform state dir, so it never fires in practice; the
-/// pointer stays total so the warn line always renders. The log verb
-/// (`log.rs`) reads through this same pointer, and the tagma side
-/// mirrors it with `logs_target` in kallip-tagma — the three shapes
-/// move together by hand.
-pub(crate) fn logs_pointer(state_home: Option<&Path>, slug: &str) -> PathBuf {
-    match state_home {
-        Some(home) => home
-            .join("kallipai")
-            .join("tagmata")
-            .join(slug)
-            .join("logs"),
-        None => PathBuf::from("<state home unresolved>"),
-    }
+/// Where an instance's log files live: the TARGET USER's state tree
+/// (`<home>/.local/state/kallipai/tagmata/<slug>/logs`) — mirroring the
+/// tagma's own placement, since logs are pure output residue kept outside
+/// the instance data tree and the slug names the tree on both sides.
+/// The instance resolves the same tree from its own process (its `$HOME`
+/// is the passwd home the daemon dropped to), so the two sides meet
+/// without sharing a pointer. The daemon may run as root while instances
+/// run as their own users — the daemon's own state home would name the
+/// wrong tree — so the log verb resolves through [`instance_logs_dir`],
+/// the single owner-aware resolver, and the tagma side mirrors the shape
+/// with `logs_target` in kallip-tagma; the three shapes move together
+/// by hand.
+pub(crate) fn logs_pointer(user_home: &Path, slug: &str) -> PathBuf {
+    user_home
+        .join(".local")
+        .join("state")
+        .join("kallipai")
+        .join("tagmata")
+        .join(slug)
+        .join("logs")
+}
+
+/// The passwd home of a uid, with a broken entry (an empty home field)
+/// treated as no answer: joining a relative tree would quietly place the
+/// logs in whatever directory the daemon happens to run in.
+pub(crate) fn passwd_home(uid: u32) -> Option<PathBuf> {
+    crate::spawn::passwd_by_uid(uid)
+        .map(|user| user.home)
+        .filter(|home| !home.as_os_str().is_empty())
+}
+
+/// Why an instance's log directory cannot be placed: the record names a
+/// target uid the passwd database does not know. The daemon refuses to
+/// guess — falling back to its own state home would read (or point at)
+/// another user's tree.
+#[derive(Debug, thiserror::Error)]
+#[error("uid {uid} has no passwd entry; cannot place the instance log directory")]
+pub(crate) struct LogsHomeError {
+    pub uid: u32,
+}
+
+/// The owner-aware log directory: resolve the target user's home through
+/// `lookup` (production: [`passwd_home`], the NSS database; tests: a
+/// table) and grow the state tree under it.
+pub(crate) fn instance_logs_dir(
+    target_uid: u32,
+    slug: &str,
+    lookup: impl Fn(u32) -> Option<PathBuf>,
+) -> Result<PathBuf, LogsHomeError> {
+    let home = lookup(target_uid).ok_or(LogsHomeError { uid: target_uid })?;
+    Ok(logs_pointer(&home, slug))
 }
 
 /// Diff the current tick's `(slug, state, pid)` tuples against `seen`,
@@ -99,15 +145,30 @@ mod tests {
     use kallip_daemon_common::wire::InstanceState::*;
 
     #[test]
-    fn dead_instance_logs_point_at_the_state_tree() {
-        let dir = logs_pointer(Some(Path::new("/state/home")), "e2e");
-        assert_eq!(dir, PathBuf::from("/state/home/kallipai/tagmata/e2e/logs"));
+    fn log_pointer_is_the_target_users_state_tree() {
+        let dir = logs_pointer(Path::new("/home/alice"), "e2e");
+        assert_eq!(
+            dir,
+            PathBuf::from("/home/alice/.local/state/kallipai/tagmata/e2e/logs")
+        );
     }
 
     #[test]
-    fn without_a_state_home_the_pointer_names_the_gap() {
-        let dir = logs_pointer(None, "e2e");
-        assert_eq!(dir, PathBuf::from("<state home unresolved>"));
+    fn instance_logs_dir_resolves_through_the_injected_lookup() {
+        let dir = instance_logs_dir(1000, "e2e", |uid| {
+            (uid == 1000).then(|| PathBuf::from("/home/alice"))
+        })
+        .expect("the uid resolves");
+        assert_eq!(
+            dir,
+            PathBuf::from("/home/alice/.local/state/kallipai/tagmata/e2e/logs")
+        );
+    }
+
+    #[test]
+    fn a_uid_without_a_passwd_entry_is_an_error_not_a_fallback() {
+        let error = instance_logs_dir(4242, "e2e", |_| None).unwrap_err();
+        assert_eq!(error.uid, 4242);
     }
 
     /// One observed instance at one tick.
