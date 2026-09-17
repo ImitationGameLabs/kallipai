@@ -1048,6 +1048,15 @@ mod tests {
                     use crate::state::RegistryEntry;
                     use crate::test_helpers::make_state;
                     let state = make_state();
+                    // Re-point the roots at the pinned identity AFTER the
+                    // state constructor (it re-asserts the shared test roots).
+                    kallip_runtime::persistence::set_instance_roots_for_tests(Some(
+                        kallip_runtime::persistence::InstanceRoots {
+                            data: tmp.path().join("kallipai").join("tagmata").join("cycle"),
+                            config: tmp.path().join("kallipai").join("tagmata").join("cycle"),
+                            state: tmp.path().join("state"),
+                        },
+                    ));
                     super::restore_agents(&state).await.unwrap();
                     let registry = state.registry.read().await;
                     for id in [&a, &b] {

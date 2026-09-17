@@ -83,6 +83,9 @@ serial_test = { workspace = true }
 # Process-start constructor: installs a global default tracing subscriber before any test thread runs — tracing callsite interest-cache race guard.
 ctor = { workspace = true }
 kallip-shell = { workspace = true }
+# Test-only instance-roots override for disk-fixture tests (see
+# kallip-runtime's `testutils` feature).
+kallip-runtime = { workspace = true, features = ["testutils"] }
 # Relay op-tests (ported from the former standalone connector): mock lesche + inline AEAD app side.
 chacha20poly1305 = { workspace = true }
 getrandom = { workspace = true }

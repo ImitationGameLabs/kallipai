@@ -125,7 +125,7 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
-    /// Whether this is the tagma-owned root agent — the unique agent minted
+    /// Whether this is the host-owned root agent — the unique agent minted
     /// with no creator (`created_by == None`). Root is the sole role allowed
     /// to author shared skills (the landlock carve in `build_tool_dispatch`
     /// keys off this), and is the agent looked up by `root_agent()` for

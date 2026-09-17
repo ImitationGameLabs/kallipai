@@ -11,6 +11,7 @@ kallip-client = { workspace = true }
 kallip-common = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
 kallip-runtime = { workspace = true }
+dirs = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
 clap = { workspace = true }
 tracing = { workspace = true }

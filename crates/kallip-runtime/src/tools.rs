@@ -444,8 +444,8 @@ mod tests {
         // and an XDG_CONFIG_HOME with no `kallip` subdir (profiles dir absent).
         let home = tempfile::tempdir().unwrap();
         let xdg = tempfile::tempdir().unwrap();
-        // The profiles resolver now derives its root from KALLIP_TAGMA_SLUG; with no
-        // slug set the profiles hole is simply absent, and the XDG_CONFIG_HOME
+        // The profiles resolver hangs off the installed instance roots; with none
+        // installed the profiles hole is simply absent, and the XDG_CONFIG_HOME
         // tempdir covers the config-tree variant (no kallipai/ subdir).
         // A real secret dir, a missing path, and a regular file — only the dir
         // qualifies (mount(2) needs a directory mountpoint).
@@ -454,6 +454,7 @@ mod tests {
         std::fs::write(&secret_file, b"x").unwrap();
         let missing = home.path().join("nope");
 
+        crate::persistence::set_instance_roots_for_tests(None);
         let mut list = std::ffi::OsString::new();
         list.push(secret_dir.path());
         list.push(":");
@@ -465,7 +466,6 @@ mod tests {
             [
                 ("HOME", Some(home.path().as_os_str())),
                 ("XDG_CONFIG_HOME", Some(xdg.path().as_os_str())),
-                ("KALLIP_TAGMA_SLUG", None),
                 ("KALLIP_SECRET_HIDE_PATHS", Some(list.as_os_str())),
             ],
             || {

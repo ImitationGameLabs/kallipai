@@ -51,6 +51,11 @@ use args::Args;
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Instance roots before logging: log placement itself hangs off the
+    // state root, and every later path resolves through them. Failure is
+    // the unnamed-boot case — stderr-only, as init_logging degrades anyway.
+    install_instance_roots()?;
+
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     init_logging(&filter);
@@ -451,20 +456,68 @@ fn ensure_credentials_root() -> Result<std::path::PathBuf> {
 /// This process's instance identity: `KALLIP_TAGMA_SLUG` is mandatory and
 /// grammar-checked (`kallip_daemon_common::wire::valid_slug` — the same
 /// rule that names the daemon's instance tree).
-fn boot_identity() -> Result<std::path::PathBuf> {
+fn boot_slug() -> Result<String> {
     let slug = std::env::var("KALLIP_TAGMA_SLUG")
         .ok()
         .filter(|s| !s.is_empty())
-        .context(
-            "KALLIP_TAGMA_SLUG is not set; name this instance with KALLIP_TAGMA_SLUG \
-             (lowercase letters, digits and '-', <=64 chars, starting with a letter or digit)",
-        )?;
+        .context(concat!(
+            "KALLIP_TAGMA_SLUG is not set; name this instance with KALLIP_TAGMA_SLUG ",
+            "(lowercase letters, digits and '-', <=64 chars, starting with a letter or digit)"
+        ))?;
     anyhow::ensure!(
         kallip_daemon_common::wire::valid_slug(&slug),
         "KALLIP_TAGMA_SLUG {slug:?} does not match [a-z0-9][a-z0-9-]* (<= 64 chars)"
     );
-    let data_root = kallip_runtime::persistence::data_dir_root()?;
-    Ok(data_root)
+    Ok(slug)
+}
+
+/// Derive this instance's three directory roots from the process
+/// identity: the data root honors `KALLIP_TAGMA_DATA_DIR` (the daemon
+/// hands managed instances their data directory at spawn), else it is
+/// the slug-namespaced tree under the platform data home; the config
+/// root is the sibling tree under the platform config home; the state
+/// root is the platform state home's `kallipai` namespace (per-instance
+/// log leaves are appended by `logs_target`). `install_instance_roots`
+/// runs this derivation before logging: log placement itself hangs off
+/// the state root.
+fn instance_roots_from_env() -> Result<kallip_runtime::persistence::InstanceRoots> {
+    let slug = boot_slug()?;
+    let data = match std::env::var_os("KALLIP_TAGMA_DATA_DIR").filter(|d| !d.is_empty()) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => dirs::data_dir()
+            .context("could not determine platform data directory")?
+            .join("kallipai")
+            .join("tagmata")
+            .join(&slug),
+    };
+    let config = dirs::config_dir()
+        .context("could not determine platform config directory")?
+        .join("kallipai")
+        .join("tagmata")
+        .join(&slug);
+    let state = dirs::state_dir()
+        .context("could not determine platform state directory")?
+        .join("kallipai");
+    Ok(kallip_runtime::persistence::InstanceRoots {
+        data,
+        config,
+        state,
+    })
+}
+
+/// Install the derived roots runtime-wide. Runs before logging: log
+/// placement itself hangs off the state root.
+fn install_instance_roots() -> Result<()> {
+    let roots = instance_roots_from_env()?;
+    kallip_runtime::persistence::install_instance_roots(roots)
+}
+
+/// This process's data root for the installed identity
+/// (`install_instance_roots` has already run by the time callers reach
+/// for it).
+fn boot_identity() -> Result<std::path::PathBuf> {
+    boot_slug()?;
+    kallip_runtime::persistence::data_dir_root()
 }
 
 /// Where this tagma's log files live: always the state tree —
@@ -872,7 +925,7 @@ fn resolve_relay_entries(args: &args::Args) -> Result<Vec<RelayEntry>> {
             );
             entries.push(RelayEntry {
                 name: e.name,
-                polis_url: kallip_runtime::polis::polis_origin(Some(e.url))?,
+                polis_url: kallip_common::polis::polis_origin(Some(e.url))?,
                 enrollment_code: e.enrollment_code,
             });
         }
@@ -885,7 +938,7 @@ fn resolve_relay_entries(args: &args::Args) -> Result<Vec<RelayEntry>> {
         // assume.
         Ok(vec![RelayEntry {
             name: "default".to_string(),
-            polis_url: kallip_runtime::polis::polis_origin(args.polis_url.clone())?,
+            polis_url: kallip_common::polis::polis_origin(args.polis_url.clone())?,
             enrollment_code: args.relay_enrollment_code.clone(),
         }])
     } else {
@@ -1164,7 +1217,7 @@ async fn activate_relay(
     // routes and the relay orchestrator (a cheap clone of the shared reqwest
     // pool + bearer).
     let lesche = kallip_lesche_client::LescheClient::builder(
-        &kallip_runtime::polis::service_base(&entry.polis_url, "lesche"),
+        &kallip_common::polis::service_base(&entry.polis_url, "lesche"),
         &tagma_token,
     )
     .build()?;

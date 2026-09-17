@@ -12,7 +12,7 @@ use tempfile::TempDir;
 #[serial]
 fn overlap_detects_workspace_inside_data_root() {
     with_data_dir(|_| {
-        // Workspace nested under the slug-derived root → overlap.
+        // Workspace nested under the installed data root → overlap.
         // Exercises the `ws.starts_with(&data)` direction.
         let ws = data_dir_root().unwrap().join("agents/x");
         std::fs::create_dir_all(&ws).unwrap();
@@ -49,7 +49,7 @@ fn overlap_detects_workspace_containing_data_root() {
         // $HOME case, the most dangerous: the broad write grant covers the
         // whole data tree). Exercises the `data.starts_with(&ws)` direction.
         // The tmp root itself is the smallest existing on-disk ancestor
-        // (the slug-derived root hangs three levels beneath it).
+        // (the data root hangs three levels beneath it).
         let ws = tmp.path().to_path_buf();
         assert!(
             workspace_overlaps_data_root(&ws).unwrap(),
@@ -103,6 +103,34 @@ fn overlap_fails_closed_on_nonexistent_workspace() {
         assert!(
             workspace_overlaps_data_root(&ws).is_err(),
             "non-canonicalizable workspace must fail closed"
+        );
+    });
+}
+
+// ----- install one-shot guard test -----
+
+#[test]
+#[serial]
+fn install_rejects_second_install() {
+    with_data_dir(|tmp| {
+        // Explicit set(Some) -> install -> refuse, then set(None) ->
+        // install -> accept: the one-shot contract backing data-tree
+        // integrity. A second install must error, never silently
+        // replace the roots.
+        let roots = InstanceRoots {
+            data: tmp.path().join("data"),
+            config: tmp.path().join("config"),
+            state: tmp.path().join("state"),
+        };
+        set_instance_roots_for_tests(Some(roots.clone()));
+        assert!(
+            install_instance_roots(roots.clone()).is_err(),
+            "second install must be refused while roots are installed"
+        );
+        set_instance_roots_for_tests(None);
+        assert!(
+            install_instance_roots(roots).is_ok(),
+            "install must succeed from an empty slot"
         );
     });
 }

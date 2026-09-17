@@ -2443,6 +2443,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "dirs",
  "kallip-archeion-common",
  "kallip-client",
  "kallip-common",

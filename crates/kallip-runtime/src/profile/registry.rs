@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn build_client_errors_when_provider_missing() {
-        // Provider existence is tagma-validated at startup; this covers the runtime lookup path.
+        // Provider existence is host-validated at startup; this covers the runtime lookup path.
         let mut lone = set("lone", "m");
         lone.profiles[0].endpoint = "missing".into();
         lone.profiles[0].max_context_window = 1000;

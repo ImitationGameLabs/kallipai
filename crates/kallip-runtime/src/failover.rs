@@ -122,7 +122,7 @@ impl FailoverState {
         self.profile_idx
     }
     /// Clone the mirrored active-profile identity. Poison-tolerant (`into_inner`), matching
-    /// the tagma-side read pattern — a panic elsewhere in a cell holder must not brick reads.
+    /// the host-side read pattern — a panic elsewhere in a cell holder must not brick reads.
     pub fn profile_snapshot(&self) -> ProfileSnapshot {
         self.snapshot
             .lock()

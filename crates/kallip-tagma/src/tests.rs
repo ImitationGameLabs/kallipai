@@ -1,5 +1,5 @@
 use super::*;
-use std::path::PathBuf;
+use serial_test::serial;
 
 #[test]
 fn polis_toml_rejects_the_relay_table_name() {
@@ -110,37 +110,62 @@ fn boot_refuses_an_invalid_slug() {
 }
 
 #[test]
-fn boot_derives_the_data_root_from_the_slug() {
+#[serial]
+fn boot_derives_the_instance_roots_from_the_slug() {
     let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().to_str().unwrap().to_owned();
     temp_env::with_vars(
         [
             ("KALLIP_TAGMA_SLUG", Some("e2e")),
-            ("XDG_DATA_HOME", Some(tmp.path().to_str().unwrap())),
+            ("KALLIP_TAGMA_DATA_DIR", None),
+            ("XDG_DATA_HOME", Some(home.as_str())),
+            ("XDG_CONFIG_HOME", Some(home.as_str())),
+            ("XDG_STATE_HOME", Some(home.as_str())),
         ],
         || {
-            let root = boot_identity().unwrap();
-            assert_eq!(
-                root,
-                tmp.path().join("kallipai").join("tagmata").join("e2e")
-            );
+            let roots = instance_roots_from_env().unwrap();
+            let leaf = tmp.path().join("kallipai").join("tagmata").join("e2e");
+            assert_eq!(roots.data, leaf);
+            assert_eq!(roots.config, leaf);
+            assert_eq!(roots.state, tmp.path().join("kallipai"));
         },
     );
 }
 
 #[test]
-fn logs_land_in_the_state_tree_under_the_slug() {
+#[serial]
+fn boot_honors_the_data_dir_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let override_dir = tmp.path().join("override");
     temp_env::with_vars(
         [
             ("KALLIP_TAGMA_SLUG", Some("e2e")),
-            ("XDG_STATE_HOME", Some("/state/home")),
+            (
+                "KALLIP_TAGMA_DATA_DIR",
+                Some(override_dir.to_str().unwrap()),
+            ),
         ],
         || {
-            assert_eq!(
-                logs_target().unwrap(),
-                PathBuf::from("/state/home/kallipai/tagmata/e2e/logs")
-            );
+            let roots = instance_roots_from_env().unwrap();
+            assert_eq!(roots.data, override_dir);
         },
     );
+}
+
+#[test]
+#[serial]
+fn logs_land_in_the_state_tree_under_the_slug() {
+    // Install the process roots (like every state-backed test): log
+    // placement resolves the state root through the injection and appends
+    // the slug leaf itself.
+    crate::test_helpers::ensure_test_data_dir();
+    temp_env::with_vars([("KALLIP_TAGMA_SLUG", Some("e2e"))], || {
+        let state_root = kallip_runtime::persistence::state_dir_root().unwrap();
+        assert_eq!(
+            logs_target().unwrap(),
+            state_root.join("tagmata").join("e2e").join("logs")
+        );
+    });
 }
 
 #[test]

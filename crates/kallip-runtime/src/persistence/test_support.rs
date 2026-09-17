@@ -13,20 +13,29 @@ use tempfile::TempDir;
 pub const NO_TRUNCATION: usize = 65_536;
 
 // ----- archive-on-remove tests -----
-// These mutate the process-global KALLIP_TAGMA_SLUG/XDG_DATA_HOME pair, so they are
-// serialized (serial_test) and each scopes a tempfile::TempDir via temp_env;
-// the data root is `<tmp>/kallipai/tagmata/test-instance` — use
-// `data_dir_root()` inside the closure instead of `tmp.path()` directly.
+// These install process-global instance roots, so they are serialized
+// (serial_test) and each scopes a tempfile::TempDir: the three roots
+// are installed beneath the temp dir. Use `data_dir_root()` inside
+// the closure instead of `tmp.path()` directly.
 pub fn with_data_dir<R>(f: impl FnOnce(&TempDir) -> R) -> R {
     let tmp = TempDir::new().unwrap();
-    let path = tmp.path().to_str().unwrap().to_owned();
-    temp_env::with_vars(
-        [
-            ("KALLIP_TAGMA_SLUG", Some("test-instance")),
-            ("XDG_DATA_HOME", Some(path.as_str())),
-        ],
-        || f(&tmp),
-    )
+    let roots = crate::persistence::InstanceRoots {
+        data: tmp.path().join("data"),
+        config: tmp.path().join("config"),
+        state: tmp.path().join("state"),
+    };
+    crate::persistence::set_instance_roots_for_tests(Some(roots));
+    let _guard = RestoreRoots;
+    f(&tmp)
+}
+
+/// Clears the installed test roots on drop (including during unwind),
+/// so leftover global state cannot leak into unrelated tests.
+struct RestoreRoots;
+impl Drop for RestoreRoots {
+    fn drop(&mut self) {
+        crate::persistence::set_instance_roots_for_tests(None);
+    }
 }
 
 /// A split-format directory with real damage to inflict: a pin, three

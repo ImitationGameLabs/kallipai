@@ -27,12 +27,6 @@ pub fn polis_origin(explicit: Option<String>) -> anyhow::Result<String> {
     Ok(raw.trim_end_matches('/').to_owned())
 }
 
-/// Read `KALLIP_POLIS_URL` from the environment and derive the origin
-/// (see [`polis_origin`]: unset and blank both fail).
-pub fn polis_origin_from_env() -> anyhow::Result<String> {
-    polis_origin(std::env::var("KALLIP_POLIS_URL").ok())
-}
-
 /// The client base for one backend service: `{origin}/v1/{service}`.
 pub fn service_base(origin: &str, service: &str) -> String {
     format!("{origin}/v1/{service}")
@@ -85,25 +79,5 @@ mod tests {
             service_base("https://api.example.com", "archeion"),
             "https://api.example.com/v1/archeion"
         );
-    }
-
-    #[test]
-    fn env_reader_unset_blank_and_set() {
-        // SAFETY: test-only env edits; no other test in this binary reads
-        // KALLIP_POLIS_URL (verified by rg at authoring time), so the
-        // process-global edits cannot race a reader here. The three legs
-        // share one test because they mutate the same process-global.
-        unsafe {
-            std::env::remove_var("KALLIP_POLIS_URL");
-        }
-        assert!(polis_origin_from_env().is_err());
-        unsafe {
-            std::env::set_var("KALLIP_POLIS_URL", "   ");
-        }
-        assert!(polis_origin_from_env().is_err());
-        unsafe {
-            std::env::set_var("KALLIP_POLIS_URL", "https://api.example.com/");
-        }
-        assert_eq!(polis_origin_from_env().unwrap(), "https://api.example.com");
     }
 }

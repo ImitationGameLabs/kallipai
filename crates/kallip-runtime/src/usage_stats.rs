@@ -3,7 +3,7 @@
 //! In-memory only, process-lifetime scoped: the map starts empty at tagma
 //! boot and fills as agents record LLM usage. This is the per-agent split of
 //! the same "since process start" semantics [`crate::token_budget::TokenBudget`]
-//! carries tagma-wide; the lifetime, on-disk cumulative totals in
+//! carries instance-wide; the lifetime, on-disk cumulative totals in
 //! `ContextStore` are a separate view and the two never mix.
 //!
 //! Clones share one `Arc`, so `AppState` and every `AgentContext` observe the

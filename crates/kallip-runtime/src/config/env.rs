@@ -1,13 +1,13 @@
 //! Environment-knob resolvers for tagma startup.
 //!
-//! Two small readers — the tagma-global policy preset and the root agent's
+//! Two small readers — the instance-global policy preset and the root agent's
 //! permission class — both following the env-knob convention: an unrecognized
 //! value is a fatal misconfiguration and panics. Re-exported by `crate::config`.
 
 use super::permissions::PermissionClass;
 use kallip_common::policy::PolicyPreset;
 
-/// Resolve the tagma-global `bash_exec` classify preset from
+/// Resolve the instance-global `bash_exec` classify preset from
 /// `KALLIP_POLICY_PRESET`.
 ///
 /// Unset or empty → [`PolicyPreset::Default`] (strict). Accepts `default`, `auto`,

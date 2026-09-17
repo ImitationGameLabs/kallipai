@@ -77,7 +77,7 @@ task is fully done. You may do work and `break` without sending anything.
 /// Returns the shared skill directory.
 ///
 /// `KALLIP_SKILLS_ROOT`, if set, is used verbatim. Otherwise the directory
-/// is `<data_dir_root>/skills/` — the slug-derived instance tree (see
+/// is `<data_dir_root>/skills/` — the host-installed instance tree (see
 /// [`crate::persistence::data_dir_root`]).
 pub fn skill_dir() -> Result<std::path::PathBuf> {
     if let Ok(dir) = std::env::var("KALLIP_SKILLS_ROOT")
@@ -266,32 +266,33 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
-    /// Run `f` with the skill-related env vars pinned: `KALLIP_TAGMA_SLUG` +
-    /// `XDG_DATA_HOME` naming the slug-derived data root (`data_dir`),
-    /// `KALLIP_SKILLS_SEED` to `seed` (None unsets), and `KALLIP_SKILLS_ROOT`
-    /// to `root` (None unsets). Pinned together so the process-global state
-    /// stays consistent.
+    /// Install the fixture instance roots (`data_dir` verbatim as the data
+    /// root) and pin the skill knobs: `KALLIP_SKILLS_SEED` to `seed` (None
+    /// unsets) and `KALLIP_SKILLS_ROOT` to `root` (None unsets). Set
+    /// together so the process-global state stays consistent.
     fn with_skill_env<R>(
         data_dir: &Path,
         seed: Option<&str>,
         root: Option<&str>,
         f: impl FnOnce() -> R,
     ) -> R {
-        temp_env::with_vars(
-            [
-                ("KALLIP_TAGMA_SLUG", Some("test")),
-                ("XDG_DATA_HOME", Some(data_dir.to_str().unwrap())),
-                ("KALLIP_SKILLS_SEED", seed),
-                ("KALLIP_SKILLS_ROOT", root),
-            ],
+        crate::persistence::set_instance_roots_for_tests(Some(crate::persistence::InstanceRoots {
+            data: data_dir.to_path_buf(),
+            config: data_dir.to_path_buf(),
+            state: data_dir.to_path_buf(),
+        }));
+        let out = temp_env::with_vars(
+            [("KALLIP_SKILLS_SEED", seed), ("KALLIP_SKILLS_ROOT", root)],
             f,
-        )
+        );
+        crate::persistence::set_instance_roots_for_tests(None);
+        out
     }
 
-    /// The slug-derived data root for the fixture data home (`with_skill_env`
-    /// pins KALLIP_TAGMA_SLUG=test + XDG_DATA_HOME=data).
+    /// The installed data root for the fixture data home (`with_skill_env`
+    /// installs `data` verbatim).
     fn data_root(data: &Path) -> PathBuf {
-        data.join("kallipai").join("tagmata").join("test")
+        data.to_path_buf()
     }
 
     /// Build a minimal seed fixture (mirrors the shipped layout: a category

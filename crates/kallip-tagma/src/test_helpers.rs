@@ -493,7 +493,7 @@ pub async fn install_inbox_store(state: &SharedState) {
 /// after those constructors return.
 pub fn ensure_test_data_dir() {
     static GUARD: OnceLock<PathBuf> = OnceLock::new();
-    GUARD.get_or_init(|| {
+    let path = GUARD.get_or_init(|| {
         let tmp = tempfile::Builder::new()
             .prefix("kallip-tagma-test-data-")
             // Inside the managed root so the one deliberate
@@ -522,6 +522,20 @@ pub fn ensure_test_data_dir() {
         }
         path
     });
+    // Mirror the host boot: point the runtime's instance roots at the
+    // pinned identity, so runtime path resolution goes through the
+    // injection (the runtime no longer reads the environment). Re-assert
+    // on every call: the OnceLock only guards the tempdir allocation, and
+    // disk-fixture tests re-point the roots per test — a once-only install
+    // would leave them dangling on a deleted fixture dir.
+    let leaf = path.join("kallipai").join("tagmata").join("test");
+    kallip_runtime::persistence::set_instance_roots_for_tests(Some(
+        kallip_runtime::persistence::InstanceRoots {
+            data: leaf.clone(),
+            config: leaf,
+            state: path.join("state").join("kallipai"),
+        },
+    ));
 }
 
 /// Register a live agent bound to the `alt` set (the dangling-bindings

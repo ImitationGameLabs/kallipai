@@ -166,7 +166,7 @@ pub struct AgentContext {
     /// The `timeout_secs` the wait timer was last armed with (for the
     /// elapsed-turn text). Meaningful only while `wait_until` is armed.
     pub wait_armed_secs: u64,
-    /// Tagma-wide token budget shared by all agents.
+    /// Instance-wide token budget shared by all agents.
     /// Cloned from `AppState` — same underlying Arc counters across all agents.
     pub token_budget: crate::token_budget::TokenBudget,
     /// Per-agent, single-launch token usage shared process-wide.

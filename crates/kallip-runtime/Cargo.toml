@@ -39,6 +39,10 @@ landlock = ["kallip-shell/landlock"]
 # the install site lives in the landlock spawn path. Off by default; the tagma
 # enables it. See `kallip-shell`'s `seccomp` feature.
 seccomp = ["landlock", "kallip-shell/seccomp"]
+# Test-only surface: `set_instance_roots_for_tests` (the instance-roots
+# override used by this crate's own tests and by dependent crates'
+# tests). Off by default; nothing test-only ships in a default build.
+testutils = []
 
 [dev-dependencies]
 temp-env = { workspace = true }

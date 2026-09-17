@@ -57,7 +57,7 @@ fn archive_moves_dir_and_preserves_contents() {
             serde_json::from_str(&std::fs::read_to_string(archived.join("context.json")).unwrap())
                 .unwrap();
         assert_eq!(ctx["cumulative_usage"]["prompt_tokens"], 100);
-        // Live and archived trees share one root (the slug-derived data
+        // Live and archived trees share one root (the installed data
         // root; single filesystem here, so `rename` is atomic — a cross-fs
         // EXDEV falls back to copy + delete).
         let root = data_dir_root().unwrap();

@@ -18,7 +18,6 @@ pub(crate) mod llm_error;
 pub(crate) mod persisted_message;
 pub mod persistence;
 pub mod policy;
-pub mod polis;
 pub mod profile;
 pub mod retry;
 pub(crate) mod runner;

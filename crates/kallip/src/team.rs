@@ -221,8 +221,49 @@ fn verdict_word(d: RoleDisposition) -> &'static str {
     }
 }
 
+/// Install the instance roots for the two commands that read this
+/// machine's instance tree (the converge's parked-area check and the
+/// lock rebuild). Same derivation as the tagma's boot: slug identity,
+/// `KALLIP_TAGMA_DATA_DIR` override, platform homes. Every other
+/// subcommand is identity-free — it talks to the tagma over HTTP — so
+/// this stays scoped to the local-disk readers.
+fn install_local_instance_roots() -> Result<()> {
+    let slug = std::env::var("KALLIP_TAGMA_SLUG")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .context(concat!(
+            "KALLIP_TAGMA_SLUG is not set; this command reads the local instance tree — ",
+            "run it with the tagma's KALLIP_TAGMA_SLUG"
+        ))?;
+    let data = match std::env::var_os("KALLIP_TAGMA_DATA_DIR").filter(|d| !d.is_empty()) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => dirs::data_dir()
+            .context("could not determine platform data directory")?
+            .join("kallipai")
+            .join("tagmata")
+            .join(&slug),
+    };
+    let config = dirs::config_dir()
+        .context("could not determine platform config directory")?
+        .join("kallipai")
+        .join("tagmata")
+        .join(&slug);
+    let state = dirs::state_dir()
+        .context("could not determine platform state directory")?
+        .join("kallipai");
+    kallip_runtime::persistence::install_instance_roots(
+        kallip_runtime::persistence::InstanceRoots {
+            data,
+            config,
+            state,
+        },
+    )
+}
 async fn run_converge(client: &TagmaClient, args: &TeamConvergeArgs) -> Result<()> {
     let (declaration, lock_path) = resolve_paths(&args.common.file, &args.common.lock);
+    // Best-effort: the parked-area check is advisory, so a missing
+    // identity degrades to the scan-warning path below, as before.
+    let _ = install_local_instance_roots();
     // A corrupt archive refuses the run (never reads as empty): the
     // operator decides — rebuild or fix — instead of losing every
     // identity binding to a silent re-spawn.
@@ -457,6 +498,7 @@ fn render_converge(
 /// recovered parked body is listed — a rebuild that silently absorbed a
 /// parked body would hide a member, the invisibility rebuild must prevent.
 async fn run_lock_rebuild(client: &TagmaClient, args: &TeamLockRebuildArgs) -> Result<()> {
+    install_local_instance_roots()?;
     let live = client.list_agents(None).await?;
     let parked = kallip_runtime::persistence::scan_inactive().context(
         "cannot scan the inactive area (is KALLIP_TAGMA_DATA_DIR / KALLIP_TAGMA_SLUG set for this tagma?)",

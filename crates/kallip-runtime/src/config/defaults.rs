@@ -15,14 +15,14 @@ pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "out, or deferred pending approval) the remaining calls in that round are ",
     "skipped and returned as errors — re-issue them after reviewing what happened.",
 );
-/// Effectively unlimited — the real safety net is the tagma-wide token budget.
+/// Effectively unlimited — the real safety net is the instance-wide token budget.
 /// Individual rounds are bounded by LLM response length; the loop as a whole is
 /// bounded by token consumption. This constant only serves as a last-resort
 /// guard against a degenerate "tool calls with no progress" loop.
 pub(crate) const DEFAULT_MAX_TOOL_ROUNDS: usize = usize::MAX;
 /// Default cap on consecutive heartbeat rounds (bare-assistant re-loops) before
 /// the harness force-idles the agent. Bounds "self-monologue" token burn; the
-/// tagma-wide token budget remains the overall hard ceiling. Three is a firm
+/// instance-wide token budget remains the overall hard ceiling. Three is a firm
 /// nudge: one accidental bare response, a reminder, then a stop.
 pub(crate) const DEFAULT_MAX_HEARTBEAT_ROUNDS: u32 = 3;
 /// Default cap on consecutive transient (failover-chain-exhausted) parks that get

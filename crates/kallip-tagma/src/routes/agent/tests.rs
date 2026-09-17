@@ -1067,6 +1067,23 @@ fn ensure_root_agent_refuses_to_mint_when_a_disk_root_exists() {
                 .unwrap();
             rt.block_on(async {
                 let state = make_state();
+                // Re-point the roots at the pinned identity AFTER the state
+                // constructor (it re-asserts the shared test roots).
+                kallip_runtime::persistence::set_instance_roots_for_tests(Some(
+                    kallip_runtime::persistence::InstanceRoots {
+                        data: tmp
+                            .path()
+                            .join("kallipai")
+                            .join("tagmata")
+                            .join("disk-root"),
+                        config: tmp
+                            .path()
+                            .join("kallipai")
+                            .join("tagmata")
+                            .join("disk-root"),
+                        state: tmp.path().join("state"),
+                    },
+                ));
                 let err = super::ensure_root_agent(&state).await.unwrap_err();
                 assert!(
                     err.to_string().contains("refusing to mint"),
@@ -1107,6 +1124,23 @@ fn ensure_root_agent_refuses_to_mint_when_the_agents_dir_is_unreadable() {
                 .unwrap();
             rt.block_on(async {
                 let state = make_state();
+                // Re-point the roots at the pinned identity AFTER the state
+                // constructor (it re-asserts the shared test roots).
+                kallip_runtime::persistence::set_instance_roots_for_tests(Some(
+                    kallip_runtime::persistence::InstanceRoots {
+                        data: tmp
+                            .path()
+                            .join("kallipai")
+                            .join("tagmata")
+                            .join("disk-root"),
+                        config: tmp
+                            .path()
+                            .join("kallipai")
+                            .join("tagmata")
+                            .join("disk-root"),
+                        state: tmp.path().join("state"),
+                    },
+                ));
                 let err = super::ensure_root_agent(&state).await.unwrap_err();
                 assert!(
                     err.to_string()

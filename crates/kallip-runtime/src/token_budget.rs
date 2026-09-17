@@ -1,4 +1,4 @@
-//! Tagma-wide token budget shared by all agents.
+//! Instance-wide token budget shared by all agents.
 //!
 //! Provides [`TokenBudget`] — a handle to an `Arc<Mutex<BudgetState>>` holding
 //! an explicit `BudgetState` enum (`Limited` or `Unlimited`), cloned from
@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// The tagma-wide budget state: a finite limit with cumulative consumption,
+/// The instance-wide budget state: a finite limit with cumulative consumption,
 /// or unlimited (enforcement off, consumption still tracked).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BudgetState {
@@ -67,7 +67,7 @@ impl TokenBudgetSnapshot {
     }
 }
 
-/// Tagma-wide token budget shared by all agents.
+/// Instance-wide token budget shared by all agents.
 ///
 /// Wraps an `Arc<Mutex<BudgetState>>` — an explicit `Limited`/`Unlimited`
 /// state machine — cloned from `AppState` so every agent on the tagma shares

@@ -264,10 +264,10 @@ fn write_back_default(raw: &str, default: &str, path: &Path) -> Result<()> {
 
 /// Resolve the config file path for reading:
 /// `<config root>/profiles/profiles.toml` (`persistence::config_dir_root`,
-/// derived from `KALLIP_TAGMA_SLUG`) — declared configuration is operator
+/// installed by the host at boot) — declared configuration is operator
 /// intent, so it lives under the config home, not the runtime data
 /// tree. Returns `None` both when the resolved file does not exist and
-/// when the root cannot be derived (no slug / no config home): either
+/// when no roots are installed: either
 /// way there is no config file to read, and `load()` degrades to the
 /// implicit env profile instead of blocking boot.
 fn resolve_config_path() -> Result<Option<PathBuf>> {
@@ -287,13 +287,13 @@ fn resolve_config_path() -> Result<Option<PathBuf>> {
 /// Resolve the config file path for writing, same single location as the read
 /// side. Unlike the read side (which returns `None` when the file does not
 /// exist), this always returns a path — `save()` needs a target even on first
-/// write. Errors when the config root cannot be derived (`KALLIP_TAGMA_SLUG`
-/// unset, or no platform config home): a write has nowhere to land.
+/// write. Errors when no instance roots are installed: a write has nowhere
+/// to land.
 pub fn config_path() -> Result<PathBuf> {
     config_dir_profile_path()
 }
 /// The single profiles location shared by both resolve fns:
-/// `<config root>/profiles/profiles.toml` (the same slug-derived leaf
+/// `<config root>/profiles/profiles.toml` (the same host-installed leaf
 /// `persistence::config_dir_root` names, so the declared config sits in
 /// the config tree while runtime data stays in the data tree). Errors
 /// when the config root cannot be derived.
@@ -536,6 +536,7 @@ struct ProviderEntry {
 mod tests {
     use super::*;
     use just_llm_client::types::generation::ReasoningEffort;
+    use serial_test::serial;
     use std::collections::BTreeSet;
 
     #[test]
@@ -1233,31 +1234,31 @@ api_key = "fake"
         let file: ConfigFile = toml::from_str(&toml).unwrap();
         assert!(validate(&file).is_err());
     }
-    /// Fixture: slug identity + an isolated XDG config home. The derived
-    /// config root is `<tmp>/kallipai/tagmata/main`.
-    fn with_slug_config_home<R>(tmp: &tempfile::TempDir, f: impl FnOnce() -> R) -> R {
-        temp_env::with_vars(
-            [
-                ("KALLIP_TAGMA_SLUG", Some("main")),
-                ("XDG_CONFIG_HOME", Some(tmp.path().to_str().unwrap())),
-            ],
-            f,
-        )
+    /// Fixture: install instance roots under an isolated temp dir. The
+    /// config root is `<tmp>/config`.
+    fn with_installed_roots<R>(tmp: &tempfile::TempDir, f: impl FnOnce() -> R) -> R {
+        crate::persistence::set_instance_roots_for_tests(Some(crate::persistence::InstanceRoots {
+            data: tmp.path().join("data"),
+            config: tmp.path().join("config"),
+            state: tmp.path().join("state"),
+        }));
+        let out = f();
+        crate::persistence::set_instance_roots_for_tests(None);
+        out
     }
 
     #[test]
-    fn slug_derived_config_root_is_the_only_profiles_location() {
+    #[serial]
+    fn installed_config_root_is_the_only_profiles_location() {
         let tmp = tempfile::tempdir().unwrap();
         let config_profiles = tmp
             .path()
-            .join("kallipai")
-            .join("tagmata")
-            .join("main")
+            .join("config")
             .join("profiles")
             .join("profiles.toml");
         std::fs::create_dir_all(config_profiles.parent().unwrap()).unwrap();
-        std::fs::write(&config_profiles, "\n").unwrap();
-        with_slug_config_home(&tmp, || {
+        std::fs::write(&config_profiles, "").unwrap();
+        with_installed_roots(&tmp, || {
             assert_eq!(
                 resolve_config_path().unwrap().as_deref(),
                 Some(config_profiles.as_path())
@@ -1267,40 +1268,37 @@ api_key = "fake"
     }
 
     #[test]
-    fn missing_slug_degrades_the_read_and_errors_the_write() {
-        temp_env::with_vars_unset(["KALLIP_TAGMA_SLUG"], || {
-            // The old HOME-level config silently shared one file across instances;
-            // a run that cannot derive its config root (no slug) gets no config
-            // file: the read side degrades to the env profile (a warning, not a
-            // boot gate), while the write side fails loud — nowhere to land.
-            assert!(resolve_config_path().unwrap().is_none());
-            assert!(config_path().is_err());
-            assert!(profiles_config_dir().is_none());
-        });
+    #[serial]
+    fn missing_roots_degrade_the_read_and_error_the_write() {
+        crate::persistence::set_instance_roots_for_tests(None);
+        // The old HOME-level config silently shared one file across instances;
+        // a run without installed roots gets no config file: the read side
+        // degrades to the env profile (a warning, not a boot gate), while the
+        // write side fails loud — nowhere to land.
+        assert!(resolve_config_path().unwrap().is_none());
+        assert!(config_path().is_err());
+        assert!(profiles_config_dir().is_none());
     }
 
     #[test]
-    fn slug_derived_root_reads_only_when_file_exists() {
+    #[serial]
+    fn installed_root_reads_only_when_file_exists() {
         let tmp = tempfile::tempdir().unwrap();
-        with_slug_config_home(&tmp, || {
-            // No profiles.toml in the derived config root: the read side must
-            // yield None, not fall through to any other location.
+        with_installed_roots(&tmp, || {
+            // No profiles.toml in the installed config root: the read side
+            // must yield None, not fall through to any other location.
             let resolved = resolve_config_path().unwrap();
             assert!(resolved.is_none());
         });
     }
 
     #[test]
-    fn profiles_config_dir_follows_the_derived_root() {
+    #[serial]
+    fn profiles_config_dir_follows_the_installed_root() {
         let tmp = tempfile::tempdir().unwrap();
-        let profiles_dir = tmp
-            .path()
-            .join("kallipai")
-            .join("tagmata")
-            .join("main")
-            .join("profiles");
+        let profiles_dir = tmp.path().join("config").join("profiles");
         std::fs::create_dir_all(&profiles_dir).unwrap();
-        with_slug_config_home(&tmp, || {
+        with_installed_roots(&tmp, || {
             // The hide-hole source must track the resolver: it hides
             // the dedicated profiles/ subdir (a directory), not the data
             // root (agents/skills stay Guest-visible).

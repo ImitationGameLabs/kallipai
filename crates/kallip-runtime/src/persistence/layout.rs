@@ -1,86 +1,107 @@
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 use anyhow::{Context as _, Result};
 
 use kallip_common::AgentId;
 
-/// Resolve the shared data root under which `agents/` (the `active/`,
-/// `inactive/`, and `archived/` life stages) and `skills/` live:
-/// `<platform_data_dir>/kallipai/tagmata/<KALLIP_TAGMA_SLUG>`.
+/// The three per-instance directory roots a runtime process needs: the
+/// data home, the declared-configuration home, and the state home.
 ///
-/// The instance identity comes solely from `KALLIP_TAGMA_SLUG` — the daemon
-/// injects it for managed instances, and every direct run (container,
-/// benchmark, test) names itself the same way. The `kallipai` namespace
-/// is the product-wide data home and `tagmata/` holds one directory per
-/// instance. An unset `KALLIP_TAGMA_SLUG` is an error: there is no fallback
-/// leaf — a process that cannot name itself must not guess where its
-/// data lives.
+/// The runtime is identity-free: it does not know how the host named it
+/// or where the host derives its directories from. The host (the tagma
+/// binary, the `kallip` CLI) resolves the three roots from its own
+/// identity configuration and installs them once at boot with
+/// [`install_instance_roots`]. Every derived path in the runtime hangs
+/// from these roots; nothing is resolved from the environment here.
+#[derive(Debug, Clone)]
+pub struct InstanceRoots {
+    /// The data home: the agent trees (`agents/` with their `active/`,
+    /// `inactive/`, and `archived/` life stages) and `skills/` live here.
+    pub data: PathBuf,
+    /// The declared-configuration home (`profiles.toml`,
+    /// `exec_hooks.toml`): operator intent rather than runtime data.
+    pub config: PathBuf,
+    /// The state home namespace: pure output residue (instance logs)
+    /// that persists across restarts yet is not portable enough to
+    /// belong in the data home.
+    pub state: PathBuf,
+}
+
+static INSTANCE_ROOTS: RwLock<Option<InstanceRoots>> = RwLock::new(None);
+
+/// Install the process-wide instance roots.
+///
+/// The host calls this exactly once at boot, before any runtime
+/// subsystem resolves a path. A second call is an error: the roots are
+/// process identity, and silently replacing them would scatter data
+/// across trees.
+pub fn install_instance_roots(roots: InstanceRoots) -> Result<()> {
+    let mut slot = INSTANCE_ROOTS
+        .write()
+        .map_err(|_| anyhow::anyhow!("instance roots lock poisoned"))?;
+    if slot.is_some() {
+        anyhow::bail!("instance roots already installed; install them once at boot");
+    }
+    *slot = Some(roots);
+    Ok(())
+}
+
+/// The installed instance roots.
+fn roots() -> Result<InstanceRoots> {
+    INSTANCE_ROOTS
+        .read()
+        .map_err(|_| anyhow::anyhow!("instance roots lock poisoned"))?
+        .clone()
+        .context("instance roots not installed; the host must install them at boot")
+}
+
+/// Available with the `testutils` feature (and during this crate's own
+/// tests): overwrite the installed instance roots. Test-only — the
+/// production install path is [`install_instance_roots`], which refuses
+/// a second install.
+#[cfg(any(test, feature = "testutils"))]
+pub fn set_instance_roots_for_tests(roots: Option<InstanceRoots>) {
+    if let Ok(mut slot) = INSTANCE_ROOTS.write() {
+        *slot = roots;
+    }
+}
+
+/// Resolve the shared data root under which the agent trees and
+/// `skills/` live.
 ///
 /// All three life-stage bases route through this so every life-stage tree
 /// shares one root. When that root is on a single filesystem,
 /// `archive_agent_dir`'s `rename` is atomic; if the root is symlinked across a
 /// filesystem boundary the `rename` raises `EXDEV` and the archive falls back to
 /// a recursive copy + delete (see `archive_agent_dir`).
-/// An explicit `KALLIP_TAGMA_DATA_DIR` wins first: the daemon hands the
-/// instance its data directory at spawn, so the two sides no longer need
-/// to assume a shared tree layout underneath. Without it the root is
-/// slug-derived (`<platform_data_dir>/kallipai/tagmata/<KALLIP_TAGMA_SLUG>`).
 pub fn data_dir_root() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("KALLIP_TAGMA_DATA_DIR").filter(|d| !d.is_empty()) {
-        return Ok(PathBuf::from(dir));
-    }
-    Ok(dirs::data_dir()
-        .context("could not determine platform data directory")?
-        .join("kallipai")
-        .join("tagmata")
-        .join(instance_slug()?))
+    Ok(roots()?.data)
 }
 
-/// The instance name every derived root hangs from: `KALLIP_TAGMA_SLUG`, set
-/// for managed instances by the daemon and by every direct run
-/// (container, benchmark, test) itself. Unset is an error: a process
-/// that cannot name itself must not guess where its data lives.
-fn instance_slug() -> Result<String> {
-    std::env::var("KALLIP_TAGMA_SLUG")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .context(
-            "KALLIP_TAGMA_SLUG is not set; the root is derived from it — name the instance with KALLIP_TAGMA_SLUG",
-        )
-}
-
-/// Resolve the per-instance config root:
-/// `<platform_config_dir>/kallipai/tagmata/<KALLIP_TAGMA_SLUG>`. Declared
-/// configuration (`profiles.toml`, `exec_hooks.toml`) is operator intent
-/// rather than runtime data, so it lives under the config home; the same
-/// slug names the leaf both trees share. Errors when `KALLIP_TAGMA_SLUG` is
-/// unset or the platform config home cannot be determined — callers
-/// choose between degrading one config file and aborting boot.
+/// Resolve the per-instance config root.
+///
+/// Declared configuration (`profiles.toml`, `exec_hooks.toml`) is
+/// operator intent rather than runtime data, so it lives under the
+/// config home rather than the data home.
 pub fn config_dir_root() -> Result<PathBuf> {
-    Ok(dirs::config_dir()
-        .context("could not determine platform config directory")?
-        .join("kallipai")
-        .join("tagmata")
-        .join(instance_slug()?))
-}
-/// Resolve the state home's `kallipai` namespace — where pure output
-/// residue lives (instance logs), symmetric to [`data_dir_root`]'s data
-/// side but under `$XDG_STATE_HOME`. State is material that persists
-/// across restarts yet is not portable enough to belong in the data
-/// home — XDG puts logs and history here, not in cache (logs are not
-/// regenerable) and not inside the portable instance tree.
-pub fn state_dir_root() -> Result<PathBuf> {
-    Ok(dirs::state_dir()
-        .context("could not determine platform state directory")?
-        .join("kallipai"))
+    Ok(roots()?.config)
 }
 
+/// Resolve the state home namespace — where pure output residue lives
+/// (instance logs), symmetric to [`data_dir_root`]'s data side but under
+/// `$XDG_STATE_HOME`. State is material that persists across restarts
+/// yet is not portable enough to belong in the data home — XDG puts
+/// logs and history here, not in cache (logs are not regenerable) and
+/// not inside the portable instance tree.
+pub fn state_dir_root() -> Result<PathBuf> {
+    Ok(roots()?.state)
+}
 /// Canonicalize the data root for path-overlap comparison.
 ///
 /// The data root may not exist yet on a fresh install (no agent ever created), in
 /// which case [`std::fs::canonicalize`] would fail. Fall back to canonicalizing the
-/// parent (which must exist — the platform data dir the slug-derived root hangs
-/// under) and re-appending the leaf,
+/// nearest existing ancestor and re-appending the leaf,
 /// yielding the canonical path the data root *would* have. This keeps the overlap
 /// check sound without forcing the data dir to exist.
 fn canonical_data_root() -> Result<PathBuf> {
@@ -88,8 +109,7 @@ fn canonical_data_root() -> Result<PathBuf> {
     match root.canonicalize() {
         Ok(c) => Ok(c),
         // The root may not exist yet on a fresh install — and neither may the
-        // `kallipai/tagmata` namespace above it. Walk up to the nearest
-        // existing ancestor (the platform data dir always exists) and
+        // instance namespace above it. Walk up to the nearest existing ancestor and
         // re-append the components that exist only notionally, yielding the
         // canonical path the root *would* have.
         Err(_) => {

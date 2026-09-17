@@ -18,7 +18,7 @@ use super::classifier::hooks::{HookRule, hook_matches, scan_command};
 /// tool is unconditionally `Allow`. The `bash_exec` verdict comes from a
 /// preset-aware [`Classifier`] applied to a snapshot of the shared per-agent
 /// [`ExecPolicy`] overrides. The preset is fixed for the agent's lifetime
-/// (tagma-global, selected once at startup), while the exec-policy is
+/// (instance-global, selected once at startup), while the exec-policy is
 /// runtime-mutable.
 /// It also owns the operator-declared hook rules (post-call compliance
 /// notes; v1 observes `bash_exec` only) — fixed for the agent's lifetime.

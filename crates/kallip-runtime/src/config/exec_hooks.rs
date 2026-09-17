@@ -8,7 +8,7 @@ use crate::policy::classifier::hooks::WRITE_REDIRECT_KEY;
 use crate::policy::{HookPhase, HookRule, Trigger};
 use kallip_shell::tools::names;
 
-/// Operator-declared exec-hook overrides from `exec_hooks.toml` (tagma-wide),
+/// Operator-declared exec-hook overrides from `exec_hooks.toml` (instance-wide),
 /// layered over the builtin preset rules.
 ///
 /// v1 observes `bash_exec` commands only (the exec domain) — hence *exec*
