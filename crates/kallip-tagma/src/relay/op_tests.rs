@@ -297,7 +297,7 @@ fn peer() -> Participant {
 
 #[tokio::test]
 async fn send_message_round_trips() {
-    let (handle, key, capture, _prompt_rx, root_id, state) = setup(1).await;
+    let (handle, key, capture, mut prompt_rx, _root_id, _state) = setup(1).await;
     let conv = conv_of(&handle);
     handle
         .handle_user_op(user_envelope(
@@ -311,16 +311,12 @@ async fn send_message_round_trips() {
             },
         ))
         .await;
-    // The root agent's prompt channel received the text, prefixed with the
-    // `[From: user <handle>]` header (a Human sender carries its handle).
-    // Message is stored in the root agent's inbox.
-    let delivered = state
-        .inboxes
-        .get()
-        .unwrap()
-        .pull_undelivered(&root_id)
-        .await
-        .unwrap();
+    // The root agent's prompt channel received the full message, prefixed
+    // with the `[From: user <handle>]` header (a Human sender carries its
+    // handle); the inbox row is marked delivered in the same stroke.
+    let delivered = prompt_rx
+        .try_recv()
+        .expect("injection queued on the prompt channel");
     assert!(delivered.contains("[From: user Alice]"));
     assert!(delivered.contains("hello"));
     // The app got a MessageAccepted reply.

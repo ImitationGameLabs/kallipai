@@ -19,69 +19,45 @@ use crate::messaging::{MessageSender, SenderRelation, format_incoming, sanitize_
 use crate::state::{RegistryEntry, SharedState};
 
 /// What the busy branch of [`enqueue_prompt`] may inject into a live agent's
-/// prompt channel. Peer direct messages inject an in-round notice unless the
-/// sender deferred; every other caller (relay surfaces, task watcher,
-/// schedule engine) keeps the historical run-boundary behavior.
-pub(crate) enum DeliveryNotice<'a> {
+/// prompt channel. Peer direct messages inject the full message payload
+/// unless the sender deferred; every other caller (relay surfaces, task
+/// watcher, schedule engine) keeps the historical run-boundary behavior.
+///
+/// Injection consumes the inbox row: the caller marks the row delivered
+/// when the payload is accepted onto the prompt channel, so the wake batch
+/// does not re-present the message. A failed injection (full queue) leaves
+/// the row undelivered and the wake batch presents the full message —
+/// failure degrades to run-boundary visibility, never to loss.
+///
+/// Declared windows, both accepted: between the accepted `try_send` and
+/// the `mark_delivered` write, a concurrent `pull_undelivered` can present
+/// the message twice (direction-safe: nothing is lost, the `delivered = 0`
+/// guard keeps re-marks idempotent, SQLite serializes writes); and if the
+/// process dies after the mark but before the injected turn is persisted,
+/// the presentation does not replay — the full text survives in the inbox
+/// store, but no wake re-delivers it.
+///
+/// The payload is injected verbatim: the `[Interjected message]` marker
+/// family is not stripped, so a sender body containing a closing marker
+/// can end the interjection block early. The full content still lands in
+/// the turn (nothing lost), and this is not a security boundary.
+pub(crate) enum DeliveryNotice {
     Peer {
-        /// Sender-opted run-boundary visibility: suppresses the notice here
-        /// and the parked kick below.
+        /// Sender-opted run-boundary visibility: suppresses the in-round
+        /// injection here and the parked kick below.
         defer: bool,
-        /// Pre-rendered notice line (see [`peer_notice_text`]).
-        text: &'a str,
     },
     /// No injection; the envelope rides the inbox alone.
     Surface,
 }
 
-/// Maximum characters of the sender's first line kept in the in-round notice
-/// preview. Local to kallip-tagma: the runtime's interjection cap is
-/// `pub(crate)` there and token-denominated, not reusable across crates.
-const NOTICE_PREVIEW_MAX_CHARS: usize = 120;
-
-/// Build the busy-branch notice line for a peer direct message. The runner's
-/// interjection drain wraps queued lines in `[Interjected message]` markers,
-/// so this returns one bare line — and strips that marker family from the
-/// preview, since a sender's first line carrying a marker could otherwise
-/// close the interjection block early. Content stays single-sourced in the
-/// inbox: the notice carries only the sender handle, a first-line preview,
-/// and an attachment flag.
-fn peer_notice_text(
-    sender: Option<&Participant>,
-    text: &str,
-    attachment: Option<&kallip_common::protocol::agent::FileAttachment>,
-) -> String {
-    let mut notice = String::from("peer message");
-    if let Some(handle) = sender.map(|p| p.handle.as_str()).filter(|h| !h.is_empty()) {
-        notice.push_str(&format!(" from {handle}"));
-    }
-    notice.push_str(" is in your inbox");
-    // First line only, block-marker family stripped, character-capped.
-    // A preview shortened by the cap carries an ellipsis.
-    let first = text.lines().next().unwrap_or("");
-    let stripped = first
-        .replace("[Interjected message]", "")
-        .replace("[/Interjected message]", "");
-    let trimmed = stripped.trim();
-    let mut preview: String = trimmed.chars().take(NOTICE_PREVIEW_MAX_CHARS).collect();
-    if preview.chars().count() < trimmed.chars().count() {
-        preview.push('…');
-    }
-    if !preview.is_empty() && attachment.is_some() {
-        notice.push_str(&format!(" (preview: {preview}; attachment included)"));
-    } else if !preview.is_empty() {
-        notice.push_str(&format!(" (preview: {preview})"));
-    } else if attachment.is_some() {
-        notice.push_str(" (attachment included)");
-    }
-    notice
-}
-
 /// Assemble the fast-path response for a live (running or idle-waiting)
-/// agent: peer notices `try_send` onto the prompt channel for in-round
-/// visibility (honestly degrading to run-boundary when the queue is full),
-/// deferred sends skip the channel write, and surface messages keep the
-/// historical notify-only behavior with no delivery-mode claim.
+/// agent: peer notices `try_send` the full payload onto the prompt channel
+/// for in-round visibility (honestly degrading to run-boundary when the
+/// queue is full), deferred sends skip the channel write, and surface
+/// messages keep the historical notify-only behavior with no delivery-mode
+/// claim. Returns the response plus whether the injection was accepted —
+/// the caller marks the inbox row delivered only on `true`.
 ///
 /// Declared race window (accepted, microseconds): a peer notice can land in
 /// the prompt channel just as the agent parks; the prompt arm has no parked
@@ -89,31 +65,44 @@ fn peer_notice_text(
 /// state. The message itself is already durable in the inbox either way.
 fn busy_peer_response(
     prompt_tx: &tokio::sync::mpsc::Sender<String>,
-    notice: &DeliveryNotice<'_>,
-) -> MessageResponse {
+    notice: &DeliveryNotice,
+    payload: &str,
+) -> (MessageResponse, bool) {
     match notice {
-        DeliveryNotice::Peer { defer: false, text } => match prompt_tx.try_send(text.to_string()) {
-            Ok(()) => MessageResponse {
+        DeliveryNotice::Peer { defer: false } => match prompt_tx.try_send(payload.to_string()) {
+            Ok(()) => (
+                MessageResponse {
+                    queue_depth: 0,
+                    warning: None,
+                    delivery_mode: Some(DeliveryMode::InRound),
+                },
+                true,
+            ),
+            Err(_) => (
+                MessageResponse {
+                    queue_depth: 0,
+                    warning: Some("notice queue full; visibility at run boundary".to_string()),
+                    delivery_mode: Some(DeliveryMode::Deferred),
+                },
+                false,
+            ),
+        },
+        DeliveryNotice::Peer { defer: true } => (
+            MessageResponse {
                 queue_depth: 0,
-                warning: None,
-                delivery_mode: Some(DeliveryMode::InRound),
-            },
-            Err(_) => MessageResponse {
-                queue_depth: 0,
-                warning: Some("notice queue full; visibility at run boundary".to_string()),
+                warning: Some("deferred by sender".to_string()),
                 delivery_mode: Some(DeliveryMode::Deferred),
             },
-        },
-        DeliveryNotice::Peer { defer: true, .. } => MessageResponse {
-            queue_depth: 0,
-            warning: Some("deferred by sender".to_string()),
-            delivery_mode: Some(DeliveryMode::Deferred),
-        },
-        DeliveryNotice::Surface => MessageResponse {
-            queue_depth: 0,
-            warning: None,
-            delivery_mode: None,
-        },
+            false,
+        ),
+        DeliveryNotice::Surface => (
+            MessageResponse {
+                queue_depth: 0,
+                warning: None,
+                delivery_mode: None,
+            },
+            false,
+        ),
     }
 }
 /// Deliver `text` to agent `id` as `identity`, attaching the `[From: ...]`
@@ -176,16 +165,12 @@ pub async fn deliver_message(
     info!(receiver = %id, sender = ?header_sender, relation = ?relation, "delivering message");
     let envelope = format_incoming(&header_sender, relation, text);
 
-    let notice = peer_notice_text(sender.as_ref(), text, attachment.as_ref());
     let response = enqueue_prompt(
         state,
         id,
         envelope,
         "operator",
-        DeliveryNotice::Peer {
-            defer,
-            text: &notice,
-        },
+        DeliveryNotice::Peer { defer },
     )
     .await?;
     // The external chat-room conversation is root-only, and only
@@ -298,7 +283,7 @@ pub(crate) async fn enqueue_prompt(
     id: &AgentId,
     envelope: String,
     source: &str,
-    notice: DeliveryNotice<'_>,
+    notice: DeliveryNotice,
 ) -> Result<MessageResponse, ApiError> {
     // Dangling-binding gate: an agent whose recorded profile-set binding
     // does not resolve (a record that predates set binding, or one naming
@@ -325,18 +310,30 @@ pub(crate) async fn enqueue_prompt(
             ));
         }
     }
-    // Push the full message body to the inbox — always. The inbox is the
-    // universal message store; the agent pulls undelivered direct messages on
-    // wake via the MessagePuller trait.
+    // The ingest timestamp is stamped once here and rendered into both the
+    // wake batch (pull_undelivered) and the in-round injection payload, so
+    // the agent sees one timestamp for a message on either presentation
+    // path; the inbox row and the payload differ by transport only.
+    let ingested_at = time::OffsetDateTime::now_utc();
+    // In-round payload for a non-deferred peer message: the full envelope
+    // behind a wake-batch-shaped header. Built before the envelope moves
+    // into the inbox row. Size is bounded downstream by the runtime's
+    // interjection cap — this crate adds no truncation of its own.
+    let injection_payload = matches!(notice, DeliveryNotice::Peer { defer: false }).then(|| {
+        let ts = ingested_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "?".to_owned());
+        format!("[{ts}] {source}:\n{envelope}")
+    });
     let inbox_store = state
         .inboxes
         .get()
         .ok_or_else(|| ApiError::internal("inbox store not installed"))?;
-    inbox_store
-        .push(
+    let inbox_id = inbox_store
+        .push_get_id(
             id.clone(),
             crate::inbox::BufferedEvent {
-                timestamp: time::OffsetDateTime::now_utc(),
+                timestamp: ingested_at,
                 source: source.to_string(),
                 body: envelope,
             },
@@ -394,7 +391,7 @@ pub(crate) async fn enqueue_prompt(
         // Sender-opted defer: skip the kick entirely — no wake turn, no
         // notify. The message waits in the inbox for the agent's next
         // natural wake.
-        if matches!(notice, DeliveryNotice::Peer { defer: true, .. }) {
+        if matches!(notice, DeliveryNotice::Peer { defer: true }) {
             return Ok(MessageResponse {
                 queue_depth: 0,
                 warning: Some("deferred by sender; agent parked".to_string()),
@@ -464,8 +461,16 @@ pub(crate) async fn enqueue_prompt(
                     "live normal-class agent is missing its workspace lock at delivery"
                 );
             }
-            let response = busy_peer_response(&live.agent.prompt_tx, &notice);
+            let (response, injected) = busy_peer_response(
+                &live.agent.prompt_tx,
+                &notice,
+                injection_payload.as_deref().unwrap_or_default(),
+            );
             live.agent.notify.notify_one();
+            if injected && let Some(inbox_id) = inbox_id {
+                drop(registry);
+                inbox_store.mark_delivered(id, inbox_id).await;
+            }
             return Ok(response);
         }
         // Channel closed: fall through to reactivation.
@@ -497,8 +502,16 @@ pub(crate) async fn enqueue_prompt(
         // Double-check: another request may have reactivated since the read-lock
         // probe. If the channel is now open, take the busy fast path.
         if !live.agent.prompt_tx.is_closed() {
-            let response = busy_peer_response(&live.agent.prompt_tx, &notice);
+            let (response, injected) = busy_peer_response(
+                &live.agent.prompt_tx,
+                &notice,
+                injection_payload.as_deref().unwrap_or_default(),
+            );
             live.agent.notify.notify_one();
+            drop(registry);
+            if injected && let Some(inbox_id) = inbox_id {
+                inbox_store.mark_delivered(id, inbox_id).await;
+            }
             return Ok(response);
         }
 

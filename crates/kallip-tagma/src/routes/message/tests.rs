@@ -10,14 +10,14 @@ use kallip_common::protocol::MessageRequest;
 
 // -- send_message: sender identity is attached to the delivered payload --
 
-/// Deliver a message as the operator. The full envelope (with header) is
-/// stored in the inbox.
+/// Deliver a message as the operator. The full envelope (with header)
+/// rides the in-round injection; the inbox row is marked delivered.
 #[tokio::test]
-async fn operator_message_stores_envelope_in_inbox() {
+async fn operator_message_injects_full_envelope() {
     let state = make_state();
     install_inbox_store(&state).await;
     let receiver = AgentId::random();
-    let (mut entry, _rx) = make_entry_with_rx(None, "recv".into());
+    let (mut entry, mut rx) = make_entry_with_rx(None, "recv".into());
     entry.identity.config.role = "root".into();
     state
         .registry
@@ -39,27 +39,26 @@ async fn operator_message_stores_envelope_in_inbox() {
     .expect("operator send accepted");
     assert_eq!(resp.0, StatusCode::ACCEPTED);
 
-    let msg = state
-        .inboxes
-        .get()
-        .unwrap()
-        .pull_undelivered(&receiver)
-        .await
-        .unwrap();
+    // The live-agent injection carries the full envelope; the inbox row
+    // is marked delivered in the same stroke.
+    let msg = rx
+        .try_recv()
+        .expect("injection queued on the prompt channel");
     assert!(msg.contains("[From: operator]"));
     assert!(msg.contains("do the thing"));
 }
 
-/// Deliver a message from a child agent to its parent. The inbox stores
-/// the full envelope with sender id + role + relation.
+/// Deliver a message from a child agent to its parent. The injected
+/// payload carries the full envelope with sender id + role + relation; the
+/// row is consumed in the same stroke.
 #[tokio::test]
-async fn agent_message_stores_sender_and_relation() {
+async fn agent_message_injects_sender_and_relation() {
     let state = make_state();
     install_inbox_store(&state).await;
     let parent = AgentId::random();
     let child = AgentId::random();
 
-    let (mut parent_entry, _parent_rx) = make_entry_with_rx(None, "parent".into());
+    let (mut parent_entry, mut parent_rx) = make_entry_with_rx(None, "parent".into());
     parent_entry.identity.config.role = "lead".into();
     state
         .registry
@@ -89,25 +88,21 @@ async fn agent_message_stores_sender_and_relation() {
     .expect("agent send accepted");
     assert_eq!(resp.0, StatusCode::ACCEPTED);
 
-    let msg = state
-        .inboxes
-        .get()
-        .unwrap()
-        .pull_undelivered(&parent)
-        .await
-        .unwrap();
+    let msg = parent_rx
+        .try_recv()
+        .expect("injection queued on the prompt channel");
     assert!(msg.contains(&child.to_string()));
     assert!(msg.contains("researcher"));
     assert!(msg.contains("results attached"));
 }
 
-/// Self-message: an agent messaging itself is stored in the inbox.
+/// Self-message: an agent messaging itself is injected in-round.
 #[tokio::test]
-async fn self_message_stored_in_inbox() {
+async fn self_message_injected_in_round() {
     let state = make_state();
     install_inbox_store(&state).await;
     let me = AgentId::random();
-    let (mut entry, _rx) = make_entry_with_rx(None, "me".into());
+    let (mut entry, mut rx) = make_entry_with_rx(None, "me".into());
     entry.identity.config.role = "solo".into();
     state
         .registry
@@ -128,13 +123,9 @@ async fn self_message_stored_in_inbox() {
     .await
     .expect("self send accepted");
 
-    let msg = state
-        .inboxes
-        .get()
-        .unwrap()
-        .pull_undelivered(&me)
-        .await
-        .unwrap();
+    let msg = rx
+        .try_recv()
+        .expect("injection queued on the prompt channel");
     assert!(msg.contains("note to self"));
 }
 
@@ -345,13 +336,14 @@ async fn off_duty_message_buffers_to_inbox() {
     assert_eq!(state.inboxes.get().unwrap().len_for(&receiver).await, 1);
 }
 
-/// An on-duty agent receives messages normally (no buffering).
+/// An on-duty live agent gets the message injected in-round (no
+/// buffering); the inbox row is marked delivered in the same stroke.
 #[tokio::test]
-async fn on_duty_message_stored_in_inbox() {
+async fn on_duty_message_injected_in_round() {
     let state = make_state();
     install_inbox_store(&state).await;
     let receiver = AgentId::random();
-    let (mut entry, _rx) = make_entry_with_rx(None, "recv".into());
+    let (mut entry, mut rx) = make_entry_with_rx(None, "recv".into());
     entry.identity.config.role = "root".into();
     state
         .registry
@@ -374,14 +366,10 @@ async fn on_duty_message_stored_in_inbox() {
     assert_eq!(resp.0, StatusCode::ACCEPTED);
     assert!(resp.1.warning.is_none(), "on-duty should have no warning");
 
-    // On-duty message is stored in the inbox.
-    let msg = state
-        .inboxes
-        .get()
-        .unwrap()
-        .pull_undelivered(&receiver)
-        .await
-        .unwrap();
+    // On-duty message is injected in-round; the row is consumed.
+    let msg = rx
+        .try_recv()
+        .expect("injection queued on the prompt channel");
     assert!(msg.contains("hello"));
 }
 
@@ -392,7 +380,7 @@ async fn duty_toggle_off_then_on() {
     let state = make_state();
     install_inbox_store(&state).await;
     let receiver = AgentId::random();
-    let (mut entry, _rx) = make_entry_with_rx(None, "recv".into());
+    let (mut entry, mut rx) = make_entry_with_rx(None, "recv".into());
     entry.identity.config.role = "root".into();
     state
         .registry
@@ -418,7 +406,7 @@ async fn duty_toggle_off_then_on() {
     .unwrap();
     assert_eq!(state.inboxes.get().unwrap().len_for(&receiver).await, 1);
 
-    // Back on-duty: message also goes to inbox.
+    // Back on-duty: the message injects in-round (row consumed).
     state
         .duty
         .set(receiver.clone(), crate::duty::DutyStatus::OnDuty);
@@ -436,16 +424,22 @@ async fn duty_toggle_off_then_on() {
     .unwrap();
     assert_eq!(state.inboxes.get().unwrap().len_for(&receiver).await, 2);
 
-    // Pull both messages.
+    // The second message (on-duty, live) rides the in-round injection and
+    // its row is marked delivered; the first (off-duty) stays undelivered.
+    let injected = rx.try_recv().expect("second message injected in-round");
+    assert!(injected.contains("second"));
     let msg = state
         .inboxes
         .get()
         .unwrap()
         .pull_undelivered(&receiver)
         .await
-        .unwrap();
+        .expect("first message still undelivered");
     assert!(msg.contains("first"));
-    assert!(msg.contains("second"));
+    assert!(
+        !msg.contains("second"),
+        "the injected message must not replay at the run boundary"
+    );
 }
 
 // -- inbound recording vs refusal: a refused message must not append a

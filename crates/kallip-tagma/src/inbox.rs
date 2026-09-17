@@ -98,8 +98,12 @@ impl InboxStore {
         }
     }
 
-    /// Push a message into an agent's inbox.
-    pub async fn push(&self, agent_id: AgentId, event: BufferedEvent) {
+    /// Push a message into an agent's inbox, returning the inserted row id
+    /// (`None` when the write fails). The in-round injection path needs the
+    /// id to mark the row delivered once the payload is accepted onto the
+    /// prompt channel, so storage and delivery agree on whether the
+    /// message was presented.
+    pub async fn push_get_id(&self, agent_id: AgentId, event: BufferedEvent) -> Option<i64> {
         let model = ActiveModel {
             agent_id: Set(agent_id.as_ref().to_string()),
             timestamp: Set(to_unix(event.timestamp)),
@@ -109,10 +113,13 @@ impl InboxStore {
             delivered: Set(0),
             ..Default::default()
         };
-        if let Err(e) = Entity::insert(model).exec(&self.db).await {
-            tracing::warn!(error = %e, "inbox push failed");
-            return;
-        }
+        let id = match Entity::insert(model).exec(&self.db).await {
+            Ok(result) => result.last_insert_id,
+            Err(e) => {
+                tracing::warn!(error = %e, "inbox push failed");
+                return None;
+            }
+        };
         let limit = self.max_retained as i64;
         self.db.execute(Statement::from_sql_and_values(
             sea_orm::DatabaseBackend::Sqlite,
@@ -120,6 +127,30 @@ impl InboxStore {
              (SELECT id FROM inbox_events WHERE agent_id = ? AND delivered = 1 ORDER BY id DESC LIMIT ?)",
             [agent_id.as_ref().into(), agent_id.as_ref().into(), limit.into()],
         )).await.ok();
+        Some(id)
+    }
+
+    /// Push a message into an agent's inbox, discarding the row id.
+    pub async fn push(&self, agent_id: AgentId, event: BufferedEvent) {
+        self.push_get_id(agent_id, event).await;
+    }
+
+    /// Mark one inbox row delivered without pulling it: the in-round
+    /// injection consumed the message on the prompt channel, so the
+    /// run-boundary wake batch must not present it again. Idempotent by
+    /// the `delivered = 0` guard.
+    pub async fn mark_delivered(&self, agent_id: &AgentId, id: i64) {
+        if let Err(e) = self
+            .db
+            .execute(Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Sqlite,
+                "UPDATE inbox_events SET delivered = 1 WHERE agent_id = ? AND id = ? AND delivered = 0",
+                [agent_id.as_ref().into(), id.into()],
+            ))
+            .await
+        {
+            tracing::warn!(error = %e, "inbox mark_delivered failed");
+        }
     }
 
     /// Atomically mark ALL undelivered direct messages as delivered and return
@@ -330,6 +361,33 @@ mod tests {
             source: source.to_string(),
             body: body.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn mark_delivered_is_idempotent_and_scoped_to_one_row() {
+        let store = InboxStore::open_in_memory().await;
+        let id = AgentId::random();
+        let first = store
+            .push_get_id(id.clone(), event("op", "one"))
+            .await
+            .expect("row id");
+        store
+            .push_get_id(id.clone(), event("op", "two"))
+            .await
+            .expect("row id");
+
+        store.mark_delivered(&id, first).await;
+        // Re-marking a delivered row is a no-op and must not touch the row
+        // that is still undelivered.
+        store.mark_delivered(&id, first).await;
+
+        let pulled = store
+            .pull_undelivered(&id)
+            .await
+            .expect("the unmarked row survives both marks");
+        assert!(pulled.contains("two"));
+        assert!(!pulled.contains("one"));
+        assert!(store.pull_undelivered(&id).await.is_none());
     }
 
     #[tokio::test]

@@ -195,7 +195,7 @@ async fn drain_interjections(
             .map(|t| {
                 format!(
                     "[Interjected message]\n{}\n[/Interjected message]",
-                    cap_external_message(t)
+                    cap_external_message(t, false)
                 )
             })
             .collect::<Vec<_>>()

@@ -292,7 +292,7 @@ impl AgentContext {
     /// start, lives inside the trust boundary, and its semantic integrity
     /// outweighs size hygiene.
     pub async fn record_message_turn(&self, text: &str) -> TurnId {
-        let guarded = cap_external_message(text);
+        let guarded = cap_external_message(text, true);
         self.record_turn(vec![Message::user(&guarded)]).await
     }
 
@@ -306,7 +306,7 @@ impl AgentContext {
         text: &str,
         attachments: Vec<crate::history::AttachmentRef>,
     ) -> TurnId {
-        let guarded = cap_external_message(text);
+        let guarded = cap_external_message(text, true);
         self.record_turn_with_attachments(vec![Message::user(&guarded)], attachments)
             .await
     }
@@ -353,12 +353,14 @@ fn message_spill_root() -> std::path::PathBuf {
 /// within the cap passes through unchanged; an oversized message is
 /// spilled and cut down to a head+tail slice with the banner. Fail-open
 /// on spill errors — entry protection must never cost a message.
-pub(crate) fn cap_external_message(text: &str) -> String {
+/// `inbox_backed` gates the banner's inbox pointer: true only for
+/// entrances that persist the message in an inbox row.
+pub(crate) fn cap_external_message(text: &str, inbox_backed: bool) -> String {
     if estimate_text(text) <= DEFAULT_MESSAGE_FULL_TOKENS {
         return text.to_owned();
     }
     match spill::spill_content(&message_spill_root(), &MESSAGE_SPILL, text) {
-        Ok(path) => cut_message(text, &path),
+        Ok(path) => cut_message(text, &path, inbox_backed),
         Err(e) => {
             tracing::warn!("message spill failed, recording untruncated: {e:#}");
             text.to_owned()
@@ -370,13 +372,24 @@ pub(crate) fn cap_external_message(text: &str) -> String {
 /// DEFAULT_TOOL_RESULT_TRUNCATED_TOKENS (mirroring the tool-result cap so
 /// both faces share the wedge math) and append the message banner: what was
 /// kept, where the full original lives, and the resend-in-parts advice.
-fn cut_message(text: &str, spill_path: &std::path::Path) -> String {
+/// Inbox-backed entrances add an inbox-copy pointer; the prompt-channel
+/// drain keeps it off. The drain sees bare lines without producer context:
+/// its rowless producers (notices, kicks, parked interrupts) are short
+/// texts that never reach the cap, and its heavy producer (peer
+/// injections) does have an inbox row — so off can only under-claim,
+/// never over-claim.
+fn cut_message(text: &str, spill_path: &std::path::Path, inbox_backed: bool) -> String {
     let full_est = estimate_text(text);
     let total = text.chars().count();
     let chars_cap = DEFAULT_TOOL_RESULT_TRUNCATED_TOKENS * total / full_est;
     let parts = converge_under_cap(text, chars_cap, DEFAULT_TOOL_RESULT_TRUNCATED_TOKENS);
+    let inbox_note = if inbox_backed {
+        "; the full text is also in your inbox (kallip inbox read)"
+    } else {
+        ""
+    };
     format!(
-        "{}\n[... message truncated: kept first {} and last {} of {total} chars (~{} of ~{full_est} estimated tokens). Full original saved at {} (a temporary file — archive it yourself if you need it long-term). If you need the rest, ask the sender to resend the content in smaller parts ...]",
+        "{}\n[... message truncated: kept first {} and last {} of {total} chars (~{} of ~{full_est} estimated tokens). Full original saved at {} (a temporary file — archive it yourself if you need it long-term){inbox_note}. If you need the rest, ask the sender to resend the content in smaller parts ...]",
         parts.2,
         parts.0,
         parts.1,
@@ -1006,6 +1019,32 @@ mod tests {
             .next()
             .unwrap();
         assert_eq!(std::fs::read_to_string(spill_path).unwrap(), original);
+        set_message_spill_root(None);
+    }
+
+    /// The banner's inbox pointer follows the inbox_backed flag: an
+    /// oversized message cut through an inbox-backed entrance points at
+    /// the inbox copy, and the same cut through the prompt-channel drain
+    /// does not — both branches spill and cut identically otherwise.
+    #[tokio::test]
+    async fn cut_banner_inbox_pointer_follows_inbox_backed_flag() {
+        let _serial = message_spill_serial().await;
+        let spill_dir = tempfile::TempDir::new().unwrap();
+        set_message_spill_root(Some(spill_dir.path().join("spill")));
+        // 40K CJK chars ≈ 40K estimated tokens: over the full cap.
+        let original = "错".repeat(40_000);
+        let inbox_backed = cap_external_message(&original, true);
+        let drained = cap_external_message(&original, false);
+        assert!(
+            inbox_backed.contains("kallip inbox read"),
+            "inbox-backed entrance must point at the inbox copy"
+        );
+        assert!(
+            !drained.contains("kallip inbox read"),
+            "drain-entrance cut must not claim an inbox copy"
+        );
+        assert!(inbox_backed.contains("message truncated"));
+        assert!(drained.contains("message truncated"));
         set_message_spill_root(None);
     }
 
