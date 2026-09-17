@@ -697,7 +697,7 @@ in
           # Tagmata are forked+setsid'd by kallip-daemon-spawn: they
           # leave the session but stay in this unit's cgroup, so the
           # default control-group kill would sweep every live instance
-          # whenever the daemon restarts - an upgrade would kill
+          # whenever the daemon restarts — an upgrade would kill
           # running work. "process" kills only the daemon; instances
           # keep running and adopt the new binary at their next
           # deliberate kallipctl stop/start, and a daemon crash with

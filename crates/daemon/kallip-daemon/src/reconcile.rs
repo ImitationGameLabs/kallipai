@@ -71,7 +71,7 @@ pub async fn run(record_root: PathBuf) {
 /// is the passwd home the daemon dropped to), so the two sides meet
 /// without sharing a pointer. The daemon may run as root while instances
 /// run as their own users — the daemon's own state home would name the
-/// wrong tree — so the log verb resolves through [`instance_logs_dir`],
+/// wrong tree — so the logs verb resolves through [`instance_logs_dir`],
 /// the single owner-aware resolver, and the tagma side mirrors the shape
 /// with `logs_target` in kallip-tagma; the three shapes move together
 /// by hand.

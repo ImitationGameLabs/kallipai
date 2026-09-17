@@ -98,9 +98,9 @@ in
   #   }
   # );
 
-  # The NixOS module evaluation check moved verbatim to
-  # ./module-eval.nix (file split per operator 2026-09-17;
-  # the returned attrset is selected by the check's dynamic name).
+  # The check's definition lives in ./module-eval.nix; the import
+  # returns an attrset of check names, and this entry selects the
+  # check by the dynamically built name.
   "${project}-nixos-module-eval" =
     (import ./module-eval.nix {
       inherit
