@@ -424,6 +424,23 @@ its own `runtime.json` but holds no record, so it stays invisible to
 live instance (slug taken) — stop first, then start re-spawns and
 re-anchors.
 
+#### Managing the persisted env
+
+The record's env pairs are manageable without a re-spawn:
+`kallipctl config env list <slug>` prints them one `KEY=VALUE` per
+line (values in full, one copy-paste-ready line each),
+`kallipctl config env set <slug> KEY=VALUE ...` replaces the whole
+list (same allowlist as spawn's env), and `kallipctl config env
+unset <slug> KEY ...` removes keys — a key that is not present
+fails the whole request and is named in the error. All three edit
+only the record: a running instance keeps its current process env,
+and the change takes effect on the next start.
+
+`kallipctl restart <slug>` composes the two: stop if running (an
+already-stopped instance simply starts), then start under the
+record's latest env — the end state is one process running the
+newest recorded configuration.
+
 Source:
 [`crates/daemon/kallip-daemon/src/main.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/daemon/kallip-daemon/src/main.rs).
 

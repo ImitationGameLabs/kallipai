@@ -119,6 +119,18 @@ pub enum RequestBody {
     },
     /// List all managed instances (directory scan).
     List,
+    /// Read an instance's persisted env pairs (the record copy, not the
+    /// live process environment). Read-only, works on stopped instances.
+    EnvGet { slug: String },
+    /// Replace the instance's persisted env pairs wholesale: the request
+    /// list becomes the record's env, validated like spawn's env. The
+    /// running process (if any) is untouched; the change takes effect on
+    /// the next start.
+    EnvSet { slug: String, env: Vec<String> },
+    /// Remove keys from the instance's persisted env. Atomic: if any
+    /// requested key is absent the whole request fails and names the
+    /// missing keys. Same effective-on-next-start semantics as env_set.
+    EnvUnset { slug: String, keys: Vec<String> },
     /// One instance's health, or omit `slug` for the daemon itself.
     Health { slug: Option<String> },
 }
@@ -177,6 +189,21 @@ pub enum OkPayload {
     },
     List {
         instances: Vec<InstanceInfo>,
+    },
+    /// The instance's persisted env pairs, verbatim (no masking).
+    EnvGet {
+        slug: String,
+        env: Vec<String>,
+    },
+    /// The write landed; the reply names the slug only — list re-reads
+    /// the record for the full state.
+    EnvSet {
+        slug: String,
+    },
+    /// The keys actually removed, in request order.
+    EnvUnset {
+        slug: String,
+        removed: Vec<String>,
     },
     Health {
         report: HealthReport,
@@ -370,6 +397,50 @@ pub fn err(code: ErrorCode, message: impl Into<String>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_verbs_round_trip() {
+        let bodies = [
+            RequestBody::EnvGet {
+                slug: "team-a".into(),
+            },
+            RequestBody::EnvSet {
+                slug: "team-a".into(),
+                env: vec!["KALLIP_X=1".into(), "RUST_LOG=debug".into()],
+            },
+            RequestBody::EnvUnset {
+                slug: "team-a".into(),
+                keys: vec!["KALLIP_X".into()],
+            },
+        ];
+        for body in bodies {
+            let line = encode_request(&request(body.clone())).expect("encode");
+            let back = decode_request(&line).expect("decode");
+            assert_eq!(back.body, body);
+        }
+    }
+
+    #[test]
+    fn env_payloads_round_trip() {
+        let payloads = [
+            OkPayload::EnvGet {
+                slug: "team-a".into(),
+                env: vec!["KALLIP_X=1".into()],
+            },
+            OkPayload::EnvSet {
+                slug: "team-a".into(),
+            },
+            OkPayload::EnvUnset {
+                slug: "team-a".into(),
+                removed: vec!["KALLIP_X".into()],
+            },
+        ];
+        for payload in payloads {
+            let line = encode_response(&ok(payload.clone())).expect("encode");
+            let back = decode_response(&line).expect("decode");
+            assert_eq!(back.body, ResponseBody::Ok { payload });
+        }
+    }
 
     #[test]
     fn log_request_round_trips_with_all_fields() {

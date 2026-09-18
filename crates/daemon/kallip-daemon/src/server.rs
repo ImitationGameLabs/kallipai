@@ -269,6 +269,60 @@ impl Daemon {
                     }
                 }
             }
+            RequestBody::EnvGet { slug } => {
+                let slug_out = slug.clone();
+                match tokio::task::spawn_blocking({
+                    let record_root = self.record_root.clone();
+                    move || crate::env::env_get(&record_root, &slug, peer_uid)
+                })
+                .await
+                {
+                    Ok(Ok(env)) => ok(OkPayload::EnvGet {
+                        slug: slug_out,
+                        env,
+                    }),
+                    Ok(Err(error)) => {
+                        let code = kallip_daemon_common::wire::ErrorCode::from(&error);
+                        err(code, error.to_string())
+                    }
+                    Err(join_error) => err(ErrorCode::Internal, format!("env task: {join_error}")),
+                }
+            }
+            RequestBody::EnvSet { slug, env } => {
+                let slug_out = slug.clone();
+                match tokio::task::spawn_blocking({
+                    let record_root = self.record_root.clone();
+                    move || crate::env::env_set(&record_root, &slug, peer_uid, &env)
+                })
+                .await
+                {
+                    Ok(Ok(())) => ok(OkPayload::EnvSet { slug: slug_out }),
+                    Ok(Err(error)) => {
+                        let code = kallip_daemon_common::wire::ErrorCode::from(&error);
+                        err(code, error.to_string())
+                    }
+                    Err(join_error) => err(ErrorCode::Internal, format!("env task: {join_error}")),
+                }
+            }
+            RequestBody::EnvUnset { slug, keys } => {
+                let slug_out = slug.clone();
+                match tokio::task::spawn_blocking({
+                    let record_root = self.record_root.clone();
+                    move || crate::env::env_unset(&record_root, &slug, peer_uid, &keys)
+                })
+                .await
+                {
+                    Ok(Ok(removed)) => ok(OkPayload::EnvUnset {
+                        slug: slug_out,
+                        removed,
+                    }),
+                    Ok(Err(error)) => {
+                        let code = kallip_daemon_common::wire::ErrorCode::from(&error);
+                        err(code, error.to_string())
+                    }
+                    Err(join_error) => err(ErrorCode::Internal, format!("env task: {join_error}")),
+                }
+            }
             RequestBody::Log {
                 slug,
                 lines,
@@ -392,6 +446,7 @@ fn log_start_outcome(slug: &str, error: &crate::start::StartError) {
 mod tests {
     use super::*;
     use kallip_daemon_client::DaemonClient;
+    use kallip_daemon_common::wire::{OkPayload, ResponseBody};
 
     #[tokio::test]
     async fn uds_round_trip_list_and_health() {
@@ -473,6 +528,133 @@ mod tests {
             other => panic!("expected bad request, got {other:?}"),
         }
 
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn env_verbs_round_trip_over_the_wire() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = tempfile::tempdir().expect("data tempdir");
+        crate::records::write_record(
+            dir.path(),
+            "alpha",
+            &crate::records::InstanceRecord {
+                instance_id: "id-1".into(),
+                owner_uid: 1000,
+                target_uid: 1000,
+                target_username: None,
+                workspace: Some("/tmp/w".into()),
+                env: vec!["KALLIP_SEED=1".into()],
+                identity: None,
+                data_dir: data.path().to_path_buf(),
+            },
+        )
+        .expect("write record");
+        let socket = dir.path().join("control.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+
+        let daemon = Daemon::new(dir.path().to_path_buf());
+        let task = tokio::spawn(daemon.serve(listener));
+
+        let client = DaemonClient::new(&socket);
+
+        // Set: wholesale replacement passes the spawn validator and lands
+        // in the record.
+        let set = client
+            .call(RequestBody::EnvSet {
+                slug: "alpha".into(),
+                env: vec!["KALLIP_A=1".into(), "RUST_LOG=debug".into()],
+            })
+            .await
+            .expect("set");
+        match set.body {
+            ResponseBody::Ok {
+                payload: OkPayload::EnvSet { slug },
+            } => assert_eq!(slug, "alpha"),
+            other => panic!("expected env_set ok, got {other:?}"),
+        }
+
+        // Get: the persisted copy comes back verbatim.
+        let get = client
+            .call(RequestBody::EnvGet {
+                slug: "alpha".into(),
+            })
+            .await
+            .expect("get");
+        match get.body {
+            ResponseBody::Ok {
+                payload: OkPayload::EnvGet { slug, env },
+            } => {
+                assert_eq!(slug, "alpha");
+                assert_eq!(
+                    env,
+                    vec!["KALLIP_A=1".to_owned(), "RUST_LOG=debug".to_owned()]
+                );
+            }
+            other => panic!("expected env_get ok, got {other:?}"),
+        }
+
+        // Unset: a missing key fails the whole batch and names it.
+        let unset = client
+            .call(RequestBody::EnvUnset {
+                slug: "alpha".into(),
+                keys: vec!["KALLIP_A".into(), "KALLIP_ABSENT".into()],
+            })
+            .await
+            .expect("unset");
+        match unset.body {
+            ResponseBody::Err { code, message } => {
+                assert_eq!(code, ErrorCode::BadRequest);
+                assert!(message.contains("KALLIP_ABSENT"), "{message}");
+            }
+            other => panic!("expected env_unset err, got {other:?}"),
+        }
+
+        // Unset: present keys are removed and named in the reply.
+        let unset = client
+            .call(RequestBody::EnvUnset {
+                slug: "alpha".into(),
+                keys: vec!["KALLIP_A".into()],
+            })
+            .await
+            .expect("unset");
+        match unset.body {
+            ResponseBody::Ok {
+                payload: OkPayload::EnvUnset { slug, removed },
+            } => {
+                assert_eq!(slug, "alpha");
+                assert_eq!(removed, vec!["KALLIP_A".to_owned()]);
+            }
+            other => panic!("expected env_unset ok, got {other:?}"),
+        }
+        let get = client
+            .call(RequestBody::EnvGet {
+                slug: "alpha".into(),
+            })
+            .await
+            .expect("get");
+        match get.body {
+            ResponseBody::Ok {
+                payload: OkPayload::EnvGet { env, .. },
+            } => assert_eq!(env, vec!["RUST_LOG=debug".to_owned()]),
+            other => panic!("expected env_get ok, got {other:?}"),
+        }
+
+        // A non-allowlisted key is refused by the spawn validator.
+        let set = client
+            .call(RequestBody::EnvSet {
+                slug: "alpha".into(),
+                env: vec!["HOME=/x".into()],
+            })
+            .await
+            .expect("set");
+        match set.body {
+            ResponseBody::Err { code, .. } => assert_eq!(code, ErrorCode::BadRequest),
+            other => panic!("expected env_set err, got {other:?}"),
+        }
+
+        // (Foreign-peer refusal lives in crate::env's unit tests: the
+        // wire test process is always the record owner.)
         task.abort();
     }
 }

@@ -15,6 +15,7 @@
 mod adopt;
 mod bins;
 mod delegates;
+mod env;
 mod log;
 mod reconcile;
 mod records;

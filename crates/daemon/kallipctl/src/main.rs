@@ -101,6 +101,17 @@ enum Command {
         #[arg(long)]
         accept_local_only: bool,
     },
+    /// Read and write an instance's persisted configuration (the env
+    /// pairs today; more surfaces can join this verb family later).
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Stop the instance if it is running, then start it under the
+    /// record's latest env: an already-stopped instance simply starts.
+    /// The systemd restart shape — the end state is one process running
+    /// the newest recorded configuration.
+    Restart { slug: String },
     /// Tail an instance's log files (read-only diagnostic): the
     /// merged tail across retained daily files, one file with
     /// --file, or live with --follow.
@@ -117,6 +128,38 @@ enum Command {
         /// Keep polling for new lines (~500 ms beats) until Ctrl-C.
         #[arg(short = 'f', long = "follow")]
         follow: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// The instance's persistent env: the pairs a later start replays.
+    Env {
+        #[command(subcommand)]
+        command: EnvCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvCommand {
+    /// Print the persisted pairs, one KEY=VALUE per line with a blank
+    /// line between variables. Values are shown in full, so a line can
+    /// be copied straight into a shell.
+    List { slug: String },
+    /// Replace the persisted env wholesale with the given KEY=VALUE
+    /// pairs (repeatable; same allowlist as spawn's env). The running
+    /// process is untouched; the change takes effect on next start.
+    Set {
+        slug: String,
+        #[arg(value_name = "KEY=VALUE")]
+        pairs: Vec<String>,
+    },
+    /// Remove keys from the persisted env. A key that is not present
+    /// fails the whole request and is named in the error.
+    Unset {
+        slug: String,
+        #[arg(value_name = "KEY")]
+        keys: Vec<String>,
     },
 }
 
@@ -144,6 +187,16 @@ async fn main() -> Result<()> {
         | Command::Adopt { slug, .. }
         | Command::Logs { slug, .. }
         | Command::Stop { slug } => Some(slug),
+        Command::Restart { slug } => Some(slug),
+        Command::Config {
+            command:
+                ConfigCommand::Env {
+                    command:
+                        EnvCommand::List { slug }
+                        | EnvCommand::Set { slug, .. }
+                        | EnvCommand::Unset { slug, .. },
+                },
+        } => Some(slug),
         _ => None,
     };
     if let Some(slug) = slug
@@ -206,6 +259,16 @@ async fn main() -> Result<()> {
         } => {
             return run_logs(&client, &slug, lines, file.as_deref(), follow).await;
         }
+        Command::Restart { slug } => {
+            return run_restart(&client, &slug).await;
+        }
+        Command::Config {
+            command: ConfigCommand::Env { command },
+        } => match command {
+            EnvCommand::List { slug } => RequestBody::EnvGet { slug },
+            EnvCommand::Set { slug, pairs } => RequestBody::EnvSet { slug, env: pairs },
+            EnvCommand::Unset { slug, keys } => RequestBody::EnvUnset { slug, keys },
+        },
     };
     let response = client
         .call(body)
@@ -283,6 +346,40 @@ async fn run_logs(
     }
 }
 
+/// The restart orchestration: stop if running, then start. The daemon
+/// has no restart verb — the CLI composes the two, exactly the shape
+/// systemd uses for `restart` on a plain service: an already-stopped
+/// instance skips the stop (NotRunning is the expected outcome, not
+/// an error), and the start replays the record's latest env. The end
+/// state is one process running the newest recorded configuration.
+async fn run_restart(client: &DaemonClient, slug: &str) -> Result<()> {
+    let stop = client
+        .call(RequestBody::Stop {
+            slug: slug.to_owned(),
+        })
+        .await
+        .context("talking to the kallip daemon")?;
+    match stop.body {
+        ResponseBody::Ok { .. } => println!("stopped {slug}"),
+        ResponseBody::Err {
+            code: ErrorCode::NotRunning,
+            ..
+        } => {}
+        ResponseBody::Err { code, message } => {
+            anyhow::bail!("{}: {message}", error_prefix(code));
+        }
+    }
+    let start = client
+        .call(RequestBody::Start {
+            slug: slug.to_owned(),
+            env: Vec::new(),
+            exe: None,
+        })
+        .await
+        .context("talking to the kallip daemon")?;
+    print(start, true)
+}
+
 /// Print a log chunk as-is with exactly one trailing newline.
 fn print_log_text(text: &str) {
     if text.ends_with('\n') {
@@ -357,6 +454,29 @@ fn print(response: Response, started: bool) -> Result<()> {
                 },
                 OkPayload::Adopt { slug, state } => {
                     println!("{}", adopt_line(&slug, state));
+                }
+                OkPayload::EnvGet { slug, env } => {
+                    if env.is_empty() {
+                        println!("{slug}: no persisted env");
+                        return Ok(());
+                    }
+                    // One KEY=VALUE line per variable, blank line between
+                    // variables: each line copies straight into a shell,
+                    // and the blanks keep multi-variable dumps readable
+                    // without wrapping long values by hand.
+                    for (n, pair) in env.iter().enumerate() {
+                        if n > 0 {
+                            println!();
+                        }
+                        println!("{pair}");
+                    }
+                }
+                OkPayload::EnvSet { slug } => {
+                    println!("updated {slug} env; takes effect on next start");
+                }
+                OkPayload::EnvUnset { slug, removed } => {
+                    let listed = removed.join(", ");
+                    println!("removed {listed} from {slug} env; takes effect on next start");
                 }
                 OkPayload::Log { text, .. } => {
                     if text.is_empty() {
