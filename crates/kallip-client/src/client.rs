@@ -227,6 +227,7 @@ async fn error_from_response(response: reqwest::Response) -> anyhow::Error {
         status: status.as_u16(),
         message,
         dangling: None,
+        code: None,
     }
     .into()
 }

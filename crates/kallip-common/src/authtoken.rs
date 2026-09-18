@@ -105,24 +105,40 @@ impl MintedToken {
     }
 }
 
-/// A display-safe mask of a token: `{kind.0}{body[..3]}***{body[len-3..]}`,
-/// where `body` is `secret` with `kind`'s prefix stripped. Enough to identify a
-/// code at a glance without exposing it; safe to persist and return on list
-/// endpoints (the plaintext itself is handed out only once, at mint).
+/// A display-safe mask of a token: `{kind.0}{head}***{tail}`, where `body`
+/// is `secret` with `kind`'s prefix stripped and `head`/`tail` are its
+/// first and last three bytes, sliced at char boundaries. Enough to
+/// identify a code at a glance without exposing it; safe to persist and
+/// return on list endpoints (the plaintext itself is handed out only
+/// once, at mint).
 ///
-/// `body` is the base64url token payload (ASCII, alphabet `[A-Za-z0-9_-]`), so
-/// byte-slicing is safe and the body can never contain `*` -- which lets callers
-/// distinguish a masked value from a full plaintext by checking for `***`.
-/// Bodies shorter than 8 chars collapse to `{kind.0}***` (the threshold exceeds
-/// head+tail = 6 so the two never overlap).
+/// Minted bodies are base64url (ASCII, alphabet `[A-Za-z0-9_-]`), so the
+/// slice points land on bytes and the body can never contain `*` -- which
+/// lets callers distinguish a masked value from a full plaintext by
+/// checking for `***`. Free-text bodies (e.g. operator-supplied upstream
+/// keys) may be multi-byte UTF-8: the slice points back off to char
+/// boundaries, so any body masks without panicking. Bodies shorter than
+/// 8 bytes collapse to `{kind.0}***` (the threshold exceeds head+tail = 6
+/// so the two never overlap).
 pub fn mask_token(secret: &str, kind: TokenKind) -> String {
     let prefix = kind.0;
     let body = secret.strip_prefix(prefix).unwrap_or(secret);
     if body.len() < 8 {
         return format!("{prefix}***");
     }
-    let head = &body[..3];
-    let tail = &body[body.len() - 3..];
+    // Free-text bodies may be multi-byte UTF-8 (minted ones are ASCII), so
+    // slide the slice points outward to char boundaries: the head backs
+    // up, the tail advances, and any body masks without panicking.
+    let mut head_end = 3;
+    while !body.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = body.len() - 3;
+    while !body.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let head = &body[..head_end];
+    let tail = &body[tail_start..];
     format!("{prefix}{head}***{tail}")
 }
 
@@ -201,6 +217,22 @@ mod tests {
     fn mask_token_short_body_collapses() {
         // A body shorter than 8 hides entirely.
         let masked = mask_token("sk-test-abc", TEST_KIND);
+        assert_eq!(masked, "sk-test-***");
+    }
+
+    #[test]
+    fn mask_token_multibyte_body_slices_at_char_boundaries() {
+        // Four two-byte chars = 8 bytes: byte 3 and byte len-3 both fall
+        // inside a character, the shape that panicked the byte-slice mask.
+        let masked = mask_token("éééé", TEST_KIND);
+        assert_eq!(masked, "sk-test-é***é"); // bytes 0..2 and 6..8: one char each side
+    }
+
+    #[test]
+    fn mask_token_fourbyte_body_backs_off_to_nothing() {
+        // Four-byte chars push the head back to the body start and the
+        // tail past its end: the mask collapses to prefix + separator.
+        let masked = mask_token("😀😀", TEST_KIND);
         assert_eq!(masked, "sk-test-***");
     }
 }

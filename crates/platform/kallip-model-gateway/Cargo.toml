@@ -1,0 +1,36 @@
+[package]
+name = "kallip-model-gateway"
+description = "kallip model gateway: profiles distribution face + credential-injecting forward face"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kallip-model-gateway"
+path = "src/main.rs"
+
+[dependencies]
+kallip-common = { workspace = true, features = ["axum", "logging"] }
+axum = { workspace = true }
+async-stream = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+testcontainers = { workspace = true, features = ["reusable-containers"] }
+testcontainers-modules = { workspace = true }

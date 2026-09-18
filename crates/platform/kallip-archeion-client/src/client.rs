@@ -327,6 +327,7 @@ async fn parse_error(status: reqwest::StatusCode, response: reqwest::Response) -
         status: status.as_u16(),
         message,
         dangling: None,
+        code: None,
     }
     .into()
 }

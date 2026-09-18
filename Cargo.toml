@@ -27,6 +27,7 @@ members = [
   "crates/daemon/kallipctl",
   "crates/platform/kallip-instances",
   "crates/platform/kallip-files",
+  "crates/platform/kallip-model-gateway",
   "crates/kallip-blob-store",
   "crates/kallip-testkit",
 ]

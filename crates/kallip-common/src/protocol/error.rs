@@ -5,9 +5,9 @@
 //! `axum` feature). The client library deserializes this envelope to produce
 //! typed errors instead of opaque status-code checks.
 //!
-//! A machine-readable `code` field is intentionally deferred — the HTTP status
-//! code alone provides sufficient classification for the current API scale
-//! (~14 endpoints). It can be added non-breaking later.
+//! An optional machine-readable `code` exists for rejections that must be
+//! distinguishable beyond the status line (the gateway's explicit
+//! key-lifecycle rejections); it is absent on every other error.
 
 use std::fmt;
 
@@ -29,6 +29,11 @@ pub struct ApiError {
     /// (absent on every other error). Serialized inside the error envelope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dangling: Option<Vec<String>>,
+    /// Machine-readable rejection code (`key_expired`, `key_revoked` on
+    /// the gateway): the deferred `code` slot, added non-breaking for
+    /// the explicit key-rejection contract; absent on every other error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 impl ApiError {
@@ -40,6 +45,7 @@ impl ApiError {
             status: 400,
             message: msg.into(),
             dangling: None,
+            code: None,
         }
     }
 
@@ -49,6 +55,20 @@ impl ApiError {
             status: 401,
             message: msg.into(),
             dangling: None,
+            code: None,
+        }
+    }
+
+    /// 401 Unauthorized carrying a machine-readable rejection code: the
+    /// gateway's explicit key-rejection contract (`key_revoked`,
+    /// `key_expired`) -- the client recovery path is refetching its
+    /// configuration (a fresh key), not retrying the same bearer.
+    pub fn unauthorized_with_code(msg: impl Into<String>, code: &str) -> Self {
+        Self {
+            status: 401,
+            message: msg.into(),
+            dangling: None,
+            code: Some(code.to_owned()),
         }
     }
 
@@ -58,6 +78,7 @@ impl ApiError {
             status: 403,
             message: msg.into(),
             dangling: None,
+            code: None,
         }
     }
 
@@ -67,6 +88,7 @@ impl ApiError {
             status: 404,
             message: msg.into(),
             dangling: None,
+            code: None,
         }
     }
 
@@ -76,6 +98,7 @@ impl ApiError {
             status: 409,
             message: msg.into(),
             dangling: None,
+            code: None,
         }
     }
 
@@ -86,6 +109,7 @@ impl ApiError {
             status: 409,
             message: msg.into(),
             dangling: Some(dangling),
+            code: None,
         }
     }
 
@@ -95,6 +119,7 @@ impl ApiError {
             status: 429,
             message: msg.into(),
             dangling: None,
+            code: None,
         }
     }
 
@@ -109,6 +134,7 @@ impl ApiError {
             status: 500,
             message: "internal error".into(),
             dangling: None,
+            code: None,
         }
     }
 
@@ -118,6 +144,7 @@ impl ApiError {
             status: 503,
             message: msg.into(),
             dangling: None,
+            code: None,
         }
     }
 
@@ -127,6 +154,7 @@ impl ApiError {
             status: 502,
             message: msg.into(),
             dangling: None,
+            code: None,
         }
     }
 
@@ -136,6 +164,7 @@ impl ApiError {
             status: 504,
             message: msg.into(),
             dangling: None,
+            code: None,
         }
     }
 }
