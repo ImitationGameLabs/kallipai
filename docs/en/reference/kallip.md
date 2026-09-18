@@ -120,19 +120,13 @@ primary: 2 profile(s), 3 agent(s), modalities: text
 cheap: 1 profile(s), 0 agent(s), modalities: text
 $ kallip profile-set bind reviewer cheap
 Bound reviewer to profile set cheap.
-$ kallip profile-set remove cheap --force
-Removed profile set cheap (interrupted: reviewer).
 ```
 
 `list` prints the default marker plus per-set profile and agent counts,
 and each set's effective modalities (the intersection across member
 declarations).
 `bind` takes effect on the agent's next wake-up (parked agents pick the new
-binding up at their next restore). `remove` refuses while the set is the
-default, while the root agent is bound to it, or while other agents hold
-bindings and `--force` is absent; with `--force` every binder is
-interrupted (faulted binders skip straight to the dangling state) and the
-output names them (by role when the record has one, else by id).
+binding up at their next restore).
 
 #### `approval` — Manage approvals
 

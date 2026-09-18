@@ -16,19 +16,4 @@ pub(crate) enum ProfileSetCommand {
         /// Exact set name; unknown names list the available sets.
         set: String,
     },
-    /// Transfer the default-set marker to an existing set.
-    Default {
-        /// Exact set name.
-        set: String,
-    },
-    /// Remove a set. The default set and the root's set are refused;
-    /// other referenced sets list their bound agents and need --force
-    /// (they are interrupted, then keep a dangling record until rebound).
-    Remove {
-        /// Exact set name.
-        set: String,
-        /// Interrupt the bound agents, then remove.
-        #[arg(long)]
-        force: bool,
-    },
 }

@@ -27,7 +27,7 @@ use kallip_client::TagmaClient;
 use kallip_client::types::LescheSessionEntry;
 use kallip_common::agentid::AgentId;
 use kallip_common::policy::{ExecDecision, ExecOverride};
-use kallip_common::protocol::{ProfileSetUpdateRequest, SetDefaultRequest};
+use kallip_common::protocol::ProfileSetUpdateRequest;
 use kallip_common::timefmt;
 use kallip_common::tokens::parse_token_amount;
 use kallip_runtime::profile::{ProfileConfig, ProfileSet};
@@ -539,38 +539,6 @@ async fn main() -> Result<()> {
                     )
                     .await?;
                 println!("Bound {} to profile set {}.", agent_label(&summary), set);
-            }
-            ProfileSetCommand::Default { set } => {
-                let cfg = client
-                    .set_default_profile_set(SetDefaultRequest {
-                        default: set.clone(),
-                    })
-                    .await?;
-                let new_default = cfg.get("default").and_then(|v| v.as_str()).unwrap_or("");
-                println!("Default profile set: {new_default}");
-            }
-            ProfileSetCommand::Remove { set, force } => {
-                let resp = client.delete_profile_set(&set, force).await?;
-                if resp.interrupted.is_empty() {
-                    println!("Removed profile set {}.", resp.removed);
-                } else {
-                    let interrupted: Vec<String> = resp
-                        .interrupted
-                        .iter()
-                        .map(|r| {
-                            if r.role.is_empty() {
-                                r.id.to_string()
-                            } else {
-                                r.role.clone()
-                            }
-                        })
-                        .collect();
-                    println!(
-                        "Removed profile set {} (interrupted: {}).",
-                        resp.removed,
-                        interrupted.join(", ")
-                    );
-                }
             }
         },
         Commands::Inbox(cmd) => match cmd {

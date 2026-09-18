@@ -10,9 +10,8 @@ use anyhow::{Context, Result};
 use just_llm_client::JsonEventStream;
 use kallip_common::agentid::AgentId;
 use kallip_common::protocol::{
-    AgentSummary, CreateAgentRequest, CreateAgentResponse, DeleteSetResponse, ListAgentsResponse,
-    ProfileSetUpdateRequest, SetDefaultRequest, SseEvent, UpdateActivityRequest,
-    UpdateAgentMetadataRequest,
+    AgentSummary, CreateAgentRequest, CreateAgentResponse, ListAgentsResponse,
+    ProfileSetUpdateRequest, SseEvent, UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 
 impl TagmaClient {
@@ -237,46 +236,6 @@ impl TagmaClient {
                     .http
                     .put(self.url(&format!("/agents/{id}/profile-set")))
                     .json(&body),
-            )
-            .send()
-            .await
-            .context("failed to connect to tagma")?,
-            "failed to parse response",
-        )
-        .await
-    }
-
-    /// Transfer the default-set marker to an existing set. Operator-only.
-    /// Returns the masked profile config (its `default` field names the new
-    /// default).
-    pub async fn set_default_profile_set(
-        &self,
-        body: SetDefaultRequest,
-    ) -> Result<serde_json::Value> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .put(self.url("/profiles/default"))
-                    .json(&body),
-            )
-            .send()
-            .await
-            .context("failed to connect to tagma")?,
-            "failed to parse response",
-        )
-        .await
-    }
-
-    /// Remove a set. Bound agents make the delete a conflict unless
-    /// `force` interrupts them first (the response lists who was
-    /// interrupted); the default set and the root's set are refused.
-    pub async fn delete_profile_set(&self, name: &str, force: bool) -> Result<DeleteSetResponse> {
-        self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .delete(self.url(&format!("/profiles/sets/{name}?force={force}"))),
             )
             .send()
             .await

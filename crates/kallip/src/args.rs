@@ -47,9 +47,7 @@ pub enum Commands {
     /// only — management actions (spawn/remove/metadata) live under `subagent`.
     #[command(name = "agent", subcommand)]
     Dir(AgentDirCommand),
-    /// Manage named profile sets: list, rebind agents, transfer the
-    /// default marker, or remove a set (bound agents interrupt with
-    /// --force).
+    /// Manage named profile sets: list them or rebind agents to a set.
     #[command(subcommand)]
     ProfileSet(ProfileSetCommand),
     /// Transfer files through the files service (direct HTTP; no tagma
