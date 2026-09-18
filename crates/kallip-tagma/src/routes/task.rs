@@ -113,6 +113,11 @@ async fn list(
         status: query.status,
         assignee: query.assignee,
         archived: query.archived,
+        time: query.time,
+        since: query.since,
+        until: query.until,
+        limit: query.limit,
+        offset: query.offset,
     };
     let rows = store(&state)?.list(filter).await.map_err(api_error)?;
     let all = store(&state)?.export_all().await.map_err(api_error)?;

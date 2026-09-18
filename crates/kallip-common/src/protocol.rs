@@ -34,7 +34,7 @@ pub use sse::{FailoverChainExhaustion, SseEvent, TransientRetryInfo};
 pub use task::{
     AssociationExport, ClosedReason, EventExport, TaskChainOpRequest, TaskCheckpointRequest,
     TaskCloseRequest, TaskCreateRequest, TaskDispatchRequest, TaskExport, TaskForceRequest,
-    TaskListQuery, TaskNoteRequest, TaskStatus,
+    TaskListQuery, TaskNoteRequest, TaskStatus, TaskTimeAxis,
 };
 pub use team::{
     RoleDisposition, TeamAction, TeamActionResult, TeamConvergeOutcome, TeamConvergeRequest,

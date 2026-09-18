@@ -13,7 +13,35 @@ use kallip_common::protocol::{
     TaskDispatchRequest, TaskExport, TaskForceRequest, TaskListQuery, TaskNoteRequest, TaskStatus,
 };
 
-use crate::args::task::{TaskChainOpType, TaskCloseReason, TaskCommand, TaskStartArgs};
+use crate::args::task::{
+    TaskChainOpType, TaskCloseReason, TaskCommand, TaskStartArgs, TaskTimeAxisArg,
+    parse_time_anchor,
+};
+use kallip_common::timefmt;
+
+/// The time column for one list row: pick the axis field, then either
+/// pass the ISO stamp through or shrink it to a relative distance. `-`
+/// marks an absent axis value (an active task has no completion time).
+fn axis_stamp(
+    axis: TaskTimeAxisArg,
+    relative: bool,
+    now: u64,
+    updated_at: Option<&str>,
+    ended_at: Option<&str>,
+) -> String {
+    let raw = match axis {
+        TaskTimeAxisArg::Updated => updated_at,
+        TaskTimeAxisArg::Closed => ended_at,
+    };
+    match raw {
+        Some(iso) if relative => match timefmt::parse_utc(iso) {
+            Ok(epoch) => timefmt::format_relative(now, epoch),
+            Err(_) => iso.to_string(),
+        },
+        Some(iso) => iso.to_string(),
+        None => "-".to_string(),
+    }
+}
 
 pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
     match cmd {
@@ -191,21 +219,48 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                     })
                 })
                 .transpose()?;
+            let now = timefmt::now_epoch();
+            let since = args
+                .since
+                .as_deref()
+                .map(|s| parse_time_anchor(s, now))
+                .transpose()?;
+            let until = args
+                .until
+                .as_deref()
+                .map(|s| parse_time_anchor(s, now))
+                .transpose()?;
             let query = TaskListQuery {
                 archived: args.archived,
                 status,
                 assignee: args.assignee.clone(),
+                time: args.time.into(),
+                since: since.map(|v| v as i64),
+                until: until.map(|v| v as i64),
+                limit: args.limit.map(u64::from),
+                offset: args.offset.map(u64::from),
             };
+            // A clock anchor up top: list times are core content, and the
+            // header calibrates the stamps below it (inbox summary precedent).
+            println!("current datetime: {}", timefmt::format_utc(now));
             let tasks = client.task_list(&query).await?;
             if tasks.is_empty() {
                 println!("(no tasks)");
             } else {
                 for t in &tasks {
+                    let shown = axis_stamp(
+                        args.time,
+                        args.relative_time,
+                        now,
+                        t.updated_at.as_deref(),
+                        t.ended_at.as_deref(),
+                    );
                     println!(
-                        "{:>4}  {:<11} {:<16} {}",
+                        "{:>4}  {:<11} {:<16} {:<24} {}",
                         t.id,
                         t.status,
                         t.assignee.as_deref().unwrap_or("-"),
+                        shown,
                         t.title
                     );
                 }
@@ -359,4 +414,60 @@ fn has_dispatch_meta(args: &TaskStartArgs) -> bool {
         || args.room.is_some()
         || args.room_seq_start.is_some()
         || args.room_seq_end.is_some()
+}
+
+#[cfg(test)]
+mod list_render_tests {
+    use super::*;
+
+    #[test]
+    fn updated_axis_reads_updated_at_by_default() {
+        let s = axis_stamp(
+            TaskTimeAxisArg::Updated,
+            false,
+            100,
+            Some("ISO-U"),
+            Some("ISO-E"),
+        );
+        assert_eq!(s, "ISO-U");
+    }
+
+    #[test]
+    fn closed_axis_reads_ended_at() {
+        let s = axis_stamp(
+            TaskTimeAxisArg::Closed,
+            false,
+            100,
+            Some("ISO-U"),
+            Some("ISO-E"),
+        );
+        assert_eq!(s, "ISO-E");
+    }
+
+    #[test]
+    fn absent_axis_value_renders_as_dash() {
+        assert_eq!(
+            axis_stamp(TaskTimeAxisArg::Closed, false, 100, Some("ISO-U"), None),
+            "-"
+        );
+    }
+
+    #[test]
+    fn relative_mode_shrinks_parsable_stamps_and_keeps_odd_ones() {
+        let now = timefmt::now_epoch();
+        let iso = timefmt::format_utc(now - 3 * 60 * 60);
+        assert!(
+            axis_stamp(TaskTimeAxisArg::Updated, true, now, Some(&iso), None).starts_with("3h ago"),
+        );
+        assert_eq!(
+            axis_stamp(
+                TaskTimeAxisArg::Updated,
+                true,
+                now,
+                Some("not-a-stamp"),
+                None
+            ),
+            "not-a-stamp"
+        );
+    }
 }

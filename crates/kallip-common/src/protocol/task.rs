@@ -178,6 +178,31 @@ pub struct TaskListQuery {
     /// true lists archived tasks only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// The time axis the since/until window anchors to and the list sorts
+    /// by (and the time column shows). `updated` = last activity;
+    /// `closed` = completion time. Orthogonal to --status: choosing the
+    /// axis filters nothing by itself.
+    #[serde(default)]
+    pub time: TaskTimeAxis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+}
+
+/// The time axis for the task list's window, sort, and time column.
+/// `updated` (default) = last activity; `closed` = completion time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskTimeAxis {
+    #[default]
+    #[serde(rename = "updated")]
+    Updated,
+    #[serde(rename = "closed")]
+    Closed,
 }
 
 /// Association keys (K8s involvedObject shape): message windows the

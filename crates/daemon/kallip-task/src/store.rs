@@ -42,6 +42,19 @@ pub struct TaskFilter {
     /// The archive partition: false (default) lists active tasks only,
     /// true lists archived tasks only.
     pub archived: bool,
+    /// The time axis for the since/until window, the sort, and the
+    /// caller's time column: `updated` (default) = last activity,
+    /// `closed` = completion time. Filtering by the axis is the
+    /// window's job; the axis itself excludes nothing.
+    pub time: kallip_common::protocol::TaskTimeAxis,
+    /// The window on the selected axis (epoch seconds, inclusive on
+    /// both ends). Rows with a NULL axis value (e.g. `closed` on an
+    /// active task) fall outside any window.
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    /// Page size and page start (both server-side, approval precedent).
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 /// SQLite-backed task store.
@@ -967,6 +980,8 @@ impl TaskStore {
         unreachable!("busy retries are bounded")
     }
     pub async fn list(&self, filter: TaskFilter) -> Result<Vec<Task>, Error> {
+        use kallip_common::protocol::TaskTimeAxis;
+        use sea_orm::QuerySelect;
         let mut query = TaskEntity::find();
         // The archive partition: the default view is the active one
         // (done.txt precedent); `archived` flips to archived-only.
@@ -977,7 +992,31 @@ impl TaskStore {
         if let Some(assignee) = filter.assignee {
             query = query.filter(TaskColumn::Assignee.eq(assignee));
         }
-        Ok(query.order_by_asc(TaskColumn::Id).all(&self.db).await?)
+        // One axis drives the window, the order, and the caller's time
+        // column: newest-first on the axis itself. A NULL axis value (an
+        // active task under the closed axis) sorts last and matches no
+        // window -- choosing the axis never filters by itself.
+        let axis = match filter.time {
+            TaskTimeAxis::Updated => TaskColumn::UpdatedAt,
+            TaskTimeAxis::Closed => TaskColumn::EndedAt,
+        };
+        if let Some(since) = filter.since {
+            query = query.filter(axis.gte(since));
+        }
+        if let Some(until) = filter.until {
+            query = query.filter(axis.lte(until));
+        }
+        query = query.order_by_desc(axis);
+        // Same-second rows tie on the axis stamp; the id breaks the
+        // tie deterministically (later creation sorts first).
+        query = query.order_by_desc(TaskColumn::Id);
+        if let Some(limit) = filter.limit {
+            query = query.limit(limit);
+        }
+        if let Some(offset) = filter.offset {
+            query = query.offset(offset);
+        }
+        Ok(query.all(&self.db).await?)
     }
 
     /// The task row and its trail are a pair: one read transaction keeps

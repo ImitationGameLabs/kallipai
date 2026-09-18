@@ -76,6 +76,27 @@ pub fn format_relative(now_secs: u64, epoch_secs: u64) -> String {
         format!("in {body}")
     }
 }
+/// Parses a `YYYY-MM-DD` UTC date into epoch seconds at that day's
+/// 00:00:00Z (journalctl's `--until 2026-09-15` reads the same way:
+/// the named day's start). The inverse of [`format_utc_day`].
+pub fn parse_utc_day(raw: &str) -> Result<u64, time::error::Parse> {
+    let date = time::Date::parse(raw.trim(), &UTC_DAY)?;
+    Ok(date
+        .with_time(time::Time::MIDNIGHT)
+        .assume_utc()
+        .unix_timestamp() as u64)
+}
+
+/// Parses an RFC 3339 UTC stamp (`2026-08-23T19:05:07Z`) back into
+/// epoch seconds; the inverse of [`format_utc`], for when a rendered
+/// column has to be compared against a window again.
+pub fn parse_utc(raw: &str) -> Result<u64, time::error::Parse> {
+    // The format carries a literal `Z` (not an offset component), so the
+    // offset-less PrimitiveDateTime is the right parse target; assume_utc
+    // is exactly what that literal means.
+    let t = time::PrimitiveDateTime::parse(raw.trim(), &UTC_SECONDS)?;
+    Ok(t.assume_utc().unix_timestamp() as u64)
+}
 
 /// Compact magnitude for counts a human scans, not computes: `1.54G` for
 /// 1542320459, `12.3M`, `845K`; below a thousand the raw number is already
@@ -109,6 +130,7 @@ mod tests {
     #[test]
     fn utc_shape_matches_tracing() {
         assert_eq!(format_utc(1_755_951_907), "2025-08-23T12:25:07Z");
+        assert_eq!(parse_utc("2025-08-23T12:25:07Z").unwrap(), 1_755_951_907);
     }
 
     #[test]

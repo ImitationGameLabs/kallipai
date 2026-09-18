@@ -210,6 +210,7 @@ async fn export_json_shape_is_stable() {
             status: Some(TaskStatus::Closed),
             archived: false,
             assignee: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -558,6 +559,7 @@ async fn archived_tasks_leave_the_default_view() {
             status: None,
             assignee: None,
             archived: false,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -567,6 +569,7 @@ async fn archived_tasks_leave_the_default_view() {
             status: None,
             assignee: None,
             archived: true,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -787,4 +790,95 @@ async fn export_all_groups_events_under_the_right_task() {
         trail.contains("note on a") && !trail.contains("note on b"),
         "a's export carries a's trail, not b's"
     );
+}
+
+#[tokio::test]
+async fn list_orders_newest_first_windows_and_pages() {
+    use kallip_common::protocol::TaskTimeAxis;
+
+    let store = TaskStore::open_in_memory().await;
+    let f = |title: &str| spec(title, "dev", &[]);
+    let a = store.create(f("a-first")).await.unwrap();
+    let b = store.create(f("b-second")).await.unwrap();
+    let c = store.create(f("c-third")).await.unwrap();
+    // Close b and c so the closed axis has both values and NULLs
+    // (close is only legal from in_progress|review, so start them first).
+    store.start(c.id, "dev", false).await.unwrap();
+    store
+        .close(c.id, "dev", ClosedReason::Completed, None, true, None)
+        .await
+        .unwrap();
+    // The closed axis sorts on ended_at (second precision); a real gap
+    // makes the order assertion meaningful instead of tie-dependent.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    store.start(b.id, "dev", false).await.unwrap();
+    store
+        .close(b.id, "dev", ClosedReason::Completed, None, true, None)
+        .await
+        .unwrap();
+
+    async fn all(store: &TaskStore, time: TaskTimeAxis) -> Vec<kallip_task::Task> {
+        store
+            .list(TaskFilter {
+                time,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+    }
+
+    // Newest-first on the chosen axis.
+    let ids: Vec<i64> = all(&store, TaskTimeAxis::Updated)
+        .await
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    // b was started and closed last, so its last activity is the newest;
+    // a was only created and never touched again.
+    assert_eq!(ids, vec![b.id, c.id, a.id], "updated axis is newest-first");
+    let ids: Vec<i64> = all(&store, TaskTimeAxis::Closed)
+        .await
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(ids, vec![b.id, c.id, a.id], "closed desc, then NULLs last");
+
+    // Windowing on the axis: an active row under the closed axis has a
+    // NULL stamp and falls outside any window (the axis itself never
+    // filters -- only the window does).
+    let windowed = store
+        .list(TaskFilter {
+            time: TaskTimeAxis::Closed,
+            since: Some(0),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let ids: Vec<i64> = windowed.iter().map(|t| t.id).collect();
+    assert_eq!(
+        ids,
+        vec![b.id, c.id],
+        "the NULL row drops out of the window"
+    );
+    let future = store
+        .list(TaskFilter {
+            time: TaskTimeAxis::Closed,
+            since: Some(i64::MAX / 2),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(future.is_empty(), "a future window matches nothing");
+
+    // Paging rides the same order.
+    let page = store
+        .list(TaskFilter {
+            limit: Some(1),
+            offset: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let ids: Vec<i64> = page.iter().map(|t| t.id).collect();
+    assert_eq!(ids, vec![c.id], "offset skips the newest, limit takes one");
 }

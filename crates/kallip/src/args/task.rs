@@ -1,7 +1,41 @@
 //! `task` command subtree of the `kallip` CLI (clap derive).
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+/// The CLI mirror of the wire's time axis: which timestamp the window,
+/// the sort, and the time column anchor to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum TaskTimeAxisArg {
+    /// Last activity time (the default).
+    Updated,
+    /// Completion time.
+    Closed,
+}
+
+impl From<TaskTimeAxisArg> for kallip_common::protocol::TaskTimeAxis {
+    fn from(a: TaskTimeAxisArg) -> Self {
+        match a {
+            TaskTimeAxisArg::Updated => kallip_common::protocol::TaskTimeAxis::Updated,
+            TaskTimeAxisArg::Closed => kallip_common::protocol::TaskTimeAxis::Closed,
+        }
+    }
+}
+
+/// Parses a --since/--until value: relative days (`3d` = now minus 3
+/// days) or an absolute UTC date (`2026-09-15` = that day, 00:00:00Z).
+/// Returns epoch seconds.
+pub(crate) fn parse_time_anchor(raw: &str, now_secs: u64) -> anyhow::Result<u64> {
+    let raw = raw.trim();
+    if let Some(days) = raw.strip_suffix('d') {
+        let days: u64 = days.parse().map_err(|_| {
+            anyhow::anyhow!("bad --since/--until value '{raw}' (try 3d or 2026-09-15)")
+        })?;
+        return Ok(now_secs.saturating_sub(days.saturating_mul(24 * 60 * 60)));
+    }
+    kallip_common::timefmt::parse_utc_day(raw)
+        .map_err(|_| anyhow::anyhow!("bad --since/--until value '{raw}' (try 3d or 2026-09-15)"))
+}
 
 // ---------------------------------------------------------------------------
 // Task commands — the tagma's task ledger, over the task domain API
@@ -43,7 +77,10 @@ pub(crate) enum TaskCommand {
     /// Archive a closed task: it leaves the default list view
     /// (`task list --archived` shows archived tasks).
     Archive(TaskArchiveArgs),
-    /// List tasks (oldest first).
+    /// List tasks (newest first on the chosen time axis).
+    /// --since/--until anchor to --time; --limit/--offset page
+    /// server-side; --relative-time switches the time column to
+    /// relative distances.
     List(TaskListArgs),
     /// Show one task: current state, association keys, event trail.
     Show(TaskShowArgs),
@@ -252,6 +289,28 @@ pub(crate) struct TaskListArgs {
     /// List archived tasks only (the default view is the active one).
     #[arg(long)]
     pub archived: bool,
+    /// The time axis: updated (last activity, the default) or closed
+    /// (completion time). The --since/--until window, the sort order,
+    /// and the time column all anchor to it.
+    #[arg(long, value_enum, default_value_t = TaskTimeAxisArg::Updated)]
+    pub time: TaskTimeAxisArg,
+    /// Window start on the axis: days back (3d) or a UTC date
+    /// (2026-09-15).
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Window end on the axis, same forms as --since.
+    #[arg(long)]
+    pub until: Option<String>,
+    /// Page size.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Page start.
+    #[arg(long)]
+    pub offset: Option<u32>,
+    /// Show the time column as relative distances (3h ago) instead of
+    /// absolute UTC.
+    #[arg(long)]
+    pub relative_time: bool,
 }
 
 #[derive(Args)]
@@ -279,4 +338,35 @@ pub(crate) struct TaskExtractArgs {
     /// Destination directory (created if absent).
     #[arg(long)]
     pub to: PathBuf,
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::parse_time_anchor;
+    use kallip_common::timefmt;
+
+    #[test]
+    fn relative_days_anchored_to_now() {
+        let now = timefmt::now_epoch();
+        assert_eq!(
+            parse_time_anchor("3d", now).unwrap(),
+            now - 3 * 24 * 60 * 60
+        );
+        assert_eq!(parse_time_anchor(" 0d ", now).unwrap(), now);
+    }
+
+    #[test]
+    fn absolute_date_is_that_days_utc_midnight() {
+        let epoch = parse_time_anchor("2026-09-15", 0).unwrap();
+        assert_eq!(timefmt::format_utc(epoch), "2026-09-15T00:00:00Z");
+    }
+
+    #[test]
+    fn garbage_is_rejected_with_a_hint() {
+        let err = parse_time_anchor("yesterday", 1_000)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("3d or 2026-09-15"), "{err}");
+        assert!(parse_time_anchor("12x", 1_000).is_err());
+    }
 }
