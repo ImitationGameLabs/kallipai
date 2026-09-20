@@ -5,8 +5,6 @@ order: 70
 internal: true
 ---
 
-## Naming
-
 This document records how the project's name evolved and why each name was
 chosen. It exists so the rationale behind `kallipai` / `kallip` is not lost,
 and so future contributors can tell the brand surface from the technical stem.
@@ -14,7 +12,7 @@ and so future contributors can tell the brand surface from the technical stem.
 For the rule that governs where each name is used today, see the
 [Naming](https://github.com/ImitationGameLabs/kallipai/blob/main/AGENTS.md#naming) section of `AGENTS.md`.
 
-### just-llm-libs
+## just-llm-libs
 
 Before there was an agent, there was frustration. Across earlier agent work we
 tried one LLM library and framework after another, and kept hitting the same
@@ -53,17 +51,15 @@ that happened to spawn it.
 The name comes from **kallipolis** (Greek _kalon_ + _polis_, "beautiful city"),
 Plato's ideal city in the _Republic_. Kallipolis is, by design, an efficient
 and harmonious structure of cooperating parts - each role doing its precise
-work, the whole city functioning as a single well-ordered organism. That is the
-picture we hold in mind for multi-agent coordination: not a swarm of
-interchangeable workers, but a structured collaboration where each agent has a
-role and the whole is more coherent than the parts.
+work, the whole city functioning as a single well-ordered organism. That is
+the picture we hold in mind for multi-agent coordination.
 
 For day-to-day use we take the simplified stem **kallip** - shorter, easier to
 type, free of the `-olis` that does no technical work - and add **AI** as a
 suffix to make the project's nature unambiguous. Read together, `kallipai` is
 literally `kallip` + `ai`.
 
-#### Service names: archeion and polis
+#### Service Names: Archeion and Polis
 
 The platform's service names follow the same Greek-city framing. **archeion**
 (ἀρχεῖον) was the ancient record office - the building that kept the citizen
@@ -96,7 +92,7 @@ historical record.
 | `--agora-url` / `--relay-agora-url` CLI flags | `--archeion-url` / `--relay-archeion-url` |
 | `agora.url` credentials file | `archeion.url` (absent old file backfills) |
 
-#### The two-stem rule
+#### The Two-Stem Rule
 
 The name is split into **two stems** that serve different audiences. The split
 is deliberate and is enforced in `AGENTS.md`:

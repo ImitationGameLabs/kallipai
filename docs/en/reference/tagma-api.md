@@ -5,8 +5,6 @@ order: 40
 internal: true
 ---
 
-## Tagma HTTP API
-
 The tagma (`kallip-tagma`) exposes an HTTP API at `KALLIP_TAGMA_ADDR`
 (default `127.0.0.1:3000`). Two event surfaces sit side by side:
 
@@ -19,15 +17,16 @@ The tagma (`kallip-tagma`) exposes an HTTP API at `KALLIP_TAGMA_ADDR`
   authored messages, runtime signals, and status snapshots (see
   [External chat-room API](#external-chat-room-api)).
 
-All endpoints require authentication. For token types, role definitions, and
-the full authorization matrix, see [auth.md](auth.md).
+All endpoints require authentication. For token types and role definitions,
+see [Authentication and authorization](auth.md); the full authorization matrix lives in
+[Archeion HTTP API](archeion-api.md) ("Authorization matrix").
 
-### Conventions
+## Conventions
 
 - **Base URL**: `http://{KALLIP_TAGMA_ADDR}` (default `127.0.0.1:3000`).
-  See [env.md](env.md) for configuration.
+  See [Tagma service](../configuration/tagma/service.md) for configuration.
 - **Authentication**: `Authorization: Bearer <token>` on every request.
-  See [auth.md](auth.md).
+  See [Authentication and authorization](auth.md).
 - **Content-Type**: `application/json` for all request and response bodies.
 - **Path parameters**: `{id}` is an agent UUID (`AgentId`), returned by
   `POST /agents`.
@@ -40,6 +39,18 @@ the full authorization matrix, see [auth.md](auth.md).
   `recent_retries.timestamp` which is Unix epoch seconds (`u64`).
 - **Empty responses**: endpoints that return no body use the corresponding
   status code alone (`204 No Content`, `202 Accepted`).
+
+### Token Handling
+
+Both token kinds are 256-bit CSPRNG secrets with a type-tag prefix
+(`sk-operator-…` / `sk-agent-…`), so the kind is self-describing and secret
+scanners can flag leaks. The tagma **never stores a token in plaintext on
+long-lived state**: only its SHA-256 hash is retained (`AppState` and the
+agent registry index). Incoming bearer tokens are hashed and compared by
+hash. Because an attacker cannot steer a SHA-256 output, variable
+comparison/lookup time over hashes leaks nothing about the secret: timing
+is not a practical vector even off-localhost (e.g. a `0.0.0.0` bind). The
+single operator comparison additionally uses a constant-time compare.
 
 ### Endpoint Overview
 
@@ -61,6 +72,9 @@ the full authorization matrix, see [auth.md](auth.md).
 | `PUT`    | `/agents/{id}/metadata`           | Update role / description                  | direct supervisor / operator |
 | `PUT`    | `/agents/{id}/activity`           | Report current activity (self)             | self / operator              |
 | `PUT`    | `/agents/{id}/profile-set`        | Rebind an agent to another named set       | operator / superior          |
+| `GET`    | `/agents/{id}/exec-policy`        | Read the `bash_exec` per-command overrides | any                          |
+| `PUT`    | `/agents/{id}/exec-policy`        | Update the `bash_exec` overrides (strictly monotonic) | operator / superior |
+| `GET`    | `/agents/{id}/verify`             | Confirm a bearer matches this agent (`204`/`401`) | any (self-consistent) |
 | `PUT`    | `/profiles/default`               | Transfer the default-set marker            | operator                     |
 | `DELETE` | `/profiles/sets/{name}`           | Remove a set (`?force=true` interrupts)    | operator                     |
 | `GET`    | `/profiles`                       | Read the profile config (masked)           | operator                     |
@@ -73,22 +87,25 @@ the full authorization matrix, see [auth.md](auth.md).
 | `GET`    | `/approvals/{id}`                 | Get a single approval                      | operator / superior          |
 | `POST`   | `/approvals/{id}`                 | Approve or deny an approval                | operator / superior          |
 
+The `kallip policy` CLI wraps the exec-policy reads and writes
+(`kallip policy show` / `exec-get` / `exec-set`).
+
 ### Agent Management
 
-#### `POST /agents` — Create subagent
+#### `POST /agents`: Create Subagent
 
 Creates a subagent under an existing supervisor. The request **must** carry
 `created_by` (the supervisor id); the caller must be that supervisor (or the
 operator).
 
-The tagma's single **root agent is tagma-managed** — eagerly created at
-startup from env vars (see `GET /agents/root` and [env.md](env.md)). A request
+The tagma's single **root agent is tagma-managed**: eagerly created at
+startup from env vars (see `GET /agents/root` and [Agent core and shell](../configuration/tagma/agent.md)). A request
 without `created_by` is rejected with `409 Conflict`; clients never create the
 root.
 
-Auth: operator or direct supervisor. See [auth.md](auth.md).
+Auth: operator or direct supervisor. See [Authentication and authorization](auth.md).
 
-##### Request body
+##### Request Body
 
 ```json
 {
@@ -106,12 +123,12 @@ Auth: operator or direct supervisor. See [auth.md](auth.md).
 }
 ```
 
-**`role` / `description`** — display metadata, supervisor-owned. A subagent
+**`role` / `description`**: display metadata, supervisor-owned. A subagent
 spawn **requires a non-empty `role`** (fleet discipline so a superior can tell
-its subagents apart). Both default to `""` and are never used as an address —
+its subagents apart). Both default to `""` and are never used as an address,
 `AgentId` is canonical. Mutable later via `PUT /agents/{id}/metadata`.
 
-**`max_tool_rounds`** — override the default/env-configured max tool-call rounds for this agent. Omit or `null` to use the tagma default (`KALLIP_MAX_TOOL_ROUNDS` env var, or unlimited). To set an explicit value:
+**`max_tool_rounds`**: override the default/env-configured max tool-call rounds for this agent. Omit or `null` to use the tagma default (`KALLIP_MAX_TOOL_ROUNDS` env var, or unlimited). To set an explicit value:
 
 ```json
 "max_tool_rounds": {"limited": 64}
@@ -125,11 +142,11 @@ To force unlimited rounds (bounded only by token budget):
 
 `Limited` values must be > 0; `Limited(0)` returns 400.
 
-**`profile_set`** — the profile set the subagent resolves against, by exact
+**`profile_set`**: the profile set the subagent resolves against, by exact
 name. Required: an unknown name is rejected with `400 Bad Request`
 listing the available sets.
 
-**`permission_class`** — the required FS-access permission class for the
+**`permission_class`**: the required FS-access permission class for the
 subagent, as the lowercase wire spelling (`"normal"` / `"guest"`). The
 tagma treats it as a **downgrade only**: a value above the supervisor's
 own granted class is rejected with `403 Forbidden` (never silently
@@ -139,7 +156,7 @@ itself. The granted class is observable on
 `GET /agents/{id}/permissions`.
 
 > **Token budget:** All agents share a single tagma-wide spend cap. Start with
-> no cap (unlimited); `KALLIP_TOKEN_BUDGET` or `POST /budget` imposes one —
+> no cap (unlimited); `KALLIP_TOKEN_BUDGET` or `POST /budget` imposes one,
 > see [Token Budget](#token-budget).
 
 ##### Response
@@ -172,30 +189,30 @@ Status: `201 Created`
 > restart, the agent count may temporarily exceed `KALLIP_MAX_AGENTS`. New
 > creation requests will return 503 until agents are removed to make room.
 
-#### `GET /agents/root` — Fetch the root agent
+#### `GET /agents/root`: Fetch the Root Agent
 
 Returns the tagma's single root agent. The tagma eagerly creates one root at
-startup (env-driven; see [env.md](env.md)), so this always succeeds once the
-tagma is accepting connections — clients fetch the root here instead of
+startup (env-driven; see [Agent core and shell](../configuration/tagma/agent.md)), so this always succeeds once the
+tagma is accepting connections; clients fetch the root here instead of
 list-then-create. Any authenticated identity may call it.
 
-**Response:** a single [agent summary](#get-agents--list-agents) object (same
+**Response:** a single [agent summary](#get-agents-list-agents) object (same
 shape as one element of `GET /agents`). Status `200`. A missing root is a
 startup-invariant violation surfaced as `500` (never `404`).
 
-#### `GET /agents` — List agents
+#### `GET /agents`: List Agents
 
 Lists running agents with their workspace root, state, supervisor, and display
 metadata (`role`/`description`/`activity`). Optional `?created_by=<AgentId>`
 restricts the result to a superior's direct subagents.
 
-Auth: any authenticated identity. Response contains no secrets. See [auth.md](auth.md).
+Auth: any authenticated identity. Response contains no secrets. See [Authentication and authorization](auth.md).
 
-##### Query params
+##### Query Params
 
 | Param        | Description                                                                                                                                                                                   |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `created_by` | `AgentId` — only list the direct subagents of this superior. Omit to list all. Any string is accepted (AgentId is not UUID-validated); a value that matches no superior yields an empty list. |
+| `created_by` | `AgentId`: only list the direct subagents of this superior. Omit to list all. Any string is accepted (AgentId is not UUID-validated); a value that matches no superior yields an empty list. |
 
 ##### Response
 
@@ -224,7 +241,7 @@ from the JSON when empty.
 
 Status: `200 OK`
 
-#### `DELETE /agents/{id}` — Remove agent
+#### `DELETE /agents/{id}`: Remove Agent
 
 Stops and removes an agent instance. Any state except busy is removable (the
 lifecycle cancel is honored everywhere, including waiting/retrying outer-loop
@@ -234,10 +251,10 @@ Removal **archives** the agent: its directory is moved to `agents/archived/<id>/
 (history, cumulative usage, and all persisted state preserved) rather than
 destroyed. `scan_agents` ignores `agents/archived/`, so an archived agent is absent
 from the live registry and is not restored on tagma restart. There is **no
-purge mechanism yet** — archived data (which may contain secrets/PII) persists
+purge mechanism yet**: archived data (which may contain secrets/PII) persists
 indefinitely; a purge command/TTL is a tracked pre-production requirement.
 
-Auth: operator or superior. See [auth.md](auth.md).
+Auth: operator or superior. See [Authentication and authorization](auth.md).
 
 Status: `204 No Content`
 
@@ -248,13 +265,13 @@ Status: `204 No Content`
 | 409  | Agent is busy (interrupt it first), has active subagents (remove or interrupt them first), or is the tagma-managed (live) root agent |
 | 500  | Agent vanished during removal                                                                                                        |
 
-#### `POST /agents/{id}/interrupt` — Interrupt agent
+#### `POST /agents/{id}/interrupt`: Interrupt Agent
 
 Aborts the agent's current round: the agent stays alive and returns to idle, ready
 for the next prompt. If the agent is already idle this is a no-op. Use `DELETE` to
 remove the agent entirely.
 
-Auth: operator or superior. See [auth.md](auth.md).
+Auth: operator or superior. See [Authentication and authorization](auth.md).
 
 Status: `202 Accepted`
 
@@ -263,16 +280,16 @@ Status: `202 Accepted`
 | 403  | Not a superior of the target agent |
 | 404  | Agent not found                    |
 
-#### `POST /agents/{id}/message` — Send message
+#### `POST /agents/{id}/message`: Send Message
 
 Sends a message to the agent's input queue. The tagma accepts the message
 immediately and processes it asynchronously. Returns queue depth feedback so
 callers can gauge expected latency.
 
 Auth: any authenticated identity. Inter-agent communication is peer-to-peer;
-no supervisor relationship is required. See [auth.md](auth.md).
+no supervisor relationship is required. See [Authentication and authorization](auth.md).
 
-##### Request body
+##### Request Body
 
 ```json
 {
@@ -292,7 +309,7 @@ no supervisor relationship is required. See [auth.md](auth.md).
 - `queue_depth == 0`: agent will process the message immediately.
 - `queue_depth > 0`: message is queued behind existing messages; `warning`
   includes a human-readable note.
-- A parked target auto-wakes: the message is buffered to the inbox and a kick `[system]` turn (park reason + elapsed) is enqueued — the agent decides in its kick round, then pulls the message; `warning` notes the kick. There is no manual wake route (removed: messages are the only wake path).
+- A parked target auto-wakes: the message is buffered to the inbox and a kick `[system]` turn (park reason + elapsed) is enqueued: the agent decides in its kick round, then pulls the message; `warning` notes the kick. There is no manual wake route (removed: messages are the only wake path).
 
 Status: `202 Accepted`
 
@@ -313,7 +330,7 @@ Status: `202 Accepted`
 > tagma returns `503` instead of accepting the message. Callers should wait
 > and retry.
 
-#### `GET /agents/{id}/events` — Internal event stream
+#### `GET /agents/{id}/events`: Internal Event Stream
 
 Opens an SSE connection to receive the full, rich agent event vocabulary
 (streaming deltas, tool calls/results, retry/failover telemetry, approvals).
@@ -321,7 +338,7 @@ This is the surface `kallip` and `kallip-run` consume; the browser
 frontend uses the [external chat-room stream](#external-chat-room-api) instead.
 See [SSE Event Types](#sse-event-types) for the event format.
 
-Auth: any authenticated identity. See [auth.md](auth.md).
+Auth: any authenticated identity. See [Authentication and authorization](auth.md).
 
 ##### Response
 
@@ -337,19 +354,19 @@ Status: `200 OK`
 > **Lagged messages:** If the client reads too slowly, lagged messages are
 > silently skipped. For high-volume monitoring, consume events promptly.
 
-### Profile sets
+### Profile Sets
 
 Profile sets are the named model groups of `profiles.toml` (see
-[env.md](env.md)). Seven endpoints manage them at runtime; the file remains
+[Model configuration methods](../configuration/tagma/methods.md)). Seven endpoints manage them at runtime; the file remains
 the source of truth, and every mutation persists to disk before it takes
 effect in memory.
 
-#### `PUT /agents/{id}/profile-set` — Rebind an agent
+#### `PUT /agents/{id}/profile-set`: Rebind an Agent
 
 Rebinds the agent to another named set. Requires the operator or a superior
 of the target.
 
-##### Request body
+##### Request Body
 
 ```json
 {
@@ -364,14 +381,14 @@ agent resolves the new binding at its next restore. Responds with the
 updated agent summary (`AgentSummary`, `profile_set` mirroring the new
 name).
 
-#### `PUT /profiles/default` — Transfer the default-set marker
+#### `PUT /profiles/default`: Transfer the Default-Set Marker
 
 Moves the `default` marker to an existing set and persists the config.
 Operator only. An unknown name is rejected with `400 Bad Request` listing
-the available sets. Responds with the full masked config — the same shape
+the available sets. Responds with the full masked config: the same shape
 as the profiles config file, with `api_key` values masked.
 
-##### Request body
+##### Request Body
 
 ```json
 {
@@ -379,7 +396,7 @@ as the profiles config file, with `api_key` values masked.
 }
 ```
 
-#### `DELETE /profiles/sets/{name}` — Remove a set
+#### `DELETE /profiles/sets/{name}`: Remove a Set
 
 Operator only. Removal is refused while it would break an invariant, and
 each refusal names its recovery path:
@@ -392,7 +409,7 @@ each refusal names its recovery path:
 | Other agents bound, no `force` | `409` | binder ids; pass `force=true` to interrupt and remove |
 | New bindings arrived mid-sweep | `409` | retry the same delete (state unchanged) |
 
-With `?force=true` every binder is released — live agents are interrupted —
+With `?force=true` every binder is released (live agents are interrupted)
 and the set is removed:
 
 ```json
@@ -403,23 +420,23 @@ and the set is removed:
 ```
 
 `interrupted` lists every agent that was bound, live or faulted. A faulted
-binder has no live round to interrupt; its end state — a dangling record,
-delivery-gated until recovery — is exactly what interrupting a live agent
+binder has no live round to interrupt; its end state (a dangling record,
+delivery-gated until recovery) is exactly what interrupting a live agent
 produces, so the sweep skips straight to it. Either way the record keeps
 the set name and dangles: prompt delivery rejects with `409` until a set
 exists again under that name, the agent is rebound via
 `PUT /agents/{id}/profile-set`, or the agent is removed. Before the
-write the sweep re-scans the registry — a spawn that landed inside the
+write the sweep re-scans the registry; a spawn that landed inside the
 interrupt-to-persist window fails the whole delete with `409` (retry the
 same command; nothing was removed).
 
-#### `GET /profiles` — Read the profile config
+#### `GET /profiles`: Read the Profile Config
 
 Operator only (the config carries API keys). Returns the current config
 in the same shape as the profiles config file, with `api_key` values
 masked.
 
-#### `PUT /profiles` — Validate, persist, hot-swap
+#### `PUT /profiles`: Validate, Persist, Hot-Swap
 
 Operator only. Accepts a full config in the file's schema. Each
 endpoint's `api_key` is tri-state on the wire: `null` keeps the live
@@ -432,10 +449,10 @@ registry is swapped as a unit, and running agents are unaffected until
 `POST /profiles/apply` (or their next restore). Responds with the
 merged masked config.
 
-#### `POST /profiles/apply` — Push the registry to live agents
+#### `POST /profiles/apply`: Push the Registry to Live Agents
 
 Operator only. For each live agent, resolves its recorded set name
-against the current registry and queues a profile reset — the agent
+against the current registry and queues a profile reset; the agent
 rebuilds its failover chain at its next wake-up. An unbound root
 instead derives its binding from the default set (recorded in memory
 only; restore re-derives it). Responds with counts:
@@ -447,17 +464,17 @@ only; restore re-derives it). Responds with counts:
 `applied` counts live agents that received the signal; `skipped` counts
 faulted entries and live agents whose recorded set no longer resolves.
 
-#### `POST /profiles/probe` — Trial-probe candidate definitions
+#### `POST /profiles/probe`: Trial-Probe Candidate Definitions
 
-Operator only. Builds throwaway backends from the request — inline
+Operator only. Builds throwaway backends from the request: inline
 `endpoints` (`api_key: null` reuses the live key for that provider id,
 the same draft semantics as the masked PUT) and named `sets` whose
-profiles are checked against the fetched model catalogs — and probes
+profiles are checked against the fetched model catalogs, and probes
 them without registering anything, so a candidate config can be
 validated before a PUT. Capped at 64 endpoints and 64 set profiles per
 request. Responds with per-endpoint results and per-set reports.
 
-### External chat-room API
+### External Chat-Room API
 
 The external chat-room API is the frontend's conversation surface. The tagma's
 internal rich vocabulary is projected (`project_external`) into two channels,
@@ -466,14 +483,14 @@ each with a different destination and persistence policy:
 - **Authored messages** (`AuthoredEvent`) are conversation content. They cross
   the E2EE envelope on the relayed (online) path and are persisted in
   `chat_history`, so a reconnect replays them. Today the only variant is
-  `assistant_content` (a complete assistant message — there is no streaming on
+  `assistant_content` (a complete assistant message; there is no streaming on
   this surface).
 - **Runtime signals** (`SignalEvent`) are operator metadata (busy/idle
   presence, turn terminals, errors). They cross a plaintext channel, are
   ephemeral (never persisted, never replayed), and are written to the tagma's
   application log (`tracing`) for observability.
 
-#### `GET /agents/{id}/external/events` — External chat-room stream
+#### `GET /agents/{id}/external/events`: External Chat-Room Stream
 
 A single multiplexed SSE carrying the conversation to a frontend client.
 Root-only: the direct conversation is the root agent's, so a non-root id is
@@ -494,10 +511,10 @@ envelope; the direct (offline) path serves it plaintext with no relay and no
 E2EE. Status snapshots are pushed on a fixed cadence; the transcript is driven
 by signals (busy/idle), not by these snapshots.
 
-Auth: any authenticated identity. See [auth.md](auth.md). Status: `200 OK` (`404`
+Auth: any authenticated identity. See [Authentication and authorization](auth.md). Status: `200 OK` (`404`
 on a non-root id, `503` if direct serving is not initialized).
 
-#### `POST /agents/{id}/lesche/messages` — Deliver an agent-authored message
+#### `POST /agents/{id}/lesche/messages`: Deliver an Agent-Authored Message
 
 The root agent's "speak to the user" primitive. The agent invokes the
 `kallip lesche send` CLI through `bash_exec`; the tagma synthesizes an
@@ -506,7 +523,7 @@ an `authored` frame on the external stream (or, on the relayed path, as an
 encrypted envelope). Self-only and root-only: only the root agent may deliver a
 user-facing message (an operator announcement is a separate concern).
 
-##### Request body
+##### Request Body
 
 ```json
 { "text": "string — the message to deliver" }
@@ -517,12 +534,12 @@ Status: `200 OK` (`{ "ok": true }`); `403` (operator or non-root agent);
 
 ### Context & Policy
 
-#### `GET /agents/{id}/status` — Agent status
+#### `GET /agents/{id}/status`: Agent Status
 
 Returns the agent's lifecycle state, context usage snapshot, and recent retry
 history.
 
-Auth: any authenticated identity. See [auth.md](auth.md).
+Auth: any authenticated identity. See [Authentication and authorization](auth.md).
 
 ##### Response
 
@@ -573,7 +590,7 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 - `token_budget`: tagma-wide cumulative token spend cap (shared by all agents);
   `0` while unlimited.
 - `token_consumed`: tagma-wide cumulative tokens consumed (shared by all agents).
-- `token_budget_unlimited`: true when no finite cap is set — `token_budget` and
+- `token_budget_unlimited`: true when no finite cap is set: `token_budget` and
   the derived remaining read `0`, enforcement is off, and `token_consumed`
   keeps accumulating.
 
@@ -583,13 +600,13 @@ Status: `200 OK`
 | ---- | --------------- |
 | 404  | Agent not found |
 
-#### `GET /agents/{id}/permissions` — Agent permissions
+#### `GET /agents/{id}/permissions`: Agent Permissions
 
 Returns the agent's permission profile (delegation depth, workspace boundary,
 granted permission class) and the tagma-global `bash_exec` classify preset in
 effect.
 
-Auth: any authenticated identity. See [auth.md](auth.md).
+Auth: any authenticated identity. See [Authentication and authorization](auth.md).
 
 ##### Response
 
@@ -603,11 +620,11 @@ Auth: any authenticated identity. See [auth.md](auth.md).
 }
 ```
 
-**`preset`** — the tagma-global `bash_exec` classify rule-set in effect for
+**`preset`**: the tagma-global `bash_exec` classify rule-set in effect for
 this agent (read-only; it is set once at tagma startup from
-`KALLIP_POLICY_PRESET`). See _Classify presets_ in `docs/en/architecture.md`.
+`KALLIP_POLICY_PRESET`).
 
-**`permission_class`** — the FS-access permission class actually granted to
+**`permission_class`**: the FS-access permission class actually granted to
 this agent (lowercase `"normal"` / `"guest"`): the value the tagma clamped at
 spawn and re-validates on restore. Surfaced so an explicit downgrade
 (`POST /agents` `permission_class`) is observable.
@@ -618,18 +635,18 @@ Status: `200 OK`
 | ---- | --------------- |
 | 404  | Agent not found |
 
-#### `PUT /agents/{id}/metadata` — Update role / description
+#### `PUT /agents/{id}/metadata`: Update Role / Description
 
 Updates the agent's `role` and/or `description` (the supervisor-owned display
 metadata). `None`/omitted fields are left unchanged; `Some(value)` sets the
-field. `role` is **change-only** — `role: Some(s)` must be non-empty (it cannot
+field. `role` is **change-only**: `role: Some(s)` must be non-empty (it cannot
 be cleared). `description` may be cleared with `Some("")`. At least one field
 must be provided.
 
 Auth: **direct supervisor** or operator (a grandparent may not relabel a
-grandchild). See [auth.md](auth.md).
+grandchild). See [Authentication and authorization](auth.md).
 
-##### Request body
+##### Request Body
 
 ```json
 {
@@ -640,7 +657,7 @@ grandchild). See [auth.md](auth.md).
 
 ##### Response
 
-The updated [`AgentSummary`](#get-agents--list-agents):
+The updated [`AgentSummary`](#get-agents-list-agents):
 
 ```json
 {
@@ -667,21 +684,21 @@ Status: `200 OK`
 
 > **Persist ordering & locking:** `meta.json` is rewritten before the in-memory
 > `AgentConfig` update, both under one registry write-lock. The lock serializes
-> the whole op — necessary because `meta.json` rewrite is a read-modify-write,
+> the whole op, necessary because `meta.json` rewrite is a read-modify-write,
 > so without it two concurrent PUTs (or a concurrent remove) could lose an
 > update. A crash leaves disk as the source of truth and restore self-heals.
 
-#### `PUT /agents/{id}/activity` — Report current activity
+#### `PUT /agents/{id}/activity`: Report Current Activity
 
 Sets the agent's ephemeral `activity` (free text, e.g. `"reading docs/x.md"`).
 Self-reported: an agent sets **its own** activity via the `kallip activity`
 CLI (which reads `KALLIP_ID`); a supervisor observes activity via
-[`GET /agents`](#get-agents--list-agents), it does not write it. An empty string
+[`GET /agents`](#get-agents-list-agents), it does not write it. An empty string
 clears it (the bridge also auto-clears on terminal events). Truncated to 256 chars.
 
-Auth: **the agent itself** or operator (`require_self_or_operator`). See [auth.md](auth.md).
+Auth: **the agent itself** or operator (`require_self_or_operator`). See [Authentication and authorization](auth.md).
 
-##### Request body
+##### Request Body
 
 ```json
 {
@@ -698,21 +715,21 @@ Status: `204 No Content`
 
 > **Policy:** an agent reports activity by running `kallip activity` through
 > `bash_exec`. `kallip` is allow-listed in the command classifier, so this
-> classifies as `Allow` under every preset — same as every other `kallip`
-> management command. See _Classify presets_ in `docs/en/architecture.md`.
+> classifies as `Allow` under every preset, same as every other `kallip`
+> management command.
 
 ### Token Budget
 
-A single tagma-wide spend cap is shared by all agents. It starts unlimited —
+A single tagma-wide spend cap is shared by all agents. It starts unlimited,
 no enforcement until a cap is set. Impose one at boot with
 `KALLIP_TOKEN_BUDGET`, or at runtime with `POST /budget` below.
 
-#### `GET /budget` — Get budget status
+#### `GET /budget`: Get Budget Status
 
 Returns the tagma-wide token budget, cumulative consumption, remaining
 tokens, and whether the cap is unlimited.
 
-Auth: any authenticated identity. See [auth.md](auth.md).
+Auth: any authenticated identity. See [Authentication and authorization](auth.md).
 
 ##### Response
 
@@ -730,14 +747,14 @@ Status: `200 OK`
 While `unlimited` is `true`, `budget` and `remaining` read `0` (no finite
 cap), enforcement is off, and `consumed` keeps accumulating.
 
-#### `POST /budget` — Adjust or set budget
+#### `POST /budget`: Adjust or Set Budget
 
 Updates the tagma-wide token budget. Exactly one of `set_remaining`, `delta`,
 or `set_unlimited` must be provided. The change affects all agents immediately.
 
-Auth: operator only. See [auth.md](auth.md).
+Auth: operator only. See [Authentication and authorization](auth.md).
 
-##### Request body (set remaining)
+##### Request Body (Set Remaining)
 
 ```json
 {
@@ -750,7 +767,7 @@ to pause all agents (remaining = 0 triggers immediate budget exceeded).
 When the budget is unlimited, setting a finite remaining migrates it to a
 limited budget (the `new_total = consumed + set_remaining` rule applies).
 
-##### Request body (delta adjustment)
+##### Request Body (Delta Adjustment)
 
 ```json
 {
@@ -759,11 +776,11 @@ limited budget (the `new_total = consumed + set_remaining` rule applies).
 ```
 
 Adjusts the total budget by a signed delta. Positive increases, negative
-decreases. The delta itself must be non-zero — a zero delta is rejected
+decreases. The delta itself must be non-zero; a zero delta is rejected
 with 400. The new budget must remain above tokens already consumed.
-Rejected with 409 while the budget is unlimited — set a finite budget first.
+Rejected with 409 while the budget is unlimited; set a finite budget first.
 
-##### Request body (remove the cap)
+##### Request Body (Remove the Cap)
 
 ```json
 {
@@ -795,7 +812,7 @@ Status: `200 OK`
 | 409  | `delta` while the budget is unlimited (set a finite budget first), or a delta landing at or below tokens already consumed |
 
 > **No persistence:** Budget changes are in-memory only. On restart the cap
-> comes back from `KALLIP_TOKEN_BUDGET` — unset, the tagma boots unlimited.
+> comes back from `KALLIP_TOKEN_BUDGET`: unset, the tagma boots unlimited.
 
 ### Approvals
 
@@ -805,15 +822,15 @@ Status: `200 OK`
 > admin/automation clients over the internal event stream
 > (`GET /agents/{id}/events`).
 
-#### `GET /approvals` — List approvals
+#### `GET /approvals`: List Approvals
 
 Lists approval entries across all agents where the caller is a superior. Results
 can be filtered and paginated.
 
-Auth: any authenticated identity. Results are filtered — each caller only sees
-approvals for agents where they are a superior. See [auth.md](auth.md).
+Auth: any authenticated identity. Results are filtered: each caller only sees
+approvals for agents where they are a superior. See [Authentication and authorization](auth.md).
 
-##### Query parameters
+##### Query Parameters
 
 | Parameter      | Type      | Default | Description                                                                  |
 | -------------- | --------- | ------- | ---------------------------------------------------------------------------- |
@@ -851,14 +868,14 @@ Status: `200 OK`
 | ---- | ---------------------- |
 | 400  | Invalid `offset` value |
 
-> **Visibility:** `pending` approvals are never visible — only `committed` and
+> **Visibility:** `pending` approvals are never visible; only `committed` and
 > later statuses are returned.
 
-#### `GET /approvals/{id}` — Get approval
+#### `GET /approvals/{id}`: Get Approval
 
 Returns a single approval entry by ID.
 
-Auth: operator or superior of the owning agent. See [auth.md](auth.md).
+Auth: operator or superior of the owning agent. See [Authentication and authorization](auth.md).
 
 ##### Response
 
@@ -871,15 +888,15 @@ Status: `200 OK`
 | 403  | Not a superior of the owning agent |
 | 404  | Approval not found                 |
 
-#### `POST /approvals/{id}` — Respond to approval
+#### `POST /approvals/{id}`: Respond to Approval
 
 Approves or denies a committed approval. On approve, the agent is notified and
 can redeem the stored tool action on its next round.
 
 Auth: operator or superior. An additional policy gate applies for approve
-decisions — see note below.
+decisions; see note below.
 
-##### Request body
+##### Request Body
 
 ```json
 {
@@ -924,7 +941,7 @@ Example SSE frame:
 data: {"type":"assistantContentDelta","delta":"Hello, "}
 ```
 
-#### Text streaming
+#### Text Streaming
 
 | `type`                  | Fields            | Description                 |
 | ----------------------- | ----------------- | --------------------------- |
@@ -933,17 +950,17 @@ data: {"type":"assistantContentDelta","delta":"Hello, "}
 | `assistantContent`      | `content: string` | Full assistant content      |
 | `assistantContentDelta` | `delta: string`   | Incremental content chunk   |
 
-#### Tool execution
+#### Tool Execution
 
 | `type`       | Fields                       | Description           |
 | ------------ | ---------------------------- | --------------------- |
 | `toolCall`   | `name: string, args: string` | Tool invocation       |
 | `toolResult` | `result: string`             | Tool execution result |
 
-#### Round-outcome events
+#### Round-Outcome Events
 
 These signal the end of the current assistant turn. Except for `cancelled`, the agent
-**stays alive** — more events will follow after the next wake. The post-turn state
+**stays alive**; more events will follow after the next wake. The post-turn state
 varies: `idle`/`interrupted` return to idle, `waiting` parks on a wake timer,
 `tokenBudgetExceeded` re-arms the wait timer as a recovery probe, an armed
 `failoverChainExhausted` enters a retrying backoff, and the unarmed/error/max-rounds
@@ -955,13 +972,13 @@ outcomes park the agent (the next incoming message auto-wakes it). Only `cancell
 | `idle`                   | _(none)_                                                                                                                              | Agent completed the turn and returned to idle (a `finished`-style content event is `assistantContent`)                                                                                              |
 | `maxRoundsExceeded`      | _(none)_                                                                                                                             | Hit the max tool rounds limit for this turn; the agent parks                                                                                                                                              |
 | `error`                  | `message: string` | Turn failed with a fatal error; the agent parks (a message auto-wakes it) |
-| `failoverChainExhausted` | `reason: "noFailoverConfigured" \| "allBackupsExhausted" \| "allCandidatesUnbuildable" \| "allCandidatesInfeasible", detail: string, transient_retry: { attempt, max_attempts, retry_in_secs }` | Within-set failover chain exhausted — every profile in the set is unavailable; `reason` distinguishes the cause (`allCandidatesInfeasible` = every candidate's declared window violated the budget shape — tune `SUMMARY_MAX_TOKENS` / `PINNED_BUDGET_RATIO` or raise the window), `detail` is the original trigger. With `transient_retry` present the agent enters a retrying backoff (the timer re-runs the original prompt); absent, it parks |
-| `waiting`                | `timeout_secs: u64`                                                                                                                  | Turn ended on `break(wait)`; the agent parks on a wake timer — the timer expiring or any external event resumes it                                                                                         |
+| `failoverChainExhausted` | `reason: "noFailoverConfigured" \| "allBackupsExhausted" \| "allCandidatesUnbuildable" \| "allCandidatesInfeasible", detail: string, transient_retry: { attempt, max_attempts, retry_in_secs }` | Within-set failover chain exhausted: every profile in the set is unavailable; `reason` distinguishes the cause (`allCandidatesInfeasible` = every candidate's declared window violated the budget shape; tune `KALLIP_SUMMARY_MAX_TOKENS` / `KALLIP_PINNED_BUDGET_RATIO` or raise the window), `detail` is the original trigger. With `transient_retry` present the agent enters a retrying backoff (the timer re-runs the original prompt); absent, it parks |
+| `waiting`                | `timeout_secs: u64`                                                                                                                  | Turn ended on `break(wait)`; the agent parks on a wake timer; the timer expiring or any external event resumes it                                                                                         |
 | `interrupted`            | _(none)_                                                                                                                             | Round aborted via interrupt; agent stays alive and idle                                                                                                                                                                                                                                                                                           |
 | `tokenBudgetExceeded`    | `consumed: u64, budget: u64`                                                                                                         | Token budget hit; the agent parks on a re-armed wait timer as a zero-cost recovery probe (waiting, not idle) until the budget is raised                                                                                                 |
-| `cancelled`              | _(none)_                                                                                                                             | Lifecycle cancel (remove / shutdown) — agent stops, stream ends                                                                                                                                                                                                                                                                                   |
+| `cancelled`              | _(none)_                                                                                                                             | Lifecycle cancel (remove / shutdown): agent stops, stream ends                                                                                                                                                                                                                                                                                   |
 
-#### State and notifications
+#### State and Notifications
 
 | `type`            | Fields                                                                                   | Description                                                                                                                        |
 | ----------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
@@ -969,5 +986,5 @@ outcomes park the agent (the next incoming message auto-wakes it). Only `cancell
 | `status`          | `message: string`                                                                        | Informational status message                                                                                                       |
 | `approvalUpdated` | `id: string, status: "committed" \| "approved" \| "denied" \| "redeemed" \| "cancelled"` | Approval state changed                                                                                                             |
 | `retrying`        | `attempt: u32, max_attempts: u32, error: string, delay_secs: f64`                        | LLM API retry in progress                                                                                                          |
-| `failover`        | `from: string, to: string, reason: string`                                               | Within-set failover to the next profile (`from`/`to` are profile ids); non-terminal — the agent stays busy and continues the turn |
-| `streamReset`    | `error: string, attempt: u32, max_attempts: u32, delay_secs: f64`                        | LLM stream dropped mid-turn (transport error after content started flowing); the runner retries from scratch — discard partial content since the last boundary. Non-terminal; mirrors `retrying` plus the carried `error` |
+| `failover`        | `from: string, to: string, reason: string`                                               | Within-set failover to the next profile (`from`/`to` are profile ids); non-terminal; the agent stays busy and continues the turn |
+| `streamReset`    | `error: string, attempt: u32, max_attempts: u32, delay_secs: f64`                        | LLM stream dropped mid-turn (transport error after content started flowing); the runner retries from scratch; discard partial content since the last boundary. Non-terminal; mirrors `retrying` plus the carried `error` |

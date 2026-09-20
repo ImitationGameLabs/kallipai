@@ -59,7 +59,7 @@ Code and test comments are self-contained: do not reference out-of-repo document
 │       └── reference/        # Reference documentation
 │           ├── auth.md       # Authentication and authorization
 │           ├── tagma-api.md  # HTTP API endpoints
-│           ├── env.md        # Environment variable reference
+│           ├── env/          # Environment variable reference
 │           ├── kallip.md     # `kallip` headless CLI for agent
 │           └── kallip-run.md # `kallip-run` agent runner for scripting
 └── nix/

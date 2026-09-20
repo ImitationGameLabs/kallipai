@@ -1,10 +1,8 @@
 ---
-title: kallip-run Reference
+title: kallip-run CLI reference
 description: CLI reference for the kallip-run runner.
 order: 80
 ---
-
-## kallip-run Reference
 
 Posts a prompt to a tagma agent and observes its run, streaming the agent's
 procedure to stderr and exiting with a semantic exit code when the agent goes
@@ -12,15 +10,15 @@ idle (calls `break`) or hits a terminal error state. Designed for scripted and
 automated workflows.
 
 `kallip-run` is a **runtime-telemetry observer**: it does **not** print the
-agent's message. A message is now a deliberate `kallip lesche send` CLI call the
-agent addresses to the user over the relay/chat path — not a value on this
+agent's message. A message is a deliberate `kallip lesche send` CLI call the
+agent addresses to the user over the relay/chat path, not a value on this
 stream.
 What `kallip-run` gives you is the procedure (reasoning, tool calls, results in
 `--verbose`) and a machine-readable exit status.
 
 By default the prompt goes to the tagma's **singleton root agent** (eagerly
 created at tagma startup). Pass `--agent <ID>` to target a specific (sub)agent
-instead — useful for running against a dedicated subagent when you need
+instead; useful for running against a dedicated subagent when you need
 isolation, since separate runs against the root share its context. The target
 agent persists after the run.
 
@@ -31,7 +29,7 @@ kallip-run [OPTIONS] --prompt <PROMPT>
 Uses `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_TAGMA_URL`
 (env, default `http://127.0.0.1:3000`).
 
-### Options
+## Options
 
 | Flag                | Description                                                    |
 | ------------------- | -------------------------------------------------------------- |
@@ -40,7 +38,7 @@ Uses `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_TAGMA_URL`
 | `--json`            | Emit a single JSON object on stdout (see Output)               |
 | `--verbose`         | Stream the agent's procedure (reasoning, tool calls) to stderr |
 
-### Exit codes
+### Exit Codes
 
 | Code | Meaning                             |
 | ---- | ----------------------------------- |
@@ -66,7 +64,7 @@ so the runner emits only a completion hint by default.
 | `--json` | `--verbose` | `{agentId, exit}` | procedure stream + diagnostics                                                        |
 
 - No message is printed to stdout. The agent's bare assistant text is procedure
-  only — in `--verbose` it streams to stderr prefixed `[assistant]`; it is not a
+  only; in `--verbose` it streams to stderr prefixed `[assistant]`; it is not a
   user message.
 - The JSON object **never contains `reasoning` or a user message**;
   `--verbose --json` streams the procedure to stderr but leaves the object
@@ -84,14 +82,14 @@ so the runner emits only a completion hint by default.
 
 `exit` is one of `success`, `error`, `max_rounds`, `cancelled`,
 `budget_exceeded`, `failover_chain_exhausted`. If the tagma is unreachable, the
-agent id is unknown, or `post_message` fails, no JSON object is emitted — the
+agent id is unknown, or `post_message` fails, no JSON object is emitted; the
 error is printed to stderr and the exit code is `1`.
 
 ```bash
 kallip-run --json --prompt "Refactor the config loader"
 ```
 
-### Continuing a session
+### Continuing a Session
 
 The target agent persists after the run. Its id is printed in the completion
 hint, and you can continue the same session:
@@ -110,9 +108,9 @@ kallip-run --verbose --prompt "Refactor the config loader"
 ```
 
 A follow-up via `--agent` keeps the agent's full context. It works only against
-a tagma that still has the agent registered — the same instance, or one that
+a tagma that still has the agent registered: the same instance, or one that
 restored it from disk on startup. `--agent` does not validate the id format; an
 unknown id surfaces as a tagma error.
 
 For the complete environment variable reference including LLM provider
-configuration, see [env.md](env.md).
+configuration, see [Model configuration](../configuration/tagma/llm.md).

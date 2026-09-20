@@ -523,7 +523,7 @@ in
           runtimeConfig is empty (the shipped config.js stands), or the
           bundle with a config.js baked from runtimeConfig. Derived by
           default; set it to pin a custom-built root. See
-          docs/en/nixos-deployment.md for the serving example.
+          docs/en/deployment/nixos/ for the serving example.
         '';
       };
     };

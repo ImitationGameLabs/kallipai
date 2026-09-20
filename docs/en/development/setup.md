@@ -5,8 +5,6 @@ order: 30
 internal: true
 ---
 
-## Development
-
 Local development runs the full kallip stack under
 [Arion](https://docs.hercules-ci.com/arion/) (a Nix-native docker-compose). The
 dev archeion side lives at `compose/dev/polis.nix`; the repo-root
@@ -15,12 +13,12 @@ auto-discovery, so a plain `arion up` brings it up.
 
 This doc covers the day-1 bring-up and the iteration loop. For the container
 images, the production split, and the integration-test mode, see
-[container.md](../reference/container.md); for the frontend workspace, see
-[frontend.md](frontend.md).
+[Container images](../deployment/container.md); for the frontend workspace, see
+[Frontend package development](frontend.md).
 For the NixOS host deployment, see
-[nixos-deployment.md](../nixos-deployment.md).
+[the NixOS deployment guide](../deployment/nixos/index.md).
 
-### Prerequisites
+## Prerequisites
 
 - Arion + a Docker (or Podman with the docker socket) daemon. Under rootless
   docker, the Caddy service uses host networking and binds the edge port
@@ -32,14 +30,14 @@ For the NixOS host deployment, see
 - Copy `.env.example` to `.env` and fill in the LLM provider credentials. Arion
   reads `.env` via `service.env_file`.
 
-#### Plain-http quick start (KALLIP_EDGE_TLS=off)
+### Plain-http Quick Start (KALLIP_EDGE_TLS=off)
 
 Set `KALLIP_EDGE_TLS=off` in `.env` for a plain-http edge with no mkcert
 and no DNS-trust setup. Keep `KALLIP_DOMAIN=localhost` (the default is
 the prod domain; the quick start pins localhost) and move the edge off
 the privileged default port: `KALLIP_EDGE_PORT=8080`. Then `arion up -d`
 
-- `deno task dev` and open `http://app.localhost:8080` — browsers
+- `deno task dev` and open `http://app.localhost:8080`: browsers
 resolve every `*.localhost` name to the loopback interface, so no
 hosts-file entry is needed. Login surface: admin key + GitHub oauth;
 passkeys work on localhost out of the box (a browser secure-context
@@ -57,7 +55,7 @@ Gotchas on this shape:
 - The host you browse must match `KALLIP_DOMAIN` (`localhost` here);
   any other host is rejected.
 
-#### TLS + DNS setup (the default https edge, one-time)
+#### TLS + DNS Setup (the Default https Edge, One-Time)
 
 The dev edge terminates TLS for `*.<devDomain>` so the stack is reachable
 cross-machine on the LAN (browsers only allow WebAuthn in a secure
@@ -69,15 +67,15 @@ the production domain (`kallipai.com`); `.env.example` sets it to
 `kallipai.lan` for local dev (so dev DNS/certs never clash with
 production), and you get that when you copy `.env.example` to `.env`.
 direnv's `dotenv` loads `.env` into the shell, so arion eval, `mkcert`,
-and vite all see it. The whole stack — the archeion/lesche env, the
+and vite all see it. The whole stack (the archeion/lesche env, the
 Caddyfile, and vite's dev-server shaping (allowedHosts, HMR websocket)
-— derives from `KALLIP_DOMAIN` plus the two edge knobs
+) derives from `KALLIP_DOMAIN` plus the two edge knobs
 (`KALLIP_EDGE_TLS`, `KALLIP_EDGE_PORT`). The web app's own API URLs
 read none of them: they derive at runtime from the browser location
 (see the offline-login notes below).
 
 1. Generate the leaf cert with `mkcert` (provided by the nix devShell). Run this
-   from the repo root — `$KALLIP_DOMAIN` comes from `.env` (`kallipai.lan`):
+   from the repo root; `$KALLIP_DOMAIN` comes from `.env` (`kallipai.lan`):
 
    ```sh
    mkdir -p compose/dev/.certs && \
@@ -88,18 +86,18 @@ read none of them: they derive at runtime from the browser location
    This writes `cert.pem` / `key.pem` into `./compose/dev/.certs/` for
    `*.<devDomain>` + the bare domain, and creates the mkcert root CA at
    `~/.local/share/mkcert/rootCA.pem` on first use. It does **not** install the
-   root into any trust store — that step is OS-specific (step 2).
+   root into any trust store; that step is OS-specific (step 2).
    `compose/dev/polis.nix` defaults the cert dir to `<repo>/compose/dev/.certs`,
    so arion finds them with nothing further to do.
 2. Install the mkcert root CA into the host trust store, so the leaf cert is
    accepted by the browser (no warning, and WebAuthn runs in a real secure
-   context). This is a manual step — the `mkcert` command above does not do it:
+   context). This is a manual step: the `mkcert` command above does not do it:
 
    ```sh
    mkcert -install
    ```
 
-   **NixOS caveat:** `mkcert -install` does NOT work — the system store and
+   **NixOS caveat:** `mkcert -install` does NOT work: the system store and
    Java `cacerts` live in the read-only `/nix/store`, so mkcert can't mutate
    them in place. Add the root to the system trust via config and rebuild
    instead (this also feeds the browser NSS/p11-kit and Java `cacerts` stores):
@@ -111,7 +109,7 @@ read none of them: they derive at runtime from the browser location
    ```
 
 3. Resolve `*.<devDomain>` to the host's LAN IP. This is **host/LAN
-   infrastructure, not part of the dev stack** — keep it out of the arion
+   infrastructure, not part of the dev stack**: keep it out of the arion
    composition and configure it wherever your network DNS lives. The exact
    mechanism depends on your host OS / network; pick one:
 
@@ -126,7 +124,7 @@ read none of them: they derive at runtime from the browser location
      explicitly.
 
    - **A LAN resolver** (dnsmasq / AdGuard Home / Pi-hole, often on a router or
-     NAS) — best when several devices need to reach the dev stack. Add a
+     NAS); best when several devices need to reach the dev stack. Add a
      wildcard record `*.kallipai.lan` -> the host's LAN IP, then either
      advertise that resolver over DHCP or point each client at it manually. On a
      NixOS host, for example:
@@ -152,9 +150,9 @@ read none of them: they derive at runtime from the browser location
 > **Scope:** this topology covers the **web** app (`packages/kallip-web`). The
 > Tauri Android shell (`packages/kallip-app`) is a separate target that still
 > defaults to `http://localhost:7100` / `:7200` and is not wired to the
-> `*.kallipai.lan` dev cert — see [frontend.md](frontend.md).
+> `*.kallipai.lan` dev cert; see [Frontend package development](frontend.md).
 
-### Bring-up
+### Bring-Up
 
 The stack comes up in two phases because the tagma's relay connector cannot
 enroll with the archeion until a real user signs up in the web UI and mints an
@@ -162,10 +160,10 @@ enrollment code -- starting it with `KALLIP_POLIS_URL` set but no code
 degrades the tagma to local-only (it logs an error and keeps serving local
 agents; the lesche message route returns 503).
 
-#### Archeion side
+#### Archeion Side
 
 ```sh
-arion up -d                # caddy + archeion + lesche + files + archeion-postgres + lesche-postgres + files-postgres (arion builds the workspace via the flake)
+arion up -d                # caddy + archeion + lesche + files + instances + archeion-postgres + lesche-postgres + files-postgres (arion builds the workspace via the flake)
 ```
 
 Dev is fronted by Caddy (see the one-time setup above): the browser loads the
@@ -179,23 +177,23 @@ browser from the origin it runs on: `https://app.kallipai.lan` yields
 Caddy topology, so no `.env` override is needed for normal LAN dev;
 
 archeion and lesche also publish `7100` / `7200` to the host for plain-HTTP
-tooling — `kallip-admin` and curl keep using `http://localhost:7100` /
+tooling: `kallip-admin` and curl keep using `http://localhost:7100` /
 `http://localhost:7200` directly, bypassing Caddy. The files service
-publishes `7400` on the loopback interface only — the browser reaches files
+publishes `7400` on the loopback interface only; the browser reaches files
 only through the edge (the edge strips `/v1/files`), while the `kallip file`
 CLI points `KALLIP_POLIS_URL` at the dev edge (`https://api.kallipai.lan`) and presents a
 tagma bearer (`KALLIP_FILES_TOKEN`); see docs/en/reference/files-api.md.
 The tagma process itself authenticates to the files service with its
-registered enrollment credential — `KALLIP_FILES_TOKEN` provisions
+registered enrollment credential: `KALLIP_FILES_TOKEN` provisions
 CLI shells, and the tagma removes a leftover copy from its own
 environment at boot.
 
-> **Passkey migration:** changing the WebAuthn RP id from the old `localhost`
-> topology to `kallipai.lan` invalidates every previously registered dev
-> passkey. On first bring-up after this change, reset the archeion volume
-> (`arion down -v`) and re-register.
+> **Passkeys and the RP id:** if a dev environment was ever brought up on
+> the old `localhost` topology, its registered passkeys are invalid under
+> the `kallipai.lan` RP id: reset the archeion volume (`arion down -v`)
+> and re-register before the first login.
 
-##### Register a test user (first bring-up only)
+##### Register a Test User (First Bring-Up Only)
 
 Signup is open (no invite code): a fresh database just needs someone to sign
 up. The `archeion_pgdata` volume persists across `arion down` / `up`, so this
@@ -229,7 +227,8 @@ curl -si -X POST http://localhost:7100/auth/admin-login \
 
 The `Set-Cookie: kallip_session=...` header is the session (see
 docs/en/reference/auth.md); pass it as `-b kallip_session=...` to mint an
-enrollment code at `POST /v1/archeion/tagmata` without signing up.
+enrollment code at `POST /tagmata` on the same direct port (no
+`/v1/archeion` prefix) without signing up.
 
 ###### The admin token
 
@@ -259,7 +258,7 @@ KALLIP_ARCHEION_ADMIN_TOKEN="$TOK" cargo run -q -p kallip-admin -- --archeion-ur
 
 The fixture is dev-only; prod must set a strong secret.
 
-#### Tagma side
+#### Tagma Side
 
 The tagma (agent host + in-process relay connector) is a separate composition
 (`compose/dev/tagma.nix`) so its lifecycle does not entangle with the archeion
@@ -270,7 +269,7 @@ side. It runs on the host network and reaches the platform edge at
 arion -f compose/dev/tagma.nix up -d   # tagma; enrolls its relay
 ```
 
-#### Multi-edge tagma (multi-relay)
+#### Multi-Edge Tagma (Multi-Relay)
 
 The tagma can hold one identity per platform deployment simultaneously (e.g. the local
 dev edge plus a remote one). Declare the entries in
@@ -310,7 +309,7 @@ platform origin. Enroll a code on each side, fill `polis.toml`, and watch the
 tagma log for two `relay connector active` lines (one per entry name); a
 message sent on either side must arrive on both.
 
-#### Manual KEX round-trip acceptance
+#### Manual KEX Round-Trip Acceptance
 
 The automated acceptance chain covers fanout and dual identity; the
 user-agent KEX round-trip itself (message in, agent reply out, both sides
@@ -336,7 +335,7 @@ setup:
 Both sides must list the new rows: `human` for the user's message,
 `agent` for the reply.
 
-#### Local daemon management (kallipctl)
+#### Local Daemon Management (kallipctl)
 
 The daemon family (`crates/daemon/`) manages multiple local tagma
 instances. The daemon keeps one registration record per instance in
@@ -344,7 +343,7 @@ its record area (default `~/.local/state/kallipai/daemon/instances/`,
 one `<slug>.json` per instance); the record and the instance's own
 `runtime.json` are the only truth. `kallipctl` talks to it over a
 0600 control socket (0660 group-widened when
-`KALLIP_DAEMON_SOCKET_GROUP` is set — the system form):
+`KALLIP_DAEMON_SOCKET_GROUP` is set; the system form):
 
 ```sh
 kallipctl spawn <slug> <workspace> -e KALLIP_LLM_PROVIDER=... \
@@ -360,14 +359,14 @@ launch anchor, and the pointer at the data directory
 (`~/.local/share/kallipai/tagmata/<slug>`); the tagma publishes
 `runtime.json` (pid + port + starttime) into the data directory on
 every boot. Env
-pairs must start with `KALLIP_` or be `RUST_LOG`; the reserved
+pairs must start with `KALLIP_` or be `RUST_LOG` or `PATH`; the reserved
 keys (`KALLIP_TAGMA_SLUG`,
 `KALLIP_WORKSPACE_ROOT`, `KALLIP_TAGMA_DATA_DIR`) are daemon-owned.
 `KALLIP_TAGMA_ADDR` is the one user-set listen knob: the daemon injects
-`127.0.0.1:0` unless any channel carries the key — a request pair,
+`127.0.0.1:0` unless any channel carries the key: a request pair,
 the harvested base, or the persisted record replayed on start; every
 channel is shape-checked as a `SocketAddr`,
-and a pinned port already in use only surfaces at bind time — spawn
+and a pinned port already in use only surfaces at bind time; spawn
 times out and rolls the record back; start keeps the record and
 reports the timeout pointing at the logs.
 A `start` relaunch drops `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` from the
@@ -376,7 +375,7 @@ replayed env once the instance holds stored relay credentials
 the code is single-use, and replaying it after a completed enrollment trips
 tagma's conflicting-relay-configuration fail-fast. An instance whose
 enrollment never completed still replays the code, so a restart can retry.
-A daemon-managed tagma instance logs into the state tree —
+A daemon-managed tagma instance logs into the state tree:
 `~/.local/state/kallipai/tagmata/<slug>/logs/` (created 0700): daily-rolling
 files, the last 7 kept. Set `KALLIP_TAGMA_LOG_TO_STDERR=1`
 (or `true`) to log to the terminal's stderr instead -- handy when manually
@@ -391,8 +390,8 @@ itself is served by the host vite dev server (Caddy routes
 web origin. The operator-key login branch is runtime-config gated: the
 shipped `config.js` factory default is `offlineLogin = true` (the
 self-hosted posture), and a cloud-facing deployment hides the branch by
-setting `services.kallipai.web.runtimeConfig.offlineLogin = false` —
-baked into the served site root — or by editing the file directly on a
+setting `services.kallipai.web.runtimeConfig.offlineLogin = false`
+(baked into the served site root), or by editing the file directly on a
 non-NixOS deployment.
 
 ### Iterating
@@ -410,7 +409,7 @@ Tail logs with `arion logs -f <service>` (`archeion`, `archeion-postgres`,
 `lesche-postgres`); for the tagma use `arion -f compose/dev/tagma.nix logs -f
 tagma`.
 
-### Optional bind overrides
+### Optional Bind Overrides
 
 By default the tagma data, the agent workspace, and shared skills live in
 docker volumes. Set these env vars (absolute, colon-free host paths) to
@@ -425,7 +424,7 @@ bind-mount them on the host instead:
 Leave `KALLIP_SKILLS_ROOT` unset when using `KALLIP_ARION_SKILLS_PATH` -- the
 former redirects `skill_dir()` away from the bind-mount target.
 
-### Integration tests
+### Integration Tests
 
 Runs the workspace's `[[test]]` targets **inside the container** to confirm the
 sandbox and shell backends behave in the containerized environment the tagma
@@ -435,9 +434,12 @@ ships in; the service exits with the overall verdict (`arion ps -a`).
 arion -f compose/dev/test.nix up
 ```
 
-See [container.md](../reference/container.md) for which suites run.
+The suites today: the sandbox suite (a scripted end-to-end agent driving
+  real landlock + seccomp + mount-ns shell sandbox) and the exec suite (real
+  `bash -c` cwd and process-group behavior); any `[[test]]` target added
+  later is picked up automatically.
 
-### Reset (clean slate)
+### Reset (Clean Slate)
 
 When the backend changes in a way that invalidates existing data (a schema
 reset, an incompatible wire format, or you simply want to start over), tear down

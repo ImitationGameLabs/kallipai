@@ -5,22 +5,20 @@ order: 60
 internal: true
 ---
 
-## kallip-cron HTTP API
-
 The timer/notification daemon `kallip-cron-daemon` hosts a small management HTTP
 API (loopback only, default `127.0.0.1:3010`) consumed by the `kallip-cron` CLI.
 When a schedule fires, the daemon injects its `message` into the target agent
 conversation via the tagma HTTP API (`POST /agents/{id}/message`), not through
 this API.
 
-### Auth — agent-token verification (self-scoped)
+## Auth: Agent-Token Verification (Self-Scoped)
 
 There is **no cron-specific token**. The daemon is loopback-only (it refuses a
 non-loopback bind at startup); the boundary is per-request agent-token
 verification:
 
 - Every request carries `Authorization: Bearer <agent-token>` and the caller's
-  claimed agent id — `agent_id` in the `POST /schedules` body, `?agent=<id>`
+  claimed agent id: `agent_id` in the `POST /schedules` body, `?agent=<id>`
   query on the read/delete ops.
 - The daemon forwards the pair to the tagma's
   `GET /agents/{id}/verify` (204 on match, 401 otherwise) and scopes the
@@ -36,11 +34,11 @@ mutate its own schedules; an operator bearer is rejected (no agent match).
 All errors are `{"error":{"message":"..."}}` with the status on the response
 line.
 
-### Precision contract
+### Precision Contract
 
 Times are UTC, second-precision. `tick_ms` is `>= 1000`; a sub-second `In`
 duration is rejected. Recurring (`Every`) intervals must be `>= 180` seconds (3
-minutes) — the event-flood guard, since a too-fast recurrence can overwhelm an
+minutes): the event-flood guard, since a too-fast recurrence can overwhelm an
 agent's processing loop with no practical value. Recurrence is a pure rolling
 interval (each `next_fire` is advanced by `duration_seconds` from the fire
 time); there is no calendar-anchored "daily at 09:00" mode.
@@ -78,10 +76,10 @@ Create a schedule owned by (and targeting) `agent_id`. The server mints the id
 
 Trigger shapes:
 
-- `{ "type": "once", "at": "<RFC3339>" }` — one-shot at an absolute time (a past
+- `{ "type": "once", "at": "<RFC3339>" }`: one-shot at an absolute time (a past
   time fires on the next tick: fire-ASAP for a missed reminder).
-- `{ "type": "in", "duration_seconds": 300 }` — one-shot N seconds from create.
-- `{ "type": "every", "duration_seconds": 10800 }` — recurring interval (whole
+- `{ "type": "in", "duration_seconds": 300 }`: one-shot N seconds from create.
+- `{ "type": "every", "duration_seconds": 10800 }`: recurring interval (whole
   seconds, `>= 180`); each fire advances `next_fire` by this much.
 
 #### `GET /schedules?agent=&status=&tag=`
@@ -100,12 +98,12 @@ List `agent`'s schedules, optionally filtered by status (`active`/`paused`/
 #### `GET /schedules/{id}?agent=`
 
 One of `agent`'s schedules, or `404`. Cross-owner is indistinguishable from
-not-found (uniform `404` — no ownership oracle).
+not-found (uniform `404`, no ownership oracle).
 
 #### `PATCH /schedules/{id}?agent=`
 
 Status-only update (pause/resume). `next_fire`/`last_fire` are never
-client-mutable — this is what prevents a fired one-timer from being re-armed.
+client-mutable; this is what prevents a fired one-timer from being re-armed.
 Cross-owner → `404`.
 
 ```json
@@ -116,7 +114,7 @@ Cross-owner → `404`.
 
 `204` on success, `404` if not found or owned by another agent.
 
-### Delivery semantics
+### Delivery Semantics
 
 At-least-once. tagma's `post_message` does not dedup, so a daemon crash in the
 post → ack window can double-deliver one row; per-id ack + persisted 503-backoff

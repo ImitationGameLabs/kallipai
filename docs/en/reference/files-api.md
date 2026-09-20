@@ -5,32 +5,36 @@ order: 50
 internal: true
 ---
 
-## kallip-files HTTP API
-
 The file transfer service `kallip-files` hosts a small content API (default
 `127.0.0.1:7400`; in deployments it sits behind a TLS-terminating reverse
 proxy). Blobs are content-addressed (SHA-256) and deduplicate by
 construction; record metadata (paths, owners, reference counts, the
 delivery log) lives in the service's own Postgres. Identity and enrollment
 facts stay in the archeion, reached through its `/internal/*` ControlPlane API
-over a shared secret on the private network — never through a public edge.
+over a shared secret on the private network, never through a public edge.
+The service reads its archeion connection from two required variables:
 
-### Auth — archeion-verified principals
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `KALLIP_FILES_ARCHEION_INTERNAL_URL` | yes (service) | _(unset)_ | Archeion internal base URL for `/internal/*` ControlPlane calls. Must NOT be publicly reachable. |
+| `KALLIP_POLIS_INTERNAL_TOKEN_FILE` | yes (service) | _(unset)_ | File holding the platform-internal secret bearer for the archeion `/internal/*` API, provisioned by the archeion (0640 under its state directory) and read at boot by the lesche, files, and instances services. |
+
+## Auth: Archeion-Verified Principals
 
 There is **no files-specific token**. Every content request carries
 `Authorization: Bearer <token>`; the service resolves it through the archeion's
 `/internal/verify-bearer` (shared-secret guarded) and acts as the resolved
 principal:
 
-- `sk-tagma-…` (an enrolled tagma) — the `kallip file` CLI's principal.
-- `sk-admin-…` (operator) — management surface only
+- `sk-tagma-…` (an enrolled tagma): the `kallip file` CLI's principal.
+- `sk-admin-…` (operator): management surface only
   (`GET /v1/files/admin/delivery-events`); the admin principal is refused on
   every content operation.
-- User session tokens verify on the web face, not the bearer path — a User
+- User session tokens verify on the web face, not the bearer path: a User
   bearer resolves nowhere here.
 
 Authorization is the per-path ACL matrix ([`acl.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/platform/kallip-files/src/acl.rs)):
-every path lives inside a user's space — `/users/{user}/shared` (the
+every path lives inside a user's space: `/users/{user}/shared` (the
 space's shared region), `/users/{user}/tagmas/{tagma}` (one tagma's private
 region, `inbox/` inside it), `/users/{user}/inbox` (the user's delivery
 landing directory). A tagma is full owner of its own region, read/write in
@@ -45,7 +49,7 @@ response line.
 
 #### `GET /health`
 
-Returns `ok` (plain text). Unauthenticated on purpose — compose
+Returns `ok` (plain text). Unauthenticated on purpose: compose
 healthcheck, Caddy probe, and acceptance tooling need a liveness answer
 without credentials.
 
@@ -64,7 +68,7 @@ identical bytes deduplicates onto the same blob. `201` returns:
 
 List the caller's records. `space` is `self` (the principal's own region,
 inbox included) or `shared` (the space's shared region); `prefix` narrows
-to paths under a relative prefix (LIKE metacharacters are escaped — the
+to paths under a relative prefix (LIKE metacharacters are escaped; the
 match is literal); `limit` can only lower the server's page cap (500).
 Returns a JSON array of entries:
 
@@ -75,7 +79,7 @@ Returns a JSON array of entries:
 #### `GET /v1/files/{id}`
 
 Download a record's content. Honors a single-range `Range` header (`206`
-with `content-range`; multi-range and unsatisfiable forms answer per RFC —
+with `content-range`; multi-range and unsatisfiable forms answer per RFC:
 `416` carries `content-range: bytes */<size>`). Full responses are `200`
 with `accept-ranges: bytes`. Unknown id: `404`.
 
@@ -91,7 +95,7 @@ grace period. `204` on success.
 
 #### `POST /v1/files/{id}/send`
 
-Deliver a record into another principal's inbox — the server-side copy:
+Deliver a record into another principal's inbox; the server-side copy:
 the recipient gets a new record id pointing at the same blob, landed in
 their space (`inbox/`). Request carries exactly one target (both or
 neither is `400`):
@@ -124,6 +128,6 @@ routes; credentials ride the environment (`KALLIP_POLIS_URL`, whose
 `KALLIP_FILES_TOKEN`), never CLI flags. Server-side callers
 authenticate as themselves: the tagma presents its registered
 enrollment credential for record media fetches. See
-[kallip.md](kallip.md).
+[kallip CLI reference](kallip.md).
 
 Source: [`crates/platform/kallip-files/src/`](https://github.com/ImitationGameLabs/kallipai/tree/main/crates/platform/kallip-files/src/).

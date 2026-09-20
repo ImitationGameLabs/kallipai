@@ -36,4 +36,4 @@ build time and talks to `api.<domain>/v1/*` directly.
 - **NixOS**: the flake's `packages.kallip-web-dist` builds the bundle (two
   derivations: a networked deps build and an offline vite build), and the
   module's `web.distWithRuntimeConfig` option derives the site root that
-  the deployment's own edge serves. See `docs/en/reference/container.md`.
+  the deployment's own edge serves. See `docs/en/deployment/container.md`.
