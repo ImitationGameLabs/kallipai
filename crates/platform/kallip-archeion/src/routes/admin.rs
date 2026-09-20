@@ -19,9 +19,10 @@ use axum::routing::{get, post};
 use base64::Engine as _;
 use kallip_archeion_common::admin::{
     CreateEnrollmentCodeRequest, CreateEnrollmentCodeResponse, Page, PageQuery, PasskeySummary,
-    UpdateUserRequest, UserSummary,
+    RotateAdminTokenResponse, UpdateUserRequest, UserSummary,
 };
 use kallip_archeion_common::ids::UserId;
+use kallip_common::authtoken::{MintedToken, TokenHash};
 use kallip_common::protocol::ApiError;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use std::collections::HashMap;
@@ -29,6 +30,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::auth::{AuthPrincipal, require_admin};
+use crate::boot_secrets;
 use crate::state::SharedState;
 
 pub fn router() -> Router<SharedState> {
@@ -41,6 +43,7 @@ pub fn router() -> Router<SharedState> {
         // The admin nest root. It is also the admin CLI's auth probe, so it MUST
         // be admin-gated: a bare handler here would make `kallip-admin ping`
         // report any token as valid.
+        .route("/token/rotate", post(rotate_admin_token))
         .route("/", get(admin_root))
 }
 
@@ -50,6 +53,37 @@ pub fn router() -> Router<SharedState> {
 async fn admin_root(AuthPrincipal(principal): AuthPrincipal) -> Result<&'static str, ApiError> {
     require_admin(&principal)?;
     Ok("kallip-archeion admin")
+}
+
+/// `POST /admin/token/rotate` rotates the minted admin token: generate a
+/// fresh secret, persist it to the output file, and swap the in-memory
+/// hash; the old token stops authenticating on the next request.
+async fn rotate_admin_token(
+    State(state): State<SharedState>,
+    AuthPrincipal(principal): AuthPrincipal,
+) -> Result<Json<RotateAdminTokenResponse>, ApiError> {
+    require_admin(&principal)?;
+    if state.admin_token_pinned {
+        return Err(ApiError::conflict(
+            "admin token is pinned (--admin-token); rotation applies only to minted tokens",
+        ));
+    }
+    let Some(out_file) = &state.admin_token_out_file else {
+        return Err(ApiError::internal(
+            "rotating the admin token failed: no output file configured",
+        ));
+    };
+    // Endpoint-level mutual exclusion: generate -> file write -> hash swap
+    // is not atomic; concurrent rotations could leave the file and memory
+    // on different generations. The guard spans the whole sequence.
+    let _rotate_guard = state.admin_token_rotate_lock.lock().expect("rotate lock");
+    let minted = MintedToken::generate(crate::token::ADMIN);
+    boot_secrets::write_generated_admin(out_file, minted.secret())
+        .map_err(|e| ApiError::internal(format!("rotating the admin token failed: {e}")))?;
+    *state.admin_token_hash.write().expect("admin token lock") = TokenHash::of(minted.secret());
+    Ok(Json(RotateAdminTokenResponse {
+        token: minted.secret().to_owned(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -327,19 +361,85 @@ mod tests {
 
     use super::{
         admin_root, create_enrollment_code, list_user_passkeys, list_users, revoke_passkey,
-        update_user,
+        rotate_admin_token, update_user,
     };
     use crate::auth::{AuthPrincipal, Principal};
     use crate::db::entity::passkeys;
     use crate::state::SharedState;
-    use crate::test_helpers::{make_state, seed_user};
+    use crate::test_helpers::{make_state, make_state_with_admin, seed_user};
     use kallip_archeion_common::admin::{
         CreateEnrollmentCodeRequest, PageQuery, UpdateUserRequest,
     };
+    use kallip_common::authtoken::TokenHash;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set};
     use time::OffsetDateTime;
     use uuid::Uuid;
 
+    #[tokio::test]
+    async fn rotate_swaps_hash_and_rewrites_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("admin-token.env");
+        let state = make_state_with_admin(Some(out.clone()), false).await;
+        let admin = AuthPrincipal(Principal::Admin);
+        let resp = rotate_admin_token(State(state.clone()), admin)
+            .await
+            .expect("rotate")
+            .0;
+        assert!(resp.token.starts_with("sk-admin-"));
+        // The file carries the new secret as a KEY=value line.
+        let file = std::fs::read_to_string(&out).expect("read token file");
+        assert_eq!(
+            file.lines().next(),
+            Some(format!("KALLIP_ARCHEION_ADMIN_TOKEN={}", resp.token)).as_deref()
+        );
+        // The in-memory hash now matches the new secret, not the seed.
+        assert_eq!(
+            *state.admin_token_hash.read().expect("admin token lock"),
+            TokenHash::of(&resp.token)
+        );
+        assert_ne!(
+            *state.admin_token_hash.read().expect("admin token lock"),
+            TokenHash::of("test-admin")
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_requires_admin() {
+        let state = make_state().await;
+        let user_id = seed_user(&state, "u").await;
+        let err = rotate_admin_token(State(state), AuthPrincipal(Principal::User(user_id)))
+            .await
+            .expect_err("non-admin must be rejected");
+        assert_eq!(err.status, 403);
+    }
+
+    #[tokio::test]
+    async fn rotate_rejects_pinned_token() {
+        let state = make_state_with_admin(None, true).await;
+        let err = rotate_admin_token(State(state), AuthPrincipal(Principal::Admin))
+            .await
+            .expect_err("pinned token must be rejected");
+        assert_eq!(err.status, 409);
+    }
+
+    #[tokio::test]
+    async fn rotate_write_failure_keeps_old_hash() {
+        let out = std::path::PathBuf::from("/nonexistent-kallipai-rotate-test/token.env");
+        let state = make_state_with_admin(Some(out), false).await;
+        let old = state
+            .admin_token_hash
+            .read()
+            .expect("admin token lock")
+            .clone();
+        let err = rotate_admin_token(State(state.clone()), AuthPrincipal(Principal::Admin))
+            .await
+            .expect_err("unwritable output must fail");
+        assert_eq!(err.status, 500);
+        assert_eq!(
+            *state.admin_token_hash.read().expect("admin token lock"),
+            old
+        );
+    }
     #[tokio::test]
     async fn admin_root_requires_admin() {
         let state = make_state().await;

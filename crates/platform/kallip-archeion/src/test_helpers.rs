@@ -214,6 +214,8 @@ pub async fn make_state_with(
         auth_rate_refill_per_sec,
         Default::default(),
         true,
+        None,
+        false,
     )
     .await
 }
@@ -230,6 +232,8 @@ pub async fn make_state_with_oauth(
         100,
         crate::oauth::ProviderRegistry::new(providers),
         true,
+        None,
+        false,
     )
     .await
 }
@@ -244,6 +248,25 @@ pub async fn make_state_with_oauth_signup_disabled(
         100,
         crate::oauth::ProviderRegistry::new(providers),
         false,
+        None,
+        false,
+    )
+    .await
+}
+
+/// Like [`make_state`] but with the admin-token lifecycle fields set (the
+/// rotation endpoint's output file and pinned flag), for rotate tests.
+pub async fn make_state_with_admin(
+    admin_out_file: Option<std::path::PathBuf>,
+    admin_pinned: bool,
+) -> SharedState {
+    build_state(
+        100,
+        100,
+        Default::default(),
+        true,
+        admin_out_file,
+        admin_pinned,
     )
     .await
 }
@@ -253,6 +276,8 @@ async fn build_state(
     auth_rate_refill_per_sec: u32,
     oauth_providers: crate::oauth::ProviderRegistry,
     signup_enabled: bool,
+    admin_out_file: Option<std::path::PathBuf>,
+    admin_pinned: bool,
 ) -> SharedState {
     let db = setup_test_db().await;
     let admin_hash = TokenHash::of("test-admin");
@@ -278,6 +303,8 @@ async fn build_state(
         .expect("build test reqwest client");
     std::sync::Arc::new(AppState::new(
         admin_hash,
+        admin_pinned,
+        admin_out_file,
         limits,
         db,
         webauthn,

@@ -56,7 +56,16 @@ const NOT_FOUND: HandlerError = (StatusCode::NOT_FOUND, String::new());
 
 /// Build a per-request `DbControlPlane` (a cloned `Db` handle + the admin hash).
 fn control(state: &SharedState) -> DbControlPlane {
-    DbControlPlane::new(state.db.clone(), state.admin_token_hash.clone())
+    // Snapshot under the read lock: a token rotation swaps the hash behind
+    // this lock, and the next request picks up the new value.
+    DbControlPlane::new(
+        state.db.clone(),
+        state
+            .admin_token_hash
+            .read()
+            .expect("admin token lock")
+            .clone(),
+    )
 }
 
 async fn verify_session(

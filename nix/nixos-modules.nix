@@ -225,12 +225,12 @@ in
           only when its id option and secret are both set).
           This is the pin form: a stable credential the operator owns, so
           it lives under /etc like other admin assets. Default null means
-          the archeion mints the token itself into its runtime directory
-          (/run/kallipai/archeion/admin-token.env, 0600) on every start --
-          a short-lived bootstrap credential, rewritten on each restart
-          and valid until the next one, never written to the
-          journal. Pin the file to keep a stable token; leave it unset to
-          accept a short-lived one.
+          the archeion mints the token itself into its state directory
+          (/var/lib/kallipai/archeion/admin-token.env, 0600) on first
+          boot and reads it (never rewrites) after; rotate with
+          kallip-admin admin-token reset (authenticates with the current
+          token). The plaintext never reaches the journal. Pin the file
+          to keep a stable token; leave it unset to mint one.
         '';
       };
       notifyTokenFile = lib.mkOption {
@@ -806,8 +806,10 @@ in
             # The internal token is state the archeion owns: generated into
             # its state dir on first boot, read (never rewritten) after.
             KALLIP_ARCHEION_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/archeion/internal-token";
-            # Runtime state: the admin bootstrap token, rewritten every start.
-            KALLIP_ARCHEION_ADMIN_TOKEN_OUT_FILE = "/run/kallipai/archeion/admin-token.env";
+            # The minted admin token: generated into the state dir on first
+            # boot, read (never rewritten) after; rotate via kallip-admin
+            # admin-token reset.
+            KALLIP_ARCHEION_ADMIN_TOKEN_OUT_FILE = "/var/lib/kallipai/archeion/admin-token.env";
           }
           // envOpt "KALLIP_ARCHEION_WEBAUTHN_RP_ID" polisCfg.archeion.webauthnRpId
           // envOpt "KALLIP_ARCHEION_WEBAUTHN_RP_ORIGIN" polisCfg.archeion.webauthnRpOrigin
@@ -837,14 +839,10 @@ in
             # token is born gate-owned and consumers traverse/read it.
             Group = cfg.group;
             StateDirectory = "kallipai/archeion";
-            # Runtime sibling: the admin bootstrap token lives here --
-            # rewritten on every start, gone when the unit stops.
-            RuntimeDirectory = "kallipai/archeion";
             LogsDirectory = "kallipai/archeion";
             # 0750 (not 0700): gate-group consumers traverse this directory
             # to read the provisioned internal token.
             StateDirectoryMode = "0750";
-            RuntimeDirectoryMode = "0700";
             LogsDirectoryMode = "0750";
             Restart = "on-failure";
             # A crash-looping archeion must not slam the unit start-rate

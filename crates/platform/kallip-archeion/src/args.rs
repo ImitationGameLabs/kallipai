@@ -120,13 +120,13 @@ pub struct Args {
     )]
     pub trusted_proxies: String,
     /// Admin token (provisioning authority). Unset = generate a fresh
-    /// `sk-admin-...` into the runtime file named by
+    /// `sk-admin-...` into the state file named by
     /// KALLIP_ARCHEION_ADMIN_TOKEN_OUT_FILE. The value is never logged.
     #[arg(long, env = "KALLIP_ARCHEION_ADMIN_TOKEN")]
     pub admin_token: Option<String>,
     /// Where a generated admin token is written (0600, KEY=value),
-    /// required when --admin-token is unset. Runtime state: rewritten on
-    /// every start and valid until the next restart, never logged.
+    /// required when --admin-token is unset. Generated on first boot,
+    /// then only read (never rewritten); never logged.
     #[arg(long, env = "KALLIP_ARCHEION_ADMIN_TOKEN_OUT_FILE")]
     pub admin_token_out_file: Option<PathBuf>,
     /// Max HTTP request body size in kilobytes. 0 = axum default (2 MB).

@@ -64,8 +64,22 @@ pub fn build_webauthn_pair(
 pub struct AppState {
     pub shutdown: CancellationToken,
     pub limits: Limits,
-    /// SHA-256 of the admin token; the single provisioning authority.
-    pub admin_token_hash: TokenHash,
+    /// SHA-256 of the admin token; the single provisioning authority. Behind a
+    /// lock so `POST /admin/token/rotate` can swap it while the server keeps
+    /// serving: readers snapshot per request, so rotation takes effect on the
+    /// next request without a restart.
+    pub admin_token_hash: Arc<std::sync::RwLock<TokenHash>>,
+    /// Whether the active admin token came from the operator (env or
+    /// --admin-token). A pinned token has no minted file to rewrite, so the
+    /// rotate endpoint refuses with 409 instead of half-rotating.
+    pub admin_token_pinned: bool,
+    /// Where a minted admin token lives. `None` when pinned; the rotate
+    /// endpoint writes the fresh secret here.
+    pub admin_token_out_file: Option<std::path::PathBuf>,
+    /// Serializes `POST /admin/token/rotate`: the file write and the
+    /// in-memory hash swap are two steps, so concurrent rotations could
+    /// otherwise leave the file and memory on different generations.
+    pub admin_token_rotate_lock: Arc<std::sync::Mutex<()>>,
     /// Durable store handle (sea-orm `DatabaseConnection`, cheap to clone).
     pub db: Db,
     /// Configured WebAuthn relying party (register/login ceremonies, incl.
@@ -114,6 +128,8 @@ impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         admin_token_hash: TokenHash,
+        admin_token_pinned: bool,
+        admin_token_out_file: Option<std::path::PathBuf>,
         limits: Limits,
         db: Db,
         webauthn: Arc<Webauthn>,
@@ -129,7 +145,10 @@ impl AppState {
         Self {
             shutdown: CancellationToken::new(),
             limits,
-            admin_token_hash,
+            admin_token_hash: Arc::new(std::sync::RwLock::new(admin_token_hash)),
+            admin_token_pinned,
+            admin_token_out_file,
+            admin_token_rotate_lock: Arc::new(std::sync::Mutex::new(())),
             db,
             webauthn,
             webauthn_core,

@@ -245,16 +245,11 @@ service's environment (a local-platform login is enabled there, and that
 route refuses to boot with an operator-set token shorter than 32 chars),
 so `kallip-admin` authenticates with it -- no log scraping.
 
-If the archeion is **already running** without this pinned (e.g. an older stack
-booted before you set it), its token was generated randomly at startup and
-cannot be changed short of recreating the container. Either `arion up -d` to
-recreate it with the pinned value, or fall back to grepping the current token
-out of **archeion's** logs (not tagma's):
-
-```sh
-TOK=$(arion logs archeion 2>&1 | grep -oP 'sk-admin-[A-Za-z0-9_-]+' | tail -1)
-KALLIP_ARCHEION_ADMIN_TOKEN="$TOK" cargo run -q -p kallip-admin -- --archeion-url http://localhost:7100 ...
-```
+The dev compose pins the fixture itself (the `environment` block in
+`polis.nix` overrides any legacy `.env` value), so a stack booted from
+the current files already authenticates with it. A stack booted from
+older files, where the archeion generated a random token at startup,
+must be recreated (`arion up -d`) to pick up the pinned fixture.
 
 The fixture is dev-only; prod must set a strong secret.
 

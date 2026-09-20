@@ -350,7 +350,14 @@ mod tests {
     use time::{Duration, OffsetDateTime};
 
     fn cp(state: &crate::state::SharedState) -> DbControlPlane {
-        DbControlPlane::new(state.db.clone(), state.admin_token_hash.clone())
+        DbControlPlane::new(
+            state.db.clone(),
+            state
+                .admin_token_hash
+                .read()
+                .expect("admin token lock")
+                .clone(),
+        )
     }
 
     /// A disabled user's already-issued session is rejected on the very next

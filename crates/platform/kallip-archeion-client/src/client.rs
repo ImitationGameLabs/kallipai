@@ -17,7 +17,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use kallip_archeion_common::admin::{
     CreateEnrollmentCodeRequest, CreateEnrollmentCodeResponse, Page, PageQuery, PasskeySummary,
-    UpdateUserRequest, UserSummary,
+    RotateAdminTokenResponse, UpdateUserRequest, UserSummary,
 };
 use kallip_archeion_common::bytes::{Ed25519PublicKey, Ed25519Signature};
 use kallip_archeion_common::control::{EnrollRequest, EnrollResponse};
@@ -269,6 +269,20 @@ impl ArcheionClient {
             .send()
             .await
             .context("revoke passkey failed")?,
+        )
+        .await
+    }
+
+    /// Rotate the minted admin token: `POST /admin/token/rotate`. Returns the
+    /// fresh `sk-admin-...` plaintext (once); the old token is invalid after.
+    pub async fn admin_rotate_token(&self) -> Result<RotateAdminTokenResponse> {
+        self.require_admin_token()?;
+        self.handle_response(
+            self.with_admin_auth(self.inner.http.post(self.url("/admin/token/rotate")))
+                .send()
+                .await
+                .context("admin token rotation failed")?,
+            "decode admin token rotation response",
         )
         .await
     }

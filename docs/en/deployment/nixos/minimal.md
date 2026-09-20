@@ -127,11 +127,26 @@ loads, you can sign up and sign in, and you can create a first agent.
 
 ## Admin Token
 
-With `adminTokenFile` unset, the archeion places a generated admin
-token in its runtime directory
-(`/run/kallipai/archeion/admin-token.env`, mode 0600).
-Read it as follows:
+With `adminTokenFile` unset, the archeion mints an admin token into its
+state directory (`/var/lib/kallipai/archeion/admin-token.env`, mode 0600)
+on first boot and reads it, never rewriting it, after that. Read it with
+the CLI (a local file read, no server round-trip):
 
 ```sh
-sudo cat /run/kallipai/archeion/admin-token.env
+sudo kallip-admin admin-token show
 ```
+
+Rotate the minted token when needed (authenticated with the current
+one; the old token stops working immediately):
+
+```sh
+export KALLIP_ARCHEION_ADMIN_TOKEN=$(sudo kallip-admin admin-token reset)
+```
+
+With `adminTokenFile` set, the operator-pinned token is used as-is and
+rotation is refused.
+
+Switching from minted to pinned: set `adminTokenFile` and redeploy.
+The archeion then uses the pinned value; the state file stays on disk
+but is dead: `show` still prints its stale value, so delete the file
+to avoid reading the wrong token.

@@ -95,3 +95,12 @@ pub struct PasskeySummary {
     /// flow -- gates the "passwordless sign-in" UI affordance.
     pub discoverable: bool,
 }
+
+/// Response for `POST /admin/token/rotate`: the freshly minted admin token in
+/// plaintext, returned exactly once. The previous token is dead by the time
+/// the client sees this body (the in-memory hash is swapped before the
+/// response is written).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotateAdminTokenResponse {
+    pub token: String,
+}

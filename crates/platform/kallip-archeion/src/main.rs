@@ -55,11 +55,13 @@ async fn main() -> Result<()> {
     kallip_common::logging::init_service_logging(&filter, "archeion", log_dir.as_deref());
 
     // Admin token lifecycle: an operator-provided token is a pinned asset and
-    // stays where the operator put it; a generated one is a short-lived
-    // bootstrap credential, so it is rewritten on every start into runtime
-    // state, valid until the next restart. Either way the plaintext
-    // never reaches the journal — the banner names the source, not the value,
-    // and only the hash is retained beyond this boot.
+    // stays where the operator put it; a generated one is provisioned into
+    // persistent state on first boot and then only read -- it outlives
+    // restarts, and rotation is a deliberate act (`kallip-admin admin-token`
+    // reset`). Either way the plaintext never reaches the journal -- the
+    // banner names the source, not the value, and only the hash is retained
+    // beyond this boot.
+    let admin_pinned = args.admin_token.is_some();
     let (admin, admin_source) = match args.admin_token.clone() {
         Some(s) => (
             MintedToken::from_secret(s),
@@ -70,18 +72,18 @@ async fn main() -> Result<()> {
                 "no admin token configured: pin one via --admin-token ",
                 "(or KALLIP_ARCHEION_ADMIN_TOKEN), or name an output file ",
                 "via --admin-token-out-file (or ",
-                "KALLIP_ARCHEION_ADMIN_TOKEN_OUT_FILE) to have one generated per ",
-                "start; the NixOS module configures the output file automatically",
+                "KALLIP_ARCHEION_ADMIN_TOKEN_OUT_FILE) to have one generated on ",
+                "first boot; the NixOS module configures the output file automatically",
             ))?;
-            let generated = MintedToken::generate(token::ADMIN);
-            boot_secrets::write_generated_admin(out, generated.secret())?;
+            let secret = boot_secrets::provision_admin_token(out)?;
+            let generated = MintedToken::from_secret(secret);
             info!(
-                "generated admin token written to {} (0600); it is rewritten on every start",
+                "admin token file at {} (0600); generated on first boot, read as-is after -- rotate via kallip-admin admin-token reset",
                 out.display()
             );
             (
                 generated,
-                format!("generated at {} (rewritten on every start)", out.display()),
+                format!("minted at {} (stable across restarts)", out.display()),
             )
         }
     };
@@ -180,6 +182,8 @@ async fn main() -> Result<()> {
 
     let state: Arc<AppState> = Arc::new(AppState::new(
         admin.hash().clone(),
+        admin_pinned,
+        args.admin_token_out_file.clone(),
         limits,
         db,
         webauthn,

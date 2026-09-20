@@ -119,8 +119,18 @@ systemctl status kallip-daemon kallip-archeion kallip-lesche \
 
 ## 管理令牌
 
-`adminTokenFile` 未设置时，archeion 每次启动都重置管理令牌（`/run/kallipai/archeion/admin-token.env`，权限 0600），通过下列方式读取：
+`adminTokenFile` 未设置时，archeion 首次启动在状态目录铸造管理令牌（`/var/lib/kallipai/archeion/admin-token.env`，权限 0600），此后只读取、不再改写。用 CLI 读取（本地读文件，不经过服务端）：
 
 ```sh
-sudo cat /run/kallipai/archeion/admin-token.env
+sudo kallip-admin admin-token show
 ```
+
+需要时轮换铸造令牌（用当前令牌认证，旧令牌随即失效）：
+
+```sh
+export KALLIP_ARCHEION_ADMIN_TOKEN=$(sudo kallip-admin admin-token reset)
+```
+
+设置 `adminTokenFile` 时使用操作者钉住的令牌，轮换会被拒绝。
+
+从铸造切换到钉住：设置 `adminTokenFile` 并重新部署后，archeion 改用钉住的值；状态文件仍留在盘上但已失效，`show` 打印的是旧值，建议删除该文件以免误读。

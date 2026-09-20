@@ -57,7 +57,16 @@ impl FromRequestParts<SharedState> for AuthPrincipal {
         // Credential verification is delegated to the shared DB-backed
         // `ControlPlane` impl (the same one the data-plane relay consumes), so
         // the registry and the relay enforce identical auth semantics.
-        let control = DbControlPlane::new(state.db.clone(), state.admin_token_hash.clone());
+        let control = DbControlPlane::new(
+            state.db.clone(),
+            // Snapshot under the read lock: a token rotation swaps the value
+            // behind this lock, and the next request picks up the new hash.
+            state
+                .admin_token_hash
+                .read()
+                .expect("admin token lock")
+                .clone(),
+        );
         // Prefer an explicit bearer credential when present.
         if let Ok(bearer) = extract_bearer_token(&parts.headers) {
             let principal = control
