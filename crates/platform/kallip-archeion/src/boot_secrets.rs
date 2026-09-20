@@ -114,6 +114,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("internal-token");
         fs::write(&path, "pre-existing-dev-secret\n").expect("write");
+        // Explicit mode: the fixture must not depend on the process umask.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
         let got = provision_internal_token(&path).expect("read");
         assert_eq!(got, "pre-existing-dev-secret");
         assert_eq!(
