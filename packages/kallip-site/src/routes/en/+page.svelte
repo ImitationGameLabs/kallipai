@@ -3,19 +3,19 @@
 
   // The primary CTA stays in this page's locale tree; the GitHub button
   // is external and stays locale-independent.
-  const docsHref = "/en/docs/";
+  const docsHref = "/en/docs/introduction/";
 </script>
 
 <svelte:head>
   <title>KallipAI</title>
   <meta
     name="description"
-    content="KallipAI is the open framework for building and running AI agents: large-scale multi-agent collaboration that is orderly, reliable, and trustworthy."
+    content="KallipAI is an agent harness designed for multi-agent collaboration, long-running tasks, and scale. Large-scale multi-agent collaboration that is orderly, reliable, and trustworthy."
   />
   <meta property="og:title" content="KallipAI" />
   <meta
     property="og:description"
-    content="KallipAI is the open framework for building and running AI agents: large-scale multi-agent collaboration that is orderly, reliable, and trustworthy."
+    content="KallipAI is an agent harness designed for multi-agent collaboration, long-running tasks, and scale. Large-scale multi-agent collaboration that is orderly, reliable, and trustworthy."
   />
 </svelte:head>
 
@@ -27,7 +27,8 @@
     class="mx-auto flex min-h-[32rem] max-w-6xl flex-col items-center justify-center gap-6 px-4 py-24 text-center"
   >
     <h1 class="h1 max-w-2xl text-surface-50">
-      The open framework for building and running AI agents
+      KallipAI is an agent harness designed for multi-agent collaboration,
+      long-running tasks, and scale.
     </h1>
     <p class="max-w-xl text-lg text-surface-50">
       Large-scale multi-agent collaboration that is orderly, reliable, and

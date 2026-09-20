@@ -2255,6 +2255,7 @@
           "dependencies": [
             "npm:@comark/svelte@0.7",
             "npm:@lucide/svelte@^1.24.0",
+            "npm:@skeletonlabs/skeleton-svelte@5",
             "npm:@skeletonlabs/skeleton@5",
             "npm:@sveltejs/adapter-static@^3.0.10",
             "npm:@sveltejs/kit@^2.63.0",

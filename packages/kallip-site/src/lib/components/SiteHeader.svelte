@@ -1,12 +1,26 @@
 <script lang="ts">
   import { page } from "$app/state";
-  import { ChevronDown, Globe } from "@lucide/svelte";
+  import { Check, ChevronDown, Languages } from "@lucide/svelte";
+  import { Menu } from "@skeletonlabs/skeleton-svelte";
   import { enHref, isLocaleZh, mirrorHref, zhHref } from "$lib/lang";
   import { headerMenus } from "$lib/header-menus";
+  import { zhDocs } from "$lib/docs";
 
   // Single locale read drives both copy and internal link targets, so the
   // header renders correctly on every page of either segment.
   const isZh = $derived(isLocaleZh(page.url.pathname));
+
+  // The zh mirror of a docs page exists only when the zh tree carries
+  // the slug; untranslated pages keep the switch on the "#" placeholder
+  // below, so prerender never crawls a dead internal path. The en tree
+  // is complete, and the static pages exist under both locales.
+  const mirrorExists = $derived.by(() => {
+    const path = page.url.pathname;
+    if (isLocaleZh(path) || !path.startsWith("/en/docs/")) return true;
+    let slug = path.slice("/en/docs/".length);
+    if (slug.endsWith("/")) slug = slug.slice(0, -1);
+    return zhDocs.some((doc) => doc.slug === slug);
+  });
 
   // Placeholder entries point at "#" until their sections land, so
   // prerender never crawls a dead internal path.
@@ -24,8 +38,8 @@
           news: "博客",
           about: "关于",
           nav: "主导航",
-          switch: "EN",
-          switchLabel: "Switch to English",
+          switch: "中文",
+          switchLabel: "Switch language",
         }
       : {
           home: "Home",
@@ -33,11 +47,26 @@
           news: "News",
           about: "About",
           nav: "Main navigation",
-          switch: "中文",
-          switchLabel: "切换到中文",
+          switch: "English",
+          switchLabel: "切换语言",
         },
   );
   const menus = $derived(headerMenus(isZh));
+  const langs = [
+    { value: "en", label: "English" },
+    { value: "zh", label: "中文" },
+  ] as const;
+  // Locale trees are prerendered per locale, so a switch is a native
+  // browser navigation: the target page ships its own static HTML.
+  function switchTo(value: (typeof langs)[number]["value"]) {
+    const current = isZh ? "zh" : "en";
+    if (value === current) return;
+    if (!mirrorExists) {
+      window.location.assign(value === "zh" ? zhHref("/") : enHref("/"));
+      return;
+    }
+    window.location.assign(mirrorHref(page.url.pathname));
+  }
 </script>
 
 <svelte:window
@@ -66,7 +95,7 @@
         class="flex-1 text-center hover:text-primary-500">{copy.home}</a
       >
       <a
-        href={localeHref("/docs/")}
+        href={localeHref("/docs/introduction/")}
         class="flex-1 text-center hover:text-primary-500">{copy.docs}</a
       >
       {#each menus as menu (menu.id)}
@@ -114,14 +143,41 @@
         class="flex-1 text-center hover:text-primary-500">{copy.about}</a
       >
     </nav>
-    <a
-      href={mirrorHref(page.url.pathname)}
-      data-sveltekit-reload
-      class="inline-flex items-center gap-1.5 text-sm hover:text-primary-500"
+    <Menu
+      positioning={{ placement: "bottom-end" }}
       aria-label={copy.switchLabel}
     >
-      <Globe size={16} />
-      {copy.switch}
-    </a>
+      <Menu.Trigger
+        class="preset-outlined-surface-500 hover:preset-filled-surface-500 inline-flex items-center gap-1.5 rounded px-2 py-1 text-sm"
+        aria-label={copy.switchLabel}
+      >
+        <Languages size={16} />
+        {copy.switch}
+        <ChevronDown size={14} />
+      </Menu.Trigger>
+      <Menu.Positioner>
+        <Menu.Content
+          class="w-36 rounded-container border border-surface-200-800 bg-surface-100-900 p-1 text-sm shadow-lg"
+        >
+          {#each langs as lang (lang.value)}
+            <Menu.OptionItem
+              type="radio"
+              value={lang.value}
+              checked={lang.value === (isZh ? "zh" : "en")}
+              onCheckedChange={(checked) => checked && switchTo(lang.value)}
+            >
+              <span
+                class="flex items-center justify-between gap-2 rounded px-2 py-1.5 data-highlighted:bg-surface-200-800"
+              >
+                {lang.label}
+                <Menu.ItemIndicator>
+                  <Check size={14} />
+                </Menu.ItemIndicator>
+              </span>
+            </Menu.OptionItem>
+          {/each}
+        </Menu.Content>
+      </Menu.Positioner>
+    </Menu>
   </div>
 </header>

@@ -27,5 +27,8 @@
     onThisPage: "On this page",
     previous: "Previous",
     next: "Next",
+    copyCode: "Copy",
+    copied: "Copied",
+    failed: "Copy failed",
   }}
 />

@@ -1,11 +1,13 @@
 // Coverage rules for the sitemap builder: every human-facing page appears
-// in both locales with hreflang alternates, and transport formats stay out.
+// in the sitemap; docs pages pair with a zh mirror only when translated.
 import assert from "node:assert/strict";
 
 import { sitemapXml } from "./sitemap.ts";
 
 const slugs = ["architecture", "reference/auth"];
-const xml = sitemapXml("https://example.test", slugs);
+// architecture stays untranslated here: the zh set carries one docs slug.
+const zhSlugs = ["reference/auth"];
+const xml = sitemapXml("https://example.test", slugs, zhSlugs);
 
 Deno.test("sitemap covers the full expected page set", () => {
   // Explicit expectation list, not a count derived from the function:
@@ -15,15 +17,12 @@ Deno.test("sitemap covers the full expected page set", () => {
     "https://example.test/en/about/",
     "https://example.test/en/terms/",
     "https://example.test/en/privacy/",
-    "https://example.test/en/docs/",
     "https://example.test/en/docs/architecture/",
     "https://example.test/en/docs/reference/auth/",
     "https://example.test/zh-cn/",
     "https://example.test/zh-cn/about/",
     "https://example.test/zh-cn/terms/",
     "https://example.test/zh-cn/privacy/",
-    "https://example.test/zh-cn/docs/",
-    "https://example.test/zh-cn/docs/architecture/",
     "https://example.test/zh-cn/docs/reference/auth/",
   ];
   for (const url of expected) {
@@ -32,7 +31,7 @@ Deno.test("sitemap covers the full expected page set", () => {
   assert.equal(xml.split("<url>").length - 1, expected.length);
 });
 
-Deno.test("en pages pair with their zh-cn mirror and en x-default", () => {
+Deno.test("static pages pair with their zh-cn mirror and en x-default", () => {
   assert.ok(xml.includes("<loc>https://example.test/en/about/</loc>"));
   assert.ok(
     xml.includes('hreflang="zh-cn" href="https://example.test/zh-cn/about/"'),
@@ -43,7 +42,7 @@ Deno.test("en pages pair with their zh-cn mirror and en x-default", () => {
   assert.ok(xml.includes("<loc>https://example.test/zh-cn/about/</loc>"));
 });
 
-Deno.test("docs pages appear under /en/docs/<slug>/", () => {
+Deno.test("docs pages pair only when the zh tree carries them", () => {
   assert.ok(
     xml.includes("<loc>https://example.test/en/docs/architecture/</loc>"),
   );
@@ -52,9 +51,11 @@ Deno.test("docs pages appear under /en/docs/<slug>/", () => {
       'hreflang="zh-cn" href="https://example.test/zh-cn/docs/reference/auth/"',
     ),
   );
+  // Untranslated: no zh loc and no zh-cn alternate, anywhere.
+  assert.ok(!xml.includes("zh-cn/docs/architecture"));
 });
 Deno.test("hostile slug characters are XML-escaped", () => {
-  const hostile = sitemapXml("https://example.test", ["a&b<c>"]);
+  const hostile = sitemapXml("https://example.test", ["a&b<c>"], []);
   assert.ok(
     hostile.includes(
       "<loc>https://example.test/en/docs/a&amp;b&lt;c&gt;/</loc>",

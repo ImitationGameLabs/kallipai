@@ -3,19 +3,19 @@
 
   // The primary CTA stays in this page's locale tree; the GitHub button
   // is external and stays locale-independent.
-  const docsHref = "/zh-cn/docs/";
+  const docsHref = "/zh-cn/docs/introduction/";
 </script>
 
 <svelte:head>
   <title>KallipAI</title>
   <meta
     name="description"
-    content="KallipAI 是构建与运行 AI 智能体的开放框架：让大规模多智能体协作有序、可靠、可托付。"
+    content="KallipAI 是面向多智能体协作、长程任务和规模化设计的智能体运行框架（Agent Harness）。让大规模多智能体协作有序、可靠、可托付。"
   />
   <meta property="og:title" content="KallipAI" />
   <meta
     property="og:description"
-    content="KallipAI 是构建与运行 AI 智能体的开放框架：让大规模多智能体协作有序、可靠、可托付。"
+    content="KallipAI 是面向多智能体协作、长程任务和规模化设计的智能体运行框架（Agent Harness）。让大规模多智能体协作有序、可靠、可托付。"
   />
 </svelte:head>
 
@@ -26,7 +26,9 @@
   <div
     class="mx-auto flex min-h-[32rem] max-w-6xl flex-col items-center justify-center gap-6 px-4 py-24 text-center"
   >
-    <h1 class="h1 max-w-2xl text-surface-50">构建与运行 AI 智能体的开放框架</h1>
+    <h1 class="h1 max-w-2xl text-surface-50">
+      KallipAI 是面向多智能体协作、长程任务和规模化设计的智能体运行框架。
+    </h1>
     <p class="max-w-xl text-lg text-surface-50">
       让大规模多智能体协作有序、可靠、可托付。
     </p>

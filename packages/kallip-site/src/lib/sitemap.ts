@@ -8,22 +8,19 @@ import { enHref, zhHref } from "./lang.ts";
 // plus one entry per docs page. zh-cn entries are derived, never hand-listed.
 // Raw-markdown mirrors and the llms.txt endpoints are deliberately absent:
 // a sitemap indexes crawlable HTML pages, not their transport formats.
+// Static pages live under both locale trees; docs pages pair with a
+// zh mirror only when the zh tree carries the translation.
+const STATIC_PATHS = ["/", "/about/", "/terms/", "/privacy/"];
+
 export function enPagePaths(docSlugs: string[]): string[] {
-  return [
-    "/",
-    "/about/",
-    "/terms/",
-    "/privacy/",
-    "/docs/",
-    ...docSlugs.map((slug) => `/docs/${slug}/`),
-  ];
+  return [...STATIC_PATHS, ...docSlugs.map((slug) => `/docs/${slug}/`)];
 }
 
-// Both locale blocks of one path (en loc + zh loc) come from here - the
-// en/zh URLs derive inside, so the caller cannot pass a mismatched pair.
-// Each block carries the full alternate set (en, zh-cn, x-default) as the
-// sitemap protocol documents for language variants; x-default points at
-// the default-language (en) version, the common convention. loc and href
+// One path's url face: the en block always; the zh block and its
+// zh-cn alternate only when the zh tree carries the path (hasZh).
+// URLs derive inside, so the caller cannot pass a mismatched pair.
+// Each block carries the sitemap-protocol alternate set (en, zh-cn,
+// x-default); x-default points at the default-language (en) version.
 // values are XML-escaped: slugs come from the docs tree, and a future
 // slug carrying & or < must not break the document.
 function escapeXml(value: string): string {
@@ -33,7 +30,7 @@ function escapeXml(value: string): string {
     .replaceAll(">", "&gt;");
 }
 
-function urlBlock(siteUrl: string, path: string): string {
+function urlBlock(siteUrl: string, path: string, hasZh: boolean): string {
   const en = escapeXml(siteUrl + enHref(path));
   const zh = escapeXml(siteUrl + zhHref(path));
   const link = (hreflang: string, href: string) =>
@@ -43,15 +40,27 @@ function urlBlock(siteUrl: string, path: string): string {
       "  <url>",
       `    <loc>${loc}</loc>`,
       link("en", en),
-      link("zh-cn", zh),
+      ...(hasZh ? [link("zh-cn", zh)] : []),
       link("x-default", en),
       "  </url>",
     ].join("\n");
-  return [block(en), block(zh)].join("\n");
+  return (hasZh ? [block(en), block(zh)] : [block(en)]).join("\n");
 }
 
-export function sitemapXml(siteUrl: string, docSlugs: string[]): string {
-  const blocks = enPagePaths(docSlugs).map((path) => urlBlock(siteUrl, path));
+export function sitemapXml(
+  siteUrl: string,
+  docSlugs: string[],
+  zhDocSlugs: string[],
+): string {
+  // Docs slugs pair with their zh mirror only when translated; the
+  // static pages exist under both locale trees unconditionally.
+  const zhPaths = new Set([
+    ...STATIC_PATHS,
+    ...zhDocSlugs.map((slug) => `/docs/${slug}/`),
+  ]);
+  const blocks = enPagePaths(docSlugs).map((path) =>
+    urlBlock(siteUrl, path, zhPaths.has(path)),
+  );
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n` +

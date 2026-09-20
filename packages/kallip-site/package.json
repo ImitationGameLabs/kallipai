@@ -16,7 +16,8 @@
     "@comark/svelte": "^0.7.0",
     "@lucide/svelte": "^1.24.0",
     "comark": "^0.7.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "@skeletonlabs/skeleton-svelte": "^5.0.0"
   },
   "devDependencies": {
     "@skeletonlabs/skeleton": "^5.0.0",

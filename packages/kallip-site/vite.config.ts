@@ -16,6 +16,12 @@ export default defineConfig({
           filename.split(/[/\\]/).includes("node_modules") ? undefined : true,
       },
       adapter: adapter(),
+      prerender: {
+        // The zh-cn docs detail route renders zero pages until the
+        // translations land; an empty prerenderable route is a state,
+        // not an error. warn keeps future misses visible in the log.
+        handleUnseenRoutes: "warn",
+      },
     }),
   ],
 });

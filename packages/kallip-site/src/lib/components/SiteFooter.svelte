@@ -43,7 +43,7 @@
       aria-label={copy.nav}
       class="mt-8 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm"
     >
-      <a href={localeHref("/docs/")} class="hover:text-primary-500"
+      <a href={localeHref("/docs/introduction/")} class="hover:text-primary-500"
         >{copy.docs}</a
       >
       <a

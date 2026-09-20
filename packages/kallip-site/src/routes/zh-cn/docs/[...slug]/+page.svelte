@@ -27,5 +27,8 @@
     onThisPage: "本页目录",
     previous: "上一篇",
     next: "下一篇",
+    copyCode: "复制",
+    copied: "已复制",
+    failed: "复制失败",
   }}
 />

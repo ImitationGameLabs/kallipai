@@ -1,47 +1,24 @@
 // Docs content pipeline — the single module behind the /docs/ section.
 // Loads the repo docs/ markdown trees at build time (import.meta.glob
 // with ?raw + eager inlines file contents into the bundle): docs/en/ is
-// the en canon, docs/zh-cn/ carries per-slug zh overrides on top of it.
+// the en canon; docs/zh-cn/ is the zh-cn tree, built the same way.
 // Frontmatter is zod-validated; ordering, neighbor lookup, and the
 // comark parse step live here. comark is 0.x: calls stay in this file.
 import { createMarkdownParser, parseFrontmatter } from "comark";
 import toc from "comark/plugins/toc";
-import { z } from "zod";
 import {
   internalLinkMessage,
+  normalizeSlug,
   resolveTocAnchor,
   segmentRelativeHref,
+  stripDocPrefix,
   ungroupedSlugs,
 } from "./doc-links.ts";
-import { mergeOverrides, stripDocPrefix } from "./doc-merge.ts";
+import { docGroups, flattenGroups, groupOrder } from "./doc-tree.ts";
+import { frontmatterSchema } from "./doc-entry.ts";
+import type { DocEntry } from "./doc-entry.ts";
 
-// Frontmatter contract for docs/ pages. `order` is a sparse numeric key
-// (convention: step by 10, insert between neighbors at the midpoint) — it is
-// a value, never a position. summary/features have no consuming page yet;
-// their shape follows the plan and the value domain tightens when one lands.
-// `internal` marks a repo-internal document: filtered from the docs list,
-// it renders on no site surface and takes no part in zh-cn overrides
-// (nothing internal is translated); the file stays in docs/en/ for
-// repo-side readers.
-const frontmatterSchema = z.object({
-  title: z.string().min(1),
-  description: z.string().min(1),
-  order: z.number().nonnegative().optional(),
-  summary: z.string().optional(),
-  features: z.array(z.string()).optional(),
-  // Domain follows common docs-tooling practice; no docs page uses it yet.
-  stability: z.enum(["stable", "experimental", "deprecated"]).optional(),
-  internal: z.boolean().optional(),
-});
-
-export type Frontmatter = z.infer<typeof frontmatterSchema>;
-
-export interface DocEntry {
-  slug: string;
-  frontmatter: Frontmatter;
-  body: string; // markdown without the frontmatter block
-  source: string; // full raw markdown, mirrored verbatim under /md/docs/
-}
+export type { DocEntry, Frontmatter } from "./doc-entry.ts";
 
 const EN_ROOT = "../../../../docs/en/";
 const ZH_ROOT = "../../../../docs/zh-cn/";
@@ -63,8 +40,8 @@ const parsed = Object.entries(rawFiles)
   })
   .filter((doc) => !doc.frontmatter.internal);
 
-// zh-cn translations override the en entry of the same slug wholesale —
-// a translation ships as one self-consistent file (frontmatter with body).
+// zh-cn is its own markdown tree; the zh view lists exactly the slugs
+// that exist here — untranslated en pages never fall through.
 const zhParsed = Object.entries(
   import.meta.glob("../../../../docs/zh-cn/**/*.md", {
     query: "?raw",
@@ -81,41 +58,24 @@ const zhParsed = Object.entries(
   } satisfies DocEntry;
 });
 
-const { merged: zhMerged, orphans: zhOrphans } = mergeOverrides(
-  parsed,
-  zhParsed,
-);
-if (zhOrphans.length > 0) {
-  console.warn(
-    `[docs] zh-cn entries without an en counterpart: ${zhOrphans.join()}`,
-  );
-}
-
-// Fixed group order (root docs, then reference/).
-// Within a group: order value (absent sorts last), ties by slug. This is the
-// single ordering source for the sidebar, the pager, and the index page —
-// nothing downstream may re-sort.
-const groupOrder = ["docs", "reference"];
-
-function groupRank(slug: string): number {
-  const slash = slug.indexOf("/");
-  const top = slash === -1 ? "docs" : slug.slice(0, slash);
-  const rank = groupOrder.indexOf(top);
-  return rank === -1 ? groupOrder.length : rank;
-}
-
-function byDocOrder(a: DocEntry, b: DocEntry): number {
-  return (
-    groupRank(a.slug) - groupRank(b.slug) ||
-    (a.frontmatter.order ?? Number.POSITIVE_INFINITY) -
-      (b.frontmatter.order ?? Number.POSITIVE_INFINITY) ||
-    a.slug.localeCompare(b.slug)
-  );
-}
-
 // The en canon: the en segment and the locale-independent surfaces (sitemap,
-// llms, the /md mirror) all read this list.
-export const docs: DocEntry[] = parsed.sort(byDocOrder);
+// llms, the /md mirror) all read this list. The flat order is the nav
+// tree's preorder traversal — the tree in doc-tree.ts is the single
+// ordering source, and nothing downstream may re-sort.
+export const docs: DocEntry[] = flattenGroups(docGroups(parsed));
+
+// The zh-cn view: only the translations that exist — no en fallback.
+// Untranslated slugs are absent from the zh tree, nav, and sitemap.
+export const zhDocs: DocEntry[] = flattenGroups(docGroups(zhParsed));
+
+export type { DocGroupNode, DocNavNode } from "./doc-tree.ts";
+export {
+  docGroups,
+  navBranchIds,
+  navIdByHref,
+  toNavNodes,
+} from "./doc-tree.ts";
+
 // A slug outside every nav group still renders as a detail page but
 // lists in no sidebar or llms group: the build says so at load time.
 const ungrouped = ungroupedSlugs(
@@ -126,22 +86,16 @@ if (ungrouped.length > 0) {
   console.warn(`[docs] slug has no nav group: ${ungrouped.join()}`);
 }
 
-// The zh-cn view: overrides applied over the en set — untranslated slugs
-// fall through to the en document — sorted by the same contract.
-export const zhDocs: DocEntry[] = zhMerged.sort(byDocOrder);
-
-// Sidebar groups in render order with their members already sorted.
-export function docGroups(
-  list: readonly DocEntry[] = docs,
-): { name: string; entries: DocEntry[] }[] {
-  return groupOrder.map((name) => ({
-    name,
-    entries: list.filter(
-      (doc) => groupRank(doc.slug) === groupOrder.indexOf(name),
-    ),
-  }));
+const zhUngrouped = ungroupedSlugs(
+  zhDocs.map((doc) => doc.slug),
+  groupOrder,
+);
+if (zhUngrouped.length > 0) {
+  console.warn(`[docs] zh-cn slug has no nav group: ${zhUngrouped.join()}`);
 }
 
+// The en canon: the en segment and the locale-independent surfaces (sitemap,
+// llms, the /md mirror) all read this list.
 export function findDoc(
   slug: string,
   list: readonly DocEntry[] = docs,
@@ -181,7 +135,10 @@ export type ParsedDoc = Awaited<ReturnType<typeof parse>>;
 // the real ids); absolute URLs and pure anchors pass through untouched.
 function rewriteHref(
   href: string,
+  // The doc file's own directory (repo-relative resolution基准).
   fromDir: string,
+  // The page URL's directory (the crawl-out depth for rewritten links).
+  urlFromDir: string,
   resolveAnchor: (slug: string, anchor: string) => string,
 ): string {
   const hash = href.indexOf("#");
@@ -195,7 +152,7 @@ function rewriteHref(
     if (segment === "..") stack.pop();
     else if (segment !== "." && segment !== "") stack.push(segment);
   }
-  const slug = stack.join("/").replace(/\.md$/, "");
+  const slug = normalizeSlug(stack.join("/").replace(/\.md$/, ""));
   // Unresolvable targets (missing doc, or ../ climbing out of docs/) keep
   // the original repo href; prerender fail-fast is the backstop.
   if (!findDoc(slug)) {
@@ -210,7 +167,7 @@ function rewriteHref(
   }
   return segmentRelativeHref(
     slug,
-    fromDir,
+    urlFromDir,
     anchor ? resolveAnchor(slug, anchor) : "",
   );
 }
@@ -218,6 +175,7 @@ function rewriteHref(
 function rewriteLinks(
   nodes: unknown[],
   fromDir: string,
+  urlFromDir: string,
   ownSlug: string,
   resolveAnchor: (slug: string, anchor: string) => string,
 ): void {
@@ -234,15 +192,20 @@ function rewriteLinks(
       if (attrs.href.startsWith("#")) {
         attrs.href = "#" + resolveAnchor(ownSlug, attrs.href.slice(1));
       } else {
-        attrs.href = rewriteHref(attrs.href, fromDir, resolveAnchor);
+        attrs.href = rewriteHref(
+          attrs.href,
+          fromDir,
+          urlFromDir,
+          resolveAnchor,
+        );
       }
     }
-    rewriteLinks(children, fromDir, ownSlug, resolveAnchor);
+    rewriteLinks(children, fromDir, urlFromDir, ownSlug, resolveAnchor);
   }
 }
 
 // Parsed document caches, one per view: each view parses its own entries,
-// so a zh-cn override renders its own body, its own TOC, and its own
+// so the zh-cn view renders its own body, its own TOC, and its own
 // rewritten links while the en view stays untouched. Everything is parsed
 // up front (prerender touches every page anyway) so cross-page anchors
 // resolve against the target's own view TOC in a second pass.
@@ -265,10 +228,19 @@ export function parseDoc(
     for (const doc of list) {
       const document = parsedDocs.get(doc.slug);
       if (!document) continue;
-      const slash = doc.slug.indexOf("/");
+      // Repo-relative targets resolve against the doc file's own
+      // directory (an index page sits in the directory its slug names);
+      // rewritten links crawl out of the page URL's directory, which is
+      // the slug minus its last segment for regular and index pages
+      // alike (.../deployment/nixos/ crawls the same two levels as
+      // .../deployment/nixos/minimal/).
+      const cut = doc.slug.lastIndexOf("/");
+      const urlFromDir = cut === -1 ? "" : doc.slug.slice(0, cut);
+      const fileDir = doc.indexPage ? doc.slug : urlFromDir;
       rewriteLinks(
         document.nodes as unknown[],
-        slash === -1 ? "" : doc.slug.slice(0, slash),
+        fileDir,
+        urlFromDir,
         doc.slug,
         (slug, anchor) => resolveTocAnchor(parsedDocs.get(slug), anchor),
       );

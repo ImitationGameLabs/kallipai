@@ -49,6 +49,13 @@ export function internalLinkMessage(
     : undefined;
 }
 
+// A directory's index page is the directory itself: both link shapes
+// ("deployment/nixos/index.md" and "deployment/nixos/" or a bare
+// "deployment/nixos.md") resolve to the one slug "deployment/nixos".
+export function normalizeSlug(slug: string): string {
+  return slug === "index" ? "" : slug.replace(/\/index$/, "");
+}
+
 // Slugs whose top segment is outside the nav groups (root docs rank as
 // docs, mirroring groupRank): they render but no group lists them.
 export function ungroupedSlugs(
@@ -60,4 +67,11 @@ export function ungroupedSlugs(
     const top = slash === -1 ? "docs" : slug.slice(0, slash);
     return !groups.includes(top);
   });
+}
+
+// Glob keys carry their tree root ("../../../../docs/en/", zh-cn
+// likewise); strip the given root so both locale trees land in one
+// slug space.
+export function stripDocPrefix(key: string, root: string): string {
+  return key.replace(root, "").replace(/\.md$/, "");
 }

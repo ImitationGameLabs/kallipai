@@ -5,12 +5,22 @@ import assert from "node:assert/strict";
 
 import {
   internalLinkMessage,
+  normalizeSlug,
   resolveTocAnchor,
   segmentRelativeHref,
   ungroupedSlugs,
 } from "./doc-links.ts";
 
-import { mergeOverrides, stripDocPrefix } from "./doc-merge.ts";
+import {
+  docGroups,
+  flattenGroups,
+  navBranchIds,
+  navIdByHref,
+  toNavNodes,
+} from "./doc-tree.ts";
+import type { DocEntry } from "./doc-entry.ts";
+
+import { stripDocPrefix } from "./doc-links.ts";
 
 function target(href: string, from: string): string {
   return new URL(href, `https://site.test${from}`).pathname;
@@ -35,15 +45,19 @@ Deno.test(
 Deno.test(
   "segmentRelativeHref depth: nested doc to a sibling nested doc",
   () => {
-    const href = segmentRelativeHref("reference/env", "reference", "");
-    assert.equal(href, "../../reference/env/");
+    const href = segmentRelativeHref(
+      "configuration/services",
+      "configuration",
+      "",
+    );
+    assert.equal(href, "../../configuration/services/");
     assert.equal(
       target(href, "/en/docs/reference/auth/"),
-      "/en/docs/reference/env/",
+      "/en/docs/configuration/services/",
     );
     assert.equal(
       target(href, "/zh-cn/docs/reference/auth/"),
-      "/zh-cn/docs/reference/env/",
+      "/zh-cn/docs/configuration/services/",
     );
   },
 );
@@ -86,50 +100,6 @@ Deno.test("stripDocPrefix strips the zh-cn glob root", () => {
     ),
     "reference/auth",
   );
-});
-
-Deno.test(
-  "mergeOverrides: zh-cn entry replaces the en entry of the same slug",
-  () => {
-    const en = [
-      { slug: "architecture", n: 1 },
-      { slug: "reference/auth", n: 2 },
-    ];
-    const zh = [{ slug: "reference/auth", n: 9 }];
-    const { merged, orphans } = mergeOverrides(en, zh);
-    assert.deepEqual(merged, [
-      { slug: "architecture", n: 1 },
-      {
-        slug: "reference/auth",
-        n: 9,
-      },
-    ]);
-    assert.deepEqual(orphans, []);
-  },
-);
-
-Deno.test(
-  "mergeOverrides: untranslated slugs fall through to the en entry",
-  () => {
-    const en = [{ slug: "architecture", n: 1 }];
-    const zh = [{ slug: "reference/auth", n: 9 }];
-    const { merged } = mergeOverrides(en, zh);
-    assert.deepEqual(merged, [{ slug: "architecture", n: 1 }]);
-  },
-);
-
-Deno.test("mergeOverrides reports zh-cn orphans and keeps en ordering", () => {
-  const en = [
-    { slug: "z-doc", n: 1 },
-    { slug: "a-doc", n: 2 },
-  ];
-  const zh = [{ slug: "ghost", n: 0 }];
-  const { merged, orphans } = mergeOverrides(en, zh);
-  assert.deepEqual(
-    merged.map((d) => d.slug),
-    ["z-doc", "a-doc"],
-  );
-  assert.deepEqual(orphans, ["ghost"]);
 });
 
 Deno.test(
@@ -222,10 +192,239 @@ Deno.test(
 Deno.test("ungroupedSlugs flags slugs outside the nav groups", () => {
   assert.deepEqual(
     ungroupedSlugs(
-      ["architecture", "reference/auth", "stray/guide", "reference/env"],
-      ["docs", "reference"],
+      ["architecture", "reference/auth", "stray/guide", "configuration/daemon"],
+      ["docs", "reference", "configuration"],
     ),
     ["stray/guide"],
   );
   assert.deepEqual(ungroupedSlugs(["naming"], ["docs", "reference"]), []);
+});
+// A minimal DocEntry fixture: only the fields the tree reads.
+function entry(slug: string, order?: number, title = slug): DocEntry {
+  return {
+    slug,
+    frontmatter: {
+      title,
+      description: "d",
+      ...(order === undefined ? {} : { order }),
+    },
+    body: "",
+    source: "",
+  };
+}
+
+Deno.test("normalizeSlug: a directory index page is the directory", () => {
+  assert.equal(normalizeSlug("deployment/nixos/index"), "deployment/nixos");
+  assert.equal(normalizeSlug("deployment/index"), "deployment");
+  assert.equal(normalizeSlug("index"), "");
+  assert.equal(normalizeSlug("reference/auth"), "reference/auth");
+});
+
+Deno.test("docGroups: top-level order is the code array", () => {
+  const groups = docGroups([
+    entry("reference/auth"),
+    entry("architecture"),
+    entry("harness-design/context-management", 20),
+    entry("deployment/nixos/minimal", 20),
+    entry("configuration/services", 50),
+  ]);
+  assert.deepEqual(
+    groups.map((group) => group.name),
+    ["docs", "harness-design", "deployment", "configuration", "reference"],
+  );
+});
+
+Deno.test("docGroups: subgroups order by their index page order value", () => {
+  const groups = docGroups([
+    entry("deployment/zzz/index", 40, "Zed"),
+    entry("deployment", undefined, "Deployment"),
+    entry("deployment/aaa", 10, "Aaa"),
+    entry("deployment/aaa/guide", 20),
+  ]);
+  const deployment = groups.find((group) => group.name === "deployment")!;
+  assert.deepEqual(
+    deployment.groups.map((group) => group.name),
+    ["deployment/aaa", "deployment/zzz"], // aaa's index carries order 10
+  );
+  assert.equal(deployment.title, "Deployment");
+  assert.equal(deployment.index?.slug, "deployment");
+});
+
+Deno.test("docGroups: entries within a level sort by order then slug", () => {
+  const groups = docGroups([
+    entry("deployment/nixos/https", 40),
+    entry("deployment/nixos/index", undefined, "NixOS"),
+    entry("deployment/nixos/minimal", 20),
+    entry("deployment/nixos/proxy", 30),
+    entry("deployment/nixos/operations", 50),
+  ]);
+  const nixos = groups.find((group) => group.name === "deployment")!.groups[0];
+  assert.equal(nixos.name, "deployment/nixos");
+  assert.equal(nixos.title, "NixOS");
+  assert.equal(nixos.index?.slug, "deployment/nixos");
+  // The index page carries no order, so unordered entries sort after
+  // all ordered ones; the tree contract test below shows how it lands
+  // in the flat order.
+  assert.deepEqual(
+    nixos.entries.map((doc) => doc.slug),
+    [
+      "deployment/nixos/minimal",
+      "deployment/nixos/proxy",
+      "deployment/nixos/https",
+      "deployment/nixos/operations",
+      "deployment/nixos",
+    ],
+  );
+});
+
+Deno.test("flattenGroups: the flat order is the tree preorder", () => {
+  const flat = flattenGroups(
+    docGroups([
+      entry("reference/auth", 20),
+      entry("deployment/nixos/https", 40),
+      entry("deployment/nixos", undefined, "NixOS"),
+      entry("deployment/nixos/minimal", 20),
+      entry("deployment", undefined, "Deployment"),
+      entry("architecture"),
+      entry("deployment/nixos/proxy", 30),
+      entry("deployment/nixos/operations", 50),
+    ]),
+  );
+  assert.deepEqual(
+    flat.map((doc) => doc.slug),
+    [
+      // docs group
+      "architecture",
+      // deployment group: its own entries, then each subgroup's subtree
+      "deployment",
+      "deployment/nixos/minimal",
+      "deployment/nixos/proxy",
+      "deployment/nixos/https",
+      "deployment/nixos/operations",
+      "deployment/nixos",
+      // reference group
+      "reference/auth",
+    ],
+  );
+});
+
+Deno.test(
+  "docGroups is idempotent over the flattened list (the sidebar re-trees docs/zhDocs)",
+  () => {
+    const fixture = [
+      entry("reference/auth", 20),
+      entry("deployment/nixos/https", 40),
+      entry("deployment/nixos/index", undefined, "NixOS"),
+      entry("deployment/nixos/minimal", 20),
+      entry("deployment/index", undefined, "Deployment"),
+      entry("architecture"),
+      entry("deployment/nixos/proxy", 30),
+      entry("deployment/nixos/operations", 50),
+    ];
+    const shape = (groups: ReturnType<typeof docGroups>) =>
+      JSON.stringify(groups);
+    const once = docGroups(fixture);
+    const twice = docGroups(flattenGroups(once));
+    assert.equal(shape(twice), shape(once));
+  },
+);
+
+Deno.test("children: direct entries and subgroups interleave by order", () => {
+  const groups = docGroups([
+    entry("configuration/index", 10, "Configuration"),
+    entry("configuration/tagma/index", 10, "Tagma"),
+    entry(
+      "configuration/tagma/environment-variables",
+      15,
+      "Environment variables",
+    ),
+    entry("configuration/tagma/llm", 20),
+    entry("configuration/tagma/agent", 30),
+    entry("configuration/tagma/service", 40),
+    entry("configuration/services", 50),
+    entry("configuration/daemon", 60),
+  ]);
+  const configuration = groups.find((group) => group.name === "configuration")!;
+  const tagmaGroup = configuration.groups.find(
+    (group) => group.name === "configuration/tagma",
+  )!;
+  // Direct entries and the subgroup share one interleaved sequence, each
+  // ranked by its own (or its index page's) order value.
+  assert.deepEqual(
+    configuration.children.map((child) =>
+      child.kind === "entry" ? child.doc.slug : child.node.name,
+    ),
+    [
+      "configuration", // 10
+      "configuration/tagma", // 10 (its index page)
+      "configuration/services", // 50
+      "configuration/daemon", // 60
+    ],
+  );
+  // The group's own index page carries order 10 and the quick reference
+  // 15, so the index leads and the quick reference precedes the pages.
+  assert.deepEqual(
+    tagmaGroup.entries.map((doc) => doc.slug),
+    [
+      "configuration/tagma",
+      "configuration/tagma/environment-variables",
+      "configuration/tagma/llm",
+      "configuration/tagma/agent",
+      "configuration/tagma/service",
+    ],
+  );
+});
+
+Deno.test("toNavNodes: groups become branches, entries linked leaves", () => {
+  const groups = docGroups([
+    entry("configuration/index", 10, "Configuration"),
+    entry("configuration/tagma/index", 10, "Tagma"),
+    entry("configuration/tagma/llm", 20, "LLM"),
+    entry("configuration/services", 50, "Cron"),
+  ]);
+  const nodes = toNavNodes(
+    groups,
+    (group) => group.title || group.name,
+    (slug) => `/en/docs/${slug}/`,
+  );
+  // The virtual docs group has no index page: its heading stays unlinked.
+  // The configuration group has one: the heading becomes the link.
+  assert.deepEqual(
+    nodes.map((node) => [node.id, node.label, node.href]),
+    [
+      ["docs", "docs", undefined],
+      ["configuration", "Configuration", "/en/docs/configuration/"],
+    ],
+  );
+  const configuration = nodes[1];
+  // The group's own index entry no longer appears among the children.
+  assert.deepEqual(
+    configuration.children!.map((child) => [
+      child.id,
+      child.label,
+      child.href,
+      child.children?.length ?? 0,
+    ]),
+    [
+      ["configuration/tagma", "Tagma", "/en/docs/configuration/tagma/", 1],
+      ["configuration/services", "Cron", "/en/docs/configuration/services/", 0],
+    ],
+  );
+  const tagmaBranch = configuration.children![0];
+  assert.deepEqual(
+    tagmaBranch.children!.map((leaf) => leaf.id),
+    ["configuration/tagma/llm"],
+  );
+  // The empty virtual docs group has no children, so it is not a branch.
+  assert.deepEqual(navBranchIds(nodes), [
+    "configuration",
+    "configuration/tagma",
+  ]);
+  // Navigating to a group's index page selects the group heading itself.
+  assert.equal(navIdByHref(nodes, "/en/docs/configuration/"), "configuration");
+  assert.equal(
+    navIdByHref(nodes, "/en/docs/configuration/tagma/llm/"),
+    "configuration/tagma/llm",
+  );
+  assert.equal(navIdByHref(nodes, "/en/docs/missing/"), undefined);
 });

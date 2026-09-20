@@ -1,7 +1,32 @@
 @import "tailwindcss";
 
-/* Skeleton v5 is CSS-first: the import brings the token layer and utility
-   classes; the theme file sets the design tokens via [data-theme]. The
-   brand theme slot stays "rocket" until a kallipai theme lands. */
+/* Skeleton v5 is CSS-first: the first import brings the token layer and
+   utility classes; the second brings the component styles the Svelte
+   packages rely on (they ship headless DOM and expect this base layer). */
 @import "@skeletonlabs/skeleton";
+@import "@skeletonlabs/skeleton-svelte";
 @import "@skeletonlabs/skeleton/themes/rocket";
+
+/* Indent: 24px per level, one shared formula for folder and file rows.
+   The component presets use the same slope but add per-part constant
+   offsets; dropping them keeps rows of equal depth exactly aligned.
+   Unlayered, so it wins over the component base layer without !important. */
+[data-scope="tree-view"][data-part="branch-control"] {
+  padding-inline-start: calc(var(--depth) * var(--spacing) * 6);
+}
+
+/* Leaf rows run the same formula as folder rows, so files and folders
+   at equal depth align. */
+[data-scope="tree-view"][data-part="item"] {
+  padding-inline-start: calc(var(--depth) * var(--spacing) * 6);
+}
+
+/* Selected row: the component marks it with preset-filled, the full-
+   contrast surface inversion, which reads as a highlight block. One soft
+   step of surface instead, near the page background in both modes via the
+   light-dark pairs; text keeps near-contrast so it stays readable. */
+[data-scope="tree-view"][data-part="item"][data-selected],
+[data-scope="tree-view"][data-part="branch-control"][data-selected] {
+  background-color: var(--color-surface-100-900);
+  color: var(--color-surface-950-50);
+}
