@@ -20,7 +20,7 @@ pub use entities::task_event::Model as TaskEvent;
 pub use kallip_blob_store::BlobStore;
 pub use kallip_common::protocol::TaskExport;
 pub use model::{ClosedReason, EventKind, TaskStatus, Transition};
-pub use store::{TaskFilter, TaskStore};
+pub use store::{ConfirmerResolver, TaskFilter, TaskStore};
 
 use thiserror::Error;
 
@@ -48,24 +48,14 @@ pub enum Error {
     },
 
     #[error(
-        "close gate: missing review receipts from registered seats: {missing}; \
+        "confirmation gate: missing confirmations from registered confirmers: {missing}; \
          --force to override (escape is recorded)"
     )]
-    ReceiptGate { missing: String },
+    ConfirmationGate { missing: String },
     #[error(
         "archive gate: task {id} is {status}; only closed tasks archive; --force to override (escape is recorded)"
     )]
     ArchiveGate { id: i64, status: String },
-
-    #[error(
-        "dispatch gate: task {id} has no review dispatch this cycle; run `task dispatch` first, or --force to override (escape is recorded)"
-    )]
-    DispatchGate { id: i64 },
-
-    #[error(
-        "gate-report gate: task {id} has no gate report since its last recorded chain op; run `task gate-report` first, or --force to override (escape is recorded)"
-    )]
-    GateReportGate { id: i64 },
 
     #[error("dossier path {path} is not a directory")]
     DossierNotDir { path: String },
@@ -76,6 +66,10 @@ pub enum Error {
     AssociationInvalid { detail: String },
     #[error("task {id}: stored {field} is corrupt")]
     CorruptRecord { id: i64, field: &'static str },
+    #[error("report is {size} bytes, over the {max}-byte limit")]
+    ReportTooLarge { size: usize, max: usize },
+    #[error("create gate: confirmer '{confirmer}' does not resolve to a registered identity")]
+    ConfirmerUnresolved { confirmer: String },
 
     #[error(transparent)]
     Db(#[from] sea_orm::DbErr),

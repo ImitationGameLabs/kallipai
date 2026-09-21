@@ -1,25 +1,26 @@
 //! The coarse state machine and the vocabulary the rest of the crate speaks.
 //!
 //! States are deliberately coarse (the K8s warning: a small state machine,
-//! details live in the event trail). `waiting` is NOT a state — it is a
-//! timing marker on the tasks row (taskwarrior precedent: an activity marker
-//! is not a state transition). The terminal state is two-level (GitHub CLI
-//! precedent): `closed` carries a reason.
+//! details live in the event trail). The terminal state is two-level (GitHub
+//! CLI precedent): `closed` carries a reason.
 
 // The state vocabulary is part of the wire face: defined once in
 // kallip-common::protocol::task and re-exported here for the crate.
 pub use kallip_common::protocol::{ClosedReason, TaskStatus};
 
-/// Every legal transition, named by the verb that drives it. `checkpoint` is
-/// deliberately absent: checkpoint/receipt/waiting are `kind=action` events
-/// that never move the machine.
+/// Every legal transition, named by the verb that drives it. Actions (notes,
+/// confirmations, forces) are `kind=action` events that never move the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transition {
     /// queued -> in_progress (`task start <id>`; the serial gate lives here).
     Start,
-    /// in_progress -> review (`task checkpoint --review`).
+    /// in_progress -> paused (`task pause`; no gate — pausing is always allowed).
+    Pause,
+    /// paused -> in_progress (`task resume`; the serial gate lives here).
+    Resume,
+    /// in_progress -> review (`task review`).
     Review,
-    /// in_progress|review -> closed (`task close`; the receipt gate lives here).
+    /// in_progress|review -> closed (`task close`; the confirmation gate lives here).
     Close,
     /// closed -> in_progress (`task reopen`).
     Reopen,
@@ -32,6 +33,8 @@ impl Transition {
             Transition::Review => TaskStatus::InProgress.as_str(),
             Transition::Close => "", // in_progress or review; see `legal_from`
             Transition::Reopen => TaskStatus::Closed.as_str(),
+            Transition::Pause => TaskStatus::InProgress.as_str(),
+            Transition::Resume => TaskStatus::Paused.as_str(),
         }
     }
 
@@ -41,6 +44,8 @@ impl Transition {
             Transition::Review => TaskStatus::Review.as_str(),
             Transition::Close => TaskStatus::Closed.as_str(),
             Transition::Reopen => TaskStatus::InProgress.as_str(),
+            Transition::Pause => TaskStatus::Paused.as_str(),
+            Transition::Resume => TaskStatus::InProgress.as_str(),
         }
     }
 
@@ -50,6 +55,8 @@ impl Transition {
             Transition::Review => "review",
             Transition::Close => "close",
             Transition::Reopen => "reopen",
+            Transition::Pause => "pause",
+            Transition::Resume => "resume",
         }
     }
 
@@ -59,6 +66,8 @@ impl Transition {
             Transition::Start => &[TaskStatus::Queued],
             Transition::Review => &[TaskStatus::InProgress],
             Transition::Close => &[TaskStatus::InProgress, TaskStatus::Review],
+            Transition::Pause => &[TaskStatus::InProgress],
+            Transition::Resume => &[TaskStatus::Paused],
             Transition::Reopen => &[TaskStatus::Closed],
         }
     }
@@ -115,6 +124,10 @@ mod tests {
     fn transitions_have_expected_endpoints() {
         assert_eq!(Transition::Start.from_str(), "queued");
         assert_eq!(Transition::Start.to_str(), "in_progress");
+        assert_eq!(Transition::Pause.from_str(), "in_progress");
+        assert_eq!(Transition::Pause.to_str(), "paused");
+        assert_eq!(Transition::Resume.from_str(), "paused");
+        assert_eq!(Transition::Resume.to_str(), "in_progress");
         assert_eq!(Transition::Review.to_str(), "review");
         assert_eq!(Transition::Reopen.from_str(), "closed");
         assert_eq!(Transition::Reopen.to_str(), "in_progress");

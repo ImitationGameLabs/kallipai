@@ -32,9 +32,9 @@ pub use inbox::{InboxEntry, InboxListQuery, InboxSummary};
 pub use skill::{SkillMeta, parse_frontmatter, parse_frontmatter_description};
 pub use sse::{FailoverChainExhaustion, SseEvent, TransientRetryInfo};
 pub use task::{
-    AssociationExport, ClosedReason, EventExport, TaskChainOpRequest, TaskCheckpointRequest,
-    TaskCloseRequest, TaskCreateRequest, TaskDispatchRequest, TaskExport, TaskForceRequest,
-    TaskListQuery, TaskNoteRequest, TaskStatus, TaskTimeAxis,
+    AssociationExport, ClosedReason, EventExport, REPORT_MAX_BYTES, TaskCloseRequest,
+    TaskConfirmRequest, TaskCreateRequest, TaskExport, TaskForceRequest, TaskListPage,
+    TaskListQuery, TaskNoteRequest, TaskRow, TaskStatus, TaskTimeAxis,
 };
 pub use team::{
     RoleDisposition, TeamAction, TeamActionResult, TeamConvergeOutcome, TeamConvergeRequest,

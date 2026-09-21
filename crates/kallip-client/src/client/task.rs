@@ -5,8 +5,8 @@
 use super::TagmaClient;
 use anyhow::{Context, Result};
 use kallip_common::protocol::{
-    TaskChainOpRequest, TaskCheckpointRequest, TaskCloseRequest, TaskCreateRequest,
-    TaskDispatchRequest, TaskExport, TaskForceRequest, TaskListQuery, TaskNoteRequest,
+    TaskCloseRequest, TaskConfirmRequest, TaskCreateRequest, TaskExport, TaskForceRequest,
+    TaskListPage, TaskListQuery, TaskNoteRequest,
 };
 
 impl TagmaClient {
@@ -37,7 +37,7 @@ impl TagmaClient {
         .await
     }
 
-    pub async fn task_list(&self, query: &TaskListQuery) -> Result<Vec<TaskExport>> {
+    pub async fn task_list(&self, query: &TaskListQuery) -> Result<TaskListPage> {
         self.handle_response(
             self.with_auth(self.inner.http.get(self.url("/tasks")).query(query))
                 .send()
@@ -69,85 +69,79 @@ impl TagmaClient {
         .await
     }
 
-    pub async fn task_checkpoint(
-        &self,
-        id: i64,
-        req: &TaskCheckpointRequest,
-    ) -> Result<TaskExport> {
+    pub async fn task_confirm(&self, id: i64, req: &TaskConfirmRequest) -> Result<TaskExport> {
         self.handle_response(
             self.with_auth(
                 self.inner
                     .http
-                    .post(self.url(&format!("/tasks/{id}/checkpoint")))
+                    .post(self.url(&format!("/tasks/{id}/confirm")))
                     .json(&req),
             )
             .send()
             .await
-            .context("checkpoint task")?,
+            .context("confirm task")?,
             "parse task export",
         )
         .await
     }
 
-    pub async fn task_annotate(&self, id: i64, req: &TaskNoteRequest) -> Result<TaskExport> {
+    pub async fn task_review(&self, id: i64) -> Result<TaskExport> {
         self.handle_response(
             self.with_auth(
                 self.inner
                     .http
-                    .post(self.url(&format!("/tasks/{id}/annotate")))
-                    .json(&req),
+                    .post(self.url(&format!("/tasks/{id}/review"))),
             )
             .send()
             .await
-            .context("annotate task")?,
+            .context("review task")?,
             "parse task export",
         )
         .await
     }
 
-    pub async fn task_gate_report(&self, id: i64, req: &TaskNoteRequest) -> Result<TaskExport> {
+    pub async fn task_pause(&self, id: i64) -> Result<TaskExport> {
         self.handle_response(
             self.with_auth(
                 self.inner
                     .http
-                    .post(self.url(&format!("/tasks/{id}/gate-report")))
-                    .json(&req),
+                    .post(self.url(&format!("/tasks/{id}/pause"))),
             )
             .send()
             .await
-            .context("record gate report")?,
+            .context("pause task")?,
             "parse task export",
         )
         .await
     }
 
-    pub async fn task_dispatch(&self, id: i64, req: &TaskDispatchRequest) -> Result<TaskExport> {
+    pub async fn task_resume(&self, id: i64, req: &TaskForceRequest) -> Result<TaskExport> {
         self.handle_response(
             self.with_auth(
                 self.inner
                     .http
-                    .post(self.url(&format!("/tasks/{id}/dispatch")))
+                    .post(self.url(&format!("/tasks/{id}/resume")))
                     .json(&req),
             )
             .send()
             .await
-            .context("dispatch task")?,
+            .context("resume task")?,
             "parse task export",
         )
         .await
     }
 
-    pub async fn task_chain_op(&self, id: i64, req: &TaskChainOpRequest) -> Result<TaskExport> {
+    pub async fn task_note(&self, id: i64, req: &TaskNoteRequest) -> Result<TaskExport> {
         self.handle_response(
             self.with_auth(
                 self.inner
                     .http
-                    .post(self.url(&format!("/tasks/{id}/chain-op")))
+                    .post(self.url(&format!("/tasks/{id}/note")))
                     .json(&req),
             )
             .send()
             .await
-            .context("record chain op")?,
+            .context("note task")?,
             "parse task export",
         )
         .await

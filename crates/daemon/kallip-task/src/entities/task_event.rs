@@ -1,9 +1,8 @@
 //! SeaORM entity for the `task_events` trail.
 //!
 //! Every state move (kind=transition) and every action that never moves the
-//! machine (kind=action: create, checkpoint, receipt, waiting_set/clear,
-//! and the auditable --force gate escapes) lands here with actor and
-//! timestamp.
+//! machine (kind=action: create, note, confirm, and the auditable --force
+//! gate escapes) lands here with actor and timestamp.
 
 use sea_orm::entity::prelude::*;
 
@@ -15,9 +14,9 @@ pub struct Model {
     pub task_id: i64,
     /// "transition" | "action"
     pub kind: String,
-    /// transition: start|review|close|reopen; action: create|checkpoint|
-    /// receipt|waiting_set|waiting_clear|force_start|force_reopen|
-    /// force_close|annotate|gate_report|dispatch|chain_op|archive.
+    /// transition: start|pause|resume|review|close|reopen; action:
+    /// create|note|confirm|force_start|force_resume|force_reopen|
+    /// force_close|archive.
     pub name: String,
     /// Who triggered the event (the CLI caller).
     pub actor: Option<String>,

@@ -12,7 +12,8 @@ use std::path::Path;
 use crate::{Task, TaskEvent};
 use kallip_blob_store::{BlobId, BlobStore};
 use kallip_common::protocol::{
-    AssociationExport, EventExport, TaskCheckpointRequest, TaskCreateRequest, TaskExport,
+    AssociationExport, EventExport, TaskConfirmRequest, TaskCreateRequest, TaskExport,
+    TaskListPage, TaskRow,
 };
 use sea_orm::entity::prelude::*;
 use sea_orm::{
@@ -23,18 +24,18 @@ use sea_orm_migration::MigratorTrait as _;
 use time::OffsetDateTime;
 
 use crate::entities::task::{ActiveModel, Column as TaskColumn, Entity as TaskEntity};
-use crate::entities::task_event::{ActiveModel as EventActive, Entity as EventEntity};
+use crate::entities::task_event::{
+    ActiveModel as EventActive, Column as EventColumn, Entity as EventEntity,
+};
 use crate::entities::{task, task_event};
 use crate::gates;
 use crate::model::{ClosedReason, TaskStatus, Transition};
 use crate::{Error, archive};
 
-/// The seat roster recorded in a `dispatch` action event's payload —
-/// the roster the close gate counts receipts against.
-#[derive(Debug, Clone, serde::Deserialize)]
-struct DispatchPayload {
-    seats: Vec<String>,
-}
+/// The name→identity resolver the create verb uses: a sync lookup over a
+/// registry snapshot, injected per create call.
+pub type ConfirmerResolver = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 #[derive(Debug, Clone, Default)]
 pub struct TaskFilter {
     pub status: Option<TaskStatus>,
@@ -98,19 +99,34 @@ impl TaskStore {
         Self { db }
     }
 
-    /// Registers a task in the queue (`queued`): dispatch metadata lands on
-    /// the row now, so the close gate can hold it accountable later. The
-    /// row and its `create` event land in one transaction, so the event
-    /// trail can always derive the flat table.
-    pub async fn create(&self, req: TaskCreateRequest) -> Result<Task, Error> {
+    /// Registers a task in the queue (`queued`): the confirmer roster is
+    /// resolved to identity ids now, so the close gate can hold it
+    /// accountable later. The row and its `create` event land in one
+    /// transaction, so the event trail can always derive the flat table.
+    pub async fn create(
+        &self,
+        req: TaskCreateRequest,
+        actor: &str,
+        resolve_confirmer: ConfirmerResolver,
+    ) -> Result<Task, Error> {
         validate_association(&req)?;
         let now = now();
-        let seats = serde_json::to_string(&req.seats)?;
-        let actor = req.creator.clone();
+        // An unresolvable confirmer name is a failed create, not a
+        // dangling confirmer: the roster is fixed here, in identity-id space.
+        let confirmers: Vec<String> = req
+            .require
+            .iter()
+            .map(|confirmer| {
+                resolve_confirmer(confirmer).ok_or_else(|| Error::ConfirmerUnresolved {
+                    confirmer: confirmer.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let confirmers_json = serde_json::to_string(&confirmers)?;
         for attempt in 0..=BUSY_RETRIES {
             let req = req.clone();
-            let seats = seats.clone();
-            let actor = actor.clone();
+            let confirmers_json = confirmers_json.clone();
+            let actor = actor.to_owned();
             match self
                 .db
                 .transaction(|tx| {
@@ -121,7 +137,7 @@ impl TaskStore {
                             status: Set(TaskStatus::Queued.as_str().to_string()),
                             creator: Set(Some(actor.clone())),
                             assignee: Set(req.assignee.clone()),
-                            seats: Set(seats),
+                            confirmers: Set(confirmers_json),
                             created_at: Set(now),
                             updated_at: Set(now),
                             dossier_path: Set(req.dossier_path),
@@ -167,6 +183,219 @@ impl TaskStore {
         unreachable!("busy retries are bounded")
     }
 
+    /// Files a confirmation toward the close gate. Allowed while the
+    /// task is `in_progress` or `review`. Outside-roster confirmations
+    /// are recorded but do not count toward the gate (the roster is
+    /// fixed at create). A report may ride along (`file`), size-capped
+    /// at [`kallip_common::protocol::REPORT_MAX_BYTES`] — checked
+    /// before the retry loop so an oversized report fails without
+    /// taking the lock.
+    pub async fn confirm(
+        &self,
+        id: i64,
+        actor: &str,
+        op: TaskConfirmRequest,
+    ) -> Result<Task, Error> {
+        if let Some(file) = &op.file {
+            let max = kallip_common::protocol::REPORT_MAX_BYTES;
+            let size = file.len();
+            if size > max {
+                return Err(Error::ReportTooLarge { size, max });
+            }
+        }
+        let actor = actor.to_owned();
+        for attempt in 0..=BUSY_RETRIES {
+            let op = op.clone();
+            let actor = actor.clone();
+            match self
+                .db
+                .transaction(|tx| {
+                    Box::pin(async move {
+                        take_write_lock(tx).await?;
+                        let row = load(tx, id).await?;
+                        let status = parse_status(&row)?;
+                        match status {
+                            TaskStatus::InProgress | TaskStatus::Review => {}
+                            _ => {
+                                return Err(Error::InvalidTransition {
+                                    id: row.id,
+                                    from: status.as_str().to_string(),
+                                    action: "confirm".to_string(),
+                                    expected: "in_progress|review".to_string(),
+                                });
+                            }
+                        }
+                        let payload = confirm_payload(&op.note, &op.file);
+                        append_event_tx(
+                            tx,
+                            row.id,
+                            "action",
+                            "confirm",
+                            Some(actor),
+                            row.assignee.clone(),
+                            None,
+                            None,
+                            payload,
+                            now(),
+                        )
+                        .await?;
+                        load(tx, id).await
+                    })
+                })
+                .await
+            {
+                Err(TransactionError::Connection(ref e))
+                    if attempt < BUSY_RETRIES && is_busy_conn(e) =>
+                {
+                    continue;
+                }
+                Err(TransactionError::Transaction(ref e))
+                    if attempt < BUSY_RETRIES && is_busy_err(e) =>
+                {
+                    continue;
+                }
+                other => return other.map_err(flat_txn),
+            }
+        }
+        unreachable!("busy retries are bounded")
+    }
+
+    /// Moves the machine `in_progress -> review`.
+    pub async fn review(&self, id: i64, actor: &str) -> Result<Task, Error> {
+        let actor = actor.to_owned();
+        for attempt in 0..=BUSY_RETRIES {
+            let actor = actor.clone();
+            match self
+                .db
+                .transaction(|tx| {
+                    Box::pin(async move {
+                        take_write_lock(tx).await?;
+                        let row = load(tx, id).await?;
+                        let status = parse_status(&row)?;
+                        check_transition(Transition::Review, status, row.id)?;
+                        apply_transition_tx(tx, row, actor, Transition::Review).await
+                    })
+                })
+                .await
+            {
+                Err(TransactionError::Connection(ref e))
+                    if attempt < BUSY_RETRIES && is_busy_conn(e) =>
+                {
+                    continue;
+                }
+                Err(TransactionError::Transaction(ref e))
+                    if attempt < BUSY_RETRIES && is_busy_err(e) =>
+                {
+                    continue;
+                }
+                other => return other.map_err(flat_txn),
+            }
+        }
+        unreachable!("busy retries are bounded")
+    }
+
+    /// Moves the machine `in_progress -> paused`. No gate: pausing is
+    /// always allowed.
+    pub async fn pause(&self, id: i64, actor: &str) -> Result<Task, Error> {
+        let actor = actor.to_owned();
+        for attempt in 0..=BUSY_RETRIES {
+            let actor = actor.clone();
+            match self
+                .db
+                .transaction(|tx| {
+                    Box::pin(async move {
+                        take_write_lock(tx).await?;
+                        let row = load(tx, id).await?;
+                        let status = parse_status(&row)?;
+                        check_transition(Transition::Pause, status, row.id)?;
+                        apply_transition_tx(tx, row, actor, Transition::Pause).await
+                    })
+                })
+                .await
+            {
+                Err(TransactionError::Connection(ref e))
+                    if attempt < BUSY_RETRIES && is_busy_conn(e) =>
+                {
+                    continue;
+                }
+                Err(TransactionError::Transaction(ref e))
+                    if attempt < BUSY_RETRIES && is_busy_err(e) =>
+                {
+                    continue;
+                }
+                other => return other.map_err(flat_txn),
+            }
+        }
+        unreachable!("busy retries are bounded")
+    }
+
+    /// Moves the machine `paused -> in_progress`. Runs the serial gate
+    /// like `start` and `reopen`; `--force` escapes with an auditable
+    /// event. The confirmation window is NOT re-based: a pause/resume
+    /// pair does not open a new cycle.
+    pub async fn resume(&self, id: i64, actor: &str, force: bool) -> Result<Task, Error> {
+        let actor = actor.to_owned();
+        for attempt in 0..=BUSY_RETRIES {
+            let actor = actor.clone();
+            match self
+                .db
+                .transaction(|tx| {
+                    Box::pin(async move {
+                        take_write_lock(tx).await?;
+                        let row = load(tx, id).await?;
+                        let status = parse_status(&row)?;
+                        check_transition(Transition::Resume, status, row.id)?;
+                        if let Some(assignee) = row.assignee.as_deref()
+                            && let Some((blocked_by, title)) =
+                                gates::serial_gate_blocked(tx, assignee, row.id).await?
+                        {
+                            if !force {
+                                return Err(Error::SerialGate {
+                                    assignee: assignee.to_string(),
+                                    blocked_by,
+                                    title,
+                                });
+                            }
+                            let payload = serde_json::json!({
+                                "gate": "serial",
+                                "blocked_by": blocked_by,
+                                "blocked_title": title,
+                            });
+                            append_event_tx(
+                                tx,
+                                row.id,
+                                "action",
+                                "force_resume",
+                                Some(actor.to_string()),
+                                row.assignee.clone(),
+                                None,
+                                None,
+                                Some(payload.to_string()),
+                                now(),
+                            )
+                            .await?;
+                        }
+                        apply_transition_tx(tx, row, actor, Transition::Resume).await
+                    })
+                })
+                .await
+            {
+                Err(TransactionError::Connection(ref e))
+                    if attempt < BUSY_RETRIES && is_busy_conn(e) =>
+                {
+                    continue;
+                }
+                Err(TransactionError::Transaction(ref e))
+                    if attempt < BUSY_RETRIES && is_busy_err(e) =>
+                {
+                    continue;
+                }
+                other => return other.map_err(flat_txn),
+            }
+        }
+        unreachable!("busy retries are bounded")
+    }
+
     /// Picks a queued task up (`queued -> in_progress`). The serial gate
     /// holds an assignee to one `in_progress` task; `--force` escapes with
     /// an auditable `force_start` event.
@@ -183,7 +412,7 @@ impl TaskStore {
                         let status = parse_status(&row)?;
                         check_transition(Transition::Start, status, id)?;
                         // Pickup assigns the task to the picker when nobody was
-                        // named at dispatch.
+                        // named at create.
                         let assignee = row.assignee.clone().unwrap_or_else(|| actor.to_string());
 
                         if let Some((blocked_by, title)) =
@@ -259,151 +488,8 @@ impl TaskStore {
         unreachable!("busy retries are bounded")
     }
 
-    /// Records a checkpoint action; `--receipt` files a review receipt;
-    /// `--review` moves the machine `in_progress -> review`; `--waiting` /
-    /// `--no-waiting` toggle the timing marker (a marker, never a state).
-    pub async fn checkpoint(&self, id: i64, op: TaskCheckpointRequest) -> Result<Task, Error> {
-        for attempt in 0..=BUSY_RETRIES {
-            let op = op.clone();
-            match self
-                .db
-                .transaction(|tx| {
-                    Box::pin(async move {
-                        take_write_lock(tx).await?;
-                        let row = load(tx, id).await?;
-                        let status = parse_status(&row)?;
-                        match status {
-                            TaskStatus::InProgress | TaskStatus::Review => {}
-                            _ => {
-                                return Err(Error::InvalidTransition {
-                                    id: row.id,
-                                    from: status.as_str().to_string(),
-                                    action: "checkpoint".to_string(),
-                                    expected: "in_progress|review".to_string(),
-                                });
-                            }
-                        }
-
-                        if op.review {
-                            if status != TaskStatus::InProgress {
-                                return Err(Error::InvalidTransition {
-                                    id: row.id,
-                                    from: status.as_str().to_string(),
-                                    action: "review".to_string(),
-                                    expected: Transition::Review.legal_from_str(),
-                                });
-                            }
-                            let update = ActiveModel {
-                                id: Set(row.id),
-                                status: Set(Transition::Review.to_str().to_string()),
-                                updated_at: Set(now()),
-                                ..Default::default()
-                            };
-                            update.update(tx).await?;
-                            append_event_tx(
-                                tx,
-                                row.id,
-                                "transition",
-                                "review",
-                                Some(op.actor.clone()),
-                                row.assignee.clone(),
-                                Some(status.as_str().to_string()),
-                                Some(Transition::Review.to_str().to_string()),
-                                None,
-                                now(),
-                            )
-                            .await?;
-                        }
-
-                        if let Some(waiting) = op.waiting {
-                            let update = ActiveModel {
-                                id: Set(row.id),
-                                waiting: Set(i64::from(waiting)),
-                                waiting_since: Set(waiting.then_some(now())),
-                                updated_at: Set(now()),
-                                ..Default::default()
-                            };
-                            update.update(tx).await?;
-                            let name = if waiting {
-                                "waiting_set"
-                            } else {
-                                "waiting_clear"
-                            };
-                            append_event_tx(
-                                tx,
-                                row.id,
-                                "action",
-                                name,
-                                Some(op.actor.clone()),
-                                row.assignee.clone(),
-                                None,
-                                None,
-                                None,
-                                now(),
-                            )
-                            .await?;
-                        }
-
-                        if op.receipt {
-                            let payload = note_payload(&op.note);
-                            append_event_tx(
-                                tx,
-                                row.id,
-                                "action",
-                                "receipt",
-                                Some(op.actor.clone()),
-                                row.assignee.clone(),
-                                None,
-                                None,
-                                payload,
-                                now(),
-                            )
-                            .await?;
-                        }
-
-                        // The note event: skip when this call only toggled the
-                        // waiting marker (its event already went in above).
-                        if !op.receipt
-                            && (op.note.is_some() || (!op.review && op.waiting.is_none()))
-                        {
-                            let payload = note_payload(&op.note);
-                            append_event_tx(
-                                tx,
-                                row.id,
-                                "action",
-                                "checkpoint",
-                                Some(op.actor.clone()),
-                                row.assignee.clone(),
-                                None,
-                                None,
-                                payload,
-                                now(),
-                            )
-                            .await?;
-                        }
-                        load(tx, id).await
-                    })
-                })
-                .await
-            {
-                Err(TransactionError::Connection(ref e))
-                    if attempt < BUSY_RETRIES && is_busy_conn(e) =>
-                {
-                    continue;
-                }
-                Err(TransactionError::Transaction(ref e))
-                    if attempt < BUSY_RETRIES && is_busy_err(e) =>
-                {
-                    continue;
-                }
-                other => return other.map_err(flat_txn),
-            }
-        }
-        unreachable!("busy retries are bounded")
-    }
-
-    /// Closes a task. The close gate requires a receipt from every seat
-    /// registered at dispatch in the current review cycle; `--force`
+    /// Closes a task. The close gate requires a confirmation from every
+    /// registered confirmer in the current cycle; `--force`
     /// escapes with an auditable event. The dossier (when registered) is
     /// packed canonically and ingested into the blob store before the
     /// transaction opens; the transaction then writes the pointer next to
@@ -415,6 +501,10 @@ impl TaskStore {
     /// successful ingest followed by a failed commit leaves the packed
     /// blob unreferenced — bounded growth; the blob store's gc reclaims
     /// on demand but nothing schedules it yet.
+    // Seven parameters: the close payload plus one injected dependency
+    // (the blob store); a struct would only relocate them, so the lint
+    // is answered with an allow.
+    #[allow(clippy::too_many_arguments)]
     pub async fn close(
         &self,
         id: i64,
@@ -465,39 +555,23 @@ impl TaskStore {
                         let row = load(tx, id).await?;
                         let status = parse_status(&row)?;
                         check_transition(Transition::Close, status, id)?;
-
-                        let seats: Vec<String> = serde_json::from_str(&row.seats)?;
-                        let cycle_open = gates::dispatch_in_current_cycle(tx, row.id).await?;
+                        let confirmers: Vec<String> = serde_json::from_str(&row.confirmers)
+                            .map_err(|_| Error::CorruptRecord {
+                                id: row.id,
+                                field: "confirmers",
+                            })?;
                         if !force {
-                            // Dispatch gate: the review round must have been
-                            // dispatched in this cycle before close counts as
-                            // reviewed.
-                            if !cycle_open {
-                                return Err(Error::DispatchGate { id: row.id });
-                            }
-                            // Receipt gate: the roster is the latest
-                            // dispatch's seats (the gate above guarantees one
-                            // exists); row.seats is only a defensive fallback.
-                            let roster = gates::latest_dispatch(tx, row.id)
-                                .await?
-                                .and_then(|e| e.payload)
-                                .and_then(|p| serde_json::from_str::<DispatchPayload>(&p).ok())
-                                .map(|p| p.seats)
-                                .unwrap_or_else(|| seats.clone());
-                            let missing = gates::missing_receipts(tx, row.id, &roster).await?;
+                            let missing =
+                                gates::missing_confirmations(tx, row.id, &confirmers).await?;
                             if !missing.is_empty() {
-                                return Err(Error::ReceiptGate {
+                                return Err(Error::ConfirmationGate {
                                     missing: missing.join(", "),
                                 });
                             }
                         } else {
-                            let mut escaped: Vec<&str> = vec!["receipts"];
-                            if !cycle_open {
-                                escaped.insert(0, "dispatch");
-                            }
                             let payload = serde_json::json!({
-                                "gates": escaped,
-                                "registered_seats": seats,
+                                "gates": ["confirmations"],
+                                "registered_confirmers": confirmers,
                             });
                             append_event_tx(
                                 tx,
@@ -522,8 +596,6 @@ impl TaskStore {
                             closed_reason: Set(Some(reason.as_str().to_string())),
                             close_summary: Set(summary.clone()),
                             archive_hash: Set(archive_hash.clone()),
-                            waiting: Set(0),
-                            waiting_since: Set(None),
                             ..Default::default()
                         };
                         update.update(tx).await?;
@@ -574,8 +646,8 @@ impl TaskStore {
     /// writes a fresh pointer for changed content. History is in the events.
     /// Reopening runs the serial gate like `start` — an assignee still
     /// works one task at a time (`--force` escapes with an auditable
-    /// event) — and the `reopen` event doubles as the receipt-cycle
-    /// marker: prior-cycle receipts no longer satisfy the close gate.
+    /// event) — and the `reopen` event doubles as the confirmation-cycle
+    /// marker: prior-cycle confirmations no longer satisfy the close gate.
     pub async fn reopen(&self, id: i64, actor: &str, force: bool) -> Result<Task, Error> {
         let actor = actor.to_owned();
         for attempt in 0..=BUSY_RETRIES {
@@ -626,8 +698,6 @@ impl TaskStore {
                             updated_at: Set(now()),
                             closed_reason: Set(None),
                             close_summary: Set(None),
-                            waiting: Set(0),
-                            waiting_since: Set(None),
                             ..Default::default()
                         };
                         update.update(tx).await?;
@@ -668,9 +738,9 @@ impl TaskStore {
     /// Appends a note to the trail. Never moves the machine and never
     /// mutates a field: this is the structured append-only record
     /// surface (the event table has no update or delete path). Allowed
-    /// in any state, `closed` included — an annotation is audit-log
+    /// in any state, `closed` included — a note is audit-log
     /// material, not a state change.
-    pub async fn annotate(&self, id: i64, actor: &str, note: String) -> Result<Task, Error> {
+    pub async fn note(&self, id: i64, actor: &str, note: String) -> Result<Task, Error> {
         for attempt in 0..=BUSY_RETRIES {
             let actor = actor.to_owned();
             let note = note.clone();
@@ -684,204 +754,12 @@ impl TaskStore {
                             tx,
                             row.id,
                             "action",
-                            "annotate",
+                            "note",
                             Some(actor),
                             row.assignee.clone(),
                             None,
                             None,
                             note_payload(&Some(note)),
-                            now(),
-                        )
-                        .await?;
-                        load(tx, id).await
-                    })
-                })
-                .await
-            {
-                Err(TransactionError::Connection(ref e))
-                    if attempt < BUSY_RETRIES && is_busy_conn(e) =>
-                {
-                    continue;
-                }
-                Err(TransactionError::Transaction(ref e))
-                    if attempt < BUSY_RETRIES && is_busy_err(e) =>
-                {
-                    continue;
-                }
-                other => return other.map_err(flat_txn),
-            }
-        }
-        unreachable!("busy retries are bounded")
-    }
-
-    /// Records a gate report — the announcement that must precede every
-    /// recorded chain operation (the report-before-you-move discipline,
-    /// tool-faced). An append-only record, any state.
-    pub async fn gate_report(&self, id: i64, actor: &str, note: String) -> Result<Task, Error> {
-        for attempt in 0..=BUSY_RETRIES {
-            let actor = actor.to_owned();
-            let note = note.clone();
-            match self
-                .db
-                .transaction(|tx| {
-                    Box::pin(async move {
-                        take_write_lock(tx).await?;
-                        let row = load(tx, id).await?;
-                        append_event_tx(
-                            tx,
-                            row.id,
-                            "action",
-                            "gate_report",
-                            Some(actor),
-                            row.assignee.clone(),
-                            None,
-                            None,
-                            note_payload(&Some(note)),
-                            now(),
-                        )
-                        .await?;
-                        load(tx, id).await
-                    })
-                })
-                .await
-            {
-                Err(TransactionError::Connection(ref e))
-                    if attempt < BUSY_RETRIES && is_busy_conn(e) =>
-                {
-                    continue;
-                }
-                Err(TransactionError::Transaction(ref e))
-                    if attempt < BUSY_RETRIES && is_busy_err(e) =>
-                {
-                    continue;
-                }
-                other => return other.map_err(flat_txn),
-            }
-        }
-        unreachable!("busy retries are bounded")
-    }
-
-    /// Dispatches the review round: records the seat roster for the
-    /// current cycle and re-bases the receipt boundary (receipts filed
-    /// before the dispatch do not count). Omitting the roster re-affirms
-    /// the seats registered at create; an empty roster is an explicit
-    /// zero-seat registration (no receipts required at close).
-    pub async fn dispatch(
-        &self,
-        id: i64,
-        actor: &str,
-        seats: Option<Vec<String>>,
-    ) -> Result<Task, Error> {
-        for attempt in 0..=BUSY_RETRIES {
-            let actor = actor.to_owned();
-            let seats = seats.clone();
-            match self
-                .db
-                .transaction(|tx| {
-                    Box::pin(async move {
-                        take_write_lock(tx).await?;
-                        let row = load(tx, id).await?;
-                        let status = parse_status(&row)?;
-                        match status {
-                            TaskStatus::InProgress | TaskStatus::Review => {}
-                            _ => {
-                                return Err(Error::InvalidTransition {
-                                    id: row.id,
-                                    from: status.as_str().to_string(),
-                                    action: "dispatch".to_string(),
-                                    expected: "in_progress|review".to_string(),
-                                });
-                            }
-                        }
-                        // A damaged stored roster must not fold to zero seats.
-                        let roster =
-                            match seats {
-                                Some(roster) => roster,
-                                None => serde_json::from_str::<Vec<String>>(&row.seats).map_err(
-                                    |_| Error::CorruptRecord {
-                                        id: row.id,
-                                        field: "seats",
-                                    },
-                                )?,
-                            };
-                        let payload = serde_json::json!({ "seats": roster });
-                        append_event_tx(
-                            tx,
-                            row.id,
-                            "action",
-                            "dispatch",
-                            Some(actor),
-                            row.assignee.clone(),
-                            None,
-                            None,
-                            Some(payload.to_string()),
-                            now(),
-                        )
-                        .await?;
-                        load(tx, id).await
-                    })
-                })
-                .await
-            {
-                Err(TransactionError::Connection(ref e))
-                    if attempt < BUSY_RETRIES && is_busy_conn(e) =>
-                {
-                    continue;
-                }
-                Err(TransactionError::Transaction(ref e))
-                    if attempt < BUSY_RETRIES && is_busy_err(e) =>
-                {
-                    continue;
-                }
-                other => return other.map_err(flat_txn),
-            }
-        }
-        unreachable!("busy retries are bounded")
-    }
-
-    /// Records a chain operation on the trail. The gate-report gate
-    /// requires a `gate_report` event newer than the last recorded chain
-    /// operation — the tool face of report-before-you-move. The CLI
-    /// cannot wrap git, so recording is voluntary; once recorded, an
-    /// out-of-order chain op is refused here instead of passing unseen.
-    pub async fn chain_op(
-        &self,
-        id: i64,
-        actor: &str,
-        op: &str,
-        detail: Option<String>,
-        force: bool,
-    ) -> Result<Task, Error> {
-        for attempt in 0..=BUSY_RETRIES {
-            let actor = actor.to_owned();
-            let detail = detail.clone();
-            let op = op.to_owned();
-            match self
-                .db
-                .transaction(|tx| {
-                    Box::pin(async move {
-                        take_write_lock(tx).await?;
-                        let row = load(tx, id).await?;
-                        if !force && !gates::gate_report_current(tx, row.id).await? {
-                            return Err(Error::GateReportGate { id: row.id });
-                        }
-                        let mut payload = serde_json::json!({ "op": op });
-                        if let Some(detail) = &detail {
-                            payload["detail"] = serde_json::Value::String(detail.clone());
-                        }
-                        if force {
-                            payload["gate"] = serde_json::Value::String("gate_report".into());
-                        }
-                        append_event_tx(
-                            tx,
-                            row.id,
-                            "action",
-                            "chain_op",
-                            Some(actor),
-                            row.assignee.clone(),
-                            None,
-                            None,
-                            Some(payload.to_string()),
                             now(),
                         )
                         .await?;
@@ -982,16 +860,7 @@ impl TaskStore {
     pub async fn list(&self, filter: TaskFilter) -> Result<Vec<Task>, Error> {
         use kallip_common::protocol::TaskTimeAxis;
         use sea_orm::QuerySelect;
-        let mut query = TaskEntity::find();
-        // The archive partition: the default view is the active one
-        // (done.txt precedent); `archived` flips to archived-only.
-        query = query.filter(TaskColumn::Archived.eq(i64::from(filter.archived)));
-        if let Some(status) = filter.status {
-            query = query.filter(TaskColumn::Status.eq(status.as_str()));
-        }
-        if let Some(assignee) = filter.assignee {
-            query = query.filter(TaskColumn::Assignee.eq(assignee));
-        }
+        let mut query = apply_task_filter(TaskEntity::find(), &filter);
         // One axis drives the window, the order, and the caller's time
         // column: newest-first on the axis itself. A NULL axis value (an
         // active task under the closed axis) sorts last and matches no
@@ -1000,12 +869,6 @@ impl TaskStore {
             TaskTimeAxis::Updated => TaskColumn::UpdatedAt,
             TaskTimeAxis::Closed => TaskColumn::EndedAt,
         };
-        if let Some(since) = filter.since {
-            query = query.filter(axis.gte(since));
-        }
-        if let Some(until) = filter.until {
-            query = query.filter(axis.lte(until));
-        }
         query = query.order_by_desc(axis);
         // Same-second rows tie on the axis stamp; the id breaks the
         // tie deterministically (later creation sorts first).
@@ -1017,6 +880,61 @@ impl TaskStore {
             query = query.offset(offset);
         }
         Ok(query.all(&self.db).await?)
+    }
+
+    /// Row count matching the filter, ignoring limit/offset: the paging
+    /// envelope's total.
+    pub async fn count(&self, filter: TaskFilter) -> Result<u64, Error> {
+        Ok(apply_task_filter(TaskEntity::find(), &filter)
+            .count(&self.db)
+            .await?)
+    }
+
+    /// Ids among `ids` carrying at least one confirm event whose payload
+    /// has a `file` key. Exact per-row parse; the input is page-sized.
+    pub async fn ids_with_reports(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashSet<i64>, Error> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let confirms = EventEntity::find()
+            .filter(EventColumn::TaskId.is_in(ids.to_vec()))
+            .filter(EventColumn::Kind.eq("action"))
+            .filter(EventColumn::Name.eq("confirm"))
+            .all(&self.db)
+            .await?;
+        Ok(confirms
+            .into_iter()
+            .filter(|e| {
+                e.payload
+                    .as_deref()
+                    .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                    .and_then(|v| v.get("file").cloned())
+                    .is_some_and(|r| r.is_string())
+            })
+            .map(|e| e.task_id)
+            .collect())
+    }
+
+    /// One paging envelope: the lightweight rows for the page plus the
+    /// filter-matched total. The list face of `GET /tasks` — a poll
+    /// never drags event trails or report bodies.
+    pub async fn list_page(&self, filter: TaskFilter) -> Result<TaskListPage, Error> {
+        let rows = self.list(filter.clone()).await?;
+        let total = self.count(filter).await?;
+        let page_ids: Vec<i64> = rows.iter().map(|t| t.id).collect();
+        let with_reports = self.ids_with_reports(&page_ids).await?;
+        let mut page_rows = Vec::with_capacity(rows.len());
+        for row in rows {
+            let has_reports = with_reports.contains(&row.id);
+            page_rows.push(to_row(row, has_reports)?);
+        }
+        Ok(TaskListPage {
+            rows: page_rows,
+            total: total as i64,
+        })
     }
 
     /// The task row and its trail are a pair: one read transaction keeps
@@ -1114,14 +1032,37 @@ impl TaskStore {
     }
 }
 
-fn to_export(task: Task, events: Vec<TaskEvent>) -> Result<TaskExport, Error> {
-    let iso = |secs: Option<i64>| {
-        secs.map(crate::model::iso8601_utc)
-            .transpose()
-            .map_err(Error::from)
+/// The filter half of the list query (partition, status, assignee, axis
+/// window) without order or paging — shared by `list` and `count`.
+fn apply_task_filter(
+    mut query: sea_orm::Select<TaskEntity>,
+    filter: &TaskFilter,
+) -> sea_orm::Select<TaskEntity> {
+    // The archive partition: the default view is the active one
+    // (done.txt precedent); `archived` flips to archived-only.
+    query = query.filter(TaskColumn::Archived.eq(i64::from(filter.archived)));
+    if let Some(status) = &filter.status {
+        query = query.filter(TaskColumn::Status.eq(status.as_str()));
+    }
+    if let Some(assignee) = &filter.assignee {
+        query = query.filter(TaskColumn::Assignee.eq(assignee.as_str()));
+    }
+    let axis = match filter.time {
+        kallip_common::protocol::TaskTimeAxis::Updated => TaskColumn::UpdatedAt,
+        kallip_common::protocol::TaskTimeAxis::Closed => TaskColumn::EndedAt,
     };
-    let seats: Vec<String> = serde_json::from_str(&task.seats)?;
-    let association =
+    if let Some(since) = filter.since {
+        query = query.filter(axis.gte(since));
+    }
+    if let Some(until) = filter.until {
+        query = query.filter(axis.lte(until));
+    }
+    query
+}
+
+/// The association export shared by the full export and the list row.
+fn association_of(task: &Task) -> Result<Option<AssociationExport>, Error> {
+    Ok(
         if task.inbox_id_start.is_some() || task.inbox_id_end.is_some() || task.room_id.is_some() {
             Some(AssociationExport {
                 inbox_id_start: task.inbox_id_start,
@@ -1132,7 +1073,18 @@ fn to_export(task: Task, events: Vec<TaskEvent>) -> Result<TaskExport, Error> {
             })
         } else {
             None
-        };
+        },
+    )
+}
+
+fn to_export(task: Task, events: Vec<TaskEvent>) -> Result<TaskExport, Error> {
+    let iso = |secs: Option<i64>| {
+        secs.map(crate::model::iso8601_utc)
+            .transpose()
+            .map_err(Error::from)
+    };
+    let confirmers: Vec<String> = serde_json::from_str(&task.confirmers)?;
+    let association = association_of(&task)?;
     let mut event_exports = Vec::with_capacity(events.len());
     for e in events {
         event_exports.push(EventExport {
@@ -1140,6 +1092,7 @@ fn to_export(task: Task, events: Vec<TaskEvent>) -> Result<TaskExport, Error> {
             kind: e.kind.clone(),
             name: e.name.clone(),
             actor: e.actor.clone(),
+            actor_role: None,
             assignee: e.assignee.clone(),
             from_status: e.from_status.clone(),
             to_status: e.to_status.clone(),
@@ -1153,13 +1106,11 @@ fn to_export(task: Task, events: Vec<TaskEvent>) -> Result<TaskExport, Error> {
         status: task.status.clone(),
         creator: task.creator.clone(),
         assignee: task.assignee.clone(),
-        seats,
+        confirmers,
         created_at: iso(Some(task.created_at))?,
         updated_at: iso(Some(task.updated_at))?,
         started_at: iso(task.started_at)?,
         ended_at: iso(task.ended_at)?,
-        waiting: task.waiting != 0,
-        waiting_since: iso(task.waiting_since)?,
         archived: task.archived != 0,
         archived_at: iso(task.archived_at)?,
         closed_reason: task.closed_reason.clone(),
@@ -1168,6 +1119,37 @@ fn to_export(task: Task, events: Vec<TaskEvent>) -> Result<TaskExport, Error> {
         dossier_path: task.dossier_path.clone(),
         archive_hash: task.archive_hash.clone(),
         events: event_exports,
+    })
+}
+
+/// The list-face projection: the store row into the lightweight wire row.
+/// `has_reports` comes from the page-level confirmation scan.
+fn to_row(task: Task, has_reports: bool) -> Result<TaskRow, Error> {
+    let iso = |secs: Option<i64>| {
+        secs.map(crate::model::iso8601_utc)
+            .transpose()
+            .map_err(Error::from)
+    };
+    let confirmers: Vec<String> = serde_json::from_str(&task.confirmers)?;
+    Ok(TaskRow {
+        id: task.id,
+        title: task.title.clone(),
+        status: task.status.clone(),
+        creator: task.creator.clone(),
+        assignee: task.assignee.clone(),
+        confirmers,
+        created_at: iso(Some(task.created_at))?,
+        updated_at: iso(Some(task.updated_at))?,
+        started_at: iso(task.started_at)?,
+        ended_at: iso(task.ended_at)?,
+        archived: task.archived != 0,
+        archived_at: iso(task.archived_at)?,
+        closed_reason: task.closed_reason.clone(),
+        close_summary: task.close_summary.clone(),
+        association: association_of(&task)?,
+        dossier_path: task.dossier_path.clone(),
+        archive_hash: task.archive_hash.clone(),
+        has_reports,
     })
 }
 
@@ -1203,6 +1185,56 @@ fn check_transition(t: Transition, from: TaskStatus, id: i64) -> Result<(), Erro
 fn note_payload(note: &Option<String>) -> Option<String> {
     note.as_ref()
         .map(|n| serde_json::json!({ "note": n }).to_string())
+}
+/// Confirm payload: `note` and `file` side by side, either omissible;
+/// None when the confirmation carries neither.
+fn confirm_payload(note: &Option<String>, file: &Option<String>) -> Option<String> {
+    if note.is_none() && file.is_none() {
+        return None;
+    }
+    let mut payload = serde_json::Map::new();
+    if let Some(note) = note {
+        payload.insert("note".to_string(), serde_json::Value::String(note.clone()));
+    }
+    if let Some(file) = file {
+        payload.insert("file".to_string(), serde_json::Value::String(file.clone()));
+    }
+    Some(serde_json::Value::Object(payload).to_string())
+}
+
+/// Shared tail of the payload-free transitions (`review`, `pause`,
+/// `resume`): flip the status row and append the transition event.
+async fn apply_transition_tx(
+    tx: &DatabaseTransaction,
+    row: task::Model,
+    actor: String,
+    t: Transition,
+) -> Result<Task, Error> {
+    let update = ActiveModel {
+        id: Set(row.id),
+        status: Set(t.to_str().to_string()),
+        updated_at: Set(now()),
+        ..Default::default()
+    };
+    update.update(tx).await?;
+    append_event_tx(
+        tx,
+        row.id,
+        "transition",
+        t.name(),
+        Some(actor),
+        row.assignee.clone(),
+        Some(
+            TaskStatus::parse(&row.status)
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_else(|| row.status.clone()),
+        ),
+        Some(t.to_str().to_string()),
+        None,
+        now(),
+    )
+    .await?;
+    load(tx, row.id).await
 }
 
 #[allow(clippy::too_many_arguments)]

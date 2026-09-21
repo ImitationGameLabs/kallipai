@@ -44,36 +44,35 @@ pub(crate) fn parse_time_anchor(raw: &str, now_secs: u64) -> anyhow::Result<u64>
 /// The tagma's task ledger: queue, coarse state machine, event trail, hard
 /// gates, and closed-task archives. Verbs go through the tagma task API
 /// (the CLI never touches tasks.sqlite); the acting agent is taken
-/// from `KALLIP_ID` (or --actor). Write verbs are enforced server-side:
+/// from the authenticated identity. Write verbs are enforced server-side:
 /// the CLI is an entry point, the tagma is the law.
 #[derive(Subcommand)]
 pub(crate) enum TaskCommand {
-    /// Register a task in the queue (--title ...), or pick a queued task up
-    /// by id (queued -> in_progress; the serial gate applies, --force to
-    /// override with an auditable escape).
+    /// Register a task in the queue: title, optional assignee, the
+    /// confirmer roster (--require, repeatable), dossier, association keys.
+    Create(TaskCreateArgs),
+    /// Pick a queued task up (queued -> in_progress; the serial gate
+    /// applies, --force to override with an auditable escape).
     Start(TaskStartArgs),
-    /// Record a checkpoint: a work note, a review receipt (--receipt), a
-    /// move to review (--review), and/or the waiting timing marker
-    /// (--waiting / --no-waiting; a marker, never a state).
-    Checkpoint(TaskCheckpointArgs),
-    /// Close a task: every review seat registered at dispatch must have
-    /// filed a receipt (checkpoint --receipt), or pass --force with an
-    /// auditable escape. The dossier (if registered) is packed canonically
-    /// and content-addressed on close.
+    /// File a confirmation toward the close gate (optionally carrying a
+    /// review report via --file).
+    Confirm(TaskConfirmArgs),
+    /// Move the task in_progress -> review.
+    Review(TaskReviewArgs),
+    /// Move the task in_progress -> paused (no gate).
+    Pause(TaskPauseArgs),
+    /// Move the task paused -> in_progress (the serial gate applies,
+    /// --force to override with an auditable escape).
+    Resume(TaskResumeArgs),
+    /// Close a task: every registered confirmer must have filed a
+    /// confirmation, or pass --force with an auditable escape. The
+    /// dossier (if registered) is packed canonically and
+    /// content-addressed on close.
     Close(TaskCloseArgs),
     /// Reopen a closed task (back to in_progress).
     Reopen(TaskReopenArgs),
     /// Append a note to the task's trail (never moves the machine).
-    Annotate(TaskAnnotateArgs),
-    /// Dispatch the review round: registers the seat roster for the
-    /// current review cycle; the close gate counts receipts against it.
-    Dispatch(TaskDispatchArgs),
-    /// Record a gate report — the announcement that precedes every
-    /// recorded chain operation.
-    GateReport(TaskGateReportArgs),
-    /// Record a chain operation (commit/amend/rebase/reset); requires a
-    /// gate report newer than the last recorded chain op.
-    ChainOp(TaskChainOpArgs),
+    Note(TaskNoteArgs),
     /// Archive a closed task: it leaves the default list view
     /// (`task list --archived` shows archived tasks).
     Archive(TaskArchiveArgs),
@@ -91,26 +90,65 @@ pub(crate) enum TaskCommand {
     /// Extract a closed task's content-addressed archive (the dossier
     /// snapshot frozen at close) into a directory.
     Extract(TaskExtractArgs),
+    /// Review confirmations for a task: list what was filed, or show
+    /// one confirmation's note and report (pick the confirmer and
+    /// version).
+    Report(TaskReportArgs),
 }
 
 #[derive(Args)]
 pub(crate) struct TaskStartArgs {
-    /// Existing task id to pick up (queued -> in_progress). Omit to
-    /// register a new task from --title.
-    pub id: Option<i64>,
-    /// Title for a new task (registers it in the queue).
+    /// Existing task id to pick up (queued -> in_progress).
+    pub id: i64,
+    /// Override the serial gate (the escape is recorded in the event trail).
     #[arg(long)]
-    pub title: Option<String>,
-    /// Creator for a new task (defaults to KALLIP_ID).
+    pub force: bool,
+}
+#[derive(Args)]
+pub(crate) struct TaskConfirmArgs {
+    /// Task id (must be in_progress or review).
+    pub id: i64,
+    /// Confirmation note.
     #[arg(long)]
-    pub creator: Option<String>,
-    /// Assignee for a new task; defaults to whoever picks it up.
+    pub note: Option<String>,
+    /// Read the review report body from this UTF-8 file.
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct TaskReviewArgs {
+    /// Task id.
+    pub id: i64,
+}
+
+#[derive(Args)]
+pub(crate) struct TaskPauseArgs {
+    /// Task id.
+    pub id: i64,
+}
+
+#[derive(Args)]
+pub(crate) struct TaskResumeArgs {
+    /// Task id.
+    pub id: i64,
+    /// Override the serial gate (the escape is recorded in the event trail).
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct TaskCreateArgs {
+    /// Title for the new task.
+    #[arg(long)]
+    pub title: String,
+    /// Assignee for the new task; defaults to whoever picks it up.
     #[arg(long)]
     pub assignee: Option<String>,
-    /// Register a review seat (repeatable). Every seat must file a receipt
-    /// before the task can close.
-    #[arg(long = "seat")]
-    pub seats: Vec<String>,
+    /// Register a confirmer (repeatable). Every registered confirmer must
+    /// file a confirmation before the task can close.
+    #[arg(long = "require")]
+    pub require: Vec<String>,
     /// Dossier directory packed into the closed archive on close.
     #[arg(long)]
     pub dossier: Option<PathBuf>,
@@ -129,36 +167,6 @@ pub(crate) struct TaskStartArgs {
     /// Association key: room seq window end.
     #[arg(long)]
     pub room_seq_end: Option<i64>,
-    /// Override the serial gate (the escape is recorded in the event trail).
-    #[arg(long)]
-    pub force: bool,
-    /// Acting agent (defaults to KALLIP_ID).
-    #[arg(long)]
-    pub actor: Option<String>,
-}
-
-#[derive(Args)]
-pub(crate) struct TaskCheckpointArgs {
-    /// Task id.
-    pub id: i64,
-    /// Work note recorded with the checkpoint.
-    #[arg(long)]
-    pub note: Option<String>,
-    /// File a review receipt as this actor (satisfies the close gate).
-    #[arg(long)]
-    pub receipt: bool,
-    /// Move the task in_progress -> review.
-    #[arg(long)]
-    pub review: bool,
-    /// Set the waiting timing marker.
-    #[arg(long)]
-    pub waiting: bool,
-    /// Clear the waiting timing marker.
-    #[arg(long = "no-waiting")]
-    pub no_waiting: bool,
-    /// Acting agent (defaults to KALLIP_ID).
-    #[arg(long)]
-    pub actor: Option<String>,
 }
 
 #[derive(Args)]
@@ -171,12 +179,10 @@ pub(crate) struct TaskCloseArgs {
     /// One-sentence result recorded with the close event.
     #[arg(long)]
     pub summary: Option<String>,
-    /// Override the receipt gate (the escape is recorded in the event trail).
+    /// Override the confirmation gate (the escape is recorded in the event
+    /// trail).
     #[arg(long)]
     pub force: bool,
-    /// Acting agent (defaults to KALLIP_ID).
-    #[arg(long)]
-    pub actor: Option<String>,
 }
 
 /// Terminal-state reason, serialized snake_case on the store face.
@@ -188,16 +194,6 @@ pub(crate) enum TaskCloseReason {
     Duplicate,
 }
 
-/// The recorded git chain operation, serialized snake_case on the store face.
-#[derive(clap::ValueEnum, Clone, Copy)]
-#[value(rename_all = "snake_case")]
-pub(crate) enum TaskChainOpType {
-    Commit,
-    Amend,
-    Rebase,
-    Reset,
-}
-
 #[derive(Args)]
 pub(crate) struct TaskReopenArgs {
     /// Task id.
@@ -205,65 +201,15 @@ pub(crate) struct TaskReopenArgs {
     /// Override the serial gate (the escape is recorded in the event trail).
     #[arg(long)]
     pub force: bool,
-    /// Acting agent (defaults to KALLIP_ID).
-    #[arg(long)]
-    pub actor: Option<String>,
 }
 
 #[derive(Args)]
-pub(crate) struct TaskAnnotateArgs {
+pub(crate) struct TaskNoteArgs {
     /// Task id (any state, closed included).
     pub id: i64,
     /// The note to append.
     #[arg(long)]
     pub note: String,
-    /// Acting agent (defaults to KALLIP_ID).
-    #[arg(long)]
-    pub actor: Option<String>,
-}
-
-#[derive(Args)]
-pub(crate) struct TaskDispatchArgs {
-    /// Task id (must be in_progress or review).
-    pub id: i64,
-    /// Seat roster for this review cycle (comma-separated). Omit to
-    /// re-affirm the roster registered at create; pass an empty value
-    /// for an explicit zero-seat registration.
-    #[arg(long, value_delimiter = ',')]
-    pub seats: Option<Vec<String>>,
-    /// Acting agent (defaults to KALLIP_ID).
-    #[arg(long)]
-    pub actor: Option<String>,
-}
-
-#[derive(Args)]
-pub(crate) struct TaskGateReportArgs {
-    /// Task id.
-    pub id: i64,
-    /// One-line report (what was announced, where).
-    #[arg(long)]
-    pub note: String,
-    /// Acting agent (defaults to KALLIP_ID).
-    #[arg(long)]
-    pub actor: Option<String>,
-}
-
-#[derive(Args)]
-pub(crate) struct TaskChainOpArgs {
-    /// Task id.
-    pub id: i64,
-    /// The chain operation: commit, amend, rebase, or reset.
-    #[arg(long)]
-    pub op: TaskChainOpType,
-    /// Reference or one-line detail (e.g. the resulting hash).
-    #[arg(long)]
-    pub detail: Option<String>,
-    /// Override the gate-report gate (the escape is recorded).
-    #[arg(long)]
-    pub force: bool,
-    /// Acting agent (defaults to KALLIP_ID).
-    #[arg(long)]
-    pub actor: Option<String>,
 }
 
 #[derive(Args)]
@@ -273,14 +219,11 @@ pub(crate) struct TaskArchiveArgs {
     /// Override the closed-only gate (the escape is recorded).
     #[arg(long)]
     pub force: bool,
-    /// Acting agent (defaults to KALLIP_ID).
-    #[arg(long)]
-    pub actor: Option<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct TaskListArgs {
-    /// Filter by status: queued, in_progress, review, closed.
+    /// Filter by status: queued, in_progress, paused, review, closed.
     #[arg(long)]
     pub status: Option<String>,
     /// Filter by assignee.
@@ -338,6 +281,49 @@ pub(crate) struct TaskExtractArgs {
     /// Destination directory (created if absent).
     #[arg(long)]
     pub to: PathBuf,
+}
+
+#[derive(Args)]
+pub(crate) struct TaskReportArgs {
+    #[command(subcommand)]
+    pub command: TaskReportCommand,
+}
+
+/// Review confirmations filed on a task, read back from the event trail.
+#[derive(Subcommand)]
+pub(crate) enum TaskReportCommand {
+    /// List the confirmations filed on a task (confirmer, version, size).
+    List(TaskReportListArgs),
+    /// Show one confirmation: the confirmer, version, note, and report body.
+    Show(TaskReportShowArgs),
+}
+
+#[derive(Args)]
+pub(crate) struct TaskReportListArgs {
+    /// Task id.
+    pub id: i64,
+    /// Filter to one confirmer (agent id or role name).
+    #[arg(long)]
+    pub confirmer: Option<String>,
+    /// Write the listing to this file instead of stdout.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct TaskReportShowArgs {
+    /// Task id.
+    pub id: i64,
+    /// The confirmer whose confirmation to show (agent id or role name).
+    #[arg(long)]
+    pub confirmer: String,
+    /// Confirmation version for that confirmer, 1-based (defaults to the
+    /// latest).
+    #[arg(long)]
+    pub version: Option<u32>,
+    /// Write the confirmation to this file instead of stdout.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
 }
 
 #[cfg(test)]

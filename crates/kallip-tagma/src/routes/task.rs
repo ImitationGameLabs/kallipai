@@ -13,8 +13,8 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use kallip_common::protocol::{
-    ApiError, TaskChainOpRequest, TaskCheckpointRequest, TaskCloseRequest, TaskCreateRequest,
-    TaskDispatchRequest, TaskForceRequest, TaskListQuery, TaskNoteRequest,
+    ApiError, TaskCloseRequest, TaskConfirmRequest, TaskCreateRequest, TaskForceRequest,
+    TaskListQuery, TaskNoteRequest,
 };
 use kallip_task::{TaskFilter, TaskStore};
 
@@ -37,6 +37,61 @@ fn blobs(state: &SharedState) -> Option<std::sync::Arc<dyn kallip_task::BlobStor
     state.task_blobs.get().cloned()
 }
 
+/// The event actor for a verb, from the authenticated identity: the agent
+/// id for agent tokens, the literal `operator` for the operator token.
+/// The tagma records who called; callers cannot claim an actor.
+fn acting_agent(auth: &crate::auth::AuthIdentity) -> String {
+    match auth.identity() {
+        crate::auth::Identity::Operator => "operator".to_string(),
+        crate::auth::Identity::Agent { id } => id.to_string(),
+    }
+}
+
+/// One id→role snapshot per request, cloned under the registry read lock
+/// and used afterwards with no lock held (the mapping body is sync).
+async fn role_snapshot(state: &SharedState) -> std::collections::HashMap<String, String> {
+    state
+        .registry
+        .read()
+        .await
+        .iter()
+        .map(|(id, entry)| (id.to_string(), entry.identity().config.role.clone()))
+        .collect()
+}
+
+/// Fill `actor_role` on every event: the role for a registered agent id,
+/// `None` for anything else (historical confirmer-name actors, the literal
+/// `operator`, deregistered ids, null actors). Read and write responses
+/// share this one mapping, so the wire type has a single fill policy.
+fn inject_actor_roles(
+    mut export: kallip_task::TaskExport,
+    roles: &std::collections::HashMap<String, String>,
+) -> kallip_task::TaskExport {
+    for event in &mut export.events {
+        event.actor_role = event
+            .actor
+            .as_deref()
+            .and_then(|actor| roles.get(actor))
+            .cloned();
+    }
+    export
+}
+
+/// The create verb's confirmer resolver, from the same snapshot shape:
+/// role name → agent id. Unresolvable names yield `None` (the store
+/// reports `ConfirmerUnresolved`).
+async fn confirmer_resolver(
+    state: &SharedState,
+) -> std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync> {
+    let registry = state.registry.read().await;
+    let mut by_role: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (id, entry) in registry.iter() {
+        by_role.insert(entry.identity().config.role.clone(), id.to_string());
+    }
+    drop(registry);
+    std::sync::Arc::new(move |name| by_role.get(name).cloned())
+}
+
 /// The store's error taxonomy to the HTTP face: state refusals are
 /// conflicts, unknown ids are misses, everything else is ours.
 fn api_error(err: kallip_task::Error) -> ApiError {
@@ -45,9 +100,8 @@ fn api_error(err: kallip_task::Error) -> ApiError {
         E::NotFound { id } => ApiError::not_found(format!("task {id} not found")),
         E::InvalidTransition { .. }
         | E::SerialGate { .. }
-        | E::ReceiptGate { .. }
-        | E::DispatchGate { .. }
-        | E::GateReportGate { .. }
+        | E::ConfirmationGate { .. }
+        | E::ConfirmerUnresolved { .. }
         | E::ArchiveGate { .. } => ApiError::conflict(err.to_string()),
         // Malformed association keys are a caller input problem, not a
         // server fault: 400, not 500.
@@ -56,6 +110,9 @@ fn api_error(err: kallip_task::Error) -> ApiError {
         // create body registered it), so it stays in the 400 family;
         // the file system merely reports the bad input.
         E::DossierNotDir { .. } => ApiError::bad_request(err.to_string()),
+        // A confirm report over the shared byte cap is caller input:
+        // 400, not 500 (the cap is REPORT_MAX_BYTES).
+        E::ReportTooLarge { .. } => ApiError::bad_request(err.to_string()),
         _ => ApiError::internal(err.to_string()),
     }
 }
@@ -73,42 +130,51 @@ fn notify(state: &SharedState, verb: &str, export: &kallip_task::TaskExport) {
         verb: verb.to_string(),
         creator: export.creator.clone(),
         assignee: export.assignee.clone(),
-        seats: export.seats.clone(),
+        confirmers: export.confirmers.clone(),
     }) {
         warn!(task = export.id, verb, error = %err, "task wake broadcast dropped");
     }
 }
 async fn create(
     State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
     Json(body): Json<TaskCreateRequest>,
 ) -> TaskResult<kallip_task::TaskExport> {
-    let task = store(&state)?.create(body).await.map_err(api_error)?;
+    let actor = acting_agent(&auth);
+    let snapshot = role_snapshot(&state).await;
+    let task = store(&state)?
+        .create(body, &actor, confirmer_resolver(&state).await)
+        .await
+        .map_err(api_error)?;
     let id = task.id;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
+    let export = inject_actor_roles(export, &snapshot);
     notify(&state, "create", &export);
     Ok(Json(export))
 }
 
 async fn start(
     State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
     Path(id): Path<i64>,
     Json(body): Json<TaskForceRequest>,
 ) -> TaskResult<kallip_task::TaskExport> {
+    let actor = acting_agent(&auth);
+    let snapshot = role_snapshot(&state).await;
     store(&state)?
-        .start(id, &body.actor, body.force)
+        .start(id, &actor, body.force)
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
+    let export = inject_actor_roles(export, &snapshot);
     notify(&state, "start", &export);
     Ok(Json(export))
 }
 
-/// The list face is the compact store row (no trail); the export face is
-/// the per-task detail. List first, then export what you need.
 async fn list(
     State(state): State<SharedState>,
     Query(query): Query<TaskListQuery>,
-) -> TaskResult<Vec<kallip_task::TaskExport>> {
+) -> TaskResult<kallip_common::protocol::TaskListPage> {
     let filter = TaskFilter {
         status: query.status,
         assignee: query.assignee,
@@ -119,150 +185,190 @@ async fn list(
         limit: query.limit,
         offset: query.offset,
     };
-    let rows = store(&state)?.list(filter).await.map_err(api_error)?;
-    let all = store(&state)?.export_all().await.map_err(api_error)?;
-    let ids: std::collections::HashSet<i64> = rows.iter().map(|t| t.id).collect();
-    Ok(Json(
-        all.into_iter().filter(|e| ids.contains(&e.id)).collect(),
-    ))
+    let page = store(&state)?.list_page(filter).await.map_err(api_error)?;
+    Ok(Json(page))
 }
 
 async fn show(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> TaskResult<kallip_task::TaskExport> {
+    let snapshot = role_snapshot(&state).await;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    Ok(Json(export))
+    Ok(Json(inject_actor_roles(export, &snapshot)))
 }
 
 async fn export_one(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> TaskResult<kallip_task::TaskExport> {
+    let snapshot = role_snapshot(&state).await;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    Ok(Json(export))
+    Ok(Json(inject_actor_roles(export, &snapshot)))
 }
 
 async fn export_all(State(state): State<SharedState>) -> TaskResult<Vec<kallip_task::TaskExport>> {
+    let snapshot = role_snapshot(&state).await;
     let all = store(&state)?.export_all().await.map_err(api_error)?;
-    Ok(Json(all))
+    Ok(Json(
+        all.into_iter()
+            .map(|export| inject_actor_roles(export, &snapshot))
+            .collect(),
+    ))
 }
 
-async fn checkpoint(
+async fn confirm(
     State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
     Path(id): Path<i64>,
-    Json(body): Json<TaskCheckpointRequest>,
+    Json(body): Json<TaskConfirmRequest>,
 ) -> TaskResult<kallip_task::TaskExport> {
+    let actor = acting_agent(&auth);
+    let snapshot = role_snapshot(&state).await;
     store(&state)?
-        .checkpoint(id, body)
+        .confirm(id, &actor, body)
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    notify(&state, "checkpoint", &export);
+    let export = inject_actor_roles(export, &snapshot);
+    notify(&state, "confirm", &export);
     Ok(Json(export))
 }
 
-async fn annotate(
+async fn review(
     State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<i64>,
+) -> TaskResult<kallip_task::TaskExport> {
+    let actor = acting_agent(&auth);
+    let snapshot = role_snapshot(&state).await;
+    store(&state)?.review(id, &actor).await.map_err(api_error)?;
+    let export = store(&state)?.export(id).await.map_err(api_error)?;
+    let export = inject_actor_roles(export, &snapshot);
+    notify(&state, "review", &export);
+    Ok(Json(export))
+}
+
+async fn pause(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<i64>,
+) -> TaskResult<kallip_task::TaskExport> {
+    let actor = acting_agent(&auth);
+    let snapshot = role_snapshot(&state).await;
+    store(&state)?.pause(id, &actor).await.map_err(api_error)?;
+    let export = store(&state)?.export(id).await.map_err(api_error)?;
+    let export = inject_actor_roles(export, &snapshot);
+    notify(&state, "pause", &export);
+    Ok(Json(export))
+}
+
+async fn resume(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<i64>,
+    Json(body): Json<TaskForceRequest>,
+) -> TaskResult<kallip_task::TaskExport> {
+    let actor = acting_agent(&auth);
+    let snapshot = role_snapshot(&state).await;
+    store(&state)?
+        .resume(id, &actor, body.force)
+        .await
+        .map_err(api_error)?;
+    let export = store(&state)?.export(id).await.map_err(api_error)?;
+    let export = inject_actor_roles(export, &snapshot);
+    notify(&state, "resume", &export);
+    Ok(Json(export))
+}
+
+async fn note(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
     Path(id): Path<i64>,
     Json(body): Json<TaskNoteRequest>,
 ) -> TaskResult<kallip_task::TaskExport> {
+    let actor = acting_agent(&auth);
+    let snapshot = role_snapshot(&state).await;
     store(&state)?
-        .annotate(id, &body.actor, body.note)
+        .note(id, &actor, body.note)
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    notify(&state, "annotate", &export);
-    Ok(Json(export))
-}
-
-async fn gate_report(
-    State(state): State<SharedState>,
-    Path(id): Path<i64>,
-    Json(body): Json<TaskNoteRequest>,
-) -> TaskResult<kallip_task::TaskExport> {
-    store(&state)?
-        .gate_report(id, &body.actor, body.note)
-        .await
-        .map_err(api_error)?;
-    let export = store(&state)?.export(id).await.map_err(api_error)?;
-    notify(&state, "gate_report", &export);
-    Ok(Json(export))
-}
-
-async fn dispatch(
-    State(state): State<SharedState>,
-    Path(id): Path<i64>,
-    Json(body): Json<TaskDispatchRequest>,
-) -> TaskResult<kallip_task::TaskExport> {
-    store(&state)?
-        .dispatch(id, &body.actor, body.seats)
-        .await
-        .map_err(api_error)?;
-    let export = store(&state)?.export(id).await.map_err(api_error)?;
-    notify(&state, "dispatch", &export);
-    Ok(Json(export))
-}
-
-async fn chain_op(
-    State(state): State<SharedState>,
-    Path(id): Path<i64>,
-    Json(body): Json<TaskChainOpRequest>,
-) -> TaskResult<kallip_task::TaskExport> {
-    store(&state)?
-        .chain_op(id, &body.actor, &body.op, body.detail, body.force)
-        .await
-        .map_err(api_error)?;
-    let export = store(&state)?.export(id).await.map_err(api_error)?;
-    notify(&state, "chain_op", &export);
+    let export = inject_actor_roles(export, &snapshot);
+    notify(&state, "note", &export);
     Ok(Json(export))
 }
 
 async fn close(
     State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
     Path(id): Path<i64>,
     Json(body): Json<TaskCloseRequest>,
 ) -> TaskResult<kallip_task::TaskExport> {
-    store(&state)?
-        .close(
-            id,
-            &body.actor,
-            body.reason,
-            body.summary,
-            body.force,
-            blobs(&state),
-        )
-        .await
-        .map_err(api_error)?;
+    let actor = acting_agent(&auth);
+    let snapshot = role_snapshot(&state).await;
+    let closed = store(&state)?.close(
+        id,
+        &actor,
+        body.reason,
+        body.summary,
+        body.force,
+        blobs(&state),
+    );
+    match closed.await {
+        Ok(_) => {}
+        // The gate message carries identity ids; the human face wants
+        // role names, so map through the same snapshot the events use.
+        Err(kallip_task::Error::ConfirmationGate { missing }) => {
+            let names: Vec<String> = missing
+                .split(", ")
+                .map(|id| snapshot.get(id).cloned().unwrap_or_else(|| id.to_string()))
+                .collect();
+            return Err(ApiError::conflict(format!(
+                "confirmation gate: missing confirmations from registered confirmers: {}; --force to override (escape is recorded)",
+                names.join(", ")
+            )));
+        }
+        Err(e) => return Err(api_error(e)),
+    };
     let export = store(&state)?.export(id).await.map_err(api_error)?;
+    let export = inject_actor_roles(export, &snapshot);
     notify(&state, "close", &export);
     Ok(Json(export))
 }
 
 async fn reopen(
     State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
     Path(id): Path<i64>,
     Json(body): Json<TaskForceRequest>,
 ) -> TaskResult<kallip_task::TaskExport> {
+    let actor = acting_agent(&auth);
+    let snapshot = role_snapshot(&state).await;
     store(&state)?
-        .reopen(id, &body.actor, body.force)
+        .reopen(id, &actor, body.force)
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
+    let export = inject_actor_roles(export, &snapshot);
     notify(&state, "reopen", &export);
     Ok(Json(export))
 }
 
 async fn archive(
     State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
     Path(id): Path<i64>,
     Json(body): Json<TaskForceRequest>,
 ) -> TaskResult<kallip_task::TaskExport> {
+    let actor = acting_agent(&auth);
+    let snapshot = role_snapshot(&state).await;
     store(&state)?
-        .archive_task(id, &body.actor, body.force)
+        .archive_task(id, &actor, body.force)
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
+    let export = inject_actor_roles(export, &snapshot);
     notify(&state, "archive", &export);
     Ok(Json(export))
 }
@@ -299,11 +405,11 @@ pub(crate) fn router() -> axum::Router<SharedState> {
         .route("/{id}", axum::routing::get(show))
         .route("/{id}/export", axum::routing::get(export_one))
         .route("/{id}/start", axum::routing::post(start))
-        .route("/{id}/checkpoint", axum::routing::post(checkpoint))
-        .route("/{id}/annotate", axum::routing::post(annotate))
-        .route("/{id}/gate-report", axum::routing::post(gate_report))
-        .route("/{id}/dispatch", axum::routing::post(dispatch))
-        .route("/{id}/chain-op", axum::routing::post(chain_op))
+        .route("/{id}/confirm", axum::routing::post(confirm))
+        .route("/{id}/review", axum::routing::post(review))
+        .route("/{id}/pause", axum::routing::post(pause))
+        .route("/{id}/resume", axum::routing::post(resume))
+        .route("/{id}/note", axum::routing::post(note))
         .route("/{id}/close", axum::routing::post(close))
         .route("/{id}/reopen", axum::routing::post(reopen))
         .route(
@@ -326,7 +432,7 @@ mod tests {
             kallip_task::Error::InvalidTransition {
                 id: 1,
                 from: "queued".into(),
-                action: "checkpoint".into(),
+                action: "confirm".into(),
                 expected: "in_progress|review".into(),
             },
             kallip_task::Error::SerialGate {
@@ -334,11 +440,9 @@ mod tests {
                 blocked_by: 1,
                 title: "t".into(),
             },
-            kallip_task::Error::ReceiptGate {
+            kallip_task::Error::ConfirmationGate {
                 missing: "scout".into(),
             },
-            kallip_task::Error::DispatchGate { id: 1 },
-            kallip_task::Error::GateReportGate { id: 1 },
             kallip_task::Error::ArchiveGate {
                 id: 1,
                 status: "queued".into(),
@@ -378,5 +482,101 @@ mod tests {
     fn anything_else_stays_internal() {
         let err = kallip_task::Error::Other("storage went away".into());
         assert_eq!(api_error(err).status, 500);
+    }
+
+    /// Same 400 family: a confirm report over the shared cap is
+    /// caller input, not a server fault.
+    #[test]
+    fn report_too_large_maps_to_bad_request() {
+        let err = kallip_task::Error::ReportTooLarge {
+            size: kallip_common::protocol::REPORT_MAX_BYTES + 1,
+            max: kallip_common::protocol::REPORT_MAX_BYTES,
+        };
+        assert_eq!(api_error(err).status, 400);
+    }
+
+    /// A create-time confirmer name resolving to no registered identity is a
+    /// state refusal (409), not a caller mistake.
+    #[test]
+    fn confirmer_unresolved_maps_to_conflict() {
+        let err = kallip_task::Error::ConfirmerUnresolved {
+            confirmer: "ghost".into(),
+        };
+        assert_eq!(api_error(err).status, 409);
+    }
+
+    /// The actor is the authenticated identity: agent ids pass
+    /// through, the operator token records the literal `operator`.
+    #[test]
+    fn acting_agent_follows_the_authenticated_identity() {
+        let agent = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent {
+            id: "agent-9".parse().unwrap(),
+        });
+        assert_eq!(acting_agent(&agent), "agent-9");
+        let op = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+        assert_eq!(acting_agent(&op), "operator");
+    }
+
+    /// The single fill policy: a registered agent id gains its role,
+    /// everything else (confirmer names, the operator literal, deregistered
+    /// ids, null actors) keeps actor_role null.
+    #[test]
+    fn actor_role_injection_covers_every_actor_shape() {
+        let roles =
+            std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
+        let export = inject_actor_roles(
+            export_with_events(&[
+                Some("agent-1"),
+                Some("reviewer-c"),
+                Some("agent-gone"),
+                Some("operator"),
+                None,
+            ]),
+            &roles,
+        );
+        let got: Vec<Option<&str>> = export
+            .events
+            .iter()
+            .map(|e| e.actor_role.as_deref())
+            .collect();
+        assert_eq!(got, vec![Some("reviewer-c"), None, None, None, None]);
+    }
+
+    /// Test fixture: an export whose events differ only in actor.
+    fn export_with_events(actors: &[Option<&str>]) -> kallip_task::TaskExport {
+        kallip_task::TaskExport {
+            id: 1,
+            title: "t".into(),
+            status: "queued".into(),
+            creator: None,
+            assignee: None,
+            confirmers: vec![],
+            created_at: None,
+            updated_at: None,
+            started_at: None,
+            ended_at: None,
+            archived: false,
+            archived_at: None,
+            closed_reason: None,
+            close_summary: None,
+            association: None,
+            dossier_path: None,
+            archive_hash: None,
+            events: actors
+                .iter()
+                .map(|a| kallip_common::protocol::EventExport {
+                    id: 0,
+                    kind: "action".into(),
+                    name: "confirm".into(),
+                    actor: a.map(|s| s.to_string()),
+                    actor_role: None,
+                    assignee: None,
+                    from_status: None,
+                    to_status: None,
+                    payload: None,
+                    created_at: None,
+                })
+                .collect(),
+        }
     }
 }

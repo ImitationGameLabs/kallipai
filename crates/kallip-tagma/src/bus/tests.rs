@@ -90,7 +90,7 @@ async fn tagma_topics_roundtrip_preserve_payloads() {
         verb: "start".into(),
         creator: Some("root".into()),
         assignee: Some("scout".into()),
-        seats: vec!["scout".into()],
+        confirmers: vec!["scout".into()],
     })
     .unwrap();
 

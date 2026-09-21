@@ -158,6 +158,9 @@ fn frame_allowed(method: &str, path: &str) -> bool {
     let sub = p
         .strip_prefix("/agents/")
         .and_then(|rest| rest.split_once('/'));
+    let task_detail = p
+        .strip_prefix("/tasks/")
+        .filter(|rest| !rest.is_empty() && !rest.contains('/'));
     match (method, p) {
         ("GET", "/agents")
         | ("GET", "/budget")
@@ -167,15 +170,19 @@ fn frame_allowed(method: &str, path: &str) -> bool {
         | ("GET", "/profiles")
         | ("POST", "/profiles/apply")
         | ("PUT", "/profiles/default") => true,
-        // Per-agent subroutes: match the {id} segment explicitly.
+        ("GET", "/tasks") => true,
+        // Task detail: GET /tasks/{id} (two segments, read-only; the
+        // static /tasks/export route is absorbed by the same shape and
+        // is equally read-only).
         _ => {
+            // Per-agent subroutes: match the {id} segment explicitly.
             let (m, s) = (method, sub);
             matches!(
                 (m, s),
                 ("GET", Some((_, "status")))
                     | ("POST", Some((_, "interrupt")))
                     | ("PUT", Some((_, "duty" | "metadata" | "profile-set")))
-            )
+            ) || matches!((method, task_detail), ("GET", Some(_)))
         }
     }
 }
@@ -252,6 +259,9 @@ mod manage_rest_tests {
             ("GET", "/profiles"),
             ("PUT", "/profiles/default"),
             ("POST", "/profiles/apply"),
+            ("GET", "/tasks"),
+            ("GET", "/tasks/7"),
+            ("GET", "/tasks/export"),
             ("GET", "/agents/x/status"),
             ("POST", "/agents/x/interrupt"),
             ("PUT", "/agents/x/duty"),
@@ -280,6 +290,12 @@ mod manage_rest_tests {
             ("GET", "/messages"),
             ("DELETE", "/agents/x"),
             ("GET", "/completely/unknown"),
+            // Task write verbs and DELETE stay off the frame: the POSTs
+            // are three-segment subroutes the read-only arm never
+            // admits, and the DELETE fails on method alone.
+            ("POST", "/tasks/7/start"),
+            ("POST", "/tasks/7/close"),
+            ("DELETE", "/tasks/7"),
         ] {
             assert!(!frame_allowed(method, path), "{method} {path}");
         }

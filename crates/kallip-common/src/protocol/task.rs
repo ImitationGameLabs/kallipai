@@ -7,8 +7,13 @@
 //! all three faces bind to one definition and cannot drift apart.
 
 use serde::{Deserialize, Serialize};
+/// Upper bound for a review report carried in a confirm event payload, counted in UTF-8 bytes.
+/// Shared by the CLI (early, friendly failure) and the store (authoritative check): 512 KiB
+/// leaves two orders of magnitude over a typical review report while keeping event rows well
+/// below SQLite payload limits; anything larger belongs in the dossier channel.
+pub const REPORT_MAX_BYTES: usize = 512 * 1024;
 
-/// The four coarse states. Serialized lowercase snake_case on the wire,
+/// The five coarse states. Serialized lowercase snake_case on the wire,
 /// matching [`TaskStatus::as_str`] and the SQLite spelling — the CLI's
 /// `--status` vocabulary and the wire vocabulary are the same strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +21,7 @@ use serde::{Deserialize, Serialize};
 pub enum TaskStatus {
     Queued,
     InProgress,
+    Paused,
     Review,
     Closed,
 }
@@ -25,6 +31,7 @@ impl TaskStatus {
         match self {
             TaskStatus::Queued => "queued",
             TaskStatus::InProgress => "in_progress",
+            TaskStatus::Paused => "paused",
             TaskStatus::Review => "review",
             TaskStatus::Closed => "closed",
         }
@@ -34,6 +41,7 @@ impl TaskStatus {
         match raw {
             "queued" => Some(TaskStatus::Queued),
             "in_progress" => Some(TaskStatus::InProgress),
+            "paused" => Some(TaskStatus::Paused),
             "review" => Some(TaskStatus::Review),
             "closed" => Some(TaskStatus::Closed),
             _ => None,
@@ -70,18 +78,17 @@ impl ClosedReason {
     }
 }
 
-/// Body of `POST /tasks`. Every field except the title and creator is
-/// optional: a minimal registration is a titled task with a creator.
+/// Body of `POST /tasks`. Every field except the title is optional: a
+/// minimal registration is a titled task.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskCreateRequest {
     pub title: String,
-    pub creator: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
-    /// The seat roster. Absent and empty are the same thing for a
-    /// registration: no seats are recorded until dispatch names them.
+    /// The confirmer roster. Names are resolved to identities at
+    /// registration; an empty list means closing needs no confirmations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub seats: Vec<String>,
+    pub require: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dossier_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,70 +103,36 @@ pub struct TaskCreateRequest {
     pub room_seq_end: Option<i64>,
 }
 
-/// Body of `POST /tasks/{id}/checkpoint`. A checkpoint is a work-log
-/// action that may also file a review receipt, move the machine to
-/// `review`, or toggle the `waiting` timing marker.
+/// Body of `POST /tasks/{id}/confirm`. A confirmation records the
+/// actor's sign-off toward the close gate, optionally carrying a
+/// review report via `file`, size-capped at [`REPORT_MAX_BYTES`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TaskCheckpointRequest {
-    pub actor: String,
+pub struct TaskConfirmRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub receipt: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub review: bool,
-    /// Some(true) sets the marker, Some(false) clears it, None leaves
-    /// it untouched.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub waiting: Option<bool>,
+    pub file: Option<String>,
 }
 
-/// Body of the force-carrying verbs: `start`, `reopen`, and `archive`.
+/// Body of the force-carrying verbs: `start`, `resume`, `reopen`, and `archive`.
 /// The flag is the auditable escape from the verb's gate; it is
 /// recorded in the task's event trail.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskForceRequest {
-    pub actor: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
 }
 
-/// Body of the note-carrying verbs: `annotate` and `gate-report`.
+/// Body of `POST /tasks/{id}/note`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskNoteRequest {
-    pub actor: String,
     pub note: String,
 }
 
-/// Body of `POST /tasks/{id}/dispatch`. The seats stay an `Option` on
-/// purpose: `None` falls back to the roster registered at create,
-/// while `Some` names an explicit roster for the close gate to count
-/// receipts against — an empty list is an explicit zero-seat dispatch.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TaskDispatchRequest {
-    pub actor: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seats: Option<Vec<String>>,
-}
-
-/// Body of `POST /tasks/{id}/chain-op`: a recorded chain operation
-/// (commit, amend, rebase, reset) that pairs with a preceding
-/// gate-report.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskChainOpRequest {
-    pub actor: String,
-    pub op: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub force: bool,
-}
-
 /// Body of `POST /tasks/{id}/close`. Closing requires a reason; the
-/// receipt gate counts dispatch seats against filed receipts.
+/// confirmation gate counts registered confirmers against filed confirmations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskCloseRequest {
-    pub actor: String,
     pub reason: ClosedReason,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -207,7 +180,7 @@ pub enum TaskTimeAxis {
 
 /// Association keys (K8s involvedObject shape): message windows the
 /// task was cut from, recorded at create time.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssociationExport {
     pub inbox_id_start: Option<i64>,
     pub inbox_id_end: Option<i64>,
@@ -222,6 +195,10 @@ pub struct EventExport {
     pub kind: String,
     pub name: String,
     pub actor: Option<String>,
+    /// Role name resolved from `actor` against the registry at export time;
+    /// null when unresolvable (deregistered agent, historical confirmer-name
+    /// actors, the literal `operator`, or a null actor).
+    pub actor_role: Option<String>,
     pub assignee: Option<String>,
     pub from_status: Option<String>,
     pub to_status: Option<String>,
@@ -237,13 +214,11 @@ pub struct TaskExport {
     pub status: String,
     pub creator: Option<String>,
     pub assignee: Option<String>,
-    pub seats: Vec<String>,
+    pub confirmers: Vec<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
-    pub waiting: bool,
-    pub waiting_since: Option<String>,
     /// The archive partition marker (a query partition, not a state).
     pub archived: bool,
     pub archived_at: Option<String>,
@@ -257,13 +232,53 @@ pub struct TaskExport {
     pub events: Vec<EventExport>,
 }
 
+/// The list-face row: a task without its event trail. `GET /tasks` returns
+/// these under the paging envelope — the trail and the report bodies live
+/// behind the per-task detail endpoint, so a list poll never drags them
+/// back. `has_reports` marks tasks carrying at least one confirmation
+/// with a report file attached.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRow {
+    pub id: i64,
+    pub title: String,
+    pub status: String,
+    pub creator: Option<String>,
+    pub assignee: Option<String>,
+    pub confirmers: Vec<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    /// The archive partition marker (a query partition, not a state).
+    pub archived: bool,
+    pub archived_at: Option<String>,
+    pub closed_reason: Option<String>,
+    pub close_summary: Option<String>,
+    pub association: Option<AssociationExport>,
+    /// Two-phase pointer: live path while open; after close, the content
+    /// address (`archive_hash`) is the frozen truth.
+    pub dossier_path: Option<String>,
+    pub archive_hash: Option<String>,
+    /// The task has at least one confirm event carrying a report file.
+    pub has_reports: bool,
+}
+
+/// Paging envelope of `GET /tasks`: one page of lightweight rows plus the
+/// total count of rows matching the filter (limit/offset excluded from
+/// the count).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskListPage {
+    pub rows: Vec<TaskRow>,
+    pub total: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn status_wire_spelling_matches_as_str() {
-        for raw in ["queued", "in_progress", "review", "closed"] {
+        for raw in ["queued", "in_progress", "review", "paused", "closed"] {
             let parsed = TaskStatus::parse(raw).expect("vocabulary round-trips");
             assert_eq!(parsed.as_str(), raw);
             assert_eq!(
@@ -273,6 +288,22 @@ mod tests {
         }
         assert_eq!(TaskStatus::parse("Queued"), None);
         assert_eq!(TaskStatus::parse("closed "), None);
+    }
+    #[test]
+    fn confirm_request_file_skips_when_absent() {
+        let bare = TaskConfirmRequest {
+            note: None,
+            file: None,
+        };
+        assert!(serde_json::to_value(&bare).unwrap().get("file").is_none());
+        let carried = TaskConfirmRequest {
+            file: Some("approved with nits".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&carried).unwrap()["file"],
+            "approved with nits"
+        );
     }
 
     #[test]
@@ -291,65 +322,28 @@ mod tests {
     fn create_request_skips_empty_optionals() {
         let req = TaskCreateRequest {
             title: "ship".into(),
-            creator: "root".into(),
-            seats: vec!["dev".into()],
+            require: vec!["dev".into()],
             ..Default::default()
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["title"], "ship");
-        assert_eq!(json["seats"], serde_json::json!(["dev"]));
+        assert_eq!(json["require"], serde_json::json!(["dev"]));
         assert!(json.get("assignee").is_none());
+        assert!(json.get("creator").is_none());
         assert!(json.get("dossier_path").is_none());
         assert!(json.get("room_id").is_none());
         let back: TaskCreateRequest = serde_json::from_value(json).unwrap();
         assert_eq!(back.title, "ship");
-        assert_eq!(back.seats, vec!["dev".to_string()]);
+        assert_eq!(back.require, vec!["dev".to_string()]);
         assert!(back.assignee.is_none());
     }
 
     #[test]
-    fn dispatch_keeps_explicit_zero_seats() {
-        // None serializes away (the store then falls back to the roster
-        // registered at create); Some(vec![]) stays on the wire as an
-        // empty array — the explicit zero-seat dispatch.
-        let none = TaskDispatchRequest {
-            actor: "root".into(),
-            seats: None,
-        };
-        assert!(serde_json::to_value(&none).unwrap().get("seats").is_none());
-        let zero = TaskDispatchRequest {
-            actor: "root".into(),
-            seats: Some(vec![]),
-        };
-        assert_eq!(
-            serde_json::to_value(&zero).unwrap()["seats"],
-            serde_json::json!([])
-        );
-    }
-
-    #[test]
-    fn force_and_checkpoint_flags_default_and_skip() {
-        let force = TaskForceRequest {
-            actor: "root".into(),
-            force: false,
-        };
+    fn force_flags_default_and_skip() {
+        let force = TaskForceRequest { force: false };
         assert!(serde_json::to_value(&force).unwrap().get("force").is_none());
-        let forced = TaskForceRequest {
-            actor: "root".into(),
-            force: true,
-        };
+        let forced = TaskForceRequest { force: true };
         assert_eq!(serde_json::to_value(&forced).unwrap()["force"], true);
-
-        let checkpoint = TaskCheckpointRequest {
-            actor: "dev".into(),
-            receipt: true,
-            ..Default::default()
-        };
-        let json = serde_json::to_value(&checkpoint).unwrap();
-        assert_eq!(json["receipt"], true);
-        assert!(json.get("review").is_none());
-        assert!(json.get("waiting").is_none());
-        assert!(json.get("note").is_none());
     }
 
     #[test]
@@ -365,7 +359,7 @@ mod tests {
 
     #[test]
     fn close_request_carries_the_reason_enum() {
-        let json = r#"{"actor":"dev","reason":"not_planned","force":true}"#;
+        let json = r#"{"reason":"not_planned","force":true}"#;
         let req: TaskCloseRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.reason, ClosedReason::NotPlanned);
         assert!(req.force);
@@ -374,69 +368,10 @@ mod tests {
     }
 
     #[test]
-    fn waiting_marker_wire_carries_all_three_states() {
-        // Absent decodes to None (leave untouched) and skips on the way
-        // back out; an explicit boolean survives verbatim both ways, so
-        // set and clear are distinguishable on the wire.
-        let untouched: TaskCheckpointRequest =
-            serde_json::from_str(r#"{"actor":"dev","note":"n"}"#).unwrap();
-        assert_eq!(untouched.waiting, None);
-        assert!(
-            serde_json::to_value(&untouched)
-                .unwrap()
-                .get("waiting")
-                .is_none()
-        );
-
-        let set: TaskCheckpointRequest =
-            serde_json::from_str(r#"{"actor":"dev","note":"n","waiting":true}"#).unwrap();
-        assert_eq!(set.waiting, Some(true));
-        assert_eq!(
-            serde_json::to_value(&set).unwrap()["waiting"],
-            serde_json::json!(true)
-        );
-
-        let clear: TaskCheckpointRequest =
-            serde_json::from_str(r#"{"actor":"dev","note":"n","waiting":false}"#).unwrap();
-        assert_eq!(clear.waiting, Some(false));
-        assert_eq!(
-            serde_json::to_value(&clear).unwrap()["waiting"],
-            serde_json::json!(false)
-        );
-    }
-
-    #[test]
-    fn chain_op_request_wire_round_trips() {
-        // The full shape and the minimal one: `detail` skips when absent
-        // and `force` defaults to false on decode — the auditable escape
-        // is opt-in on the wire.
-        let full: TaskChainOpRequest = serde_json::from_str(
-            r#"{"actor":"root","op":"rebase","detail":"five commits","force":true}"#,
-        )
-        .unwrap();
-        assert_eq!(full.op, "rebase");
-        assert_eq!(full.detail.as_deref(), Some("five commits"));
-        assert!(full.force);
-
-        let minimal: TaskChainOpRequest =
-            serde_json::from_str(r#"{"actor":"root","op":"commit"}"#).unwrap();
-        assert!(minimal.detail.is_none());
-        assert!(!minimal.force);
-        let wire = serde_json::to_value(&minimal).unwrap();
-        assert!(wire.get("detail").is_none());
-        assert!(wire.get("force").is_none());
-    }
-
-    #[test]
     fn close_request_rejects_an_unknown_reason() {
         // The reason vocabulary is closed: an unknown or mis-cased
         // spelling must fail the decode, not coerce into a default.
-        assert!(
-            serde_json::from_str::<TaskCloseRequest>(r#"{"actor":"dev","reason":"done"}"#).is_err()
-        );
-        assert!(
-            serde_json::from_str::<TaskCloseRequest>(r#"{"actor":"dev","reason":"Completed"}"#)
-                .is_err()
-        );
+        assert!(serde_json::from_str::<TaskCloseRequest>(r#"{"reason":"done"}"#).is_err());
+        assert!(serde_json::from_str::<TaskCloseRequest>(r#"{"reason":"Completed"}"#).is_err());
     }
 }

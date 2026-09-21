@@ -12,8 +12,8 @@ pub use kallip_common::protocol::{
     UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 pub use kallip_common::protocol::{
-    ClosedReason, TaskChainOpRequest, TaskCheckpointRequest, TaskCloseRequest, TaskCreateRequest,
-    TaskDispatchRequest, TaskExport, TaskForceRequest, TaskListQuery, TaskNoteRequest,
+    ClosedReason, TaskCloseRequest, TaskConfirmRequest, TaskCreateRequest, TaskExport,
+    TaskForceRequest, TaskListQuery, TaskNoteRequest,
 };
 pub use kallip_common::protocol::{InboxEntry, InboxSummary};
 pub use types::ListApprovalsParams;

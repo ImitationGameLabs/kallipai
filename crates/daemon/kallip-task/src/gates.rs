@@ -8,10 +8,9 @@
 //! waits for the winner to commit, then re-checks the gate against the
 //! fresh state.
 //!
-//! Close-gate receipts are cycle-scoped: a review cycle starts at create
-//! or at the latest `reopen` transition, and a `dispatch` action re-bases
-//! the receipt boundary — only receipts filed after the later of the two
-//! count.
+//! The confirmation gate is cycle-scoped: a cycle starts at the latest
+//! `start` or `reopen` transition (whichever is later), and only
+//! confirmations filed after it count.
 
 use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder};
 
@@ -35,104 +34,65 @@ pub async fn serial_gate_blocked(
     Ok(row.map(|t| (t.id, t.title)))
 }
 
-/// Close gate: every review seat registered at dispatch must have
-/// filed a receipt event (`kind=action`, `name=receipt`, actor = the
-/// seat) in the current review cycle. Reopening a task starts a new
-/// cycle — the `reopen` transition event is the invalidation marker —
-/// so receipts older than the latest reopen do not count. Returns the
-/// seats whose current-cycle receipts are missing.
-pub async fn missing_receipts(
+/// Confirmation gate: every registered confirmer must have filed a
+/// confirm event (`kind=action`, `name=confirm`) in the current cycle.
+/// `confirmers` carries the identity ids fixed at create time; confirm
+/// actors are ids by construction, so no normalization pass is needed.
+/// Returns the confirmer ids whose current-cycle confirmations are
+/// missing; the caller renders them into names for the error face.
+pub async fn missing_confirmations(
     tx: &DatabaseTransaction,
     task_id: i64,
-    seats: &[String],
+    confirmers: &[String],
 ) -> Result<Vec<String>, sea_orm::DbErr> {
-    let boundary = receipt_boundary(tx, task_id).await?;
-    let receipts = EventEntity::find()
+    let boundary = confirmation_boundary(tx, task_id).await?;
+    let confirms = EventEntity::find()
         .filter(EventColumn::TaskId.eq(task_id))
         .filter(EventColumn::Kind.eq("action"))
-        .filter(EventColumn::Name.eq("receipt"))
+        .filter(EventColumn::Name.eq("confirm"))
         .filter(EventColumn::Id.gt(boundary))
         .all(tx)
         .await?;
-    let filed: std::collections::HashSet<&str> =
-        receipts.iter().filter_map(|e| e.actor.as_deref()).collect();
-    Ok(seats
+    let filed: std::collections::HashSet<String> =
+        confirms.iter().filter_map(|e| e.actor.clone()).collect();
+    Ok(confirmers
         .iter()
-        .filter(|s| !filed.contains(s.as_str()))
+        .filter(|id| !filed.contains(*id))
         .cloned()
         .collect())
 }
 
 /// Id of the latest `reopen` transition event for the task; 0 when the
-/// task was never reopened, so every receipt counts in the first cycle.
+/// task was never reopened.
 async fn latest_reopen_event_id(
     tx: &DatabaseTransaction,
     task_id: i64,
 ) -> Result<i64, sea_orm::DbErr> {
-    let event = EventEntity::find()
-        .filter(EventColumn::TaskId.eq(task_id))
-        .filter(EventColumn::Kind.eq("transition"))
-        .filter(EventColumn::Name.eq("reopen"))
-        .order_by_desc(EventColumn::Id)
-        .one(tx)
-        .await?;
-    Ok(event.map(|e| e.id).unwrap_or(0))
+    latest_transition_event_id(tx, task_id, "reopen").await
 }
 
-/// Receipt boundary: the later of the latest `reopen` transition (the
-/// cycle start) and the latest `dispatch` action (the roster
-/// re-registration). 0 when neither exists, so first-cycle receipts all
-/// count.
-async fn receipt_boundary(tx: &DatabaseTransaction, task_id: i64) -> Result<i64, sea_orm::DbErr> {
-    Ok(latest_reopen_event_id(tx, task_id)
+/// Confirmation boundary: the later of the latest `start` and the
+/// latest `reopen` transition — the task's most recent entry into
+/// `in_progress` through a gated door. `resume` deliberately does not
+/// re-base it: a pause/resume pair does not open a new cycle.
+async fn confirmation_boundary(
+    tx: &DatabaseTransaction,
+    task_id: i64,
+) -> Result<i64, sea_orm::DbErr> {
+    Ok(latest_transition_event_id(tx, task_id, "start")
         .await?
-        .max(latest_action_event_id(tx, task_id, "dispatch").await?))
+        .max(latest_reopen_event_id(tx, task_id).await?))
 }
 
-/// The latest `dispatch` action event, if any: its payload carries the
-/// seat roster the close gate counts receipts against.
-pub async fn latest_dispatch(
-    tx: &DatabaseTransaction,
-    task_id: i64,
-) -> Result<Option<crate::entities::task_event::Model>, sea_orm::DbErr> {
-    EventEntity::find()
-        .filter(EventColumn::TaskId.eq(task_id))
-        .filter(EventColumn::Kind.eq("action"))
-        .filter(EventColumn::Name.eq("dispatch"))
-        .order_by_desc(EventColumn::Id)
-        .one(tx)
-        .await
-}
-
-/// Dispatch gate: a dispatch must exist in the current review cycle
-/// (after the latest reopen, if any) for `close` to pass without force.
-pub async fn dispatch_in_current_cycle(
-    tx: &DatabaseTransaction,
-    task_id: i64,
-) -> Result<bool, sea_orm::DbErr> {
-    Ok(latest_action_event_id(tx, task_id, "dispatch").await?
-        > latest_reopen_event_id(tx, task_id).await?)
-}
-
-/// Gate-report gate: a gate report must exist after the last recorded
-/// chain operation (after every chain op, when none is recorded yet).
-pub async fn gate_report_current(
-    tx: &DatabaseTransaction,
-    task_id: i64,
-) -> Result<bool, sea_orm::DbErr> {
-    Ok(latest_action_event_id(tx, task_id, "gate_report").await?
-        > latest_action_event_id(tx, task_id, "chain_op").await?)
-}
-
-/// Id of the latest `action` event with the given name; 0 when none.
-async fn latest_action_event_id(
+/// Id of the latest `transition` event with the given name; 0 when none.
+async fn latest_transition_event_id(
     tx: &DatabaseTransaction,
     task_id: i64,
     name: &str,
 ) -> Result<i64, sea_orm::DbErr> {
     let event = EventEntity::find()
         .filter(EventColumn::TaskId.eq(task_id))
-        .filter(EventColumn::Kind.eq("action"))
+        .filter(EventColumn::Kind.eq("transition"))
         .filter(EventColumn::Name.eq(name))
         .order_by_desc(EventColumn::Id)
         .one(tx)

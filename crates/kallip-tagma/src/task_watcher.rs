@@ -1,13 +1,13 @@
 //! Task-ledger change watcher: subscribes to [`TaskChanged`] on the topic
 //! bus and drops a wake hint into the prompt queue of every agent whose
-//! role appears in the task's people set (assignee, seats, creator).
+//! role appears in the task's people set (assignee, confirmers, creator).
 //!
-//! Verbs that already carry an explicit message face (`dispatch`, `close`)
-//! are silent here: the dispatch roster or the close summary reaches the
-//! affected agents as a real message, and a synthetic hint would only
-//! duplicate it. Consecutive verbs on one task collapse to one hint
+//! Verbs that already carry an explicit message face (`close`)
+//! are silent here: the close summary reaches the affected agents
+//! as a real message, and a synthetic hint would only duplicate it.
+//! Consecutive verbs on one task collapse to one hint
 //! (keep-last debounce, runs only — interleaved tasks keep their
-//! order), so `start` + `checkpoint` back-to-back reads as one wakeup.
+//! order), so `start` + `note` back-to-back reads as one wakeup.
 
 use kallip_common::agentid::AgentId;
 use tokio::sync::broadcast::error::RecvError;
@@ -19,16 +19,13 @@ use crate::state::SharedState;
 
 /// Verbs that never wake anyone: they reach the affected agents through
 /// their own explicit message face instead.
-const SILENT_VERBS: [&str; 2] = ["dispatch", "close"];
+const SILENT_VERBS: [&str; 1] = ["close"];
 
-/// Registration verbs where the named creator is presumed to have just
-/// spoken (the CLI defaults --creator to the caller): hinting the
-/// creator about their own registration is pure noise. The exemption
-/// is a presumption, not a fact — a --creator proxy naming a third
-/// agent would silence that agent too. Closing that gap needs an
-/// actor field on the event; deferred until hints become reliable
-/// delivery or proxy creation becomes common. The loss is one missed
-/// hint, never data.
+/// The create verb: the creator is the authenticated identity recorded
+/// at request time, so a create event is always the caller registering
+/// their own task and hinting them is pure noise. Events carry the
+/// actor field for consumers that need the true actor. The loss is one
+/// missed hint, never data.
 const CREATOR_SILENT_VERBS: [&str; 1] = ["create"];
 
 /// What the run loop does with one `recv` outcome. Lag is recovery, not
@@ -86,11 +83,11 @@ pub(crate) async fn run(state: SharedState) {
     }
 }
 
-/// The people set for an event: seats, then assignee, then creator (the
+/// The people set for an event: confirmers, then assignee, then creator (the
 /// creator dropped for verbs where the creator just spoke). Deduplicated,
 /// order-stable — a role listed twice hears one hint, not two.
 fn people_of(ev: &TaskChanged) -> Vec<String> {
-    let mut people: Vec<String> = ev.seats.clone();
+    let mut people: Vec<String> = ev.confirmers.clone();
     if let Some(assignee) = &ev.assignee {
         people.push(assignee.clone());
     }
@@ -172,12 +169,12 @@ mod tests {
             verb: verb.into(),
             creator: Some("root".into()),
             assignee: Some("scout".into()),
-            seats: vec!["scout".into(), "reviewer-c".into()],
+            confirmers: vec!["scout".into(), "reviewer-c".into()],
         }
     }
 
-    /// Seats, assignee, creator all present on a regular verb; a role named
-    /// twice (seat + assignee) hears one hint.
+    /// Confirmers, assignee, creator all present on a regular verb; a role
+    /// named twice (confirmer + assignee) hears one hint.
     #[test]
     fn people_of_dedupes_and_keeps_creator() {
         assert_eq!(
@@ -195,11 +192,9 @@ mod tests {
 
     /// Silent verbs produce no hint at all — the message face covers them.
     #[test]
-    fn silent_verbs_are_dispatch_and_close_only() {
-        for verb in ["dispatch", "close"] {
-            assert!(SILENT_VERBS.contains(&verb), "{verb} must be silent");
-        }
-        for verb in ["start", "checkpoint", "annotate", "reopen", "archive"] {
+    fn silent_verbs_are_close_only() {
+        assert_eq!(SILENT_VERBS, ["close"]);
+        for verb in ["start", "note", "confirm", "pause", "resume"] {
             assert!(!SILENT_VERBS.contains(&verb), "{verb} must wake");
         }
     }
@@ -220,7 +215,7 @@ mod tests {
     /// latest; interleaved tasks keep both, in order.
     #[test]
     fn keep_last_collapses_same_task_runs_only() {
-        let mut late = event(1, "checkpoint");
+        let mut late = event(1, "note");
         late.status = "review".into();
         let collapsed = keep_last_per_task(vec![event(1, "start"), late, event(2, "start")]);
         assert_eq!(collapsed.len(), 2, "task 1 run collapses to one");

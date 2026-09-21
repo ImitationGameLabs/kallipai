@@ -90,7 +90,7 @@ impl Event for ProjectionSnapshot {
 /// A task-ledger mutation worth waking the task's people for: published by
 /// the task routes after every write verb; consumed by the task watcher,
 /// which drops a wake hint into the prompt queue of every agent whose role
-/// appears in the task's people set (assignee, seats, creator). Live-only
+/// appears in the task's people set (assignee, confirmers, creator). Live-only
 /// economics: a lost frame costs one missed hint, and the next verb on the
 /// task re-announces the current state.
 #[derive(Clone, Debug)]
@@ -101,7 +101,7 @@ pub(crate) struct TaskChanged {
     pub(crate) verb: String,
     pub(crate) creator: Option<String>,
     pub(crate) assignee: Option<String>,
-    pub(crate) seats: Vec<String>,
+    pub(crate) confirmers: Vec<String>,
 }
 
 impl Event for TaskChanged {

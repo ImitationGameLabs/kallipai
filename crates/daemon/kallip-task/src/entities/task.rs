@@ -1,8 +1,8 @@
 //! SeaORM entity for the `tasks` flat table.
 //!
 //! One row per task: the four timestamps (created/updated/started/ended),
-//! the current coarse state, the dispatch registration (creator, assignee,
-//! review seats), the `waiting` timing marker, the two-level terminal
+//! the current coarse state, the confirmation registration (creator, assignee,
+//! registered confirmers), the two-level terminal
 //! state (`closed` + reason), the association keys (an inbox id range
 //! and/or a lesche room + seq range in the K8s involvedObject shape),
 //! live dossier pointer, and the closed-archive hash pointer.
@@ -18,17 +18,14 @@ pub struct Model {
     pub status: String,
     pub creator: Option<String>,
     pub assignee: Option<String>,
-    /// JSON array of registered review-seat id/role strings (dispatch time).
-    pub seats: String,
+    /// JSON array of registered confirmer identities (fixed at create).
+    pub confirmers: String,
     pub created_at: i64,
     pub updated_at: i64,
     /// Set at first start; preserved across reopen (the original start
     /// line stays the task's start line).
     pub started_at: Option<i64>,
     pub ended_at: Option<i64>,
-    /// Timing marker, not a state (taskwarrior precedent).
-    pub waiting: i64,
-    pub waiting_since: Option<i64>,
     /// Query partition marker, not a state: archived tasks leave the
     /// default list view (`task list --archived` shows them). Set by
     /// `task archive`; the gate requires `closed` (the escape is recorded).

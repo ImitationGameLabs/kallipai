@@ -1,21 +1,19 @@
 //! The `kallip task` family: thin rendering over the task-domain API.
 //! Everything rides the tagma HTTP face (`/tasks`); the tagma process is
-//! the SOLE writer of tasks.sqlite. Every write verb resolves the acting
-//! agent from `KALLIP_ID` (or --actor) and passes it down as the event
-//! `actor`.
+//! the SOLE writer of tasks.sqlite. Write verbs carry no actor: the
+//! tagma records the acting agent from the authenticated identity.
 
 use std::io::Cursor;
 
 use anyhow::{Result, anyhow};
 use kallip_client::TagmaClient;
 use kallip_common::protocol::{
-    ClosedReason, TaskChainOpRequest, TaskCheckpointRequest, TaskCloseRequest, TaskCreateRequest,
-    TaskDispatchRequest, TaskExport, TaskForceRequest, TaskListQuery, TaskNoteRequest, TaskStatus,
+    ClosedReason, REPORT_MAX_BYTES, TaskCloseRequest, TaskConfirmRequest, TaskCreateRequest,
+    TaskExport, TaskForceRequest, TaskListQuery, TaskNoteRequest, TaskStatus,
 };
 
 use crate::args::task::{
-    TaskChainOpType, TaskCloseReason, TaskCommand, TaskStartArgs, TaskTimeAxisArg,
-    parse_time_anchor,
+    TaskCloseReason, TaskCommand, TaskReportCommand, TaskTimeAxisArg, parse_time_anchor,
 };
 use kallip_common::timefmt;
 
@@ -45,72 +43,73 @@ fn axis_stamp(
 
 pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
     match cmd {
-        TaskCommand::Start(args) => {
-            let actor = task_actor(args.actor.as_deref())?;
-            let task = match args.id {
-                Some(id) => {
-                    if has_dispatch_meta(args) {
-                        return Err(anyhow!(
-                            "start <id> picks an existing task up; dispatch \
-                             metadata (--title and friends) registers a new one"
-                        ));
-                    }
-                    client
-                        .task_start(
-                            id,
-                            &TaskForceRequest {
-                                actor,
-                                force: args.force,
-                            },
-                        )
-                        .await?
-                }
-                None => {
-                    let title = args.title.as_deref().ok_or_else(|| {
-                        anyhow!("give a task id to pick up, or --title to register a new task")
-                    })?;
-                    client
-                        .task_create(&TaskCreateRequest {
-                            title: title.to_string(),
-                            creator: args.creator.clone().unwrap_or_else(|| actor.clone()),
-                            assignee: args.assignee.clone(),
-                            seats: args.seats.clone(),
-                            dossier_path: args.dossier.as_ref().map(|p| p.display().to_string()),
-                            inbox_id_start: args.inbox_start,
-                            inbox_id_end: args.inbox_end,
-                            room_id: args.room.clone(),
-                            room_seq_start: args.room_seq_start,
-                            room_seq_end: args.room_seq_end,
-                        })
-                        .await?
-                }
-            };
+        TaskCommand::Create(args) => {
+            let task = client
+                .task_create(&TaskCreateRequest {
+                    title: args.title.clone(),
+                    assignee: args.assignee.clone(),
+                    require: args.require.clone(),
+                    dossier_path: args.dossier.as_ref().map(|p| p.display().to_string()),
+                    inbox_id_start: args.inbox_start,
+                    inbox_id_end: args.inbox_end,
+                    room_id: args.room.clone(),
+                    room_seq_start: args.room_seq_start,
+                    room_seq_end: args.room_seq_end,
+                })
+                .await?;
             print_state_line(&task);
         }
-        TaskCommand::Checkpoint(args) => {
-            let actor = task_actor(args.actor.as_deref())?;
-            let waiting = tri_flag(args.waiting, args.no_waiting)?;
+        TaskCommand::Start(args) => {
             let task = client
-                .task_checkpoint(
+                .task_start(args.id, &TaskForceRequest { force: args.force })
+                .await?;
+            print_state_line(&task);
+        }
+        TaskCommand::Confirm(args) => {
+            let file = match &args.file {
+                Some(path) => {
+                    let body = std::fs::read_to_string(path)
+                        .map_err(|e| anyhow!("read {}: {e}", path.display()))?;
+                    let size = body.len();
+                    if size > REPORT_MAX_BYTES {
+                        return Err(anyhow!(
+                            "report is {size} bytes; the cap is {REPORT_MAX_BYTES} bytes"
+                        ));
+                    }
+                    Some(body)
+                }
+                None => None,
+            };
+            let task = client
+                .task_confirm(
                     args.id,
-                    &TaskCheckpointRequest {
-                        actor,
+                    &TaskConfirmRequest {
                         note: args.note.clone(),
-                        receipt: args.receipt,
-                        review: args.review,
-                        waiting,
+                        file,
                     },
                 )
                 .await?;
             print_state_line(&task);
         }
+        TaskCommand::Review(args) => {
+            let task = client.task_review(args.id).await?;
+            print_state_line(&task);
+        }
+        TaskCommand::Pause(args) => {
+            let task = client.task_pause(args.id).await?;
+            print_state_line(&task);
+        }
+        TaskCommand::Resume(args) => {
+            let task = client
+                .task_resume(args.id, &TaskForceRequest { force: args.force })
+                .await?;
+            print_state_line(&task);
+        }
         TaskCommand::Close(args) => {
-            let actor = task_actor(args.actor.as_deref())?;
             let task = client
                 .task_close(
                     args.id,
                     &TaskCloseRequest {
-                        actor,
                         reason: close_reason(args.reason),
                         summary: args.summary.clone(),
                         force: args.force,
@@ -126,86 +125,26 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
             }
         }
         TaskCommand::Reopen(args) => {
-            let actor = task_actor(args.actor.as_deref())?;
             let task = client
-                .task_reopen(
-                    args.id,
-                    &TaskForceRequest {
-                        actor,
-                        force: args.force,
-                    },
-                )
+                .task_reopen(args.id, &TaskForceRequest { force: args.force })
                 .await?;
             print_state_line(&task);
         }
 
-        TaskCommand::Annotate(args) => {
-            let actor = task_actor(args.actor.as_deref())?;
+        TaskCommand::Note(args) => {
             let task = client
-                .task_annotate(
+                .task_note(
                     args.id,
                     &TaskNoteRequest {
-                        actor,
                         note: args.note.clone(),
-                    },
-                )
-                .await?;
-            print_state_line(&task);
-        }
-        TaskCommand::Dispatch(args) => {
-            let actor = task_actor(args.actor.as_deref())?;
-            // Blank seat entries are dropped: a blank seat name would
-            // ghost the close gate forever. `--seats ""` therefore
-            // registers an explicit empty roster; omitting --seats
-            // re-affirms the registered seats.
-            let seats = args.seats.clone().map(|list| {
-                list.into_iter()
-                    .filter(|s| !s.trim().is_empty())
-                    .collect::<Vec<String>>()
-            });
-            let task = client
-                .task_dispatch(args.id, &TaskDispatchRequest { actor, seats })
-                .await?;
-            print_state_line(&task);
-        }
-        TaskCommand::GateReport(args) => {
-            let actor = task_actor(args.actor.as_deref())?;
-            let task = client
-                .task_gate_report(
-                    args.id,
-                    &TaskNoteRequest {
-                        actor,
-                        note: args.note.clone(),
-                    },
-                )
-                .await?;
-            print_state_line(&task);
-        }
-        TaskCommand::ChainOp(args) => {
-            let actor = task_actor(args.actor.as_deref())?;
-            let task = client
-                .task_chain_op(
-                    args.id,
-                    &TaskChainOpRequest {
-                        actor,
-                        op: chain_op_name(args.op).to_string(),
-                        detail: args.detail.clone(),
-                        force: args.force,
                     },
                 )
                 .await?;
             print_state_line(&task);
         }
         TaskCommand::Archive(args) => {
-            let actor = task_actor(args.actor.as_deref())?;
             let task = client
-                .task_archive(
-                    args.id,
-                    &TaskForceRequest {
-                        actor,
-                        force: args.force,
-                    },
-                )
+                .task_archive(args.id, &TaskForceRequest { force: args.force })
                 .await?;
             print_state_line(&task);
         }
@@ -243,11 +182,11 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
             // A clock anchor up top: list times are core content, and the
             // header calibrates the stamps below it (inbox summary precedent).
             println!("current datetime: {}", timefmt::format_utc(now));
-            let tasks = client.task_list(&query).await?;
-            if tasks.is_empty() {
-                println!("(no tasks)");
+            let page = client.task_list(&query).await?;
+            if page.rows.is_empty() {
+                println!("(no tasks, {} total)", page.total);
             } else {
-                for t in &tasks {
+                for t in &page.rows {
                     let shown = axis_stamp(
                         args.time,
                         args.relative_time,
@@ -264,7 +203,10 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                         t.title
                     );
                 }
-                println!("(showing {})", tasks.len());
+                println!(
+                    "{}",
+                    task_list_footer(page.rows.len(), page.total, args.limit, args.offset)
+                );
             }
         }
         TaskCommand::Show(args) => {
@@ -302,6 +244,60 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                 args.to.display()
             );
         }
+        TaskCommand::Report(args) => match &args.command {
+            TaskReportCommand::List(args) => {
+                let export = client.task_show(args.id).await?;
+                let mut confirms = task_confirms(&export);
+                if let Some(confirmer) = args.confirmer.as_deref() {
+                    confirms.retain(|r| confirm_matches_confirmer(r, confirmer));
+                }
+                if confirms.is_empty() {
+                    println!("(no confirmations filed)");
+                    return Ok(());
+                }
+                for r in &confirms {
+                    let size = match &r.report {
+                        Some(body) => format!("{}B", body.len()),
+                        None => "-".to_string(),
+                    };
+                    println!(
+                        "{} v{} {} {size}",
+                        r.confirmer,
+                        r.version,
+                        r.created_at.as_deref().unwrap_or("?")
+                    );
+                }
+            }
+            TaskReportCommand::Show(args) => {
+                let export = client.task_show(args.id).await?;
+                let confirms = task_confirms(&export);
+                let mine: Vec<&TaskConfirmView> = confirms
+                    .iter()
+                    .filter(|r| confirm_matches_confirmer(r, args.confirmer.as_str()))
+                    .collect();
+                let picked = match args.version {
+                    Some(v) => mine.iter().copied().find(|r| r.version == v),
+                    None => mine.last().copied(),
+                };
+                let r = picked.ok_or_else(|| {
+                    anyhow!(
+                        "no matching confirmation for confirmer '{}' (try: kallip task report list)",
+                        args.confirmer
+                    )
+                })?;
+                let report = r.report.as_deref().ok_or_else(|| {
+                    anyhow!(
+                        "confirmation v{} for confirmer '{}' carries no report",
+                        r.version,
+                        r.confirmer
+                    )
+                })?;
+                match &args.out {
+                    Some(path) => std::fs::write(path, report)?,
+                    None => print!("{report}"),
+                }
+            }
+        },
     }
     Ok(())
 }
@@ -318,14 +314,8 @@ fn print_show(e: &TaskExport) {
         e.assignee.as_deref().unwrap_or("-"),
         e.creator.as_deref().unwrap_or("-")
     );
-    if !e.seats.is_empty() {
-        println!("seats: {}", e.seats.join(", "));
-    }
-    if e.waiting {
-        println!(
-            "waiting: yes (since {})",
-            e.waiting_since.as_deref().unwrap_or("?")
-        );
+    if !e.confirmers.is_empty() {
+        println!("confirmers: {}", e.confirmers.join(", "));
     }
     if let Some(a) = &e.association {
         let mut parts = Vec::new();
@@ -366,23 +356,11 @@ fn print_show(e: &TaskExport) {
             ev.kind,
             ev.name,
             scope,
-            ev.actor.as_deref().unwrap_or("-")
+            ev.actor_role
+                .as_deref()
+                .or(ev.actor.as_deref())
+                .unwrap_or("-")
         );
-    }
-}
-
-fn task_actor(flag: Option<&str>) -> Result<String> {
-    flag.map(str::to_string)
-        .or_else(|| std::env::var("KALLIP_ID").ok())
-        .ok_or_else(|| anyhow!("KALLIP_ID not set and --actor not given"))
-}
-
-fn tri_flag(set: bool, clear: bool) -> Result<Option<bool>> {
-    match (set, clear) {
-        (true, true) => Err(anyhow!("--waiting and --no-waiting are mutually exclusive")),
-        (true, false) => Ok(Some(true)),
-        (false, true) => Ok(Some(false)),
-        (false, false) => Ok(None),
     }
 }
 
@@ -393,27 +371,78 @@ fn close_reason(reason: TaskCloseReason) -> ClosedReason {
         TaskCloseReason::Duplicate => ClosedReason::Duplicate,
     }
 }
+/// One filed confirmation, read back from the event trail: `task report`
+/// filters this list locally instead of a dedicated endpoint. Versions
+/// count per confirmer key (role name when resolved, else the raw actor)
+/// in event id order, from 1.
+struct TaskConfirmView {
+    confirmer: String,
+    /// The raw actor, kept so `--confirmer <agent id>` still matches
+    /// events
+    /// the server could not resolve to a role.
+    actor: Option<String>,
+    version: u32,
+    created_at: Option<String>,
+    /// The report body; `None` for a bare confirmation (no --file).
+    report: Option<String>,
+}
 
-fn chain_op_name(op: TaskChainOpType) -> &'static str {
-    match op {
-        TaskChainOpType::Commit => "commit",
-        TaskChainOpType::Amend => "amend",
-        TaskChainOpType::Rebase => "rebase",
-        TaskChainOpType::Reset => "reset",
+fn task_confirms(export: &TaskExport) -> Vec<TaskConfirmView> {
+    let mut filed: Vec<(i64, TaskConfirmView)> = export
+        .events
+        .iter()
+        .filter(|ev| ev.kind == "action" && ev.name == "confirm")
+        .map(|ev| {
+            let report = ev
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("file"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let view = TaskConfirmView {
+                confirmer: ev
+                    .actor_role
+                    .clone()
+                    .or_else(|| ev.actor.clone())
+                    .unwrap_or_else(|| "-".to_string()),
+                actor: ev.actor.clone(),
+                version: 0,
+                created_at: ev.created_at.clone(),
+                report,
+            };
+            (ev.id, view)
+        })
+        .collect();
+    filed.sort_by_key(|(id, _)| *id);
+    let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for (_, view) in &mut filed {
+        let next = seen.entry(view.confirmer.clone()).or_insert(0);
+        *next += 1;
+        view.version = *next;
+    }
+    filed.into_iter().map(|(_, view)| view).collect()
+}
+
+/// One-line footer for `task list`: paginated form under a positive
+/// --limit, bare counts otherwise.
+fn task_list_footer(showing: usize, total: i64, limit: Option<u32>, offset: Option<u32>) -> String {
+    match limit {
+        Some(limit) if limit > 0 => {
+            let offset = u64::from(offset.unwrap_or(0));
+            let limit = u64::from(limit);
+            let page_no = offset / limit + 1;
+            let pages = (total as u64).div_ceil(limit);
+            format!("(showing {showing}, page {page_no} / {pages}, {total} total)")
+        }
+        _ => format!("(showing {showing}, {total} total)"),
     }
 }
 
-fn has_dispatch_meta(args: &TaskStartArgs) -> bool {
-    args.title.is_some()
-        || args.creator.is_some()
-        || args.assignee.is_some()
-        || !args.seats.is_empty()
-        || args.dossier.is_some()
-        || args.inbox_start.is_some()
-        || args.inbox_end.is_some()
-        || args.room.is_some()
-        || args.room_seq_start.is_some()
-        || args.room_seq_end.is_some()
+/// A confirmation belongs to `--confirmer` when its resolved confirmer
+/// name matches, or when the raw actor matches literally (unresolved
+/// actors).
+fn confirm_matches_confirmer(confirm: &TaskConfirmView, confirmer: &str) -> bool {
+    confirm.confirmer == confirmer || confirm.actor.as_deref() == Some(confirmer)
 }
 
 #[cfg(test)]
@@ -469,5 +498,96 @@ mod list_render_tests {
             ),
             "not-a-stamp"
         );
+    }
+
+    /// Versions count per confirmer key (role name when the server resolved
+    /// one, else the raw actor) in event id order, from 1.
+    #[test]
+    fn confirm_versions_count_per_confirmer_by_event_order() {
+        let export = kallip_common::protocol::TaskExport {
+            id: 1,
+            title: "t".into(),
+            status: "review".into(),
+            creator: None,
+            assignee: None,
+            confirmers: vec![],
+            created_at: None,
+            updated_at: None,
+            started_at: None,
+            ended_at: None,
+            archived: false,
+            archived_at: None,
+            closed_reason: None,
+            close_summary: None,
+            association: None,
+            dossier_path: None,
+            archive_hash: None,
+            events: vec![
+                confirm_event(1, "agent-1", Some("reviewer-c")),
+                confirm_event(2, "agent-2", Some("reviewer-h")),
+                confirm_event(3, "agent-1", Some("reviewer-c")),
+            ],
+        };
+        let confirms = task_confirms(&export);
+        let versions: Vec<(&str, u32)> = confirms
+            .iter()
+            .map(|r| (r.confirmer.as_str(), r.version))
+            .collect();
+        assert_eq!(
+            versions,
+            vec![("reviewer-c", 1), ("reviewer-h", 1), ("reviewer-c", 2)]
+        );
+    }
+
+    /// Fixture: one confirm event; the role rides in actor_role when
+    /// the server could resolve the actor to a registered agent.
+    fn confirm_event(
+        id: i64,
+        actor: &str,
+        role: Option<&str>,
+    ) -> kallip_common::protocol::EventExport {
+        kallip_common::protocol::EventExport {
+            id,
+            kind: "action".into(),
+            name: "confirm".into(),
+            actor: Some(actor.into()),
+            actor_role: role.map(|r| r.into()),
+            assignee: None,
+            from_status: None,
+            to_status: None,
+            payload: None,
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn footer_without_positive_limit_shows_bare_counts() {
+        assert_eq!(task_list_footer(5, 42, None, None), "(showing 5, 42 total)");
+        assert_eq!(
+            task_list_footer(5, 42, Some(0), None),
+            "(showing 5, 42 total)"
+        );
+    }
+
+    #[test]
+    fn footer_unaligned_offset_computes_page_number() {
+        assert_eq!(
+            task_list_footer(10, 45, Some(10), Some(15)),
+            "(showing 10, page 2 / 5, 45 total)"
+        );
+    }
+
+    #[test]
+    fn confirmer_predicate_role_hit_actor_fallback_double_miss() {
+        let view = TaskConfirmView {
+            confirmer: "reviewer-c".into(),
+            actor: Some("agent-1".into()),
+            version: 1,
+            created_at: None,
+            report: None,
+        };
+        assert!(confirm_matches_confirmer(&view, "reviewer-c"));
+        assert!(confirm_matches_confirmer(&view, "agent-1"));
+        assert!(!confirm_matches_confirmer(&view, "agent-2"));
     }
 }
