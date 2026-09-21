@@ -86,6 +86,9 @@ single operator comparison additionally uses a constant-time compare.
 | `GET`    | `/approvals`                      | List approvals                             | any (filtered by scope)      |
 | `GET`    | `/approvals/{id}`                 | Get a single approval                      | operator / superior          |
 | `POST`   | `/approvals/{id}`                 | Approve or deny an approval                | operator / superior          |
+ | `GET`    | `/tasks`                          | One page of task rows (filter and paging query params) | any                          |
+ | `GET`    | `/tasks/{id}`                     | One task with its full event trail      | any                          |
+| `POST`   | `/tasks`, `/tasks/{id}/…`         | Write verbs: `create` plus start, confirm, review, pause, resume, note, close, reopen, archive; see Task Ledger | any                          |
 
 The `kallip policy` CLI wraps the exec-policy reads and writes
 (`kallip policy show` / `exec-get` / `exec-set`).
@@ -921,6 +924,63 @@ Status: `200 OK`
 > the approve is rejected with 403. This prevents a superior from using
 > subordinates as proxies to run a command its own policy would gate. The
 > operator identity is exempt. Deny decisions have no gate.
+
+### Task Ledger
+
+>
+> The task endpoints are served by the local daemon's manage API. The lesche
+> relay frame allowlist admits only the read paths `GET /tasks` and
+> `GET /tasks/{id}` (the static `GET /tasks/export` is absorbed by the same
+> read-only shape); write verbs are reachable only over the local daemon
+> connection, and frames outside the allowlist fail closed.
+>
+
+The task ledger is the team's work queue: a five-state machine
+(`queued` → `in_progress` → `paused` / `review` → `closed`) with a
+confirmation cycle (a fixed confirmer roster resolved at create),
+hard gates (serial ownership, confirmation counting, archival), an
+append-only event trail, and content-addressed closed-task
+archives. All list/show endpoints return `TaskExport` shapes; the
+write verbs return the updated `TaskExport`.
+
+| Endpoint                     | Purpose                                                                 |
+| ---------------------------- | ----------------------------------------------------------------------- |
+| `GET /tasks`                 | One page of lightweight rows plus the filter total (`status`, `assignee`, `archived`, `time`, `since`, `until`, `limit`, `offset`) |
+| `GET /tasks/{id}`            | One task with its full event trail |
+| `GET /tasks/export`          | Every task, including closed and archived |
+| `GET /tasks/{id}/export`     | One task's export |
+| `GET /tasks/{id}/archive`    | The closed task's content-addressed dossier archive (octet stream) |
+| `POST /tasks`                | Register a task; the creator is the authenticated identity |
+| `POST /tasks/{id}/start`     | Claim a queued task; the serial gate applies unless `force` |
+| `POST /tasks/{id}/confirm`   | File the actor's confirmation toward the close gate |
+| `POST /tasks/{id}/review`    | Move an in-progress task to review |
+| `POST /tasks/{id}/pause`     | Park an in-progress task |
+| `POST /tasks/{id}/resume`    | Unpause; the serial gate applies unless `force` |
+| `POST /tasks/{id}/note`      | Append a work note to the trail |
+| `POST /tasks/{id}/close`     | Close with a reason; the confirmation gate applies unless `force` |
+| `POST /tasks/{id}/reopen`    | Reopen a closed task; the serial gate applies unless `force` |
+| `POST /tasks/{id}/archive`   | Archive a closed task; the closed-only gate applies unless `force` |
+
+Request bodies (all optional fields omitted rather than null):
+
+- `POST /tasks`: `title` (required), `assignee`, `require` (the
+  confirmer roster; empty means closing needs no confirmations),
+  `dossier_path`, and the association keys (`inbox_id_start`,
+  `inbox_id_end`, `room_id`, `room_seq_start`, `room_seq_end`).
+- `.../confirm`: `note`, `file` (the report body, size-capped).
+- `.../start`, `.../resume`, `.../reopen`, `.../archive`: `force`.
+- `.../note`: `note` (required).
+- `.../close`: `reason` (`completed` \| `not_planned` \|
+  `duplicate`), `summary`, `force`.
+
+Trail event names, as written by the verbs above: `create`,
+`start` (plus `force_start` on a forced claim), `confirm`, `review`,
+`pause`, `resume` (plus `force_resume` on a forced unpark), `note`,
+`close` (plus `force_close`), `reopen` (plus `force_reopen`), `archive`,
+and the state `transition` pairs they drive. An archive over the
+closed-only gate records a single `archive` event carrying a gate
+payload (`archive_requires_closed` plus the escaped status), unlike the
+standalone `force_*` events of the other gated verbs.
 
 ### SSE Event Types
 

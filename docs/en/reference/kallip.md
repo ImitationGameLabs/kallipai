@@ -321,24 +321,26 @@ one skill's metadata, read directly from the filesystem.
 
 ### `task`: Task Ledger on the Tagma
 
-Queue, state machine, event trail, hard gates, and closed-task
-archives, served by the tagma task API:
+Queue, state machine, confirmation cycle, event trail, hard gates, and
+closed-task archives, served by the tagma task API:
 
 | Subcommand | Purpose |
 | --- | --- |
-| `task start` | Register a task (`--title ...`) or pick a queued one up by id; the serial gate applies unless `--force` |
-| `task checkpoint` | Record a work note, a review receipt (`--receipt`), a move to review (`--review`), and/or the waiting marker |
-| `task close` | Close a task; every dispatched seat must have filed a receipt unless `--force` |
-| `task reopen` | Reopen a closed task |
-| `task annotate` | Append a note to the trail without moving the state machine |
-| `task dispatch` | Register the seat roster for the current review cycle |
-| `task gate-report` | Record the announcement that precedes every chain operation |
-| `task chain-op` | Record a chain operation (commit/amend/rebase/reset); requires a newer gate report |
-| `task archive` | Archive a closed task so it leaves the default list view |
-| `task list` | List tasks (`--status`, `--assignee`, `--archived`) |
+| `task create` | Register a task (`--title ...`); `--require` fixes the confirmer roster (repeatable), resolved to identities at create; `--assignee` defaults to whoever picks it up; plus `--dossier` and the association keys |
+| `task start` | Pick a queued task up by id; the serial gate applies unless `--force` |
+| `task confirm` | File your confirmation toward the close gate, with an optional `--note` and a report body read from `--file` |
+| `task review` | Move an in-progress task to review |
+| `task pause` | Park an in-progress task; no gate applies |
+| `task resume` | Unpause a paused task; the serial gate applies unless `--force` |
+| `task note` | Append a work note to the trail without moving the state machine |
+| `task close` | Close a task with a `--reason` and an optional `--summary`; every registered confirmer must have confirmed unless `--force` |
+| `task reopen` | Reopen a closed task; the serial gate applies unless `--force` |
+| `task archive` | Archive a closed task so it leaves the default list view; the closed-only gate applies unless `--force` |
+| `task list` | List tasks (`--status`, `--assignee`, `--archived`, time-window filters, paging, `--relative-time`) |
 | `task show` | Show one task's state, association keys, and event trail |
 | `task export` | Export one task or all tasks; `--json` emits the machine face |
 | `task extract` | Extract a closed task's content-addressed dossier archive |
+| `task report` | Read confirmations back from the trail: `report list` (optional `--confirmer` filter, `--out`), `report show` one confirmation (`--confirmer`, `--version`, `--out`) |
 
 ### `team`: Declarative Team Management
 

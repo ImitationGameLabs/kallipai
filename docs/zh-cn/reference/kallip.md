@@ -244,23 +244,25 @@ kallip skill meta <PATH>
 
 ### `task`：tagma 上的任务台账
 
-队列、状态机、事件轨迹、硬门与已关闭任务的归档，由 tagma task API 提供：
+队列、状态机、确认周期、事件轨迹、硬门与已关闭任务的归档，由 tagma task API 提供：
 
 | 子命令 | 用途 |
 | --- | --- |
-| `task start` | 注册任务（`--title ...`）或按 id 认领排队任务；串行门生效，`--force` 可越过 |
-| `task checkpoint` | 记录工作注记、评审回执（`--receipt`）、转入评审（`--review`）和/或等待标记 |
-| `task close` | 关闭任务；每个指派的席位都已交回执，否则需 `--force` |
-| `task reopen` | 重新打开已关闭的任务 |
-| `task annotate` | 向事件轨迹追加注记，不移动状态机 |
-| `task dispatch` | 为当前评审轮注册席位名单 |
-| `task gate-report` | 记录先于每次历史操作的公告 |
-| `task chain-op` | 记录历史操作（commit/amend/rebase/reset）；要求存在更新的门报 |
-| `task archive` | 归档已关闭任务，使其离开默认列表视图 |
-| `task list` | 列出任务（`--status`、`--assignee`、`--archived`） |
+| `task create` | 注册任务（`--title ...`）；`--require` 固定确认人名单（可重复），注册时解析为身份；`--assignee` 默认为认领人；另加 `--dossier` 与关联键 |
+| `task start` | 按 id 认领排队任务；串行门生效，`--force` 可越过 |
+| `task confirm` | 为关单门交回确认，可附 `--note` 与从 `--file` 读取的报告正文 |
+| `task review` | 将进行中任务转入评审 |
+| `task pause` | 暂停进行中任务；无门生效 |
+| `task resume` | 恢复已暂停任务；串行门生效，`--force` 可越过 |
+| `task note` | 向事件轨迹追加工作注记，不移动状态机 |
+| `task close` | 以 `--reason` 与可选 `--summary` 关闭任务；每个登记确认人都已确认，否则需 `--force` |
+| `task reopen` | 重新打开已关闭任务；串行门生效，`--force` 可越过 |
+| `task archive` | 归档已关闭任务，使其离开默认列表视图；closed-only 门生效，`--force` 可越过 |
+| `task list` | 列出任务（`--status`、`--assignee`、`--archived`、时间窗过滤、分页、`--relative-time`） |
 | `task show` | 显示单个任务的状态、关联键与事件轨迹 |
 | `task export` | 导出单个或全部任务；`--json` 输出供机器消费的 JSON |
 | `task extract` | 解包已关闭任务的内容寻址 dossier 归档 |
+| `task report` | 回读事件轨迹中的确认：`report list` 列出已交回的确认（可选 `--confirmer` 过滤、`--out` 写文件），`report show` 显示单个确认（`--confirmer`、`--version`、`--out`） |
 
 ### `team`：声明式团队管理
 
