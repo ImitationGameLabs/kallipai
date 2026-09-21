@@ -31,6 +31,7 @@ import {
   nav_profiles,
   nav_chats,
   nav_schedules,
+  nav_tasks,
   nav_tagmata,
   tagma_profile_unnamed,
 } from "../../paraglide/messages.js";
@@ -72,6 +73,7 @@ export interface NavIcons {
   manageAgents: Component;
   manageProfiles: Component;
   manageSchedules: Component;
+  manageTasks: Component;
   /** The files page entry (online Manage section, second item). */
   files: Component;
 }
@@ -201,6 +203,11 @@ export function navFor(args: {
             href: "/local/manage/schedules",
             label: nav_schedules(),
             icon: icons.manageSchedules,
+          },
+          {
+            href: "/local/manage/tasks",
+            label: nav_tasks(),
+            icon: icons.manageTasks,
           },
         ],
       },

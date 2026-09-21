@@ -28,6 +28,14 @@ import type {
   ProfileProbeRequest,
   ProfileProbeResponse,
   PutWorkScheduleRequest,
+  TaskCloseRequest,
+  TaskConfirmRequest,
+  TaskCreateRequest,
+  TaskExport,
+  TaskForceRequest,
+  TaskListPage,
+  TaskListQuery,
+  TaskNoteRequest,
   UpdateAgentMetadataRequest,
   UpdateDutyRequest,
   WorkSchedule,
@@ -64,6 +72,19 @@ export interface ManagementBackend {
   deleteProfileSet(name: string, force: boolean): Promise<DeleteSetResponse>;
   getWorkSchedule(): Promise<WorkSchedule>;
   putWorkSchedule(body: PutWorkScheduleRequest): Promise<WorkSchedule>;
+  listTasks(query?: TaskListQuery): Promise<TaskListPage>;
+  getTask(id: number): Promise<TaskExport>;
+  createTask(body: TaskCreateRequest): Promise<TaskExport>;
+  startTask(id: number, body?: TaskForceRequest): Promise<TaskExport>;
+  confirmTask(id: number, body?: TaskConfirmRequest): Promise<TaskExport>;
+  reviewTask(id: number): Promise<TaskExport>;
+  pauseTask(id: number): Promise<TaskExport>;
+  resumeTask(id: number, body?: TaskForceRequest): Promise<TaskExport>;
+  noteTask(id: number, body: TaskNoteRequest): Promise<TaskExport>;
+  closeTask(id: number, body: TaskCloseRequest): Promise<TaskExport>;
+  reopenTask(id: number, body?: TaskForceRequest): Promise<TaskExport>;
+  archiveTask(id: number, body?: TaskForceRequest): Promise<TaskExport>;
+  fetchTaskArchive(id: number): Promise<Uint8Array>;
 }
 
 // --- OfflineBackend (wraps TagmaClient) ---
@@ -117,6 +138,45 @@ export class OfflineBackend implements ManagementBackend {
   }
   putWorkSchedule(body: PutWorkScheduleRequest) {
     return this.client.putWorkSchedule(body);
+  }
+  listTasks(query?: TaskListQuery) {
+    return this.client.listTasks(query);
+  }
+  getTask(id: number) {
+    return this.client.getTask(id);
+  }
+  createTask(body: TaskCreateRequest) {
+    return this.client.createTask(body);
+  }
+  startTask(id: number, body?: TaskForceRequest) {
+    return this.client.startTask(id, body);
+  }
+  confirmTask(id: number, body?: TaskConfirmRequest) {
+    return this.client.confirmTask(id, body);
+  }
+  reviewTask(id: number) {
+    return this.client.reviewTask(id);
+  }
+  pauseTask(id: number) {
+    return this.client.pauseTask(id);
+  }
+  resumeTask(id: number, body?: TaskForceRequest) {
+    return this.client.resumeTask(id, body);
+  }
+  noteTask(id: number, body: TaskNoteRequest) {
+    return this.client.noteTask(id, body);
+  }
+  closeTask(id: number, body: TaskCloseRequest) {
+    return this.client.closeTask(id, body);
+  }
+  reopenTask(id: number, body?: TaskForceRequest) {
+    return this.client.reopenTask(id, body);
+  }
+  archiveTask(id: number, body?: TaskForceRequest) {
+    return this.client.archiveTask(id, body);
+  }
+  fetchTaskArchive(id: number) {
+    return this.client.fetchTaskArchive(id);
   }
 }
 
@@ -360,5 +420,105 @@ export class OnlineBackend implements ManagementBackend {
   }
   putWorkSchedule(body: PutWorkScheduleRequest) {
     return this.req<WorkSchedule>("PUT", "/work-schedule", body);
+  }
+  listTasks(query?: TaskListQuery) {
+    const params = new URLSearchParams();
+    if (query?.status) params.set("status", query.status);
+    if (query?.assignee) params.set("assignee", query.assignee);
+    if (query?.archived !== undefined) {
+      params.set("archived", String(query.archived));
+    }
+    if (query?.time) params.set("time", query.time);
+    if (query?.since !== undefined) params.set("since", String(query.since));
+    if (query?.until !== undefined) params.set("until", String(query.until));
+    if (query?.limit !== undefined) params.set("limit", String(query.limit));
+    if (query?.offset !== undefined) params.set("offset", String(query.offset));
+    const qs = params.toString();
+    return this.req<TaskListPage>("GET", `/tasks${qs ? `?${qs}` : ""}`);
+  }
+  getTask(id: number) {
+    return this.req<TaskExport>("GET", `/tasks/${id}`);
+  }
+  // The lesche manage-frame allowlist only passes GET /tasks and
+  // GET /tasks/{id}: every task write verb and the archive download
+  // are offline-transport-only, so the online implementations fail
+  // loudly instead of gambling on a proxy 404 (or worse, a JSON-
+  // decoded binary for the archive).
+  createTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  startTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  confirmTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  reviewTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  pauseTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  resumeTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  noteTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  closeTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  reopenTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  archiveTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  fetchTaskArchive(): Promise<Uint8Array> {
+    return Promise.reject(
+      new Error(
+        "archive download is offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
   }
 }

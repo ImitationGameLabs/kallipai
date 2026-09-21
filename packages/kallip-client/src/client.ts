@@ -1,17 +1,18 @@
 import {
   KallipError,
-  TransportError,
   parseSseStream,
   readApiError,
+  TransportError,
 } from "@kallipai/kallip-common";
 import type { AgentId, FileAttachment } from "@kallipai/kallip-common";
 import type {
   AgentStatusResponse,
-  DirectMessageRow,
   BudgetResponse,
   BudgetUpdateRequest,
   DeleteSetResponse,
+  DirectMessageRow,
   ExternalHistoryResponse,
+  LescheSessionEntry,
   ListAgentsManagementResponse,
   ListAgentsQuery,
   MessageResponse,
@@ -21,7 +22,14 @@ import type {
   ProfileProbeRequest,
   ProfileProbeResponse,
   PutWorkScheduleRequest,
-  LescheSessionEntry,
+  TaskCloseRequest,
+  TaskConfirmRequest,
+  TaskCreateRequest,
+  TaskExport,
+  TaskForceRequest,
+  TaskListPage,
+  TaskListQuery,
+  TaskNoteRequest,
   UpdateAgentMetadataRequest,
   UpdateDutyRequest,
   WireAgentSummary,
@@ -84,6 +92,11 @@ export class TagmaClient {
         ...(init.headers as Record<string, string> | undefined),
       },
     }).then((r) => r.json() as Promise<T>);
+  }
+  private bytes(path: string): Promise<Uint8Array> {
+    return this.request(path)
+      .then((r) => r.arrayBuffer())
+      .then((b) => new Uint8Array(b));
   }
 
   // --- agent surface ---
@@ -307,5 +320,107 @@ export class TagmaClient {
       method: "PUT",
       body: JSON.stringify(body),
     });
+  }
+
+  // --- management: task ledger ---
+
+  /** GET /tasks — one page of lightweight rows plus the filter total. */
+  listTasks(query?: TaskListQuery): Promise<TaskListPage> {
+    const params = new URLSearchParams();
+    if (query?.status) params.set("status", query.status);
+    if (query?.assignee) params.set("assignee", query.assignee);
+    if (query?.archived !== undefined) {
+      params.set("archived", String(query.archived));
+    }
+    if (query?.time) params.set("time", query.time);
+    if (query?.since !== undefined) params.set("since", String(query.since));
+    if (query?.until !== undefined) params.set("until", String(query.until));
+    if (query?.limit !== undefined) params.set("limit", String(query.limit));
+    if (query?.offset !== undefined) params.set("offset", String(query.offset));
+    const qs = params.toString();
+    return this.json<TaskListPage>(`/tasks${qs ? `?${qs}` : ""}`);
+  }
+
+  /** GET /tasks/{id} — one task with its event trail. */
+  getTask(id: number): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}`);
+  }
+  /** POST /tasks — register a task (the creator is the authenticated identity). */
+  createTask(body: TaskCreateRequest): Promise<TaskExport> {
+    return this.json<TaskExport>("/tasks", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** POST /tasks/{id}/start — claim the task; --force escapes the serial gate. */
+  startTask(id: number, body: TaskForceRequest = {}): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}/start`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** POST /tasks/{id}/confirm — file the actor's confirmation, optionally with a report. */
+  confirmTask(id: number, body: TaskConfirmRequest = {}): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** POST /tasks/{id}/review — move an in-progress task to review. */
+  reviewTask(id: number): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}/review`, { method: "POST" });
+  }
+
+  /** POST /tasks/{id}/pause — park an in-progress task. */
+  pauseTask(id: number): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}/pause`, { method: "POST" });
+  }
+
+  /** POST /tasks/{id}/resume — unpause; --force escapes the serial gate. */
+  resumeTask(id: number, body: TaskForceRequest = {}): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}/resume`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** POST /tasks/{id}/note — append a work note to the trail. */
+  noteTask(id: number, body: TaskNoteRequest): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}/note`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** POST /tasks/{id}/close — close with a reason; the confirmation gate applies. */
+  closeTask(id: number, body: TaskCloseRequest): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}/close`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** POST /tasks/{id}/reopen — reopen a closed task; --force escapes the serial gate. */
+  reopenTask(id: number, body: TaskForceRequest = {}): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}/reopen`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** POST /tasks/{id}/archive — archive a closed task; --force overrides the gate. */
+  archiveTask(id: number, body: TaskForceRequest = {}): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}/archive`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** GET /tasks/{id}/archive — download the closed dossier snapshot. */
+  fetchTaskArchive(id: number): Promise<Uint8Array> {
+    return this.bytes(`/tasks/${id}/archive`);
   }
 }

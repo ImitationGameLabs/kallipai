@@ -1,5 +1,5 @@
 <script lang="ts">
-  // The five-row manage grid: the single source for the row list shared by
+  // The six-row manage grid: the single source for the row list shared by
   // the /local/manage hub (ManageHubPage renders it as the whole nav) and
   // the offline home's manage section (LocalHomePage stacks it under the
   // chat row). Order and icons mirror the desktop sidebar's manage section
@@ -9,6 +9,7 @@
   import {
     Calendar,
     LayoutGrid,
+    ListTodo,
     Settings,
     Users,
     Wallet,
@@ -20,6 +21,7 @@
     nav_agents,
     nav_profiles,
     nav_schedules,
+    nav_tasks,
   } from "../paraglide/messages.js";
 
   const rows = [
@@ -28,6 +30,7 @@
     { href: "/local/manage/agents", label: nav_agents, Icon: Users },
     { href: "/local/manage/profiles", label: nav_profiles, Icon: Settings },
     { href: "/local/manage/schedules", label: nav_schedules, Icon: Calendar },
+    { href: "/local/manage/tasks", label: nav_tasks, Icon: ListTodo },
   ];
 </script>
 

@@ -5,7 +5,7 @@ import { assert } from "@std/assert";
 // flags a component that is imported but never rendered -- the gap let an
 // empty <nav></nav> land on /local/manage with the whole suite green.
 // These pins guard the mount itself: the template (past </script>) must
-// actually carry the component, and the grid must carry the five hrefs.
+// actually carry the component, and the grid must carry the six hrefs.
 
 const MANAGE_HUB = new URL("./manage/ManageHubPage.svelte", import.meta.url);
 const LOCAL_HOME = new URL("./LocalHomePage.svelte", import.meta.url);
@@ -21,6 +21,7 @@ const HREFS = [
   "/local/manage/agents",
   "/local/manage/profiles",
   "/local/manage/schedules",
+  "/local/manage/tasks",
 ];
 
 Deno.test(
@@ -44,7 +45,7 @@ Deno.test(
 );
 
 Deno.test(
-  "ManageGrid carries the five manage hrefs",
+  "ManageGrid carries the six manage hrefs",
   { permissions: { read: [MANAGE_GRID] } },
   () => {
     const src = source(MANAGE_GRID);

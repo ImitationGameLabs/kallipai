@@ -35,6 +35,7 @@ import {
   nav_profiles,
   nav_rooms,
   nav_schedules,
+  nav_tasks,
   nav_tagmata,
   room_label_fallback,
   settings_heading,
@@ -66,6 +67,7 @@ const sectionLabels: Record<TagmaDetailsSection, () => string> = {
   agents: nav_breadcrumb_agents,
   profiles: nav_profiles,
   schedules: nav_schedules,
+  tasks: nav_tasks,
 };
 
 // Operator-set IA rule: every entry opens with the Home segment (target

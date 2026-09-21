@@ -8,16 +8,20 @@ import type {
   ProfileConfig,
   ProfileModel,
   ProfileSet,
+  TaskEventExport,
 } from "@kallipai/kallip-client";
 import {
-  addProvider,
   addProfile,
+  addProvider,
   addSet,
   barColorClass,
   barFillPct,
   type BudgetSample,
   buildProbeRequest,
   burnRate,
+  clampPage,
+  confirmationBoundary,
+  confirmerConfirmationState,
   consumedPct,
   cronHasFiveFields,
   etaMinutes,
@@ -26,28 +30,48 @@ import {
   moveFromParking,
   moveProfile,
   moveToParking,
-  profileConfigEqual,
   normalizeModalities,
+  profileConfigEqual,
   profileConfigToWire,
   profileModalities,
-  removeProvider,
   removeProfile,
+  removeProvider,
   removeSet,
   renameSet,
   replaceParkingProfiles,
-  replaceSetProfiles,
   replaceSetProfile,
+  replaceSetProfiles,
   setDefaultSet,
   setEffectiveModalities,
   setHasShadowedMembers,
-  singleProviderProbeRequest,
-  singleProfileProbeRequest,
   singleParkingProfileProbeRequest,
+  singleProfileProbeRequest,
+  singleProviderProbeRequest,
   updateSetDescription,
   upsertProvider,
   validateWarnMinutes,
 } from "./compute.ts";
 
+/** Minimal TaskEventExport factory for the confirmation-cycle tests. */
+function ev(
+  id: number,
+  kind: string,
+  name: string,
+  actor: string | null = null,
+): TaskEventExport {
+  return {
+    id,
+    kind,
+    name,
+    actor,
+    actor_role: null,
+    assignee: null,
+    from_status: null,
+    to_status: null,
+    payload: null,
+    created_at: null,
+  };
+}
 // --- consumedPct ---
 
 Deno.test("consumedPct: budget 0 returns 0 (not 100)", () => {
@@ -1007,3 +1031,142 @@ Deno.test("formatModalities: canonical order join", () => {
   );
   assertEquals(formatModalities([]), "");
 });
+
+Deno.test("confirmationBoundary: no start/reopen counts everything", () => {
+  const events = [ev(1, "action", "confirm"), ev(2, "action", "note")];
+  assertEquals(confirmationBoundary(events), 0);
+});
+
+Deno.test(
+  "confirmationBoundary: latest start or reopen re-bases the cycle",
+  () => {
+    const events = [
+      ev(5, "transition", "reopen"),
+      ev(9, "transition", "start"),
+      ev(7, "transition", "resume"),
+    ];
+    assertEquals(confirmationBoundary(events), 9);
+  },
+);
+
+Deno.test(
+  "confirmerConfirmationState: pre-boundary confirms do not count",
+  () => {
+    const events = [
+      ev(1, "action", "confirm", "agent-1"),
+      ev(2, "transition", "start"),
+      ev(3, "action", "confirm", "agent-2"),
+    ];
+    assertEquals(
+      confirmerConfirmationState(events, ["agent-1", "agent-2"]),
+      new Map([
+        [
+          "agent-1",
+          {
+            filed: false,
+            version: 0,
+            report: null,
+            reportedAt: null,
+          },
+        ],
+        [
+          "agent-2",
+          {
+            filed: true,
+            version: 1,
+            report: null,
+            reportedAt: null,
+          },
+        ],
+      ]),
+    );
+  },
+);
+
+Deno.test(
+  "confirmerConfirmationState: a historical name actor does not match an id roster",
+  () => {
+    const withRole = (
+      id: number,
+      actor: string | null,
+      actor_role: string | null,
+    ): TaskEventExport => ({
+      ...ev(id, "action", "confirm", actor),
+      actor_role,
+    });
+    const events = [
+      // Historical name actor (no id): counted server-side only as a
+      // trail row, never against the id roster.
+      withRole(3, "reviewer-c", null),
+      // Modern id actor carrying its role for display.
+      withRole(4, "agent-1", "reviewer-c"),
+    ];
+    assertEquals(
+      confirmerConfirmationState(events, ["agent-1"]).get("agent-1"),
+      {
+        filed: true,
+        version: 1,
+        report: null,
+        reportedAt: null,
+      },
+    );
+  },
+);
+
+Deno.test(
+  "confirmerConfirmationState: the latest confirmation's file payload is the report",
+  () => {
+    const withPayload = (
+      id: number,
+      payload: unknown,
+      created_at: string | null,
+    ): TaskEventExport => ({
+      ...ev(id, "action", "confirm", "agent-1"),
+      actor_role: "reviewer-c",
+      payload,
+      created_at,
+    });
+    const events = [
+      withPayload(3, { note: "bare" }, "2026-09-20T00:00:00Z"),
+      withPayload(4, { file: "body v2" }, "2026-09-21T00:00:00Z"),
+    ];
+    assertEquals(
+      confirmerConfirmationState(events, ["agent-1"]).get("agent-1"),
+      {
+        filed: true,
+        version: 2,
+        report: "body v2",
+        reportedAt: "2026-09-21T00:00:00Z",
+      },
+    );
+  },
+);
+
+Deno.test("confirmationBoundary: a resume does not re-base the cycle", () => {
+  const events = [
+    ev(2, "transition", "start"),
+    ev(5, "transition", "resume"),
+    ev(4, "action", "confirm"),
+  ];
+  assertEquals(confirmationBoundary(events), 2);
+});
+
+Deno.test(
+  "clampPage clamps the requested page into the valid zero-based range",
+  () => {
+    // In-range pages pass through.
+    assertEquals(clampPage(0, 100, 25), 0);
+    assertEquals(clampPage(2, 100, 25), 2);
+    assertEquals(clampPage(3, 100, 25), 3);
+    // Past the last (partial) page clamps back to it.
+    assertEquals(clampPage(9, 100, 25), 3);
+    assertEquals(clampPage(4, 101, 25), 4);
+    // Negative requests clamp to the first page.
+    assertEquals(clampPage(-1, 100, 25), 0);
+    // Zero rows collapses to page 0 regardless of the request.
+    assertEquals(clampPage(5, 0, 25), 0);
+    // An exactly full last page does not manufacture an empty page.
+    assertEquals(clampPage(1, 50, 25), 1);
+    assertEquals(clampPage(2, 50, 25), 1);
+  },
+);

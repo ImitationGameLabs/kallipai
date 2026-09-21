@@ -13,6 +13,7 @@
   import {
     Calendar,
     Cpu,
+    ListTodo,
     Folder,
     House,
     LayoutGrid,
@@ -47,6 +48,7 @@
     manageAgents: Users,
     manageProfiles: Settings,
     manageSchedules: Calendar,
+    manageTasks: ListTodo,
     files: Folder,
   };
 

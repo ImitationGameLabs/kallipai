@@ -22,7 +22,8 @@ export type TagmaDetailsSection =
   | "budget"
   | "agents"
   | "profiles"
-  | "schedules";
+  | "schedules"
+  | "tasks";
 
 /** A manage details section: `/tagma/<uuid>/details/<section>`. */
 export function tagmaDetailsSectionPath(

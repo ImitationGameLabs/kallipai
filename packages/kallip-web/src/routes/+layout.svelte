@@ -20,6 +20,7 @@
     Folder,
     House,
     LayoutGrid,
+    ListTodo,
     MessageSquare,
     Settings,
     Users,
@@ -57,6 +58,7 @@
     manageAgents: Users,
     manageProfiles: Settings,
     manageSchedules: Calendar,
+    manageTasks: ListTodo,
     files: Folder,
   };
 

@@ -33,6 +33,7 @@ const FILES = [
   "manage_budget",
   "manage_profiles",
   "manage_schedules",
+  "manage_tasks",
   "manage_instances",
   "panorama",
   "files",
@@ -119,6 +120,10 @@ const loaders: Record<string, Loader> = {
     }).then((m) => m.default as Record<string, string>),
   "en|manage_schedules": () =>
     import("../i18n/project.inlang/messages/en/manage_schedules.json", {
+      with: { type: "json" },
+    }).then((m) => m.default as Record<string, string>),
+  "en|manage_tasks": () =>
+    import("../i18n/project.inlang/messages/en/manage_tasks.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
   "en|manage_instances": () =>
@@ -211,6 +216,10 @@ const loaders: Record<string, Loader> = {
     }).then((m) => m.default as Record<string, string>),
   "zh|manage_schedules": () =>
     import("../i18n/project.inlang/messages/zh/manage_schedules.json", {
+      with: { type: "json" },
+    }).then((m) => m.default as Record<string, string>),
+  "zh|manage_tasks": () =>
+    import("../i18n/project.inlang/messages/zh/manage_tasks.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
   "zh|manage_instances": () =>
@@ -333,6 +342,7 @@ const PREFIXES = new Set([
   "manage_profiles",
   "manage_schedules",
   "manage_instances",
+  "manage_tasks",
   "panorama",
   "files",
 ]);
@@ -399,6 +409,7 @@ const PREFIX_FILES: Record<string, string> = {
   manage_profiles: "manage_profiles",
   manage_schedules: "manage_schedules",
   manage_instances: "manage_instances",
+  manage_tasks: "manage_tasks",
   panorama: "panorama",
   files: "files",
 };
@@ -477,6 +488,7 @@ const SYNONYMS: string[][] = [
   ["nav_agents", "manage_agents_heading"],
   ["nav_profiles", "manage_profiles_heading"],
   ["nav_schedules", "manage_schedules_heading"],
+  ["nav_tasks", "manage_tasks_heading"],
   ["nav_tagmata", "manage_instances_heading"],
   ["manage_instances_token_apply", "manage_profiles_apply"],
   ["tagma_presence_online", "room_member_online_aria"],

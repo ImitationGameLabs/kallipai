@@ -8,10 +8,11 @@ import type {
   Modality,
   ProfileConfig,
   ProfileConfigPutRequest,
-  ProfileProvider,
   ProfileModel,
   ProfileProbeRequest,
+  ProfileProvider,
   ProfileSet,
+  TaskEventExport,
 } from "@kallipai/kallip-client";
 import {
   manage_schedules_warn_invalid,
@@ -667,4 +668,105 @@ export function validateWarnMinutes(pre: number, final: number): string | null {
   if (pre <= 0 || final <= 0) return manage_schedules_warn_positive();
   if (pre < final) return manage_schedules_warn_order();
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Task ledger: confirmation-cycle accounting
+// ---------------------------------------------------------------------------
+
+/**
+ * The confirmation boundary: the larger event id of the latest `start`
+ * and the latest `reopen` transition; 0 when neither exists, so first-
+ * cycle confirmations all count. A pause/resume pair does not open a
+ * new cycle (resume emits no start event). Mirrors kallip-task gates.rs
+ * confirmation_boundary.
+ */
+export function confirmationBoundary(
+  events: readonly {
+    readonly id: number;
+    readonly kind: string;
+    readonly name: string;
+  }[],
+): number {
+  let boundary = 0;
+  for (const event of events) {
+    if (
+      event.kind === "transition" &&
+      (event.name === "start" || event.name === "reopen")
+    ) {
+      if (event.id > boundary) boundary = event.id;
+    }
+  }
+  return boundary;
+}
+
+/**
+ * Clamp a requested page index into the valid range for `total` rows at
+ * `pageSize` rows per page: zero-based, never negative, and the last
+ * page never past the final partial page. A zero total collapses to
+ * page 0.
+ */
+export function clampPage(
+  page: number,
+  total: number,
+  pageSize: number,
+): number {
+  const pages = Math.ceil(total / pageSize);
+  return Math.min(Math.max(page, 0), Math.max(pages - 1, 0));
+}
+
+/**
+ * One confirmer's confirmation state in the current cycle: whether a
+ * confirmation was filed, its 1-based version for that confirmer, and
+ * the report body/timestamp when the latest confirmation carried one.
+ */
+export interface ConfirmationState {
+  readonly filed: boolean;
+  readonly version: number;
+  readonly report: string | null;
+  readonly reportedAt: string | null;
+}
+
+/**
+ * Confirmer → confirmation state in the current cycle. A confirmation
+ * counts only when its id exceeds the boundary; the key is the event's
+ * raw actor — an identity id, the same key space the confirmers
+ * roster uses (mirrors kallip-task gates.rs missing_confirmations,
+ * which files by actor against the id roster). actor_role is a
+ * display name, never a counting key; a historical name actor does
+ * not match an id roster, exactly as on the server.
+ */
+export function confirmerConfirmationState(
+  events: readonly TaskEventExport[],
+  confirmers: readonly string[],
+): Map<string, ConfirmationState> {
+  const boundary = confirmationBoundary(events);
+  const confirms = events
+    .filter(
+      (event) =>
+        event.id > boundary &&
+        event.kind === "action" &&
+        event.name === "confirm",
+    )
+    .sort((a, b) => a.id - b.id);
+  const state = new Map<string, ConfirmationState>();
+  for (const event of confirms) {
+    const key = event.actor;
+    if (key === null) continue;
+    const payload = (event.payload ?? {}) as { file?: unknown };
+    const report = typeof payload.file === "string" ? payload.file : null;
+    state.set(key, {
+      filed: true,
+      version: (state.get(key)?.version ?? 0) + 1,
+      report,
+      reportedAt: event.created_at ?? null,
+    });
+  }
+  const absent: ConfirmationState = {
+    filed: false,
+    version: 0,
+    report: null,
+    reportedAt: null,
+  };
+  return new Map(confirmers.map((c) => [c, state.get(c) ?? absent]));
 }

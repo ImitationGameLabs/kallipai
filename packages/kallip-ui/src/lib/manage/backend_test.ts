@@ -4,7 +4,7 @@
 // and that the save-failure classification still routes a bare 409 (old
 // backend) to the stale-backend branch.
 
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { KallipError } from "@kallipai/kallip-common";
 import {
   type ManageRestClient,
@@ -43,6 +43,34 @@ const DANGLING_BODY = {
     dangling: ["agent-x → 'alt'"],
   },
 };
+
+Deno.test(
+  "OnlineBackend task write verbs fail loudly (offline-only face)",
+  async () => {
+    const backend = new OnlineBackend(restWith(DANGLING_BODY), "t-a");
+    const verbs = [
+      [() => backend.createTask(), "create"],
+      [() => backend.startTask(), "start"],
+      [() => backend.confirmTask(), "confirm"],
+      [() => backend.reviewTask(), "review"],
+      [() => backend.pauseTask(), "pause"],
+      [() => backend.resumeTask(), "resume"],
+      [() => backend.noteTask(), "note"],
+      [() => backend.closeTask(), "close"],
+      [() => backend.reopenTask(), "reopen"],
+      [() => backend.archiveTask(), "archive"],
+      [() => backend.fetchTaskArchive(), "fetchArchive"],
+    ] as const;
+    for (const [call, name] of verbs) {
+      await assertRejects(
+        call as () => Promise<unknown>,
+        Error,
+        "offline-only",
+        `${name} must reject explicitly, not fall through to a proxy 404`,
+      );
+    }
+  },
+);
 
 Deno.test(
   "a relayed 409 with a dangling list reaches the confirm flow",

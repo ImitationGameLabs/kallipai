@@ -21,6 +21,7 @@
   import { agentsStore } from "../../lib/manage/agents.svelte.ts";
   import { profilesStore } from "../../lib/manage/profiles.svelte.ts";
   import { schedulesStore } from "../../lib/manage/schedules.svelte.ts";
+  import { tasksStore } from "../../lib/manage/tasks.svelte.ts";
   import { usageStore } from "../../lib/manage/usage.svelte.ts";
   import { managementBackend } from "../../lib/manage/client.ts";
   import {
@@ -32,6 +33,7 @@
   import AgentsPage from "./AgentsPage.svelte";
   import ProfilesPage from "./ProfilesPage.svelte";
   import SchedulesPage from "./SchedulesPage.svelte";
+  import TasksPage from "./TasksPage.svelte";
   import {
     manage_backend_failed,
     chat_channel_unavailable,
@@ -96,6 +98,7 @@
       profilesStore.switchBackend(backend);
       schedulesStore.switchBackend(backend);
       usageStore.switchBackend(backend);
+      tasksStore.switchBackend(backend);
       backendReady = true;
       error = null;
     } catch (e) {
@@ -114,6 +117,7 @@
         profilesStore.switchBackend(b);
         schedulesStore.switchBackend(b);
         usageStore.switchBackend(b);
+        tasksStore.switchBackend(b);
       } catch {
         /* no offline config */
       }
@@ -161,6 +165,8 @@
       <ProfilesPage {basePath} />
     {:else if page === "schedules"}
       <SchedulesPage {basePath} />
+    {:else if page === "tasks"}
+      <TasksPage />
     {/if}
   </div>
 </div>

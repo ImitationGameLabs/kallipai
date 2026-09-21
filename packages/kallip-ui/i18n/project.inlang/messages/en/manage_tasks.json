@@ -1,0 +1,22 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "manage_tasks_title": "KallipAI · tasks",
+  "manage_tasks_heading": "Tasks",
+  "manage_tasks_empty": "No tasks.",
+  "manage_tasks_load_failed": "Could not load the task ledger.",
+  "manage_tasks_col_assignee": "Assignee",
+  "manage_tasks_col_created": "Created",
+  "manage_tasks_show_archived": "Archived",
+  "manage_tasks_readonly": "This view is read-only for users; task records are produced by agents.",
+  "manage_tasks_timeline": "Activity",
+  "manage_tasks_close_reason": "Closed",
+  "manage_tasks_dossier": "Dossier",
+  "manage_tasks_page_prev": "Previous page",
+  "manage_tasks_page_next": "Next page",
+  "manage_tasks_page_status": "Page {page} of {pages} · {total} tasks",
+  "manage_tasks_confirmers": "Confirmers",
+  "manage_tasks_confirm_done": "confirmation filed",
+  "manage_tasks_confirm_pending": "confirmation pending",
+  "manage_tasks_no_confirmers": "No confirmers registered.",
+  "manage_tasks_confirm_no_report": "Confirmation filed, no report attached"
+}

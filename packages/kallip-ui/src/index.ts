@@ -111,6 +111,7 @@ export { default as AgentsPage } from "./pages/manage/AgentsPage.svelte";
 export { default as AgentDetailPage } from "./pages/manage/AgentDetailPage.svelte";
 export { default as ProfilesPage } from "./pages/manage/ProfilesPage.svelte";
 export { default as SchedulesPage } from "./pages/manage/SchedulesPage.svelte";
+export { default as TasksPage } from "./pages/manage/TasksPage.svelte";
 export { default as OnlineManagePage } from "./pages/manage/OnlineManagePage.svelte";
 export { default as OnlineAgentDetailPage } from "./pages/manage/OnlineAgentDetailPage.svelte";
 export { budgetStore } from "./lib/manage/budget.svelte.ts";

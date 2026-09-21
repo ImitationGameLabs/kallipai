@@ -1,0 +1,22 @@
+{
+  "$schema": "https://inlang.com/schema/message-format",
+  "manage_tasks_title": "KallipAI · 任务",
+  "manage_tasks_heading": "任务",
+  "manage_tasks_empty": "暂无任务。",
+  "manage_tasks_load_failed": "无法加载任务台账。",
+  "manage_tasks_col_assignee": "负责人",
+  "manage_tasks_col_created": "创建时间",
+  "manage_tasks_show_archived": "已归档",
+  "manage_tasks_readonly": "此视图对用户只读，任务记录由 Agent 产生。",
+  "manage_tasks_timeline": "活动",
+  "manage_tasks_close_reason": "已关闭",
+  "manage_tasks_dossier": "dossier",
+  "manage_tasks_page_prev": "上一页",
+  "manage_tasks_page_next": "下一页",
+  "manage_tasks_page_status": "第 {page} 页，共 {pages} 页 · {total} 项",
+  "manage_tasks_confirmers": "确认人",
+  "manage_tasks_confirm_done": "已确认",
+  "manage_tasks_confirm_pending": "待确认",
+  "manage_tasks_no_confirmers": "未登记确认人。",
+  "manage_tasks_confirm_no_report": "已确认，未附报告"
+}

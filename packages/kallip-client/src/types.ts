@@ -506,3 +506,150 @@ export interface DirectMessageRow {
   readonly attachment?: FileAttachment;
   readonly created_at: string;
 }
+
+// --- task ledger (management surface) ---
+
+/** The five coarse task states, serialized snake_case on the wire
+ * (kallip-common `TaskStatus`). */
+export type TaskStatus =
+  | "queued"
+  | "in_progress"
+  | "paused"
+  | "review"
+  | "closed";
+
+/** One event in a task's trail (kallip-common `EventExport`). */
+export interface TaskEventExport {
+  readonly id: number;
+  readonly kind: string;
+  readonly name: string;
+  readonly actor: string | null;
+  readonly actor_role: string | null;
+  readonly assignee: string | null;
+  readonly from_status: string | null;
+  readonly to_status: string | null;
+  readonly payload: unknown;
+  /** ISO 8601 UTC. */
+  readonly created_at: string | null;
+}
+
+/** Inbox/room association keys (kallip-common `AssociationExport`). */
+export interface TaskAssociationExport {
+  readonly inbox_id_start: number | null;
+  readonly inbox_id_end: number | null;
+  readonly room_id: string | null;
+  readonly room_seq_start: number | null;
+  readonly room_seq_end: number | null;
+}
+
+/** One task plus its event trail (kallip-common `TaskExport`, the
+ * machine face both the list and the detail endpoints return). */
+export interface TaskExport {
+  readonly id: number;
+  readonly title: string;
+  readonly status: TaskStatus;
+  readonly creator: string | null;
+  readonly assignee: string | null;
+  readonly confirmers: readonly string[];
+  readonly created_at: string | null;
+  readonly updated_at: string | null;
+  readonly started_at: string | null;
+  readonly ended_at: string | null;
+  /** A query partition, not a state (mirrors CLI --archived). */
+  readonly archived: boolean;
+  readonly archived_at: string | null;
+  readonly closed_reason: "completed" | "not_planned" | "duplicate" | null;
+  readonly close_summary: string | null;
+  readonly association: TaskAssociationExport | null;
+  readonly dossier_path: string | null;
+  readonly archive_hash: string | null;
+  readonly events: readonly TaskEventExport[];
+}
+
+/** One lightweight list row (`GET /tasks` page item): a task without
+ * its event trail — the trail and report bodies live behind the detail
+ * endpoint, so a list poll never drags them back. */
+export interface TaskRow {
+  readonly id: number;
+  readonly title: string;
+  readonly status: TaskStatus;
+  readonly creator: string | null;
+  readonly assignee: string | null;
+  readonly confirmers: readonly string[];
+  readonly created_at: string | null;
+  readonly updated_at: string | null;
+  readonly started_at: string | null;
+  readonly ended_at: string | null;
+  readonly archived: boolean;
+  readonly archived_at: string | null;
+  readonly closed_reason: "completed" | "not_planned" | "duplicate" | null;
+  readonly close_summary: string | null;
+  readonly association: TaskAssociationExport | null;
+  readonly dossier_path: string | null;
+  readonly archive_hash: string | null;
+  /** The task has at least one confirm event carrying a report. */
+  readonly has_reports: boolean;
+}
+
+/** Paging envelope of `GET /tasks`: one page of lightweight rows plus
+ * the total count matching the filter (limit/offset excluded). */
+export interface TaskListPage {
+  readonly rows: readonly TaskRow[];
+  readonly total: number;
+}
+
+/** The time axis the since/until window anchors to and the list sorts
+ * by (kallip-common `TaskTimeAxis`). */
+export type TaskTimeAxis = "updated" | "closed";
+
+/** Body of `POST /tasks` (kallip-common `TaskCreateRequest`). */
+export interface TaskCreateRequest {
+  readonly title: string;
+  readonly assignee?: string;
+  /** The confirmer roster; empty means closing needs no confirmations. */
+  readonly require?: readonly string[];
+  readonly dossier_path?: string;
+  readonly inbox_id_start?: number;
+  readonly inbox_id_end?: number;
+  readonly room_id?: string;
+  readonly room_seq_start?: number;
+  readonly room_seq_end?: number;
+}
+
+/** Body of `POST /tasks/{id}/confirm` (kallip-common `TaskConfirmRequest`):
+ * the actor's sign-off, optionally carrying a report via `file`. */
+export interface TaskConfirmRequest {
+  readonly note?: string;
+  readonly file?: string;
+}
+
+/** Body of the force-carrying verbs: start, resume, reopen, archive
+ * (kallip-common `TaskForceRequest`). */
+export interface TaskForceRequest {
+  readonly force?: boolean;
+}
+
+/** Body of `POST /tasks/{id}/note` (kallip-common `TaskNoteRequest`). */
+export interface TaskNoteRequest {
+  readonly note: string;
+}
+
+/** Body of `POST /tasks/{id}/close` (kallip-common `TaskCloseRequest`). */
+export interface TaskCloseRequest {
+  readonly reason: "completed" | "not_planned" | "duplicate";
+  readonly summary?: string;
+  readonly force?: boolean;
+}
+
+/** Query parameters of `GET /tasks` (kallip-common `TaskListQuery`).
+ * `since`/`until` are unix epoch seconds. */
+export interface TaskListQuery {
+  readonly status?: TaskStatus;
+  readonly assignee?: string;
+  readonly archived?: boolean;
+  readonly time?: TaskTimeAxis;
+  readonly since?: number;
+  readonly until?: number;
+  readonly limit?: number;
+  readonly offset?: number;
+}
