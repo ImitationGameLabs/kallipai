@@ -125,11 +125,14 @@ systemctl status kallip-daemon kallip-archeion kallip-lesche \
 sudo kallip-admin admin-token show
 ```
 
-需要时轮换铸造令牌（用当前令牌认证，旧令牌随即失效）：
+需要时轮换铸造令牌（用当前令牌认证，旧令牌随即失效）。reset 在调用服务端前也会本地读取状态文件，因此需在 archeion 主机上运行；`sudo` 需用 `-E` 保留环境中的令牌：
 
 ```sh
-export KALLIP_ARCHEION_ADMIN_TOKEN=$(sudo kallip-admin admin-token reset)
+export KALLIP_ARCHEION_ADMIN_TOKEN=$(sudo kallip-admin admin-token show)
+sudo -E kallip-admin admin-token reset
 ```
+
+reset 打印的新值即当前有效令牌，后续命令需重新 export（sudo kallip-admin admin-token show 再取，或直接捕获 reset 输出）。
 
 设置 `adminTokenFile` 时使用操作者钉住的令牌，轮换会被拒绝。
 

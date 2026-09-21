@@ -110,8 +110,8 @@ enum AdminTokenCmd {
     Show,
     /// Rotate the minted admin token (authenticates with the current
     /// token). Prints the fresh sk-admin- value once; the old one stops
-    /// working. Typical use:
-    /// KALLIP_ARCHEION_ADMIN_TOKEN=$(kallip-admin admin-token reset)
+    /// working. Requires the local state file to be readable (the same
+    /// preflight as `show`), so run it on the archeion host.
     Reset,
 }
 
@@ -180,13 +180,29 @@ fn read_admin_token_file(path: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("{path} carries no KALLIP_ARCHEION_ADMIN_TOKEN value"))
 }
 
+/// The minted admin token file: `KALLIP_ARCHEION_ADMIN_TOKEN_OUT_FILE`
+/// if set, the NixOS default path otherwise. Shared by `show` and the
+/// `reset` preflight.
+fn admin_token_path() -> String {
+    std::env::var("KALLIP_ARCHEION_ADMIN_TOKEN_OUT_FILE")
+        .unwrap_or_else(|_| "/var/lib/kallipai/archeion/admin-token.env".to_string())
+}
 /// `admin-token show`: print the minted token's bare value to stdout.
 fn admin_token_show() -> anyhow::Result<()> {
-    let path = std::env::var("KALLIP_ARCHEION_ADMIN_TOKEN_OUT_FILE")
-        .unwrap_or_else(|_| "/var/lib/kallipai/archeion/admin-token.env".to_string());
+    let path = admin_token_path();
     let secret = read_admin_token_file(&path)?;
     println!("{secret}");
     Ok(())
+}
+
+/// Pre-flight check for `admin-token reset`: the local state file must
+/// be readable where this runs (same mechanics as `show`). A pinned
+/// operator has no minted file to rotate, and a caller off the archeion
+/// host sees no file either; both refuse before an HTTP round-trip can
+/// muddy the diagnosis. The value read here is a capability check only:
+/// the request still authenticates with the env token.
+fn reset_local_gate(path: &str) -> anyhow::Result<()> {
+    read_admin_token_file(path).map(|_| ())
 }
 
 async fn run(client: &ArcheionClient, json: bool, cmd: Cmd) -> Result<()> {
@@ -262,6 +278,10 @@ async fn run(client: &ArcheionClient, json: bool, cmd: Cmd) -> Result<()> {
             }
         },
         Cmd::AdminToken(AdminTokenCmd::Reset) => {
+            // Local capability gate (see `reset_local_gate`); the value is
+            // not used to authenticate.
+            let path = admin_token_path();
+            reset_local_gate(&path)?;
             let resp = client.admin_rotate_token().await?;
             println!("{}", resp.token);
         }
@@ -363,7 +383,7 @@ mod tests {
     //! The `admin-token show` file-read/error-mapping surface, as a pure
     //! function of the file contents and the io error kind.
 
-    use super::read_admin_token_file;
+    use super::{read_admin_token_file, reset_local_gate};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
@@ -409,6 +429,53 @@ mod tests {
         fs::write(&path, "KALLIP_ARCHEION_ADMIN_TOKEN=\n").expect("write");
         let err =
             read_admin_token_file(path.to_str().expect("utf8")).expect_err("empty value must fail");
+        assert!(
+            err.to_string()
+                .contains("carries no KALLIP_ARCHEION_ADMIN_TOKEN"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn reset_gate_passes_when_the_file_is_readable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("admin-token.env");
+        fs::write(&path, "KALLIP_ARCHEION_ADMIN_TOKEN=sk-admin-t\n").expect("write");
+        reset_local_gate(path.to_str().expect("utf8")).expect("gate passes");
+    }
+
+    #[test]
+    fn reset_gate_missing_file_names_both_possibilities() {
+        let err = reset_local_gate("/nonexistent-kallipai-admin/env")
+            .expect_err("missing file must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("no minted admin token file"), "{msg}");
+        assert!(msg.contains("pinned"), "{msg}");
+    }
+
+    #[test]
+    fn reset_gate_permission_denied_names_the_sudo_hint() {
+        // Root ignores permission bits; skip where the path is unreachable.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("admin-token.env");
+        fs::write(&path, "KALLIP_ARCHEION_ADMIN_TOKEN=sk-admin-t\n").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let err = reset_local_gate(path.to_str().expect("utf8"))
+            .expect_err("unreadable file must be refused");
+        assert!(err.to_string().contains("permission denied"), "{err}");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("restore");
+    }
+
+    #[test]
+    fn reset_gate_empty_value_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("admin-token.env");
+        fs::write(&path, "KALLIP_ARCHEION_ADMIN_TOKEN=\n").expect("write");
+        let err = reset_local_gate(path.to_str().expect("utf8"))
+            .expect_err("empty value must be refused");
         assert!(
             err.to_string()
                 .contains("carries no KALLIP_ARCHEION_ADMIN_TOKEN"),

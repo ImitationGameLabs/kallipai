@@ -137,11 +137,17 @@ sudo kallip-admin admin-token show
 ```
 
 Rotate the minted token when needed (authenticated with the current
-one; the old token stops working immediately):
+one; the old token stops working immediately). The reset command
+also reads the state file locally before calling the server, so run
+it on the archeion host; `sudo` must keep the token in the
+environment (`-E`):
 
 ```sh
-export KALLIP_ARCHEION_ADMIN_TOKEN=$(sudo kallip-admin admin-token reset)
+export KALLIP_ARCHEION_ADMIN_TOKEN=$(sudo kallip-admin admin-token show)
+sudo -E kallip-admin admin-token reset
 ```
+
+The value that reset prints is the new active token; later commands must re-export it (run `sudo kallip-admin admin-token show` again, or capture the reset output directly).
 
 With `adminTokenFile` set, the operator-pinned token is used as-is and
 rotation is refused.
