@@ -281,8 +281,10 @@ in
       service.command = [ "${workspace}/bin/kallip-archeion" ];
       service.ports = [ "${archeionHostPort}:7100" ];
       # The dev admin token is the pin form (stable value, set here); the
-      # generated form writes a fresh token to runtime state on every start
-      # and never reaches the logs.
+      # generated form: the container has no persistent volume for state, so
+      # after a restart the state file is absent and the archeion mints a
+      # fresh one (absence-driven, not rewritten in place); it never
+      # reaches the logs.
       service.env_file = [ ".env" ];
       service.volumes = [ "polis_internal:/var/lib/kallipai/internal" ];
       # cacert: the reqwest oauth client (rustls) loads the system trust

@@ -1,12 +1,12 @@
 //! Atomic secret-file primitives for boot-provisioned credentials.
 //!
-//! Two lifecycle shapes share these mechanics: a service-generated shared
-//! secret is written once into persistent state and only read afterwards
-//! (the value must stay stable across restarts), while a short-lived
-//! bootstrap credential is rewritten on every start into runtime state.
-//! Both need the same guarantees: a reader never observes a partial file
-//! (temp file + rename in the destination directory), and the on-disk mode
-//! is explicit rather than umask-dependent.
+//! One lifecycle shape uses these mechanics: a service-generated secret is
+//! written once into persistent state and only read afterwards, so the
+//! value stays stable across restarts. The guarantees a reader gets: never
+//! a partial file (temp file + rename in the destination directory), and
+//! an on-disk mode that is explicit rather than umask-dependent. Boot
+//! provisioning callers (the platform-internal token, the minted admin
+//! token) share this shape.
 
 use std::fs;
 use std::io::Write;

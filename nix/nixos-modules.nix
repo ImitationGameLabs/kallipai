@@ -16,7 +16,7 @@
 # and one self-managed secret: the platform-internal token is generated
 # by the archeion into its own state directory on first boot and only
 # read afterwards. Operator token knobs stay paths (pin an admin token,
-# or let the unit mint a short-lived one); no secret hits the store.
+# or let the unit mint a persistent one); no secret hits the store.
 
 # The platform knobs services.kallipai.domain and services.kallipai.tls
 # feed every web-facing default (CORS origins, the session cookie,
