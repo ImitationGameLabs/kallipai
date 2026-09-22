@@ -5,10 +5,15 @@
 // polls rows only; the detail pane fetches once per selection and again
 // when the selected row's status moves under it.
 
-import type { TaskExport, TaskRow } from "@kallipai/kallip-client";
+import type {
+  TaskExport,
+  TaskRow,
+  TaskStatus,
+  TaskTimeAxis,
+} from "@kallipai/kallip-client";
 import { type ManagementBackend, managementBackend } from "./client.ts";
 import { startVisibleInterval } from "../visibleInterval.ts";
-import { clampPage } from "./compute.ts";
+import { clampPage, filterEpoch } from "./compute.ts";
 import { displayError } from "./errors.ts";
 import { manage_tasks_load_failed } from "../../paraglide/messages.js";
 
@@ -29,22 +34,40 @@ class TasksStore {
   selectedId = $state<number | null>(null);
   detail = $state<TaskExport | null>(null);
   showArchived = $state(false);
+  statusFilter = $state<TaskStatus | null>(null);
+  assigneeFilter = $state("");
+  timeAxis = $state<TaskTimeAxis>("updated");
+  sinceDate = $state("");
+  untilDate = $state("");
   isLoading = $state(false);
   hasLoaded = $state(false);
   error = $state<string | null>(null);
 
   private pollStop: (() => void) | null = null;
+  /** Monotonic token for in-flight refreshes: a slow response from a
+   * superseded request must not clobber the newer one's rows (the
+   * same race loadDetail guards by selected id). */
+  private refreshSeq = 0;
 
   async refresh(force = false): Promise<void> {
     if (!force && this.isLoading) return;
+    const seq = ++this.refreshSeq;
     this.isLoading = true;
     this.error = null;
+    const superseded = () => seq !== this.refreshSeq;
+
     try {
       const result = await this.backend.listTasks({
         archived: this.showArchived,
+        status: this.statusFilter ?? undefined,
+        assignee: this.assigneeFilter.trim() || undefined,
+        time: this.timeAxis,
+        since: filterEpoch(this.sinceDate),
+        until: filterEpoch(this.untilDate, true),
         limit: TASKS_PAGE_SIZE,
         offset: this.page * TASKS_PAGE_SIZE,
       });
+      if (superseded()) return;
       const prev = this.rows.find((r) => r.id === this.selectedId);
       // Re-clamp the page against the fresh total: a shrinking ledger
       // can strand the current page past the new end.
@@ -57,6 +80,8 @@ class TasksStore {
         // The rows just read belong to the stranded page; refetch the
         // clamped page (forced, bounded: the clamped page is in range).
         void this.refresh(true);
+        return;
+      } else if (superseded()) {
         return;
       }
       // Keep the selection stable; fall back to the first row when it
@@ -76,9 +101,10 @@ class TasksStore {
       }
       this.hasLoaded = true;
     } catch (e) {
+      if (superseded()) return;
       this.error = displayError("tasks", e, manage_tasks_load_failed());
     } finally {
-      this.isLoading = false;
+      if (seq === this.refreshSeq) this.isLoading = false;
     }
   }
 
@@ -101,6 +127,37 @@ class TasksStore {
       }
       this.error = displayError("task detail", e, manage_tasks_load_failed());
     }
+  }
+
+  /** Set one list filter and refetch from the first page. */
+  setStatus(status: TaskStatus | null): void {
+    this.statusFilter = status;
+    this.page = 0;
+    void this.refresh(true);
+  }
+
+  setAssignee(assignee: string): void {
+    this.assigneeFilter = assignee;
+    this.page = 0;
+    void this.refresh(true);
+  }
+
+  setTimeAxis(timeAxis: TaskTimeAxis): void {
+    this.timeAxis = timeAxis;
+    this.page = 0;
+    void this.refresh(true);
+  }
+
+  setSince(date: string): void {
+    this.sinceDate = date;
+    this.page = 0;
+    void this.refresh(true);
+  }
+
+  setUntil(date: string): void {
+    this.untilDate = date;
+    this.page = 0;
+    void this.refresh(true);
   }
 
   /** Flip the archive partition (mirrors the CLI's --archived flag). */
@@ -145,6 +202,11 @@ class TasksStore {
     this.selectedId = null;
     this.detail = null;
     this.showArchived = false;
+    this.statusFilter = null;
+    this.assigneeFilter = "";
+    this.timeAxis = "updated";
+    this.sinceDate = "";
+    this.untilDate = "";
     this.error = null;
     this.hasLoaded = false;
   }

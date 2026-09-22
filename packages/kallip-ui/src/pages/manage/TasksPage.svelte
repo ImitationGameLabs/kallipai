@@ -7,6 +7,8 @@
   import {
     type ConfirmationState,
     confirmerConfirmationState,
+    associationText,
+    timelinePayloadView,
   } from "../../lib/manage/compute.ts";
   import {
     common_loading,
@@ -28,7 +30,21 @@
     manage_tasks_page_prev,
     manage_tasks_page_next,
     manage_tasks_page_status,
+    manage_tasks_filter_all,
+    manage_tasks_filter_time,
+    manage_tasks_filter_since,
+    manage_tasks_filter_until,
+    manage_tasks_col_updated,
+    manage_tasks_close_summary,
+    manage_tasks_has_reports,
+    manage_tasks_creator,
+    manage_tasks_col_started,
+    manage_tasks_col_ended,
+    manage_tasks_col_archived,
+    manage_tasks_archive_hash,
+    manage_tasks_association,
   } from "../../paraglide/messages.js";
+  import type { TaskStatus, TaskTimeAxis } from "@kallipai/kallip-client";
   import { TASKS_PAGE_SIZE } from "../../lib/manage/tasks.svelte.ts";
 
   $effect(() => {
@@ -75,7 +91,22 @@
       : new Map<string, ConfirmationState>(),
   );
 
+  // Headline vote badge: filed confirmations over the registered roster.
+  const confirmedCount = $derived(
+    [...confirmationByConfirmer.values()].filter((c) => c.filed).length,
+  );
+
   const pages = $derived(Math.ceil(tasksStore.total / TASKS_PAGE_SIZE));
+
+  // Filter chips: the five-vocabulary state machine plus the all row.
+  const statusChips: (TaskStatus | null)[] = [
+    null,
+    "queued",
+    "in_progress",
+    "paused",
+    "review",
+    "closed",
+  ];
 
   // The one expanded confirmation row (single-open accordion): report
   // can be long, so only one rolls open at a time.
@@ -110,6 +141,61 @@
     <p class="text-xs opacity-60 preset-tonal-surface rounded px-3 py-2">
       {manage_tasks_readonly()}
     </p>
+
+    <div class="flex flex-wrap items-center gap-1.5">
+      {#each statusChips as chip (chip)}
+        <button
+          type="button"
+          class="btn btn-sm {tasksStore.statusFilter === chip
+            ? 'preset-filled-primary-500'
+            : 'preset-outlined-surface-500 hover:preset-filled-surface-500'}"
+          onclick={() => tasksStore.setStatus(chip)}
+        >
+          {#if chip === null}{manage_tasks_filter_all()}{:else}{chip}{/if}
+        </button>
+      {/each}
+    </div>
+
+    <div class="flex flex-wrap items-end gap-3 text-sm">
+      <label class="flex flex-col gap-1">
+        <span class="text-xs opacity-60">{manage_tasks_col_assignee()}</span>
+        <input
+          class="input h-8 w-40"
+          value={tasksStore.assigneeFilter}
+          onchange={(e) => tasksStore.setAssignee(e.currentTarget.value)}
+        />
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="text-xs opacity-60">{manage_tasks_filter_time()}</span>
+        <select
+          class="select h-8 w-32"
+          value={tasksStore.timeAxis}
+          onchange={(e) =>
+            tasksStore.setTimeAxis(e.currentTarget.value as TaskTimeAxis)}
+        >
+          <option value="updated">updated</option>
+          <option value="closed">closed</option>
+        </select>
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="text-xs opacity-60">{manage_tasks_filter_since()}</span>
+        <input
+          type="date"
+          class="input h-8 w-36"
+          value={tasksStore.sinceDate}
+          onchange={(e) => tasksStore.setSince(e.currentTarget.value)}
+        />
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="text-xs opacity-60">{manage_tasks_filter_until()}</span>
+        <input
+          type="date"
+          class="input h-8 w-36"
+          value={tasksStore.untilDate}
+          onchange={(e) => tasksStore.setUntil(e.currentTarget.value)}
+        />
+      </label>
+    </div>
 
     {#if tasksStore.error}
       <p class="text-error-500 dark:text-error-400 text-sm">
@@ -148,6 +234,19 @@
                 <span>{task.status}</span>
                 <span>{task.assignee ?? "—"}</span>
                 <span>{fmtTime(task.created_at)}</span>
+                <span
+                  >{manage_tasks_col_updated()}:
+                  {fmtTime(task.updated_at)}</span
+                >
+                <span
+                  >{manage_tasks_confirmers()}:
+                  {task.confirmers.length}</span
+                >
+                {#if task.has_reports}
+                  <span class="text-success-500">
+                    ✓ {manage_tasks_has_reports()}
+                  </span>
+                {/if}
               </div>
             </button>
           {/each}
@@ -196,6 +295,13 @@
                 <h2 class="text-base font-semibold flex-1">
                   {tasksStore.detail.title}
                 </h2>
+                {#if tasksStore.detail.confirmers.length > 0}
+                  <span
+                    class="text-xs preset-filled-success-500 rounded-full px-2 py-0.5"
+                  >
+                    {confirmedCount}/{tasksStore.detail.confirmers.length}
+                  </span>
+                {/if}
               </div>
 
               <div class="text-xs opacity-60 flex gap-4 flex-wrap">
@@ -207,9 +313,57 @@
                   >{manage_tasks_col_created()}:
                   {fmtTime(tasksStore.detail.created_at)}</span
                 >
-                {#if tasksStore.detail.close_summary}
+                {#if tasksStore.detail.creator}
+                  <span
+                    >{manage_tasks_creator()}:
+                    {tasksStore.detail.creator}</span
+                  >
+                {/if}
+                {#if tasksStore.detail.started_at}
+                  <span
+                    >{manage_tasks_col_started()}:
+                    {fmtTime(tasksStore.detail.started_at)}</span
+                  >
+                {/if}
+                {#if tasksStore.detail.ended_at}
+                  <span
+                    >{manage_tasks_col_ended()}:
+                    {fmtTime(tasksStore.detail.ended_at)}</span
+                  >
+                {/if}
+                {#if tasksStore.detail.archived_at}
+                  <span
+                    >{manage_tasks_col_archived()}:
+                    {fmtTime(tasksStore.detail.archived_at)}</span
+                  >
+                {/if}
+                {#if tasksStore.detail.closed_reason}
                   <span
                     >{manage_tasks_close_reason()}:
+                    <span class="font-mono"
+                      >{tasksStore.detail.closed_reason}</span
+                    ></span
+                  >
+                {/if}
+                {#if tasksStore.detail.archive_hash}
+                  <span
+                    >{manage_tasks_archive_hash()}:
+                    <span class="font-mono"
+                      >{tasksStore.detail.archive_hash.slice(0, 12)}…</span
+                    ></span
+                  >
+                {/if}
+                {#if tasksStore.detail.association}
+                  <span
+                    >{manage_tasks_association()}:
+                    <span class="font-mono"
+                      >{associationText(tasksStore.detail.association)}</span
+                    ></span
+                  >
+                {/if}
+                {#if tasksStore.detail.close_summary}
+                  <span
+                    >{manage_tasks_close_summary()}:
                     {tasksStore.detail.close_summary}</span
                   >
                 {/if}
@@ -296,11 +450,16 @@
                 </h3>
                 <ol class="space-y-1.5">
                   {#each timeline as event (event.id)}
-                    <li class="text-xs flex gap-2 items-baseline">
+                    {@const pv = timelinePayloadView(event.payload)}
+                    <li class="text-xs flex gap-2 items-baseline flex-wrap">
                       <span class="opacity-50 whitespace-nowrap"
                         >{fmtTime(event.created_at)}</span
                       >
-                      <span class="font-medium">{event.name}</span>
+                      <span
+                        class="font-medium {pv.forced
+                          ? 'text-warning-500'
+                          : ''}">{event.name}</span
+                      >
                       {#if event.from_status && event.to_status}
                         <span class="opacity-60"
                           >{event.from_status} → {event.to_status}</span
@@ -310,6 +469,13 @@
                         <span class="opacity-60 font-mono"
                           >{event.actor_role ?? event.actor}</span
                         >
+                      {/if}
+                      {#if pv.detail}
+                        <span class="opacity-50 font-mono">{pv.detail}</span>
+                      {/if}
+                      {#if pv.note}
+                        <pre
+                          class="w-full text-xs whitespace-pre-wrap break-words preset-tonal-surface rounded p-2">{pv.note}</pre>
                       {/if}
                     </li>
                   {/each}

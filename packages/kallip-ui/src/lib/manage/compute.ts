@@ -13,6 +13,7 @@ import type {
   ProfileProvider,
   ProfileSet,
   TaskEventExport,
+  TaskExport,
 } from "@kallipai/kallip-client";
 import {
   manage_schedules_warn_invalid,
@@ -769,4 +770,72 @@ export function confirmerConfirmationState(
     reportedAt: null,
   };
   return new Map(confirmers.map((c) => [c, state.get(c) ?? absent]));
+}
+
+// ---------------------------------------------------------------------------
+// Task list filters & detail helpers
+// ---------------------------------------------------------------------------
+
+/** `GET /tasks` window anchors are unix epoch seconds; the page's date
+ * inputs carry `YYYY-MM-DD`. `endOfDay` pushes an `until` date to
+ * 23:59:59Z so the window includes the chosen day. Blank or unparseable
+ * input filters nothing (undefined). */
+export function filterEpoch(
+  date: string,
+  endOfDay = false,
+): number | undefined {
+  if (date === "") return undefined;
+  const time = Date.parse(`${date}T${endOfDay ? "23:59:59" : "00:00:00"}Z`);
+  return Number.isNaN(time) ? undefined : Math.floor(time / 1000);
+}
+
+/** Narrow an event `payload` (unknown JSON) for the timeline: the note
+ * text renders in full and gate escapes flag the row. Matches the shapes
+ * the Rust store writes (kallip-task store.rs): note/confirm payloads
+ * carry `note`, force escapes carry `gate` or `gates` plus context. */
+export function timelinePayloadView(payload: unknown): {
+  note?: string;
+  forced: boolean;
+  detail?: string;
+} {
+  if (payload === null || typeof payload !== "object") {
+    return { forced: false };
+  }
+  const p = payload as Record<string, unknown>;
+  const forced = "gate" in p || "gates" in p;
+  const note = typeof p.note === "string" ? p.note : undefined;
+  if (!forced) return { note, forced };
+  const bits: string[] = [];
+  if (typeof p.gate === "string") bits.push(p.gate);
+  if (Array.isArray(p.gates)) {
+    const names = p.gates.filter((g) => typeof g === "string");
+    if (names.length > 0) bits.push(names.join(", "));
+  }
+  if (typeof p.blocked_by === "number") bits.push(`#${p.blocked_by}`);
+  if (Array.isArray(p.registered_confirmers)) {
+    bits.push(`${p.registered_confirmers.length} confirmers`);
+  }
+  return {
+    note,
+    forced,
+    detail: bits.length > 0 ? bits.join(" · ") : undefined,
+  };
+}
+
+/** Compact one-line form of the association keys for the detail pane. */
+export function associationText(
+  a: NonNullable<TaskExport["association"]>,
+): string {
+  const parts: string[] = [];
+  if (a.inbox_id_start !== null || a.inbox_id_end !== null) {
+    parts.push(`inbox ${a.inbox_id_start ?? "?"}–${a.inbox_id_end ?? "?"}`);
+  }
+  if (a.room_id !== null) {
+    let room = `room ${a.room_id}`;
+    if (a.room_seq_start !== null || a.room_seq_end !== null) {
+      room += ` [${a.room_seq_start ?? "?"}–${a.room_seq_end ?? "?"}]`;
+    }
+    parts.push(room);
+  }
+  return parts.length > 0 ? parts.join(" · ") : "—";
 }

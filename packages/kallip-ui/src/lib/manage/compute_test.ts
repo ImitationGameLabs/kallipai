@@ -20,6 +20,7 @@ import {
   buildProbeRequest,
   burnRate,
   clampPage,
+  associationText,
   confirmationBoundary,
   confirmerConfirmationState,
   consumedPct,
@@ -30,6 +31,7 @@ import {
   moveFromParking,
   moveProfile,
   moveToParking,
+  filterEpoch,
   normalizeModalities,
   profileConfigEqual,
   profileConfigToWire,
@@ -46,6 +48,7 @@ import {
   setHasShadowedMembers,
   singleParkingProfileProbeRequest,
   singleProfileProbeRequest,
+  timelinePayloadView,
   singleProviderProbeRequest,
   updateSetDescription,
   upsertProvider,
@@ -1170,3 +1173,105 @@ Deno.test(
     assertEquals(clampPage(2, 50, 25), 1);
   },
 );
+
+Deno.test(
+  "filterEpoch converts date inputs to unix epoch seconds (inclusive until)",
+  () => {
+    // Midnight UTC opens the since edge.
+    assertEquals(filterEpoch("2026-09-22"), 1790035200);
+    // The until edge includes the whole chosen day.
+    assertEquals(filterEpoch("2026-09-22", true), 1790121599);
+    // Blank input filters nothing.
+    assertEquals(filterEpoch(""), undefined);
+    assertEquals(filterEpoch("", true), undefined);
+    // Unparseable input filters nothing instead of throwing.
+    assertEquals(filterEpoch("not-a-date"), undefined);
+  },
+);
+
+Deno.test(
+  "timelinePayloadView narrows note payloads and flags gate escapes",
+  () => {
+    // A note payload renders its text, not forced.
+    assertEquals(timelinePayloadView({ note: "hold the gate" }), {
+      note: "hold the gate",
+      forced: false,
+    });
+    // A force_start payload is flagged with its gate context.
+    const force = timelinePayloadView({
+      gate: "serial",
+      blocked_by: 7,
+    });
+    assertEquals(force.forced, true);
+    assertEquals(force.detail, "serial · #7");
+    // A force_close payload lists its gates and roster size.
+    const closed = timelinePayloadView({
+      gates: ["confirmations"],
+      registered_confirmers: ["a", "b"],
+    });
+    assertEquals(closed.forced, true);
+    assertEquals(closed.detail, "confirmations · 2 confirmers");
+    // A gates array with no string entries leaves the detail empty
+    // instead of rendering an empty separator.
+    assertEquals(timelinePayloadView({ gates: [1, 2] }), {
+      note: undefined,
+      forced: true,
+      detail: undefined,
+    });
+    // Non-object payloads degrade to a plain row.
+    assertEquals(timelinePayloadView(null), { forced: false });
+    assertEquals(timelinePayloadView("note"), { forced: false });
+    // A forced payload with no known context keys still flags.
+    assertEquals(timelinePayloadView({ gate: "archive_requires_closed" }), {
+      note: undefined,
+      forced: true,
+      detail: "archive_requires_closed",
+    });
+  },
+);
+
+Deno.test("associationText renders the set association keys compactly", () => {
+  // Inbox window.
+  assertEquals(
+    associationText({
+      inbox_id_start: 100,
+      inbox_id_end: 200,
+      room_id: null,
+      room_seq_start: null,
+      room_seq_end: null,
+    }),
+    "inbox 100–200",
+  );
+  // Room with a seq window.
+  assertEquals(
+    associationText({
+      inbox_id_start: null,
+      inbox_id_end: null,
+      room_id: "r-1",
+      room_seq_start: 5,
+      room_seq_end: 9,
+    }),
+    "room r-1 [5–9]",
+  );
+  // Both parts join; an empty association reads as an em dash.
+  assertEquals(
+    associationText({
+      inbox_id_start: 1,
+      inbox_id_end: null,
+      room_id: "r",
+      room_seq_start: null,
+      room_seq_end: null,
+    }),
+    "inbox 1–? · room r",
+  );
+  assertEquals(
+    associationText({
+      inbox_id_start: null,
+      inbox_id_end: null,
+      room_id: null,
+      room_seq_start: null,
+      room_seq_end: null,
+    }),
+    "—",
+  );
+});

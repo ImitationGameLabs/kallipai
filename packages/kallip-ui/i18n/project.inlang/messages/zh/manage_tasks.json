@@ -18,5 +18,18 @@
   "manage_tasks_confirm_done": "已确认",
   "manage_tasks_confirm_pending": "待确认",
   "manage_tasks_no_confirmers": "未登记确认人。",
-  "manage_tasks_confirm_no_report": "已确认，未附报告"
+  "manage_tasks_confirm_no_report": "已确认，未附报告",
+  "manage_tasks_filter_all": "全部",
+  "manage_tasks_filter_time": "时间轴",
+  "manage_tasks_filter_since": "起",
+  "manage_tasks_filter_until": "止",
+  "manage_tasks_col_updated": "更新于",
+  "manage_tasks_has_reports": "已附报告",
+  "manage_tasks_creator": "创建者",
+  "manage_tasks_col_started": "开始于",
+  "manage_tasks_col_ended": "结束于",
+  "manage_tasks_col_archived": "归档于",
+  "manage_tasks_archive_hash": "归档哈希",
+  "manage_tasks_association": "关联",
+  "manage_tasks_close_summary": "关闭小结"
 }

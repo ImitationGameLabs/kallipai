@@ -18,5 +18,18 @@
   "manage_tasks_confirm_done": "confirmation filed",
   "manage_tasks_confirm_pending": "confirmation pending",
   "manage_tasks_no_confirmers": "No confirmers registered.",
-  "manage_tasks_confirm_no_report": "Confirmation filed, no report attached"
+  "manage_tasks_confirm_no_report": "Confirmation filed, no report attached",
+  "manage_tasks_filter_all": "All",
+  "manage_tasks_filter_time": "Time axis",
+  "manage_tasks_filter_since": "Since",
+  "manage_tasks_filter_until": "Until",
+  "manage_tasks_col_updated": "Updated",
+  "manage_tasks_has_reports": "reports attached",
+  "manage_tasks_creator": "Creator",
+  "manage_tasks_col_started": "Started",
+  "manage_tasks_col_ended": "Ended",
+  "manage_tasks_col_archived": "Archived",
+  "manage_tasks_archive_hash": "Archive hash",
+  "manage_tasks_association": "Association",
+  "manage_tasks_close_summary": "Close summary"
 }
