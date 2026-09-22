@@ -119,10 +119,15 @@ fn api_error(err: kallip_task::Error) -> ApiError {
 
 type TaskResult<T> = Result<Json<T>, ApiError>;
 
-/// One wake broadcast per successful write verb. Publish failure is
-/// log-and-drop by bus contract: no subscribers (watcher not running)
-/// is benign, and the next verb on the task re-announces state.
+/// One wake per successful write verb: bump the snapshot-pump
+/// invalidation generation, then publish the TaskChanged wake.
+/// Publish failure is log-and-drop by bus contract: no subscribers
+/// (watcher not running) is benign, and the next verb on the task
+/// re-announces state.
+/// The generation is level-triggered: concurrent writers can coalesce
+/// onto one step, so a wake reads "state moved", not "exactly one write".
 fn notify(state: &SharedState, verb: &str, export: &kallip_task::TaskExport) {
+    state.invalidate();
     if let Err(err) = state.bus.publish(TaskChanged {
         task_id: export.id,
         title: export.title.clone(),
@@ -421,6 +426,8 @@ pub(crate) fn router() -> axum::Router<SharedState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::*;
+    use std::sync::Arc;
 
     /// The gate taxonomy is the 409 family: every state refusal maps to
     /// conflict, unknown ids to not-found, and anything else (storage,
@@ -578,5 +585,170 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// Every write verb wakes the snapshot pumps: the handlers share one
+    /// `notify` tail, so a verb that skips the bump would leave the
+    /// header stale until a fallback ticker catches up. `close` runs
+    /// twice because `reopen` and `archive` each need a closed task in
+    /// front of them.
+    #[tokio::test]
+    async fn every_write_verb_bumps_the_invalidation_generation() {
+        let state = make_state();
+        state
+            .tasks
+            .set(Arc::new(kallip_task::TaskStore::open_in_memory().await))
+            .ok()
+            .expect("task store installs once");
+        let mut rx = state.subscribe_invalidations();
+        let mut generation = *rx.borrow();
+        let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+        let force = Json(TaskForceRequest::default());
+        let created = create(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Json(TaskCreateRequest {
+                title: "gen".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("create succeeds");
+        let id = created.0.id;
+        expect_bump(&mut rx, &mut generation, "create").await;
+        let _ = start(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            force.clone(),
+        )
+        .await
+        .expect("start succeeds");
+        expect_bump(&mut rx, &mut generation, "start").await;
+        let _ = note(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            Json(TaskNoteRequest { note: "n".into() }),
+        )
+        .await
+        .expect("note succeeds");
+        expect_bump(&mut rx, &mut generation, "note").await;
+        let _ = pause(State(Arc::clone(&state)), auth.clone(), Path(id))
+            .await
+            .expect("pause succeeds");
+        expect_bump(&mut rx, &mut generation, "pause").await;
+        let _ = resume(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            force.clone(),
+        )
+        .await
+        .expect("resume succeeds");
+        expect_bump(&mut rx, &mut generation, "resume").await;
+        let _ = confirm(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            Json(TaskConfirmRequest::default()),
+        )
+        .await
+        .expect("confirm succeeds");
+        expect_bump(&mut rx, &mut generation, "confirm").await;
+        let _ = review(State(Arc::clone(&state)), auth.clone(), Path(id))
+            .await
+            .expect("review succeeds");
+        expect_bump(&mut rx, &mut generation, "review").await;
+        let close_req = || {
+            Json(TaskCloseRequest {
+                reason: kallip_common::protocol::ClosedReason::Completed,
+                summary: None,
+                force: false,
+            })
+        };
+        let _ = close(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            close_req(),
+        )
+        .await
+        .expect("close succeeds");
+        expect_bump(&mut rx, &mut generation, "close").await;
+        let _ = reopen(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            force.clone(),
+        )
+        .await
+        .expect("reopen succeeds");
+        expect_bump(&mut rx, &mut generation, "reopen").await;
+        let _ = close(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            close_req(),
+        )
+        .await
+        .expect("second close succeeds");
+        expect_bump(&mut rx, &mut generation, "close").await;
+        let _ = archive(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            force.clone(),
+        )
+        .await
+        .expect("archive succeeds");
+        expect_bump(&mut rx, &mut generation, "archive").await;
+        // A refused verb skips the notify tail: confirm needs
+        // in_progress|review, so confirming a fresh queued task is a 409
+        // refusal that must leave the generation where it was.
+        let queued = create(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Json(TaskCreateRequest {
+                title: "refused".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("second create succeeds");
+        expect_bump(&mut rx, &mut generation, "create").await;
+        let refused = confirm(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(queued.0.id),
+            Json(TaskConfirmRequest::default()),
+        )
+        .await;
+        assert!(refused.is_err(), "confirm on queued is refused");
+        assert_eq!(
+            *rx.borrow(),
+            generation,
+            "a refused verb leaves the generation alone"
+        );
+    }
+
+    /// The per-verb assertion: each successful verb advances the watch
+    /// generation by exactly one — more would mean double wakes, fewer
+    /// would mean a verb skipped its notify tail.
+    async fn expect_bump(
+        rx: &mut tokio::sync::watch::Receiver<u64>,
+        generation: &mut u64,
+        verb: &str,
+    ) {
+        let changed = tokio::time::timeout(std::time::Duration::from_secs(5), rx.changed())
+            .await
+            .unwrap_or_else(|_| panic!("{verb}: generation did not advance"));
+        changed.expect("the invalidation sender lives on the AppState");
+        *generation += 1;
+        assert_eq!(
+            *rx.borrow(),
+            *generation,
+            "{verb} advances the generation by exactly one"
+        );
     }
 }
