@@ -21,7 +21,17 @@ let
     }
   );
 
-  src = craneLib.cleanCargoSource root;
+  # Allowlist branch over the crane cargo filter: any route-shapes.json
+  # under any crate joins the build source. Written as a single
+  # cleanSourceWith (an outer layer over cleanCargoSource cannot revive
+  # files, because cleanSourceWith composes filters with AND); this
+  # expands cleanCargoSource and adds one OR branch.
+  src = lib.cleanSourceWith {
+    src = lib.cleanSource root;
+    filter =
+      path: type: craneLib.filterCargoSources path type || baseNameOf path == "route-shapes.json";
+    name = "kallip-source";
+  };
 
   # Use git shortRev as version, fallback to "dirty" if working tree is dirty
   gitVersion = inputs.self.shortRev or "dirty";

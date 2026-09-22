@@ -30,7 +30,10 @@ in
     commonArgs
     // {
       inherit cargoArtifacts;
-      env.RUSTDOCFLAGS = "--deny warnings";
+      # crane cargoDoc already runs --locked --no-deps by default;
+      # no override needed. Warning denial comes from the repo-root
+      # .cargo/config.toml (build.warnings), which the crane filter
+      # passes into the source.
     }
   );
 
@@ -46,8 +49,9 @@ in
       # Repeat `--locked`: overriding cargoExtraArgs replaces crane's default
       # ("--locked"), so it must be re-stated here. --locked asserts Cargo.lock
       # is current (fails instead of silently updating it) for hermetic builds.
+      # Warning denial comes from the repo-root .cargo/config.toml
+      # (build.warnings), which the crane filter passes into the source.
       cargoExtraArgs = "--locked --all-features";
-      env.RUSTDOCFLAGS = "--deny warnings";
     }
   );
 
