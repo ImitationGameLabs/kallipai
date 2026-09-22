@@ -24,11 +24,11 @@ let
   # library packages' tsconfigs extend and vite/esbuild follows while
   # transforming them), the seven package subtrees the bundle imports
   # (kallip-web -> kallip-ui -> {common, kallip-client, archeion/lesche/
-  # files clients}), and the manifests of the two app packages whose
+  # files clients}), and the manifests of the three app packages whose
   # sources the web build never reads -- deno install resolves the whole
   # workspace, so their package.json rides along. Excluding the rest
-  # (Rust crates, docs, nix expressions, the kallip-app and kallip-direct
-  # trees) keeps unrelated edits from re-materializing the web build
+  # (Rust crates, docs, nix expressions, the kallip-app, kallip-direct,
+  # and kallip-site trees) keeps unrelated edits from re-materializing the
   # chain. Build state never enters src anyway: the flake source only
   # carries git-tracked files.
   filteredSrc =
@@ -54,8 +54,10 @@ let
         "tsconfig.base.json"
         "packages/kallip-app"
         "packages/kallip-direct"
+        "packages/kallip-site"
         "packages/kallip-app/package.json"
         "packages/kallip-direct/package.json"
+        "packages/kallip-site/package.json"
       ];
     in
     pkgs.lib.cleanSourceWith {
@@ -103,6 +105,8 @@ let
         "packages/kallip-app/package.json"
         "packages/kallip-direct"
         "packages/kallip-direct/package.json"
+        "packages/kallip-site"
+        "packages/kallip-site/package.json"
       ];
     in
     pkgs.lib.cleanSourceWith {
@@ -124,7 +128,7 @@ let
     impureEnvVars = pkgs.lib.fetchers.proxyImpureEnvVars;
 
     outputHashMode = "recursive";
-    outputHash = "sha256-8uZLoX6sCldIHxBIw1rYln5bESp98dzQv8JoQZnDJLI=";
+    outputHash = "sha256-8kfPaG5iJz5zI1xSayD4LTsraB+QKkCPWnEykWirg34=";
     outputHashAlgo = "sha256";
 
     nativeBuildInputs = [ deno ];
