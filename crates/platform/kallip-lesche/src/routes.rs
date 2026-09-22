@@ -226,10 +226,7 @@ mod tests {
     /// itself in isolation).
     #[test]
     fn route_table_matches_the_shared_fixture() {
-        let fixture = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../packages/kallip-lesche-client/src/route-shapes.json",
-        ));
+        let fixture = include_str!("route-shapes.json");
         let fixture: serde_json::Value = serde_json::from_str(fixture).unwrap();
         let mut fixture_routes: Vec<(String, String)> = fixture["routes"]
             .as_array()

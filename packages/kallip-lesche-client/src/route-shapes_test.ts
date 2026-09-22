@@ -9,7 +9,9 @@
 
 import { ManageRestClient } from "./manageRest.ts";
 import { ProjectionClient } from "./projection.ts";
-import shapes from "./route-shapes.json" with { type: "json" };
+import shapes from "../../../crates/platform/kallip-lesche/src/route-shapes.json" with {
+  type: "json",
+};
 
 const ROUTES: ReadonlyArray<readonly string[]> = shapes.routes;
 
