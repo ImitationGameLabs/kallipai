@@ -24,6 +24,8 @@
   "composer_connect_link": "连接智能体编队",
   "composer_connect_tail": "后即可发送。",
   "chat_send_failed": "无法发送消息。",
+  "chat_retry_send_aria": "重试发送这条消息",
+  "chat_cached_until": "缓存至 {time}",
   "chat_reconnecting": "正在重连…",
   "chat_unread_badge_aria": "{count} 条未读",
   "chat_jump_to_latest": "回到底部",

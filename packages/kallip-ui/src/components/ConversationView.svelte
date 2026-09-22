@@ -8,6 +8,7 @@
   import Composer from "./Composer.svelte";
   import MessageBubble from "./MessageBubble.svelte";
   import ScrollToBottomButton from "./ScrollToBottomButton.svelte";
+  import { RotateCcw } from "@lucide/svelte";
   import {
     createAutoScroll,
     createTogglePin,
@@ -15,6 +16,7 @@
   import { timelineMarkers } from "../lib/channel/timeline.ts";
   import {
     chat_send_to_start,
+    chat_retry_send_aria,
     room_sending_aria,
   } from "../paraglide/messages.js";
   import type {
@@ -32,6 +34,7 @@
     composer,
     disabled,
     pendingCount,
+    onRetry,
     notice,
     loadOlder,
     hasMoreOlder,
@@ -49,6 +52,9 @@
     composer?: ComposerModel;
     disabled: boolean;
     pendingCount: number;
+    /** Optional retry affordance for failed lines: present = failed
+     *  lines render an inline retry button wired to the page's retry handler. */
+    onRetry?: (localId: number) => void;
     /** Optional lazy-window pager: when present, a sentinel above the first
      *  line fires it as it enters the viewport (scroll-up paging). All three
      *  props default off so non-windowed callers (online relay pages) keep
@@ -229,16 +235,44 @@
                 >{line.sender.handle}</span
               >
             {/if}
-            <MessageBubble
-              text={line.text}
-              markdown={line.role === "assistant"}
-              mine={line.role === "user"}
-              bare={line.role === "user" && line.status === "sending"}
-              pending={line.status === "sending"}
-              attachment={line.attachment}
-              {downloadAttachment}
-              pin={togglePin}
-            />
+            {#if line.role === "user" && line.status === "failed"}
+              <!-- Failed lines are transient: outline + copy always, retry
+                   button only where the page wires a handler, pin/copy never. -->
+              <div
+                class="flex flex-row items-center gap-1.5 self-end max-w-[80%]"
+              >
+                {#if onRetry}
+                  <button
+                    type="button"
+                    class="shrink-0 size-7 rounded-full preset-outlined-error-500 hover:preset-filled-error-500 flex items-center justify-center cursor-pointer"
+                    aria-label={chat_retry_send_aria()}
+                    onclick={() => onRetry(line.historyId)}
+                  >
+                    <RotateCcw class="size-3.5" aria-hidden="true" />
+                  </button>
+                {/if}
+                <MessageBubble
+                  text={line.text}
+                  mine
+                  bare
+                  failed
+                  failureCopy={line.error}
+                  attachment={line.attachment}
+                  {downloadAttachment}
+                />
+              </div>
+            {:else}
+              <MessageBubble
+                text={line.text}
+                markdown={line.role === "assistant"}
+                mine={line.role === "user"}
+                bare={line.role === "user" && line.status === "sending"}
+                pending={line.status === "sending"}
+                attachment={line.attachment}
+                {downloadAttachment}
+                pin={togglePin}
+              />
+            {/if}
             {#if line.role === "user" && line.status === "sending"}
               <span
                 class="text-xs opacity-50 animate-pulse"

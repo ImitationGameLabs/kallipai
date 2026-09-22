@@ -24,8 +24,8 @@
 
 import type {
   AuthoredEvent,
-  HistoryEntry,
   FileAttachment,
+  HistoryEntry,
   Participant,
   SignalEvent,
   TagmaReply,
@@ -88,10 +88,13 @@ export interface ConversationLine {
    * for an optimistic user line, the client-side render time until the ack
    * refines it. Absent on old cached rows and on signal-produced system lines. */
   readonly createdAt?: string;
-  /** Per-line delivery status for an optimistic user line. Absent (≡ "sent")
-   * for confirmed/replayed lines and for all non-user lines; `"sending"` from
-   * the moment the line is rendered until its `MessageAccepted` ack lands. */
-  readonly status?: "sending" | "sent";
+  /** Per-line delivery status for an optimistic user line. Absent (equivalent
+   * to "sent") for confirmed/replayed lines and for all non-user lines;
+   * "sending" from the moment the line is rendered until its ack lands;
+   * "failed" when the send never landed -- the line stays visible (with its
+   * per-line error copy) as a retry candidate instead of vanishing. */
+  readonly status?: "sending" | "sent" | "failed";
+  readonly error?: string;
   /** The file attached to this message, when the sender shared one (an
    *  optimistic user line that carries it, or a replayed user row). Rendered
    *  as a file card; absent on plain-text lines and system/error lines. */
@@ -389,22 +392,62 @@ export function withUserLine(
   };
 }
 
-/** Apply a local send failure: drop the optimistic line and set the red
- * status error -- and append NO history line. A genuine server
- * kind:"error" reply (the wire path) still enters history via
- * `applyTagmaReply`; that double render is exactly why this local
- * failure, which never was a server reply, gets its own entry point. */
+/** Apply a local send failure: the line STAYS (status "failed", the copy
+ * riding it) as the retry candidate -- it is never dropped and no history
+ * line is appended. With a message, the transcript-wide red error joins
+ * it; without one (a rehydrated row with no stored copy), only the line
+ * marks failed. A genuine server kind:"error" reply (the wire path) still
+ * enters history via `applyTagmaReply`; that double render is exactly why
+ * this local failure, which never was a server reply, gets its own entry
+ * point. */
 export function sendFailed(
   state: ConversationTranscript,
   localId: number,
-  message: string,
+  message?: string,
 ): ConversationTranscript {
   return {
     ...state,
-    lines: state.lines.filter((l) => l.historyId !== localId),
-    status: "error",
-    error: message,
+    // Keep the line, mark it failed: the user's words stay visible as a
+    // retry candidate (the pending store holds the durable copy).
+    lines: state.lines.map((l) =>
+      l.historyId === localId
+        ? { ...l, status: "failed" as const, error: message }
+        : l,
+    ),
+    // The transcript-wide red banner is copy-driven: no stored copy (the
+    // common rehydration case) marks the line failed without forcing the
+    // whole transcript into the error state.
+    ...(message ? { status: "error" as const, error: message } : {}),
   };
+}
+
+/** Re-arm a failed user line for another send attempt: back to "sending",
+ * per-line error cleared (the transcript-wide red error goes with the next
+ * turn). No-op when the line is gone or already re-armed. */
+export function retryLine(
+  state: ConversationTranscript,
+  localId: number,
+): ConversationTranscript {
+  return {
+    ...state,
+    lines: state.lines.map((l) =>
+      l.historyId === localId && l.status === "failed"
+        ? { ...l, status: "sending" as const, error: undefined }
+        : l,
+    ),
+  };
+}
+
+/** The next durable pending stamp: a negative millisecond mark (newer sends
+ * compare smaller). The transcript renders in insertion order -- each send
+ * appends to the tail -- so the stamp's job is uniqueness, and the pending
+ * flush re-orders rows explicitly (oldest-first) before walking them.
+ * Same-millisecond sends and clock steps just decrement: uniqueness is
+ * what matters, not wall-clock fidelity. Pure so the allocation is
+ * testable without IndexedDB. */
+export function nextPendingSeq(nowMs: number, lastSeq: number): number {
+  const candidate = -nowMs;
+  return candidate < lastSeq ? candidate : lastSeq - 1;
 }
 
 /** True when `reply` is the op error answering the in-flight send: the

@@ -215,6 +215,10 @@
             )
             .catch((e) => {
               channelsStore.localError = e;
+              // Cold-start offline: hydrate the degraded view from the cache
+              // instead of parking the chat page on its connecting
+              // placeholder. localError stays set (the shell signals it).
+              void channelsStore.attachLocalOfflineView();
             });
         }
       } else {

@@ -49,6 +49,11 @@
       : null,
   );
 
+  // The mounted degraded offline view (open failed, but this device has
+  // cached history + unsent lines to show): renders instead of the
+  // dead-end unavailable placeholder.
+  const offlineView = $derived(channelsStore.offlineViewOf(tagmaId));
+
   // Open on mount (idempotent), gated on signed-in + enrolled. Tracks ONLY the
   // gate -- deliberately not `channelState` -- so a status transition (peer
   // snapshot, drain death, error) does not re-fire this and re-KEX. ensureOpen
@@ -102,6 +107,29 @@
       <div class="flex-1 min-h-0 flex flex-col">
         <div class="flex-1 min-h-0">
           <ChannelChatPage {conversationId} />
+        </div>
+      </div>
+    {:else if offlineView}
+      <!-- Degraded offline view: cached transcript, retryable sends. The
+       retry row re-arms the real channel; sends land in the pending store
+       and auto-flush when the connection comes back. -->
+      <div class="flex-1 min-h-0 flex flex-col">
+        <div
+          class="border-b border-surface-200-800 px-4 py-2 flex items-center justify-center gap-3"
+        >
+          <p class="text-xs text-error-500 dark:text-error-400">
+            {chat_channel_unavailable()}
+          </p>
+          <button
+            type="button"
+            class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
+            onclick={() => channelsStore.retryTagma(tagmaId)}
+          >
+            {common_retry()}
+          </button>
+        </div>
+        <div class="flex-1 min-h-0">
+          <ChannelChatPage conversationId={offlineView.conversationId} />
         </div>
       </div>
     {:else if channelsStore.isAutoOpenFailed(tagmaId) && channelState.kind !== "pending"}

@@ -19,10 +19,15 @@ export { LinearBackoff, ProjectionClient } from "./projection.ts";
 export {
   type CachedLine,
   clear as clearConvCache,
+  clearPendings,
   clearReadWatermarks,
+  deletePending,
   getReadWatermark,
+  type PendingLine,
   put,
+  putPending,
   putReadWatermark,
+  readPendingByTagma,
   readTail,
   readTailBefore,
 } from "./cache.ts";

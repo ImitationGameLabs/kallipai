@@ -24,6 +24,8 @@
   "composer_connect_link": "Connect a tagma",
   "composer_connect_tail": "to send.",
   "chat_send_failed": "Could not send the message.",
+  "chat_retry_send_aria": "Retry sending this message",
+  "chat_cached_until": "Messages cached up to {time}",
   "chat_reconnecting": "Reconnecting…",
   "chat_unread_badge_aria": "{count} unread",
   "chat_jump_to_latest": "Back to bottom",

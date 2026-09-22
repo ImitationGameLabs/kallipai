@@ -31,7 +31,9 @@ import {
   isInFlightError,
   markLineSent,
   mergeHistoryLines,
+  nextPendingSeq,
   replaceLineId,
+  retryLine,
   sendFailed,
   toSender,
   withUserLine,
@@ -43,13 +45,17 @@ import type {
 } from "../transcript.ts";
 import type {
   CachedLine,
-  HistoryEntry,
   FileAttachment,
+  HistoryEntry,
   Participant,
   TagmaReply,
 } from "@kallipai/kallip-lesche-client";
 import {
+  deletePending,
+  type PendingLine,
   put as cachePut,
+  putPending,
+  readPendingByTagma,
   readTailBefore,
 } from "@kallipai/kallip-lesche-client";
 import type { Transport } from "./transport.ts";
@@ -105,8 +111,11 @@ export abstract class ConversationBase {
   /** Source of synthetic negative ids for lines without a real history_id.
    *  Plain (the {#each} key is read at line construction, not observed). */
   syntheticSeq = 0;
+  /** The most recent pending stamp this session allocated (the monotonic
+   *  floor nextPendingSeq decrements below; plain, not observed). */
+  lastPendingSeq = 0;
 
-  abstract readonly kind: "local" | "relay";
+  abstract readonly kind: "local" | "relay" | "offline-view";
 
   /** The underlying transport, or null once the drain has ended. `$state` so
    *  `connected` (and the store's `localConnected`) re-fire when run() nulls it
@@ -181,24 +190,97 @@ export abstract class ConversationBase {
   close(): void {
     this.transport?.close();
   }
-
-  /** Send a user message. Renders the optimistic line and hands off to the
-   *  shared single-in-flight send pump (the in-flight POST's `user_message` frame
-   *  promotes the line via `applyReplyCore`). */
+  /** Send a user message online: renders the optimistic line, queues it,
+   *  and hands off to the shared single-in-flight send pump (the in-flight
+   *  POST's `user_message` frame promotes the line via `applyReplyCore`). */
   send(text: string, attachment?: FileAttachment): void {
-    const trimmed = text.trim();
     if (!this.transport) return;
+    const trimmed = text.trim();
     if (trimmed === "" && attachment === undefined) return;
-    const localId = (this.syntheticSeq -= 1);
+    const localId = this.renderPendingLine(trimmed, attachment);
+    this.pending = [...this.pending, { localId, text: trimmed, attachment }];
+    void this.pumpPending();
+  }
+
+  /** Render + persist one locally authored line: the shared core of the
+   *  online send and the offline shell's send. The caller trims and
+   *  empty-gates the text; this takes the next localSeq, appends the
+   *  optimistic bubble, and writes the durable pending row (removed when
+   *  the ack lands). Returns the localSeq, which doubles as the rendered
+   *  line's historyId. */
+  protected renderPendingLine(
+    trimmed: string,
+    attachment?: FileAttachment,
+  ): number {
+    const now = new Date();
+    const localId = nextPendingSeq(now.getTime(), this.lastPendingSeq);
+    this.lastPendingSeq = localId;
     this.transcript = withUserLine(
       this.transcript,
       trimmed,
       localId,
       this.localSender,
       attachment,
+      now,
     );
-    this.pending = [...this.pending, { localId, text: trimmed, attachment }];
+    void putPending({
+      tagmaId: this.pendingKey,
+      localSeq: localId,
+      text: trimmed,
+      ...(attachment !== undefined ? { attachment } : {}),
+      createdAt: now.toISOString(),
+    });
+    return localId;
+  }
+
+  /** The pending-store partition this conversation's unsent lines live
+   *  under (the tagma id; the offline shell's local conversation uses the
+   *  literal "local", mirroring its cache-key fallback). */
+  abstract get pendingKey(): string;
+
+  /** Re-send one failed line (the bubble's retry button). Idempotent: a
+   *  line that is not failed, already in flight, or already queued is a
+   *  no-op. */
+  retrySend(localSeq: number): void {
+    const line = this.transcript.lines.find((l) => l.historyId === localSeq);
+    if (!line || line.status !== "failed") return;
+    if (this.pendingInFlight?.localId === localSeq) return;
+    if (this.pending.some((p) => p.localId === localSeq)) return;
+    this.transcript = retryLine(this.transcript, localSeq);
+    this.pending = [
+      ...this.pending,
+      { localId: localSeq, text: line.text, attachment: line.attachment },
+    ];
     void this.pumpPending();
+  }
+
+  /** Drain every persisted pending row through the normal send pump (the
+   *  reconnect auto-flush). Lines a reload wiped from memory are re-rendered
+   *  from the durable copy first, so the bubble is never lost.
+   *  At-least-once by design: a row the server accepted but whose ack never
+   *  landed re-sends a duplicate -- the guards are local idempotence only. */
+  async retryAllPending(): Promise<void> {
+    let rows: PendingLine[] = [];
+    try {
+      rows = await readPendingByTagma(this.pendingKey);
+    } catch {
+      return; // IndexedDB unavailable (private mode): nothing to flush
+    }
+    for (const row of rows) {
+      if (!this.transcript.lines.some((l) => l.historyId === row.localSeq)) {
+        let t = withUserLine(
+          this.transcript,
+          row.text,
+          row.localSeq,
+          this.localSender,
+          row.attachment,
+          new Date(row.createdAt),
+        );
+        t = sendFailed(t, row.localSeq, row.lastError);
+        this.transcript = t;
+      }
+      this.retrySend(row.localSeq);
+    }
   }
 
   /** Hook for leaves to react to a reply AFTER the shared core reduce (the relay
@@ -286,12 +368,16 @@ export abstract class ConversationBase {
             attachment: confirmed.attachment,
           });
         }
+        // The send landed: the durable pending copy is no longer needed.
+        void deletePending(this.pendingKey, localId);
         if (ackId > this.maxRendered) this.maxRendered = ackId;
       } else {
         // Unstamped echo: keep the synthetic line, flip it to "sent". The echo
         // carries no new content, so drop it (never append) -- otherwise it
         // would render a second bubble and the send pump would never advance.
         this.transcript = markLineSent(this.transcript, localId);
+        // Landed (direct-path ack): drop the durable pending copy too.
+        void deletePending(this.pendingKey, localId);
       }
       this.pendingInFlight = null;
       void this.pumpPending();
@@ -326,10 +412,11 @@ export abstract class ConversationBase {
     this.onReply(reply);
   }
 
-  /** Single-in-flight send pump. POSTs the next queued optimistic line (if any,
-   *  and if no POST is already outstanding), leaving its localId + text in
-   *  `pendingInFlight` so the stamped `user_message` frame can correlate. On a
-   *  POST failure, drops the optimistic line and surfaces a synthetic error. */
+  /** Single-in-flight send pump. POSTs the next queued optimistic line (if
+   *  any, and if no POST is already outstanding), leaving its localId + text
+   *  in `pendingInFlight` so the stamped `user_message` frame can correlate.
+   *  On a POST failure the line is kept and marked failed via `sendFailed`
+   *  (retryable), with the failure copy inline. */
   protected async pumpPending(): Promise<void> {
     if (this.pendingInFlight !== null) return;
     const next = this.pending.shift();
@@ -579,6 +666,10 @@ interface RelayPull {
 
 export class RelayConversation extends ConversationBase {
   readonly kind = "relay" as const;
+  /** Pending rows partition by tagma (the tagma id is known offline). */
+  get pendingKey(): string {
+    return this.tagmaId;
+  }
 
   readonly tagmaId: string;
   readonly label: string | null;
@@ -834,6 +925,9 @@ export class RelayConversation extends ConversationBase {
 
 export class LocalConversation extends ConversationBase {
   readonly kind = "local" as const;
+  get pendingKey(): string {
+    return "local";
+  }
 
   constructor(
     store: ConversationStoreLike,
@@ -869,6 +963,9 @@ export class LocalConversation extends ConversationBase {
       this.status = "reconnecting";
     } else {
       this.status = "open";
+      // Back online: flush the durable unsent lines once (M2: retrySend is
+      // idempotent, so racing retries collapse).
+      void this.retryAllPending();
       void this.catchUp();
     }
   }
@@ -925,5 +1022,52 @@ export class LocalConversation extends ConversationBase {
     const { rows, more } = await t.pullHistory({ before: head, limit: k });
     const added = this.applyPulledRows(rows);
     if (!more || added === 0) this.hasMoreOlder = false;
+  }
+}
+
+/** The degraded offline view of a relay conversation: the key exchange
+ * could not run (the tagma is unreachable), so there is no transport --
+ * the transcript hydrates from the per-device cache, sends land in the
+ * pending store for a later retry/auto-flush, and scroll-up pages come
+ * from the cache alone. Registered under the mapped conversation id AND
+ * carrying the tagma id, so a successful re-open tears this down (via
+ * findByTagma) instead of coexisting with the live conversation. */
+export class OfflineConversation extends ConversationBase {
+  readonly kind = "offline-view" as const;
+
+  constructor(
+    conversationId: string,
+    store: ConversationStoreLike,
+    readonly tagmaId: string,
+    localSender: ConversationSender,
+  ) {
+    // No transport: run() ends immediately. Pin "offline" here -- the base
+    // default is "opening", which would lock the composer and gates forever.
+    super(conversationId, store, null, conversationId, localSender);
+    this.status = "offline";
+  }
+
+  get pendingKey(): string {
+    return this.tagmaId;
+  }
+
+  /** The base send early-returns without a transport; the offline view
+   *  sends by design -- the line renders (failed, retryable) and lands in
+   *  the pending store for the reconnect auto-flush. No pump: there is
+   *  nothing to pump into until a real channel opens. */
+  override send(text: string, attachment?: FileAttachment): void {
+    const trimmed = text.trim();
+    if (trimmed === "" && attachment === undefined) return;
+    const localId = this.renderPendingLine(trimmed, attachment);
+    this.transcript = sendFailed(this.transcript, localId, chat_send_failed());
+  }
+
+  /** Cache-first page source: offline there is nothing else. */
+  protected override async loadOlderPage(k: number): Promise<void> {
+    const head = this.minRendered;
+    if (!head) return;
+    const cached = await readTailBefore(this.cacheConversationId, head, k);
+    this.mergeWindowLines(cached.map(cachedLineToLine));
+    if (cached.length < k) this.hasMoreOlder = false;
   }
 }

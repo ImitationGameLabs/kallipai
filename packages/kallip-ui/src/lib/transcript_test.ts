@@ -8,17 +8,19 @@ import { assert, assertEquals } from "@std/assert";
 import {
   applySignal,
   applyTagmaReply,
-  historyEntryLine,
   cacheLineOf,
+  type ConversationLine,
   type ConversationTranscript,
   EMPTY_TRANSCRIPT,
-  mergeHistoryLines,
-  markLineSent,
-  replaceLineId,
-  sendFailed,
+  historyEntryLine,
   isInFlightError,
+  markLineSent,
+  mergeHistoryLines,
+  nextPendingSeq,
+  replaceLineId,
+  retryLine,
+  sendFailed,
   withUserLine,
-  type ConversationLine,
 } from "./transcript.ts";
 import type {
   Participant,
@@ -100,18 +102,63 @@ Deno.test("TagmaReply error sets status error + a system line", () => {
   ]);
 });
 
-// A local send failure renders once (red banner), never as a history
-// line -- the wire kind:"error" path above is the one that appends.
-Deno.test(
-  "sendFailed drops the optimistic line and sets only the red error",
-  () => {
-    const sending = withUserLine(EMPTY_TRANSCRIPT, "hello", -1, userS);
-    const t = sendFailed(sending, -1, "post failed");
-    assertEquals(t.lines, []);
-    assertEquals(t.status, "error");
-    assertEquals(t.error, "post failed");
-  },
-);
+// A local send failure keeps the optimistic line (status "failed", the
+// per-line error copy riding it) and sets the transcript-wide red error.
+// The line is the retry candidate; the pending store holds its copy.
+Deno.test("sendFailed keeps the line as a failed retry candidate", () => {
+  const sending = withUserLine(EMPTY_TRANSCRIPT, "hello", -1, userS);
+  const t = sendFailed(sending, -1, "post failed");
+  assertEquals(t.lines, [
+    {
+      historyId: -1,
+      role: "user",
+      text: "hello",
+      sender: userS,
+      createdAt: t.lines[0]!.createdAt,
+      status: "failed",
+      error: "post failed",
+    },
+  ]);
+  assertEquals(t.status, "error");
+  assertEquals(t.error, "post failed");
+});
+
+// No-copy variant (the rehydration path): the line marks failed so the
+// bubble shows the error outline, but the transcript-wide red banner is
+// not forced on -- there is nothing actionable to say at that moment.
+Deno.test("sendFailed without copy skips the transcript-wide banner", () => {
+  const sending = withUserLine(EMPTY_TRANSCRIPT, "hello", -1, userS);
+  const t = sendFailed(sending, -1);
+  assertEquals(t.lines[0]!.status, "failed");
+  assertEquals(t.lines[0]!.error, undefined);
+  assertEquals(t.status, "busy");
+  assertEquals(t.error, undefined);
+});
+
+// retryLine re-arms the failed line for another attempt; a second call is
+// a no-op (the line is no longer failed), the retry-send idempotency guard.
+Deno.test("retryLine re-arms a failed line and is idempotent", () => {
+  const failed = sendFailed(
+    withUserLine(EMPTY_TRANSCRIPT, "hello", -1, userS),
+    -1,
+    "post failed",
+  );
+  const armed = retryLine(failed, -1);
+  assertEquals(armed.lines[0]!.status, "sending");
+  assertEquals(armed.lines[0]!.error, undefined);
+  assertEquals(retryLine(armed, -1), armed);
+});
+
+// The pending stamp allocator: negative, strictly decreasing across calls,
+// even for same-millisecond sends.
+Deno.test("nextPendingSeq allocates strictly decreasing stamps", () => {
+  const first = nextPendingSeq(1_000, 0);
+  assertEquals(first, -1_000);
+  const second = nextPendingSeq(1_000, first);
+  assertEquals(second, -1_001);
+  const later = nextPendingSeq(2_000, second);
+  assertEquals(later, -2_000);
+});
 
 // The next send after a failure starts a clean turn: the fresh user
 // line clears the stale red error.

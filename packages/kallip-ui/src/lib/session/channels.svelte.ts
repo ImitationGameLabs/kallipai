@@ -12,8 +12,8 @@
 import { type TagmaView } from "@kallipai/kallip-archeion-client";
 import {
   type Envelope,
-  LescheApiError,
   type FileAttachment,
+  LescheApiError,
   openRelayChannel,
   type RelayChannel,
   type SignalEvent,
@@ -28,19 +28,49 @@ import { unreadStore } from "./unread.svelte.ts";
 import type { DirectTransport } from "./directTransport.ts";
 import { RelayTransport } from "./relayTransport.ts";
 import {
+  cachedLineToLine,
   ConversationBase,
   LocalConversation,
-  cachedLineToLine,
+  OfflineConversation,
   RelayConversation,
   WINDOW_PAGE,
 } from "./conversation.svelte.ts";
 import {
   clearConvCache,
+  clearPendings,
   getReadWatermark,
   readTail,
 } from "@kallipai/kallip-lesche-client";
 import { configStore } from "../config/config.svelte.ts";
-import type { ConversationLine } from "../transcript.ts";
+import { type ConversationLine, LOCAL_OPERATOR_SENDER } from "../transcript.ts";
+
+/** The last conversation id each conversation partition resolved to, so an
+ * offline open can hydrate the cached transcript without a server round
+ * trip (the relay conversation id is server-derived and otherwise unknown
+ * offline; direct remembers under the "local" key). A derived id -- no
+ * content -- so localStorage is an acceptable home; best-effort both ways. */
+function convOfKey(partition: string): string {
+  return "kallip-relay:conv-of:" + partition;
+}
+
+function rememberConversationOf(
+  partition: string,
+  conversationId: string,
+): void {
+  try {
+    localStorage.setItem(convOfKey(partition), conversationId);
+  } catch {
+    // storage blocked: the offline view just starts empty
+  }
+}
+
+function lastConversationOf(partition: string): string | undefined {
+  try {
+    return localStorage.getItem(convOfKey(partition)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Automatic channel-open backoff: first retry after 1s, doubling, capped at
  *  60s; six straight failures silence the automatic path for the session. */
@@ -246,6 +276,7 @@ export class ChannelsStore {
     this.detachLocal();
     this.localError = null;
     const cacheConversationId = conversationId ?? "local";
+    rememberConversationOf("local", cacheConversationId);
     const conv = new LocalConversation(this, transport, cacheConversationId);
     // Wire the transport's stream-retry lifecycle into the conversation:
     // reconnecting flips its status (spinner + composer gate), resumed
@@ -347,6 +378,16 @@ export class ChannelsStore {
       tagma.tagma_id,
       await getReadWatermark(tagma.tagma_id),
     );
+    // A successful open supersedes any degraded offline view: drop it (an
+    // expired mapping could key it differently, so match by tagma).
+    for (const [key, conv] of this.conversations) {
+      if (
+        conv instanceof OfflineConversation &&
+        conv.tagmaId === tagma.tagma_id
+      ) {
+        this.conversations.delete(key);
+      }
+    }
     // Race guard: a teardown (logout / mode switch) during the KEX or cache
     // awaits cleared the map; drop the channel we built instead of
     // resurrecting the conversation. The return value is unused by callers;
@@ -373,6 +414,10 @@ export class ChannelsStore {
     // per-batch timeouts + the notification floor.
     void conv.run();
     void conv.catchUp();
+    // Flush the durable unsent lines (offline/failed sends) once the
+    // transport is live: the relay face of the reconnect auto-retry.
+    void conv.retryAllPending();
+    rememberConversationOf(tagma.tagma_id, channel.conversationId);
     return channel.conversationId;
   }
 
@@ -434,6 +479,10 @@ export class ChannelsStore {
       this.openBudgets.delete(tagma.tagma_id);
     } catch (e) {
       this.recordOpenFailure(tagma.tagma_id, e);
+      // Degraded offline view: hydrate the cached transcript so the chat
+      // page renders history and accepts retryable sends instead of a
+      // dead-end placeholder (no-op when nothing ever opened).
+      void this.attachOfflineView(tagma.tagma_id);
       console.warn(
         `[channels] auto-open failed for tagma ${tagma.tagma_id}:`,
         e instanceof Error ? e.message : e,
@@ -443,13 +492,86 @@ export class ChannelsStore {
     }
   }
 
-  /** Count one auto-open failure: an exponential cooldown (1s doubling,
-   *  capped at 60s) between automatic attempts, and a session terminal
-   *  after OPEN_FAILURE_LIMIT straight failures so a flapping peer cannot
-   *  drive a request storm. An offline-class failure (KEX 503) additionally
-   *  asks the shell to correct stale presence: the lesche just proved the
-   *  tagma unreachable, which is better evidence than a `tagma_offline`
-   *  event missed during an SSE gap. */
+  /** Mount the degraded offline view for a tagma whose open just failed,
+   *  hydrating the cached tail so history renders. No-op when a conversation
+   *  already exists or this device has never opened the tagma (no
+   *  remembered conversation id to hydrate from). */
+  async attachOfflineView(tagmaId: string): Promise<void> {
+    for (const conv of this.conversations.values()) {
+      if (conv instanceof OfflineConversation && conv.tagmaId === tagmaId) {
+        return;
+      }
+    }
+    const conversationId = lastConversationOf(tagmaId);
+    if (!conversationId) return;
+    const user = archeionSession.user;
+    const userId = user?.user_id;
+    if (!userId) return;
+    const conv = new OfflineConversation(conversationId, this, tagmaId, {
+      kind: "user",
+      id: userId,
+      handle: user?.display_name ?? user?.username ?? userId,
+    });
+    this.conversations.set(conversationId, conv);
+    // Hydrate the cached tail so the offline view renders history (the
+    // same per-tagma cache the live conversation reads; a blocked cache
+    // just leaves an empty transcript, sends still land in the store).
+    try {
+      const cached = await readTail(conversationId, WINDOW_PAGE);
+      if (cached.length > 0) {
+        conv.transcript = {
+          lines: cached.map(cachedLineToLine),
+          status: "idle",
+        };
+        conv.minRendered = cached[0]!.historyId;
+        conv.maxRendered = cached[cached.length - 1]!.historyId;
+      }
+    } catch {
+      // IndexedDB unavailable (private mode): proceed empty.
+    }
+  }
+
+  /** Cold-start offline degrade (direct): the boot connect failed, so no
+   *  local conversation exists -- mount the offline view from the
+   *  remembered cache id instead of leaving the chat page on its
+   *  connecting placeholder, hydrating the cached tail. localError stays
+   *  set (the shell signals it). */
+  async attachLocalOfflineView(): Promise<void> {
+    if (this.local) return;
+    const conversationId = lastConversationOf("local") ?? "local";
+    const conv = new OfflineConversation(
+      conversationId,
+      this,
+      "local",
+      LOCAL_OPERATOR_SENDER,
+    );
+    this.conversations.set("local", conv);
+    // Hydrate the cached tail (same shape as the tagma offline view; a
+    // blocked cache just leaves an empty transcript, sends still land).
+    try {
+      const cached = await readTail(conversationId, WINDOW_PAGE);
+      if (cached.length > 0) {
+        conv.transcript = {
+          lines: cached.map(cachedLineToLine),
+          status: "idle",
+        };
+        conv.minRendered = cached[0]!.historyId;
+        conv.maxRendered = cached[cached.length - 1]!.historyId;
+      }
+    } catch {
+      // IndexedDB unavailable (private mode): proceed empty.
+    }
+  }
+
+  /** The mounted degraded offline view for a tagma, if any (the chat page
+   *  renders it in place of the dead-end unavailable placeholder). */
+  offlineViewOf(tagmaId: string): OfflineConversation | undefined {
+    const id = lastConversationOf(tagmaId);
+    if (!id) return undefined;
+    const conv = this.conversations.get(id);
+    return conv instanceof OfflineConversation ? conv : undefined;
+  }
+
   private recordOpenFailure(tagmaId: string, e: unknown): void {
     const failures = (this.openBudgets.get(tagmaId)?.failures ?? 0) + 1;
     const delay = Math.min(
@@ -554,6 +676,20 @@ export class ChannelsStore {
     this.tearDownAll();
     for (const conv of entries) {
       void clearConvCache(conv.cacheConversationId);
+    }
+    // Global by design: run once, unconditionally (an empty-conversation
+    // logout must still purge the pending store).
+    void clearPendings();
+    // The persisted conversation-map keys follow the same logout
+    // contract: no session trace stays (convOfKey("") is the shared
+    // key prefix).
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key?.startsWith(convOfKey(""))) localStorage.removeItem(key);
+      }
+    } catch {
+      // storage blocked: nothing to purge
     }
   }
 

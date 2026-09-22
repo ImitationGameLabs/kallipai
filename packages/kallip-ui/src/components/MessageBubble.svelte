@@ -28,6 +28,8 @@
     mine = false,
     bare = false,
     pending = false,
+    failed = false,
+    failureCopy,
     pin,
     attachment,
     downloadAttachment,
@@ -44,6 +46,10 @@
     bare?: boolean;
     /** Dim the box (optimistic/unconfirmed lines). */
     pending?: boolean;
+    /** Failed line: error outline on the box. */
+    failed?: boolean;
+    /** Optional inline failure text under the content (the retry hint). */
+    failureCopy?: string;
     /** Parent's scroll-pin controller, invoked on a raw toggle. Optional so the bubble can
      *  render outside a scroll context (no pinning). */
     pin?: TogglePin;
@@ -86,7 +92,9 @@
     ? 'preset-filled-primary-100-900'
     : 'preset-tonal-surface'} {!markdown
     ? 'whitespace-pre-wrap break-words'
-    : ''} {pending ? 'opacity-60' : ''}"
+    : ''} {pending ? 'opacity-60' : ''} {failed
+    ? 'ring-1 ring-error-500 dark:ring-error-400'
+    : ''}"
 >
   {#if attachment}
     <div
@@ -124,6 +132,9 @@
     {/if}
   {:else}
     {text}
+  {/if}
+  {#if failureCopy}
+    <p class="mt-1 text-xs text-error-500 dark:text-error-400">{failureCopy}</p>
   {/if}
 </div>
 {#if !bare}

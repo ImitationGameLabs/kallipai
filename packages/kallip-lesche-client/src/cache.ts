@@ -46,9 +46,10 @@ const DB_NAME = "kallip-relay";
 // unread high-water). The messages store is a disposable derived cache
 // (re-pulled from the tagma), so on upgrade we drop+recreate it rather than
 // migrate rows; the watermark store is created once and never dropped.
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const STORE = "messages";
 const WATERMARK_STORE = "read_watermarks";
+const PENDING_STORE = "pending";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -82,6 +83,14 @@ function db(): Promise<IDBDatabase> {
         // dropped on upgrade: recreating it empty would re-count every
         // delivered line as unread once the catch-up pull lands.
         d.createObjectStore(WATERMARK_STORE, { keyPath: "tagmaId" });
+      }
+      if (!d.objectStoreNames.contains(PENDING_STORE)) {
+        // v5: unsent local messages, one row per attempt, keyed
+        // [tagmaId, localSeq]. Survives upgrades like the watermark store:
+        // these rows exist nowhere else -- a dropped row is a lost message.
+        d.createObjectStore(PENDING_STORE, {
+          keyPath: ["tagmaId", "localSeq"],
+        });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -270,6 +279,81 @@ export async function putReadWatermark(
 export async function clearReadWatermarks(): Promise<void> {
   try {
     await run("readwrite", (s) => s.clear(), WATERMARK_STORE);
+  } catch {
+    // best-effort
+  }
+}
+
+// --- unsent local messages (v5) ---------------------------------------------
+
+/** One locally-sent-but-unconfirmed chat line, durable across reloads. These
+ * rows exist nowhere else -- the tagma has no copy until the send lands -- so
+ * the store is durable (never dropped on upgrade) and the row carries the
+ * rendered text, not a CachedLine view. The localSeq is a negative monotonic
+ * stamp that doubles as the transcript's synthetic line id, so the pending
+ * row and its optimistic bubble share one key for retry/confirm/remove. */
+export interface PendingLine {
+  readonly tagmaId: string;
+  readonly localSeq: number;
+  readonly text: string;
+  readonly attachment?: FileAttachment;
+  readonly createdAt: string;
+  readonly lastError?: string;
+}
+
+/** Persist one unsent line (best-effort: a failed write only means the line
+ * is lost on reload, the same degrade the in-memory queue already has). */
+export async function putPending(row: PendingLine): Promise<void> {
+  try {
+    await run("readwrite", (s) => s.put(row), PENDING_STORE);
+  } catch {
+    // best-effort
+  }
+}
+
+/** Remove one pending row (the send landed, or the user discarded it). */
+export async function deletePending(
+  tagmaId: string,
+  localSeq: number,
+): Promise<void> {
+  try {
+    await run("readwrite", (s) => s.delete([tagmaId, localSeq]), PENDING_STORE);
+  } catch {
+    // best-effort
+  }
+}
+
+/** Order pending rows oldest-first for flushing and rehydration.
+ *  localSeq is -Date.now(): the MOST negative value is the NEWEST row,
+ *  so descending numeric order (b - a) puts the oldest row first. */
+export function sortPendingOldestFirst(rows: PendingLine[]): PendingLine[] {
+  return rows.sort((a, b) => b.localSeq - a.localSeq);
+}
+
+/** Every unsent line for a tagma, oldest-first. Empty on any failure. */
+export async function readPendingByTagma(
+  tagmaId: string,
+): Promise<PendingLine[]> {
+  try {
+    const rows = await run<PendingLine[]>(
+      "readonly",
+      (s) =>
+        s.getAll(
+          IDBKeyRange.bound([tagmaId], [tagmaId, Number.MAX_SAFE_INTEGER]),
+        ),
+      PENDING_STORE,
+    );
+    return sortPendingOldestFirst(rows);
+  } catch {
+    return [];
+  }
+}
+
+/** Drop every pending row (logout: same shared-device privacy contract as
+ * the message cache -- these carry the user's own unsent words). */
+export async function clearPendings(): Promise<void> {
+  try {
+    await run("readwrite", (s) => s.clear(), PENDING_STORE);
   } catch {
     // best-effort
   }

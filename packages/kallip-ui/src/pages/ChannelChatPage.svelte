@@ -12,7 +12,10 @@
   import { createComposer } from "../lib/composer.svelte.ts";
   import { saveBlob } from "../lib/saveBlob.ts";
   import { bindDraft } from "../lib/session/drafts.svelte.ts";
-  import { RelayConversation } from "../lib/session/conversation.svelte.ts";
+  import {
+    OfflineConversation,
+    RelayConversation,
+  } from "../lib/session/conversation.svelte.ts";
   import { statusCardStore } from "../lib/session/statusCard.svelte.ts";
   import { OnlineBackend } from "../lib/manage/backend.ts";
   import {
@@ -37,6 +40,7 @@
   import type { FileAttachment } from "@kallipai/kallip-lesche-client";
   import { ConversationBase } from "../lib/session/conversation.svelte.ts";
   import { unreadStore, tagmaKey } from "../lib/session/unread.svelte.ts";
+  import { formatDateTime } from "../lib/tagmata.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import {
     connect_connecting,
@@ -45,6 +49,7 @@
     chat_go_tagmata,
     chat_title_local,
     chat_title_channel,
+    chat_cached_until,
     chat_notice_local,
     chat_notice_offline,
   } from "../paraglide/messages.js";
@@ -66,6 +71,14 @@
   // (the gate routes a failed reconnect to /connect, so this is a short window).
   const conv = $derived(channelsStore.get(conversationId));
   const isLocal = $derived(conversationId === "local");
+  // Cache-freshness stamp for the offline banner: the newest CONFIRMED
+  // cached line's timestamp (in-flight and failed local lines are not
+  // server rows), so a returning reader knows how stale the view is.
+  const lastCachedAt = $derived(
+    conv?.transcript.lines.findLast(
+      (line) => line.status !== "sending" && line.status !== "failed",
+    )?.createdAt,
+  );
 
   // Viewing: the open chat page clears the badge for the tagma's
   // 1:1 conversation; the line-entry hook (RelayConversation.onLineLanded)
@@ -188,7 +201,9 @@
     // Busy is not a gate: send renders the optimistic line at once and POSTs as
     // soon as the previous POST's user_message frame lands (single-in-flight
     // pump, shared by both transports).
-    canSubmit: () => conv?.status === "open" && allReady(attachments),
+    canSubmit: () =>
+      (conv?.status === "open" || conv?.status === "offline") &&
+      allReady(attachments), // open = live sends; offline = queued-to-store
     // An attachment-only submit (empty draft) is allowed once every
     // upload is ready; with no attachments the non-empty rule holds.
     allowEmpty: () => attachments.length > 0 && allReady(attachments),
@@ -300,7 +315,11 @@
     return () => document.removeEventListener("visibilitychange", onVisible);
   });
 
-  const disabled = $derived(!conv || conv.status !== "open");
+  // Offline views send by design (lines land in the pending store for a
+  // later auto-flush), so they are not a disabled state.
+  const disabled = $derived(
+    !conv || (conv.status !== "open" && conv.status !== "offline"),
+  );
   const pendingCount = $derived(conv?.pending.length ?? 0);
 </script>
 
@@ -312,8 +331,9 @@
   <div class="flex-1 min-h-0">
     {#if !conv}
       {#if isLocal}
-        <!-- Offline /local/chat before the boot reconnect lands. The gate routes a
-         failed reconnect to /connect; this is the brief resolving window. -->
+        <!-- Offline /local/chat before the boot reconnect lands: the boot
+         connect retries once and gives up (staying on the connecting
+         placeholder is this window's worst case, not a /connect bounce). -->
         <div class="h-full grid place-items-center p-6">
           <p class="text-sm opacity-60">{connect_connecting()}</p>
         </div>
@@ -399,6 +419,9 @@
             {composer}
             {disabled}
             {pendingCount}
+            onRetry={conv instanceof OfflineConversation
+              ? undefined
+              : (id) => conv?.retrySend(id)}
             {loadOlder}
             hasMoreOlder={windowStates.hasMoreOlder}
             loadingOlder={windowStates.loadingOlder}
@@ -418,6 +441,11 @@
                     {chat_notice_offline()}
                   {/if}
                 </p>
+                {#if lastCachedAt}
+                  <p class="text-xs opacity-60 text-center">
+                    {chat_cached_until({ time: formatDateTime(lastCachedAt) })}
+                  </p>
+                {/if}
               {/if}
             {/snippet}
             {#snippet attachmentBar()}
