@@ -62,7 +62,14 @@ impl Config {
         let candidates = kallip_daemon_common::socket::candidates_from_env(
             self.daemon_socket.as_deref().map(std::path::Path::new),
         );
-        kallip_daemon_common::socket::probe(&candidates).map_err(|err| {
+        Self::probe_candidates(&candidates)
+    }
+
+    /// The probe half of resolve_socket, split so tests can drive the
+    /// report path with a self-contained candidate list; a seam that
+    /// keeps the host system leg out of the unit tests' reach.
+    pub(crate) fn probe_candidates(candidates: &[PathBuf]) -> anyhow::Result<PathBuf> {
+        kallip_daemon_common::socket::probe(candidates).map_err(|err| {
             anyhow::anyhow!(kallip_daemon_common::socket::describe_probe_failure(&err))
         })
     }
@@ -88,108 +95,35 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::os::unix::net::UnixListener::bind(path).unwrap()
     }
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Set/clear env keys for the closure's duration. Serial under
-    /// ENV_LOCK; mirrors the daemon-common socket tests.
-    fn with_env<R>(vars: &[(&str, Option<&std::ffi::OsStr>)], f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let mut applied: Vec<(&str, Option<std::ffi::OsString>)> = Vec::new();
-        for (key, value) in vars {
-            applied.push((key, std::env::var_os(key)));
-            match value {
-                Some(v) => unsafe { std::env::set_var(key, v) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
-        let out = f();
-        for (key, old) in applied {
-            match old {
-                Some(v) => unsafe { std::env::set_var(key, v) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
-        out
-    }
 
     #[test]
-    fn flag_socket_wins() {
-        // Pin the env legs so this env-reading test cannot race the
-        // lock-holding writer in the sibling test; the explicit flag
-        // must win over the pinned (empty) legs.
+    fn probe_candidates_returns_the_first_reachable_candidate() {
         let scratch = tempfile::tempdir().unwrap();
-        let env_runtime = tempfile::tempdir().unwrap();
-        let env_state = tempfile::tempdir().unwrap();
-        let flag_path = scratch.path().join("flag.sock");
-        let _listener = live_socket(&flag_path);
-        with_env(
-            &[
-                ("XDG_RUNTIME_DIR", Some(env_runtime.path().as_os_str())),
-                ("XDG_STATE_HOME", Some(env_state.path().as_os_str())),
-                ("KALLIP_DAEMON_SOCKET", None),
-            ],
-            || {
-                let config = Config {
-                    addr: "127.0.0.1:7300".into(),
-                    daemon_socket: Some(flag_path.clone()),
-                    token: None,
-                    backend: "daemon".into(),
-                    archeion_internal_url: None,
-                    archeion_internal_token: None,
-                    archeion_internal_token_file: None,
-                    allowed_hosts_raw: String::new(),
-                    cors_origins: String::new(),
-                };
-                assert_eq!(config.resolve_socket().expect("resolve"), flag_path);
-            },
-        );
+        let live = scratch.path().join("live.sock");
+        let listener = live_socket(&live);
+        let dead = scratch.path().join("absent").join("control.sock");
+        let resolved = Config::probe_candidates(&[dead, live.clone()]).expect("resolve");
+        assert_eq!(resolved, live);
+        drop(listener);
     }
 
     #[test]
-    fn no_reachable_socket_names_the_tried_candidates() {
-        // Pin the environment legs at empty scratch trees so a live
-        // daemon elsewhere on the host cannot answer the probe.
-        let runtime = tempfile::tempdir().unwrap();
-        let state = tempfile::tempdir().unwrap();
-        with_env(
-            &[
-                ("XDG_RUNTIME_DIR", Some(runtime.path().as_os_str())),
-                ("XDG_STATE_HOME", Some(state.path().as_os_str())),
-                ("KALLIP_DAEMON_SOCKET", None),
-            ],
-            || {
-                let config = Config {
-                    addr: "127.0.0.1:7300".into(),
-                    daemon_socket: None,
-                    token: None,
-                    backend: "daemon".into(),
-                    archeion_internal_url: None,
-                    archeion_internal_token: None,
-                    archeion_internal_token_file: None,
-                    allowed_hosts_raw: String::new(),
-                    cors_origins: String::new(),
-                };
-                let err = config.resolve_socket().unwrap_err();
-                let message = err.to_string();
-                for leg in [
-                    runtime.path().join("kallipai/daemon/control.sock"),
-                    state.path().join("kallipai/daemon/control.sock"),
-                ] {
-                    assert!(
-                        message.contains(&format!("{} (no such file or directory)", leg.display())),
-                        "{message}"
-                    );
-                }
-                // The host may carry its own system-leg socket that this
-                // user cannot connect to; both exhaustion shapes name the
-                // tried candidates, only the leading phrase differs.
-                assert!(
-                    message.contains("no reachable daemon socket")
-                        || message.contains("access is denied"),
-                    "{message}"
-                );
-            },
-        );
+    fn probe_candidates_names_every_dead_candidate_when_exhausted() {
+        let scratch = tempfile::tempdir().unwrap();
+        let runtime = scratch.path().join("runtime");
+        let state = scratch.path().join("state");
+        let dead_runtime = runtime.join("kallipai").join("daemon").join("control.sock");
+        let dead_state = state.join("kallipai").join("daemon").join("control.sock");
+        let error =
+            Config::probe_candidates(&[dead_runtime.clone(), dead_state.clone()]).unwrap_err();
+        let message = error.to_string();
+        for leg in [&dead_runtime, &dead_state] {
+            assert!(
+                message.contains(&format!("{} (no such file or directory)", leg.display())),
+                "{message}"
+            );
+        }
+        assert!(message.contains("no reachable daemon socket"), "{message}");
     }
 
     #[test]
