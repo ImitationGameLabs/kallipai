@@ -1,5 +1,5 @@
 //! Persisted env management for managed instances: read the record's
-//! user env pairs, replace them wholesale, or remove keys. All three
+//! user env pairs, merge new pairs into them, or remove keys. All three
 //! verbs share the stop verb's authorization shape (the instance owner
 //! or root; a foreign peer is refused after the record is read) and
 //! spawn's env validation for anything they write. None of them touch
@@ -94,11 +94,14 @@ pub(crate) fn env_get(
     let record = authorized_record(record_root, slug, peer_uid)?;
     Ok(record.env)
 }
-
-/// Replace the record's env pairs wholesale. The request list is
-/// validated exactly like spawn's request env (same shape, same
-/// allowlist, same reserved-key refusals); on success it becomes the
-/// record's env verbatim.
+/// Merge the given KEY=VALUE pairs into the record's env: existing
+/// keys are replaced in place and new keys are appended. A key with
+/// several existing copies (spawn batches may write duplicates) is
+/// replaced at the first position and the remaining copies removed,
+/// mirroring env_unset's removal of every copy. The request
+/// list is validated exactly like spawn's request env (same shape,
+/// same allowlist, same reserved-key refusals). An empty request is
+/// refused: removing keys belongs to env_unset.
 pub(crate) fn env_set(
     record_root: &Path,
     slug: &str,
@@ -107,8 +110,31 @@ pub(crate) fn env_set(
 ) -> Result<(), EnvError> {
     let record = authorized_record(record_root, slug, peer_uid)?;
     crate::spawn::validate_user_env(env).map_err(|error| EnvError::Invalid(error.to_string()))?;
+    if env.is_empty() {
+        return Err(EnvError::Invalid(
+            "no pairs provided; to remove keys use env unset".to_string(),
+        ));
+    }
+    let mut updated = record.env.clone();
+    for pair in env {
+        let key = env_key(pair);
+        let mut replaced = false;
+        updated.retain_mut(|existing| {
+            if env_key(existing) == key {
+                if replaced {
+                    return false;
+                }
+                *existing = pair.clone();
+                replaced = true;
+            }
+            true
+        });
+        if !replaced {
+            updated.push(pair.clone());
+        }
+    }
     let updated = InstanceRecord {
-        env: env.to_vec(),
+        env: updated,
         ..record
     };
     crate::records::write_record(record_root, slug, &updated).map_err(|e| EnvError::Internal {
@@ -201,11 +227,77 @@ mod tests {
     }
 
     #[test]
-    fn set_replaces_the_whole_list_after_validation() {
+    fn set_merges_new_keys_and_keeps_existing() {
         let (root, slug) = setup();
         env_set(root.path(), &slug, 1000, &["KALLIP_NEW=2".to_owned()]).expect("set");
         let env = env_get(root.path(), &slug, 1000).expect("get");
-        assert_eq!(env, vec!["KALLIP_NEW=2".to_owned()]);
+        assert_eq!(
+            env,
+            vec![
+                "KALLIP_EXISTING=1".to_owned(),
+                "RUST_LOG=info".to_owned(),
+                "KALLIP_NEW=2".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn set_replaces_an_existing_key_in_place() {
+        let (root, slug) = setup();
+        env_set(root.path(), &slug, 1000, &["RUST_LOG=debug".to_owned()]).expect("set");
+        let env = env_get(root.path(), &slug, 1000).expect("get");
+        assert_eq!(
+            env,
+            vec!["KALLIP_EXISTING=1".to_owned(), "RUST_LOG=debug".to_owned()]
+        );
+    }
+
+    #[test]
+    fn set_refuses_an_empty_request() {
+        let (root, slug) = setup();
+        let error =
+            env_set(root.path(), &slug, 1000, &[]).expect_err("empty request must be refused");
+        let EnvError::Invalid(message) = error else {
+            panic!("expected Invalid, got {error:?}");
+        };
+        assert!(message.contains("env unset"), "{message}");
+    }
+
+    #[test]
+    fn set_resolves_duplicate_keys_last_wins() {
+        let (root, slug) = setup();
+        env_set(
+            root.path(),
+            &slug,
+            1000,
+            &["RUST_LOG=debug".to_owned(), "RUST_LOG=trace".to_owned()],
+        )
+        .expect("set");
+        let env = env_get(root.path(), &slug, 1000).expect("get");
+        assert_eq!(
+            env,
+            vec!["KALLIP_EXISTING=1".to_owned(), "RUST_LOG=trace".to_owned()]
+        );
+    }
+
+    #[test]
+    fn set_collapses_pre_existing_duplicates_to_one_pair() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let record = InstanceRecord {
+            env: vec![
+                "KALLIP_DUP=1".into(),
+                "RUST_LOG=info".into(),
+                "KALLIP_DUP=2".into(),
+            ],
+            ..sample(root.path())
+        };
+        crate::records::create_record(root.path(), "team", &record).expect("create record");
+        env_set(root.path(), "team", 1000, &["KALLIP_DUP=9".to_owned()]).expect("set");
+        let env = env_get(root.path(), "team", 1000).expect("get");
+        assert_eq!(
+            env,
+            vec!["KALLIP_DUP=9".to_owned(), "RUST_LOG=info".to_owned()]
+        );
     }
 
     #[test]

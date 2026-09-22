@@ -122,10 +122,11 @@ pub enum RequestBody {
     /// Read an instance's persisted env pairs (the record copy, not the
     /// live process environment). Read-only, works on stopped instances.
     EnvGet { slug: String },
-    /// Replace the instance's persisted env pairs wholesale: the request
-    /// list becomes the record's env, validated like spawn's env. The
-    /// running process (if any) is untouched; the change takes effect on
-    /// the next start.
+    /// Merge the given KEY=VALUE pairs into the instance's persisted
+    /// env: existing keys are replaced in place, new keys are appended,
+    /// validated like spawn's env. An empty request is refused (use
+    /// env_unset to remove keys). The running process (if any) is
+    /// untouched; the change takes effect on the next start.
     EnvSet { slug: String, env: Vec<String> },
     /// Remove keys from the instance's persisted env. Atomic: if any
     /// requested key is absent the whole request fails and names the

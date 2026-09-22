@@ -558,8 +558,8 @@ mod tests {
 
         let client = DaemonClient::new(&socket);
 
-        // Set: wholesale replacement passes the spawn validator and lands
-        // in the record.
+        // Set: merged pairs pass the spawn validator and land in the
+        // record.
         let set = client
             .call(RequestBody::EnvSet {
                 slug: "alpha".into(),
@@ -588,7 +588,11 @@ mod tests {
                 assert_eq!(slug, "alpha");
                 assert_eq!(
                     env,
-                    vec!["KALLIP_A=1".to_owned(), "RUST_LOG=debug".to_owned()]
+                    vec![
+                        "KALLIP_SEED=1".to_owned(),
+                        "KALLIP_A=1".to_owned(),
+                        "RUST_LOG=debug".to_owned()
+                    ]
                 );
             }
             other => panic!("expected env_get ok, got {other:?}"),
@@ -636,7 +640,10 @@ mod tests {
         match get.body {
             ResponseBody::Ok {
                 payload: OkPayload::EnvGet { env, .. },
-            } => assert_eq!(env, vec!["RUST_LOG=debug".to_owned()]),
+            } => assert_eq!(
+                env,
+                vec!["KALLIP_SEED=1".to_owned(), "RUST_LOG=debug".to_owned()]
+            ),
             other => panic!("expected env_get ok, got {other:?}"),
         }
 

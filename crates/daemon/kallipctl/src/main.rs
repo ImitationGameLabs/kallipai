@@ -146,9 +146,10 @@ enum EnvCommand {
     /// line between variables. Values are shown in full, so a line can
     /// be copied straight into a shell.
     List { slug: String },
-    /// Replace the persisted env wholesale with the given KEY=VALUE
-    /// pairs (repeatable; same allowlist as spawn's env). The running
-    /// process is untouched; the change takes effect on next start.
+    /// Merge the given KEY=VALUE pairs into the persisted env: existing
+    /// keys are replaced in place, new keys are appended (same allowlist
+    /// as spawn's env). The running process is untouched; the change
+    /// takes effect on next start.
     Set {
         slug: String,
         #[arg(value_name = "KEY=VALUE")]
