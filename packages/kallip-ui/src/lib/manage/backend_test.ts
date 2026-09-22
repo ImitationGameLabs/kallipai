@@ -585,3 +585,30 @@ Deno.test(
     }
   },
 );
+
+Deno.test(
+  "OnlineBackend rejects the task download face (offline-only)",
+  async () => {
+    // The refusals are unconditional: the args never reach a request.
+    const backend = new OnlineBackend(restWith({}), "t-a");
+    // Single-task export rides the allowlist refusal family.
+    await assertRejects(
+      () => backend.exportTask(),
+      Error,
+      "task export is offline-only",
+    );
+    // Bulk export cites the manage-reply frame cap instead: the measured
+    // ledger export (632KB) overshoots the 256KB default reply limit.
+    await assertRejects(
+      () => backend.exportAllTasks(),
+      Error,
+      "offline-only: the lesche manage-reply frame caps",
+    );
+    // The archive download keeps its existing allowlist refusal.
+    await assertRejects(
+      () => backend.fetchTaskArchive(),
+      Error,
+      "archive download is offline-only",
+    );
+  },
+);

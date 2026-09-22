@@ -11,11 +11,18 @@ import type {
   TaskStatus,
   TaskTimeAxis,
 } from "@kallipai/kallip-client";
-import { type ManagementBackend, managementBackend } from "./client.ts";
+import {
+  type ManagementBackend,
+  OfflineBackend,
+  managementBackend,
+} from "./client.ts";
 import { startVisibleInterval } from "../visibleInterval.ts";
 import { clampPage, filterEpoch } from "./compute.ts";
 import { displayError } from "./errors.ts";
-import { manage_tasks_load_failed } from "../../paraglide/messages.js";
+import {
+  manage_tasks_load_failed,
+  manage_tasks_download_failed,
+} from "../../paraglide/messages.js";
 
 /** Server-side page size for the row list. */
 export const TASKS_PAGE_SIZE = 25;
@@ -42,6 +49,10 @@ class TasksStore {
   isLoading = $state(false);
   hasLoaded = $state(false);
   error = $state<string | null>(null);
+  /** Large downloads need the direct transport; the relay-tunnel
+   * manage-reply frame caps response bodies below ledger exports. */
+  downloadsAvailable = $state(true);
+  downloading = $state(false);
 
   private pollStop: (() => void) | null = null;
   /** Monotonic token for in-flight refreshes: a slow response from a
@@ -111,6 +122,57 @@ class TasksStore {
   select(id: number): void {
     this.selectedId = id;
     void this.loadDetail(id);
+  }
+
+  /** Download the closed dossier snapshot (direct transport only). */
+  async fetchArchive(id: number): Promise<Uint8Array | null> {
+    this.downloading = true;
+    try {
+      return await this.backend.fetchTaskArchive(id);
+    } catch (e) {
+      this.error = displayError(
+        "archive download",
+        e,
+        manage_tasks_download_failed(),
+      );
+      return null;
+    } finally {
+      this.downloading = false;
+    }
+  }
+
+  /** Export one task plus its trail as JSON (direct transport only). */
+  async exportTask(id: number): Promise<TaskExport | null> {
+    this.downloading = true;
+    try {
+      return await this.backend.exportTask(id);
+    } catch (e) {
+      this.error = displayError(
+        "task export",
+        e,
+        manage_tasks_download_failed(),
+      );
+      return null;
+    } finally {
+      this.downloading = false;
+    }
+  }
+
+  /** Export every task plus its trail as JSON (direct transport only). */
+  async exportAllTasks(): Promise<TaskExport[] | null> {
+    this.downloading = true;
+    try {
+      return await this.backend.exportAllTasks();
+    } catch (e) {
+      this.error = displayError(
+        "bulk export",
+        e,
+        manage_tasks_download_failed(),
+      );
+      return null;
+    } finally {
+      this.downloading = false;
+    }
   }
 
   private async loadDetail(id: number): Promise<void> {
@@ -195,6 +257,8 @@ class TasksStore {
   switchBackend(backend: ManagementBackend): void {
     this.stopPolling();
     this._backend = backend;
+    this.downloadsAvailable = backend instanceof OfflineBackend;
+    this.refreshSeq = 0;
     this.isLoading = false;
     this.rows = [];
     this.total = 0;

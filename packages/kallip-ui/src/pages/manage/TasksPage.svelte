@@ -43,6 +43,10 @@
     manage_tasks_col_archived,
     manage_tasks_archive_hash,
     manage_tasks_association,
+    manage_tasks_download_archive,
+    manage_tasks_export_json,
+    manage_tasks_export_all,
+    manage_tasks_downloads_offline,
   } from "../../paraglide/messages.js";
   import type { TaskStatus, TaskTimeAxis } from "@kallipai/kallip-client";
   import { TASKS_PAGE_SIZE } from "../../lib/manage/tasks.svelte.ts";
@@ -111,6 +115,53 @@
   // The one expanded confirmation row (single-open accordion): report
   // can be long, so only one rolls open at a time.
   let expandedConfirmer = $state<string | null>(null);
+
+  // Downloads need the direct (offline) transport; over the relay tunnel
+  // the manage-reply frame caps response bodies, so the buttons disable
+  // and the hint points at the CLI instead.
+  function saveBlob(
+    data: string | Uint8Array,
+    filename: string,
+    type: string,
+  ): void {
+    // The DOM lib types the Blob part as narrow overloads; the cast
+    // silences that lib noise, not a real risk - do not simplify away.
+    const url = URL.createObjectURL(new Blob([data as BlobPart], { type }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function downloadArchive(id: number): Promise<void> {
+    const bytes = await tasksStore.fetchArchive(id);
+    if (bytes) {
+      saveBlob(bytes, `task-${id}-archive.tar`, "application/x-tar");
+    }
+  }
+
+  async function exportTaskJson(id: number): Promise<void> {
+    const task = await tasksStore.exportTask(id);
+    if (task) {
+      saveBlob(
+        JSON.stringify(task, null, 2),
+        `task-${id}-export.json`,
+        "application/json",
+      );
+    }
+  }
+
+  async function exportAllJson(): Promise<void> {
+    const all = await tasksStore.exportAllTasks();
+    if (all) {
+      saveBlob(
+        JSON.stringify(all, null, 2),
+        "tasks-export.json",
+        "application/json",
+      );
+    }
+  }
 </script>
 
 <svelte:head><title>{manage_tasks_title()}</title></svelte:head>
@@ -131,6 +182,13 @@
           />
           {manage_tasks_show_archived()}
         </label>
+        <button
+          class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+          disabled={!tasksStore.downloadsAvailable || tasksStore.downloading}
+          onclick={() => exportAllJson()}
+        >
+          {manage_tasks_export_all()}
+        </button>
         <button
           class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
           onclick={() => tasksStore.refresh(true)}>⟳</button
@@ -196,6 +254,12 @@
         />
       </label>
     </div>
+
+    {#if !tasksStore.downloadsAvailable}
+      <p class="text-xs opacity-60 preset-tonal-surface rounded px-3 py-2">
+        {manage_tasks_downloads_offline()}
+      </p>
+    {/if}
 
     {#if tasksStore.error}
       <p class="text-error-500 dark:text-error-400 text-sm">
@@ -302,6 +366,27 @@
                     {confirmedCount}/{tasksStore.detail.confirmers.length}
                   </span>
                 {/if}
+                <div class="flex gap-1.5">
+                  <button
+                    type="button"
+                    class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+                    disabled={!tasksStore.downloadsAvailable ||
+                      tasksStore.downloading ||
+                      !tasksStore.detail.archived}
+                    onclick={() => downloadArchive(tasksStore.detail!.id)}
+                  >
+                    {manage_tasks_download_archive()}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+                    disabled={!tasksStore.downloadsAvailable ||
+                      tasksStore.downloading}
+                    onclick={() => exportTaskJson(tasksStore.detail!.id)}
+                  >
+                    {manage_tasks_export_json()}
+                  </button>
+                </div>
               </div>
 
               <div class="text-xs opacity-60 flex gap-4 flex-wrap">

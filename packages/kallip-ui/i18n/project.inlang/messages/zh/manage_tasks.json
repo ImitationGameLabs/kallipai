@@ -31,5 +31,10 @@
   "manage_tasks_col_archived": "归档于",
   "manage_tasks_archive_hash": "归档哈希",
   "manage_tasks_association": "关联",
-  "manage_tasks_close_summary": "关闭小结"
+  "manage_tasks_close_summary": "关闭小结",
+  "manage_tasks_download_archive": "下载归档",
+  "manage_tasks_export_json": "导出 JSON",
+  "manage_tasks_export_all": "导出全部",
+  "manage_tasks_downloads_offline": "下载仅限离线：在线经隧道请使用 CLI（kallip task export/archive）或离线直连。",
+  "manage_tasks_download_failed": "下载失败。"
 }

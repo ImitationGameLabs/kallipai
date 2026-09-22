@@ -423,4 +423,13 @@ export class TagmaClient {
   fetchTaskArchive(id: number): Promise<Uint8Array> {
     return this.bytes(`/tasks/${id}/archive`);
   }
+  /** GET /tasks/{id}/export — one task plus its trail as JSON. */
+  exportTask(id: number): Promise<TaskExport> {
+    return this.json<TaskExport>(`/tasks/${id}/export`);
+  }
+
+  /** GET /tasks/export — every task plus its trail as JSON. */
+  exportAllTasks(): Promise<TaskExport[]> {
+    return this.json<TaskExport[]>("/tasks/export");
+  }
 }

@@ -85,6 +85,8 @@ export interface ManagementBackend {
   reopenTask(id: number, body?: TaskForceRequest): Promise<TaskExport>;
   archiveTask(id: number, body?: TaskForceRequest): Promise<TaskExport>;
   fetchTaskArchive(id: number): Promise<Uint8Array>;
+  exportTask(id: number): Promise<TaskExport>;
+  exportAllTasks(): Promise<TaskExport[]>;
 }
 
 // --- OfflineBackend (wraps TagmaClient) ---
@@ -177,6 +179,12 @@ export class OfflineBackend implements ManagementBackend {
   }
   fetchTaskArchive(id: number) {
     return this.client.fetchTaskArchive(id);
+  }
+  exportTask(id: number) {
+    return this.client.exportTask(id);
+  }
+  exportAllTasks() {
+    return this.client.exportAllTasks();
   }
 }
 
@@ -518,6 +526,20 @@ export class OnlineBackend implements ManagementBackend {
     return Promise.reject(
       new Error(
         "archive download is offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  exportTask(): Promise<TaskExport> {
+    return Promise.reject(
+      new Error(
+        "task export is offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+  exportAllTasks(): Promise<TaskExport[]> {
+    return Promise.reject(
+      new Error(
+        "bulk export is offline-only: the lesche manage-reply frame caps responses below the ledger's export size",
       ),
     );
   }

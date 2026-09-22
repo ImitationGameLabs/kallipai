@@ -31,5 +31,10 @@
   "manage_tasks_col_archived": "Archived",
   "manage_tasks_archive_hash": "Archive hash",
   "manage_tasks_association": "Association",
-  "manage_tasks_close_summary": "Close summary"
+  "manage_tasks_close_summary": "Close summary",
+  "manage_tasks_download_archive": "Download archive",
+  "manage_tasks_export_json": "Export JSON",
+  "manage_tasks_export_all": "Export all",
+  "manage_tasks_downloads_offline": "Downloads are offline-only: over the relay tunnel use the CLI (kallip task export/archive) or a direct connection.",
+  "manage_tasks_download_failed": "Download failed."
 }
