@@ -114,4 +114,5 @@ After modifying Rust code:
 - `cargo fmt` - Format check
 - `cargo clippy --workspace --all-targets --all-features` - Lint check
 - `cargo test --workspace --all-targets --all-features` - Run tests
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps` - Build docs and fail on rustdoc warnings
+- `cargo doc --workspace --all-features --no-deps` - Build docs
+- `cargo check`, clippy, test, and doc deny warnings via `.cargo/config.toml` (build.warnings = deny). To relax for one invocation, prefix with `CARGO_BUILD_WARNINGS=allow`.
