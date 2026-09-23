@@ -41,7 +41,7 @@ async fn scenario2_normal() {
         Reply::Tool(format!("cat {agent_data}/meta.json")),             // 4: read ok
         Reply::Tool("ls -A $HOME/.ssh".into()),                         // 5: Normal reads .ssh
         Reply::Tool("cat $HOME/.ssh/id_testkey".into()),                // 6: contents readable
-        Reply::Tool("cat \"$XDG_CONFIG_HOME/kallipai/tagmata/main/profiles/profiles.toml\"".into()), // 7: Normal reads profiles
+        Reply::Tool("cat \"$XDG_CONFIG_HOME/kallipai/tagmata/main/profiles.toml\"".into()), // 7: Normal reads profiles
     ];
     if have_shm {
         script.push(Reply::Tool(format!("echo s > {shm_probe}"))); // 8: /dev/shm writable

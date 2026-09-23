@@ -600,7 +600,6 @@ mod guard_tests {
             .join("kallipai")
             .join("tagmata")
             .join("test")
-            .join("profiles")
             .join("profiles.toml");
         let body = std::fs::read_to_string(persisted).expect("written under guard dir");
         assert!(body.contains("default = \"alt\""));

@@ -44,7 +44,7 @@ Four subcommands cover inspection, rebinding, marker transfer, and removal:
 ### File Location
 
 The profiles config file lives at the instance config root's
-`profiles/profiles.toml`: `<config home>/kallipai/tagmata/<slug>/`.
+`profiles.toml`: `<config home>/kallipai/tagmata/<slug>/`.
 A config root that cannot be derived (no `KALLIP_TAGMA_SLUG`, no config
 home) degrades the read to the implicit env profile with a warning;
 a write with no config root errors out. Without a config file (the

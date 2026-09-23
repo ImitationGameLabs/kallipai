@@ -242,8 +242,8 @@ fn guest_hide_holes() -> Vec<PathBuf> {
             push_if_dir(home.join(sub), &mut out);
         }
     }
-    // The tagma profiles dir (holds API keys). Reuse profile::config's
-    // resolution so the data-dir location is covered, not just a default.
+    // The tagma config root (holds profiles.toml with API keys). Reuse
+    // profile::config's resolution so the resolver's location is covered.
     if let Some(dir) = crate::profile::config::profiles_config_dir() {
         push_if_dir(dir, &mut out);
     }

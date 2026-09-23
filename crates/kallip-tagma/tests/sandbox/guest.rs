@@ -20,7 +20,7 @@ async fn scenario1_guest() {
         Reply::Tool(format!("echo x > {}/probe.txt", ws.display())), // 1: workspace RO
         Reply::Tool(format!("echo x >> {agent_data}/meta.json")), // 2: data tree RO
         Reply::Tool("mkdir -p $HOME/elsewhere && echo x > $HOME/elsewhere/x".into()), // 3: home RO
-        Reply::Tool("cat \"$XDG_CONFIG_HOME/kallipai/tagmata/main/profiles/profiles.toml\"".into()), // 4: profiles hide-hole
+        Reply::Tool("cat \"$XDG_CONFIG_HOME/kallipai/tagmata/main/profiles.toml\"".into()), // 4: config-root hide-hole
         Reply::End("done"),
     ];
 

@@ -1344,7 +1344,6 @@ mod tests {
                 .join("kallipai")
                 .join("tagmata")
                 .join("test")
-                .join("profiles")
                 .join("profiles.toml"),
         )
         .unwrap();

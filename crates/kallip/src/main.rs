@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
             }
             AgentCommand::Status(args) => {
                 // Two scales: no argument renders the fleet overview;
-                // an argument keeps the per-agent deep view unchanged.
+                // an argument renders the per-agent deep view.
                 let Some(ref_arg) = args.id else {
                     print_status_overview(&client, args.utc).await?;
                     return Ok(());

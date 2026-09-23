@@ -27,7 +27,7 @@ order: 21
 
 ### 文件位置
 
-profiles 配置文件位于实例配置根的 `profiles/profiles.toml`：`<config home>/kallipai/tagmata/<slug>/`。配置根推导不出（无 `KALLIP_TAGMA_SLUG`、无 config home）时，读取降级为隐式 env profile 并记警告；无配置根的写入则报错。没有配置文件（经 Harbor 与 `kallip-run` 做基准/脚本的默认；Harbor 是外部 agent 基准测试框架）时用单一隐式 profile：其 `max_context_window` 从 `KALLIP_CONTEXT_WINDOW_TOKENS`（默认 `128000`）推导。
+profiles 配置文件位于实例配置根的 `profiles.toml`：`<config home>/kallipai/tagmata/<slug>/`。配置根推导不出（无 `KALLIP_TAGMA_SLUG`、无 config home）时，读取降级为隐式 env profile 并记警告；无配置根的写入则报错。没有配置文件（经 Harbor 与 `kallip-run` 做基准/脚本的默认；Harbor 是外部 agent 基准测试框架）时用单一隐式 profile：其 `max_context_window` 从 `KALLIP_CONTEXT_WINDOW_TOKENS`（默认 `128000`）推导。
 
 有配置文件时，tagma 加载多个 provider/model 组合，每个 profile 自行声明 `max_context_window`。每个 profile 还可声明 `modalities`；省略默认纯文本，set 的生效模态是其成员的交集。
 

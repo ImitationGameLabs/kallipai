@@ -43,7 +43,7 @@ pub struct ProfileConfig {
     pub parking: Vec<Profile>,
 }
 
-/// Load profile configuration: from `<config_dir>/profiles/profiles.toml` when
+/// Load profile configuration: from `<config_dir>/profiles.toml` when
 /// present, else an implicit single profile built from `KALLIP_LLM_*` env.
 pub fn load() -> Result<ProfileConfig> {
     match resolve_config_path()? {
@@ -263,7 +263,7 @@ fn write_back_default(raw: &str, default: &str, path: &Path) -> Result<()> {
 }
 
 /// Resolve the config file path for reading:
-/// `<config root>/profiles/profiles.toml` (`persistence::config_dir_root`,
+/// `<config root>/profiles.toml` (`persistence::config_dir_root`,
 /// installed by the host at boot) — declared configuration is operator
 /// intent, so it lives under the config home, not the runtime data
 /// tree. Returns `None` both when the resolved file does not exist and
@@ -293,14 +293,12 @@ pub fn config_path() -> Result<PathBuf> {
     config_dir_profile_path()
 }
 /// The single profiles location shared by both resolve fns:
-/// `<config root>/profiles/profiles.toml` (the same host-installed leaf
+/// `<config root>/profiles.toml` (the same host-installed root
 /// `persistence::config_dir_root` names, so the declared config sits in
 /// the config tree while runtime data stays in the data tree). Errors
 /// when the config root cannot be derived.
 fn config_dir_profile_path() -> Result<PathBuf> {
-    Ok(crate::persistence::config_dir_root()?
-        .join("profiles")
-        .join("profiles.toml"))
+    Ok(crate::persistence::config_dir_root()?.join("profiles.toml"))
 }
 
 /// Serialize a [`ProfileConfig`] to TOML and write it to `path` atomically
@@ -332,15 +330,15 @@ pub fn save(config: &ProfileConfig, path: &Path) -> Result<()> {
 
 /// The directory holding `profiles.toml` (and thus potentially API keys) — the
 /// path a sandbox hide-hole should overlay so a broad-read agent cannot read
-/// credentials. Mirrors the loader's single location: the dedicated
-/// `<config root>/profiles/` subdir; `None` when the config root cannot be
+/// credentials. That directory is the config root itself (the file sits at
+/// `<config root>/profiles.toml`); `None` when the config root cannot be
 /// derived (no derivable root means no profiles file to hide).
 pub fn profiles_config_dir() -> Option<PathBuf> {
     // Same single source as the loader (`config_dir_profile_path`): the
     // hide-hole must follow the resolver, or a relocated profiles.toml leaks
-    // past the Guest sandbox. The subdir (a directory, as the tmpfs overlay
-    // contract requires) rather than the data root — hiding the root would
-    // also hide agents/skills and break Guest agents.
+    // past the Guest sandbox. The config root is a directory (as the tmpfs
+    // overlay contract requires), and hiding it never touches the data root
+    // (agents/skills stay Guest-visible).
     config_dir_profile_path()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
@@ -1251,11 +1249,7 @@ api_key = "fake"
     #[serial]
     fn installed_config_root_is_the_only_profiles_location() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_profiles = tmp
-            .path()
-            .join("config")
-            .join("profiles")
-            .join("profiles.toml");
+        let config_profiles = tmp.path().join("config").join("profiles.toml");
         std::fs::create_dir_all(config_profiles.parent().unwrap()).unwrap();
         std::fs::write(&config_profiles, "").unwrap();
         with_installed_roots(&tmp, || {
@@ -1296,12 +1290,12 @@ api_key = "fake"
     #[serial]
     fn profiles_config_dir_follows_the_installed_root() {
         let tmp = tempfile::tempdir().unwrap();
-        let profiles_dir = tmp.path().join("config").join("profiles");
+        let profiles_dir = tmp.path().join("config");
         std::fs::create_dir_all(&profiles_dir).unwrap();
         with_installed_roots(&tmp, || {
-            // The hide-hole source must track the resolver: it hides
-            // the dedicated profiles/ subdir (a directory), not the data
-            // root (agents/skills stay Guest-visible).
+            // The hide-hole source must track the resolver: it hides the
+            // config root itself (declared config is operator intent), not
+            // the data root (agents/skills stay Guest-visible).
             assert_eq!(
                 profiles_config_dir().as_deref(),
                 Some(profiles_dir.as_path())

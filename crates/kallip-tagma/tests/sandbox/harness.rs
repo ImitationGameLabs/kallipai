@@ -185,13 +185,12 @@ impl World {
     }
     fn profiles_file(&self) -> PathBuf {
         // Declared config lives in the config tree: the resolver reads
-        // profiles.toml under the slug-derived CONFIG root, so the fixture
+        // profiles.toml at the slug-derived CONFIG root, so the fixture
         // must write it there (XDG_CONFIG_HOME is set on the spawned child).
         self.config_dir
             .join("kallipai")
             .join("tagmata")
             .join(Self::SLUG)
-            .join("profiles")
             .join("profiles.toml")
     }
 
