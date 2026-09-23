@@ -55,7 +55,11 @@ pub(crate) struct IdArgs {
 pub(crate) struct StatusArgs {
     /// Agent ID or role (positional; omit for the fleet overview).
     pub id: Option<AgentId>,
-    /// Render timestamps as relative distances (8m ago) instead of absolute UTC.
+    /// Render timestamps as relative distances (8m ago) instead of absolute stamps.
     #[arg(long)]
     pub relative_time: bool,
+    /// Render absolute stamps in UTC instead of the tagma's configured
+    /// timezone or the machine's local zone.
+    #[arg(long)]
+    pub utc: bool,
 }

@@ -251,9 +251,13 @@ pub(crate) struct TaskListArgs {
     #[arg(long)]
     pub offset: Option<u32>,
     /// Show the time column as relative distances (3h ago) instead of
-    /// absolute UTC.
+    /// absolute stamps.
     #[arg(long)]
     pub relative_time: bool,
+    /// Render absolute stamps in UTC instead of the tagma's configured
+    /// timezone or the machine's local zone.
+    #[arg(long)]
+    pub utc: bool,
 }
 
 #[derive(Args)]

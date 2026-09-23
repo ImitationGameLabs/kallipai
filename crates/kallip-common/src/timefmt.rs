@@ -18,6 +18,81 @@ const UTC_SECONDS: &[FormatItem<'static>] =
 /// Day precision, for the absolute suffix on old relative stamps.
 const UTC_DAY: &[FormatItem<'static>] = format_description!("[year]-[month]-[day]");
 
+/// Absolute stamps with a non-UTC offset (`2026-09-23T19:05:07+08:00`).
+const OFFSET_SECONDS: &[FormatItem<'static>] = format_description!(
+    "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_minute]"
+);
+
+/// Which zone an absolute stamp renders in. Precedence is decided by the
+/// caller (`--utc` flag > configured timezone > machine local); every arm
+/// that cannot resolve its zone degrades to UTC (with a one-time stderr
+/// note) so a stamp always renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisplayZone {
+    /// Force RFC 3339 UTC regardless of configuration.
+    Utc,
+    /// Render in the named IANA timezone (`Asia/Shanghai`).
+    Named(String),
+    /// Render in the machine's local timezone.
+    Local,
+}
+
+fn warn_once_missing_local() {
+    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if WARNED.set(()).is_ok() {
+        eprintln!("timefmt: no local timezone available (no tzdata/TZ); rendering UTC");
+    }
+}
+
+fn warn_once_bad_setting(name: &str) {
+    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if WARNED.set(()).is_ok() {
+        eprintln!("timefmt: unknown timezone setting {name:?}; rendering UTC");
+    }
+}
+
+fn named_offset_secs(name: &str, epoch_secs: i64) -> Option<i32> {
+    let tz = jiff::tz::TimeZone::get(name).ok()?;
+    let ts = jiff::Timestamp::from_second(epoch_secs).ok()?;
+    Some(tz.to_offset(ts).seconds())
+}
+
+fn resolve_offset(zone: &DisplayZone, epoch_secs: i64) -> UtcOffset {
+    match zone {
+        DisplayZone::Utc => UtcOffset::UTC,
+        DisplayZone::Named(name) => match named_offset_secs(name, epoch_secs) {
+            Some(secs) => UtcOffset::from_whole_seconds(secs).unwrap_or(UtcOffset::UTC),
+            None => {
+                warn_once_bad_setting(name);
+                UtcOffset::UTC
+            }
+        },
+        DisplayZone::Local => match UtcOffset::current_local_offset() {
+            Ok(offset) => offset,
+            Err(_) => {
+                warn_once_missing_local();
+                UtcOffset::UTC
+            }
+        },
+    }
+}
+
+/// Render an epoch-seconds stamp in the requested zone: `Z`-suffixed UTC
+/// for [`DisplayZone::Utc`], a named-offset string otherwise. Named and
+/// local zones that cannot be resolved degrade to UTC (see
+/// [`DisplayZone`]).
+pub fn format_display(epoch_secs: u64, zone: &DisplayZone) -> String {
+    let offset = resolve_offset(zone, epoch_secs as i64);
+    let dt = OffsetDateTime::from_unix_timestamp(epoch_secs as i64)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .to_offset(offset);
+    if offset == UtcOffset::UTC {
+        return dt.format(&UTC_SECONDS).unwrap_or_else(|_| "invalid".into());
+    }
+    dt.format(&OFFSET_SECONDS)
+        .unwrap_or_else(|_| "invalid".into())
+}
+
 /// Current wall clock as epoch seconds (0 on a pre-epoch clock); shared by
 /// the CLI so every view anchors to the same clock source.
 pub fn now_epoch() -> u64 {
@@ -131,6 +206,42 @@ mod tests {
     fn utc_shape_matches_tracing() {
         assert_eq!(format_utc(1_755_951_907), "2025-08-23T12:25:07Z");
         assert_eq!(parse_utc("2025-08-23T12:25:07Z").unwrap(), 1_755_951_907);
+    }
+
+    #[test]
+    fn display_zone_utc_matches_format_utc() {
+        let epoch = 1_755_951_907;
+        assert_eq!(format_display(epoch, &DisplayZone::Utc), format_utc(epoch));
+    }
+
+    #[test]
+    fn display_zone_named_renders_fixed_offset() {
+        // Asia/Shanghai keeps +08:00 year-round (no DST), so any epoch
+        // pins the same offset; the real DST behavior is covered below.
+        assert_eq!(
+            format_display(1_755_951_907, &DisplayZone::Named("Asia/Shanghai".into())),
+            "2025-08-23T20:25:07+08:00"
+        );
+    }
+
+    #[test]
+    fn display_zone_named_tracks_dst() {
+        // America/New_York observes DST: the same wall clock maps to
+        // -05:00 in January and -04:00 in July, so a correct lookup must
+        // render different offsets for the two mid-season epochs.
+        let jan = 1_767_225_600; // 2026-01-01T00:00:00Z
+        let jul = 1_782_864_000; // 2026-07-01T00:00:00Z
+        let zone = DisplayZone::Named("America/New_York".into());
+        assert_eq!(format_display(jan, &zone), "2025-12-31T19:00:00-05:00");
+        assert_eq!(format_display(jul, &zone), "2026-06-30T20:00:00-04:00");
+    }
+
+    #[test]
+    fn display_zone_unknown_name_degrades_to_utc() {
+        assert_eq!(
+            format_display(1_755_951_907, &DisplayZone::Named("Mars/Olympus".into())),
+            "2025-08-23T12:25:07Z"
+        );
     }
 
     #[test]

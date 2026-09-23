@@ -10,6 +10,7 @@ name = "kallip_tagma"
 path = "src/lib.rs"
 
 [dependencies]
+jiff = { workspace = true }
 kallip-runtime = { workspace = true, features = ["landlock", "seccomp"] }
 kallip-common = { workspace = true, features = ["axum"] }
 kallip-task = { workspace = true }

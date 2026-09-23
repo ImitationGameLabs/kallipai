@@ -16,6 +16,21 @@ use crate::args::task::{
     TaskCloseReason, TaskCommand, TaskReportCommand, TaskTimeAxisArg, parse_time_anchor,
 };
 use kallip_common::timefmt;
+use kallip_common::timefmt::DisplayZone;
+
+/// Resolve the zone absolute stamps render in: `--utc` wins, then the
+/// tagma's configured timezone, then the machine's local zone. The
+/// settings fetch is best-effort with its own short timeout; any failure
+/// silently degrades to local.
+pub(crate) async fn display_zone(utc: bool, client: &TagmaClient) -> DisplayZone {
+    if utc {
+        return DisplayZone::Utc;
+    }
+    match client.get_timezone().await {
+        Ok(Some(name)) => DisplayZone::Named(name),
+        _ => DisplayZone::Local,
+    }
+}
 
 /// The time column for one list row: pick the axis field, then either
 /// pass the ISO stamp through or shrink it to a relative distance. `-`
@@ -23,6 +38,7 @@ use kallip_common::timefmt;
 fn axis_stamp(
     axis: TaskTimeAxisArg,
     relative: bool,
+    zone: &DisplayZone,
     now: u64,
     updated_at: Option<&str>,
     ended_at: Option<&str>,
@@ -36,7 +52,10 @@ fn axis_stamp(
             Ok(epoch) => timefmt::format_relative(now, epoch),
             Err(_) => iso.to_string(),
         },
-        Some(iso) => iso.to_string(),
+        Some(iso) => match timefmt::parse_utc(iso) {
+            Ok(epoch) => timefmt::format_display(epoch, zone),
+            Err(_) => iso.to_string(),
+        },
         None => "-".to_string(),
     }
 }
@@ -159,6 +178,7 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                 })
                 .transpose()?;
             let now = timefmt::now_epoch();
+            let zone = display_zone(args.utc, client).await;
             let since = args
                 .since
                 .as_deref()
@@ -181,7 +201,7 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
             };
             // A clock anchor up top: list times are core content, and the
             // header calibrates the stamps below it (inbox summary precedent).
-            println!("current datetime: {}", timefmt::format_utc(now));
+            println!("current datetime: {}", timefmt::format_display(now, &zone));
             let page = client.task_list(&query).await?;
             if page.rows.is_empty() {
                 println!("(no tasks, {} total)", page.total);
@@ -190,6 +210,7 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                     let shown = axis_stamp(
                         args.time,
                         args.relative_time,
+                        &zone,
                         now,
                         t.updated_at.as_deref(),
                         t.ended_at.as_deref(),
@@ -454,6 +475,7 @@ mod list_render_tests {
         let s = axis_stamp(
             TaskTimeAxisArg::Updated,
             false,
+            &DisplayZone::Utc,
             100,
             Some("ISO-U"),
             Some("ISO-E"),
@@ -466,6 +488,7 @@ mod list_render_tests {
         let s = axis_stamp(
             TaskTimeAxisArg::Closed,
             false,
+            &DisplayZone::Utc,
             100,
             Some("ISO-U"),
             Some("ISO-E"),
@@ -476,7 +499,14 @@ mod list_render_tests {
     #[test]
     fn absent_axis_value_renders_as_dash() {
         assert_eq!(
-            axis_stamp(TaskTimeAxisArg::Closed, false, 100, Some("ISO-U"), None),
+            axis_stamp(
+                TaskTimeAxisArg::Closed,
+                false,
+                &DisplayZone::Utc,
+                100,
+                Some("ISO-U"),
+                None,
+            ),
             "-"
         );
     }
@@ -486,12 +516,21 @@ mod list_render_tests {
         let now = timefmt::now_epoch();
         let iso = timefmt::format_utc(now - 3 * 60 * 60);
         assert!(
-            axis_stamp(TaskTimeAxisArg::Updated, true, now, Some(&iso), None).starts_with("3h ago"),
+            axis_stamp(
+                TaskTimeAxisArg::Updated,
+                true,
+                &DisplayZone::Utc,
+                now,
+                Some(&iso),
+                None
+            )
+            .starts_with("3h ago"),
         );
         assert_eq!(
             axis_stamp(
                 TaskTimeAxisArg::Updated,
                 true,
+                &DisplayZone::Utc,
                 now,
                 Some("not-a-stamp"),
                 None

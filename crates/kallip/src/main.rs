@@ -127,16 +127,17 @@ async fn main() -> Result<()> {
                 // Two scales: no argument renders the fleet overview;
                 // an argument keeps the per-agent deep view unchanged.
                 let Some(ref_arg) = args.id else {
-                    print_status_overview(&client).await?;
+                    print_status_overview(&client, args.utc).await?;
                     return Ok(());
                 };
                 let id = client.resolve_agent_ref(ref_arg.as_ref()).await?;
                 let status = client.agent_status(&id).await?;
                 let now = now_epoch();
+                let zone = crate::task::display_zone(args.utc, &client).await;
                 // Four blank-line groups: a timezone-anchored clock first (readers
                 // calibrate against it instead of doing date arithmetic), then
                 // state, context, retries.
-                println!("current datetime: {}", timefmt::format_utc(now));
+                println!("current datetime: {}", timefmt::format_display(now, &zone));
                 println!();
                 println!("state: {}", status.state);
                 println!();
@@ -170,7 +171,7 @@ async fn main() -> Result<()> {
                         let stamp = if args.relative_time {
                             timefmt::format_relative(now, r.timestamp)
                         } else {
-                            timefmt::format_utc(r.timestamp)
+                            timefmt::format_display(r.timestamp, &zone)
                         };
                         let quota = r
                             .quota_reset
@@ -544,6 +545,7 @@ async fn main() -> Result<()> {
         Commands::Inbox(cmd) => match cmd {
             InboxCommand::List(args) => {
                 let id = resolve_id_ref(&client, args.id).await?;
+                let zone = crate::task::display_zone(args.utc, &client).await;
                 let resp = client
                     .inbox_list(&id, args.status.as_deref(), args.limit)
                     .await?;
@@ -552,9 +554,12 @@ async fn main() -> Result<()> {
                 } else {
                     // A clock anchor at the top: inbox times are core content,
                     // and the header calibrates the per-entry stamps below it.
-                    println!("current datetime: {}", timefmt::format_utc(now_epoch()));
+                    println!(
+                        "current datetime: {}",
+                        timefmt::format_display(now_epoch(), &zone)
+                    );
                     for e in &resp {
-                        print_inbox_entry(e, now_epoch(), args.relative_time);
+                        print_inbox_entry(e, now_epoch(), args.relative_time, &zone);
                         println!("---");
                     }
                     println!("(showing {})", resp.len());
@@ -563,7 +568,8 @@ async fn main() -> Result<()> {
             InboxCommand::Read(args) => {
                 let id = resolve_id_ref(&client, args.id).await?;
                 let e = client.inbox_read(&id, args.msg_id).await?;
-                print_inbox_entry(&e, now_epoch(), false);
+                let zone = crate::task::display_zone(args.utc, &client).await;
+                print_inbox_entry(&e, now_epoch(), false, &zone);
             }
             InboxCommand::Summary(args) => {
                 let id = resolve_id_ref(&client, args.id).await?;
@@ -680,7 +686,12 @@ fn now_epoch() -> u64 {
     timefmt::now_epoch()
 }
 
-fn print_inbox_entry(e: &kallip_client::InboxEntry, now: u64, relative: bool) {
+fn print_inbox_entry(
+    e: &kallip_client::InboxEntry,
+    now: u64,
+    relative: bool,
+    zone: &timefmt::DisplayZone,
+) {
     println!("id: {}", e.id);
     println!("source: {}", e.source);
     println!("status: {}", e.status);
@@ -688,7 +699,7 @@ fn print_inbox_entry(e: &kallip_client::InboxEntry, now: u64, relative: bool) {
     let stamp = if relative {
         timefmt::format_relative(now, epoch)
     } else {
-        timefmt::format_utc(epoch)
+        timefmt::format_display(epoch, zone)
     };
     println!("time: {stamp}");
     println!("body: {}", e.body);
@@ -750,11 +761,12 @@ fn print_agent_blocks(agents: &[kallip_common::protocol::AgentSummary], now: u64
 
 /// `kallip status` with no argument: the whole fleet at a glance — clock,
 /// budget, anomaly-sorted agent blocks, and the drill-down tip.
-async fn print_status_overview(client: &TagmaClient) -> Result<()> {
+async fn print_status_overview(client: &TagmaClient, utc: bool) -> Result<()> {
     let now = timefmt::now_epoch();
+    let zone = crate::task::display_zone(utc, client).await;
     let mut agents = client.list_agents(None).await?;
     let budget = client.get_token_budget().await?;
-    println!("current datetime: {}", timefmt::format_utc(now));
+    println!("current datetime: {}", timefmt::format_display(now, &zone));
     println!();
     if budget.unlimited {
         println!(

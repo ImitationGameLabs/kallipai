@@ -25,6 +25,7 @@ pub mod pump_driver;
 pub mod relay;
 pub mod root_guard;
 pub mod routes;
+pub mod settings;
 pub mod shutdown;
 pub mod sse;
 pub mod state;
@@ -946,7 +947,7 @@ fn resolve_relay_plan(args: &args::Args) -> Result<Vec<(RelayEntry, EnrollEntry)
 }
 
 /// The instance data root, slug-derived (see `boot_identity`).
-fn data_root() -> Result<std::path::PathBuf> {
+pub(crate) fn data_root() -> Result<std::path::PathBuf> {
     kallip_runtime::persistence::data_dir_root()
 }
 

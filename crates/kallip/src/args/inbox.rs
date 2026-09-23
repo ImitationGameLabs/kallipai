@@ -34,9 +34,13 @@ pub(crate) struct InboxListArgs {
     /// Max messages to return (default 50, max 200).
     #[arg(long)]
     pub limit: Option<u32>,
-    /// Render timestamps as relative distances (8m ago) instead of absolute UTC.
+    /// Render timestamps as relative distances (8m ago) instead of absolute stamps.
     #[arg(long)]
     pub relative_time: bool,
+    /// Render absolute stamps in UTC instead of the tagma's configured
+    /// timezone or the machine's local zone.
+    #[arg(long)]
+    pub utc: bool,
 }
 
 #[derive(Args)]
@@ -46,6 +50,10 @@ pub(crate) struct InboxReadArgs {
     pub id: Option<AgentId>,
     /// Message ID (positional).
     pub msg_id: i64,
+    /// Render absolute stamps in UTC instead of the tagma's configured
+    /// timezone or the machine's local zone.
+    #[arg(long)]
+    pub utc: bool,
 }
 
 #[derive(Args)]

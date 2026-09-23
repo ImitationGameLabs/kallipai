@@ -12,6 +12,7 @@ pub(crate) mod lesche;
 mod message;
 pub(crate) mod profile_probe;
 pub(crate) mod profiles;
+pub(crate) mod settings;
 pub(crate) mod task;
 pub(crate) mod team;
 
@@ -169,6 +170,10 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/profiles/probe",
             axum::routing::post(profile_probe::probe_profiles),
+        )
+        .route(
+            "/settings/timezone",
+            axum::routing::get(settings::get_timezone).put(settings::put_timezone),
         )
         .route(
             "/work-schedule",

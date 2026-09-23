@@ -9,6 +9,7 @@ mod attachments;
 mod budget;
 mod inbox;
 mod lesche;
+mod settings;
 mod status;
 mod task;
 mod team;
