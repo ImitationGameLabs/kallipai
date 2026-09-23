@@ -47,5 +47,7 @@
   "chat_direct_empty": "你的 tagma 之间的会话会显示在这里。",
   "chat_direct_unavailable": "中继暂不可达，恢复后即可看到转录。",
   "chat_direct_fallback": "会话 {id}",
-  "chat_direct_title": "{name} · 直会话"
+  "chat_direct_title": "{name} · 直会话",
+  "chat_error_profile_set_unusable": "该 agent 没有可用的 profile set，请重新绑定后再试。",
+  "chat_conversation_unknown": "本设备没有这个会话的记录，它可能属于此浏览器从未连接过的 tagma。"
 }

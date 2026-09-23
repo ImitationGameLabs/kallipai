@@ -27,6 +27,8 @@
   import { managementBackend } from "../lib/manage/client.ts";
   import { convDraftKey, tagmaDraftKey } from "../lib/session/drafts.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
+  import { tagmaForConversation } from "../lib/session/convOf.ts";
+  import { chat_conversation_unknown } from "../paraglide/messages.js";
   import { realtimeStore } from "../lib/session/realtime.svelte";
   import {
     filesClientOrFail,
@@ -101,6 +103,22 @@
       ? { hasMoreOlder: conv.hasMoreOlder, loadingOlder: conv.loadingOlder }
       : {},
   );
+
+  // --- /chat/{id} deep-link dead-end guard -------------------------------
+  // A channel for this id may never open (offline tagma, or a conversation
+  // from a previous boot). Reverse-resolve the owning tagma from the
+  // remembered conv-of keys and mount its degraded offline view, so the
+  // page renders history instead of a permanent "opening" placeholder.
+  let unknownConversation = $state(false);
+  $effect(() => {
+    if (conv || isLocal) return;
+    const tagmaId = tagmaForConversation(conversationId);
+    if (tagmaId) {
+      void channelsStore.attachOfflineView(tagmaId);
+    } else {
+      unknownConversation = true;
+    }
+  });
 
   // --- attachments (relay 1:1 only; the file button stays off otherwise) ---
   // Picked files upload at once (shared-space put, then inbox delivery);
@@ -341,13 +359,17 @@
         </div>
       {:else}
         <!-- No open channel for this conversation yet. Channels auto-connect at
-         boot and on presence transitions, so this is normally brief. The
-         conversationId is server-derived and not reverse-resolvable, so if
-         auto-connect does not open it (bogus id, revoked, offline tagma) the
-         user needs a way out. -->
+         boot and on presence transitions, so this is normally brief; the
+         guard above also reverse-resolves a remembered tagma and mounts its
+         degraded offline view, so a deep-linked offline tagma renders its
+         cached history instead of a permanent placeholder. -->
         <div class="h-full grid place-items-center p-6">
           <div class="text-center flex flex-col gap-3 max-w-sm">
-            <p class="text-sm opacity-80">{chat_opening()}</p>
+            <p class="text-sm opacity-80">
+              {unknownConversation
+                ? chat_conversation_unknown()
+                : chat_opening()}
+            </p>
             <button
               type="button"
               class="btn preset-outlined-surface-500 hover:preset-filled-surface-500 self-center"

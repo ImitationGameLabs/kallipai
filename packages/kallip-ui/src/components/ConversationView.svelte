@@ -18,6 +18,7 @@
   import {
     chat_send_to_start,
     chat_retry_send_aria,
+    chat_error_profile_set_unusable,
     room_sending_aria,
   } from "../paraglide/messages.js";
   import type {
@@ -259,7 +260,9 @@
                   mine
                   bare
                   failed
-                  failureCopy={line.error}
+                  failureCopy={line.errorCode === "profile_set_unusable"
+                    ? chat_error_profile_set_unusable()
+                    : line.error}
                   attachment={line.attachment}
                   {downloadAttachment}
                 />

@@ -321,8 +321,16 @@ export abstract class ConversationBase {
     // path below: a durable system line + red, the server-error record.
     if (isInFlightError(reply, this.pendingInFlight)) {
       const localId = this.pendingInFlight!.localId;
-      this.transcript = sendFailed(this.transcript, localId, reply.message);
+      this.transcript = sendFailed(
+        this.transcript,
+        localId,
+        reply.message,
+        reply.code,
+      );
       this.pendingInFlight = null;
+      // The verbatim operator text stays in the console for diagnosis; the
+      // UI shows the localized short form keyed by the code (when present).
+      console.warn(`[send] rejected (${reply.status}):`, reply.message);
       void this.pumpPending();
       this.onReply(reply);
       return;

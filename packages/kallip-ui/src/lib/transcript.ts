@@ -95,6 +95,11 @@ export interface ConversationLine {
    * per-line error copy) as a retry candidate instead of vanishing. */
   readonly status?: "sending" | "sent" | "failed";
   readonly error?: string;
+  /** Machine-readable rejection code when the server sent one (e.g.
+   * `profile_set_unusable`): the bubble renders the localized short form
+   * keyed by this, and the transcript-wide error banner is suppressed so
+   * the failure is shown once, on the line. */
+  readonly errorCode?: string;
   /** The file attached to this message, when the sender shared one (an
    *  optimistic user line that carries it, or a replayed user row). Rendered
    *  as a file card; absent on plain-text lines and system/error lines. */
@@ -404,6 +409,7 @@ export function sendFailed(
   state: ConversationTranscript,
   localId: number,
   message?: string,
+  code?: string,
 ): ConversationTranscript {
   return {
     ...state,
@@ -411,13 +417,15 @@ export function sendFailed(
     // retry candidate (the pending store holds the durable copy).
     lines: state.lines.map((l) =>
       l.historyId === localId
-        ? { ...l, status: "failed" as const, error: message }
+        ? { ...l, status: "failed" as const, error: message, errorCode: code }
         : l,
     ),
     // The transcript-wide red banner is copy-driven: no stored copy (the
     // common rehydration case) marks the line failed without forcing the
-    // whole transcript into the error state.
-    ...(message ? { status: "error" as const, error: message } : {}),
+    // whole transcript into the error state. A coded server rejection (the
+    // localized short form lives in the line bubble) skips the banner: the
+    // failure renders once, on the line.
+    ...(message && !code ? { status: "error" as const, error: message } : {}),
   };
 }
 

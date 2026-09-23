@@ -102,6 +102,18 @@ impl ApiError {
         }
     }
 
+    /// 409 Conflict carrying a machine-readable rejection code: the UI
+    /// renders a localized short form instead of the operator-facing text
+    /// (the CLI keeps the full message).
+    pub fn conflict_with_code(msg: impl Into<String>, code: &str) -> Self {
+        Self {
+            status: 409,
+            message: msg.into(),
+            dangling: None,
+            code: Some(code.to_owned()),
+        }
+    }
+
     /// 409 Conflict carrying the stranded profile-set bindings from a
     /// non-forced `PUT /profiles` (see the tagma profiles routes).
     pub fn conflict_dangling(msg: impl Into<String>, dangling: Vec<String>) -> Self {

@@ -117,6 +117,9 @@ export type TagmaReply =
       readonly req_id: number;
       readonly status: number;
       readonly message: string;
+      /** Machine-readable rejection code, when the source ApiError carries
+       * one (absent on frames that do not carry it). */
+      readonly code?: string;
     }
   | {
       readonly kind: "event";

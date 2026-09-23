@@ -117,11 +117,28 @@ Deno.test("sendFailed keeps the line as a failed retry candidate", () => {
       createdAt: t.lines[0]!.createdAt,
       status: "failed",
       error: "post failed",
+      errorCode: undefined,
     },
   ]);
   assertEquals(t.status, "error");
   assertEquals(t.error, "post failed");
 });
+
+Deno.test(
+  "sendFailed: coded rejection lands on the line and skips the banner",
+  () => {
+    const sending = withUserLine(EMPTY_TRANSCRIPT, "hello", -1, userS);
+    const t = sendFailed(
+      sending,
+      -1,
+      "operator verbatim",
+      "profile_set_unusable",
+    );
+    assertEquals(t.lines[0]!.errorCode, "profile_set_unusable");
+    assertEquals(t.status, sending.status); // banner state unchanged
+    assertEquals(t.error, undefined);
+  },
+);
 
 // No-copy variant (the rehydration path): the line marks failed so the
 // bubble shows the error outline, but the transcript-wide red banner is

@@ -118,6 +118,7 @@ impl RelayHandle {
                     req_id,
                     status: 502,
                     message: "relay op panicked".to_string(),
+                    code: None,
                 }
             }
         };

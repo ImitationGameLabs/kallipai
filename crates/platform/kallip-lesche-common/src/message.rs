@@ -173,6 +173,10 @@ pub enum TagmaReply {
         req_id: u64,
         status: u16,
         message: String,
+        /// Machine-readable rejection code, when the source ApiError carries
+        /// one (absent on frames that do not carry it).
+        #[serde(default)]
+        code: Option<String>,
     },
     /// An unsolicited authored tagma event (an assistant message). Has no
     /// `req_id`: it is produced by the tagma's event pump, not in reply to any
@@ -510,6 +514,7 @@ mod tests {
                 req_id: 5,
                 status: 502,
                 message: "boom".into(),
+                code: None,
             })
             .unwrap(),
             serde_json::to_string(&TagmaReply::Event {

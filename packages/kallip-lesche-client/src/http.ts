@@ -117,10 +117,14 @@ abstract class BaseClient {
       headers[CSRF_HEADER] = CSRF_HEADER_VALUE;
       if (body !== undefined) headers["content-type"] = "application/json";
     }
+    // Hard timeout: a stalled relay must reject the pending open (the chat
+    // page then degrades) rather than hang forever. 30s matches the SSE
+    // connect timeout already used by the streaming path.
     const resp = await fetch(this.baseUrl + path, {
       method,
       headers,
       credentials: "include",
+      signal: AbortSignal.timeout(30_000),
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     if (!resp.ok) throw await lescheError(resp);

@@ -47,5 +47,7 @@
   "chat_direct_empty": "Sessions between your tagmas will appear here.",
   "chat_direct_unavailable": "The relay is unreachable right now. The transcript appears once it returns.",
   "chat_direct_fallback": "Session {id}",
-  "chat_direct_title": "{name} · Direct"
+  "chat_direct_title": "{name} · Direct",
+  "chat_error_profile_set_unusable": "This agent has no usable profile set. Rebind the agent, then retry.",
+  "chat_conversation_unknown": "This conversation is not known on this device; it may belong to a tagma this browser never opened."
 }

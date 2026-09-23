@@ -44,34 +44,11 @@ import {
 import { configStore } from "../config/config.svelte.ts";
 import { type ConversationLine, LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 
-/** The last conversation id each conversation partition resolved to, so an
- * offline open can hydrate the cached transcript without a server round
- * trip (the relay conversation id is server-derived and otherwise unknown
- * offline; direct remembers under the "local" key). A derived id -- no
- * content -- so localStorage is an acceptable home; best-effort both ways. */
-function convOfKey(partition: string): string {
-  return "kallip-relay:conv-of:" + partition;
-}
-
-function rememberConversationOf(
-  partition: string,
-  conversationId: string,
-): void {
-  try {
-    localStorage.setItem(convOfKey(partition), conversationId);
-  } catch {
-    // storage blocked: the offline view just starts empty
-  }
-}
-
-function lastConversationOf(partition: string): string | undefined {
-  try {
-    return localStorage.getItem(convOfKey(partition)) ?? undefined;
-  } catch {
-    return undefined;
-  }
-}
-
+import {
+  convOfKey,
+  lastConversationOf,
+  rememberConversationOf,
+} from "./convOf.ts";
 /** Automatic channel-open backoff: first retry after 1s, doubling, capped at
  *  60s; six straight failures silence the automatic path for the session. */
 const OPEN_BACKOFF_BASE_MS = 1_000;

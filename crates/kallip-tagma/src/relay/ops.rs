@@ -22,14 +22,15 @@ pub(super) const TUNNEL_RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
 /// may carry internal paths or source detail) are reduced to a fixed string and
 /// logged server-side by `handle_user_op`.
 pub(super) fn op_err_reply(req_id: u64, e: &anyhow::Error) -> TagmaReply {
-    let (status, message) = match e.downcast_ref::<ApiError>() {
-        Some(a) => (a.status, a.message.clone()),
-        None => (502, "tagma op failed".to_string()),
+    let (status, message, code) = match e.downcast_ref::<ApiError>() {
+        Some(a) => (a.status, a.message.clone(), a.code.clone()),
+        None => (502, "tagma op failed".to_string(), None),
     };
     TagmaReply::Error {
         req_id,
         status,
         message,
+        code,
     }
 }
 
