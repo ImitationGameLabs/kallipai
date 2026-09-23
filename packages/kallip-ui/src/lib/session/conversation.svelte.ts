@@ -52,6 +52,8 @@ import type {
 } from "@kallipai/kallip-lesche-client";
 import {
   deletePending,
+  isFailedPending,
+  markPendingFailed,
   type PendingLine,
   put as cachePut,
   putPending,
@@ -62,10 +64,19 @@ import type { Transport } from "./transport.ts";
 import { DirectTransport, type TransportState } from "./directTransport.ts";
 import { LescheApiError } from "@kallipai/kallip-lesche-client";
 import { KallipError } from "@kallipai/kallip-common";
-import { chat_send_failed } from "../../paraglide/messages.js";
+import {
+  chat_send_failed,
+  chat_send_timed_out,
+} from "../../paraglide/messages.js";
+
 import { tagmaKey, unreadStore } from "./unread.svelte.ts";
 import { statusCardStore } from "./statusCard.svelte.ts";
 import { notify } from "./notify.ts";
+
+/** How long an accepted send waits for its ack/error reply before the
+ * watchdog presumes the reply lost. Aligned with the SSE connect timeout
+ * and the per-attempt fetch cap (30s each). */
+const SEND_WATCHDOG_MS = 30_000;
 
 /** The lazy-window page size: how many lines a hydrate, a catch-up batch,
  *  or a scroll-up page brings in at once. Mirrors the server's
@@ -136,6 +147,12 @@ export abstract class ConversationBase {
   pending = $state<
     { localId: number; text: string; attachment?: FileAttachment }[]
   >([]);
+
+  /** Watchdog for the in-flight POST: if neither the ack nor an error
+   *  reply consumes `pendingInFlight` within the window, the pump would
+   *  stall forever (a lost reply rides no transport failure). The timer
+   *  fails the line (retryable) and releases the slot. */
+  private pumpWatchdog: ReturnType<typeof setTimeout> | null = null;
   /** The ONE in-flight POST (its `user_message` frame has not landed): its
    *  synthetic id + sent text, or null when the pump is idle. The text lets the
    *  promotion branch correlate the echo to this exact send, so a history-replay
@@ -229,6 +246,7 @@ export abstract class ConversationBase {
       text: trimmed,
       ...(attachment !== undefined ? { attachment } : {}),
       createdAt: now.toISOString(),
+      status: "queued",
     });
     return localId;
   }
@@ -254,11 +272,13 @@ export abstract class ConversationBase {
     void this.pumpPending();
   }
 
-  /** Drain every persisted pending row through the normal send pump (the
-   *  reconnect auto-flush). Lines a reload wiped from memory are re-rendered
-   *  from the durable copy first, so the bubble is never lost.
-   *  At-least-once by design: a row the server accepted but whose ack never
-   *  landed re-sends a duplicate -- the guards are local idempotence only. */
+  /** Drain every persisted pending row after (re)connect. The partition:
+   *  queued rows (never accepted) are auto-sent -- at-least-once by design,
+   *  a row the server accepted but whose ack never landed re-sends a
+   *  duplicate -- while FAILED rows are only re-rendered (the failure copy
+   *  rides the line), never auto-resent: a failed send must wait for an
+   *  explicit user retry. Lines a reload wiped from memory are re-rendered
+   *  from the durable copy first, so the bubble is never lost. */
   async retryAllPending(): Promise<void> {
     let rows: PendingLine[] = [];
     try {
@@ -267,6 +287,9 @@ export abstract class ConversationBase {
       return; // IndexedDB unavailable (private mode): nothing to flush
     }
     for (const row of rows) {
+      const failed = isFailedPending(row);
+      // Render (or re-render) in stored order, whatever the branch: the
+      // bubble sequence must follow the rows' original timing.
       if (!this.transcript.lines.some((l) => l.historyId === row.localSeq)) {
         let t = withUserLine(
           this.transcript,
@@ -276,11 +299,20 @@ export abstract class ConversationBase {
           row.attachment,
           new Date(row.createdAt),
         );
-        t = sendFailed(t, row.localSeq, row.lastError);
+        if (failed) t = sendFailed(t, row.localSeq, row.lastError);
         this.transcript = t;
       }
-      this.retrySend(row.localSeq);
+      if (failed) continue; // wait for an explicit retry
+      // Queued: enqueue directly (retrySend's failed-state guard does not
+      // apply -- this row never failed; it is waiting for its first send).
+      if (this.pendingInFlight?.localId === row.localSeq) continue;
+      if (this.pending.some((p) => p.localId === row.localSeq)) continue;
+      this.pending = [
+        ...this.pending,
+        { localId: row.localSeq, text: row.text, attachment: row.attachment },
+      ];
     }
+    if (this.pending.length > 0) void this.pumpPending();
   }
 
   /** Hook for leaves to react to a reply AFTER the shared core reduce (the relay
@@ -327,6 +359,8 @@ export abstract class ConversationBase {
         reply.message,
         reply.code,
       );
+      void markPendingFailed(this.pendingKey, localId, reply.message);
+      this.clearWatchdog();
       this.pendingInFlight = null;
       // The verbatim operator text stays in the console for diagnosis; the
       // UI shows the localized short form keyed by the code (when present).
@@ -388,6 +422,7 @@ export abstract class ConversationBase {
         void deletePending(this.pendingKey, localId);
       }
       this.pendingInFlight = null;
+      this.clearWatchdog();
       void this.pumpPending();
       this.onReply(reply);
       return;
@@ -432,6 +467,11 @@ export abstract class ConversationBase {
     this.pendingInFlight = { localId: next.localId, text: next.text };
     try {
       const reqId = await this.transport!.send(next.text, next.attachment);
+      // The POST was accepted: arm the reply watchdog. From here the only
+      // way the line resolves is the ack or an error reply arriving on the
+      // wire -- if neither lands (reply lost), the watchdog releases the
+      // pump and fails the line for an explicit retry.
+      this.armWatchdog(next.localId);
       // The channel stamps this send's req_id on accept; the reply-side
       // error correlation (applyReplyCore) closes the line on it.
       if (this.pendingInFlight) {
@@ -456,11 +496,37 @@ export abstract class ConversationBase {
       // stays. Feeding this failure through the same reducer is what
       // double-rendered it (system line + red banner).
       this.transcript = sendFailed(this.transcript, next.localId, failureCopy);
+      void markPendingFailed(this.pendingKey, next.localId, failureCopy);
       this.pendingInFlight = null;
+      this.clearWatchdog();
       void this.pumpPending();
     }
   }
 
+  /** Arm the reply watchdog for one in-flight send. 30s, matching the SSE
+   *  connect timeout and the per-attempt fetch cap: past that, a reply is
+   *  presumed lost. Fails the line (retryable, no auto-resend) and frees
+   *  the pump slot. */
+  private armWatchdog(localId: number): void {
+    this.clearWatchdog();
+    this.pumpWatchdog = setTimeout(() => {
+      this.pumpWatchdog = null;
+      if (this.pendingInFlight?.localId !== localId) return;
+      const copy = chat_send_timed_out();
+      this.transcript = sendFailed(this.transcript, localId, copy);
+      void markPendingFailed(this.pendingKey, localId, copy);
+      this.pendingInFlight = null;
+      console.warn("[chat] send reply lost; failed the line after 30s");
+      void this.pumpPending();
+    }, SEND_WATCHDOG_MS);
+  }
+
+  protected clearWatchdog(): void {
+    if (this.pumpWatchdog !== null) {
+      clearTimeout(this.pumpWatchdog);
+      this.pumpWatchdog = null;
+    }
+  }
   /** Fold one page of already-renderable lines into the window in a single
    *  transcript rebuild (the batch — not the row — is the update unit, so a
    *  50-row page costs one O(window) pass, not 50). Pure w.r.t. the
@@ -920,6 +986,7 @@ export class RelayConversation extends ConversationBase {
   abandonPending(): void {
     this.pending = [];
     this.pendingInFlight = null;
+    this.clearWatchdog();
     this.transcript = {
       ...this.transcript,
       lines: this.transcript.lines.filter((l) => l.status !== "sending"),

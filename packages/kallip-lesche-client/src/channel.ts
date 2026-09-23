@@ -27,10 +27,11 @@ import {
   participantIdForUser,
   uuidV4,
 } from "@kallipai/kallip-common";
+import { LescheApiError } from "./types.ts";
 import type {
   Envelope,
-  KeyExchangeInit,
   FileAttachment,
+  KeyExchangeInit,
   Participant,
   TagmaControl,
   TagmaReply,
@@ -200,12 +201,19 @@ export class RelayChannel {
    * tagma's `message_accepted`/`error` reply flows through `replies`. */
   send(text: string, attachment?: FileAttachment): Promise<number> {
     const req_id = this.nextReqId++;
-    return this.sendRequest({
-      op: "send_message",
-      req_id,
-      text,
-      ...(attachment ? { attachment } : {}),
-    }).then(() => req_id);
+    // Network-layer retries (operator-final params): the POST may fail
+    // transiently (relay down, socket hiccup); retry with exponential
+    // backoff -- 5 attempts total, 1/2/4/8s gaps -- before surfacing the
+    // failure. Client errors (4xx) are deterministic and never retried.
+    // The 30s cap per attempt rides the shared fetch timeout (http.ts).
+    return sendWithRetry(() =>
+      this.sendRequest({
+        op: "send_message",
+        req_id,
+        text,
+        ...(attachment ? { attachment } : {}),
+      }),
+    ).then(() => req_id);
   }
 
   /** Request a batch of chat history (cursor-based). `after` = incremental
@@ -306,5 +314,43 @@ export class RelayChannel {
       ciphertext: encodeB64(ciphertext),
     };
     await this.lesche.postEnvelope(this.conversationId, envelope);
+  }
+}
+
+const SEND_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
+
+/** Whether a send failure is worth retrying: transport errors (the fetch
+ * threw -- network down, socket reset, timeout) and server-side 5xx yes;
+ * client errors (4xx -- a rejected envelope is rejected for good) no.
+ * Exported for tests. */
+export function isRetryableSendError(e: unknown): boolean {
+  if (e instanceof LescheApiError) return e.status >= 500;
+  return true;
+}
+
+/** Retry an async send attempt with exponential backoff (5 attempts total:
+ * 1/2/4/8s gaps). The last error propagates when the attempts are spent or
+ * the failure is non-retryable. `sleep` is injectable so tests run
+ * instantly. Module-level (not a method) for the same reason.
+ *
+ * A retried send re-POSTs the SAME req_id in a NEW envelope (fresh sequence,
+ * fresh trace id): a lost 202 response means the server may already have
+ * accepted the first attempt, so the retry can double-deliver -- the same
+ * at-least-once contract the reconnect pending flush declares; the UI's
+ * history_id dedup absorbs the duplicate at render time. */
+export async function sendWithRetry<T>(
+  attempt: () => Promise<T>,
+  delays: readonly number[] = SEND_RETRY_DELAYS_MS,
+  sleep: (ms: number) => Promise<void> = (ms) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms)),
+): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await attempt();
+    } catch (e) {
+      const delay = delays[i];
+      if (delay === undefined || !isRetryableSendError(e)) throw e;
+      await sleep(delay);
+    }
   }
 }

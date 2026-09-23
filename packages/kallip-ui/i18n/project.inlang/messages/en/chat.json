@@ -49,5 +49,6 @@
   "chat_direct_fallback": "Session {id}",
   "chat_direct_title": "{name} · Direct",
   "chat_error_profile_set_unusable": "This agent has no usable profile set. Rebind the agent, then retry.",
-  "chat_conversation_unknown": "This conversation is not known on this device; it may belong to a tagma this browser never opened."
+  "chat_conversation_unknown": "This conversation is not known on this device; it may belong to a tagma this browser never opened.",
+  "chat_send_timed_out": "Sending timed out. Check the connection and retry."
 }

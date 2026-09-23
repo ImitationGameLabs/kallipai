@@ -299,6 +299,12 @@ export interface PendingLine {
   readonly attachment?: FileAttachment;
   readonly createdAt: string;
   readonly lastError?: string;
+  /** Lifecycle of the row: "queued" = never accepted by the server (the
+   * reconnect flush may send it); "failed" = a send attempt failed and the
+   * user must retry explicitly (never auto-resent). Optional for rows
+   * written before the field existed: an absent status with a lastError is
+   * read as failed, without one as queued. */
+  readonly status?: "queued" | "failed";
 }
 
 /** Persist one unsent line (best-effort: a failed write only means the line
@@ -306,6 +312,47 @@ export interface PendingLine {
 export async function putPending(row: PendingLine): Promise<void> {
   try {
     await run("readwrite", (s) => s.put(row), PENDING_STORE);
+  } catch {
+    // best-effort
+  }
+}
+
+/** Whether a pending row counts as failed: an explicit "failed" status, or
+ * the pre-status legacy shape (a lastError with no status field). Failed
+ * rows are never auto-resent by the reconnect flush -- the user retries
+ * them explicitly. Pure so the partition is testable without IndexedDB. */
+export function isFailedPending(row: PendingLine): boolean {
+  return (
+    row.status === "failed" ||
+    (row.status === undefined && row.lastError !== undefined)
+  );
+}
+
+/** Flip a pending row to failed after a send attempt rejects (best-effort).
+ * The reconnect flush partitions on this: failed rows are surfaced to the
+ * user for an explicit retry, never auto-resent. The get and the put run
+ * in ONE readwrite transaction so the write cannot resurrect a row the
+ * ack path deleted between the read and the write. */
+export async function markPendingFailed(
+  tagmaId: string,
+  localSeq: number,
+  error: string,
+): Promise<void> {
+  try {
+    const d = await db();
+    await new Promise<void>((resolve, reject) => {
+      const tx = d.transaction(PENDING_STORE, "readwrite");
+      const store = tx.objectStore(PENDING_STORE);
+      const key = [tagmaId, localSeq];
+      const getReq = store.get(key);
+      getReq.onsuccess = () => {
+        const row = getReq.result as PendingLine | undefined;
+        if (row) store.put({ ...row, status: "failed", lastError: error });
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("idb write failed"));
+      tx.onabort = () => reject(tx.error ?? new Error("idb aborted"));
+    });
   } catch {
     // best-effort
   }
@@ -330,10 +377,22 @@ export function sortPendingOldestFirst(rows: PendingLine[]): PendingLine[] {
   return rows.sort((a, b) => b.localSeq - a.localSeq);
 }
 
+/** Test seam: when non-null, readPendingByTagma returns this instead of
+ * touching IndexedDB, so tests can inject a fixed row set and observe the
+ * flush's ordering and partitioning. Production code never sets it. */
+let pendingRowsOverride: ((tagmaId: string) => PendingLine[]) | null = null;
+
+/** Install (or clear with null) the pending-rows test seam. */
+export function setPendingRowsForTests(
+  provide: ((tagmaId: string) => PendingLine[]) | null,
+): void {
+  pendingRowsOverride = provide;
+}
 /** Every unsent line for a tagma, oldest-first. Empty on any failure. */
 export async function readPendingByTagma(
   tagmaId: string,
 ): Promise<PendingLine[]> {
+  if (pendingRowsOverride) return pendingRowsOverride(tagmaId);
   try {
     const rows = await run<PendingLine[]>(
       "readonly",

@@ -23,6 +23,8 @@ export {
   clearReadWatermarks,
   deletePending,
   getReadWatermark,
+  isFailedPending,
+  markPendingFailed,
   type PendingLine,
   put,
   putPending,
@@ -30,6 +32,7 @@ export {
   readPendingByTagma,
   readTail,
   readTailBefore,
+  setPendingRowsForTests,
 } from "./cache.ts";
 
 // Data-plane wire types the UI consumes. The remaining wire types
