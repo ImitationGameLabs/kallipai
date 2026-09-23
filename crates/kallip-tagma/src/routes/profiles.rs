@@ -372,31 +372,23 @@ pub async fn apply_profiles(
                     skipped += 1;
                     return (targets, rebinds, skipped);
                 };
-                // An unbound root derives its binding from the current
-                // default set — the same rule restore applies — so a
-                // profile-less boot picks up the first configured
-                // profile on the next apply instead of needing a
-                // restart. The derived name is written back to the
-                // in-memory record below, never to meta.json (restore
-                // re-derives it on the next boot).
+                // Resolve through the bundle's default-set fallback (the one
+                // resolution rule for every consumer): an unbound record
+                // resolves to the default and is rebound in memory; a
+                // dangling root binding resolves through the fallback
+                // without rebinding (its recorded name is kept). A still-
+                // dangling binding is skipped, not guessed at. The rebind
+                // never writes meta.json (restore re-derives it on the
+                // next boot).
                 let recorded = live.identity.config.profile_set.clone();
-                let derived_root = recorded.is_none()
-                    && live.identity.config.created_by.is_none()
-                    && !bundle.config.default.is_empty();
-                let binding = if derived_root {
-                    Some(bundle.config.default.clone())
-                } else {
-                    recorded
-                };
-                // Any other binding that does not resolve (a record
-                // predating set binding, or a set the registry no
-                // longer offers) is skipped, not guessed at.
-                let Ok(set) = registry.resolve_recorded_set(binding.as_deref()) else {
+                let Ok(set) = bundle
+                    .resolve_with_fallback(recorded.as_deref(), live.identity.config.is_root())
+                else {
                     skipped += 1;
                     return (targets, rebinds, skipped);
                 };
-                if derived_root {
-                    rebinds.push((id.clone(), binding.clone()));
+                if recorded.is_none() {
+                    rebinds.push((id.clone(), Some(set.name.clone())));
                 }
                 targets.push((
                     kallip_runtime::ProfileReset {

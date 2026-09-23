@@ -834,3 +834,119 @@ fn startup_token_budget_covers_grammar_and_error_paths() {
         assert!(err.to_string().contains(bad) || bad.is_empty(), "{err}");
     }
 }
+
+#[test]
+fn resolve_with_fallback_matrix() {
+    use kallip_runtime::profile::{BackendSource, Profile, ProfileRegistry, ProfileSet, Provider};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    struct NilSource;
+    impl BackendSource for NilSource {
+        fn get(&self, _: &str) -> anyhow::Result<Arc<dyn just_llm_client::LlmBackend>> {
+            anyhow::bail!("nil source")
+        }
+    }
+
+    let set = ProfileSet {
+        name: "research".into(),
+        description: None,
+        profiles: vec![Profile {
+            id: "p".into(),
+            endpoint: "ds".into(),
+            model: "m".into(),
+            max_context_window: 500_000,
+            store: None,
+            effort: None,
+            modalities: Profile::default_modalities(),
+        }],
+    };
+    let cfg = ProfileConfig {
+        sets: BTreeMap::from([("research".to_string(), set)]),
+        default: "research".into(),
+        endpoints: BTreeMap::<String, Provider>::new()
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>(),
+        parking: vec![],
+    };
+    let registry = Arc::new(
+        ProfileRegistry::new(cfg.sets.clone(), Arc::new(NilSource))
+            .expect("single set registry constructs"),
+    );
+    let bundle = ProfileBundle {
+        config: cfg,
+        registry,
+    };
+
+    // A valid binding wins over the fallback, whatever the role.
+    assert_eq!(
+        bundle
+            .resolve_with_fallback(Some("research"), true)
+            .expect("valid binding")
+            .name,
+        "research"
+    );
+    assert_eq!(
+        bundle
+            .resolve_with_fallback(Some("research"), false)
+            .expect("valid subagent binding")
+            .name,
+        "research"
+    );
+    // Unbound record: falls back to the default set, any role.
+    assert_eq!(
+        bundle
+            .resolve_with_fallback(None, true)
+            .expect("unbound root falls back")
+            .name,
+        "research"
+    );
+    assert_eq!(
+        bundle
+            .resolve_with_fallback(None, false)
+            .expect("unbound subagent falls back")
+            .name,
+        "research"
+    );
+    // Dangling name: root falls back, subagent keeps the error.
+    assert_eq!(
+        bundle
+            .resolve_with_fallback(Some("gone"), true)
+            .expect("dangling root falls back")
+            .name,
+        "research"
+    );
+    assert!(bundle.resolve_with_fallback(Some("gone"), false).is_err());
+}
+
+#[test]
+fn resolve_without_default_never_falls_back() {
+    use kallip_runtime::profile::{BackendSource, ProfileRegistry};
+    use std::sync::Arc;
+
+    struct NilSource;
+    impl BackendSource for NilSource {
+        fn get(&self, _: &str) -> anyhow::Result<Arc<dyn just_llm_client::LlmBackend>> {
+            anyhow::bail!("nil source")
+        }
+    }
+
+    let registry = Arc::new(
+        ProfileRegistry::new(std::collections::BTreeMap::new(), Arc::new(NilSource))
+            .expect("empty set map is constructible"),
+    );
+    let cfg = ProfileConfig {
+        sets: std::collections::BTreeMap::new(),
+        default: String::new(),
+        endpoints: Default::default(),
+        parking: vec![],
+    };
+    let bundle = ProfileBundle {
+        config: cfg,
+        registry,
+    };
+    // Profile-less boot: no default to fall back to, all inputs dangle.
+    assert!(bundle.resolve_with_fallback(None, true).is_err());
+    assert!(bundle.resolve_with_fallback(Some("gone"), true).is_err());
+    assert!(bundle.resolve_with_fallback(None, false).is_err());
+}

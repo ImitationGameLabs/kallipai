@@ -52,6 +52,37 @@ pub struct ProfileBundle {
     pub registry: Arc<ProfileRegistry>,
 }
 
+impl ProfileBundle {
+    /// Resolve an agent's profile set with the default-set fallback. The one
+    /// resolution point for every recorded-binding consumer (spawn, restore,
+    /// delivery, reactivation, apply), so the fallback cannot drift between
+    /// call sites. Rules: an unbound record and a dangling root binding both
+    /// resolve to the configured default set (when one exists) — an unbound
+    /// record carries no operator intent to contradict, and a root dangling
+    /// name means the operator rewrote the profiles; a dangling subagent
+    /// binding keeps erroring, because the explicit bind was that operator's
+    /// choice and silently swapping profiles would hide the mistake. The
+    /// fallback is a resolution-time behavior, never persisted: records stay
+    /// unbound, so a later default rename is followed automatically (the
+    /// apply route's in-memory rebind mirrors this and also never writes
+    /// meta.json). Errors otherwise match plain resolution.
+    pub fn resolve_with_fallback(
+        &self,
+        binding: Option<&str>,
+        is_root: bool,
+    ) -> Result<&kallip_runtime::profile::ProfileSet, kallip_runtime::profile::DanglingSet> {
+        let known = binding.is_some_and(|name| self.registry.sets().contains_key(name));
+        let fallback =
+            !self.config.default.is_empty() && (binding.is_none() || (is_root && !known));
+        let effective = if fallback {
+            Some(self.config.default.as_str())
+        } else {
+            binding
+        };
+        self.registry.resolve_recorded_set(effective)
+    }
+}
+
 /// Tagma-side cache of the rooms this tagma belongs to, keyed by relay name:
 /// each online relay's room-membership poll owns its slice, so two concurrently
 /// connected archeions never overwrite each other. Rooms are plaintext

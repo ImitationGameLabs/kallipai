@@ -214,16 +214,18 @@ fn validate_permission_class_from_chain(
     Ok(())
 }
 
-/// Restore-time set resolution. A dangling binding (a record that predates
-/// set binding, or one naming a set the registry no longer offers) does not
-/// fault the restore: the agent comes back unspecified, running against the
+/// Restore-time set resolution. A binding that still dangles after the
+/// bundle's default-set fallback (a record naming a set the registry no
+/// longer offers, and no default to fall back to) does not fault the
+/// restore: the agent comes back unspecified, running against the
 /// unconfigured placeholder, and delivery rejects inbound messages until a
 /// live set is bound again.
 fn set_for_restore(
-    registry: &kallip_runtime::profile::ProfileRegistry,
+    bundle: &crate::state::ProfileBundle,
     binding: Option<&str>,
+    is_root: bool,
 ) -> kallip_runtime::profile::ProfileSet {
-    match registry.resolve_recorded_set(binding) {
+    match bundle.resolve_with_fallback(binding, is_root) {
         Ok(set) => set.clone(),
         Err(_) => crate::backend::unconfigured_set(),
     }
@@ -381,7 +383,7 @@ async fn restore_one(
     // Resolve the profile set from the persisted binding.
     let set = {
         let bundle = shared_state.profiles.load();
-        set_for_restore(&bundle.registry, config.profile_set.as_deref())
+        set_for_restore(&bundle, config.profile_set.as_deref(), config.is_root())
     };
 
     let store = Arc::new(tokio::sync::Mutex::new(restored.store));
@@ -828,24 +830,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dangling_binding_restores_against_placeholder() {
-        let reg = kallip_runtime::profile::ProfileRegistry::new(
-            std::collections::BTreeMap::new(),
-            std::sync::Arc::new(NilSource),
-        )
-        .expect("empty set map is constructible");
-        // A record with no binding (predates set binding)...
-        let set = set_for_restore(&reg, None);
-        assert_eq!(set.active_profile().endpoint, crate::backend::UNCONFIGURED);
-        // ...and one naming a set the registry no longer offers: both
-        // come back unspecified instead of faulting the restore.
-        let set = set_for_restore(&reg, Some("gone"));
-        assert_eq!(set.active_profile().endpoint, crate::backend::UNCONFIGURED);
-    }
-
-    #[test]
-    fn bound_record_restores_its_named_set() {
+    // A bundle with one set, named by config.default: the fallback target.
+    fn bundle_with_default() -> crate::state::ProfileBundle {
         let set = kallip_runtime::profile::ProfileSet {
             name: "research".into(),
             description: None,
@@ -859,12 +845,67 @@ mod tests {
                 modalities: kallip_runtime::profile::Profile::default_modalities(),
             }],
         };
+        let cfg = kallip_runtime::profile::ProfileConfig {
+            sets: std::collections::BTreeMap::from([("research".to_string(), set)]),
+            default: "research".into(),
+            endpoints: Default::default(),
+            parking: vec![],
+        };
+        let registry = std::sync::Arc::new(
+            kallip_runtime::profile::ProfileRegistry::new(
+                cfg.sets.clone(),
+                std::sync::Arc::new(NilSource),
+            )
+            .expect("single set registry constructs"),
+        );
+        crate::state::ProfileBundle {
+            config: cfg,
+            registry,
+        }
+    }
+
+    #[test]
+    fn dangling_binding_restores_against_placeholder_without_default() {
         let reg = kallip_runtime::profile::ProfileRegistry::new(
-            std::collections::BTreeMap::from([("research".to_string(), set)]),
+            std::collections::BTreeMap::new(),
             std::sync::Arc::new(NilSource),
         )
-        .expect("single set registry constructs");
-        let set = set_for_restore(&reg, Some("research"));
+        .expect("empty set map is constructible");
+        let bundle = crate::state::ProfileBundle {
+            config: kallip_runtime::profile::ProfileConfig {
+                sets: Default::default(),
+                default: String::new(),
+                endpoints: Default::default(),
+                parking: vec![],
+            },
+            registry: std::sync::Arc::new(reg),
+        };
+        // A record with no binding (predates set binding)...
+        let set = set_for_restore(&bundle, None, true);
+        assert_eq!(set.active_profile().endpoint, crate::backend::UNCONFIGURED);
+        // ...and one naming a set the registry no longer offers: both
+        // come back unspecified instead of faulting the restore.
+        let set = set_for_restore(&bundle, Some("gone"), true);
+        assert_eq!(set.active_profile().endpoint, crate::backend::UNCONFIGURED);
+    }
+
+    #[test]
+    fn restore_falls_back_to_default_for_dangling_root() {
+        let bundle = bundle_with_default();
+        // Unbound record: resolves to the default set at restore time.
+        let set = set_for_restore(&bundle, None, true);
+        assert_eq!(set.name, "research");
+        // Dangling name: root falls back, a subagent stays placeholder.
+        let set = set_for_restore(&bundle, Some("gone"), true);
+        assert_eq!(set.name, "research");
+        let set = set_for_restore(&bundle, Some("gone"), false);
+        assert_eq!(set.active_profile().endpoint, crate::backend::UNCONFIGURED);
+    }
+
+    #[test]
+    fn bound_record_restores_its_named_set() {
+        let bundle = bundle_with_default();
+        let set = set_for_restore(&bundle, Some("research"), true);
         assert_eq!(set.name, "research");
         assert_eq!(set.active_profile().model, "m");
     }

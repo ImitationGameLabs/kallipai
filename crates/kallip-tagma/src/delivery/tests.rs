@@ -159,15 +159,16 @@ async fn slow_path_spawn_failure_leaves_agent_dead_with_conflict_free_state() {
 
 // -- dangling-binding gate (reject before the inbox write) --
 
-/// A live idle agent whose recorded binding does not resolve: the send is
+/// A live idle subagent whose explicit binding does not resolve: the send is
 /// rejected and the message never reaches the inbox (both the notify fast
-/// path and the kick path pass through the gate).
+/// path and the kick path pass through the gate). A subagent, because an
+/// unbound or dangling-root record falls back to the default set instead.
 #[tokio::test]
 async fn delivery_rejected_for_dangling_agent_live_idle() {
     let state = make_state();
     install_inbox_store(&state).await;
     let id = AgentId::random();
-    let (mut entry, _rx) = make_entry_with_rx(None, format!("agent-{id}"));
+    let (mut entry, _rx) = make_entry_with_rx(Some(AgentId::random()), format!("agent-{id}"));
     entry.identity.config.profile_set = Some("gone".into());
     state
         .registry
@@ -200,15 +201,16 @@ async fn delivery_rejected_for_dangling_agent_live_idle() {
     );
 }
 
-/// The parked kick path is gated the same way: a parked agent with an
-/// unbound record is not kickable, and the message never reaches the inbox.
+/// The parked kick path is gated the same way: a parked subagent with a
+/// dangling explicit binding is not kickable, and the message never reaches
+/// the inbox.
 #[tokio::test]
 async fn delivery_rejected_for_parked_kick() {
     let state = make_state();
     install_inbox_store(&state).await;
     let id = AgentId::random();
-    let (mut entry, _rx) = make_entry_with_rx(None, format!("agent-{id}"));
-    entry.identity.config.profile_set = None;
+    let (mut entry, _rx) = make_entry_with_rx(Some(AgentId::random()), format!("agent-{id}"));
+    entry.identity.config.profile_set = Some("gone".into());
     entry.agent.state.store(
         crate::state::AgentState::PARKED,
         std::sync::atomic::Ordering::Relaxed,
@@ -243,6 +245,35 @@ async fn delivery_rejected_for_parked_kick() {
         listed.is_empty(),
         "rejected message must not reach the inbox"
     );
+}
+
+/// A live idle root with an unbound record falls back to the default set at
+/// the gate: the send proceeds (no 409) where a dangling subagent binding
+/// is rejected — the operator never bound the root explicitly, so the
+/// default is the right resolution.
+#[tokio::test]
+async fn delivery_root_unbound_falls_back_to_default_set() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let id = AgentId::random();
+    let (mut entry, _rx) = make_entry_with_rx(None, format!("agent-{id}"));
+    entry.identity.config.profile_set = None;
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+    state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
+
+    crate::delivery::enqueue_prompt(
+        &state,
+        &id,
+        "hello".to_string(),
+        "operator",
+        crate::delivery::DeliveryNotice::Surface,
+    )
+    .await
+    .expect("unbound root must fall back to the default set, not 409");
 }
 
 /// The delivery fast path observes lock visibility: a live

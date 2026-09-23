@@ -444,25 +444,25 @@ impl<'a> Materialize<'a> {
         let mut config = self.config;
         let exec_policy = Arc::new(std::sync::RwLock::new(self.exec_policy));
 
-        // Resolve the profile set by the recorded binding — the default set
-        // name for root, the requested name for a subagent.
+        // Resolve the profile set with the bundle's default-set fallback:
+        // unbound records resolve to the default set whatever the role; a
+        // profile-less boot (no default) still lands on the placeholder
+        // below. The fallback is resolution-time only — the identity
+        // record stays unbound.
         let set = {
             let bundle = state.profiles.load();
-            match bundle
-                .registry
-                .resolve_recorded_set(config.profile_set.as_deref())
-            {
+            match bundle.resolve_with_fallback(config.profile_set.as_deref(), is_root) {
                 Ok(set) => set.clone(),
-                // Profile-less boot: the root registers against a placeholder
-                // profile (endpoint "unconfigured" has no provider), so the
-                // tagma — and its management page — comes up; the root's
-                // first LLM call then fails per call with the
-                // management-page hint (see `backend::unconfigured_set`).
-                // Subagent spawns reject instead — a client error the caller
-                // can act on.
                 Err(_) if is_root => crate::backend::unconfigured_set(),
                 Err(e) => return Err(ApiError::bad_request(format!("{e}"))),
             }
+            // Profile-less boot (no default set): the root registers
+            // against a placeholder profile (endpoint "unconfigured" has
+            // no provider), so the tagma — and its management page —
+            // comes up; the root's first LLM call then fails per call
+            // with the management-page hint (see
+            // `backend::unconfigured_set`). Subagent spawns reject
+            // instead — a client error the caller can act on.
         };
 
         let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
