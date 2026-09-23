@@ -16,7 +16,7 @@
   import CreateRoomDialog, {
     type CreateRoomOpts,
   } from "./CreateRoomDialog.svelte";
-  import { getLocale } from "../../paraglide/runtime.js";
+  import { formatStamp } from "../../lib/time/stamp.svelte.ts";
   import {
     common_loading,
     rooms_new_room,
@@ -194,9 +194,9 @@
                     <span class="text-xs opacity-50">
                       {rooms_invite_meta({
                         invitedBy: inv.invited_by,
-                        date: new Date(inv.expires_at).toLocaleDateString(
-                          getLocale(),
-                        ),
+                        date: formatStamp(inv.expires_at, {
+                          dateStyle: "medium",
+                        }),
                       })}</span
                     >
                   </div>

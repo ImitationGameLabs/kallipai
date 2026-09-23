@@ -7,6 +7,7 @@
   // fully mode-agnostic: status, transcript, and pending count are all read off
   // the Conversation, so online and offline render identically.
   import ConversationView from "../components/ConversationView.svelte";
+  import { timezoneSetting } from "../lib/time/stamp.svelte.ts";
   import TagmaStatusHeader from "../components/TagmaStatusHeader.svelte";
   import AttachmentBar from "../components/AttachmentBar.svelte";
   import { createComposer } from "../lib/composer.svelte.ts";
@@ -444,7 +445,9 @@
                 </p>
                 {#if lastCachedAt}
                   <p class="text-xs opacity-60 text-center">
-                    {chat_cached_until({ time: formatDateTime(lastCachedAt) })}
+                    {chat_cached_until({
+                      time: formatDateTime(lastCachedAt, timezoneSetting.value),
+                    })}
                   </p>
                 {/if}
               {/if}

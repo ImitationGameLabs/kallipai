@@ -6,7 +6,7 @@
 // `now` is an explicit parameter so tests drive the clock; RetryListCard
 // passes Date.now()/1000 per render, which the 5s status poll refreshes anyway.
 
-import { getLocale } from "../../paraglide/runtime.js";
+import { formatStampInZone } from "../time/stamp.ts";
 import {
   manage_agent_retry_days_ago,
   manage_agent_retry_error_auth,
@@ -42,9 +42,12 @@ export function retryOutcome(r: RetryEntry): string {
 }
 
 /** The retry line with an absolute locale timestamp and the raw error. */
-export function fmtAbsoluteRetry(r: RetryEntry): string {
+export function fmtAbsoluteRetry(
+  r: RetryEntry,
+  timezone?: string | null,
+): string {
   return manage_agent_retry_line({
-    date: new Date(r.timestamp * 1000).toLocaleString(getLocale()),
+    date: formatStampInZone(r.timestamp * 1000, undefined, timezone),
     error: r.error,
     outcome: retryOutcome(r),
   });

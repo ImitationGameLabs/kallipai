@@ -50,6 +50,7 @@
   } from "../../paraglide/messages.js";
   import type { TaskStatus, TaskTimeAxis } from "@kallipai/kallip-client";
   import { TASKS_PAGE_SIZE } from "../../lib/manage/tasks.svelte.ts";
+  import { formatStamp } from "../../lib/time/stamp.svelte.ts";
 
   $effect(() => {
     tasksStore.startPolling(30_000);
@@ -68,7 +69,7 @@
 
   function fmtTime(iso: string | null): string {
     if (!iso) return "—";
-    return new Date(iso).toLocaleString();
+    return formatStamp(iso);
   }
 
   // One merged stream, oldest first: transitions and actions are both

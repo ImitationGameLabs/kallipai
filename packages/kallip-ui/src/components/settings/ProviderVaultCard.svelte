@@ -13,7 +13,7 @@
   import { Check, Copy, MoreVertical, Trash } from "@lucide/svelte";
   import { copyText } from "../../lib/clipboard.ts";
   import { TONAL_ICON_SURF } from "../../lib/classes.ts";
-  import { getLocale } from "../../paraglide/runtime.js";
+  import { formatStamp } from "../../lib/time/stamp.svelte.ts";
   import {
     settings_added_date,
     settings_confirm_remove,
@@ -55,7 +55,7 @@
   const keyTail = $derived(entry.key_material.slice(-4));
 
   function formatDate(ts: string): string {
-    return new Date(ts).toLocaleDateString(getLocale(), {
+    return formatStamp(ts, {
       year: "numeric",
       month: "short",
       day: "numeric",

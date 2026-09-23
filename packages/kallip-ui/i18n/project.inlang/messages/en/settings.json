@@ -76,5 +76,11 @@
   "settings_provider_actions_aria": "Entry actions",
   "settings_provider_name_duplicate": "A key with that name already exists.",
   "settings_provider_flip_to_encrypted": "Encrypt",
-  "settings_provider_flip_to_plaintext": "Store as plaintext"
+  "settings_provider_flip_to_plaintext": "Store as plaintext",
+  "settings_timezone": "Timezone",
+  "settings_timezone_desc": "IANA name used to render absolute timestamps. Leave empty for your browser's local zone.",
+  "settings_timezone_placeholder": "e.g. Asia/Shanghai",
+  "settings_timezone_saved": "Timezone saved.",
+  "settings_timezone_clear": "Use browser local",
+  "settings_timezone_invalid": "The server rejected that name."
 }

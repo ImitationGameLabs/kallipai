@@ -17,7 +17,7 @@
 <script lang="ts">
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
   import { MoreVertical, Settings } from "@lucide/svelte";
-  import { getLocale } from "../../paraglide/runtime.js";
+  import { formatStamp } from "../../lib/time/stamp.svelte.ts";
   import {
     room_label_fallback,
     room_public_badge,
@@ -57,7 +57,7 @@
       <p class="text-xs opacity-70 line-clamp-2">{room.description}</p>
     {/if}
     <p class="text-xs opacity-50">
-      {new Date(room.created_at).toLocaleDateString(getLocale())}
+      {formatStamp(room.created_at, { dateStyle: "medium" })}
     </p>
   </button>
 

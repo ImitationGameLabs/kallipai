@@ -11,6 +11,7 @@
     fmtAbsoluteRetry,
     fmtRelativeRetry,
   } from "../../lib/manage/retryFormat.ts";
+  import { timezoneSetting } from "../../lib/time/stamp.svelte.ts";
   import {
     manage_agent_recent_retries,
     manage_agent_retry_show_absolute,
@@ -54,7 +55,7 @@
     <div class="text-xs opacity-70">
       {retryMode === "relative"
         ? fmtRelativeRetry(r, Math.floor(Date.now() / 1000))
-        : fmtAbsoluteRetry(r)}
+        : fmtAbsoluteRetry(r, timezoneSetting.value)}
     </div>
   {/each}
   {#if status.recent_retries.length > 3}

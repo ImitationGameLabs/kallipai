@@ -14,6 +14,7 @@
     createTogglePin,
   } from "../lib/transcript.svelte.ts";
   import { timelineMarkers } from "../lib/channel/timeline.ts";
+  import { timezoneSetting } from "../lib/time/stamp.svelte.ts";
   import {
     chat_send_to_start,
     chat_retry_send_aria,
@@ -91,7 +92,9 @@
   const busy = $derived(status === "busy");
   // Per-line date divider / time label: a new group on day change or a >5min
   // gap; otherwise consecutive lines share the previous group's timestamp.
-  const markers = $derived(timelineMarkers(lines));
+  const markers = $derived(
+    timelineMarkers(lines, { timezone: timezoneSetting.value }),
+  );
 
   // Stick to the tail as lines arrive; stop once the user scrolls up to read.
   const scroll = createAutoScroll();

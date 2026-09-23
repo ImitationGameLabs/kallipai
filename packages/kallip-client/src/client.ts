@@ -432,4 +432,22 @@ export class TagmaClient {
   exportAllTasks(): Promise<TaskExport[]> {
     return this.json<TaskExport[]>("/tasks/export");
   }
+
+  // --- settings surface ---
+
+  /** GET /settings/timezone — the configured IANA timezone name, or null
+   * when unset. Any authenticated principal may read. */
+  getTimezone(): Promise<{ timezone: string | null }> {
+    return this.json<{ timezone: string | null }>("/settings/timezone");
+  }
+
+  /** PUT /settings/timezone — set (operator-only) or clear (null) the
+   * display timezone. The server validates IANA names and answers 400 on
+   * a miss; the thrown KallipError carries that message. */
+  putTimezone(timezone: string | null): Promise<{ timezone: string | null }> {
+    return this.json<{ timezone: string | null }>("/settings/timezone", {
+      method: "PUT",
+      body: JSON.stringify({ timezone }),
+    });
+  }
 }

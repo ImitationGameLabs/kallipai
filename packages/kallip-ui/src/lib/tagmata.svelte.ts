@@ -3,7 +3,7 @@
 // prop-driven and portable. The consuming app (kallip-web) maps archeion-client
 // response types into these `Props` before passing them down.
 
-import { getLocale } from "../paraglide/runtime.js";
+import { formatStampInZone } from "./time/stamp.ts";
 import {
   remaining_days,
   remaining_hours,
@@ -199,9 +199,11 @@ export function presenceLabel(presence: TagmaPresence): string {
 }
 
 /** Locale-formatted timestamp for an RFC3339 string. */
-export function formatDateTime(iso: string): string {
+export function formatDateTime(iso: string, timezone?: string | null): string {
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(getLocale());
+  return Number.isNaN(d.getTime())
+    ? iso
+    : formatStampInZone(iso, undefined, timezone);
 }
 
 /** Compact token-count formatting: `12k`, `1.2M`, or the raw number below 1k.

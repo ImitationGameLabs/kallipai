@@ -8,6 +8,7 @@
 // field existed) are transparent: they render no marker and do NOT reset the
 // group, so a stray system line between two messages doesn't split them.
 
+import { formatStampInZone } from "../time/stamp.ts";
 import { getLocale } from "../../paraglide/runtime.js";
 import {
   timeline_today,
@@ -29,6 +30,9 @@ interface TimelineOpts {
   /** Max gap within which consecutive messages share one time label.
    * Default 5 minutes. */
   readonly groupWindowMs?: number;
+  /** Display timezone (IANA name) for dividers and time labels; absent =
+   * the browser's local zone. */
+  readonly timezone?: string | null;
   /** Epoch ms treated as "now" (for Today/Yesterday). Defaults to `Date.now()`;
    * tests pass a fixed value. */
   readonly now?: number;
@@ -36,30 +40,47 @@ interface TimelineOpts {
 
 const DEFAULT_GROUP_WINDOW_MS = 5 * 60_000;
 
-// Locale formatters are process-constant; hoist them so a recompute on every
-// transcript mutation (the `$derived` in ChannelChatPage) doesn't rebuild them.
-const dayFmt = new Intl.DateTimeFormat(getLocale(), {
-  month: "short",
-  day: "numeric",
-});
-const timeFmt = new Intl.DateTimeFormat(getLocale(), {
-  hour: "numeric",
-  minute: "2-digit",
-});
+// Formatters are built per timelineMarkers call with the explicit display
+// timezone: this module stays pure (no runes), so tests pass a fixed zone
+// the same way they pass `now`. The build sites route through
+// formatStampInZone, whose try/catch chain degrades an ICU-unknown zone
+// (newer server tzdb than the browser's) instead of throwing mid-render.
+const dayFmt =
+  (timezone?: string | null) =>
+  (ms: number): string =>
+    formatStampInZone(ms, { month: "short", day: "numeric" }, timezone);
+const timeFmt =
+  (timezone?: string | null) =>
+  (ms: number): string =>
+    formatStampInZone(ms, { hour: "numeric", minute: "2-digit" }, timezone);
 
 export function timelineMarkers(
   lines: readonly { createdAt?: string }[],
   opts?: TimelineOpts,
 ): TimelineMarker[] {
-  const groupWindow = opts?.groupWindowMs ?? DEFAULT_GROUP_WINDOW_MS;
   const now = opts?.now ?? Date.now();
+  const timezone = opts?.timezone;
+  const groupWindow = opts?.groupWindowMs ?? DEFAULT_GROUP_WINDOW_MS;
 
-  // Day key in the browser's local timezone -- compared as a string so the
-  // divider respects the user's zone, not UTC.
-  const dayKey = (ms: number): string => {
-    const d = new Date(ms);
-    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-  };
+  // Built once per call (not per line): hoisted here so the loop reuses a
+  // single formatter; en-CA yields sortable YYYY-MM-DD. Unknown zone falls
+  // back to the browser default via formatStampInZone semantics.
+  let dayKeyFmt: Intl.DateTimeFormat;
+  try {
+    dayKeyFmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone ?? undefined,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+    });
+  } catch {
+    dayKeyFmt = new Intl.DateTimeFormat("en-CA", {
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+    });
+  }
+  const dayKey = (ms: number): string => dayKeyFmt.format(new Date(ms));
   const todayKey = dayKey(now);
   const yesterdayDate = new Date(now);
   yesterdayDate.setDate(yesterdayDate.getDate() - 1);
@@ -69,7 +90,7 @@ export function timelineMarkers(
     const k = dayKey(ms);
     if (k === todayKey) return timeline_today();
     if (k === yesterdayKey) return timeline_yesterday();
-    return dayFmt.format(ms);
+    return dayFmt(timezone)(ms);
   };
 
   const out: TimelineMarker[] = [];
@@ -89,7 +110,7 @@ export function timelineMarkers(
       prevMs === undefined ||
       ms - prevMs > groupWindow ||
       dateDivider !== undefined
-        ? timeFmt.format(ms)
+        ? timeFmt(timezone)(ms)
         : undefined;
     out.push({
       ...(dateDivider !== undefined && { dateDivider }),

@@ -3,6 +3,14 @@
   import { channelsStore } from "../lib/session/channels.svelte";
   import { configStore } from "../lib/config/config.svelte";
   import { shellMode } from "../lib/shell/port.ts";
+  import { managementBackend } from "../lib/manage/client.ts";
+  import { KallipError } from "@kallipai/kallip-common";
+  import {
+    timezoneLoad,
+    timezoneSetting,
+    saveTimezoneSetting,
+    timezoneCandidates,
+  } from "../lib/time/stamp.svelte.ts";
   import type {
     AddPasskeyResult,
     PasskeySummary,
@@ -30,6 +38,12 @@
     settings_appearance,
     settings_dark_mode,
     settings_language,
+    settings_timezone,
+    settings_timezone_desc,
+    settings_timezone_placeholder,
+    settings_timezone_saved,
+    settings_timezone_clear,
+    settings_timezone_invalid,
     settings_title,
     settings_heading,
     settings_account,
@@ -45,6 +59,7 @@
     settings_rate_limited,
     settings_error_unknown,
     chat_notifications_label,
+    common_save,
     chat_notifications_desc,
     chat_notifications_denied,
   } from "../paraglide/messages.js";
@@ -208,6 +223,44 @@
     await archeionSession.createProvider(req);
     return true;
   }
+
+  // -- timezone (offline management face) ---------------------------------
+  // The tagma-level display timezone: what every absolute stamp renders in.
+  // The server validates IANA names (400 on a miss); the input is free text
+  // with a browser-provided candidate list, so no zone catalogue ships in
+  // the bundle.
+  let tzSeeded = $state(false);
+  let tzInput = $state("");
+  const tzCandidates = timezoneCandidates();
+  let tzBusy = $state(false);
+  let tzFeedback = $state<"saved" | "invalid" | "network" | null>(null);
+
+  $effect(() => {
+    if (mode !== "offline" || !timezoneLoad.done || !timezoneLoad.ok) return;
+    if (!tzSeeded) {
+      tzInput = timezoneSetting.value ?? "";
+      tzSeeded = true;
+    }
+  });
+  async function onTimezoneSave(): Promise<void> {
+    const name = tzInput.trim();
+    tzBusy = true;
+    try {
+      const confirmed = await saveTimezoneSetting(
+        (tz) => managementBackend().putTimezone(tz),
+        name === "" ? null : name,
+      );
+      tzInput = confirmed ?? "";
+      tzFeedback = "saved";
+    } catch (e) {
+      tzFeedback =
+        e instanceof KallipError && e.api.status === 400
+          ? "invalid"
+          : "network";
+    } finally {
+      tzBusy = false;
+    }
+  }
 </script>
 
 <svelte:head><title>{settings_title()}</title></svelte:head>
@@ -235,6 +288,62 @@
         <LanguageSwitch />
       </div>
     </section>
+
+    {#if mode === "offline"}
+      <section class="space-y-3">
+        <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+          {settings_timezone()}
+        </h2>
+        <div class="card preset-tonal-surface space-y-2 p-4">
+          <p class="text-sm opacity-70">{settings_timezone_desc()}</p>
+          <input
+            class="input text-sm"
+            type="text"
+            list="timezone-candidates"
+            bind:value={tzInput}
+            placeholder={settings_timezone_placeholder()}
+            aria-label={settings_timezone()}
+          />
+          <datalist id="timezone-candidates">
+            {#each tzCandidates as zone (zone)}
+              <option value={zone}></option>
+            {/each}
+          </datalist>
+          <div class="flex items-center gap-2">
+            <button
+              class="btn preset-filled-primary-500 text-sm"
+              disabled={tzBusy || !timezoneLoad.ok}
+              onclick={onTimezoneSave}
+            >
+              {common_save()}
+            </button>
+            <button
+              class="btn preset-outlined-surface-500 hover:preset-filled-surface-500 text-sm"
+              disabled={tzBusy || !timezoneLoad.ok}
+              onclick={() => {
+                tzInput = "";
+                void onTimezoneSave();
+              }}
+            >
+              {settings_timezone_clear()}
+            </button>
+          </div>
+          {#if tzFeedback === "saved"}
+            <p class="text-sm preset-text-success-500">
+              {settings_timezone_saved()}
+            </p>
+          {:else if tzFeedback === "invalid"}
+            <p class="text-sm preset-text-error-500">
+              {settings_timezone_invalid()}
+            </p>
+          {:else if tzFeedback === "network"}
+            <p class="text-sm preset-text-error-500">
+              {settings_error_unknown()}
+            </p>
+          {/if}
+        </div>
+      </section>
+    {/if}
 
     <section class="space-y-3">
       <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">

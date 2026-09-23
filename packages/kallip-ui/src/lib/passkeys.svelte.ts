@@ -3,7 +3,7 @@
 // portable. The consuming page maps archeion-client response types into these
 // `Props` before passing them down (mirrors `tagmata.svelte.ts`).
 
-import { getLocale } from "../paraglide/runtime.js";
+import { formatStamp } from "./time/stamp.svelte.ts";
 /** Load phase of the passkeys section. */
 export type PasskeyPhase = "loading" | "loaded" | "error";
 
@@ -44,7 +44,7 @@ export function pairSecondsRemaining(expiresAt: string, now: number): number {
  *  granularity is deliberate (the time of day a credential was added is not
  *  useful to a user managing their devices). */
 export function formatPasskeyDate(ts: string): string {
-  return new Date(ts).toLocaleDateString(getLocale(), {
+  return formatStamp(ts, {
     year: "numeric",
     month: "short",
     day: "numeric",

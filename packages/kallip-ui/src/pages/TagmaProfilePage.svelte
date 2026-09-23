@@ -8,6 +8,7 @@
   // The "Message" CTA opens the tagma's DM, but ONLY for a tagma the caller owns
   // (the bilateral DM is owner-scoped); a peer's tagma has no CTA.
   import { ChevronLeft, Cpu, MessageSquare } from "@lucide/svelte";
+  import { timezoneSetting } from "../lib/time/stamp.svelte.ts";
   import {
     archeionClientOrFail,
     archeionSession,
@@ -141,7 +142,7 @@
           {/if}
           <div class="text-xs opacity-50">
             {tagma_profile_created({
-              date: formatDateTime(profile.created_at),
+              date: formatDateTime(profile.created_at, timezoneSetting.value),
             })}
           </div>
         </section>

@@ -87,6 +87,8 @@ export interface ManagementBackend {
   fetchTaskArchive(id: number): Promise<Uint8Array>;
   exportTask(id: number): Promise<TaskExport>;
   exportAllTasks(): Promise<TaskExport[]>;
+  getTimezone(): Promise<{ timezone: string | null }>;
+  putTimezone(timezone: string | null): Promise<{ timezone: string | null }>;
 }
 
 // --- OfflineBackend (wraps TagmaClient) ---
@@ -185,6 +187,13 @@ export class OfflineBackend implements ManagementBackend {
   }
   exportAllTasks() {
     return this.client.exportAllTasks();
+  }
+
+  getTimezone() {
+    return this.client.getTimezone();
+  }
+  putTimezone(timezone: string | null) {
+    return this.client.putTimezone(timezone);
   }
 }
 
@@ -555,6 +564,21 @@ export class OnlineBackend implements ManagementBackend {
     return Promise.reject(
       new Error(
         "task export is offline-only: the lesche manage frame allowlist passes the task read face only",
+      ),
+    );
+  }
+
+  getTimezone(): Promise<{ timezone: string | null }> {
+    return Promise.reject(
+      new Error(
+        "timezone settings are offline-only: the lesche manage frame allowlist does not pass the settings face",
+      ),
+    );
+  }
+  putTimezone(_timezone: string | null): Promise<{ timezone: string | null }> {
+    return Promise.reject(
+      new Error(
+        "timezone settings are offline-only: the lesche manage frame allowlist does not pass the settings face",
       ),
     );
   }

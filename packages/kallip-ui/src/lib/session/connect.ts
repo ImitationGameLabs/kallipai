@@ -3,6 +3,7 @@ import type { AgentId } from "@kallipai/kallip-common";
 import type { OfflineModeConfig } from "../config/config.ts";
 import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 import { DirectTransport } from "./directTransport.ts";
+import { loadTimezoneSetting } from "../time/stamp.svelte.ts";
 
 /** The result of connecting to the tagma directly: the transport bound to the
  * root agent, plus the tagma's conversation id (when enrolled) the offline path
@@ -31,6 +32,10 @@ export async function connectDirect(
   });
 
   const root = await client.getRootAgent();
+  // Session-level timezone load: one GET per established session (the
+  // single-flight guard in the stamp module dedupes concurrent callers),
+  // covering every render site without each page re-fetching.
+  void loadTimezoneSetting(() => client.getTimezone());
   const agentId: AgentId = root.id;
 
   return {

@@ -22,12 +22,11 @@ export function managementBackend(): ManagementBackend {
   if (!offline) {
     throw new Error("management requires offline tagma configuration");
   }
-  return new OfflineBackend(
-    new TagmaClient({
-      baseUrl: offline.tagmaUrl,
-      authToken: offline.authToken,
-    }),
-  );
+  const client = new TagmaClient({
+    baseUrl: offline.tagmaUrl,
+    authToken: offline.authToken,
+  });
+  return new OfflineBackend(client);
 }
 
 export type { ManagementBackend };

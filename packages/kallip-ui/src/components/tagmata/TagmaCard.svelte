@@ -8,6 +8,7 @@
   // keeps its confirmation dialog (one-click irreversible, cuts the device
   // off on its next request).
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
+  import { timezoneSetting } from "../../lib/time/stamp.svelte.ts";
   import {
     Check,
     ExternalLink,
@@ -273,7 +274,11 @@
   <div class="flex flex-col gap-1 text-sm opacity-80">
     {#if tagma}
       <p class="font-mono text-sm break-all">{tagma.tagmaId}</p>
-      <p>{tagma_enrolled_at({ date: formatDateTime(tagma.createdAt) })}</p>
+      <p>
+        {tagma_enrolled_at({
+          date: formatDateTime(tagma.createdAt, timezoneSetting.value),
+        })}
+      </p>
       {#if tagma.status}
         <p class="text-xs opacity-70">{formatTagmaStatusLine(tagma.status)}</p>
       {/if}

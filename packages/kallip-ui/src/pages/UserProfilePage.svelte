@@ -8,6 +8,7 @@
   import { archeionClientOrFail } from "../lib/session/archeion.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import { formatDateTime } from "../lib/tagmata.svelte.ts";
+  import { timezoneSetting } from "../lib/time/stamp.svelte.ts";
   import { TONAL_ICON_SURF } from "../lib/classes.ts";
   import type { PublicUserProfile } from "@kallipai/kallip-archeion-client";
   import {
@@ -105,7 +106,9 @@
             @{profile.username}
           </div>
           <div class="text-xs opacity-50">
-            {user_profile_joined({ date: formatDateTime(profile.created_at) })}
+            {user_profile_joined({
+              date: formatDateTime(profile.created_at, timezoneSetting.value),
+            })}
           </div>
         </section>
       {/if}

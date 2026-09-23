@@ -76,5 +76,11 @@
   "settings_provider_actions_aria": "条目操作",
   "settings_provider_name_duplicate": "同名密钥已存在。",
   "settings_provider_flip_to_encrypted": "加密",
-  "settings_provider_flip_to_plaintext": "存为明文"
+  "settings_provider_flip_to_plaintext": "存为明文",
+  "settings_timezone": "时区",
+  "settings_timezone_desc": "渲染绝对时间戳使用的 IANA 名称，留空跟随浏览器本地时区。",
+  "settings_timezone_placeholder": "例如 Asia/Shanghai",
+  "settings_timezone_saved": "时区已保存。",
+  "settings_timezone_clear": "使用浏览器本地时区",
+  "settings_timezone_invalid": "服务器拒绝了该名称。"
 }

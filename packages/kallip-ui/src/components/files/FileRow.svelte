@@ -8,6 +8,7 @@
     files_download_aria,
   } from "../../paraglide/messages.js";
   import type { FileRowView } from "../../lib/filesView.ts";
+  import { formatStamp } from "../../lib/time/stamp.svelte.ts";
 
   let {
     row,
@@ -32,7 +33,7 @@
         : `${(row.size / (1024 * 1024)).toFixed(1)} MB`,
   );
   const dateLabel = $derived(
-    new Date(row.createdAt).toLocaleDateString(undefined, {
+    formatStamp(row.createdAt, {
       year: "numeric",
       month: "short",
       day: "numeric",

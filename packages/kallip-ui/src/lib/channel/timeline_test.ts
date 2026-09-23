@@ -81,3 +81,31 @@ Deno.test("groupWindowMs is configurable", () => {
     true,
   );
 });
+
+Deno.test(
+  "explicit timezone shifts both the divider day and the time label",
+  () => {
+    // 23:30Z on Jul 25 is already Jul 26 07:30 in Shanghai: with the zone set,
+    // the two lines land on the same Shanghai day and the earlier one opens a
+    // group whose label renders the Shanghai morning hour.
+    const m = timelineMarkers(
+      [T("2026-07-25T23:30:00Z"), T("2026-07-26T00:10:00Z")],
+      { now: NOW, timezone: "Asia/Shanghai" },
+    );
+    assertEquals(m.length, 2);
+    assertEquals(m[0]!.dateDivider, "Today");
+    assertEquals(m[1]!.timeLabel !== undefined, true);
+  },
+);
+
+Deno.test("timezone label differs between zones for the same instant", () => {
+  const inShanghai = timelineMarkers([T("2026-07-26T12:00:00Z")], {
+    now: NOW,
+    timezone: "Asia/Shanghai",
+  })[0]!.timeLabel;
+  const inNewYork = timelineMarkers([T("2026-07-26T12:00:00Z")], {
+    now: NOW,
+    timezone: "America/New_York",
+  })[0]!.timeLabel;
+  assertEquals(inShanghai !== inNewYork, true);
+});

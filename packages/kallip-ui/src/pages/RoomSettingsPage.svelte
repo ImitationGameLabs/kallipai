@@ -26,7 +26,7 @@
   import MemberRow from "../components/rooms/MemberRow.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import { TONAL_ICON_SURF } from "../lib/classes.ts";
-  import { getLocale } from "../paraglide/runtime.js";
+  import { formatStamp } from "../lib/time/stamp.svelte.ts";
 
   import {
     common_loading,
@@ -319,7 +319,7 @@
           {#if room}
             <span
               >{roomsettings_created({
-                date: new Date(room.created_at).toLocaleString(getLocale()),
+                date: formatStamp(room.created_at),
               })}</span
             >
           {/if}
