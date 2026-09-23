@@ -41,7 +41,7 @@
 
   async function guardDiscardAndLeave() {
     if (profilesStore.config) {
-      profilesStore.draft = structuredClone(profilesStore.config);
+      profilesStore.reset();
     }
     await leaveTo(leaveGuard.to);
   }

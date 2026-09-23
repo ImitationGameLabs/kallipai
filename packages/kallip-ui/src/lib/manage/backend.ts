@@ -189,6 +189,19 @@ export class OfflineBackend implements ManagementBackend {
 }
 
 // --- OnlineBackend (wraps ManageRestClient over the lesche proxy) ---
+/**
+ * The encrypted envelope face of a relay channel, narrowed to what
+ * profiles writes need. Provider API keys never ride the plaintext
+ * manage frame (the frame allowlist fails those routes closed), so
+ * key-bearing writes go through this E2E-encrypted channel instead.
+ */
+export interface ProfilesEnvelopeChannel {
+  manage(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<{ status: number; body: unknown }>;
+}
 
 /**
  * Reconstruct a KallipError from a manage_result when status >= 400. The
@@ -221,6 +234,7 @@ export class OnlineBackend implements ManagementBackend {
     private readonly rest: ManageRestClient,
     private readonly agent: string,
     private readonly projection?: ProjectionClient,
+    private readonly envelope?: ProfilesEnvelopeChannel,
   ) {
     if (!projection) return;
     // A single shared reconnect loop -- one sse connection per
@@ -406,8 +420,16 @@ export class OnlineBackend implements ManagementBackend {
   getProfiles() {
     return this.req<ProfileConfig>("GET", "/profiles");
   }
-  updateProfiles(body: ProfileConfigPutRequest) {
-    return this.req<ProfileConfig>("PUT", "/profiles", body);
+  async updateProfiles(body: ProfileConfigPutRequest) {
+    // No plaintext fallback: the manage-frame allowlist fails
+    // provider-key-bearing writes closed, so a save without an
+    // envelope channel would fail opaquely downstream (403/404).
+    if (!this.envelope) {
+      throw new Error("profiles save requires an E2E envelope channel");
+    }
+    const result = await this.envelope.manage("PUT", "/profiles", body);
+    if (result.status >= 400) throw parseError(result.status, result.body);
+    return result.body as ProfileConfig;
   }
   applyProfiles() {
     return this.req<ProfileApplyResponse>("POST", "/profiles/apply");

@@ -57,9 +57,12 @@
       // conv.kind === "relay" narrows to RelayConversation
       const relayConv =
         conv as import("../../lib/session/conversation.svelte.ts").RelayConversation;
+      const channel = relayConv.relayTransport.relayChannel;
       backend = new OnlineBackend(
         new ManageRestClient(lescheBaseUrlOrFail()),
-        relayConv.relayTransport.relayChannel.tagmaId,
+        channel.tagmaId,
+        undefined,
+        channel,
       );
     } catch (e) {
       console.error("[agent detail] backend wiring failed:", e);

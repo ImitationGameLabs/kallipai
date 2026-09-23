@@ -1,8 +1,8 @@
 // The online shell's confirm flow keys off the structured dangling list a
-// 409 profiles save carries. These tests pin that the relay path
+// 409 profiles save carries. These tests pin that the envelope path
 // reconstructs the full KallipError — not a flattened message-only one —
-// and that the save-failure classification still routes a bare 409 (old
-// backend) to the stale-backend branch.
+// and that a bare 409 (no structured dangling list, as an older tagma
+// emits) still lands on the stale-backend downgrade.
 
 import { assertEquals, assertRejects } from "@std/assert";
 import { KallipError } from "@kallipai/kallip-common";
@@ -10,7 +10,7 @@ import {
   type ManageRestClient,
   ProjectionClient,
 } from "@kallipai/kallip-lesche-client";
-import { OnlineBackend } from "./backend.ts";
+import { OnlineBackend, type ProfilesEnvelopeChannel } from "./backend.ts";
 
 // The projection feed consults document.hidden and binds a
 // visibilitychange listener at backend construction; deno test has
@@ -24,10 +24,27 @@ if (typeof globalThis.document === "undefined") {
   } as unknown as typeof globalThis.document;
 }
 import { classifySaveFailure } from "./profiles-view.ts";
-function restWith(body: unknown): ManageRestClient {
+function restWith(): ManageRestClient {
   return {
-    manage: () => Promise.resolve({ status: 409, body }),
+    manage: () =>
+      Promise.reject(
+        new Error(
+          "plaintext manage frame reached; profiles saves ride the envelope",
+        ),
+      ),
   } as unknown as ManageRestClient;
+}
+function envelopeWith(body: unknown): ProfilesEnvelopeChannel {
+  return {
+    manage: (method, path) => {
+      if (method !== "PUT" || path !== "/profiles") {
+        return Promise.reject(
+          new Error(`unexpected envelope call: ${method} ${path}`),
+        );
+      }
+      return Promise.resolve({ status: 409, body });
+    },
+  };
 }
 
 const PUT_BODY = {
@@ -47,7 +64,7 @@ const DANGLING_BODY = {
 Deno.test(
   "OnlineBackend task write verbs fail loudly (offline-only face)",
   async () => {
-    const backend = new OnlineBackend(restWith(DANGLING_BODY), "t-a");
+    const backend = new OnlineBackend(restWith(), "t-a");
     const verbs = [
       [() => backend.createTask(), "create"],
       [() => backend.startTask(), "start"],
@@ -75,7 +92,12 @@ Deno.test(
 Deno.test(
   "a relayed 409 with a dangling list reaches the confirm flow",
   async () => {
-    const backend = new OnlineBackend(restWith(DANGLING_BODY), "t-a");
+    const backend = new OnlineBackend(
+      restWith(),
+      "t-a",
+      undefined,
+      envelopeWith(DANGLING_BODY),
+    );
     let caught: unknown = null;
     await backend.updateProfiles({ ...PUT_BODY, force: false }).catch((e) => {
       caught = e;
@@ -93,8 +115,10 @@ Deno.test(
   "a bare relayed 409 (old backend) still lands on the downgrade branch",
   async () => {
     const backend = new OnlineBackend(
-      restWith({ error: { message: "config drops sets still bound" } }),
+      restWith(),
       "t-a",
+      undefined,
+      envelopeWith({ error: { message: "config drops sets still bound" } }),
     );
     let caught: unknown = null;
     await backend.updateProfiles({ ...PUT_BODY, force: true }).catch((e) => {
@@ -590,7 +614,7 @@ Deno.test(
   "OnlineBackend rejects the task download face (offline-only)",
   async () => {
     // The refusals are unconditional: the args never reach a request.
-    const backend = new OnlineBackend(restWith({}), "t-a");
+    const backend = new OnlineBackend(restWith(), "t-a");
     // Single-task export rides the allowlist refusal family.
     await assertRejects(
       () => backend.exportTask(),

@@ -267,6 +267,7 @@
             new ManageRestClient(lescheBaseUrlOrFail()),
             conv.relayTransport.relayChannel.tagmaId,
             new ProjectionClient(lescheBaseUrlOrFail()),
+            conv.relayTransport.relayChannel,
           ),
         );
       } else {

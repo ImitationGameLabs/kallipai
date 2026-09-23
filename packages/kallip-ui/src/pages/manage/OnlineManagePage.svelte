@@ -92,6 +92,7 @@
         new ManageRestClient(lescheBaseUrlOrFail()),
         channel.tagmaId,
         new ProjectionClient(lescheBaseUrlOrFail()),
+        channel,
       );
       budgetStore.switchBackend(backend);
       agentsStore.switchBackend(backend);

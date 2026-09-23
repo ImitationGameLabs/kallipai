@@ -253,11 +253,12 @@
       );
       const backend = new OnlineBackend(
         // The projection drives the status card's read plane (roster, budget,
-        // work schedule, SSE feed); the profile push ports below still go
-        // through the write-plane manage client.
+        // work schedule, SSE feed); profile saves ride the E2E
+        // envelope channel below (keys never ride plaintext frames).
         new ManageRestClient(lescheBaseUrlOrFail()),
         channel.tagmaId,
         new ProjectionClient(lescheBaseUrlOrFail()),
+        channel,
       );
       const ports: PushPorts = {
         fetchLive: () => backend.getProfiles(),
