@@ -750,7 +750,7 @@ async fn wait_timer_elapse_injects_system_turn_and_reruns() {
             if found {
                 return true;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     })
     .await;

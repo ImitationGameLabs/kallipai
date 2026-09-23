@@ -615,21 +615,11 @@ async fn bridge_dispatches_idle_to_superior() {
     let mut wake = std::pin::pin!(parent_notify.notified());
     agent_tx.send(AgentEvent::Idle).await.unwrap();
 
-    let mut settled = false;
-    for _ in 0..40 {
-        if atomic_state.load(Ordering::Relaxed) == AgentState::IDLE
+    crate::wait_for!("idle dispatch must mark idle and inbox the notification", {
+        atomic_state.load(Ordering::Relaxed) == AgentState::IDLE
             && activity.lock().unwrap().is_empty()
             && state.inboxes.get().unwrap().len_for(&parent).await == 1
-        {
-            settled = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        settled,
-        "idle dispatch must mark idle and inbox the notification"
-    );
+    });
     let msg = state
         .inboxes
         .get()
@@ -697,18 +687,9 @@ async fn bridge_idle_dispatch_off_duty_superior_not_woken() {
     agent_tx.send(AgentEvent::Idle).await.unwrap();
 
     // Wait for the inbox push (delivery's observable half)...
-    let mut delivered = false;
-    for _ in 0..40 {
-        if state.inboxes.get().unwrap().len_for(&parent).await == 1 {
-            delivered = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        delivered,
-        "off-duty dispatch must still buffer the notification"
-    );
+    crate::wait_for!("off-duty dispatch must still buffer the notification", {
+        state.inboxes.get().unwrap().len_for(&parent).await == 1
+    });
     // ...then confirm no wake arrives after delivery: the waiter stays
     // pending (no permit is stored by the duty-gated path).
     assert!(
@@ -765,15 +746,9 @@ async fn bridge_dispatches_error_to_superior() {
         .send(AgentEvent::Error("model endpoint returned 500".into()))
         .await
         .unwrap();
-    let mut delivered = false;
-    for _ in 0..40 {
-        if state.inboxes.get().unwrap().len_for(&parent).await == 1 {
-            delivered = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(delivered, "error dispatch must notify the superior");
+    crate::wait_for!("error dispatch must notify the superior", {
+        state.inboxes.get().unwrap().len_for(&parent).await == 1
+    });
     let msg = state
         .inboxes
         .get()
@@ -839,15 +814,9 @@ async fn bridge_dispatches_failover_exhausted_to_superior() {
         })
         .await
         .unwrap();
-    let mut delivered = false;
-    for _ in 0..40 {
-        if state.inboxes.get().unwrap().len_for(&parent).await == 1 {
-            delivered = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(delivered, "FCE dispatch must notify the superior");
+    crate::wait_for!("FCE dispatch must notify the superior", {
+        state.inboxes.get().unwrap().len_for(&parent).await == 1
+    });
     let msg = state
         .inboxes
         .get()
@@ -905,15 +874,9 @@ async fn bridge_dispatches_max_rounds_to_superior() {
     ));
 
     agent_tx.send(AgentEvent::MaxRoundsExceeded).await.unwrap();
-    let mut delivered = false;
-    for _ in 0..40 {
-        if state.inboxes.get().unwrap().len_for(&parent).await == 1 {
-            delivered = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(delivered, "max-rounds dispatch must notify the superior");
+    crate::wait_for!("max-rounds dispatch must notify the superior", {
+        state.inboxes.get().unwrap().len_for(&parent).await == 1
+    });
     let msg = state
         .inboxes
         .get()
@@ -969,15 +932,9 @@ async fn bridge_interrupted_does_not_notify_superior() {
     ));
 
     agent_tx.send(AgentEvent::Interrupted).await.unwrap();
-    let mut settled = false;
-    for _ in 0..40 {
-        if atomic_state.load(Ordering::Relaxed) == AgentState::IDLE {
-            settled = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(settled, "interrupted must still mark idle");
+    crate::wait_for!("interrupted must still mark idle", {
+        atomic_state.load(Ordering::Relaxed) == AgentState::IDLE
+    });
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         state.inboxes.get().unwrap().len_for(&parent).await,
@@ -1255,21 +1212,14 @@ async fn bridge_waiting_marks_waiting_and_notifies() {
         .await
         .unwrap();
 
-    let mut settled = false;
-    for _ in 0..40 {
-        if atomic_state.load(Ordering::Relaxed) == AgentState::WAITING
-            && cells.parked.lock().unwrap().is_none()
-            && cells.retrying.lock().unwrap().is_none()
-            && state.inboxes.get().unwrap().len_for(&parent).await == 1
+    crate::wait_for!(
+        "waiting dispatch must mark WAITING and inbox the notification",
         {
-            settled = true;
-            break;
+            atomic_state.load(Ordering::Relaxed) == AgentState::WAITING
+                && cells.parked.lock().unwrap().is_none()
+                && cells.retrying.lock().unwrap().is_none()
+                && state.inboxes.get().unwrap().len_for(&parent).await == 1
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        settled,
-        "waiting dispatch must mark WAITING and inbox the notification"
     );
     let msg = state
         .inboxes
@@ -1317,21 +1267,14 @@ async fn bridge_fce_with_retry_marks_retrying_no_notice() {
         .await
         .unwrap();
 
-    let mut settled = false;
-    for _ in 0..40 {
-        let cell = *cells.retrying.lock().unwrap();
-        if state.load(Ordering::Relaxed) == AgentState::RETRYING
-            && cells.parked.lock().unwrap().is_none()
-            && matches!(&cell, Some(info) if info.attempt == 1 && info.max_attempts == 3)
+    crate::wait_for!(
+        "armed FCE must mark RETRYING with the retry plan mirrored",
         {
-            settled = true;
-            break;
+            let cell = *cells.retrying.lock().unwrap();
+            state.load(Ordering::Relaxed) == AgentState::RETRYING
+                && cells.parked.lock().unwrap().is_none()
+                && matches!(&cell, Some(info) if info.attempt == 1 && info.max_attempts == 3)
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        settled,
-        "armed FCE must mark RETRYING with the retry plan mirrored"
     );
     drop(agent_tx);
 }
@@ -1363,10 +1306,9 @@ async fn bridge_fce_without_retry_marks_parked() {
         .await
         .unwrap();
 
-    let mut settled = false;
-    for _ in 0..40 {
+    crate::wait_for!("unarmed FCE must park with the chain reason in the cell", {
         let cell = cells.parked.lock().unwrap().clone();
-        if state.load(Ordering::Relaxed) == AgentState::PARKED
+        state.load(Ordering::Relaxed) == AgentState::PARKED
             && cells.retrying.lock().unwrap().is_none()
             && matches!(
                 &cell,
@@ -1375,16 +1317,7 @@ async fn bridge_fce_without_retry_marks_parked() {
                     ..
                 })
             )
-        {
-            settled = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        settled,
-        "unarmed FCE must park with the chain reason in the cell"
-    );
+    });
     drop(agent_tx);
 }
 
@@ -1410,25 +1343,18 @@ async fn bridge_error_parks_with_fatal_reason() {
         .await
         .unwrap();
 
-    let mut settled = false;
-    for _ in 0..40 {
+    crate::wait_for!("fatal error must park with the message mirrored", {
         let cell = cells.parked.lock().unwrap().clone();
-        if state.load(Ordering::Relaxed) == AgentState::PARKED
+        state.load(Ordering::Relaxed) == AgentState::PARKED
             && cells.retrying.lock().unwrap().is_none()
             && matches!(
-                &cell,
-                Some(crate::state::ParkedSnapshot {
-                    reason: kallip_common::protocol::ParkedReason::FatalError { message },
-                    ..
-                }) if message == "boom"
+            &cell,
+            Some(crate::state::ParkedSnapshot {
+            reason: kallip_common::protocol::ParkedReason::FatalError { message },
+            ..
+            }) if message == "boom"
             )
-        {
-            settled = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(settled, "fatal error must park with the message mirrored");
+    });
     drop(agent_tx);
 }
 
@@ -1458,20 +1384,13 @@ async fn bridge_token_budget_marks_waiting() {
         .await
         .unwrap();
 
-    let mut settled = false;
-    for _ in 0..40 {
-        if state.load(Ordering::Relaxed) == AgentState::WAITING
-            && cells.parked.lock().unwrap().is_none()
-            && cells.retrying.lock().unwrap().is_none()
+    crate::wait_for!(
+        "budget exhaustion must leave the agent WAITING, not parked",
         {
-            settled = true;
-            break;
+            state.load(Ordering::Relaxed) == AgentState::WAITING
+                && cells.parked.lock().unwrap().is_none()
+                && cells.retrying.lock().unwrap().is_none()
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        settled,
-        "budget exhaustion must leave the agent WAITING, not parked"
     );
     drop(agent_tx);
 }
@@ -1511,10 +1430,9 @@ async fn bridge_fce_after_spent_budget_parks_retry_exhausted() {
         .await
         .unwrap();
 
-    let mut settled = false;
-    for _ in 0..40 {
+    crate::wait_for!("spent budget + unarmed FCE must park as retry-exhausted", {
         let cell = cells.parked.lock().unwrap().clone();
-        if state.load(Ordering::Relaxed) == AgentState::PARKED
+        state.load(Ordering::Relaxed) == AgentState::PARKED
             && cells.retrying.lock().unwrap().is_none()
             && matches!(
                 &cell,
@@ -1523,16 +1441,7 @@ async fn bridge_fce_after_spent_budget_parks_retry_exhausted() {
                     ..
                 })
             )
-        {
-            settled = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        settled,
-        "spent budget + unarmed FCE must park as retry-exhausted"
-    );
+    });
     drop(agent_tx);
 }
 
@@ -1564,21 +1473,11 @@ async fn bridge_layer1_retrying_overlay_lifecycle() {
         })
         .await
         .unwrap();
-    let mut overlaid = false;
-    for _ in 0..40 {
-        if state.load(Ordering::Relaxed) == AgentState::RETRYING
+    crate::wait_for!("in-request retry must overlay RETRYING without payloads", {
+        state.load(Ordering::Relaxed) == AgentState::RETRYING
             && cells.parked.lock().unwrap().is_none()
             && cells.retrying.lock().unwrap().is_none()
-        {
-            overlaid = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        overlaid,
-        "in-request retry must overlay RETRYING without payloads"
-    );
+    });
 
     agent_tx
         .send(AgentEvent::AssistantContentDelta {
@@ -1586,17 +1485,9 @@ async fn bridge_layer1_retrying_overlay_lifecycle() {
         })
         .await
         .unwrap();
-    let mut recovered = false;
-    for _ in 0..40 {
-        if state.load(Ordering::Relaxed) == AgentState::BUSY {
-            recovered = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        recovered,
-        "the next in-flight event must end the overlay and return to BUSY"
+    crate::wait_for!(
+        "the next in-flight event must end the overlay and return to BUSY",
+        state.load(Ordering::Relaxed) == AgentState::BUSY
     );
     drop(agent_tx);
 }

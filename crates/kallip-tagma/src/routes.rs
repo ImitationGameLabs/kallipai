@@ -1,6 +1,6 @@
 pub(crate) mod agent;
 pub(crate) mod budget;
-pub(crate) use agent::ensure_root_agent;
+pub use agent::ensure_root_agent;
 #[cfg(test)]
 pub(crate) mod approval;
 #[cfg(not(test))]

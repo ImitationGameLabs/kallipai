@@ -78,7 +78,7 @@ const HANDLE_MAX_LEN: usize = 64;
 /// delimiters (so a crafted handle cannot close the header and inject prompt
 /// text), line/control characters (no newlines to break out of the header),
 /// and Unicode bidi / zero-width chars (no RTL spoofing); truncates to
-/// [`HANDLE_MAX_LEN`]. Whitespace is collapsed and trimmed.
+/// `HANDLE_MAX_LEN`. Whitespace is collapsed and trimmed.
 ///
 /// This is the single ingest sanitizer; `format_incoming` sanitizes again as
 /// defense in depth.

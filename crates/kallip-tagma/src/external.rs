@@ -13,12 +13,12 @@
 //! Ingress:
 //! - **Agent runtime replies** — the projector subscribes to the root agent's
 //!   raw `SseEvent` broadcast (the single subscription that the two pumps used
-//!   to duplicate), projects each event via [`crate::projector::project_external`],
+//!   to duplicate), projects each event via `crate::projector::project_external`,
 //!   persists the authored half once, and publishes it. The signal half is
 //!   published without persistence (ephemeral).
-//! - **Agent `send` CLI** — [`ExternalProjector::record_outbound`] (called by
+//! - **Agent `send` CLI** — `ExternalProjector::record_outbound` (called by
 //!   the lesche message route), which burst-limits, persists, and publishes.
-//! - **Inbound user message** — [`ExternalProjector::record_inbound`] (called
+//! - **Inbound user message** — `ExternalProjector::record_inbound` (called
 //!   by the shared `deliver_message` seam before the prompt enqueues), which
 //!   appends the row and publishes a stamped `UserMessage` frame so the
 //!   frontend can promote its optimistic line.
@@ -48,7 +48,7 @@ use crate::state::{AppState, RegistryEntry};
 /// The single external projector handle. Cheap to clone (`Arc` inside); the
 /// pumps and routes hold clones to subscribe / record.
 #[derive(Clone)]
-pub(crate) struct ExternalProjector {
+pub struct ExternalProjector {
     inner: Arc<Inner>,
 }
 

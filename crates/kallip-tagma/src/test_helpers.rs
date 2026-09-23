@@ -524,22 +524,36 @@ pub fn ensure_test_data_dir() {
     });
     // Mirror the host boot: point the runtime's instance roots at the
     // pinned identity, so runtime path resolution goes through the
-    // injection (the runtime no longer reads the environment). Re-assert
-    // on every call: the OnceLock only guards the tempdir allocation, and
-    // disk-fixture tests re-point the roots per test — a once-only install
-    // would leave them dangling on a deleted fixture dir.
+    // injection (the runtime no longer reads the environment). Install
+    // lazily: only when nothing is installed or the installed roots dangle
+    // on a deleted fixture directory. A live pin (the disk-fixture tests
+    // re-point the roots for their own temp tree) must survive this call:
+    // rewriting over it mid-test would send its refusal checks at the
+    // shared tree and race the suite.
     let leaf = path.join("kallipai").join("tagmata").join("test");
-    kallip_runtime::persistence::set_instance_roots_for_tests(Some(
-        kallip_runtime::persistence::InstanceRoots {
-            data: leaf.clone(),
-            config: leaf,
-            state: path.join("state").join("kallipai"),
-        },
-    ));
+    // Dangling means "points somewhere that is neither the shared tree nor
+    // an existing directory": the shared leaf materializes lazily (first
+    // config persist), so an unmaterialized shared value must not count as
+    // dangling, or the helper would re-install its own (not yet
+    // materialized) value on every call instead of recognizing it.
+    let dangling = match kallip_runtime::persistence::data_dir_root() {
+        Ok(current) => current != leaf && !current.exists(),
+        Err(_) => true,
+    };
+    if dangling {
+        kallip_runtime::persistence::set_instance_roots_for_tests(Some(
+            kallip_runtime::persistence::InstanceRoots {
+                data: leaf.clone(),
+                config: leaf,
+                state: path.join("state").join("kallipai"),
+            },
+        ));
+    }
 }
 
 /// Register a live agent bound to the `alt` set (the dangling-bindings
 /// scenarios' subject). Returns the agent id.
+#[cfg(test)]
 pub(crate) async fn alt_bound_sub(state: &SharedState) -> AgentId {
     let sub = AgentId::random();
     let supervisor = AgentId::random();

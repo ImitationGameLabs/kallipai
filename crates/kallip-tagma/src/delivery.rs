@@ -18,7 +18,7 @@ use crate::lifecycle::{
 use crate::messaging::{MessageSender, SenderRelation, format_incoming, sanitize_sender};
 use crate::state::{RegistryEntry, SharedState};
 
-/// What the busy branch of [`enqueue_prompt`] may inject into a live agent's
+/// What the busy branch of `enqueue_prompt` may inject into a live agent's
 /// prompt channel. Peer direct messages inject the full message payload
 /// unless the sender deferred; every other caller (relay surfaces, task
 /// watcher, schedule engine) keeps the historical run-boundary behavior.
@@ -212,7 +212,7 @@ pub async fn deliver_message(
 /// entirely (the lesche is the surface's store of record; the tagma is one
 /// member, not the transcript owner), so no local `chat_history` row is
 /// written and no bilateral `UserMessage` frame is published. The shared
-/// [`enqueue_prompt`] (fast path + reactivation) is reused so a relay
+/// `enqueue_prompt` (fast path + reactivation) is reused so a relay
 /// message wakes a dead root agent just like a bilateral one.
 pub async fn deliver_inbound_relay_message(
     state: &SharedState,

@@ -20,9 +20,9 @@ use crate::bus::{AuthoredFrame, SignalFrame, StatusSnapshot, TopicReceiver};
 /// enum, not a bus item.
 /// The variant is the SSE event-name discriminator; the inner value is the
 /// `data:` payload. Serialization (variant name + inner JSON) lives in
-/// [`serialize_direct_frame`].
+/// `serialize_direct_frame`.
 #[derive(Clone, Debug)]
-pub(crate) enum DirectFrame {
+pub enum DirectFrame {
     /// An authored message forwarded from the projector: an `assistant_content`
     /// event, a `user_message` echo, etc. Carries the sender alongside the
     /// content reply (mirrors the online envelope's `{sender, body}`); already
@@ -199,7 +199,7 @@ pub(crate) fn merge_direct_frames(
 /// `initial` is an optional one-shot frame prepended to the stream — used to
 /// push an immediate status snapshot on connect so the chat header renders at
 /// once instead of after the next pump tick (~2 s). Serialized through the same
-/// [`serialize_direct_frame`] so the wire shape is identical to a pump-driven
+/// `serialize_direct_frame` so the wire shape is identical to a pump-driven
 /// status frame; `None` skips it (no leading event).
 pub fn direct_sse_stream(
     frames: impl Stream<Item = DirectFrame> + Send + 'static,

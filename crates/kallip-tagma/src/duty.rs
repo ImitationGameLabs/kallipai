@@ -31,6 +31,12 @@ pub struct DutyStore {
     invalidations: tokio::sync::watch::Sender<u64>,
 }
 
+#[cfg(test)]
+impl Default for DutyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl DutyStore {
     /// Bare constructor: flips land on a private channel (test-friendly — no
     /// receiver, no observable effect). The AppState constructor installs the

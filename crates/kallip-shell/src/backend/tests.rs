@@ -1,7 +1,7 @@
 use super::*;
 use crate::builder::ShellBuilder;
 
-use kallip_testkit::DevDir;
+use kallip_testkit::{DevDir, wait_for};
 
 fn dev_tempdir(label: &str) -> DevDir {
     DevDir::new(label)
@@ -39,6 +39,50 @@ fn finalized_spills(root: &Path) -> Vec<PathBuf> {
                 .is_some_and(|n| n.to_string_lossy().starts_with(".tmp-"))
         })
         .collect()
+}
+
+/// True when any live process's full command line contains `pattern`
+/// (`pgrep -f` semantics without the host dependency: reads
+/// /proc/*/cmdline directly on Linux).
+#[cfg(target_os = "linux")]
+fn stray_process_exists(pattern: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str() else {
+            return false;
+        };
+        if !pid.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        // Permission denials and already-exited pids are routine; skip them.
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            return false;
+        };
+        // A zombie's cmdline is empty: it cannot match, as with `pgrep -f`.
+        if cmdline.is_empty() {
+            return false;
+        }
+        let line: String = cmdline
+            .iter()
+            .map(|b| if *b == 0 { ' ' } else { *b as char })
+            .collect();
+        line.contains(pattern)
+    })
+}
+
+/// The non-Linux fallback keeps the original `pgrep -f` probe (macOS
+/// has no /proc but does ship pgrep).
+#[cfg(not(target_os = "linux"))]
+fn stray_process_exists(pattern: &str) -> bool {
+    std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(pattern)
+        .output()
+        .map(|out| !out.stdout.is_empty())
+        .unwrap_or(false)
 }
 
 #[tokio::test]
@@ -107,16 +151,9 @@ async fn exec_timeout_converts_to_background_task() {
     assert_eq!(read.state, supervisor::TaskState::Running);
     // Killing it reaps the whole process group.
     backend.kill_background(&id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let pgrep = std::process::Command::new("pgrep")
-        .arg("-f")
-        .arg("sleep 43")
-        .output()
-        .unwrap();
-    assert!(
-        pgrep.stdout.is_empty(),
-        "orphaned `sleep 43` survived: {:?}",
-        String::from_utf8_lossy(&pgrep.stdout)
+    wait_for!(
+        "the killed group to be reaped",
+        !stray_process_exists("sleep 43")
     );
 }
 
@@ -136,16 +173,13 @@ async fn converted_task_reports_real_exit_code() {
         .await
         .unwrap();
     let id = out.task_id.expect("converted");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let read = backend.read_background(&id, 4096).await.unwrap();
-        if read.state == supervisor::TaskState::Exited {
-            assert_eq!(read.exit_code, Some(7));
-            return;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "task never exited");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let mut seen;
+    wait_for!("the converted task to exit", {
+        seen = Some(backend.read_background(&id, 4096).await.unwrap());
+        seen.as_ref()
+            .is_some_and(|r| r.state == supervisor::TaskState::Exited)
+    });
+    assert_eq!(seen.unwrap().exit_code, Some(7));
 }
 
 #[tokio::test]
@@ -161,19 +195,10 @@ async fn converted_task_output_keeps_growing() {
         .unwrap();
     let id = out.task_id.expect("converted");
     assert!(out.output.as_deref().unwrap().contains("one"));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
+    wait_for!("the second line to appear", {
         let read = backend.read_background(&id, 4096).await.unwrap();
-        if read.output.contains("two") {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "second line never appeared: {:?}",
-            read.output
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+        read.output.contains("two")
+    });
 }
 
 /// The sticky cwd does NOT advance on a conversion: the command has
@@ -258,23 +283,10 @@ async fn exec_cancel_kills_process_group_no_orphans() {
     // The orphaned group is reaped asynchronously after the SIGKILL, so poll
     // for it to be gone rather than asserting instantaneously (follows the
     // polling shape of `pgroup::tests::kill_tree_reaps_orphaned_child`).
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        let pgrep = std::process::Command::new("pgrep")
-            .arg("-f")
-            .arg("sleep 44")
-            .output()
-            .unwrap();
-        if pgrep.stdout.is_empty() {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "orphaned `sleep 44` survived cancel: {}",
-            String::from_utf8_lossy(&pgrep.stdout)
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for!(
+        "the cancelled group to be reaped",
+        !stray_process_exists("sleep 44")
+    );
 }
 
 /// Gate battery for the conversion path: a converted task bumps
@@ -297,12 +309,10 @@ async fn converted_task_blocks_carve_until_killed() {
         .await
         .unwrap();
     let id = out.task_id.expect("converted");
-    for _ in 0..50 {
-        if gate.running_bg() == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for!(
+        "the converted task to bump the tally",
+        gate.running_bg() == 1
+    );
     assert_eq!(gate.running_bg(), 1, "converted task bumps the tally");
     assert_eq!(
         gate.try_write().unwrap_err(),
@@ -310,24 +320,12 @@ async fn converted_task_blocks_carve_until_killed() {
         "a carve must be refused while the converted task runs"
     );
     backend.kill_background(&id).await.unwrap();
-    for _ in 0..50 {
-        if gate.running_bg() == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for!("the kill to drain the tally", gate.running_bg() == 0);
     assert_eq!(gate.running_bg(), 0, "kill drains the tally");
     assert!(gate.try_write().is_ok(), "carve allowed after the kill");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let pgrep = std::process::Command::new("pgrep")
-        .arg("-f")
-        .arg("sleep 45")
-        .output()
-        .unwrap();
-    assert!(
-        pgrep.stdout.is_empty(),
-        "orphaned `sleep 45` survived: {:?}",
-        String::from_utf8_lossy(&pgrep.stdout)
+    wait_for!(
+        "the killed group to be reaped",
+        !stray_process_exists("sleep 45")
     );
 }
 
@@ -346,22 +344,14 @@ async fn converted_task_tally_drains_when_it_exits() {
         .await
         .unwrap();
     let id = out.task_id.expect("converted");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let read = backend.read_background(&id, 4096).await.unwrap();
-        if read.state == supervisor::TaskState::Exited {
-            assert_eq!(read.exit_code, Some(0));
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "task never exited");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    for _ in 0..50 {
-        if gate.running_bg() == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let mut seen;
+    wait_for!("the converted task to exit", {
+        seen = Some(backend.read_background(&id, 4096).await.unwrap());
+        seen.as_ref()
+            .is_some_and(|r| r.state == supervisor::TaskState::Exited)
+    });
+    assert_eq!(seen.unwrap().exit_code, Some(0));
+    wait_for!("the tally to drain after exit", gate.running_bg() == 0);
     assert_eq!(
         gate.running_bg(),
         0,
@@ -385,31 +375,20 @@ async fn converted_task_tally_drains_on_registry_drop() {
         .await
         .unwrap();
     assert!(out.task_id.is_some());
-    for _ in 0..50 {
-        if gate.running_bg() == 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for!(
+        "the converted task to bump the tally",
+        gate.running_bg() == 1
+    );
     assert_eq!(gate.running_bg(), 1);
     drop(backend);
-    for _ in 0..50 {
-        if gate.running_bg() == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for!(
+        "the registry Drop to drain the tally",
+        gate.running_bg() == 0
+    );
     assert_eq!(gate.running_bg(), 0, "registry Drop drains the tally");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let pgrep = std::process::Command::new("pgrep")
-        .arg("-f")
-        .arg("sleep 46")
-        .output()
-        .unwrap();
-    assert!(
-        pgrep.stdout.is_empty(),
-        "orphaned `sleep 46` survived the registry Drop: {:?}",
-        String::from_utf8_lossy(&pgrep.stdout)
+    wait_for!(
+        "the killed group to be reaped",
+        !stray_process_exists("sleep 46")
     );
 }
 
@@ -429,13 +408,10 @@ async fn carve_landing_after_fork_refuses_the_conversion() {
     // fork releases the READ (long before its timeout).
     let carver_gate = gate.clone();
     let carver = tokio::spawn(async move {
-        loop {
-            if let Ok(guard) = carver_gate.try_write() {
-                drop(guard);
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        wait_for!(
+            "the exec fork to release the carve slot",
+            carver_gate.try_write().is_ok()
+        );
     });
     let out = backend
         .exec(
@@ -525,18 +501,10 @@ async fn converted_pipes_size_watchdog_kills_overflow() {
         .await
         .unwrap();
     let id = out.task_id.expect("converted");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
+    wait_for!("the size watchdog to kill the task", {
         let read = backend.read_background(&id, 4096).await.unwrap();
-        if read.state == supervisor::TaskState::Killed {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "watchdog never killed"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+        read.state == supervisor::TaskState::Killed
+    });
 }
 
 /// Adopted-task cap path: a converted task keeps its capture pumps, so the
@@ -558,35 +526,33 @@ async fn converted_task_surfaces_disk_cap_reason() {
     // the adopted side.
     let out = backend
         .exec(
-            "for i in $(seq 1 1000000); do echo hello; sleep 0.01; done",
+            "for i in $(seq 1 3000); do echo hello; sleep 0.01; done",
             Duration::from_millis(400),
             CaptureMode::Merged,
         )
         .await
         .unwrap();
     let id = out.task_id.expect("converted to background");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        let read = backend.read_background(&id, 4096).await.unwrap();
-        if read.output.contains("disk cap") {
-            assert!(
-                read.output.contains("written to disk"),
-                "reason carries the disk volume: {}",
-                read.output
-            );
-            assert!(
-                read.output.contains("narrow the command or redirect"),
-                "recovery guidance rides the reason: {}",
-                read.output
-            );
-            return;
+    let mut seen;
+    wait_for!(
+        Duration::from_secs(20),
+        "the disk cap reason to surface on the adopted read",
+        {
+            seen = Some(backend.read_background(&id, 4096).await.unwrap());
+            seen.as_ref().is_some_and(|r| r.output.contains("disk cap"))
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "cap reason never surfaced on the adopted read path"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    );
+    let read = seen.unwrap();
+    assert!(
+        read.output.contains("written to disk"),
+        "reason carries the disk volume: {}",
+        read.output
+    );
+    assert!(
+        read.output.contains("narrow the command or redirect"),
+        "recovery guidance rides the reason: {}",
+        read.output
+    );
 }
 
 /// drain_pumps recovery: a grandchild the command backgrounded keeps the
@@ -605,24 +571,19 @@ async fn converted_grandchild_pipe_drain_reaches_terminal() {
         .await
         .unwrap();
     let id = out.task_id.expect("converted");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let read = backend.read_background(&id, 4096).await.unwrap();
-        if read.state == supervisor::TaskState::Exited {
-            assert_eq!(read.exit_code, Some(0));
-            assert!(
-                read.output.contains("grandchild-pipe"),
-                "output survived the drain: {}",
-                read.output
-            );
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "drain never finished"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let mut seen;
+    wait_for!("the drained task to reach Exited", {
+        seen = Some(backend.read_background(&id, 4096).await.unwrap());
+        seen.as_ref()
+            .is_some_and(|r| r.state == supervisor::TaskState::Exited)
+    });
+    let read = seen.unwrap();
+    assert_eq!(read.exit_code, Some(0));
+    assert!(
+        read.output.contains("grandchild-pipe"),
+        "output survived the drain: {}",
+        read.output
+    );
     // The grandchild (sleep 5) outlives the task and dies naturally;
     // killing stragglers after the leader exits is not this path's
     // contract (the drain deadline, 1s < 5s, is what unblocks the
@@ -650,17 +611,15 @@ async fn converted_task_read_after_exit_keeps_head_and_tail() {
         .await
         .unwrap();
     let id = out.task_id.expect("converted");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let read = backend.read_background(&id, 4096).await.unwrap();
-        if read.state == supervisor::TaskState::Exited {
-            assert_eq!(read.exit_code, Some(3));
-            assert!(read.output.contains('b'), "head retained");
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "task never exited");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let mut seen;
+    wait_for!("the converted task to exit", {
+        seen = Some(backend.read_background(&id, 4096).await.unwrap());
+        seen.as_ref()
+            .is_some_and(|r| r.state == supervisor::TaskState::Exited)
+    });
+    let first = seen.unwrap();
+    assert_eq!(first.exit_code, Some(3));
+    assert!(first.output.contains('b'), "head retained");
     let read = backend.read_background(&id, 4096).await.unwrap();
     assert_eq!(read.state, supervisor::TaskState::Exited);
     assert!(
@@ -691,15 +650,10 @@ async fn dropping_backend_unlinks_post_adoption_spill() {
             .await
             .unwrap();
     let id = out.task_id.expect("converted");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while spill_files(spill.path()).is_empty() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "capture never spilled post-adoption"
-        );
+    wait_for!("the capture to spill post-adoption", {
         let _ = backend.read_background(&id, 4096).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+        !spill_files(spill.path()).is_empty()
+    });
     drop(backend);
     assert!(
         spill_files(spill.path()).is_empty(),

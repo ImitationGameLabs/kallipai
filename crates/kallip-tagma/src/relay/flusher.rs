@@ -414,11 +414,11 @@ mod tests {
     }
 
     async fn wait_for_batches(capture: &Capture, n: usize) -> Vec<Vec<UpstreamEvent>> {
-        for _ in 0..400 {
+        for _ in 0..40 {
             if capture.lock().await.len() >= n {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         capture.lock().await.clone()
     }

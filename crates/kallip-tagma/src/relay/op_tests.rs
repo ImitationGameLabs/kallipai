@@ -25,7 +25,6 @@ use kallip_lesche_common::event::UpstreamEvent;
 use kallip_lesche_common::message::{Envelope, Participant, RoomMessage, TagmaReply, TagmaRequest};
 use kallip_lesche_common::rooms::RoomId;
 use std::sync::Arc;
-use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
@@ -495,12 +494,10 @@ async fn pump_splits_authored_envelope_and_system_signal() {
         let (_, entry) = registry.root_agent().expect("root present");
         entry.as_live().expect("root live").agent.events_tx.clone()
     };
-    for _ in 0..400 {
-        if events_tx.receiver_count() >= 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    crate::wait_for!(
+        "the pump to subscribe to root agent events",
+        events_tx.receiver_count() >= 1
+    );
     for ev in events {
         events_tx.send(ev).expect("pump subscribed");
         // Yield between sends so the pump's recv->emit loop keeps up; the
@@ -511,18 +508,18 @@ async fn pump_splits_authored_envelope_and_system_signal() {
     // Authored content rides the encrypted envelope channel; busy/idle do
     // NOT (they cross as plaintext signals), so the envelope capture holds
     // exactly one authored reply.
-    let mut got = Vec::new();
-    for _ in 0..300 {
+    let mut got;
+    crate::wait_for!("the authored reply to arrive", {
         got = drain_replies(&capture, &key).await;
-        if !got.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+        !got.is_empty()
+    });
     // System signals ride the plaintext upstream channel (the flusher's
     // POST /upstream batches); drain the captured batches and flatten.
     let mut sig = Vec::new();
-    for _ in 0..300 {
+    // The initial value only anchors the element type; the wait loop
+    // overwrites it before any read.
+    let _ = &sig;
+    crate::wait_for!("the system signals to arrive", {
         sig = signals
             .lock()
             .await
@@ -534,11 +531,8 @@ async fn pump_splits_authored_envelope_and_system_signal() {
                 _ => None,
             })
             .collect();
-        if sig.len() >= 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+        sig.len() >= 2
+    });
     handle.stop_pump().await;
     handle.stop_upstream_flusher().await;
     assert_eq!(

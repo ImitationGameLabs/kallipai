@@ -289,7 +289,7 @@ async fn room_pump_slot_start_stop_restart() {
     );
 
     // The first tick is immediate: wait out the spawned poll briefly.
-    for _ in 0..100 {
+    for _ in 0..10 {
         if state
             .joined_rooms
             .is_joined(&RoomId::from("room-a".to_string()))
@@ -297,7 +297,7 @@ async fn room_pump_slot_start_stop_restart() {
         {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(
         state

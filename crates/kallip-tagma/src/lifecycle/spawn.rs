@@ -30,7 +30,7 @@ use crate::state::{
     Agent, AgentEntry, AgentIdentity, AgentState, FaultedEntry, RegistryEntry, SharedState,
 };
 
-pub(crate) struct SpawnArgs {
+pub struct SpawnArgs {
     pub agent_id: AgentId,
     /// The tagma root agent for this spawn. Computed by the caller
     /// (Materialize::run / restore_one / reactivation), never re-derived inside

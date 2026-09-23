@@ -1073,43 +1073,43 @@ mod tests {
     #[test]
     fn adopt_admits_the_canonical_position_and_stores_it_canonically() {
         // The XDG data anchor is process-global: serialize the one
-        // test that redirects it. Other adopt tests only compare
-        // tree-external data dirs, so a displaced anchor cannot flip
-        // their verdicts.
-        static XDG: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = XDG.lock().unwrap();
-        let previous = std::env::var("XDG_DATA_HOME").ok();
+        // test that redirects it (the shared lock also keeps this
+        // test exclusive against any other env-touching test in the
+        // process). Other adopt tests only compare tree-external
+        // data dirs, so a displaced anchor cannot flip their
+        // verdicts.
         let home = tempdir();
-        // SAFETY: adopt tests touching the data home are serialized
-        // by the lock above; the previous value is restored below.
-        unsafe { std::env::set_var("XDG_DATA_HOME", home.path()) };
-        let slug = "canonical-test";
-        let canonical = home.path().join("kallipai").join("tagmata").join(slug);
-        fs::create_dir_all(&canonical).expect("canonical position");
+        kallip_testkit::with_env(
+            &[(
+                "XDG_DATA_HOME",
+                Some(home.path().to_str().expect("utf-8 tempdir path")),
+            )],
+            || {
+                let slug = "canonical-test";
+                let canonical = home.path().join("kallipai").join("tagmata").join(slug);
+                fs::create_dir_all(&canonical).expect("canonical position");
 
-        // The canonical position admits a bare directory, and the
-        // record stores that canonical form.
-        let ws = tempdir();
-        let first_root = tempdir();
-        let state = adopt_at(first_root.path(), slug, ws.path(), &canonical, &[]).expect("adopt");
-        assert!(matches!(state, InstanceState::Stopped), "{state:?}");
-        let stored = records::read_record(first_root.path(), slug).expect("record");
-        assert_eq!(stored.data_dir, canonical.canonicalize().unwrap());
+                // The canonical position admits a bare directory, and the
+                // record stores that canonical form.
+                let ws = tempdir();
+                let first_root = tempdir();
+                let state =
+                    adopt_at(first_root.path(), slug, ws.path(), &canonical, &[]).expect("adopt");
+                assert!(matches!(state, InstanceState::Stopped), "{state:?}");
+                let stored = records::read_record(first_root.path(), slug).expect("record");
+                assert_eq!(stored.data_dir, canonical.canonicalize().unwrap());
 
-        // A valid alias admits the adopt, and the record stores the
-        // canonical form, never the alias.
-        let alias = home.path().join("alias-to-canonical");
-        std::os::unix::fs::symlink(&canonical, &alias).expect("symlink");
-        let root = tempdir();
-        let state = adopt_at(root.path(), slug, ws.path(), &alias, &[]).expect("adopt");
-        assert!(matches!(state, InstanceState::Stopped), "{state:?}");
-        let stored = records::read_record(root.path(), slug).expect("record");
-        assert_eq!(stored.data_dir, canonical.canonicalize().unwrap());
-
-        match previous {
-            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
-            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
-        }
+                // A valid alias admits the adopt, and the record stores the
+                // canonical form, never the alias.
+                let alias = home.path().join("alias-to-canonical");
+                std::os::unix::fs::symlink(&canonical, &alias).expect("symlink");
+                let root = tempdir();
+                let state = adopt_at(root.path(), slug, ws.path(), &alias, &[]).expect("adopt");
+                assert!(matches!(state, InstanceState::Stopped), "{state:?}");
+                let stored = records::read_record(root.path(), slug).expect("record");
+                assert_eq!(stored.data_dir, canonical.canonicalize().unwrap());
+            },
+        );
     }
 
     #[test]

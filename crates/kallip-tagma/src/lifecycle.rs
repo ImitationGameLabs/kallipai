@@ -13,7 +13,8 @@ mod workspace;
 #[cfg(test)]
 pub(crate) use identity::{compose_system_prompt, meta_skill_content};
 pub(crate) use identity::{inject_identity_env, resolve_root_agent};
-pub(crate) use restore::{restore_agents, restore_inactive};
+pub use restore::restore_agents;
+pub(crate) use restore::restore_inactive;
 
 pub(crate) use spawn::{Materialize, SpawnArgs, abort_agent, spawn_agent};
 /// The single indirect spawn entry every creation path routes through;

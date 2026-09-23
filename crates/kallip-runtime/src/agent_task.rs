@@ -1246,7 +1246,7 @@ mod tests {
                 if has_msg {
                     return true;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         })
         .await;
@@ -1316,7 +1316,7 @@ mod tests {
                 if notice && body {
                     return true;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         })
         .await;
@@ -1400,7 +1400,7 @@ mod tests {
                 if has {
                     return true;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         })
         .await;
@@ -1544,7 +1544,7 @@ mod tests {
                 if let (Some(k), Some(m)) = (kick, msg) {
                     return (k, m);
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         })
         .await;

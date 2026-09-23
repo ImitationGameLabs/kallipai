@@ -5,6 +5,10 @@ edition = "2024"
 version.workspace = true
 license.workspace = true
 
+[lib]
+name = "kallip_tagma"
+path = "src/lib.rs"
+
 [dependencies]
 kallip-runtime = { workspace = true, features = ["landlock", "seccomp"] }
 kallip-common = { workspace = true, features = ["axum"] }
@@ -47,6 +51,10 @@ percent-encoding = { workspace = true }
 dirs = { workspace = true }
 arc-swap = { workspace = true }
 libc = { workspace = true }
+tempfile = { workspace = true, optional = true }
+ctor = { workspace = true, optional = true }
+temp-env = { workspace = true, optional = true }
+serial_test = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -57,7 +65,10 @@ default = []
 # unaffected. Enables the landlock feature on kallip-shell so the
 # landlock-availability skip probe (`ensure_supported`) is available.
 sandbox-test = ["kallip-shell/landlock"]
-
+test-support = ["dep:tempfile", "dep:ctor", "dep:temp-env", "dep:serial_test"]
+# Exposes `test_helpers` to integration tests (tests/roots_isolation):
+# the fixture tests re-point the process-wide INSTANCE_ROOTS singleton
+# and must run in their own process, away from the unit-test target.
 # The sandbox integration test is a black-box integration test (subprocesses +
 # filesystem, no crate-private imports), so it lives under `tests/` rather than
 # a `#[cfg(test)]` module in `src/`. `required-features` skips building the
@@ -65,6 +76,12 @@ sandbox-test = ["kallip-shell/landlock"]
 [[test]]
 name = "sandbox"
 required-features = ["sandbox-test"]
+
+# The roots-isolation fixture tests write the INSTANCE_ROOTS singleton and
+# need the crate's test helpers, so they build only under `test-support`.
+[[test]]
+name = "roots_isolation"
+required-features = ["test-support"]
 
 [dev-dependencies]
 # Wire-level assertion that the resolved User-Agent reaches the provider. reqwest applies client

@@ -1,6 +1,6 @@
 //! The direct (local, non-relay) status driver. The chat topics are consumed
 //! where they belong — at the local SSE endpoint, which merges the three bus
-//! topics over [`crate::sse::merge_direct_frames`]. Status is a snapshot
+//! topics over `crate::sse::merge_direct_frames`. Status is a snapshot
 //! pump driver instance publishing `StatusSnapshot` onto the bus under the
 //! same event-driven policy as the relay pump (the declared unification):
 //! wakes on registry invalidations and turn signals with a short debounce,

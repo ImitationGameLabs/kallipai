@@ -17,7 +17,7 @@ use crate::state::{AgentRegistry, ParkedSnapshot, SharedState, transition_state}
 /// read, mirrored as `Agent` fields. Grouped so the spawn boundary and
 /// `mark_and_snapshot` pass one value instead of five.
 #[derive(Clone)]
-pub(crate) struct BridgeCells {
+pub struct BridgeCells {
     pub state: Arc<AtomicU8>,
     pub state_since: Arc<AtomicU64>,
     pub activity: Arc<std::sync::Mutex<String>>,

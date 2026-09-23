@@ -132,7 +132,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "process group still has living members after grace period"
             );
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 }

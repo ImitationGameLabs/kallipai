@@ -8,6 +8,12 @@
 //! for "this user's login PATH carries the kallip installation" — the
 //! marker directory plays the role the kallip bin directory plays in a
 //! real deployment.
+//!
+//! Prerequisites: the workspace binaries built (kallip and kallip-tagma
+//! must resolve) and /bin/bash for the harvest shell. Missing either:
+//! each test skips with a reason instead of spuriously failing. The
+//! eprintln skip notice is --nocapture-visible only, unlike the sandbox
+//! lane's structured ran/skipped declaration.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,6 +47,16 @@ fn resolve_bin(name: &str) -> PathBuf {
         }
     }
     PathBuf::from(name)
+}
+
+/// True when the workspace binaries the daemon spawns resolve to real
+/// files. A package-scoped build produces only this crate's binary, so
+/// a missing workspace binary means the prerequisites are not built —
+/// the caller skips instead of spuriously failing.
+fn workspace_bins_available() -> bool {
+    ["kallip", "kallip-tagma"]
+        .iter()
+        .all(|bin| resolve_bin(bin).is_file())
 }
 
 struct DaemonProc {
@@ -92,7 +108,7 @@ fn start_daemon_with_home(home: &Path) -> DaemonProc {
                 _state: state_dir,
             };
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -208,7 +224,7 @@ fn stop_and_wait(client: &DaemonClient, pid: u32) {
         if !PathBuf::from(format!("/proc/{pid}")).exists() {
             return;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
     panic!("tagma {pid} did not exit after stop");
 }
@@ -235,6 +251,10 @@ fn record_env(records: &Path) -> serde_json::Value {
 fn harvest_supplies_login_env_and_daemon_keys_stay_owned() {
     if !harvest_bash_exists() {
         eprintln!("skip: no /bin/bash on this host");
+        return;
+    }
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
         return;
     }
     let home = fixture_home();
@@ -274,6 +294,10 @@ fn explicit_pairs_win_over_harvested_values() {
         eprintln!("skip: no /bin/bash on this host");
         return;
     }
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
+        return;
+    }
     let home = fixture_home();
     let daemon = start_daemon_with_home(home.path());
     let client = DaemonClient::new(&daemon.socket);
@@ -299,6 +323,10 @@ fn explicit_pairs_win_over_harvested_values() {
 fn restart_reharvests_following_profile_changes() {
     if !harvest_bash_exists() {
         eprintln!("skip: no /bin/bash on this host");
+        return;
+    }
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
         return;
     }
     let home = fixture_home();
@@ -350,6 +378,10 @@ fn restart_overlay_reaches_the_relaunched_env() {
         eprintln!("skip: no /bin/bash on this host");
         return;
     }
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
+        return;
+    }
     let home = fixture_home();
     let daemon = start_daemon_with_home(home.path());
     let client = DaemonClient::new(&daemon.socket);
@@ -383,6 +415,10 @@ fn restart_overlay_reaches_the_relaunched_env() {
 fn harvested_env_is_not_persisted() {
     if !harvest_bash_exists() {
         eprintln!("skip: no /bin/bash on this host");
+        return;
+    }
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
         return;
     }
     let home = fixture_home();
@@ -430,6 +466,10 @@ fn harvested_env_is_not_persisted() {
 fn spawn_survives_a_background_pipe_holder() {
     if !harvest_bash_exists() {
         eprintln!("skip: no /bin/bash on this host");
+        return;
+    }
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
         return;
     }
     let home = fixture_home();

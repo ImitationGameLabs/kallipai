@@ -84,7 +84,7 @@ impl InboxStore {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn open_in_memory() -> Self {
         let mut opts = ConnectOptions::new("sqlite::memory:".to_owned());
         opts.max_connections(1);

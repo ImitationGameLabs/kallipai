@@ -301,6 +301,12 @@ pub struct AppState {
     pub converge: tokio::sync::Mutex<()>,
 }
 
+#[cfg(test)]
+impl Default for AgentRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 /// Combined index: agent map + token-hash→id lookup + subagent reverse pointers.
 /// All mutations go through methods that maintain invariants atomically.
 ///
@@ -672,13 +678,13 @@ impl AppState {
     }
 
     /// Test-only constructor with generous resource limits.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(operator_token_hash: TokenHash, profiles: Arc<ArcSwap<ProfileBundle>>) -> Self {
         Self::new_with_preset(operator_token_hash, profiles, PolicyPreset::Default)
     }
 
     /// Test-only constructor with a custom tagma-global preset.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_preset(
         operator_token_hash: TokenHash,
         profiles: Arc<ArcSwap<ProfileBundle>>,
@@ -887,6 +893,9 @@ impl AgentRegistry {
 
     pub fn len(&self) -> usize {
         self.agents.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.agents.is_empty()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&AgentId, &RegistryEntry)> {

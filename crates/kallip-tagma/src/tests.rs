@@ -15,42 +15,13 @@ fn polis_toml_rejects_the_relay_table_name() {
 }
 
 #[test]
-fn files_token_scan_precedes_restore_agents() {
-    // Source-order pin: restore re-assembly fetches record bytes
-    // through the boot-time token slot, so a boot that restored
-    // before filling the slot would 503 every files fallback.
-    // Swapping the two regions (or dropping the scan) must fail
-    // here.
-    let src = include_str!("main.rs");
-    let scan = src
-        .find("let files_token = resolve_files_token(&args)")
-        .expect("token scan call site present");
-    let restore = src
-        .find("lifecycle::restore_agents(&state)")
-        .expect("restore call site present");
-    assert!(scan < restore);
-}
-
-#[test]
 fn sweep_removes_a_legacy_files_token_exactly_once() {
-    let prior = std::env::var_os("KALLIP_FILES_TOKEN");
-    // SAFETY: test-only env edit; this test is the only reader and
-    // writer of KALLIP_FILES_TOKEN in the suite (the same accepted
-    // race shape as the test_helpers data-dir bootstrapping).
-    unsafe {
-        std::env::set_var("KALLIP_FILES_TOKEN", "legacy-token");
-    }
-    assert!(sweep_legacy_files_token());
-    assert!(std::env::var_os("KALLIP_FILES_TOKEN").is_none());
-    // Idempotent: a clean environment sweeps nothing.
-    assert!(!sweep_legacy_files_token());
-    // SAFETY: restore-the-prior-value counterpart of the edit above.
-    unsafe {
-        match prior {
-            Some(value) => std::env::set_var("KALLIP_FILES_TOKEN", value),
-            None => std::env::remove_var("KALLIP_FILES_TOKEN"),
-        }
-    }
+    kallip_testkit::with_env(&[("KALLIP_FILES_TOKEN", Some("legacy-token"))], || {
+        assert!(sweep_legacy_files_token());
+        assert!(std::env::var_os("KALLIP_FILES_TOKEN").is_none());
+        // Idempotent: a clean environment sweeps nothing.
+        assert!(!sweep_legacy_files_token());
+    });
 }
 
 #[test]

@@ -592,6 +592,24 @@ async fn send_validates_targets() {
     assert!(events.as_array().expect("events").is_empty());
 }
 
+/// Poll `probe` every 100ms up to 5s, then fail naming `what`. The
+/// fire-and-forget delivery task gives no completion signal, so the
+/// push observable is all the test can await; a wall-clock bound
+/// keeps the wait honest under load, unlike a fixed retry count.
+async fn wait_for(what: &str, mut probe: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if probe() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out after 5s waiting for {what}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 #[tokio::test]
 async fn range_requests_serve_slices() {
     let world = TestWorld::new().await;
@@ -706,49 +724,70 @@ async fn dedup_keeps_sibling_records_readable() {
 
 #[tokio::test]
 async fn service_boots_and_answers_health() {
-    // Grab a free port, release it, and race the server to it: the window
-    // is tiny and the retry loop tolerates losing the race.
-    let addr = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
-        probe.local_addr().expect("probe addr")
-    };
+    // Pick a port and race the server for it: another process may grab
+    // it between the probe and the bind. A lost race kills the server
+    // task immediately (bind error), so the test retries on a fresh
+    // port, bounded, and reports the last failure when exhausted.
     let db_url = common::test_db_url().await;
     let blob = tempfile::TempDir::new().expect("blob dir");
-    let boot = kallip_files::state::BootConfig {
-        listen_addr: addr.to_string(),
-        database_url: db_url,
-        archeion_internal_url: "http://127.0.0.1:1".to_owned(),
-        archeion_internal_token: "unused".to_owned(),
-        notify_url: String::new(),
-        notify_token: String::new(),
-        blob_root: std::path::PathBuf::from(blob.path()),
-        files: kallip_files::state::FilesConfig {
-            max_body_bytes: 1024 * 1024,
-            cors_origins: String::new(),
-            degrade_fail_soft: false,
-            gc: kallip_files::gc::GcConfig::default(),
-        },
-    };
-    let handle = tokio::spawn(async move {
-        kallip_files::state::run(boot).await.expect("service runs");
-    });
-
-    let client = reqwest::Client::new();
-    let url = format!("http://{addr}/health");
-    let mut healthy = false;
-    for _ in 0..50 {
-        if let Ok(response) = client.get(&url).send().await
-            && response.status().as_u16() == 200
-        {
-            healthy = response.text().await.map(|b| b == "ok").unwrap_or(false);
-            if healthy {
-                break;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .expect("build test reqwest client");
+    let mut last_loss = None;
+    let mut outcome = None;
+    for _ in 0..3 {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+        let addr = probe.local_addr().expect("probe addr");
+        drop(probe);
+        let boot = kallip_files::state::BootConfig {
+            listen_addr: addr.to_string(),
+            database_url: db_url.clone(),
+            archeion_internal_url: "http://127.0.0.1:1".to_owned(),
+            archeion_internal_token: "unused".to_owned(),
+            notify_url: String::new(),
+            notify_token: String::new(),
+            blob_root: std::path::PathBuf::from(blob.path()),
+            files: kallip_files::state::FilesConfig {
+                max_body_bytes: 1024 * 1024,
+                cors_origins: String::new(),
+                degrade_fail_soft: false,
+                gc: kallip_files::gc::GcConfig::default(),
+            },
+        };
+        let handle = tokio::spawn(async move {
+            kallip_files::state::run(boot).await.expect("service runs");
+        });
+        let url = format!("http://{addr}/health");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut healthy = false;
+        while !healthy && !handle.is_finished() {
+            if let Ok(response) = client.get(&url).send().await
+                && response.status().as_u16() == 200
+                && response.text().await.map(|b| b == "ok").unwrap_or(false)
+            {
+                healthy = true;
+            } else {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "service never answered {url}"
+                );
             }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if healthy {
+            outcome = Some((addr, handle));
+            break;
+        }
+        // Lost the bind race (or the service died at boot): keep the
+        // failure for the exhausted-retry diagnostic and try anew.
+        last_loss = Some((addr, handle.await));
     }
+    let (_, handle) = match outcome {
+        Some(pair) => pair,
+        None => panic!("service failed to bind on 3 fresh ports: {last_loss:?}"),
+    };
     handle.abort();
-    assert!(healthy, "service never answered {url}");
 }
 /// A store wrapper recording the largest `get_range` window and the window
 /// count: evidence that streaming serves through bounded windows instead of
@@ -963,12 +1002,10 @@ async fn send_pushes_the_delivery_event_once() {
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let value = json_of(response).await;
-    for _ in 0..40 {
-        if !spy.0.lock().unwrap().is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    wait_for("the delivery push to land", || {
+        !spy.0.lock().unwrap().is_empty()
+    })
+    .await;
     let pushes = spy.0.lock().unwrap();
     assert_eq!(pushes.len(), 1);
     let (to_user, record_id, path, from, name, size) = &pushes[0];

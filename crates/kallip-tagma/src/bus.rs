@@ -15,7 +15,7 @@
 //! priorities, no cross-topic routing, no persistence, no observer-style
 //! callbacks — the bus is the buffered, pulled half of the event system
 //! only. New topics are one `Event` impl + one line at the registration
-//! site ([`tagma_bus`]); new behavior is a consumer, not a core feature.
+//! site (`tagma_bus`); new behavior is a consumer, not a core feature.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -248,7 +248,7 @@ impl std::fmt::Display for SubscribeError {
 }
 /// The typed topic bus. Immutable after `build`; held by value on
 /// [`crate::state::AppState`], so every holder of the state sees it.
-pub(crate) struct EventBus {
+pub struct EventBus {
     slots: Vec<TopicSlot>,
     index: HashMap<TypeId, usize>,
 }

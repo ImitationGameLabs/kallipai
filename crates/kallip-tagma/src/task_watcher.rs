@@ -1,4 +1,4 @@
-//! Task-ledger change watcher: subscribes to [`TaskChanged`] on the topic
+//! Task-ledger change watcher: subscribes to `TaskChanged` on the topic
 //! bus and drops a wake hint into the prompt queue of every agent whose
 //! role appears in the task's people set (assignee, confirmers, creator).
 //!

@@ -1,8 +1,8 @@
 //! Tagma-wide agent shutdown: bounded graceful drain with a force-abort safety net.
 //!
-//! Tagma exit pays no fixed worst-case sleep: [`graceful_agent_shutdown`]
+//! Tagma exit pays no fixed worst-case sleep: `graceful_agent_shutdown`
 //! drains the registry and awaits real task completion (via
-//! [`crate::state::Agent::shutdown`]) under a deadline, force-aborting
+//! `crate::state::Agent::shutdown`) under a deadline, force-aborting
 //! only the genuinely stuck tasks.
 
 use std::time::Duration;

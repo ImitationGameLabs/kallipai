@@ -431,31 +431,23 @@ mod tests {
     #[tokio::test]
     async fn fetch_without_a_registered_credential_is_unavailable() {
         // The credential check precedes the URL read, so the credential
-        // error is independent of the environment.
-        let prior_url = std::env::var("KALLIP_POLIS_URL").ok();
-        // SAFETY: test-only env edit; this test is the only reader and
-        // writer of KALLIP_POLIS_URL in the suite.
-        unsafe {
-            std::env::remove_var("KALLIP_POLIS_URL");
-        }
-        let err = fetch_record_bytes(&reqwest::Client::new(), None, uuid::Uuid::nil())
-            .await
-            .unwrap_err();
-        assert_eq!(err.status, 503);
-        assert!(err.message.contains("no registered files credential"));
-        // A registered token still takes the URL from the environment
-        // (non-secret process configuration).
-        let err = fetch_record_bytes(&reqwest::Client::new(), Some("tok"), uuid::Uuid::nil())
-            .await
-            .unwrap_err();
-        assert_eq!(err.status, 503);
-        assert!(err.message.contains("KALLIP_POLIS_URL is not set"));
-        // SAFETY: restore-the-prior-value counterpart of the edit above.
-        unsafe {
-            match prior_url {
-                Some(value) => std::env::set_var("KALLIP_POLIS_URL", value),
-                None => std::env::remove_var("KALLIP_POLIS_URL"),
-            }
-        }
+        // error is independent of the environment. The async env lock is
+        // held across the awaits below: both error paths read the
+        // variable, so the unset window must cover the whole body.
+        kallip_testkit::with_env_async(&[("KALLIP_POLIS_URL", None)], async {
+            let err = fetch_record_bytes(&reqwest::Client::new(), None, uuid::Uuid::nil())
+                .await
+                .unwrap_err();
+            assert_eq!(err.status, 503);
+            assert!(err.message.contains("no registered files credential"));
+            // A registered token still takes the URL from the environment
+            // (non-secret process configuration).
+            let err = fetch_record_bytes(&reqwest::Client::new(), Some("tok"), uuid::Uuid::nil())
+                .await
+                .unwrap_err();
+            assert_eq!(err.status, 503);
+            assert!(err.message.contains("KALLIP_POLIS_URL is not set"));
+        })
+        .await;
     }
 }

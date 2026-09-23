@@ -181,35 +181,10 @@ fn failure_phrase(kind: std::io::ErrorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kallip_testkit::DevDir;
+    use kallip_testkit::{DevDir, with_env};
 
     fn dev_tempdir(label: &str) -> DevDir {
         DevDir::new(label)
-    }
-    use std::sync::Mutex;
-
-    /// Env mutation is process-global: serialize the env-touching tests.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Set/clear env keys for the closure's duration. Serial under ENV_LOCK.
-    fn with_env<R>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let mut applied: Vec<(&str, Option<std::ffi::OsString>)> = Vec::new();
-        for (key, value) in vars {
-            applied.push((key, std::env::var_os(key)));
-            match value {
-                Some(v) => unsafe { std::env::set_var(key, v) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
-        let out = f();
-        for (key, old) in applied {
-            match old {
-                Some(v) => unsafe { std::env::set_var(key, v) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
-        out
     }
 
     #[test]

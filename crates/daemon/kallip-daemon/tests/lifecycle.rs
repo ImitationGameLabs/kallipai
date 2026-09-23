@@ -8,6 +8,10 @@
 //! alike. A package-scoped `cargo build -p kallip-daemon` does NOT
 //! produce the workspace binaries: build the workspace first or
 //! these tests spuriously fail.
+//!
+//! Prerequisites: the workspace binaries built (kallip and kallip-tagma
+//! must resolve); no daemon-specific kernel features. Missing binaries:
+//! each test skips with a reason instead of spuriously failing.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -50,6 +54,16 @@ fn resolve_bin(name: &str) -> PathBuf {
         }
     }
     PathBuf::from(name)
+}
+
+/// True when the workspace binaries the daemon spawns resolve to real
+/// files. A package-scoped build produces only this crate's binary, so
+/// a missing workspace binary means the prerequisites are not built —
+/// the caller skips instead of spuriously failing.
+fn workspace_bins_available() -> bool {
+    ["kallip", "kallip-tagma"]
+        .iter()
+        .all(|bin| resolve_bin(bin).is_file())
 }
 
 fn start_daemon() -> DaemonProc {
@@ -95,7 +109,7 @@ fn start_daemon() -> DaemonProc {
                 log_path,
             };
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
     // Give-up path: do not leak the daemon process.
     let _ = child.kill();
@@ -143,6 +157,10 @@ fn expect_ok(
 
 #[test]
 fn spawn_health_stop_round_trip() {
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
+        return;
+    }
     let daemon = start_daemon();
     let client = DaemonClient::new(&daemon.socket);
     let workspace = tempfile::tempdir().expect("workspace tempdir");
@@ -241,7 +259,7 @@ fn spawn_health_stop_round_trip() {
         if !PathBuf::from(format!("/proc/{pid}")).exists() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
     assert!(
         !PathBuf::from(format!("/proc/{pid}")).exists(),
@@ -351,6 +369,10 @@ fn spawn_health_stop_round_trip() {
 
 #[test]
 fn start_filters_consumed_enrollment_code() {
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
+        return;
+    }
     let daemon = start_daemon();
     let client = DaemonClient::new(&daemon.socket);
     let workspace = tempfile::tempdir().expect("workspace tempdir");
@@ -383,7 +405,7 @@ fn start_filters_consumed_enrollment_code() {
         if !PathBuf::from(format!("/proc/{pid}")).exists() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     // Fabricate the bug's exact state: a spawn-time enrollment code still
@@ -450,7 +472,7 @@ fn start_filters_consumed_enrollment_code() {
         if !PathBuf::from(format!("/proc/{started_pid}")).exists() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
     assert!(
         !PathBuf::from(format!("/proc/{started_pid}")).exists(),
@@ -460,6 +482,10 @@ fn start_filters_consumed_enrollment_code() {
 
 #[test]
 fn spawn_rejects_slug_reuse_and_workspace_overlap() {
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
+        return;
+    }
     let daemon = start_daemon();
     let client = DaemonClient::new(&daemon.socket);
     let workspace = tempfile::tempdir().expect("workspace");
@@ -513,6 +539,10 @@ fn spawn_rejects_slug_reuse_and_workspace_overlap() {
 
 #[test]
 fn start_recovers_from_stale_runtime_json() {
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
+        return;
+    }
     // The failure mode this locks: a leftover runtime.json from a previous
     // incarnation must not poison the launch poll, and its recorded pid
     // (required to look like a tagma before it is trusted) must not decide
@@ -549,7 +579,7 @@ fn start_recovers_from_stale_runtime_json() {
         if !PathBuf::from(format!("/proc/{pid}")).exists() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
     let stale = serde_json::json!({ "pid": pid, "port": 1, "starttime": 1 });
     let instance_dir = daemon
@@ -587,7 +617,7 @@ fn start_recovers_from_stale_runtime_json() {
         if !PathBuf::from(format!("/proc/{started_pid}")).exists() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
     assert!(
         !PathBuf::from(format!("/proc/{started_pid}")).exists(),
@@ -597,6 +627,10 @@ fn start_recovers_from_stale_runtime_json() {
 
 #[test]
 fn start_rejects_when_stale_runtime_names_a_live_pid() {
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
+        return;
+    }
     // Liveness alone decides AlreadyRunning: a leftover naming a live pid
     // (here: this test process) is refused, not taken over and not killed.
     // Under the old comm re-check this same shape wedged the poll into a
@@ -629,7 +663,7 @@ fn start_rejects_when_stale_runtime_names_a_live_pid() {
         if !PathBuf::from(format!("/proc/{pid}")).exists() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     // A live pid that is not a tagma: the conservative refusal is the
@@ -662,6 +696,10 @@ fn start_rejects_when_stale_runtime_names_a_live_pid() {
 /// TCP connect proves the boot got past identity resolution.
 #[test]
 fn manual_boot_with_slug_publishes_runtime_json() {
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
+        return;
+    }
     let data_home = tempfile::tempdir().expect("data home tempdir");
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
     let port = probe.local_addr().expect("probe addr").port();
@@ -696,7 +734,7 @@ fn manual_boot_with_slug_publishes_runtime_json() {
             connected = true;
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
     let _ = tagma.kill();
     let _ = tagma.wait();
@@ -713,6 +751,10 @@ fn manual_boot_with_slug_publishes_runtime_json() {
 /// stop succeeds because the anchor verifies the original pid.
 #[test]
 fn stop_refuses_tampered_runtime_pid_then_allows_restored() {
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
+        return;
+    }
     let daemon = start_daemon();
     let client = DaemonClient::new(&daemon.socket);
     let workspace = tempfile::tempdir().expect("workspace tempdir");
@@ -767,7 +809,7 @@ fn stop_refuses_tampered_runtime_pid_then_allows_restored() {
         if !PathBuf::from(format!("/proc/{pid}")).exists() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
     assert!(
         !PathBuf::from(format!("/proc/{pid}")).exists(),
