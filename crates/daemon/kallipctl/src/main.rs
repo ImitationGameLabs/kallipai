@@ -129,6 +129,85 @@ enum Command {
         #[arg(short = 'f', long = "follow")]
         follow: bool,
     },
+    /// Directly rewrite a content-addressed blob store's on-disk
+    /// representation (raw bytes -> zstd frames). Runs against the
+    /// store on disk -- never through the daemon's wire protocol and
+    /// never against the files metadata store.
+    Blobs {
+        #[command(subcommand)]
+        command: BlobsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum BlobsCommand {
+    /// Re-encode every raw object of one store as a zstd frame. All
+    /// targets walk the store on disk (plain, catalog-free), verify
+    /// bytes against addresses before rewriting, and commit by atomic
+    /// rename; re-runs are safe. A running owner is a warning, not a
+    /// refusal -- but stopping first is still the polite form.
+    Rewrite {
+        /// Which store to rewrite.
+        #[arg(long, value_enum, default_value_t = RewriteTarget::Tasks)]
+        target: RewriteTarget,
+        /// The instance owning the tasks/attachments blob store: its
+        /// daemon record supplies the data directory and the running
+        /// state for the warning. (The files target never reads this.)
+        #[arg(
+            long,
+            required_if_eq("target", "tasks"),
+            required_if_eq("target", "attachments")
+        )]
+        slug: Option<String>,
+        /// The files blob store root (the directory containing blobs/
+        /// and tmp/). Defaults to env KALLIP_FILES_BLOB_ROOT. Only the
+        /// files target reads this.
+        #[arg(long)]
+        blob_root: Option<String>,
+        /// Raw objects whose stored size exceeds this many bytes stay
+        /// raw. Defaults to env KALLIP_FILES_BLOB_COMPRESSION_ABOVE_BYTES
+        /// (8 MiB) for the files target; 0 = no limit.
+        #[arg(long)]
+        above_bytes: Option<u64>,
+        /// Report what would be rewritten without touching anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Leave corrupt blobs (bytes that no longer hash to their
+        /// address) untouched and count them, instead of failing the run.
+        #[arg(long)]
+        skip_corrupt: bool,
+        /// Print a cumulative progress line to stderr after this many
+        /// objects (0 = quiet until the summary; 1 = every object).
+        #[arg(long, default_value_t = 0)]
+        progress_every: usize,
+        /// zstd level for newly encoded frames (default 3).
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(i32).range(1..=22))]
+        level: i32,
+    },
+}
+
+/// The store a rewrite pass targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum RewriteTarget {
+    /// The daemon task-archive blobs (`<data_dir>/blobs/tasks`).
+    Tasks,
+    /// The attachment-mirror blobs (`<data_dir>/blobs/attachments`).
+    Attachments,
+    /// The files service's content store.
+    Files,
+}
+
+impl RewriteTarget {
+    /// The blob store directory name under a data dir (the two daemon
+    /// stores only; the files target resolves its root from --blob-root
+    /// or the environment and never calls this).
+    fn dir_name(self) -> &'static str {
+        match self {
+            RewriteTarget::Tasks => "tasks",
+            RewriteTarget::Attachments => "attachments",
+            RewriteTarget::Files => unreachable!("the files target has its own root"),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -189,6 +268,12 @@ async fn main() -> Result<()> {
         | Command::Logs { slug, .. }
         | Command::Stop { slug } => Some(slug),
         Command::Restart { slug } => Some(slug),
+        Command::Blobs {
+            command: BlobsCommand::Rewrite { target, slug, .. },
+        } => match target {
+            RewriteTarget::Tasks | RewriteTarget::Attachments => slug.as_ref(),
+            RewriteTarget::Files => None,
+        },
         Command::Config {
             command:
                 ConfigCommand::Env {
@@ -263,6 +348,34 @@ async fn main() -> Result<()> {
         Command::Restart { slug } => {
             return run_restart(&client, &slug).await;
         }
+        Command::Blobs {
+            command:
+                BlobsCommand::Rewrite {
+                    target,
+                    slug,
+                    blob_root,
+                    above_bytes,
+                    dry_run,
+                    skip_corrupt,
+                    progress_every,
+                    level,
+                },
+        } => {
+            return run_blobs_rewrite(
+                RewriteInvocation {
+                    target,
+                    slug,
+                    blob_root,
+                    above_bytes,
+                    dry_run,
+                    skip_corrupt,
+                    progress_every,
+                    level,
+                },
+                &client,
+            )
+            .await;
+        }
         Command::Config {
             command: ConfigCommand::Env { command },
         } => match command {
@@ -276,6 +389,151 @@ async fn main() -> Result<()> {
         .await
         .context("talking to the kallip daemon")?;
     print(response, started)
+}
+
+/// One fully-parsed rewrite invocation, handed over by the CLI
+/// dispatch.
+struct RewriteInvocation {
+    target: RewriteTarget,
+    slug: Option<String>,
+    blob_root: Option<String>,
+    above_bytes: Option<u64>,
+    dry_run: bool,
+    skip_corrupt: bool,
+    progress_every: usize,
+    level: i32,
+}
+
+/// The blobs rewrite verb: plain on-disk work under the same
+/// Result-based flow the wire verbs use, against whichever store the
+/// target names.
+async fn run_blobs_rewrite(args: RewriteInvocation, client: &DaemonClient) -> Result<()> {
+    let corrupt = if args.skip_corrupt {
+        kallip_blob_store::CorruptPolicy::Skip
+    } else {
+        kallip_blob_store::CorruptPolicy::Fail
+    };
+    let root = match args.target {
+        RewriteTarget::Tasks | RewriteTarget::Attachments => {
+            let slug = args
+                .slug
+                .as_deref()
+                .context("this target rewrites a specific instance's store: pass --slug")?;
+            // The daemon's record supplies the data directory; a
+            // running instance is a warning, not a refusal -- the walk
+            // plus atomic renames stays safe under a live writer (the
+            // worst case is a concurrent write winning the rename race
+            // and getting re-framed next run) -- but the operator
+            // should know.
+            let response = client
+                .call(RequestBody::Record {
+                    slug: slug.to_owned(),
+                })
+                .await
+                .context("talking to the kallip daemon")?;
+            let data_dir = match response.body {
+                ResponseBody::Ok {
+                    payload: OkPayload::Record { data_dir, state },
+                } => {
+                    if state == InstanceState::Running {
+                        eprintln!(
+                            "warning: instance {slug} is running; rewriting its store in place"
+                        );
+                    }
+                    data_dir
+                }
+                ResponseBody::Err { message, .. } => {
+                    anyhow::bail!("cannot rewrite {slug}: {message}");
+                }
+                _ => anyhow::bail!("unexpected daemon response while resolving {slug}"),
+            };
+            data_dir.join("blobs").join(args.target.dir_name())
+        }
+        RewriteTarget::Files => {
+            if args.slug.is_some() {
+                anyhow::bail!("--slug applies to the tasks/attachments targets only");
+            }
+            let addr =
+                std::env::var("KALLIP_FILES_ADDR").unwrap_or_else(|_| "127.0.0.1:7400".to_owned());
+            if let Some(detail) = files_service_answers(&addr).await {
+                eprintln!("warning: the files service answers on {addr} ({detail})");
+            }
+            args.blob_root
+                .or_else(|| std::env::var("KALLIP_FILES_BLOB_ROOT").ok())
+                .context("--blob-root or KALLIP_FILES_BLOB_ROOT is required")?
+                .into()
+        }
+    };
+    // The size threshold defaults to each store's writer policy: the
+    // files service reads its env (8 MiB fallback), while the daemon
+    // stores' writers have no threshold at all -- so the default there
+    // is unlimited, and the tool never disagrees with its writer.
+    let threshold = match args.above_bytes {
+        Some(v) => v,
+        None => match args.target {
+            RewriteTarget::Files => {
+                match std::env::var("KALLIP_FILES_BLOB_COMPRESSION_ABOVE_BYTES") {
+                    Ok(v) => v
+                        .parse::<u64>()
+                        .context("KALLIP_FILES_BLOB_COMPRESSION_ABOVE_BYTES is not a number")?,
+                    Err(_) => 8 * 1024 * 1024,
+                }
+            }
+            // The daemon stores' writers have no threshold at all.
+            _ => 0,
+        },
+    };
+    let report = kallip_blob_store::rewrite_root(
+        &root,
+        &kallip_blob_store::RewriteOptions {
+            dry_run: args.dry_run,
+            level: args.level,
+            corrupt,
+            progress_every: args.progress_every,
+            max_stored_bytes: (threshold > 0).then_some(threshold),
+        },
+    )?;
+    print_rewrite_summary(&report);
+    Ok(())
+}
+
+/// The shared end-of-run summary: the same honestly-counted totals in
+/// every mode. The dry run never invents an "after" number.
+fn print_rewrite_summary(report: &kallip_blob_store::RewriteReport) {
+    println!(
+        "scanned={} rewritten={} would_rewrite={} already_compressed={} skipped_corrupt={} skipped_oversized={} bytes_raw={} bytes_compressed={}",
+        report.scanned,
+        report.rewritten,
+        report.dry_run_would_rewrite,
+        report.already_compressed,
+        report.skipped_corrupt,
+        report.skipped_oversized,
+        report.bytes_raw,
+        report.bytes_compressed,
+    );
+}
+
+/// Probe the files service's unauthenticated /health: `Some(detail)`
+/// means something answered (the warning fires), `None` means nothing
+/// is listening on the service address.
+async fn files_service_answers(addr: &str) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.ok()?;
+    let request = format!("GET /health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.ok()?;
+    let mut buf = vec![0u8; 256];
+    let n = stream.read(&mut buf).await.unwrap_or(0);
+    let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+    let first = head.lines().next().unwrap_or("").to_owned();
+    Some(
+        if first.starts_with("HTTP/1.1 200") || first.starts_with("HTTP/1.0 200") {
+            "answers /health with 200".to_owned()
+        } else if first.is_empty() {
+            "accepts connections but answered nothing".to_owned()
+        } else {
+            format!("answered unexpectedly: {first}")
+        },
+    )
 }
 
 /// The one-line adopt outcome: verb, slug, and the observed state —
@@ -478,6 +736,10 @@ fn print(response: Response, started: bool) -> Result<()> {
                 OkPayload::EnvUnset { slug, removed } => {
                     let listed = removed.join(", ");
                     println!("removed {listed} from {slug} env; takes effect on next start");
+                }
+                OkPayload::Record { data_dir, state } => {
+                    println!("{}", data_dir.display());
+                    println!("state: {}", state.as_str());
                 }
                 OkPayload::Log { text, .. } => {
                     if text.is_empty() {

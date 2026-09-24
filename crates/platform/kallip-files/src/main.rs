@@ -48,6 +48,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             kallip_common::secret_file::BOOT_RETRY,
         )?,
         blob_root: args.blob_root.into(),
+        blob_policy: kallip_blob_store::IngestPolicy {
+            compression: kallip_blob_store::Compression::from_config_word(
+                &args.blob_compression,
+                args.blob_compression_level,
+            ),
+            compress_above: (args.blob_compression_above_bytes > 0)
+                .then_some(args.blob_compression_above_bytes),
+        },
         files: config,
         notify_url: args.notify_url,
         notify_token: args.notify_token,

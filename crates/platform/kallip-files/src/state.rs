@@ -75,6 +75,9 @@ pub struct BootConfig {
     /// Root directory of the blob store (the reconciler walks it; the
     /// store trait itself has no directory listing).
     pub blob_root: std::path::PathBuf,
+    /// How new uploads are stored (ingest-side policy; reads
+    /// self-identify from the bytes and need no recorded facts).
+    pub blob_policy: kallip_blob_store::IngestPolicy,
     /// The files-specific statics.
     pub files: FilesConfig,
 }
@@ -151,7 +154,7 @@ pub async fn run(boot: BootConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     let db = metadata::connect_and_migrate(&boot.database_url).await?;
     let state = AppState {
         db: db.clone(),
-        blob: LocalBackend::arc(&boot.blob_root),
+        blob: LocalBackend::arc_with_policy(&boot.blob_root, boot.blob_policy),
         blob_root: boot.blob_root.clone(),
         control: Arc::new(FilesControlPlane::new(
             boot.archeion_internal_url,

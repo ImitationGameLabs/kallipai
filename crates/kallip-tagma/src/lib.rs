@@ -200,20 +200,27 @@ pub async fn run(args: Args) -> Result<()> {
     .await
     .context("open task store")?;
     state.tasks.set(Arc::new(task_store)).ok();
+    // The two blob stores read their own settings sections
+    // ([blob.tasks] / [blob.attachments]); the defaults differ -- task
+    // archives compress by default, attachment mirrors stay raw unless
+    // explicitly enabled (mirrors are mostly already-compressed
+    // images, so wrapping them in a frame buys little).
     state
         .task_blobs
-        .set(kallip_blob_store::LocalBackend::arc(
+        .set(kallip_blob_store::LocalBackend::arc_with(
             kallip_runtime::persistence::data_dir_root()?
                 .join("blobs")
                 .join("tasks"),
+            settings::load_task_blob_compression(),
         ))
         .ok();
     state
         .attachment_blobs
-        .set(kallip_blob_store::LocalBackend::arc(
+        .set(kallip_blob_store::LocalBackend::arc_with(
             kallip_runtime::persistence::data_dir_root()?
                 .join("blobs")
                 .join("attachments"),
+            settings::load_attachment_blob_compression(),
         ))
         .ok();
 

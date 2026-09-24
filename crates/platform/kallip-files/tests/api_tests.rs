@@ -748,6 +748,10 @@ async fn service_boots_and_answers_health() {
             notify_url: String::new(),
             notify_token: String::new(),
             blob_root: std::path::PathBuf::from(blob.path()),
+            blob_policy: kallip_files::IngestPolicy {
+                compression: kallip_files::Compression::Off,
+                compress_above: None,
+            },
             files: kallip_files::state::FilesConfig {
                 max_body_bytes: 1024 * 1024,
                 cors_origins: String::new(),
@@ -813,12 +817,8 @@ impl kallip_files::BlobStore for WindowRecorder {
     async fn put(
         &self,
         content: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
-    ) -> Result<kallip_files::BlobId, kallip_files::Error> {
+    ) -> Result<kallip_files::PutOutcome, kallip_files::Error> {
         self.inner.put(content).await
-    }
-
-    async fn get(&self, id: &kallip_files::BlobId) -> Result<Vec<u8>, kallip_files::Error> {
-        self.inner.get(id).await
     }
 
     async fn get_range(
@@ -827,11 +827,17 @@ impl kallip_files::BlobStore for WindowRecorder {
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, kallip_files::Error> {
+        // The production read path windows through get_range; the
+        // window accounting follows it.
         self.max_window
             .fetch_max(len as usize, std::sync::atomic::Ordering::SeqCst);
         self.windows
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.get_range(id, offset, len).await
+    }
+
+    async fn get(&self, id: &kallip_files::BlobId) -> Result<Vec<u8>, kallip_files::Error> {
+        self.inner.get(id).await
     }
 
     async fn stat(
@@ -1058,4 +1064,82 @@ async fn lesche_delivered_false_answer_is_tolerated() {
     )
     .await;
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+/// A service-level round trip under the zstd ingest policy: an upload
+/// below the size threshold lands as a zstd frame on disk, GET returns
+/// the original bytes through read-side self-identification, and a
+/// Range window slices the decoded content. This pins the HTTP-face
+/// glue: the write-side policy and the read path agree with nothing
+/// recorded anywhere.
+#[tokio::test]
+async fn zstd_policy_round_trips_through_self_identified_reads() {
+    let blob_dir = tempfile::TempDir::new().expect("blob dir");
+    let blob_root = blob_dir.path().to_path_buf();
+    let world = TestWorld::with_parts(
+        kallip_files::LocalBackend::arc_with_policy(
+            &blob_root,
+            kallip_files::IngestPolicy {
+                compression: kallip_files::Compression::Zstd { level: 3 },
+                // Far above this upload's size, so it must take the
+                // frame path.
+                compress_above: Some(1024 * 1024),
+            },
+        ),
+        blob_root,
+        1024 * 1024,
+        blob_dir,
+        None,
+    )
+    .await;
+    // Deterministic content that is not itself a zstd frame.
+    let content: Vec<u8> = (0..64 * 1024).map(|i| (i * 7 % 251) as u8).collect();
+    let (record_id, blob_id) = put_ok(
+        &world,
+        cookie_for(&world, 1),
+        &user1_shared(&world, "framed.bin"),
+        &content,
+    )
+    .await;
+
+    // The write side really framed it: a raw/raw double miss would
+    // still satisfy the byte equality below. The content-addressed
+    // layout is two-level buckets, so walk the buckets for the id.
+    let buckets = world.blob_dir.path().join("blobs");
+    let stored_path = std::fs::read_dir(&buckets)
+        .expect("buckets dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path().join(&blob_id))
+        .find(|candidate| candidate.exists())
+        .expect("blob on disk");
+    let stored = std::fs::read(stored_path).expect("read stored blob");
+    assert!(
+        kallip_blob_store::compression::is_zstd_frame(&stored),
+        "upload below the threshold must land as a zstd frame"
+    );
+
+    // The read side self-identifies the stored bytes end to end.
+    let response = get(&world, cookie_for(&world, 1), &record_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(bytes_of(response).await, content);
+
+    // A Range window slices the decoded content.
+    let request = with_auth(
+        Request::builder()
+            .method(axum::http::Method::GET)
+            .uri(format!("/{record_id}")),
+        cookie_for(&world, 1),
+    )
+    .header("range", "bytes=1000-1099")
+    .body(axum::body::Body::empty())
+    .expect("build request");
+    let response = world
+        .router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()["content-range"], "bytes 1000-1099/65536");
+    assert_eq!(bytes_of(response).await, content[1000..1100]);
 }

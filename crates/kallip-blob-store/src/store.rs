@@ -14,6 +14,25 @@ pub struct BlobInfo {
     pub size: u64,
 }
 
+/// The ingest-side representation policy: which representation new
+/// blobs get and the logical-size ceiling above which an object stays
+/// raw anyway (a compressed ranged read decodes the whole frame, so
+/// very large objects keep raw cost and memory behavior). Reads are
+/// self-identifying: they decode a frame whose content hashes back to
+/// the address and pass anything else through unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngestPolicy {
+    pub compression: crate::compression::Compression,
+    pub compress_above: Option<u64>,
+}
+
+/// What a successful `put` produced: the content address of the
+/// stored object (dedup means the address may already have existed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutOutcome {
+    pub id: BlobId,
+}
+
 /// The full blob surface, backend-agnostic.
 ///
 /// The trait is object-safe so services can hold an
@@ -31,10 +50,10 @@ pub struct BlobInfo {
 /// start to EOF must succeed.
 #[async_trait]
 pub trait BlobStore: Send + Sync + 'static {
-    /// Stream `content` in, store it, return its content address.
+    /// Stream `content` in, store it, return the content address.
     /// Uploading the same bytes again is idempotent: the store keeps
     /// exactly one copy per digest.
-    async fn put(&self, content: &mut (dyn AsyncRead + Unpin + Send)) -> Result<BlobId, Error>;
+    async fn put(&self, content: &mut (dyn AsyncRead + Unpin + Send)) -> Result<PutOutcome, Error>;
 
     /// Read the whole blob into memory, sized to the blob (the upload
     /// size cap bounds it); prefer [`Self::get_range`] windows when

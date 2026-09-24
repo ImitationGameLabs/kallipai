@@ -178,6 +178,11 @@ arc-swap = "1"
 tokenx-rs = "0.1"
 temp-env = "0.3"
 tempfile = "3"
+# Blob-store compression: the zstd binding drives both the encode pass
+# (pledged source size + checksum in the frame header) and the decode /
+# frame-magic sniffing on the read side.
+zstd = "0.14.0"
+zstd-safe = "8.0.0"
 http-body-util = "0.1"
 wiremock = "0.6.5"
 serial_test = "3.5.0"

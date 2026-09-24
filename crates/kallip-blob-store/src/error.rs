@@ -24,6 +24,10 @@ pub enum Error {
     #[error("entropy source failure: {0}")]
     Rng(String),
 
+    /// The blocking encode pass died (join error on the blocking pool).
+    #[error("blob encode task failed: {0}")]
+    Encode(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

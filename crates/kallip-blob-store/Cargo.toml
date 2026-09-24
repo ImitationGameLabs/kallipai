@@ -12,6 +12,9 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util"] }
+tracing = { workspace = true }
+zstd = { workspace = true }
+zstd-safe = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -118,6 +118,16 @@ impl Daemon {
                     None => err(ErrorCode::NotFound, format!("no instance named {slug}")),
                 }
             }
+            RequestBody::Record { slug } => match instances.iter().find(|i| i.slug == slug) {
+                Some(instance) => match crate::records::read_record(&self.record_root, &slug) {
+                    Some(record) => ok(OkPayload::Record {
+                        data_dir: record.data_dir,
+                        state: instance.health().state,
+                    }),
+                    None => err(ErrorCode::NotFound, format!("no record named {slug}")),
+                },
+                None => err(ErrorCode::NotFound, format!("no instance named {slug}")),
+            },
             RequestBody::Spawn {
                 slug,
                 workspace,

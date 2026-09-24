@@ -15,7 +15,9 @@ pub mod notify;
 #[cfg(test)]
 mod test_helpers;
 
-pub use kallip_blob_store::{BlobId, BlobInfo, BlobStore, Error, LocalBackend};
+pub use kallip_blob_store::{
+    BlobId, BlobInfo, BlobStore, Compression, Error, IngestPolicy, LocalBackend, PutOutcome,
+};
 
 pub mod acl;
 pub mod api;

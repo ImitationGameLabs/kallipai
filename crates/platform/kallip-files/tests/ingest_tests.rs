@@ -62,7 +62,7 @@ fn parse_accepts_the_canonical_form_and_rejects_the_rest() {
 #[tokio::test]
 async fn empty_upload_yields_the_known_digest_id() {
     let (backend, _dir) = store().await;
-    let id = backend.put(&mut reader(b"")).await.expect("put");
+    let id = backend.put(&mut reader(b"")).await.expect("put").id;
     assert_eq!(id.as_str(), EMPTY_SHA256);
     let info = backend.stat(&id).await.expect("stat").expect("stored");
     assert_eq!(info.size, 0);
@@ -73,8 +73,8 @@ async fn empty_upload_yields_the_known_digest_id() {
 #[tokio::test]
 async fn reupload_is_idempotent_with_one_stored_copy() {
     let (backend, dir) = store().await;
-    let first = backend.put(&mut reader(CONTENT)).await.expect("put");
-    let second = backend.put(&mut reader(CONTENT)).await.expect("put");
+    let first = backend.put(&mut reader(CONTENT)).await.expect("put").id;
+    let second = backend.put(&mut reader(CONTENT)).await.expect("put").id;
     assert_eq!(first, second);
     assert_eq!(count_files(&dir.path().join("blobs")), 1);
     assert_eq!(count_files(&dir.path().join("tmp")), 0);
@@ -87,8 +87,8 @@ async fn reupload_is_idempotent_with_one_stored_copy() {
 #[tokio::test]
 async fn distinct_content_yields_distinct_ids() {
     let (backend, _dir) = store().await;
-    let a = backend.put(&mut reader(b"alpha")).await.expect("put a");
-    let b = backend.put(&mut reader(b"beta")).await.expect("put b");
+    let a = backend.put(&mut reader(b"alpha")).await.expect("put a").id;
+    let b = backend.put(&mut reader(b"beta")).await.expect("put b").id;
     assert_ne!(a, b);
     assert_eq!(backend.stat(&a).await.expect("stat").unwrap().size, 5);
     assert_eq!(backend.stat(&b).await.expect("stat").unwrap().size, 4);
@@ -122,7 +122,11 @@ async fn concurrent_same_content_uploads_self_clean() {
 #[tokio::test]
 async fn delete_is_idempotent_and_reads_then_miss() {
     let (backend, _dir) = store().await;
-    let id = backend.put(&mut reader(b"ephemeral")).await.expect("put");
+    let id = backend
+        .put(&mut reader(b"ephemeral"))
+        .await
+        .expect("put")
+        .id;
     assert!(backend.stat(&id).await.expect("stat").is_some());
     backend.delete(&id).await.expect("delete");
     backend.delete(&id).await.expect("delete again");
@@ -134,7 +138,7 @@ async fn delete_is_idempotent_and_reads_then_miss() {
 #[tokio::test]
 async fn stored_file_lands_in_its_bucket() {
     let (backend, dir) = store().await;
-    let id = backend.put(&mut reader(CONTENT)).await.expect("put");
+    let id = backend.put(&mut reader(CONTENT)).await.expect("put").id;
     let path = dir.path().join("blobs").join(id.bucket()).join(id.as_str());
     assert!(path.is_file());
 }
@@ -154,13 +158,15 @@ async fn multi_chunk_content_roundtrips_and_dedups() {
     let id = backend
         .put(&mut std::io::Cursor::new(content.clone()))
         .await
-        .expect("put");
+        .expect("put")
+        .id;
     assert_eq!(backend.get(&id).await.expect("get"), content);
     let info = backend.stat(&id).await.expect("stat").expect("stored");
     assert_eq!(info.size, expected_len);
     let again = backend
         .put(&mut std::io::Cursor::new(content))
         .await
-        .expect("re-put");
+        .expect("re-put")
+        .id;
     assert_eq!(id, again);
 }

@@ -116,10 +116,10 @@ pub async fn put_file(
     // until then no space is quota-checked and uploads
     // are bounded only by the body cap below.
 
-    let blob_id = {
+    let outcome = {
         let mut reader = CappedBody::new(body, state.config.max_body_bytes);
         match state.blob.put(&mut reader).await {
-            Ok(blob_id) => blob_id,
+            Ok(outcome) => outcome,
             Err(e) => {
                 if reader.exceeded() {
                     return Err(ApiError {
@@ -136,6 +136,7 @@ pub async fn put_file(
             }
         }
     };
+    let blob_id = outcome.id;
 
     let size = state
         .blob

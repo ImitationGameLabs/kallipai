@@ -62,7 +62,7 @@ pub(crate) async fn store_mirror(
 ) -> Option<String> {
     let blobs = blobs?;
     match blobs.put(&mut std::io::Cursor::new(bytes)).await {
-        Ok(id) => Some(id.as_str().to_owned()),
+        Ok(outcome) => Some(outcome.id.as_str().to_owned()),
         Err(e) => {
             tracing::warn!("attachment mirror write failed (falling back to files): {e}");
             None

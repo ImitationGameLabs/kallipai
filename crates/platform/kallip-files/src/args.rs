@@ -72,4 +72,24 @@ pub struct Args {
     /// Maximum catalog rows reclaimed per GC pass.
     #[arg(long, env = "KALLIP_FILES_GC_BATCH", default_value_t = 128)]
     pub gc_batch: u32,
+    /// How new uploads are physically stored: `zstd` frames them
+    /// (below the size threshold), `off` keeps every object raw. This
+    /// is the write-side policy only -- reads self-identify from the
+    /// bytes either way.
+    #[arg(
+        long,
+        env = "KALLIP_FILES_BLOB_COMPRESSION",
+        value_parser = clap::builder::PossibleValuesParser::new(kallip_blob_store::Compression::CONFIG_WORDS),
+        default_value = "off"
+    )]
+    pub blob_compression: String,
+    /// zstd level for newly framed uploads (clamped 1..=22).
+    #[arg(long, env = "KALLIP_FILES_BLOB_COMPRESSION_LEVEL", default_value_t = 3, value_parser = clap::value_parser!(i32).range(1..=22))]
+    pub blob_compression_level: i32,
+    /// Uploads larger than this many logical bytes stay raw even when
+    /// compression is on: a compressed ranged read decodes the whole
+    /// frame, so large objects keep raw cost and memory behavior.
+    /// `0` disables the threshold.
+    #[arg(long, env = "KALLIP_FILES_BLOB_COMPRESSION_ABOVE_BYTES", default_value_t = 8 * 1024 * 1024)]
+    pub blob_compression_above_bytes: u64,
 }

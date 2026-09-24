@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 kallip-daemon-client = { workspace = true }
+kallip-blob-store = { workspace = true }
 kallip-daemon-common = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }

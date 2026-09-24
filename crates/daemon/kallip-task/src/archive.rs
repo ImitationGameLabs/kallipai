@@ -65,7 +65,7 @@ pub fn pack_dir(dir: &Path) -> Result<Vec<u8>, Error> {
 /// Stores the packed bytes; the returned id is the content address.
 pub async fn ingest(blobs: &dyn BlobStore, bytes: Vec<u8>) -> Result<BlobId, Error> {
     let mut cursor = Cursor::new(bytes);
-    let id = blobs.put(&mut cursor).await?;
+    let id = blobs.put(&mut cursor).await?.id;
     Ok(id)
 }
 

@@ -11,7 +11,8 @@ async fn stored() -> (LocalBackend, tempfile::TempDir, BlobId) {
     let id = backend
         .put(&mut std::io::Cursor::new(CONTENT))
         .await
-        .expect("put");
+        .expect("put")
+        .id;
     (backend, dir, id)
 }
 

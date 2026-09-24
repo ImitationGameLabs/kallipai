@@ -134,6 +134,12 @@ pub enum RequestBody {
     EnvUnset { slug: String, keys: Vec<String> },
     /// One instance's health, or omit `slug` for the daemon itself.
     Health { slug: Option<String> },
+    /// One instance's record facts: where its data directory lives and
+    /// whether it is running. The blob-rewrite tool's slug arm reads
+    /// both: the running state drives a warning (not a refusal -- the
+    /// on-disk walk stays safe under a live writer), and the data
+    /// directory locates `<data_dir>/blobs/` without guessing paths.
+    Record { slug: String },
 }
 
 /// A daemon response envelope.
@@ -208,6 +214,10 @@ pub enum OkPayload {
     },
     Health {
         report: HealthReport,
+    },
+    Record {
+        data_dir: std::path::PathBuf,
+        state: InstanceState,
     },
 }
 

@@ -267,7 +267,7 @@ mod tests {
     async fn store_with(root: &Path, content: &[u8]) -> (BlobId, LocalBackend) {
         let store = LocalBackend::new(root);
         let mut reader = std::io::Cursor::new(content);
-        let id = store.put(&mut reader).await.expect("put blob");
+        let id = store.put(&mut reader).await.expect("put blob").id;
         (id, store)
     }
 

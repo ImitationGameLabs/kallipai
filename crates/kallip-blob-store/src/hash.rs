@@ -61,6 +61,14 @@ impl BlobId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The raw 32-byte digest behind the hex form.
+    pub fn digest(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(&self.0[Self::PREFIX.len()..], &mut out)
+            .expect("canonical lowercase hex is always decodable");
+        out
+    }
 }
 
 impl fmt::Display for BlobId {

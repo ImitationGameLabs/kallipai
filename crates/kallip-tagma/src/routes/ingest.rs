@@ -212,6 +212,7 @@ async fn store_blob(
     blobs
         .put(&mut std::io::Cursor::new(bytes))
         .await
+        .map(|outcome| outcome.id)
         .map_err(|e| {
             tracing::warn!("attachment blob store write failed: {e}");
             ApiError::unavailable(format!("attachment blob store write failed: {e}"))
@@ -782,7 +783,7 @@ mod tests {
         // Pre-store the master copy the header will point at; the
         // request body stays empty.
         let mut bytes: &[u8] = &[3, 1, 4];
-        let stored = backend.put(&mut bytes).await.unwrap();
+        let stored = backend.put(&mut bytes).await.unwrap().id;
 
         let mut headers = op_headers("image/png", None);
         headers.insert("x-kallip-blob-id", stored.as_str().parse().unwrap());

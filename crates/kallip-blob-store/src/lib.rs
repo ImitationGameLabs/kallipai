@@ -14,16 +14,21 @@
 //! `<root>/blobs/<first two hex characters>/<id>` with staging under
 //! `<root>/tmp/`, both on one volume so commits are atomic renames.
 
+pub mod compression;
+pub mod encode;
 pub mod error;
 pub mod hash;
 mod ingest;
 pub mod local;
+pub mod rewrite;
 pub mod store;
 
+pub use self::compression::Compression;
 pub use self::error::Error;
 pub use self::hash::BlobId;
 pub use self::local::LocalBackend;
-pub use self::store::{BlobInfo, BlobStore};
+pub use self::rewrite::{CorruptPolicy, RewriteOptions, RewriteReport, rewrite_root};
+pub use self::store::{BlobInfo, BlobStore, IngestPolicy, PutOutcome};
 
 /// The on-disk layout for one blob: `<root>/blobs/<bucket>/<id>`.
 ///
