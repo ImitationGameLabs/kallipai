@@ -19,7 +19,6 @@
     chat_channel_error,
     chat_channel_unavailable,
     common_retry,
-    chat_offline_no_history,
     chat_opening,
     chat_go_tagmata,
     nav_breadcrumb_tagma,
@@ -141,15 +140,10 @@
           </button>
         </div>
         <div class="flex-1 min-h-0">
-          {#if offlineView.transcript.lines.length === 0}
-            <div class="h-full grid place-items-center p-6">
-              <p class="text-sm opacity-70 max-w-sm text-center">
-                {chat_offline_no_history()}
-              </p>
-            </div>
-          {:else}
-            <ChannelChatPage conversationId={offlineView.conversationId} />
-          {/if}
+          <!-- Zero history is the same page with an empty transcript: the
+               no-history notice renders inside ChannelChatPage's notice
+               slot, in the same shape as the offline/cached-time notes. -->
+          <ChannelChatPage conversationId={offlineView.conversationId} />
         </div>
       </div>
     {:else if channelsStore.isAutoOpenFailed(tagmaId) && channelState.kind !== "pending"}

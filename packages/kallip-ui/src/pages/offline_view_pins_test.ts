@@ -121,3 +121,38 @@ Deno.test(
     );
   },
 );
+
+Deno.test(
+  "zero history renders the same ChannelChatPage (no separate empty branch)",
+  () => {
+    const src = source(TAGMA_PAGE);
+    const branch = src.indexOf("offlineView");
+    assert(branch !== -1, "an offlineView branch must exist");
+    const body = src.slice(branch, src.indexOf("{:else if", branch));
+    assert(
+      src.indexOf("<ChannelChatPage", branch) !== -1,
+      "the offline branch mounts the shared chat page",
+    );
+    assert(
+      !body.includes("lines.length === 0"),
+      "zero history is a count-0 case of the same page, not a separate branch",
+    );
+  },
+);
+
+Deno.test(
+  "the zero-history notice renders inside ChannelChatPage's notice slot",
+  () => {
+    const src = source(CHANNEL_PAGE);
+    // The call site, not the import line: search after the notice snippet.
+    const snippet = src.indexOf("#snippet notice()");
+    assert(snippet !== -1, "the notice slot must exist");
+    const at = src.indexOf("chat_offline_no_history()", snippet);
+    assert(at !== -1, "the notice must render inside the notice slot");
+    const guard = src.slice(src.lastIndexOf("{#if", at), at);
+    assert(
+      guard.includes('"offline-view"') && guard.includes("lines.length === 0"),
+      "the notice gates on the offline view with an empty transcript",
+    );
+  },
+);

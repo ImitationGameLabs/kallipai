@@ -28,7 +28,10 @@
   import { convDraftKey, tagmaDraftKey } from "../lib/session/drafts.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { tagmaForConversation } from "../lib/session/convOf.ts";
-  import { chat_conversation_unknown } from "../paraglide/messages.js";
+  import {
+    chat_conversation_unknown,
+    chat_offline_no_history,
+  } from "../paraglide/messages.js";
   import { realtimeStore } from "../lib/session/realtime.svelte";
   import {
     filesClientOrFail,
@@ -455,6 +458,11 @@
             {downloadAttachment}
           >
             {#snippet notice()}
+              {#if conv.kind === "offline-view" && conv.transcript.lines.length === 0}
+                <p class="text-xs opacity-70 text-center">
+                  {chat_offline_no_history()}
+                </p>
+              {/if}
               {#if conv.status === "offline"}
                 <p
                   class="text-xs text-error-500 dark:text-error-400 text-center"

@@ -602,7 +602,13 @@ export class ChannelsStore {
     attachment?: FileAttachment,
   ): void {
     const conv = this.conversations.get(conversationId);
-    if (!conv || !conv.connected) return;
+    // Same gate the chat page's canSubmit uses: open sends live,
+    // offline queues to the store. Judging transport here instead made
+    // the offline view's designed send path (failed line + retry +
+    // pending store) unreachable -- the message just vanished.
+    if (!conv || (conv.status !== "open" && conv.status !== "offline")) {
+      return;
+    }
     void conv.send(text, attachment);
   }
 

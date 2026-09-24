@@ -1137,6 +1137,12 @@ export class OfflineConversation extends ConversationBase {
     this.transcript = sendFailed(this.transcript, localId, chat_send_failed());
   }
 
+  /** No retry on the offline view: with no transport the pump would
+   *  throw inside its send and the catch would demote the durable
+   *  queued row to failed, cancelling the reconnect auto-flush that
+   *  send() deliberately preserves. The failed line keeps its retry
+   *  button only where a live channel exists. */
+  override retrySend(_localSeq: number): void {}
   /** Cache-first page source: offline there is nothing else. */
   protected override async loadOlderPage(k: number): Promise<void> {
     const head = this.minRendered;
