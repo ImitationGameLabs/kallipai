@@ -7,14 +7,15 @@
 //! executes the work at that moment.
 
 use std::borrow::Cow;
-use std::path::Path;
 
 use crate::{Task, TaskEvent};
 use kallip_blob_store::{BlobId, BlobStore};
 use kallip_common::protocol::{
-    AssociationExport, EventExport, TaskConfirmRequest, TaskCreateRequest, TaskExport,
-    TaskListPage, TaskRow,
+    AssociationExport, EventExport, TaskCloseRequest, TaskConfirmRequest, TaskCreateRequest,
+    TaskExport, TaskListPage, TaskRow,
 };
+use std::path::Path;
+
 use sea_orm::entity::prelude::*;
 use sea_orm::{
     ActiveValue::Set, ConnectOptions, Database, DatabaseBackend, DatabaseConnection,
@@ -23,14 +24,14 @@ use sea_orm::{
 use sea_orm_migration::MigratorTrait as _;
 use time::OffsetDateTime;
 
+use crate::Error;
 use crate::entities::task::{ActiveModel, Column as TaskColumn, Entity as TaskEntity};
 use crate::entities::task_event::{
     ActiveModel as EventActive, Column as EventColumn, Entity as EventEntity,
 };
 use crate::entities::{task, task_event};
 use crate::gates;
-use crate::model::{ClosedReason, TaskStatus, Transition};
-use crate::{Error, archive};
+use crate::model::{TaskStatus, Transition};
 
 /// The name→identity resolver the create verb uses: a sync lookup over a
 /// registry snapshot, injected per create call.
@@ -140,7 +141,6 @@ impl TaskStore {
                             confirmers: Set(confirmers_json),
                             created_at: Set(now),
                             updated_at: Set(now),
-                            dossier_path: Set(req.dossier_path),
                             inbox_id_start: Set(req.inbox_id_start),
                             inbox_id_end: Set(req.inbox_id_end),
                             room_id: Set(req.room_id),
@@ -195,18 +195,42 @@ impl TaskStore {
         id: i64,
         actor: &str,
         op: TaskConfirmRequest,
+        blobs: std::sync::Arc<dyn BlobStore>,
     ) -> Result<Task, Error> {
-        if let Some(file) = &op.file {
-            let max = kallip_common::protocol::REPORT_MAX_BYTES;
-            let size = file.len();
-            if size > max {
-                return Err(Error::ReportTooLarge { size, max });
+        // Ingest before the transaction: the decoded body lands in the
+        // content-addressed store first, and the event inside the
+        // transaction carries only the pointer. A crash between the two
+        // leaves an unreferenced blob - harmless, deduplicated on retry.
+        let file_meta = match &op.file {
+            Some(file) => {
+                use base64::Engine as _;
+                let body = base64::engine::general_purpose::STANDARD
+                    .decode(&file.file_b64)
+                    .map_err(|_| Error::MalformedBase64 {
+                        what: "confirm report",
+                    })?;
+                if std::str::from_utf8(&body).is_err() {
+                    return Err(Error::ReportNotUtf8);
+                }
+                let max = kallip_common::protocol::REPORT_MAX_BYTES;
+                let size = body.len();
+                if size > max {
+                    return Err(Error::ReportTooLarge { size, max });
+                }
+                let blob_id = kallip_blob_store::archive::ingest(blobs.as_ref(), body).await?;
+                Some(serde_json::json!({
+                    "file_blob": blob_id.as_str(),
+                    "file_name": file.file_name,
+                    "size": size,
+                }))
             }
-        }
+            None => None,
+        };
         let actor = actor.to_owned();
         for attempt in 0..=BUSY_RETRIES {
             let op = op.clone();
             let actor = actor.clone();
+            let file_meta = file_meta.clone();
             match self
                 .db
                 .transaction(|tx| {
@@ -225,7 +249,7 @@ impl TaskStore {
                                 });
                             }
                         }
-                        let payload = confirm_payload(&op.note, &op.file);
+                        let payload = confirm_payload(&op.note, file_meta.as_ref());
                         append_event_tx(
                             tx,
                             row.id,
@@ -501,48 +525,48 @@ impl TaskStore {
     /// successful ingest followed by a failed commit leaves the packed
     /// blob unreferenced — bounded growth; the blob store's gc reclaims
     /// on demand but nothing schedules it yet.
-    // Seven parameters: the close payload plus one injected dependency
-    // (the blob store); a struct would only relocate them, so the lint
-    // is answered with an allow.
-    #[allow(clippy::too_many_arguments)]
     pub async fn close(
         &self,
         id: i64,
         actor: &str,
-        reason: ClosedReason,
-        summary: Option<String>,
-        force: bool,
-        blobs: Option<std::sync::Arc<dyn BlobStore>>,
+        req: TaskCloseRequest,
+        blobs: std::sync::Arc<dyn BlobStore>,
     ) -> Result<Task, Error> {
         let actor = actor.to_owned();
-        // Pack and ingest outside the write transaction: a large dossier
-        // would otherwise hold the write lock for the whole archive IO.
-        // TOCTOU: the live directory may change between this pack and
-        // the commit below. The hash is the content address of the
-        // packed snapshot, so the pointer stays exact for what was
-        // archived; a later reopen + close archives fresh content under
-        // a new hash.
-        let row = self.load(id).await?;
-        let archive_hash: Option<String> = match (&row.dossier_path, blobs.as_ref()) {
-            (Some(dossier), Some(blobs)) => {
-                let dir = Path::new(dossier);
-                if !dir.is_dir() {
-                    return Err(Error::DossierNotDir {
-                        path: dossier.clone(),
-                    });
+        // Ingest outside the write transaction: a large archive would
+        // otherwise hold the write lock for the whole blob IO. The
+        // caller froze the dossier into tar bytes before the request,
+        // so closing never touches the filesystem. A crash between the
+        // ingest and the commit leaves an unreferenced blob - harmless,
+        // deduplicated by content address on retry; a later reopen +
+        // close archives fresh content under a new hash.
+        let archive: Option<(String, i64)> = match &req.dossier_tar_b64 {
+            Some(tar_b64) => {
+                use base64::Engine as _;
+                let packed = base64::engine::general_purpose::STANDARD
+                    .decode(tar_b64)
+                    .map_err(|_| Error::MalformedBase64 {
+                        what: "dossier archive",
+                    })?;
+                let max = kallip_common::protocol::DOSSIER_MAX_BYTES;
+                let size = packed.len();
+                if size > max {
+                    return Err(Error::DossierTooLarge { size, max });
                 }
-                let packed = archive::pack_dir(dir)?;
-                let blob_id = archive::ingest(blobs.as_ref(), packed).await?;
-                Some(blob_id.as_str().to_string())
+                let entries = count_tar_entries(&packed)?;
+                let blob_id = kallip_blob_store::archive::ingest(blobs.as_ref(), packed).await?;
+                Some((blob_id.as_str().to_string(), entries))
             }
-            (Some(dossier), None) => {
-                return Err(Error::ArchiveNoBlobStore {
-                    id,
-                    path: dossier.clone(),
-                });
-            }
-            _ => None,
+            None => None,
         };
+        let archive_hash = archive.as_ref().map(|(hash, _)| hash.clone());
+        let archive_entries = archive.as_ref().map(|(_, entries)| *entries);
+        let TaskCloseRequest {
+            reason,
+            summary,
+            force,
+            ..
+        } = req;
         for attempt in 0..=BUSY_RETRIES {
             let actor = actor.clone();
             let summary = summary.clone();
@@ -596,6 +620,7 @@ impl TaskStore {
                             closed_reason: Set(Some(reason.as_str().to_string())),
                             close_summary: Set(summary.clone()),
                             archive_hash: Set(archive_hash.clone()),
+                            archive_entries: Set(archive_entries),
                             ..Default::default()
                         };
                         update.update(tx).await?;
@@ -890,6 +915,85 @@ impl TaskStore {
             .await?)
     }
 
+    /// One-time startup migration for confirm-report payloads: the body
+    /// used to live in the event row (the `file` key held the report
+    /// text); it moves to the content-addressed blob store and the event
+    /// keeps only the pointer plus display metadata. Idempotent by
+    /// shape: events already in the pointer form (a `file_blob` key) are
+    /// skipped, so a second boot is a no-op. Pre-migration reports had
+    /// no file name on record; `report.txt` stands in for display.
+    pub async fn migrate_report_payloads(&self, blobs: &dyn BlobStore) -> Result<usize, Error> {
+        let confirms = EventEntity::find()
+            .filter(EventColumn::Kind.eq("action"))
+            .filter(EventColumn::Name.eq("confirm"))
+            .all(&self.db)
+            .await?;
+        let mut migrated = 0usize;
+        for event in confirms {
+            let Some(raw) = event.payload.as_deref() else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+                continue;
+            };
+            // Pointer form: already migrated.
+            if value.get("file_blob").is_some() {
+                continue;
+            }
+            let Some(body) = value.get("file").and_then(|f| f.as_str()) else {
+                continue;
+            };
+            let size = body.len();
+            let blob_id =
+                kallip_blob_store::archive::ingest(blobs, body.as_bytes().to_vec()).await?;
+            let mut next = value.clone();
+            next["file"] = serde_json::json!({
+                "file_blob": blob_id.as_str(),
+                "file_name": "report.txt",
+                "size": size,
+            });
+            let mut active: task_event::ActiveModel = event.into();
+            active.payload = Set(Some(next.to_string()));
+            active.update(&self.db).await?;
+            migrated += 1;
+        }
+        Ok(migrated)
+    }
+
+    /// Reads one confirmation report body back: the blob id must appear
+    /// in this task's confirm trail, so one task's reports cannot be
+    /// read through another task's id. Returns the decoded UTF-8 text.
+    pub async fn report_body(
+        &self,
+        id: i64,
+        blob: &str,
+        blobs: &dyn BlobStore,
+    ) -> Result<String, Error> {
+        let confirms = EventEntity::find()
+            .filter(EventColumn::TaskId.eq(id))
+            .filter(EventColumn::Kind.eq("action"))
+            .filter(EventColumn::Name.eq("confirm"))
+            .all(&self.db)
+            .await?;
+        let carried = confirms.iter().any(|e| {
+            e.payload
+                .as_deref()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                .and_then(|v| v.get("file").and_then(|f| f.get("file_blob")).cloned())
+                .and_then(|b| b.as_str().map(str::to_string))
+                .is_some_and(|found| found == blob)
+        });
+        if !carried {
+            return Err(Error::NotFound { id });
+        }
+        let blob_id = BlobId::parse(blob)?;
+        let bytes = blobs.get(&blob_id).await?;
+        String::from_utf8(bytes).map_err(|_| Error::CorruptRecord {
+            id,
+            field: "report body",
+        })
+    }
+
     /// Ids among `ids` carrying at least one confirm event whose payload
     /// has a `file` key. Exact per-row parse; the input is page-sized.
     pub async fn ids_with_reports(
@@ -911,7 +1015,7 @@ impl TaskStore {
                 e.payload
                     .as_deref()
                     .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
-                    .and_then(|v| v.get("file").cloned())
+                    .and_then(|v| v.get("file").and_then(|f| f.get("file_blob")).cloned())
                     .is_some_and(|r| r.is_string())
             })
             .map(|e| e.task_id)
@@ -1023,13 +1127,6 @@ impl TaskStore {
             .transpose()
             .map_err(Error::from)
     }
-
-    async fn load(&self, id: i64) -> Result<Task, Error> {
-        TaskEntity::find_by_id(id)
-            .one(&self.db)
-            .await?
-            .ok_or(Error::NotFound { id })
-    }
 }
 
 /// The filter half of the list query (partition, status, assignee, axis
@@ -1116,8 +1213,8 @@ fn to_export(task: Task, events: Vec<TaskEvent>) -> Result<TaskExport, Error> {
         closed_reason: task.closed_reason.clone(),
         close_summary: task.close_summary.clone(),
         association,
-        dossier_path: task.dossier_path.clone(),
         archive_hash: task.archive_hash.clone(),
+        archive_entries: task.archive_entries,
         events: event_exports,
     })
 }
@@ -1147,8 +1244,8 @@ fn to_row(task: Task, has_reports: bool) -> Result<TaskRow, Error> {
         closed_reason: task.closed_reason.clone(),
         close_summary: task.close_summary.clone(),
         association: association_of(&task)?,
-        dossier_path: task.dossier_path.clone(),
         archive_hash: task.archive_hash.clone(),
+        archive_entries: task.archive_entries,
         has_reports,
     })
 }
@@ -1186,20 +1283,39 @@ fn note_payload(note: &Option<String>) -> Option<String> {
     note.as_ref()
         .map(|n| serde_json::json!({ "note": n }).to_string())
 }
-/// Confirm payload: `note` and `file` side by side, either omissible;
-/// None when the confirmation carries neither.
-fn confirm_payload(note: &Option<String>, file: &Option<String>) -> Option<String> {
-    if note.is_none() && file.is_none() {
+/// Confirm payload: the note and the stored report pointer side by
+/// side, either omissible; None when the confirmation carries neither.
+/// The report body lives in the blob store - the event carries the
+/// content address plus display metadata, never the body.
+fn confirm_payload(note: &Option<String>, file_meta: Option<&serde_json::Value>) -> Option<String> {
+    if note.is_none() && file_meta.is_none() {
         return None;
     }
     let mut payload = serde_json::Map::new();
     if let Some(note) = note {
         payload.insert("note".to_string(), serde_json::Value::String(note.clone()));
     }
-    if let Some(file) = file {
-        payload.insert("file".to_string(), serde_json::Value::String(file.clone()));
+    if let Some(file) = file_meta {
+        payload.insert("file".to_string(), file.clone());
     }
     Some(serde_json::Value::Object(payload).to_string())
+}
+
+/// Counts the entries of an in-memory tar: the entry count is a property
+/// of the archived bytes, computed from exactly what gets ingested.
+/// Bytes that do not parse as tar are caller input, not a server fault.
+fn count_tar_entries(packed: &[u8]) -> Result<i64, Error> {
+    let mut archive = tar::Archive::new(packed);
+    let mut count = 0i64;
+    for entry in archive.entries().map_err(|_| Error::MalformedArchive {
+        what: "dossier archive",
+    })? {
+        let _ = entry.map_err(|_| Error::MalformedArchive {
+            what: "dossier archive",
+        })?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Shared tail of the payload-free transitions (`review`, `pause`,

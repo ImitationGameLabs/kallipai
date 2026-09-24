@@ -5,7 +5,7 @@
 //! registered confirmers), the two-level terminal
 //! state (`closed` + reason), the association keys (an inbox id range
 //! and/or a lesche room + seq range in the K8s involvedObject shape),
-//! live dossier pointer, and the closed-archive hash pointer.
+//! and the closed-archive pointer (content address + entry count).
 
 use sea_orm::entity::prelude::*;
 
@@ -40,11 +40,10 @@ pub struct Model {
     pub room_id: Option<String>,
     pub room_seq_start: Option<i64>,
     pub room_seq_end: Option<i64>,
-    /// Two-phase dossier pointer: the live path until close; the content
-    /// address in `archive_hash` freezes the truth after close (the live
-    /// path keeps existing for human reading).
-    pub dossier_path: Option<String>,
+    /// The closed archive: the content address, plus the tar entry
+    /// count frozen at close. Both absent until a close with a dossier.
     pub archive_hash: Option<String>,
+    pub archive_entries: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

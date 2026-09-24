@@ -33,8 +33,14 @@ fn store(state: &SharedState) -> Result<&TaskStore, ApiError> {
         .ok_or_else(|| ApiError::internal("task store not installed"))
 }
 
-fn blobs(state: &SharedState) -> Option<std::sync::Arc<dyn kallip_task::BlobStore>> {
-    state.task_blobs.get().cloned()
+fn blobs(state: &SharedState) -> Result<std::sync::Arc<dyn kallip_task::BlobStore>, ApiError> {
+    // Boot installs the store unconditionally; a missing install is a
+    // wiring bug, not a caller problem.
+    state
+        .task_blobs
+        .get()
+        .cloned()
+        .ok_or_else(|| ApiError::internal("blob store not installed"))
 }
 
 /// The event actor for a verb, from the authenticated identity: the agent
@@ -106,13 +112,14 @@ fn api_error(err: kallip_task::Error) -> ApiError {
         // Malformed association keys are a caller input problem, not a
         // server fault: 400, not 500.
         E::AssociationInvalid { .. } => ApiError::bad_request(err.to_string()),
-        // DossierNotDir is about a caller-supplied dossier_path (the
-        // create body registered it), so it stays in the 400 family;
-        // the file system merely reports the bad input.
-        E::DossierNotDir { .. } => ApiError::bad_request(err.to_string()),
-        // A confirm report over the shared byte cap is caller input:
-        // 400, not 500 (the cap is REPORT_MAX_BYTES).
-        E::ReportTooLarge { .. } => ApiError::bad_request(err.to_string()),
+        // Oversized bulk payloads (a mistyped --dossier, a report over
+        // the cap), undecodable base64 bodies, non-tar archive payloads,
+        // and non-UTF-8 report files are caller input: 400, not 500.
+        E::DossierTooLarge { .. }
+        | E::ReportTooLarge { .. }
+        | E::MalformedBase64 { .. }
+        | E::MalformedArchive { .. }
+        | E::ReportNotUtf8 => ApiError::bad_request(err.to_string()),
         _ => ApiError::internal(err.to_string()),
     }
 }
@@ -231,7 +238,7 @@ async fn confirm(
     let actor = acting_agent(&auth);
     let snapshot = role_snapshot(&state).await;
     store(&state)?
-        .confirm(id, &actor, body)
+        .confirm(id, &actor, body, blobs(&state)?)
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
@@ -312,14 +319,7 @@ async fn close(
 ) -> TaskResult<kallip_task::TaskExport> {
     let actor = acting_agent(&auth);
     let snapshot = role_snapshot(&state).await;
-    let closed = store(&state)?.close(
-        id,
-        &actor,
-        body.reason,
-        body.summary,
-        body.force,
-        blobs(&state),
-    );
+    let closed = store(&state)?.close(id, &actor, body, blobs(&state)?);
     match closed.await {
         Ok(_) => {}
         // The gate message carries identity ids; the human face wants
@@ -390,7 +390,7 @@ async fn fetch_archive(
     let blob = TaskStore::archive_blob_id(&task)
         .map_err(api_error)?
         .ok_or_else(|| ApiError::not_found(format!("task {id} has no closed archive")))?;
-    let blobs = blobs(&state).ok_or_else(|| ApiError::internal("blob store not installed"))?;
+    let blobs = blobs(&state)?;
     let bytes = blobs
         .get(&blob)
         .await
@@ -398,6 +398,29 @@ async fn fetch_archive(
     Ok((
         [(axum::http::header::CONTENT_TYPE, "application/x-tar")],
         bytes,
+    )
+        .into_response())
+}
+
+/// Serves one confirmation report body: the tagma checks that the blob
+/// is referenced by this task's confirm trail, then returns the decoded
+/// text. Content addressing makes the id unforgeable; the task binding
+/// keeps one task's reports from being read through another's id.
+async fn fetch_report(
+    State(state): State<SharedState>,
+    Path((id, blob)): Path<(i64, String)>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+    let body = store(&state)?
+        .report_body(id, &blob, blobs(&state)?.as_ref())
+        .await
+        .map_err(api_error)?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        body,
     )
         .into_response())
 }
@@ -410,12 +433,23 @@ pub(crate) fn router() -> axum::Router<SharedState> {
         .route("/{id}", axum::routing::get(show))
         .route("/{id}/export", axum::routing::get(export_one))
         .route("/{id}/start", axum::routing::post(start))
-        .route("/{id}/confirm", axum::routing::post(confirm))
+        .route(
+            "/{id}/confirm",
+            axum::routing::post(confirm).layer(axum::extract::DefaultBodyLimit::max(
+                kallip_common::protocol::TASK_BODY_LIMIT_BYTES,
+            )),
+        )
         .route("/{id}/review", axum::routing::post(review))
         .route("/{id}/pause", axum::routing::post(pause))
         .route("/{id}/resume", axum::routing::post(resume))
         .route("/{id}/note", axum::routing::post(note))
-        .route("/{id}/close", axum::routing::post(close))
+        .route(
+            "/{id}/close",
+            axum::routing::post(close).layer(axum::extract::DefaultBodyLimit::max(
+                kallip_common::protocol::TASK_BODY_LIMIT_BYTES,
+            )),
+        )
+        .route("/{id}/reports/{blob}", axum::routing::get(fetch_report))
         .route("/{id}/reopen", axum::routing::post(reopen))
         .route(
             "/{id}/archive",
@@ -471,16 +505,6 @@ mod tests {
     fn association_invalid_maps_to_bad_request() {
         let err = kallip_task::Error::AssociationInvalid {
             detail: "empty range".into(),
-        };
-        assert_eq!(api_error(err).status, 400);
-    }
-
-    /// Same 400 family for a caller-supplied dossier path that turns out
-    /// not to be a directory.
-    #[test]
-    fn dossier_not_dir_maps_to_bad_request() {
-        let err = kallip_task::Error::DossierNotDir {
-            path: "/no/such/dir".into(),
         };
         assert_eq!(api_error(err).status, 400);
     }
@@ -567,8 +591,8 @@ mod tests {
             closed_reason: None,
             close_summary: None,
             association: None,
-            dossier_path: None,
             archive_hash: None,
+            archive_entries: None,
             events: actors
                 .iter()
                 .map(|a| kallip_common::protocol::EventExport {
@@ -587,6 +611,303 @@ mod tests {
         }
     }
 
+    /// Close with a packed dossier: the content address and entry count
+    /// land in the store, and the bytes come back from the blob store.
+    /// Everything rides the request body - the store reads no paths.
+    #[tokio::test]
+    async fn close_with_a_dossier_archives_it() {
+        let state = make_state();
+        state
+            .tasks
+            .set(Arc::new(kallip_task::TaskStore::open_in_memory().await))
+            .ok()
+            .expect("task store installs once");
+        let blobs = Arc::new(kallip_blob_store::LocalBackend::new(
+            std::env::temp_dir().join(format!("kallip-tagma-close-blobs-{}", std::process::id())),
+        ));
+        state.task_blobs.set(blobs).ok();
+
+        let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+        let created = create(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Json(TaskCreateRequest {
+                title: "archived".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("create succeeds");
+        let id = created.0.id;
+        let _ = start(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            Json(TaskForceRequest::default()),
+        )
+        .await
+        .expect("start succeeds");
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(6);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "plan.md", "# plan\n".as_bytes())
+            .unwrap();
+        let packed = builder.into_inner().unwrap();
+        use base64::Engine as _;
+        let tar_b64 = base64::engine::general_purpose::STANDARD.encode(&packed);
+
+        let closed = close(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            Json(TaskCloseRequest {
+                reason: kallip_common::protocol::ClosedReason::Completed,
+                summary: None,
+                force: false,
+                dossier_tar_b64: Some(tar_b64),
+            }),
+        )
+        .await
+        .expect("close with dossier succeeds");
+        assert!(closed.0.archive_hash.is_some());
+        assert_eq!(closed.0.archive_entries, Some(1));
+    }
+
+    /// A confirm report round-trips through the blob store: the event
+    /// carries only the pointer, and the report endpoint serves the
+    /// decoded body bound to the task that owns it.
+    #[tokio::test]
+    async fn confirm_report_round_trips_through_the_blob_store() {
+        let state = make_state();
+        state
+            .tasks
+            .set(Arc::new(kallip_task::TaskStore::open_in_memory().await))
+            .ok()
+            .expect("task store installs once");
+        let blobs = Arc::new(kallip_blob_store::LocalBackend::new(
+            std::env::temp_dir().join(format!("kallip-tagma-report-blobs-{}", std::process::id())),
+        ));
+        state.task_blobs.set(blobs).ok();
+
+        let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+        let created = create(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Json(TaskCreateRequest {
+                title: "reported".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("create succeeds");
+        let id = created.0.id;
+        let _ = start(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            Json(TaskForceRequest::default()),
+        )
+        .await
+        .expect("start succeeds");
+
+        let confirmed = confirm(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            Json(TaskConfirmRequest {
+                note: Some("signed".into()),
+                file: Some(kallip_common::protocol::TaskConfirmFile {
+                    file_name: "review.md".into(),
+                    file_b64: base64::engine::general_purpose::STANDARD.encode("the report body"),
+                }),
+            }),
+        )
+        .await
+        .expect("confirm succeeds");
+        use base64::Engine as _;
+        let file = confirmed
+            .0
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.name == "confirm")
+            .and_then(|e| e.payload.as_ref())
+            .and_then(|p| p.get("file"))
+            .and_then(|f| f.get("file_blob"))
+            .and_then(|b| b.as_str())
+            .map(str::to_string)
+            .expect("confirm event carries the report pointer");
+
+        let response = fetch_report(State(Arc::clone(&state)), Path((id, file)))
+            .await
+            .expect("report body served");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("report body bytes");
+        assert_eq!(&bytes[..], b"the report body");
+    }
+
+    /// An undecodable base64 body is caller input: 400 on both bulk
+    /// routes, before any state access.
+    #[tokio::test]
+    async fn close_and_confirm_refuse_undecodable_base64() {
+        let state = make_state();
+        state
+            .tasks
+            .set(Arc::new(kallip_task::TaskStore::open_in_memory().await))
+            .ok()
+            .expect("task store installs once");
+        let blobs = Arc::new(kallip_blob_store::LocalBackend::new(
+            std::env::temp_dir().join(format!("kallip-tagma-b64-blobs-{}", std::process::id())),
+        ));
+        state.task_blobs.set(blobs).ok();
+
+        let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+        let created = create(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Json(TaskCreateRequest {
+                title: "b64".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("create succeeds");
+        let id = created.0.id;
+
+        let err = match close(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            Json(TaskCloseRequest {
+                reason: kallip_common::protocol::ClosedReason::Completed,
+                summary: None,
+                force: false,
+                dossier_tar_b64: Some("not base64!!!".into()),
+            }),
+        )
+        .await
+        {
+            // Match, not expect_err: the Ok half carries no Debug.
+            Err(err) => err,
+            Ok(_) => panic!("bad base64 refuses"),
+        };
+        assert_eq!(err.status, 400);
+        assert!(err.message.contains("not valid base64"));
+
+        let err = match confirm(
+            State(Arc::clone(&state)),
+            auth,
+            Path(id),
+            Json(TaskConfirmRequest {
+                note: None,
+                file: Some(kallip_common::protocol::TaskConfirmFile {
+                    file_name: "review.md".into(),
+                    file_b64: "!!!".into(),
+                }),
+            }),
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("bad base64 refuses"),
+        };
+        assert_eq!(err.status, 400);
+        assert!(err.message.contains("not valid base64"));
+    }
+
+    /// The report route binds the blob to the task: a fabricated task id
+    /// and a second task's id both refuse with not-found and never serve
+    /// the bytes.
+    #[tokio::test]
+    async fn fetch_report_refuses_foreign_or_fabricated_task_ids() {
+        let state = make_state();
+        state
+            .tasks
+            .set(Arc::new(kallip_task::TaskStore::open_in_memory().await))
+            .ok()
+            .expect("task store installs once");
+        let blobs = Arc::new(kallip_blob_store::LocalBackend::new(
+            std::env::temp_dir().join(format!("kallip-tagma-report-blobs-{}", std::process::id())),
+        ));
+        state.task_blobs.set(blobs).ok();
+
+        let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+        let created = create(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Json(TaskCreateRequest {
+                title: "bound".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("create succeeds");
+        let id = created.0.id;
+        let _ = start(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            Json(TaskForceRequest::default()),
+        )
+        .await
+        .expect("start succeeds");
+        let confirmed = confirm(
+            State(Arc::clone(&state)),
+            auth.clone(),
+            Path(id),
+            Json(TaskConfirmRequest {
+                note: Some("signed".into()),
+                file: Some(kallip_common::protocol::TaskConfirmFile {
+                    file_name: "review.md".into(),
+                    file_b64: base64::engine::general_purpose::STANDARD.encode("secret body"),
+                }),
+            }),
+        )
+        .await
+        .expect("confirm succeeds");
+        use base64::Engine as _;
+        let file = confirmed
+            .0
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.name == "confirm")
+            .and_then(|e| e.payload.as_ref())
+            .and_then(|p| p.get("file"))
+            .and_then(|f| f.get("file_blob"))
+            .and_then(|b| b.as_str())
+            .map(str::to_string)
+            .expect("confirm event carries the report pointer");
+
+        let err =
+            match fetch_report(State(Arc::clone(&state)), Path((i64::MAX, file.clone()))).await {
+                Err(err) => err,
+                Ok(_) => panic!("a fabricated task id refuses"),
+            };
+        assert_eq!(err.status, 404);
+
+        let other = create(
+            State(Arc::clone(&state)),
+            auth,
+            Json(TaskCreateRequest {
+                title: "other".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("create succeeds");
+        let err = match fetch_report(State(Arc::clone(&state)), Path((other.0.id, file))).await {
+            Err(err) => err,
+            Ok(_) => panic!("a foreign task id refuses"),
+        };
+        assert_eq!(err.status, 404);
+    }
     /// Every write verb wakes the snapshot pumps: the handlers share one
     /// `notify` tail, so a verb that skips the bump would leave the
     /// header stale until a fallback ticker catches up. `close` runs
@@ -600,6 +921,13 @@ mod tests {
             .set(Arc::new(kallip_task::TaskStore::open_in_memory().await))
             .ok()
             .expect("task store installs once");
+        state
+            .task_blobs
+            .set(Arc::new(kallip_blob_store::LocalBackend::new(
+                std::env::temp_dir()
+                    .join(format!("kallip-tagma-bump-blobs-{}", std::process::id())),
+            )))
+            .ok();
         let mut rx = state.subscribe_invalidations();
         let mut generation = *rx.borrow();
         let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
@@ -665,6 +993,7 @@ mod tests {
                 reason: kallip_common::protocol::ClosedReason::Completed,
                 summary: None,
                 force: false,
+                dossier_tar_b64: None,
             })
         };
         let _ = close(

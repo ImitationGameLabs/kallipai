@@ -25,7 +25,6 @@
     manage_tasks_confirm_pending,
     manage_tasks_no_confirmers,
     manage_tasks_close_reason,
-    manage_tasks_dossier,
     manage_tasks_confirm_no_report,
     manage_tasks_page_prev,
     manage_tasks_page_next,
@@ -451,14 +450,6 @@
                   <span
                     >{manage_tasks_close_summary()}:
                     {tasksStore.detail.close_summary}</span
-                  >
-                {/if}
-                {#if tasksStore.detail.dossier_path}
-                  <span
-                    >{manage_tasks_dossier()}:
-                    <span class="font-mono"
-                      >{tasksStore.detail.dossier_path}</span
-                    ></span
                   >
                 {/if}
               </div>

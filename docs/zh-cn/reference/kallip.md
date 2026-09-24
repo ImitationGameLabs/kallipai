@@ -248,14 +248,14 @@ kallip skill meta <PATH>
 
 | 子命令 | 用途 |
 | --- | --- |
-| `task create` | 注册任务（`--title ...`）；`--require` 固定确认人名单（可重复），注册时解析为身份；`--assignee` 默认为认领人；另加 `--dossier` 与关联键 |
+| `task create` | 注册任务（`--title ...`）；`--require` 固定确认人名单（可重复），注册时解析为身份；`--assignee` 默认为认领人；另加关联键 |
 | `task start` | 按 id 认领排队任务；串行门生效，`--force` 可越过 |
 | `task confirm` | 为关单门交回确认，可附 `--note` 与从 `--file` 读取的报告正文 |
 | `task review` | 将进行中任务转入评审 |
 | `task pause` | 暂停进行中任务；无门生效 |
 | `task resume` | 恢复已暂停任务；串行门生效，`--force` 可越过 |
 | `task note` | 向事件轨迹追加工作注记，不移动状态机 |
-| `task close` | 以 `--reason` 与可选 `--summary` 关闭任务；每个登记确认人都已确认，否则需 `--force` |
+| `task close` | 以 `--reason` 与可选 `--summary` 关闭任务；每个登记确认人都已确认，否则需 `--force`。带 `--dossier <目录>` 时该目录在关闭时规范化打包并随任务归档 |
 | `task reopen` | 重新打开已关闭任务；串行门生效，`--force` 可越过 |
 | `task archive` | 归档已关闭任务，使其离开默认列表视图；closed-only 门生效，`--force` 可越过 |
 | `task list` | 列出任务（`--status`、`--assignee`、`--archived`、时间窗过滤、分页、`--relative-time`） |

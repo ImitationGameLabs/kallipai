@@ -51,6 +51,13 @@ pub(super) async fn team_status(
             "'file' must name the declaration file",
         ));
     }
+    // The declaration is read in this process: a caller-relative path
+    // would resolve against the tagma's cwd, not the caller's shell.
+    if !std::path::Path::new(&query.file).is_absolute() {
+        return Err(ApiError::bad_request(
+            "declaration file path must be absolute; the tagma resolves no caller-relative paths",
+        ));
+    }
     // The path is caller-named and read on the tagma's machine — sound
     // under the same single-machine trust model as every other route
     // (localhost bind, operator bearer). The response only distinguishes

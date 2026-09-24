@@ -950,6 +950,7 @@ write verbs return the updated `TaskExport`.
 | `GET /tasks/export`          | Every task, including closed and archived |
 | `GET /tasks/{id}/export`     | One task's export |
 | `GET /tasks/{id}/archive`    | The closed task's content-addressed dossier archive (octet stream) |
+| `GET /tasks/{id}/reports/{blob}` | A filed confirmation report body fetched by blob id (plain text) |
 | `POST /tasks`                | Register a task; the creator is the authenticated identity |
 | `POST /tasks/{id}/start`     | Claim a queued task; the serial gate applies unless `force` |
 | `POST /tasks/{id}/confirm`   | File the actor's confirmation toward the close gate |
@@ -964,14 +965,16 @@ write verbs return the updated `TaskExport`.
 Request bodies (all optional fields omitted rather than null):
 
 - `POST /tasks`: `title` (required), `assignee`, `require` (the
-  confirmer roster; empty means closing needs no confirmations),
-  `dossier_path`, and the association keys (`inbox_id_start`,
-  `inbox_id_end`, `room_id`, `room_seq_start`, `room_seq_end`).
-- `.../confirm`: `note`, `file` (the report body, size-capped).
+  confirmer roster; empty means closing needs no confirmations), and
+  the association keys (`inbox_id_start`, `inbox_id_end`, `room_id`,
+  `room_seq_start`, `room_seq_end`).
+- `.../confirm`: `note`, `file` (`file_name` plus the base64 report
+  body; the tagma stores it in the blob store, size-capped).
 - `.../start`, `.../resume`, `.../reopen`, `.../archive`: `force`.
 - `.../note`: `note` (required).
 - `.../close`: `reason` (`completed` \| `not_planned` \|
-  `duplicate`), `summary`, `force`.
+  `duplicate`), `summary`, `force`, `dossier_tar_b64` (canonical tar of
+  the dossier, base64-encoded; the tagma blob-stores it, size-capped).
 
 Trail event names, as written by the verbs above: `create`,
 `start` (plus `force_start` on a forced claim), `confirm`, `review`,

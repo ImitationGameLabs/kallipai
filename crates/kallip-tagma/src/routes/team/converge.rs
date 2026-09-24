@@ -365,6 +365,13 @@ pub(super) async fn team_converge(
             "'file' must name the declaration file",
         ));
     }
+    // The declaration is read in this process: a caller-relative path
+    // would resolve against the tagma's cwd, not the caller's shell.
+    if !std::path::Path::new(&req.file).is_absolute() {
+        return Err(ApiError::bad_request(
+            "declaration file path must be absolute; the tagma resolves no caller-relative paths",
+        ));
+    }
     authorize_converge(&state, auth.identity()).await?;
     // Global mutual exclusion: a second converge is refused, never queued —
     // a collision means look at the current state, not wait behind a stale

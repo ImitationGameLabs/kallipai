@@ -52,16 +52,23 @@ impl LockFile {
 
 /// Resolve the declaration path and the lock path for a command. The
 /// lock defaults to `tagma.lock` beside the declaration — the two files
-/// are one team archive.
-fn resolve_paths(file: &Option<String>, lock: &Option<PathBuf>) -> (String, PathBuf) {
+/// are one team archive. The declaration travels absolute: the tagma
+/// reads it in its own process and resolves no caller-relative paths.
+/// The lock stays a CLI-side path exactly as given (the tagma never
+/// sees it).
+fn resolve_paths(file: &Option<String>, lock: &Option<PathBuf>) -> Result<(String, PathBuf)> {
     let declaration = file.clone().unwrap_or_else(|| "tagma.toml".to_string());
+    let absolute = std::path::absolute(&declaration)
+        .map_err(|e| anyhow!("resolve {declaration}: {e}"))?
+        .display()
+        .to_string();
     let lock_path = lock.clone().unwrap_or_else(|| {
-        Path::new(&declaration)
+        Path::new(&absolute)
             .parent()
-            .unwrap_or(Path::new("."))
+            .unwrap_or(Path::new("/"))
             .join("tagma.lock")
     });
-    (declaration, lock_path)
+    Ok((absolute, lock_path))
 }
 
 /// Read the lock archive. `Ok(None)` = the file does not exist, which
@@ -143,7 +150,7 @@ pub async fn run_team(client: &TagmaClient, cmd: &TeamCommand) -> Result<()> {
 }
 
 async fn run_status(client: &TagmaClient, args: &TeamStatusArgs) -> Result<()> {
-    let (declaration, lock_path) = resolve_paths(&args.common.file, &args.common.lock);
+    let (declaration, lock_path) = resolve_paths(&args.common.file, &args.common.lock)?;
     // A corrupt archive must not silently render as "no lock": say so,
     // then show the table without it (the face is read-only).
     let lock = match read_lock(&lock_path) {
@@ -260,7 +267,7 @@ fn install_local_instance_roots() -> Result<()> {
     )
 }
 async fn run_converge(client: &TagmaClient, args: &TeamConvergeArgs) -> Result<()> {
-    let (declaration, lock_path) = resolve_paths(&args.common.file, &args.common.lock);
+    let (declaration, lock_path) = resolve_paths(&args.common.file, &args.common.lock)?;
     // Best-effort: the parked-area check is advisory, so a missing
     // identity degrades to the scan-warning path below, as before.
     let _ = install_local_instance_roots();
@@ -742,5 +749,34 @@ mod tests {
         for _ in 0..100 {
             assert!(seen.insert(lock_tmp_path(&base)));
         }
+    }
+
+    /// The declaration travels absolute (the tagma resolves no
+    /// caller-relative paths) and the lock default sits beside it —
+    /// whatever directory the command runs from.
+    #[test]
+    fn declaration_absolutizes_and_lock_defaults_beside_it() {
+        let cwd = std::env::current_dir().unwrap();
+        let (declaration, lock) = resolve_paths(&Some("team/tagma.toml".into()), &None).unwrap();
+        assert_eq!(Path::new(&declaration), &cwd.join("team/tagma.toml"));
+        assert_eq!(lock, cwd.join("team/tagma.lock"));
+
+        let (declaration, lock) =
+            resolve_paths(&Some("/etc/kallip/tagma.toml".into()), &None).unwrap();
+        assert_eq!(declaration, "/etc/kallip/tagma.toml");
+        assert_eq!(lock, Path::new("/etc/kallip/tagma.lock"));
+    }
+
+    /// An explicit --lock passes through untouched: the lock is a
+    /// CLI-side archive, the tagma never sees its path.
+    #[test]
+    fn an_explicit_lock_stays_as_given() {
+        let (declaration, lock) = resolve_paths(
+            &Some("/etc/kallip/tagma.toml".into()),
+            &Some(PathBuf::from("relative.lock")),
+        )
+        .unwrap();
+        assert_eq!(declaration, "/etc/kallip/tagma.toml");
+        assert_eq!(lock, PathBuf::from("relative.lock"));
     }
 }

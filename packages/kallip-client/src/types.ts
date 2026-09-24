@@ -561,8 +561,9 @@ export interface TaskExport {
   readonly closed_reason: "completed" | "not_planned" | "duplicate" | null;
   readonly close_summary: string | null;
   readonly association: TaskAssociationExport | null;
-  readonly dossier_path: string | null;
+  /** The closed archive: content address plus the frozen entry count. */
   readonly archive_hash: string | null;
+  readonly archive_entries: number | null;
   readonly events: readonly TaskEventExport[];
 }
 
@@ -585,8 +586,9 @@ export interface TaskRow {
   readonly closed_reason: "completed" | "not_planned" | "duplicate" | null;
   readonly close_summary: string | null;
   readonly association: TaskAssociationExport | null;
-  readonly dossier_path: string | null;
+  /** The closed archive: content address plus the frozen entry count. */
   readonly archive_hash: string | null;
+  readonly archive_entries: number | null;
   /** The task has at least one confirm event carrying a report. */
   readonly has_reports: boolean;
 }
@@ -608,7 +610,6 @@ export interface TaskCreateRequest {
   readonly assignee?: string;
   /** The confirmer roster; empty means closing needs no confirmations. */
   readonly require?: readonly string[];
-  readonly dossier_path?: string;
   readonly inbox_id_start?: number;
   readonly inbox_id_end?: number;
   readonly room_id?: string;
@@ -620,7 +621,8 @@ export interface TaskCreateRequest {
  * the actor's sign-off, optionally carrying a report via `file`. */
 export interface TaskConfirmRequest {
   readonly note?: string;
-  readonly file?: string;
+  /** Report name + UTF-8 body base64-encoded; the tagma blob-stores it. */
+  readonly file?: { readonly file_name: string; readonly file_b64: string };
 }
 
 /** Body of the force-carrying verbs: start, resume, reopen, archive

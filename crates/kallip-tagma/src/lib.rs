@@ -214,6 +214,19 @@ pub async fn run(args: Args) -> Result<()> {
             settings::load_task_blob_compression(),
         ))
         .ok();
+    // One-time report-payload migration: pre-blob confirm events carry
+    // the report text inline; move it into the blob store and leave the
+    // pointer in the event. Idempotent (pointer-form events are
+    // skipped), so it is safe on every boot. A failure is logged and
+    // boot continues - the affected old reports simply stay unreadable
+    // until the next boot retries the migration.
+    if let (Some(store), Some(blobs)) = (state.tasks.get(), state.task_blobs.get()) {
+        match store.migrate_report_payloads(blobs.as_ref()).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("migrated {n} confirm report payloads into the blob store"),
+            Err(e) => tracing::warn!("confirm report payload migration deferred: {e}"),
+        }
+    }
     state
         .attachment_blobs
         .set(kallip_blob_store::LocalBackend::arc_with(

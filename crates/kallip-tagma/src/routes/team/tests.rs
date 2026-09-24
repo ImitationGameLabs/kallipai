@@ -1,11 +1,16 @@
 use super::converge::*;
 use super::status::*;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum::Json;
+use axum::extract::{Query, State};
 
 use kallip_common::AgentId;
 use kallip_common::declaration::{TeamDeclaration, parse_declaration};
 use kallip_common::protocol::{
-    RoleDisposition, TeamAction, TeamLockEntry, TeamRejectionKind, TeamRoleStatus, TeamRowOutcome,
+    RoleDisposition, TeamAction, TeamConvergeRequest, TeamLockEntry, TeamRejectionKind,
+    TeamRoleStatus, TeamRowOutcome, TeamStatusQuery,
 };
 
 use kallip_testkit::DevDir;
@@ -908,4 +913,47 @@ async fn converge_restore_degrades_into_a_fresh_spawn_and_rebinds() {
     assert_ne!(new_id, old);
     assert_eq!(mapping[0].id, new_id);
     assert!(state.registry.read().await.get(&old).is_none());
+}
+
+// -- absolute-path contract --
+
+/// A caller-relative declaration path refuses on both team faces before
+/// any filesystem access: the tagma reads the declaration in its own
+/// process and resolves no caller-relative paths.
+#[tokio::test]
+async fn converge_and_status_refuse_relative_declaration_paths() {
+    let state = make_state();
+    let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+
+    let err = match team_converge(
+        State(Arc::clone(&state)),
+        auth.clone(),
+        Json(TeamConvergeRequest {
+            file: "team-template/tagma.toml".into(),
+            ..Default::default()
+        }),
+    )
+    .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("a relative declaration path refuses"),
+    };
+    assert_eq!(err.status, 400);
+    assert!(err.message.contains("path must be absolute"));
+
+    let err = match team_status(
+        State(Arc::clone(&state)),
+        auth,
+        Query(TeamStatusQuery {
+            file: "team-template/tagma.toml".into(),
+            ..Default::default()
+        }),
+    )
+    .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("a relative declaration path refuses"),
+    };
+    assert_eq!(err.status, 400);
+    assert!(err.message.contains("path must be absolute"));
 }

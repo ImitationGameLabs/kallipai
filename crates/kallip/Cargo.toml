@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true }
+kallip-blob-store = { workspace = true }
 kallip-client = { workspace = true }
 kallip-common = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }

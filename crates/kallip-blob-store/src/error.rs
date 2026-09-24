@@ -24,6 +24,21 @@ pub enum Error {
     #[error("entropy source failure: {0}")]
     Rng(String),
 
+    /// Canonical packing caps the packed byte total (semantic anti-
+    /// footgun bound, not an availability edge); the count is what the
+    /// pack reached when it aborted.
+    #[error("dossier packs to {size} bytes, over the {max}-byte cap")]
+    DossierTooLarge { size: usize, max: usize },
+    /// A canonical archive holds regular files and directories only.
+    #[error("dossier contains a non-regular entry: {0}")]
+    NonRegularEntry(String),
+    /// A symlink could pull out-of-dossier content in or loop the walk.
+    #[error("dossier contains a symlink entry: {0}")]
+    SymlinkEntry(String),
+    /// A non-UTF-8 name would be mangled into the tar entry name.
+    #[error("dossier contains a non-UTF-8 entry name: {0}")]
+    NonUtf8Entry(String),
+
     /// The blocking encode pass died (join error on the blocking pool).
     #[error("blob encode task failed: {0}")]
     Encode(String),

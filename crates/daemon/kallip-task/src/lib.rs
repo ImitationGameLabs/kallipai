@@ -8,7 +8,6 @@
 //! directory. Gates are enforced inside the transition transaction, not at
 //! the CLI surface — the CLI is an entry point, the store is the law.
 
-pub mod archive;
 pub mod entities;
 pub mod gates;
 pub mod migration;
@@ -57,10 +56,20 @@ pub enum Error {
     )]
     ArchiveGate { id: i64, status: String },
 
-    #[error("dossier path {path} is not a directory")]
-    DossierNotDir { path: String },
-    #[error("task {id} registers a dossier ({path}) but close got no blob store to archive it")]
-    ArchiveNoBlobStore { id: i64, path: String },
+    #[error("dossier packs to {size} bytes, over the {max}-byte cap")]
+    DossierTooLarge { size: usize, max: usize },
+    /// A bulk payload's base64 does not decode: caller input, so the
+    /// route face owes a 400, not an internal error.
+    #[error("{what} is not valid base64")]
+    MalformedBase64 { what: &'static str },
+    /// A payload that claims to be an archive does not parse as one.
+    #[error("{what} is not a valid tar archive")]
+    MalformedArchive { what: &'static str },
+    /// A confirm report body is not UTF-8 text: refused at write time,
+    /// because the read-back path would otherwise surface it as a
+    /// corrupt record (a 500) instead of the caller's mistake (a 400).
+    #[error("confirm report is not valid UTF-8")]
+    ReportNotUtf8,
 
     #[error("invalid association keys: {detail}")]
     AssociationInvalid { detail: String },

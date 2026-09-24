@@ -14,6 +14,7 @@
 //! `<root>/blobs/<first two hex characters>/<id>` with staging under
 //! `<root>/tmp/`, both on one volume so commits are atomic renames.
 
+pub mod archive;
 pub mod compression;
 pub mod encode;
 pub mod error;
@@ -23,6 +24,7 @@ pub mod local;
 pub mod rewrite;
 pub mod store;
 
+pub use self::archive::{extract, ingest, pack_dir};
 pub use self::compression::Compression;
 pub use self::error::Error;
 pub use self::hash::BlobId;

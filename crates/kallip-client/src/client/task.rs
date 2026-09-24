@@ -194,6 +194,19 @@ impl TagmaClient {
         )
         .await
     }
+    pub async fn task_report_body(&self, id: i64, blob: &str) -> Result<String> {
+        let resp = self
+            .with_auth(
+                self.inner
+                    .http
+                    .get(self.url(&format!("/tasks/{id}/reports/{blob}"))),
+            )
+            .send()
+            .await
+            .context("fetch task report")?;
+        let resp = self.ensure_success(resp).await?;
+        Ok(resp.text().await?)
+    }
     /// Downloads the closed-task archive blob (canonical tar bytes).
     pub async fn task_fetch_archive(&self, id: i64) -> Result<Vec<u8>> {
         let resp = self

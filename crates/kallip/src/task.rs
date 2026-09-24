@@ -6,10 +6,12 @@
 use std::io::Cursor;
 
 use anyhow::{Result, anyhow};
+use base64::Engine as _;
 use kallip_client::TagmaClient;
 use kallip_common::protocol::{
-    ClosedReason, REPORT_MAX_BYTES, TaskCloseRequest, TaskConfirmRequest, TaskCreateRequest,
-    TaskExport, TaskForceRequest, TaskListQuery, TaskNoteRequest, TaskStatus,
+    ClosedReason, DOSSIER_MAX_BYTES, REPORT_MAX_BYTES, TaskCloseRequest, TaskConfirmFile,
+    TaskConfirmRequest, TaskCreateRequest, TaskExport, TaskForceRequest, TaskListQuery,
+    TaskNoteRequest, TaskStatus,
 };
 
 use crate::args::task::{
@@ -68,7 +70,6 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                     title: args.title.clone(),
                     assignee: args.assignee.clone(),
                     require: args.require.clone(),
-                    dossier_path: args.dossier.as_ref().map(|p| p.display().to_string()),
                     inbox_id_start: args.inbox_start,
                     inbox_id_end: args.inbox_end,
                     room_id: args.room.clone(),
@@ -95,7 +96,13 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                             "report is {size} bytes; the cap is {REPORT_MAX_BYTES} bytes"
                         ));
                     }
-                    Some(body)
+                    Some(TaskConfirmFile {
+                        file_name: path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "report.txt".to_string()),
+                        file_b64: base64::engine::general_purpose::STANDARD.encode(body),
+                    })
                 }
                 None => None,
             };
@@ -125,6 +132,20 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
             print_state_line(&task);
         }
         TaskCommand::Close(args) => {
+            // Pack at close time: the directory freezes here, in the
+            // caller's shell, and travels as bytes. The tagma never
+            // reads the filesystem to close a task.
+            let dossier_tar_b64 = match &args.dossier {
+                Some(dir) => {
+                    if !dir.is_dir() {
+                        return Err(anyhow!("dossier {} is not a directory", dir.display()));
+                    }
+                    let packed =
+                        kallip_blob_store::archive::pack_dir(dir, Some(DOSSIER_MAX_BYTES as u64))?;
+                    Some(base64::engine::general_purpose::STANDARD.encode(packed))
+                }
+                None => None,
+            };
             let task = client
                 .task_close(
                     args.id,
@@ -132,6 +153,7 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                         reason: close_reason(args.reason),
                         summary: args.summary.clone(),
                         force: args.force,
+                        dossier_tar_b64,
                     },
                 )
                 .await?;
@@ -277,12 +299,12 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                     return Ok(());
                 }
                 for r in &confirms {
-                    let size = match &r.report {
-                        Some(body) => format!("{}B", body.len()),
+                    let attached = match &r.report {
+                        Some(file) => format!("{} {}B", file.file_name, file.size),
                         None => "-".to_string(),
                     };
                     println!(
-                        "{} v{} {} {size}",
+                        "{} v{} {} {attached}",
                         r.confirmer,
                         r.version,
                         r.created_at.as_deref().unwrap_or("?")
@@ -306,13 +328,14 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                         args.confirmer
                     )
                 })?;
-                let report = r.report.as_deref().ok_or_else(|| {
+                let pointer = r.report.as_ref().ok_or_else(|| {
                     anyhow!(
                         "confirmation v{} for confirmer '{}' carries no report",
                         r.version,
                         r.confirmer
                     )
                 })?;
+                let report = client.task_report_body(args.id, &pointer.blob).await?;
                 match &args.out {
                     Some(path) => std::fs::write(path, report)?,
                     None => print!("{report}"),
@@ -353,11 +376,11 @@ fn print_show(e: &TaskExport) {
             println!("association: {}", parts.join("; "));
         }
     }
-    if let Some(path) = &e.dossier_path {
-        println!("dossier: {path} (live)");
-    }
     if let Some(hash) = &e.archive_hash {
-        println!("archive: {hash} (closed)");
+        match e.archive_entries {
+            Some(entries) => println!("archive: {hash} (closed, {entries} entries)"),
+            None => println!("archive: {hash} (closed)"),
+        }
     }
     if let Some(reason) = &e.closed_reason {
         match &e.close_summary {
@@ -404,8 +427,17 @@ struct TaskConfirmView {
     actor: Option<String>,
     version: u32,
     created_at: Option<String>,
-    /// The report body; `None` for a bare confirmation (no --file).
-    report: Option<String>,
+    /// The stored report pointer; `None` for a bare confirmation
+    /// (no --file).
+    report: Option<ReportPointer>,
+}
+
+/// One stored report: the content address the body is fetched by, plus
+/// the display metadata recorded at confirm time.
+struct ReportPointer {
+    blob: String,
+    file_name: String,
+    size: i64,
 }
 
 fn task_confirms(export: &TaskExport) -> Vec<TaskConfirmView> {
@@ -418,8 +450,13 @@ fn task_confirms(export: &TaskExport) -> Vec<TaskConfirmView> {
                 .payload
                 .as_ref()
                 .and_then(|p| p.get("file"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+                .and_then(|v| {
+                    Some(ReportPointer {
+                        blob: v.get("file_blob")?.as_str()?.to_string(),
+                        file_name: v.get("file_name")?.as_str()?.to_string(),
+                        size: v.get("size")?.as_i64()?,
+                    })
+                });
             let view = TaskConfirmView {
                 confirmer: ev
                     .actor_role
@@ -559,8 +596,8 @@ mod list_render_tests {
             closed_reason: None,
             close_summary: None,
             association: None,
-            dossier_path: None,
             archive_hash: None,
+            archive_entries: None,
             events: vec![
                 confirm_event(1, "agent-1", Some("reviewer-c")),
                 confirm_event(2, "agent-2", Some("reviewer-h")),

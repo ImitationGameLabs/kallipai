@@ -94,6 +94,7 @@ wiremock = { workspace = true }
 # scratch dirs, serial execution, and the landlock runtime probe from
 # kallip-shell.
 tempfile = { workspace = true }
+tar = { workspace = true }
 temp-env = { workspace = true }
 base64 = { workspace = true }
 kallip-testkit = { workspace = true }

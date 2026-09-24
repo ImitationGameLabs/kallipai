@@ -326,14 +326,14 @@ closed-task archives, served by the tagma task API:
 
 | Subcommand | Purpose |
 | --- | --- |
-| `task create` | Register a task (`--title ...`); `--require` fixes the confirmer roster (repeatable), resolved to identities at create; `--assignee` defaults to whoever picks it up; plus `--dossier` and the association keys |
+| `task create` | Register a task (`--title ...`); `--require` fixes the confirmer roster (repeatable), resolved to identities at create; `--assignee` defaults to whoever picks it up; plus the association keys |
 | `task start` | Pick a queued task up by id; the serial gate applies unless `--force` |
 | `task confirm` | File your confirmation toward the close gate, with an optional `--note` and a report body read from `--file` |
 | `task review` | Move an in-progress task to review |
 | `task pause` | Park an in-progress task; no gate applies |
 | `task resume` | Unpause a paused task; the serial gate applies unless `--force` |
 | `task note` | Append a work note to the trail without moving the state machine |
-| `task close` | Close a task with a `--reason` and an optional `--summary`; every registered confirmer must have confirmed unless `--force` |
+| `task close` | Close a task with a `--reason` and an optional `--summary`; every registered confirmer must have confirmed unless `--force`. With `--dossier <dir>` the directory packs canonically and archives with the close |
 | `task reopen` | Reopen a closed task; the serial gate applies unless `--force` |
 | `task archive` | Archive a closed task so it leaves the default list view; the closed-only gate applies unless `--force` |
 | `task list` | List tasks (`--status`, `--assignee`, `--archived`, time-window filters, paging, `--relative-time`) |

@@ -2,17 +2,41 @@
 
 use std::sync::Arc;
 
+use base64::Engine as _;
 use kallip_blob_store::LocalBackend;
-use kallip_common::protocol::{REPORT_MAX_BYTES, TaskConfirmRequest, TaskCreateRequest};
+use kallip_common::protocol::{
+    REPORT_MAX_BYTES, TaskCloseRequest, TaskConfirmFile, TaskConfirmRequest, TaskCreateRequest,
+};
 use kallip_task::store::TaskFilter;
 use kallip_task::{ClosedReason, ConfirmerResolver, Error, TaskStatus, TaskStore};
 use sea_orm::ConnectionTrait;
 
-fn confirm_req(note: Option<&str>, file: Option<&str>) -> TaskConfirmRequest {
+fn confirm_req(note: Option<&str>, file: Option<(&str, &str)>) -> TaskConfirmRequest {
     TaskConfirmRequest {
         note: note.map(str::to_string),
-        file: file.map(str::to_string),
+        file: file.map(|(name, body)| TaskConfirmFile {
+            file_name: name.to_string(),
+            file_b64: base64::engine::general_purpose::STANDARD.encode(body),
+        }),
     }
+}
+
+fn close_req(reason: ClosedReason, summary: Option<String>, force: bool) -> TaskCloseRequest {
+    TaskCloseRequest {
+        reason,
+        summary,
+        force,
+        dossier_tar_b64: None,
+    }
+}
+
+/// A scratch blob store: every close/confirm carries one now, and the
+/// content-addressed root only needs to exist by first ingest.
+fn blobs() -> Arc<dyn kallip_blob_store::BlobStore> {
+    Arc::new(LocalBackend::new(std::env::temp_dir().join(format!(
+        "kallip-task-lifecycle-blobs-{}",
+        std::process::id()
+    ))))
 }
 
 fn spec(title: &str, assignee: &str, require: &[&str]) -> TaskCreateRequest {
@@ -66,14 +90,19 @@ async fn lifecycle_with_review_and_confirmations() {
     assert!(t.started_at.is_some());
 
     let t = store
-        .confirm(t.id, "dev", confirm_req(Some("wip"), None))
+        .confirm(t.id, "dev", confirm_req(Some("wip"), None), blobs())
         .await
         .unwrap();
     assert_eq!(t.status, "in_progress");
 
     // Closing without confirmations fails the gate, naming every id.
     let err = store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -90,11 +119,16 @@ async fn lifecycle_with_review_and_confirmations() {
 
     // One confirmation is still not enough.
     store
-        .confirm(t.id, "agent-r1", confirm_req(None, None))
+        .confirm(t.id, "agent-r1", confirm_req(None, None), blobs())
         .await
         .unwrap();
     let err = store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -103,17 +137,15 @@ async fn lifecycle_with_review_and_confirmations() {
     );
 
     store
-        .confirm(t.id, "agent-r2", confirm_req(None, None))
+        .confirm(t.id, "agent-r2", confirm_req(None, None), blobs())
         .await
         .unwrap();
     let t = store
         .close(
             t.id,
             "dev",
-            ClosedReason::Completed,
-            Some("landed".to_string()),
-            false,
-            None,
+            close_req(ClosedReason::Completed, Some("landed".to_string()), false),
+            blobs(),
         )
         .await
         .unwrap();
@@ -189,7 +221,7 @@ async fn confirm_on_queued_paused_or_closed_is_an_invalid_transition() {
     // queued
     let t = create(&store, "q", "dev", &[], resolver.clone()).await;
     let err = store
-        .confirm(t.id, "dev", confirm_req(Some("wip"), None))
+        .confirm(t.id, "dev", confirm_req(Some("wip"), None), blobs())
         .await
         .unwrap_err();
     assert!(matches!(err, Error::InvalidTransition { .. }));
@@ -199,7 +231,7 @@ async fn confirm_on_queued_paused_or_closed_is_an_invalid_transition() {
     store.start(t.id, "dev", false).await.unwrap();
     store.pause(t.id, "dev").await.unwrap();
     let err = store
-        .confirm(t.id, "dev", confirm_req(Some("wip"), None))
+        .confirm(t.id, "dev", confirm_req(Some("wip"), None), blobs())
         .await
         .unwrap_err();
     assert!(matches!(err, Error::InvalidTransition { .. }));
@@ -208,11 +240,16 @@ async fn confirm_on_queued_paused_or_closed_is_an_invalid_transition() {
     let t = create(&store, "d", "dev", &[], resolver).await;
     store.start(t.id, "dev", false).await.unwrap();
     store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap();
     let err = store
-        .confirm(t.id, "dev", confirm_req(Some("wip"), None))
+        .confirm(t.id, "dev", confirm_req(Some("wip"), None), blobs())
         .await
         .unwrap_err();
     assert!(matches!(err, Error::InvalidTransition { .. }));
@@ -273,7 +310,7 @@ async fn resume_does_not_rebase_the_confirmation_window() {
     let t = create(&store, "window", "dev", &["r1"], roster_resolver()).await;
     store.start(t.id, "dev", false).await.unwrap();
     store
-        .confirm(t.id, "agent-r1", confirm_req(None, None))
+        .confirm(t.id, "agent-r1", confirm_req(None, None), blobs())
         .await
         .unwrap();
 
@@ -282,7 +319,12 @@ async fn resume_does_not_rebase_the_confirmation_window() {
     store.pause(t.id, "dev").await.unwrap();
     store.resume(t.id, "dev", false).await.unwrap();
     let t = store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap();
     assert_eq!(t.status, "closed");
@@ -294,11 +336,16 @@ async fn export_json_shape_is_stable() {
     let t = create(&store, "exported", "dev", &["r1"], roster_resolver()).await;
     store.start(t.id, "dev", false).await.unwrap();
     store
-        .confirm(t.id, "agent-r1", confirm_req(None, None))
+        .confirm(t.id, "agent-r1", confirm_req(None, None), blobs())
         .await
         .unwrap();
     store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap();
 
@@ -340,14 +387,7 @@ async fn close_archives_dossier_content_addressed() {
     std::fs::write(dossier.join("notes/a.md"), "a").unwrap();
 
     let t = store
-        .create(
-            TaskCreateRequest {
-                dossier_path: Some(dossier.display().to_string()),
-                ..spec("archived", "dev", &[])
-            },
-            "root",
-            roster_resolver(),
-        )
+        .create(spec("archived", "dev", &[]), "root", roster_resolver())
         .await
         .unwrap();
     store.start(t.id, "dev", false).await.unwrap();
@@ -356,24 +396,32 @@ async fn close_archives_dossier_content_addressed() {
     let blobs: Arc<dyn kallip_blob_store::BlobStore> =
         Arc::new(LocalBackend::new(blob_root.path().join("blobs")));
 
+    // Pack like the CLI does, then ship the bytes: the store never
+    // touches the directory itself, so closing works from any cwd.
+    let packed = kallip_blob_store::archive::pack_dir(&dossier, None).unwrap();
+    let tar_b64 = base64::engine::general_purpose::STANDARD.encode(&packed);
+
     let t = store
         .close(
             t.id,
             "dev",
-            ClosedReason::Completed,
-            None,
-            false,
-            Some(blobs.clone()),
+            TaskCloseRequest {
+                dossier_tar_b64: Some(tar_b64),
+                ..close_req(ClosedReason::Completed, None, false)
+            },
+            blobs.clone(),
         )
         .await
         .unwrap();
     let hash = t.archive_hash.clone().expect("archive hash pointer set");
+    let entries = t.archive_entries.expect("entry count recorded");
+    assert_eq!(entries, 3, "plan.md, notes/, notes/a.md");
 
     let blob_id = kallip_blob_store::BlobId::parse(&hash).unwrap();
     assert!(blobs.stat(&blob_id).await.unwrap().is_some());
 
     let out = tempfile::tempdir().unwrap();
-    kallip_task::archive::extract(blobs.as_ref(), &blob_id, &out.path().join("out"))
+    kallip_blob_store::archive::extract(blobs.as_ref(), &blob_id, &out.path().join("out"))
         .await
         .unwrap();
     assert_eq!(
@@ -389,7 +437,12 @@ async fn reopen_runs_the_serial_gate_and_force_is_audited() {
     let done = create(&store, "done", "dev", &[], resolver.clone()).await;
     store.start(done.id, "dev", false).await.unwrap();
     store
-        .close(done.id, "dev", ClosedReason::Completed, None, true, None)
+        .close(
+            done.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, true),
+            blobs(),
+        )
         .await
         .unwrap();
 
@@ -416,11 +469,16 @@ async fn reopen_invalidates_prior_cycle_confirmations() {
     let t = create(&store, "cycle", "dev", &["r1"], roster_resolver()).await;
     store.start(t.id, "dev", false).await.unwrap();
     store
-        .confirm(t.id, "agent-r1", confirm_req(None, None))
+        .confirm(t.id, "agent-r1", confirm_req(None, None), blobs())
         .await
         .unwrap();
     store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap();
 
@@ -428,7 +486,12 @@ async fn reopen_invalidates_prior_cycle_confirmations() {
     // longer counts.
     store.reopen(t.id, "dev", false).await.unwrap();
     let err = store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -438,36 +501,19 @@ async fn reopen_invalidates_prior_cycle_confirmations() {
 
     // A fresh confirmation satisfies the gate again.
     store
-        .confirm(t.id, "agent-r1", confirm_req(None, None))
+        .confirm(t.id, "agent-r1", confirm_req(None, None), blobs())
         .await
         .unwrap();
     let t = store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
-        .await
-        .unwrap();
-    assert_eq!(t.status, "closed");
-}
-
-#[tokio::test]
-async fn close_with_a_registered_dossier_but_no_blob_store_is_an_error() {
-    let store = TaskStore::open_in_memory().await;
-    let t = store
-        .create(
-            TaskCreateRequest {
-                dossier_path: Some("/tmp/does-not-matter".to_string()),
-                ..spec("dossier", "dev", &[])
-            },
-            "root",
-            roster_resolver(),
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
         )
         .await
         .unwrap();
-    store.start(t.id, "dev", false).await.unwrap();
-    let err = store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, Error::ArchiveNoBlobStore { .. }));
+    assert_eq!(t.status, "closed");
 }
 
 #[tokio::test]
@@ -477,7 +523,12 @@ async fn force_close_escapes_the_confirmation_gate_and_is_audited() {
     store.start(t.id, "dev", false).await.unwrap();
 
     let err = store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -486,7 +537,12 @@ async fn force_close_escapes_the_confirmation_gate_and_is_audited() {
     );
 
     store
-        .close(t.id, "dev", ClosedReason::Completed, None, true, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, true),
+            blobs(),
+        )
         .await
         .unwrap();
     let (_, events) = store.get(t.id).await.unwrap();
@@ -613,7 +669,12 @@ async fn note_records_a_note_in_any_state() {
     assert_eq!(t.status, "in_progress");
 
     store
-        .close(t.id, "dev", ClosedReason::Completed, None, true, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, true),
+            blobs(),
+        )
         .await
         .unwrap();
     // Notes land on closed tasks too: the trail is append-only.
@@ -667,7 +728,12 @@ async fn archived_tasks_leave_the_default_view() {
     let t = create(&store, "done", "dev", &[], roster_resolver()).await;
     store.start(t.id, "dev", false).await.unwrap();
     store
-        .close(t.id, "dev", ClosedReason::Completed, None, true, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, true),
+            blobs(),
+        )
         .await
         .unwrap();
     store.archive_task(t.id, "root", false).await.unwrap();
@@ -727,7 +793,12 @@ async fn close_with_a_damaged_stored_roster_fails_loudly() {
     .unwrap();
 
     let err = store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap_err();
     match err {
@@ -782,7 +853,12 @@ async fn list_orders_newest_first_windows_and_pages() {
     // (close is only legal from in_progress|review, so start them first).
     store.start(c.id, "dev", false).await.unwrap();
     store
-        .close(c.id, "dev", ClosedReason::Completed, None, true, None)
+        .close(
+            c.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, true),
+            blobs(),
+        )
         .await
         .unwrap();
     // The closed axis sorts on ended_at (second precision); a real gap
@@ -790,7 +866,12 @@ async fn list_orders_newest_first_windows_and_pages() {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     store.start(b.id, "dev", false).await.unwrap();
     store
-        .close(b.id, "dev", ClosedReason::Completed, None, true, None)
+        .close(
+            b.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, true),
+            blobs(),
+        )
         .await
         .unwrap();
 
@@ -876,11 +957,16 @@ async fn close_gate_accepts_a_confirmation_filed_as_the_agent_id() {
     let store = TaskStore::open_in_memory().await;
     let t = confirmed_task(&store, "reviewer-c", "agent-1").await;
     store
-        .confirm(t.id, "agent-1", confirm_req(None, None))
+        .confirm(t.id, "agent-1", confirm_req(None, None), blobs())
         .await
         .unwrap();
     let t = store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap();
     assert_eq!(t.status, "closed");
@@ -893,7 +979,7 @@ async fn confirm_from_an_outside_actor_does_not_count() {
     let store = TaskStore::open_in_memory().await;
     let t = confirmed_task(&store, "reviewer-c", "agent-1").await;
     store
-        .confirm(t.id, "mystery", confirm_req(None, None))
+        .confirm(t.id, "mystery", confirm_req(None, None), blobs())
         .await
         .unwrap();
     let (_, events) = store.get(t.id).await.unwrap();
@@ -905,7 +991,12 @@ async fn confirm_from_an_outside_actor_does_not_count() {
     );
 
     let err = store
-        .close(t.id, "dev", ClosedReason::Completed, None, false, None)
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -919,20 +1010,13 @@ async fn confirm_from_an_outside_actor_does_not_count() {
 #[tokio::test]
 async fn confirm_payload_shapes_follow_the_optional_fields() {
     let store = TaskStore::open_in_memory().await;
+    let blobs = blobs();
     let cases = [
-        (
-            Some("with both"),
-            Some("r1"),
-            serde_json::json!({"note": "with both", "file": "r1"}),
-        ),
-        (
-            Some("note only"),
-            None,
-            serde_json::json!({"note": "note only"}),
-        ),
-        (None, Some("r2"), serde_json::json!({"file": "r2"})),
+        (Some("with both"), Some(("review.md", "r1"))),
+        (Some("note only"), None),
+        (None, Some(("notes.md", "r2"))),
     ];
-    for (i, (note, file, want)) in cases.into_iter().enumerate() {
+    for (i, (note, file)) in cases.into_iter().enumerate() {
         let t = store
             .create(
                 spec("payload", &format!("dev{i}"), &[]),
@@ -942,14 +1026,20 @@ async fn confirm_payload_shapes_follow_the_optional_fields() {
             .await
             .unwrap();
         store.start(t.id, "dev", false).await.unwrap();
+        let file = file.map(|(name, body)| TaskConfirmFile {
+            file_name: name.to_string(),
+            file_b64: base64::engine::general_purpose::STANDARD.encode(body),
+        });
+        let expected_name = file.as_ref().map(|f| f.file_name.clone());
         store
             .confirm(
                 t.id,
                 "dev",
                 TaskConfirmRequest {
                     note: note.map(str::to_string),
-                    file: file.map(str::to_string),
+                    file,
                 },
+                blobs.clone(),
             )
             .await
             .unwrap();
@@ -960,14 +1050,27 @@ async fn confirm_payload_shapes_follow_the_optional_fields() {
             .and_then(|e| e.payload.as_deref())
             .map(|p| serde_json::from_str(p).unwrap())
             .unwrap();
-        assert_eq!(payload, want);
+        match (note, expected_name) {
+            (Some(note), Some(name)) => {
+                assert_eq!(payload["note"], note);
+                assert_eq!(payload["file"]["file_name"], name);
+                assert!(payload["file"]["file_blob"].is_string());
+                assert!(payload["file"]["size"].as_i64().unwrap() > 0);
+            }
+            (Some(note), None) => assert_eq!(payload["note"], note),
+            (None, Some(name)) => {
+                assert_eq!(payload["file"]["file_name"], name);
+                assert!(payload["file"]["file_blob"].is_string());
+            }
+            (None, None) => unreachable!("no such case row"),
+        }
     }
 
     // Neither field: no payload at all.
     let t = create(&store, "payload", "dev", &[], roster_resolver()).await;
     store.start(t.id, "dev", false).await.unwrap();
     store
-        .confirm(t.id, "dev", confirm_req(None, None))
+        .confirm(t.id, "dev", confirm_req(None, None), blobs.clone())
         .await
         .unwrap();
     let (_, events) = store.get(t.id).await.unwrap();
@@ -984,14 +1087,19 @@ async fn confirm_report_over_cap_is_refused() {
     let store = TaskStore::open_in_memory().await;
     let t = create(&store, "big", "dev", &[], roster_resolver()).await;
     store.start(t.id, "dev", false).await.unwrap();
+    let oversized = "x".repeat(REPORT_MAX_BYTES + 1);
     let err = store
         .confirm(
             t.id,
             "dev",
             TaskConfirmRequest {
                 note: None,
-                file: Some("x".repeat(REPORT_MAX_BYTES + 1)),
+                file: Some(TaskConfirmFile {
+                    file_name: "big.md".into(),
+                    file_b64: base64::engine::general_purpose::STANDARD.encode(&oversized),
+                }),
             },
+            blobs(),
         )
         .await
         .unwrap_err();
@@ -1017,15 +1125,24 @@ async fn list_page_reports_has_reports_and_total_by_filter() {
             "dev",
             TaskConfirmRequest {
                 note: None,
-                file: Some("body".into()),
+                file: Some(TaskConfirmFile {
+                    file_name: "review.md".into(),
+                    file_b64: base64::engine::general_purpose::STANDARD.encode("body"),
+                }),
             },
+            blobs(),
         )
         .await
         .unwrap();
     let done = create(&store, "done", "ops", &[], resolver).await;
     store.start(done.id, "ops", false).await.unwrap();
     store
-        .close(done.id, "ops", ClosedReason::Completed, None, true, None)
+        .close(
+            done.id,
+            "ops",
+            close_req(ClosedReason::Completed, None, true),
+            blobs(),
+        )
         .await
         .unwrap();
 
@@ -1059,4 +1176,150 @@ async fn list_page_reports_has_reports_and_total_by_filter() {
     assert_eq!(closed.total, 1, "the status filter moves the total");
     assert_eq!(closed.rows[0].id, done.id);
     assert_eq!(has(&closed, done.id), Some(false));
+}
+
+/// The close gate refusal runs after the blob ingest: the archive bytes
+/// are already stored (an orphan until the retry), the task is still in
+/// progress, and forcing the same dossier lands the same content address
+/// - the orphan is reclaimed by dedup, never duplicated.
+#[tokio::test]
+async fn close_gate_refusal_leaves_task_open_and_blob_ingested() {
+    let store = TaskStore::open_in_memory().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let dossier = tmp.path().join("dossier");
+    std::fs::create_dir_all(&dossier).unwrap();
+    std::fs::write(dossier.join("plan.md"), "# plan\n").unwrap();
+
+    let t = store
+        .create(spec("atomic", "dev", &["r1"]), "root", roster_resolver())
+        .await
+        .unwrap();
+    store.start(t.id, "dev", false).await.unwrap();
+
+    let blob_root = tempfile::tempdir().unwrap();
+    let blobs: Arc<dyn kallip_blob_store::BlobStore> =
+        Arc::new(LocalBackend::new(blob_root.path().join("blobs")));
+
+    let packed = kallip_blob_store::archive::pack_dir(&dossier, None).unwrap();
+    let tar_b64 = base64::engine::general_purpose::STANDARD.encode(&packed);
+    let expected = kallip_blob_store::archive::ingest(blobs.as_ref(), packed.clone())
+        .await
+        .unwrap();
+
+    let err = match store
+        .close(
+            t.id,
+            "dev",
+            TaskCloseRequest {
+                dossier_tar_b64: Some(tar_b64.clone()),
+                ..close_req(ClosedReason::Completed, None, false)
+            },
+            blobs.clone(),
+        )
+        .await
+    {
+        Err(e) => e,
+        Ok(_) => panic!("missing confirmations must refuse"),
+    };
+    assert!(
+        matches!(err, Error::ConfirmationGate { .. }),
+        "refusal is the confirmations gate"
+    );
+    let (task, _) = store.get(t.id).await.unwrap();
+    assert_eq!(task.status, "in_progress", "the refusal closes nothing");
+    assert!(
+        blobs.stat(&expected).await.unwrap().is_some(),
+        "the ingested blob survives the refusal"
+    );
+
+    let t = store
+        .close(
+            t.id,
+            "dev",
+            TaskCloseRequest {
+                dossier_tar_b64: Some(tar_b64),
+                ..close_req(ClosedReason::Completed, None, true)
+            },
+            blobs.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        t.archive_hash.as_deref(),
+        Some(expected.as_str()),
+        "same bytes, same content address"
+    );
+}
+
+/// The startup report migration is idempotent: legacy body-in-payload
+/// rows move to the pointer form exactly once, a second pass writes
+/// nothing.
+#[tokio::test]
+async fn report_payload_migration_is_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("tasks.db");
+    let store = TaskStore::open(&db_path).await.unwrap();
+    let blob_root = tempfile::tempdir().unwrap();
+    let blobs: Arc<dyn kallip_blob_store::BlobStore> =
+        Arc::new(LocalBackend::new(blob_root.path().join("blobs")));
+
+    assert_eq!(
+        store.migrate_report_payloads(blobs.as_ref()).await.unwrap(),
+        0,
+        "an empty trail migrates nothing"
+    );
+
+    let t = store
+        .create(spec("legacy report", "dev", &[]), "root", no_resolver())
+        .await
+        .unwrap();
+
+    let legacy = serde_json::json!({
+        "note": "done",
+        "file": "the legacy report body",
+    });
+    let raw = sea_orm::Database::connect(format!("sqlite://{}?mode=rw", db_path.display()))
+        .await
+        .unwrap();
+    raw.execute_unprepared(&format!(
+        "INSERT INTO task_events (task_id, kind, name, actor, payload, created_at) VALUES ({}, 'action', 'confirm', 'dev', '{}', 0)",
+        t.id,
+        legacy.to_string().replace('\'', "''"),
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        store.migrate_report_payloads(blobs.as_ref()).await.unwrap(),
+        1,
+        "the legacy row migrates once"
+    );
+    let (_, events) = store.get(t.id).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_str(
+        events
+            .iter()
+            .find(|e| e.kind == "action" && e.name == "confirm")
+            .and_then(|e| e.payload.as_deref())
+            .expect("confirm payload"),
+    )
+    .unwrap();
+    let blob = payload["file"]["file_blob"].as_str().expect("pointer form");
+    assert_eq!(payload["file"]["file_name"], "report.txt");
+    assert_eq!(payload["file"]["size"], "the legacy report body".len());
+
+    assert_eq!(
+        store.migrate_report_payloads(blobs.as_ref()).await.unwrap(),
+        0,
+        "the second pass is a no-op"
+    );
+    let (_, events) = store.get(t.id).await.unwrap();
+    let again: serde_json::Value = serde_json::from_str(
+        events
+            .iter()
+            .find(|e| e.kind == "action" && e.name == "confirm")
+            .and_then(|e| e.payload.as_deref())
+            .expect("confirm payload"),
+    )
+    .unwrap();
+    assert_eq!(again["file"]["file_blob"], blob, "pointer untouched");
 }

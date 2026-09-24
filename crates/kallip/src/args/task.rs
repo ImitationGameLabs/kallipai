@@ -49,7 +49,7 @@ pub(crate) fn parse_time_anchor(raw: &str, now_secs: u64) -> anyhow::Result<u64>
 #[derive(Subcommand)]
 pub(crate) enum TaskCommand {
     /// Register a task in the queue: title, optional assignee, the
-    /// confirmer roster (--require, repeatable), dossier, association keys.
+    /// confirmer roster (--require, repeatable), association keys.
     Create(TaskCreateArgs),
     /// Pick a queued task up (queued -> in_progress; the serial gate
     /// applies, --force to override with an auditable escape).
@@ -65,9 +65,9 @@ pub(crate) enum TaskCommand {
     /// --force to override with an auditable escape).
     Resume(TaskResumeArgs),
     /// Close a task: every registered confirmer must have filed a
-    /// confirmation, or pass --force with an auditable escape. The
-    /// dossier (if registered) is packed canonically and
-    /// content-addressed on close.
+    /// confirmation, or pass --force with an auditable escape. With
+    /// --dossier the directory is packed canonically here and travels
+    /// with the close request as the content-addressed archive.
     Close(TaskCloseArgs),
     /// Reopen a closed task (back to in_progress).
     Reopen(TaskReopenArgs),
@@ -149,9 +149,6 @@ pub(crate) struct TaskCreateArgs {
     /// file a confirmation before the task can close.
     #[arg(long = "require")]
     pub require: Vec<String>,
-    /// Dossier directory packed into the closed archive on close.
-    #[arg(long)]
-    pub dossier: Option<PathBuf>,
     /// Association key: inbox id window start (the task's message trail).
     #[arg(long)]
     pub inbox_start: Option<i64>,
@@ -176,6 +173,10 @@ pub(crate) struct TaskCloseArgs {
     /// Why the task closes (gh-style two-level terminal state).
     #[arg(long, value_enum, default_value_t = TaskCloseReason::Completed)]
     pub reason: TaskCloseReason,
+    /// Dossier directory: packed canonically at close time and archived
+    /// with the task (the same tree always packs to the same bytes).
+    #[arg(long)]
+    pub dossier: Option<PathBuf>,
     /// One-sentence result recorded with the close event.
     #[arg(long)]
     pub summary: Option<String>,

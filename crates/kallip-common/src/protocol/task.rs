@@ -7,11 +7,26 @@
 //! all three faces bind to one definition and cannot drift apart.
 
 use serde::{Deserialize, Serialize};
-/// Upper bound for a review report carried in a confirm event payload, counted in UTF-8 bytes.
-/// Shared by the CLI (early, friendly failure) and the store (authoritative check): 512 KiB
-/// leaves two orders of magnitude over a typical review report while keeping event rows well
-/// below SQLite payload limits; anything larger belongs in the dossier channel.
-pub const REPORT_MAX_BYTES: usize = 512 * 1024;
+/// Upper bound for a review report, counted in decoded bytes. Shared by
+/// the CLI (early, friendly failure) and the store (authoritative check).
+/// The body lands in the content-addressed blob store and the confirm
+/// event carries only the pointer, so the cap is a semantic anti-footgun
+/// bound (a mistyped --file), not a database-size guard.
+pub const REPORT_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Upper bound for a closed-task dossier, counted in packed tar bytes.
+/// Like [`REPORT_MAX_BYTES`] this is an anti-footgun bound — a `--dossier`
+/// aimed at a giant tree fails the pack early instead of shipping a
+/// giant request. The store aborts the pack mid-walk (early stop).
+pub const DOSSIER_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Route-level body-limit override for the two task routes that carry
+/// bulk payloads (`close` with a dossier, `confirm` with a report). The
+/// tagma-wide default (`KALLIP_MAX_BODY_SIZE_KB`, 1 MiB) would 413 the
+/// base64 body before the handler could give its friendly error; the
+/// override stays scoped to these routes so no other endpoint loosens.
+/// Sized for [`DOSSIER_MAX_BYTES`] base64-encoded (~85 MiB) with headroom.
+pub const TASK_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
 
 /// The five coarse states. Serialized lowercase snake_case on the wire,
 /// matching [`TaskStatus::as_str`] and the SQLite spelling — the CLI's
@@ -90,8 +105,6 @@ pub struct TaskCreateRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dossier_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub inbox_id_start: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inbox_id_end: Option<i64>,
@@ -111,7 +124,7 @@ pub struct TaskConfirmRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
+    pub file: Option<TaskConfirmFile>,
 }
 
 /// Body of the force-carrying verbs: `start`, `resume`, `reopen`, and `archive`.
@@ -131,6 +144,9 @@ pub struct TaskNoteRequest {
 
 /// Body of `POST /tasks/{id}/close`. Closing requires a reason; the
 /// confirmation gate counts registered confirmers against filed confirmations.
+/// The dossier, when the caller names one, travels as canonical tar bytes
+/// base64-encoded: the caller packs and freezes the content, the tagma
+/// never touches the filesystem to close.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskCloseRequest {
     pub reason: ClosedReason,
@@ -138,6 +154,17 @@ pub struct TaskCloseRequest {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dossier_tar_b64: Option<String>,
+}
+
+/// A review report riding a confirmation: the file's name for display
+/// and the UTF-8 body base64-encoded. The store ingests the body into
+/// the blob store and the event carries only the pointer + metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskConfirmFile {
+    pub file_name: String,
+    pub file_b64: String,
 }
 
 /// Query parameters of `GET /tasks`.
@@ -225,10 +252,10 @@ pub struct TaskExport {
     pub closed_reason: Option<String>,
     pub close_summary: Option<String>,
     pub association: Option<AssociationExport>,
-    /// Two-phase pointer: live path while open; after close, the content
-    /// address (`archive_hash`) is the frozen truth. Both are exported.
-    pub dossier_path: Option<String>,
+    /// The closed archive: the content address plus the tar entry count
+    /// frozen at close. Absent until the task closes with a dossier.
     pub archive_hash: Option<String>,
+    pub archive_entries: Option<i64>,
     pub events: Vec<EventExport>,
 }
 
@@ -255,10 +282,9 @@ pub struct TaskRow {
     pub closed_reason: Option<String>,
     pub close_summary: Option<String>,
     pub association: Option<AssociationExport>,
-    /// Two-phase pointer: live path while open; after close, the content
-    /// address (`archive_hash`) is the frozen truth.
-    pub dossier_path: Option<String>,
+    /// The closed archive: content address plus tar entry count.
     pub archive_hash: Option<String>,
+    pub archive_entries: Option<i64>,
     /// The task has at least one confirm event carrying a report file.
     pub has_reports: bool,
 }
@@ -297,13 +323,23 @@ mod tests {
         };
         assert!(serde_json::to_value(&bare).unwrap().get("file").is_none());
         let carried = TaskConfirmRequest {
-            file: Some("approved with nits".into()),
+            file: Some(TaskConfirmFile {
+                file_name: "review.md".into(),
+                file_b64: "YXBwcm92ZWQ=".into(),
+            }),
             ..Default::default()
         };
-        assert_eq!(
-            serde_json::to_value(&carried).unwrap()["file"],
-            "approved with nits"
-        );
+        let json = serde_json::to_value(&carried).unwrap();
+        assert_eq!(json["file"]["file_name"], "review.md");
+        assert_eq!(json["file"]["file_b64"], "YXBwcm92ZWQ=");
+    }
+
+    #[test]
+    fn close_request_skips_an_absent_dossier() {
+        let bare: TaskCloseRequest = serde_json::from_str(r#"{"reason":"completed"}"#).unwrap();
+        assert!(bare.dossier_tar_b64.is_none());
+        let json = serde_json::to_value(&bare).unwrap();
+        assert!(json.get("dossier_tar_b64").is_none());
     }
 
     #[test]
@@ -330,7 +366,6 @@ mod tests {
         assert_eq!(json["require"], serde_json::json!(["dev"]));
         assert!(json.get("assignee").is_none());
         assert!(json.get("creator").is_none());
-        assert!(json.get("dossier_path").is_none());
         assert!(json.get("room_id").is_none());
         let back: TaskCreateRequest = serde_json::from_value(json).unwrap();
         assert_eq!(back.title, "ship");
