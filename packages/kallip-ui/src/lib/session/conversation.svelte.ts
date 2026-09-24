@@ -1105,8 +1105,8 @@ export class LocalConversation extends ConversationBase {
  * the transcript hydrates from the per-device cache, sends land in the
  * pending store for a later retry/auto-flush, and scroll-up pages come
  * from the cache alone. Registered under the mapped conversation id AND
- * carrying the tagma id, so a successful re-open tears this down (via
- * findByTagma) instead of coexisting with the live conversation. */
+ * carrying the tagma id, so a successful re-open sweeps it by tagma id
+ * instead of coexisting with the live conversation. */
 export class OfflineConversation extends ConversationBase {
   readonly kind = "offline-view" as const;
 

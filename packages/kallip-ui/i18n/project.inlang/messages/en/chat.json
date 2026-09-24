@@ -50,5 +50,6 @@
   "chat_direct_title": "{name} · Direct",
   "chat_error_profile_set_unusable": "This agent has no usable profile set. Rebind the agent, then retry.",
   "chat_conversation_unknown": "This conversation is not known on this device; it may belong to a tagma this browser never opened.",
-  "chat_send_timed_out": "Sending timed out. Check the connection and retry."
+  "chat_send_timed_out": "Sending timed out. Check the connection and retry.",
+  "chat_offline_no_history": "No messages from this tagma are stored on this device yet. The tagma is currently offline; new messages will appear here when it comes back online."
 }

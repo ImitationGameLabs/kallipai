@@ -11,6 +11,7 @@
   import ChannelChatPage from "./ChannelChatPage.svelte";
   import { archeionSession } from "../lib/session/archeion.svelte";
   import { channelsStore } from "../lib/session/channels.svelte";
+  import { realtimeStore } from "../lib/session/realtime.svelte";
   import { tagmaDetailsPath } from "../lib/shell/routes.ts";
   import { navigate } from "../lib/shell/port.ts";
   import {
@@ -18,6 +19,7 @@
     chat_channel_error,
     chat_channel_unavailable,
     common_retry,
+    chat_offline_no_history,
     chat_opening,
     chat_go_tagmata,
     nav_breadcrumb_tagma,
@@ -49,22 +51,32 @@
       : null,
   );
 
-  // The mounted degraded offline view (open failed, but this device has
-  // cached history + unsent lines to show): renders instead of the
-  // dead-end unavailable placeholder.
+  // The mounted degraded offline view (peer reads offline, or the open
+  // failed): history from the device cache when any, the empty-history
+  // notice otherwise; sends land in the pending store.
   const offlineView = $derived(channelsStore.offlineViewOf(tagmaId));
 
-  // Open on mount (idempotent), gated on signed-in + enrolled. Tracks ONLY the
-  // gate -- deliberately not `channelState` -- so a status transition (peer
-  // snapshot, drain death, error) does not re-fire this and re-KEX. ensureOpen
-  // is idempotent and the page mount is the single trigger; retry after a hard
-  // error is the terminal row's Retry button or navigate away and back (both
-  // re-fire this, ensureOpen tears down the dead conversation and re-KEXes).
-  // The open is explicit: a user visit outranks the failure budget's
-  // gates (an explicit FAILURE still counts; success clears it).
+  // Open on mount for an online peer, gated on signed-in + enrolled -- and
+  // NEVER for a peer whose presence reads offline: an offline peer gets
+  // the offline history view, not a fresh open attempt. A mount open
+  // would have to bypass the failure budget to be explicit, and an
+  // effect re-fire is not user intent -- so online peers open through
+  // the AUTOMATIC path, where the budget's backoff and terminal gate
+  // apply; only the Retry button is explicit.
+  // The effect tracks ONLY its gates (user presence/enrollment/offline) --
+  // not channelState -- so status transitions do not re-fire it. The
+  // offline branch mounts the degraded history view (cached tail, or an
+  // empty one when this device has no local history).
+  const offlinePeer = $derived(
+    realtimeStore.resolved && !realtimeStore.has(tagmaId),
+  );
   $effect(() => {
     if (!archeionSession.user) return;
-    if (tagma) void channelsStore.ensureOpen(tagma, { explicit: true });
+    if (offlinePeer) {
+      void channelsStore.attachOfflineView(tagmaId);
+      return;
+    }
+    if (tagma) void channelsStore.ensureOpen(tagma);
   });
 </script>
 
@@ -129,7 +141,15 @@
           </button>
         </div>
         <div class="flex-1 min-h-0">
-          <ChannelChatPage conversationId={offlineView.conversationId} />
+          {#if offlineView.transcript.lines.length === 0}
+            <div class="h-full grid place-items-center p-6">
+              <p class="text-sm opacity-70 max-w-sm text-center">
+                {chat_offline_no_history()}
+              </p>
+            </div>
+          {:else}
+            <ChannelChatPage conversationId={offlineView.conversationId} />
+          {/if}
         </div>
       </div>
     {:else if channelsStore.isAutoOpenFailed(tagmaId) && channelState.kind !== "pending"}

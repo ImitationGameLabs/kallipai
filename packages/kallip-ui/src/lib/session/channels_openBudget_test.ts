@@ -153,3 +153,25 @@ Deno.test(
     assertEquals(h.getTagmaChannelState("t-1").kind, "absent");
   },
 );
+
+Deno.test(
+  "a terminal budget blocks even the refresh leg (presence transitions cannot resync an offline peer)",
+  async () => {
+    const h = new Harness();
+    h.script = Array.from(
+      { length: 6 },
+      () => new LescheApiError(503, "tagma offline"),
+    );
+    // Six 503 failures terminal the budget...
+    for (let i = 0; i < 6; i++) {
+      await h.ensureOpen(tagma);
+      h.clock += 60_000;
+    }
+    assertEquals(h.attempts, 6);
+    // ...and a presence online-transition refresh (NOT explicit) is refused
+    // past the terminal -- this is the leg the presence sink drives on every
+    // snapshot the SSE replays. If this leaked, the 503 loop would never end.
+    await h.ensureOpen(tagma, { refresh: true });
+    assertEquals(h.attempts, 6);
+  },
+);

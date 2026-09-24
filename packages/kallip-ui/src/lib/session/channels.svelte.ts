@@ -355,16 +355,9 @@ export class ChannelsStore {
       tagma.tagma_id,
       await getReadWatermark(tagma.tagma_id),
     );
-    // A successful open supersedes any degraded offline view: drop it (an
-    // expired mapping could key it differently, so match by tagma).
-    for (const [key, conv] of this.conversations) {
-      if (
-        conv instanceof OfflineConversation &&
-        conv.tagmaId === tagma.tagma_id
-      ) {
-        this.conversations.delete(key);
-      }
-    }
+    // A successful open supersedes any degraded offline view; see
+    // sweepOfflineViewsFor.
+    this.sweepOfflineViewsFor(tagma.tagma_id);
     // Race guard: a teardown (logout / mode switch) during the KEX or cache
     // awaits cleared the map; drop the channel we built instead of
     // resurrecting the conversation. The return value is unused by callers;
@@ -403,8 +396,8 @@ export class ChannelsStore {
    *  flight. A dead conversation is torn down first WITHOUT purging its cache,
    *  so the re-KEX rehydrates the prior transcript.
    *
-   *  `explicit` marks a user-initiated open (the chat page's mount or its
-   *  retry button): it bypasses the failure budget's gates -- a failed
+   *  `explicit` marks a user-initiated open (the Retry button): it bypasses
+   *  the failure budget's gates -- a failed
    *  explicit open still counts, so the session terminal silences the
    *  automatic path without ever locking the user out.
    *
@@ -469,19 +462,29 @@ export class ChannelsStore {
     }
   }
 
-  /** Mount the degraded offline view for a tagma whose open just failed,
-   *  hydrating the cached tail so history renders. No-op when a conversation
-   *  already exists or this device has never opened the tagma (no
-   *  remembered conversation id to hydrate from). */
+  /** Mount the degraded offline view for a tagma whose open just failed or
+   *  whose peer reads offline, hydrating the cached tail so history renders.
+   *  No-op when an offline view already exists. When this device has never
+   *  opened the tagma (no remembered conversation id) a synthetic view is
+   *  mounted anyway -- an offline peer renders the same history-view shape
+   *  whether or not this device has local history. A live relay
+   *  conversation for the tagma is torn down first (cache preserved), so
+   *  the view never overwrites an open transport in place. */
   async attachOfflineView(tagmaId: string): Promise<void> {
     for (const conv of this.conversations.values()) {
       if (conv instanceof OfflineConversation && conv.tagmaId === tagmaId) {
         return;
       }
     }
-    const conversationId = lastConversationOf(tagmaId);
-    if (!conversationId) return;
+    // A live relay conversation must not be overwritten in place: closing
+    // it here releases the transport (an overwritten one would leak its
+    // socket) and keeps inbound routing unambiguous. The cache survives,
+    // so this view still hydrates and a re-open rehydrates through the
+    // presence sink's online leg under the failure budget.
+    const live = this.findByTagma(tagmaId);
+    if (live) this.tearDown(live.conversationId);
     const user = archeionSession.user;
+    const conversationId = lastConversationOf(tagmaId) ?? `offline-${tagmaId}`;
     const userId = user?.user_id;
     if (!userId) return;
     const conv = new OfflineConversation(conversationId, this, tagmaId, {
@@ -543,12 +546,14 @@ export class ChannelsStore {
   /** The mounted degraded offline view for a tagma, if any (the chat page
    *  renders it in place of the dead-end unavailable placeholder). */
   offlineViewOf(tagmaId: string): OfflineConversation | undefined {
-    const id = lastConversationOf(tagmaId);
-    if (!id) return undefined;
-    const conv = this.conversations.get(id);
-    return conv instanceof OfflineConversation ? conv : undefined;
+    const candidates = [lastConversationOf(tagmaId), `offline-${tagmaId}`];
+    for (const id of candidates) {
+      if (!id) continue;
+      const conv = this.conversations.get(id);
+      if (conv instanceof OfflineConversation) return conv;
+    }
+    return undefined;
   }
-
   private recordOpenFailure(tagmaId: string, e: unknown): void {
     const failures = (this.openBudgets.get(tagmaId)?.failures ?? 0) + 1;
     const delay = Math.min(
@@ -685,6 +690,17 @@ export class ChannelsStore {
   private setRelayConv(id: string, conv: RelayConversation): void {
     this.conversations.set(id, conv);
     this.tagmaIndex.set(conv.tagmaId, id);
+  }
+
+  /** Drop any degraded offline views for a tagma: a successful open
+   *  supersedes them (an expired mapping could key them differently, so
+   *  match by tagma id). */
+  private sweepOfflineViewsFor(tagmaId: string): void {
+    for (const [key, conv] of this.conversations) {
+      if (conv instanceof OfflineConversation && conv.tagmaId === tagmaId) {
+        this.conversations.delete(key);
+      }
+    }
   }
 
   /** Drop a conversation by id, removing its tagma-id index entry when it is a

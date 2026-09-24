@@ -64,6 +64,11 @@ class Harness extends ChannelsStore {
     const step = this.script.shift();
     if (step === undefined) throw new Error("script exhausted");
     if (step instanceof Error) throw step;
+    // Mirror the real openRelay's post-KEX sweep so the regression test
+    // below exercises the same registration sequence as production.
+    (
+      this as unknown as { sweepOfflineViewsFor(id: string): void }
+    ).sweepOfflineViewsFor(tagma.tagma_id);
     const conv = new FakeEntry("conv-1", tagma.tagma_id);
     const self = this as unknown as {
       conversations: Map<string, FakeEntry>;
@@ -136,5 +141,62 @@ Deno.test(
     await h.ensureOpen(tagma, { refresh: true });
     assertEquals(h.attempts, 2);
     assertEquals(h.getTagmaChannelState("t-1").kind, "open");
+  },
+);
+
+Deno.test(
+  "attachOfflineView mounts a synthetic view even with no remembered conversation",
+  async () => {
+    const h = new Harness();
+    h.script = ["ok"];
+    // attachOfflineView gates on a signed-in user (it stamps the sender);
+    // save/restore keeps later tests in this file unaffected.
+    const archeion = await import("./archeion.svelte.ts");
+    const saved = archeion.archeionSession.user;
+    archeion.archeionSession.user = {
+      user_id: "u-1",
+      username: "alice",
+      display_name: "alice",
+    } as never;
+    try {
+      // lastConversationOf reads localStorage, absent under deno test ->
+      // undefined: the unified offline shape mounts the view anyway.
+      await h.attachOfflineView("t-never");
+      const view = h.offlineViewOf("t-never");
+      if (!view) throw new Error("synthetic offline view must mount");
+      assertEquals(view.conversationId, "offline-t-never");
+      assertEquals(view.transcript.lines.length, 0);
+      // Idempotent: a second call does not duplicate.
+      await h.attachOfflineView("t-never");
+      assertEquals(h.offlineViewOf("t-never"), view);
+    } finally {
+      archeion.archeionSession.user = saved;
+    }
+  },
+);
+
+Deno.test(
+  "a successful open sweeps the offline view, synthetic key included",
+  async () => {
+    const h = new Harness();
+    h.script = ["ok", "ok"];
+    const archeion = await import("./archeion.svelte.ts");
+    const saved = archeion.archeionSession.user;
+    archeion.archeionSession.user = {
+      user_id: "u-1",
+      username: "alice",
+      display_name: "alice",
+    } as never;
+    try {
+      await h.attachOfflineView("t-sweep");
+      if (!h.offlineViewOf("t-sweep")) {
+        throw new Error("offline view must mount before the open");
+      }
+      const sweep = { tagma_id: "t-sweep", state: "enrolled" } as never;
+      await h.ensureOpen(sweep);
+      assertEquals(h.offlineViewOf("t-sweep"), undefined);
+    } finally {
+      archeion.archeionSession.user = saved;
+    }
   },
 );
