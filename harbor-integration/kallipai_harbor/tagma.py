@@ -35,7 +35,7 @@ RUN_LOG = LOGS_DIR / "run.log"
 def agents_dir(xdg_data_home: str | Path, slug: str) -> Path:
     """The instance's ``agents/`` directory for a slug boot.
 
-    Mirrors ``kallipai_runtime::persistence::data_dir_root``: the data
+    Mirrors ``kallipai_adk::persistence::data_dir_root``: the data
     root is ``<xdg>/kallipai/tagmata/<slug>`` and agents persist under
     its ``agents/`` subtree. Pure so tests can pin the layout without
     a running tagma.

@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Instant;
 
+use kallipai_adk::event::AgentEvent;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::approval::ApprovalStatus;
 use kallipai_common::protocol::{AgentState, ParkedReason, SseEvent, TransientRetryInfo};
-use kallipai_runtime::event::AgentEvent;
 use time::OffsetDateTime;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;

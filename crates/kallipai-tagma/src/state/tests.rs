@@ -687,8 +687,8 @@ fn with_limits_sets_max_agents() {
         5,
         make_profile_bundle(),
         PolicyPreset::Default,
-        kallipai_runtime::usage_stats::UsageStats::default(),
-        kallipai_runtime::token_budget::TokenBudget::unlimited(),
+        kallipai_adk::usage_stats::UsageStats::default(),
+        kallipai_adk::token_budget::TokenBudget::unlimited(),
         None,
     );
     assert_eq!(state.max_agents, 50);
@@ -780,7 +780,7 @@ async fn summary_lock_visibility_follows_class_and_lifecycle() {
     // A Guest never locks: the field is absent regardless of manager state.
     let gid = AgentId::random();
     let (mut guest, _rx) = make_entry_with_rx(None, "guest-token".to_string());
-    guest.identity.config.permissions_class = kallipai_runtime::config::PermissionClass::Guest;
+    guest.identity.config.permissions_class = kallipai_adk::config::PermissionClass::Guest;
     guest.identity.config.workspace_root = ws.clone();
     let guest = RegistryEntry::Live(guest);
     assert_eq!(
@@ -837,9 +837,7 @@ fn startup_token_budget_covers_grammar_and_error_paths() {
 
 #[test]
 fn resolve_with_fallback_matrix() {
-    use kallipai_runtime::profile::{
-        BackendSource, Profile, ProfileRegistry, ProfileSet, Provider,
-    };
+    use kallipai_adk::profile::{BackendSource, Profile, ProfileRegistry, ProfileSet, Provider};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -923,7 +921,7 @@ fn resolve_with_fallback_matrix() {
 
 #[test]
 fn resolve_without_default_never_falls_back() {
-    use kallipai_runtime::profile::{BackendSource, ProfileRegistry};
+    use kallipai_adk::profile::{BackendSource, ProfileRegistry};
     use std::sync::Arc;
 
     struct NilSource;

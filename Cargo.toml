@@ -9,7 +9,7 @@ members = [
   "crates/platform/kallipai-archeion-client",
   "crates/platform/kallipai-lesche-client",
   "crates/platform/kallipai-admin",
-  "crates/kallipai-runtime",
+  "crates/kallipai-adk",
   "crates/kallipai-shell",
   "crates/kallip",
   "crates/kallipai-tagma",
@@ -55,7 +55,7 @@ kallipai-lesche = { path = "crates/platform/kallipai-lesche" }
 kallipai-e2ee = { path = "crates/platform/kallipai-e2ee" }
 kallipai-archeion-client = { path = "crates/platform/kallipai-archeion-client" }
 kallipai-lesche-client = { path = "crates/platform/kallipai-lesche-client" }
-kallipai-runtime = { path = "crates/kallipai-runtime" }
+kallipai-adk = { path = "crates/kallipai-adk" }
 kallipai-shell = { path = "crates/kallipai-shell" }
 kallipai-client = { path = "crates/kallipai-client" }
 kallipai-tagma = { path = "crates/kallipai-tagma" }

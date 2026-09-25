@@ -669,7 +669,7 @@ impl InboxPuller {
 }
 
 #[async_trait::async_trait]
-impl kallipai_runtime::agent_task::MessagePuller for InboxPuller {
+impl kallipai_adk::agent_task::MessagePuller for InboxPuller {
     async fn pull_undelivered(&self) -> Option<String> {
         self.store.pull_undelivered(&self.agent_id).await
     }

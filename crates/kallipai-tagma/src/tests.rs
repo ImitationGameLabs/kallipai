@@ -131,7 +131,7 @@ fn logs_land_in_the_state_tree_under_the_slug() {
     // the slug leaf itself.
     crate::test_helpers::ensure_test_data_dir();
     temp_env::with_vars([("KALLIPAI_TAGMA_SLUG", Some("e2e"))], || {
-        let state_root = kallipai_runtime::persistence::state_dir_root().unwrap();
+        let state_root = kallipai_adk::persistence::state_dir_root().unwrap();
         assert_eq!(
             logs_target().unwrap(),
             state_root.join("tagmata").join("e2e").join("logs")

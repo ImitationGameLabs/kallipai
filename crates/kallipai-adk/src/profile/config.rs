@@ -20,7 +20,7 @@ use kallipai_common::protocol::Modality;
 
 /// Parsed + validated profile configuration: the data the tagma assembles into a
 /// [`super::registry::ProfileRegistry`] after building backends. Pure data — no reqwest, no
-/// backends. The tagma owns construction (see `kallipai_runtime::profile`).
+/// backends. The tagma owns construction (see `kallipai_adk::profile`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileConfig {
     /// Named profile sets keyed by set name (`[sets.<name>]` in TOML). The map

@@ -18,7 +18,7 @@ struct SettingsDoc<'a> {
 const SETTINGS_FILE: &str = "settings.toml";
 
 fn settings_path() -> anyhow::Result<PathBuf> {
-    kallipai_runtime::persistence::config_dir_root().map(|d| d.join(SETTINGS_FILE))
+    kallipai_adk::persistence::config_dir_root().map(|d| d.join(SETTINGS_FILE))
 }
 
 /// The configured IANA timezone name, or `None` when unset or when the

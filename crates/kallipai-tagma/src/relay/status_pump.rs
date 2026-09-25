@@ -19,9 +19,9 @@ use std::sync::Weak;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use kallipai_adk::token_budget::TokenBudget;
 use kallipai_common::protocol::AgentState;
 use kallipai_lesche_common::event::TagmaStatusPayload;
-use kallipai_runtime::token_budget::TokenBudget;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 

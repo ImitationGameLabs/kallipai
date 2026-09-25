@@ -16,8 +16,8 @@ use crate::test_helpers::{
     make_state,
 };
 use axum::extract::{Path, Query, State};
+use kallipai_adk::config::PermissionProfile;
 use kallipai_common::protocol::ListAgentsQuery;
-use kallipai_runtime::config::PermissionProfile;
 
 #[test]
 fn truncate_keeps_short_strings() {

@@ -23,7 +23,7 @@ use just_llm_client::{
     BackendConstructError, BackendError, GenerationClient, GenerationClientOptions,
     GenerationStream, Identifiable, LlmBackend,
 };
-use kallipai_runtime::profile::{BackendSource, NO_PROFILE_HINT, ProfileConfig, Provider};
+use kallipai_adk::profile::{BackendSource, NO_PROFILE_HINT, ProfileConfig, Provider};
 
 /// Default timeout for establishing the outbound LLM HTTP connection (DNS + TCP + TLS). Distinct
 /// from [`DEFAULT_READ_TIMEOUT`], which bounds per-read idle.
@@ -204,8 +204,8 @@ pub(crate) const UNCONFIGURED: &str = "unconfigured";
 /// The profile-less root's placeholder set (`ProfileSet { one placeholder
 /// profile }`), shared by first boot (`Materialize::run`) and restore
 /// (`restore_one`) so both paths register the root against the sentinel.
-pub(crate) fn unconfigured_set() -> kallipai_runtime::profile::ProfileSet {
-    let placeholder = kallipai_runtime::profile::Profile {
+pub(crate) fn unconfigured_set() -> kallipai_adk::profile::ProfileSet {
+    let placeholder = kallipai_adk::profile::Profile {
         id: UNCONFIGURED.into(),
         endpoint: UNCONFIGURED.into(),
         model: UNCONFIGURED.into(),
@@ -213,9 +213,9 @@ pub(crate) fn unconfigured_set() -> kallipai_runtime::profile::ProfileSet {
         // The sentinel carries no behavior config: both fields stay unset.
         store: None,
         effort: None,
-        modalities: kallipai_runtime::profile::Profile::default_modalities(),
+        modalities: kallipai_adk::profile::Profile::default_modalities(),
     };
-    kallipai_runtime::profile::ProfileSet {
+    kallipai_adk::profile::ProfileSet {
         name: UNCONFIGURED.into(),
         description: None,
         profiles: vec![placeholder],
@@ -307,7 +307,7 @@ pub(crate) fn unconfigured_client(system_prompt: Option<String>) -> GenerationCl
 mod tests {
     use super::*;
     use just_llm_client::types::generation::{GenerationRequest, Message};
-    use kallipai_runtime::profile::{Profile, ProfileSet};
+    use kallipai_adk::profile::{Profile, ProfileSet};
     use std::collections::BTreeMap;
 
     #[test]
@@ -316,7 +316,7 @@ mod tests {
             .render_messages(&[])
             .expect_err("sentinel render fails");
         assert!(
-            format!("{err}").contains(kallipai_runtime::profile::NO_PROFILE_HINT),
+            format!("{err}").contains(kallipai_adk::profile::NO_PROFILE_HINT),
             "got: {err}"
         );
     }

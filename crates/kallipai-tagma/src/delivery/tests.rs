@@ -21,8 +21,8 @@ use crate::test_helpers::{
 
 #[derive(Default)]
 struct Seen {
-    store: Mutex<Option<Arc<tokio::sync::Mutex<kallipai_runtime::context::ContextStore>>>>,
-    approvals: Mutex<Option<Arc<tokio::sync::Mutex<kallipai_runtime::approval::ApprovalStore>>>>,
+    store: Mutex<Option<Arc<tokio::sync::Mutex<kallipai_adk::context::ContextStore>>>>,
+    approvals: Mutex<Option<Arc<tokio::sync::Mutex<kallipai_adk::approval::ApprovalStore>>>>,
     initial_prompt: Mutex<Option<String>>,
 }
 
@@ -56,7 +56,7 @@ async fn register_dead_root(
     state: &SharedState,
 ) -> (
     AgentId,
-    Arc<tokio::sync::Mutex<kallipai_runtime::context::ContextStore>>,
+    Arc<tokio::sync::Mutex<kallipai_adk::context::ContextStore>>,
 ) {
     let id = AgentId::random();
     let (entry, _rx) = make_entry_with_rx(None, format!("agent-{id}"));

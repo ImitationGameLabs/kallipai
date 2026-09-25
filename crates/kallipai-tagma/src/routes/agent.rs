@@ -8,14 +8,14 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use kallipai_adk::config::{
+    AgentConfig, DelegationMode, PermissionClass, permission_class_from_env,
+};
+use kallipai_adk::persistence;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::authtoken::MintedToken;
 use kallipai_common::policy::ExecPolicy;
 use kallipai_common::protocol::ApiError;
-use kallipai_runtime::config::{
-    AgentConfig, DelegationMode, PermissionClass, permission_class_from_env,
-};
-use kallipai_runtime::persistence;
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
@@ -73,7 +73,7 @@ pub async fn create_agent(
         .delegation_mode
         .as_deref()
         .unwrap_or(kallipai_common::protocol::DELEGATION_CARVE_OUT)
-        .parse::<kallipai_runtime::config::DelegationMode>()
+        .parse::<kallipai_adk::config::DelegationMode>()
         .map_err(ApiError::bad_request)?;
     config.profile_set = Some(req.profile_set.clone());
     // Fleet discipline: a subagent spawn must carry a non-empty role so a
@@ -611,8 +611,8 @@ pub(crate) async fn teardown_agent(
             supervisor_id,
             &entry.identity().config.workspace_root,
         ) {
-            Ok(kallipai_runtime::dirlock::TransferOutcome::Transferred) => {}
-            Ok(kallipai_runtime::dirlock::TransferOutcome::NotOwner) => {
+            Ok(kallipai_adk::dirlock::TransferOutcome::Transferred) => {}
+            Ok(kallipai_adk::dirlock::TransferOutcome::NotOwner) => {
                 debug!(
                     child = %id,
                     supervisor = %supervisor_id,
@@ -769,7 +769,7 @@ pub async fn update_profile_set(
     let summary = state.summarize(&id, entry);
     if let Some(live) = entry.as_live() {
         signal = Some((
-            kallipai_runtime::ProfileReset {
+            kallipai_adk::ProfileReset {
                 set: set.clone(),
                 registry: bundle.registry.clone(),
             },

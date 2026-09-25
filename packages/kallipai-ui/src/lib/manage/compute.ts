@@ -211,7 +211,7 @@ export function profileModalities(profile: ProfileModel): readonly Modality[] {
 
 /** Effective modalities of a set: the intersection across member
  * profiles. An empty set short-circuits to the empty intersection,
- * matching kallipai-runtime ProfileSet::effective_modalities. */
+ * matching kallipai-adk ProfileSet::effective_modalities. */
 export function setEffectiveModalities(set: ProfileSet): Modality[] {
   if (set.profiles.length === 0) {
     return [];

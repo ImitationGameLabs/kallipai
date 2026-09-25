@@ -3,11 +3,11 @@
 //! ensure_test_data_dir regression guard. They live in their own
 //! integration-test target so the singleton mutation cannot race the
 //! unit-test process.
-use kallipai_common::agentid::AgentId;
-use kallipai_runtime::config::{DelegationMode, PermissionClass};
-use kallipai_runtime::persistence::{
+use kallipai_adk::config::{DelegationMode, PermissionClass};
+use kallipai_adk::persistence::{
     AgentMeta, InstanceRoots, data_dir_root, set_instance_roots_for_tests,
 };
+use kallipai_common::agentid::AgentId;
 use kallipai_tagma::lifecycle::restore_agents;
 use kallipai_tagma::routes::ensure_root_agent;
 use kallipai_tagma::state::RegistryEntry;
@@ -203,7 +203,7 @@ fn restore_agents_registers_cycle_stragglers_faulted() {
                 description: String::new(),
                 profile_set: None,
                 permissions_class: PermissionClass::Normal,
-                delegation_mode: kallipai_runtime::config::DelegationMode::CarveOut,
+                delegation_mode: kallipai_adk::config::DelegationMode::CarveOut,
             })
             .unwrap(),
         )

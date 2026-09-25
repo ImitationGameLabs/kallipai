@@ -10,13 +10,13 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicU8;
 
 use ctor::ctor;
+use kallipai_adk::approval::ApprovalStore;
+use kallipai_adk::config::{AgentConfig, PermissionProfile};
+use kallipai_adk::context::ContextStore;
+use kallipai_adk::retry::RetryPolicy;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::policy::{ExecPolicy, PolicyPreset};
 use kallipai_common::protocol::AgentState;
-use kallipai_runtime::approval::ApprovalStore;
-use kallipai_runtime::config::{AgentConfig, PermissionProfile};
-use kallipai_runtime::context::ContextStore;
-use kallipai_runtime::retry::RetryPolicy;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -102,7 +102,7 @@ fn make_entry_inner(
         permissions_class: Default::default(),
         role: String::new(),
         description: String::new(),
-        delegation_mode: kallipai_runtime::config::DelegationMode::CarveOut,
+        delegation_mode: kallipai_adk::config::DelegationMode::CarveOut,
     };
     let entry = AgentEntry {
         identity: AgentIdentity {
@@ -129,10 +129,10 @@ fn make_entry_inner(
             env: std::collections::HashMap::new(),
             preset,
             exec_policy: Arc::new(std::sync::RwLock::new(exec_policy)),
-            exec_gate: kallipai_runtime::ExecGate::new(),
+            exec_gate: kallipai_adk::ExecGate::new(),
             pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
             profile_snapshot: Arc::new(std::sync::Mutex::new(
-                kallipai_runtime::ProfileSnapshot::default(),
+                kallipai_adk::ProfileSnapshot::default(),
             )),
         },
         subagent_ids: vec![],
@@ -238,9 +238,7 @@ pub async fn enqueue_committed_approval(
 pub fn make_profile_bundle() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundle>> {
     ensure_test_data_dir();
     use just_llm_client::family;
-    use kallipai_runtime::profile::{
-        Profile, ProfileConfig, ProfileRegistry, ProfileSet, Provider,
-    };
+    use kallipai_adk::profile::{Profile, ProfileConfig, ProfileRegistry, ProfileSet, Provider};
     use std::collections::{BTreeMap, HashMap};
     let mut endpoints = HashMap::new();
     endpoints.insert(
@@ -294,9 +292,7 @@ pub fn make_profile_bundle() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundl
 pub fn make_profile_bundle_two_sets() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundle>> {
     ensure_test_data_dir();
     use just_llm_client::family;
-    use kallipai_runtime::profile::{
-        Profile, ProfileConfig, ProfileRegistry, ProfileSet, Provider,
-    };
+    use kallipai_adk::profile::{Profile, ProfileConfig, ProfileRegistry, ProfileSet, Provider};
     use std::collections::{BTreeMap, HashMap};
     let mut endpoints = HashMap::new();
     endpoints.insert(
@@ -404,10 +400,8 @@ pub fn make_state_with_spawn(spawn_fn: crate::lifecycle::SpawnFn) -> SharedState
 pub fn make_profile_bundle_image_set() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundle>> {
     ensure_test_data_dir();
     use just_llm_client::family;
+    use kallipai_adk::profile::{Profile, ProfileConfig, ProfileRegistry, ProfileSet, Provider};
     use kallipai_common::protocol::Modality;
-    use kallipai_runtime::profile::{
-        Profile, ProfileConfig, ProfileRegistry, ProfileSet, Provider,
-    };
     use std::collections::{BTreeMap, HashMap};
     let mut endpoints = HashMap::new();
     endpoints.insert(
@@ -472,7 +466,7 @@ pub fn make_state_with_image_set() -> SharedState {
 /// budget assertions can lean on (the tagma binary itself resolves
 /// `KALLIPAI_TOKEN_BUDGET` at startup and passes the value in).
 fn pin_test_budget(state: &mut AppState) {
-    state.token_budget = kallipai_runtime::token_budget::TokenBudget::new(1_000_000, 0);
+    state.token_budget = kallipai_adk::token_budget::TokenBudget::new(1_000_000, 0);
 }
 
 /// Install an in-memory inbox store on a test `SharedState`.
@@ -488,7 +482,7 @@ pub async fn install_inbox_store(state: &SharedState) {
 /// the env; later calls are no-ops.
 ///
 /// Why: profile-handler tests reach `persist_config` →
-/// `kallipai_runtime::profile::config_path`, which resolves against the process
+/// `kallipai_adk::profile::config_path`, which resolves against the process
 /// environment. `cargo test` inherits the caller's real `KALLIPAI_TAGMA_SLUG`/`XDG_DATA_HOME`, so
 /// an unguarded persist overwrites the live profiles file (2026-09-02).
 ///
@@ -542,13 +536,13 @@ pub fn ensure_test_data_dir() {
     // config persist), so an unmaterialized shared value must not count as
     // dangling, or the helper would re-install its own (not yet
     // materialized) value on every call instead of recognizing it.
-    let dangling = match kallipai_runtime::persistence::data_dir_root() {
+    let dangling = match kallipai_adk::persistence::data_dir_root() {
         Ok(current) => current != leaf && !current.exists(),
         Err(_) => true,
     };
     if dangling {
-        kallipai_runtime::persistence::set_instance_roots_for_tests(Some(
-            kallipai_runtime::persistence::InstanceRoots {
+        kallipai_adk::persistence::set_instance_roots_for_tests(Some(
+            kallipai_adk::persistence::InstanceRoots {
                 data: leaf.clone(),
                 config: leaf,
                 state: path.join("state").join("kallipai"),

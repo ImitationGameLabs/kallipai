@@ -278,7 +278,7 @@ fn missing_history_records_degrade_instead_of_failing() {
 }
 
 /// Manual migration drill against a copy of a real agent directory:
-/// `KALLIPAI_MIGRATION_DRILL_DIR=<agent dir> cargo test -p kallipai-runtime
+/// `KALLIPAI_MIGRATION_DRILL_DIR=<agent dir> cargo test -p kallipai-adk
 /// real_dir_migration_drill -- --ignored --nocapture`. Verifies the
 /// production-shape directory migrates, rehydrates losslessly, and
 /// prints the size split. Never touches the source directory.

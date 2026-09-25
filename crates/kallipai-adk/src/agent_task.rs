@@ -177,7 +177,7 @@ pub struct AgentContext {
     /// [`ProfileReset`](crate::failover::ProfileReset) here; the agent task drains it at the top of
     /// [`run_and_report`] and rebuilds its failover state + client. Shared
     /// (same `Arc`) with the tagma `Agent` struct so the apply route can write
-    /// to it without reaching into runtime internals. `None` when no reset is
+    /// to it without reaching into adk internals. `None` when no reset is
     /// pending.
     pub pending_profile_reset: Arc<std::sync::Mutex<Option<crate::failover::ProfileReset>>>,
     /// Inbox message puller. Injected by the tagma so the runtime can pull

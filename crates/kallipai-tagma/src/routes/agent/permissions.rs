@@ -1,10 +1,10 @@
 //! Subagent permission validation: supervisor checks and the
 //! requested-vs-granted permission-class resolution.
 
+use kallipai_adk::config::{DelegationMode, PermissionClass, PermissionProfile};
 use kallipai_common::agentid::AgentId;
 use kallipai_common::policy::ExecPolicy;
 use kallipai_common::protocol::ApiError;
-use kallipai_runtime::config::{DelegationMode, PermissionClass, PermissionProfile};
 
 /// Validate supervisor constraints for a subagent creation request.
 ///

@@ -3,12 +3,12 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use super::BridgeCells;
+use kallipai_adk::event::AgentEvent;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::policy::{ExecPolicy, PolicyPreset};
 use kallipai_common::protocol::{
     AgentState, FailoverChainExhaustion, SseEvent, TransientRetryInfo,
 };
-use kallipai_runtime::event::AgentEvent;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use futures_util::future::join_all;
 use just_llm_client::client::BackendFactory;
 use just_llm_client::types::generation::{GenerationRequest, Message};
-use kallipai_runtime::profile::{ProfileConfig, Provider};
+use kallipai_adk::profile::{ProfileConfig, Provider};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, DEFAULT_USER_AGENT};

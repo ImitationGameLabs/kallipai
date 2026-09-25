@@ -94,8 +94,8 @@ pub(crate) async fn fetch_local_first(
     record_id: uuid::Uuid,
     bytes_fetch: impl std::future::Future<Output = Result<Vec<u8>, ApiError>>,
     blob_id: Option<&str>,
-) -> kallipai_runtime::context::FetchedImage {
-    use kallipai_runtime::context::FetchedImage;
+) -> kallipai_adk::context::FetchedImage {
+    use kallipai_adk::context::FetchedImage;
     if let (Some(blobs), Some(anchor)) = (blobs, blob_id)
         && let Ok(id) = kallipai_blob_store::BlobId::parse(anchor)
     {
@@ -179,7 +179,7 @@ mod tests {
         )
         .await;
         match verdict {
-            kallipai_runtime::context::FetchedImage::Bytes(bytes) => {
+            kallipai_adk::context::FetchedImage::Bytes(bytes) => {
                 assert_eq!(bytes, vec![1, 2, 3]);
             }
             other => panic!("expected a local hit, got {other:?}"),
@@ -200,7 +200,7 @@ mod tests {
         )
         .await;
         match verdict {
-            kallipai_runtime::context::FetchedImage::Bytes(bytes) => {
+            kallipai_adk::context::FetchedImage::Bytes(bytes) => {
                 assert_eq!(bytes, vec![9, 9]);
             }
             other => panic!("expected fetched bytes, got {other:?}"),
@@ -230,7 +230,7 @@ mod tests {
         )
         .await;
         match verdict {
-            kallipai_runtime::context::FetchedImage::Bytes(bytes) => {
+            kallipai_adk::context::FetchedImage::Bytes(bytes) => {
                 assert_eq!(bytes, vec![4, 5]);
             }
             other => panic!("the local copy must win over a files 404, got {other:?}"),
@@ -252,10 +252,7 @@ mod tests {
             None,
         )
         .await;
-        assert!(matches!(
-            verdict,
-            kallipai_runtime::context::FetchedImage::Gone
-        ));
+        assert!(matches!(verdict, kallipai_adk::context::FetchedImage::Gone));
     }
 
     #[tokio::test]
@@ -275,7 +272,7 @@ mod tests {
         .await;
         assert!(matches!(
             verdict,
-            kallipai_runtime::context::FetchedImage::Transient(_)
+            kallipai_adk::context::FetchedImage::Transient(_)
         ));
     }
 
@@ -293,7 +290,7 @@ mod tests {
         .await;
         assert!(matches!(
             verdict,
-            kallipai_runtime::context::FetchedImage::Bytes(_)
+            kallipai_adk::context::FetchedImage::Bytes(_)
         ));
         let anchor = kallipai_blob_store::BlobId::for_bytes(&[6, 6]);
         assert_eq!(
@@ -329,7 +326,7 @@ mod tests {
         )
         .await;
         match verdict {
-            kallipai_runtime::context::FetchedImage::Bytes(bytes) => {
+            kallipai_adk::context::FetchedImage::Bytes(bytes) => {
                 assert_eq!(bytes, vec![7, 7]);
             }
             other => panic!("expected files-backed bytes, got {other:?}"),
@@ -344,7 +341,7 @@ mod tests {
         let verdict =
             fetch_local_first(None, some_record(), async { Ok(vec![8, 8]) }, Some(&anchor)).await;
         match verdict {
-            kallipai_runtime::context::FetchedImage::Bytes(bytes) => {
+            kallipai_adk::context::FetchedImage::Bytes(bytes) => {
                 assert_eq!(bytes, vec![8, 8]);
             }
             other => panic!("expected files-backed bytes, got {other:?}"),
@@ -367,7 +364,7 @@ mod tests {
         )
         .await;
         match verdict {
-            kallipai_runtime::context::FetchedImage::Bytes(bytes) => {
+            kallipai_adk::context::FetchedImage::Bytes(bytes) => {
                 assert_eq!(bytes, vec![3, 1]);
             }
             other => panic!("expected served bytes despite backfill failure, got {other:?}"),
@@ -387,10 +384,7 @@ mod tests {
             Some(&anchor),
         )
         .await;
-        assert!(matches!(
-            verdict,
-            kallipai_runtime::context::FetchedImage::Gone
-        ));
+        assert!(matches!(verdict, kallipai_adk::context::FetchedImage::Gone));
     }
 
     #[tokio::test]
@@ -403,10 +397,7 @@ mod tests {
             None,
         )
         .await;
-        assert!(matches!(
-            verdict,
-            kallipai_runtime::context::FetchedImage::Gone
-        ));
+        assert!(matches!(verdict, kallipai_adk::context::FetchedImage::Gone));
     }
 
     #[tokio::test]
@@ -421,7 +412,7 @@ mod tests {
         )
         .await;
         match verdict {
-            kallipai_runtime::context::FetchedImage::Bytes(bytes) => {
+            kallipai_adk::context::FetchedImage::Bytes(bytes) => {
                 assert_eq!(bytes, vec![8, 8]);
             }
             other => panic!("expected the local copy, got {other:?}"),

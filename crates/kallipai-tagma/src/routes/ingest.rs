@@ -17,14 +17,14 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, header::CONTENT_TYPE};
 use just_llm_client::types::generation::Message;
+use kallipai_adk::ProfileSnapshot;
+use kallipai_adk::context::{ContextStore, IngestImage, ingest_message};
+use kallipai_adk::history::{AttachmentRef, HistoryWriter, RecordKind};
 use kallipai_common::agentid::AgentId;
 use kallipai_common::protocol::{
     ApiError, AttachmentIngestLocalResponse, AttachmentIngestRequest, AttachmentIngestResponse,
     Modality,
 };
-use kallipai_runtime::ProfileSnapshot;
-use kallipai_runtime::context::{ContextStore, IngestImage, ingest_message};
-use kallipai_runtime::history::{AttachmentRef, HistoryWriter, RecordKind};
 use tokio::sync::{Mutex, Notify};
 
 use crate::auth::{AuthIdentity, Identity};
@@ -388,7 +388,7 @@ mod tests {
         let target = target_for(&state, &id);
         // The live snapshot must name a real set — seed it the way the
         // runtime's FailoverState would have.
-        *target.profile_snapshot.lock().unwrap() = kallipai_runtime::ProfileSnapshot {
+        *target.profile_snapshot.lock().unwrap() = kallipai_adk::ProfileSnapshot {
             set_name: "default".into(),
             profile_id: "default-p".into(),
             provider: "oc-go".into(),
@@ -455,7 +455,7 @@ mod tests {
             .unwrap()
             .path();
         let line = std::fs::read_to_string(&file).unwrap();
-        let record: kallipai_runtime::history::HistoryRecord =
+        let record: kallipai_adk::history::HistoryRecord =
             serde_json::from_str(line.lines().next().unwrap()).unwrap();
         assert_eq!(record.attachments.len(), 1);
         let attachment = &record.attachments[0];
@@ -508,7 +508,7 @@ mod tests {
             .unwrap()
             .path();
         let line = std::fs::read_to_string(&file).unwrap();
-        let record: kallipai_runtime::history::HistoryRecord =
+        let record: kallipai_adk::history::HistoryRecord =
             serde_json::from_str(line.lines().next().unwrap()).unwrap();
         assert_eq!(
             record.attachments[0].blob_id.as_deref(),
@@ -536,7 +536,7 @@ mod tests {
     fn seed_default_snapshot(state: &SharedState, id: &AgentId) {
         let registry = state.registry.try_read().unwrap();
         let entry = registry.get(id).unwrap().as_live().unwrap();
-        *entry.agent.profile_snapshot.lock().unwrap() = kallipai_runtime::ProfileSnapshot {
+        *entry.agent.profile_snapshot.lock().unwrap() = kallipai_adk::ProfileSnapshot {
             set_name: "default".into(),
             profile_id: "default-p".into(),
             provider: "oc-go".into(),
@@ -611,7 +611,7 @@ mod tests {
             .unwrap()
             .path();
         let line = std::fs::read_to_string(&file).unwrap();
-        let record: kallipai_runtime::history::HistoryRecord =
+        let record: kallipai_adk::history::HistoryRecord =
             serde_json::from_str(line.lines().next().unwrap()).unwrap();
         assert_eq!(record.attachments.len(), 1);
         let attachment = &record.attachments[0];
@@ -829,7 +829,7 @@ mod tests {
             .unwrap()
             .path();
         let line = std::fs::read_to_string(&file).unwrap();
-        let record: kallipai_runtime::history::HistoryRecord =
+        let record: kallipai_adk::history::HistoryRecord =
             serde_json::from_str(line.lines().next().unwrap()).unwrap();
         assert_eq!(record.attachments.len(), 1);
         assert_eq!(record.attachments[0].record_id, uuid::Uuid::nil());

@@ -1042,7 +1042,7 @@ pub fn spawn(
     // env signaling relay intent (a `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE` or
     // explicit `KALLIPAI_POLIS_URL` entry) gets a missing origin filled from
     // the daemon's own environment; explicit values pass through; an unset
-    // -- or empty (the kallipai-runtime's persistence.rs `filter(!is_empty)`
+    // -- or empty (the kallipai-adk's persistence.rs `filter(!is_empty)`
     // precedent) -- daemon value means unconfigured: nothing is filled
     // for that origin. This runs before the record snapshot is written,
     // so the record stores the filled env: a restart replays the
@@ -1218,7 +1218,7 @@ pub fn spawn(
 /// workspaces were canonicalized when written.
 /// The daemon-side relay-URL defaults (read once per spawn from this
 /// process's environment; the unit env carries them). An unset -- or
-/// empty, aligned with the kallipai-runtime's persistence.rs
+/// empty, aligned with the kallipai-adk's persistence.rs
 /// `filter(!is_empty)` precedent
 /// so a stray empty value cannot silently switch the fill off -- value
 /// counts as unconfigured.

@@ -18,15 +18,15 @@ For planned direction, see the [roadmap](docs/en/roadmap.md).
 
 ## Architecture
 
-| Crate              | Description                                                                           |
-| ----------------   | ------------------------------------------------------------------------------------- |
-| `kallipai-common`  | Shared types and command parsing                                                      |
-| `kallipai-runtime` | Agent runtime: agent context management, policy engine, tool dispatch                 |
-| `kallipai-shell`   | Provider-neutral shell/session tools for LLM applications (used by the runtime)       |
-| `kallipai-tagma`   | HTTP API server hosting multiple agent instances                                      |
-| `kallipai-client`  | Async client library for the tagma HTTP API                                           |
-| `kallip`           | Headless CLI — designed for agents to call, so an agent can manage other agents       |
-| `kallipai-run`     | Agent runner for scripting and automation — CI, benchmarks, scripted workflows        |
+| Crate            | Description                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------|
+| `kallipai-common`| Shared types and command parsing                                                     |
+| `kallipai-adk`   | Agent development kit (ADK): agent context management, policy engine, tool dispatch  |
+| `kallipai-shell` | Provider-neutral shell/session tools for LLM applications (used by the adk)          |
+| `kallipai-tagma` | HTTP API server hosting multiple agent instances                                     |
+| `kallipai-client`| Async client library for the tagma HTTP API                                          |
+| `kallip`         | Headless CLI — designed for agents to call, so an agent can manage other agents      |
+| `kallipai-run`   | Agent runner for scripting and automation — CI, benchmarks, scripted workflows       |
 
 > Note: `just-llm-client` is an unrelated upstream crate, not part of this project.
 

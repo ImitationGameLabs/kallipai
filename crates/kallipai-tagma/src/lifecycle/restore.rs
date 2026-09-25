@@ -14,12 +14,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context as _;
+use kallipai_adk::config::AgentConfig;
+use kallipai_adk::persistence;
+use kallipai_adk::policy::classifier;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::authtoken::MintedToken;
 use kallipai_common::policy::ExecPolicy;
-use kallipai_runtime::config::AgentConfig;
-use kallipai_runtime::persistence;
-use kallipai_runtime::policy::classifier;
 use std::path::PathBuf;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -143,7 +143,7 @@ fn validate_depth_from_chain(
     }
 
     let chain_depth = u8::try_from(chain.len()).unwrap_or(u8::MAX);
-    Ok(kallipai_runtime::config::DEFAULT_MAX_DEPTH.saturating_sub(chain_depth))
+    Ok(kallipai_adk::config::DEFAULT_MAX_DEPTH.saturating_sub(chain_depth))
 }
 
 /// Validate that `exec_policy` is at least as strict as every ancestor's
@@ -188,7 +188,7 @@ fn validate_exec_policy_from_chain(
 /// `meta.json` elevating a child above its parent.
 fn validate_permission_class_from_chain(
     agent_id: &AgentId,
-    class: kallipai_runtime::config::PermissionClass,
+    class: kallipai_adk::config::PermissionClass,
     chain: &[ChainNode],
 ) -> anyhow::Result<()> {
     if let Some(supervisor) = chain.first() {
@@ -224,7 +224,7 @@ fn set_for_restore(
     bundle: &crate::state::ProfileBundle,
     binding: Option<&str>,
     is_root: bool,
-) -> kallipai_runtime::profile::ProfileSet {
+) -> kallipai_adk::profile::ProfileSet {
     match bundle.resolve_with_fallback(binding, is_root) {
         Ok(set) => set.clone(),
         Err(_) => crate::backend::unconfigured_set(),
@@ -258,7 +258,7 @@ async fn restore_one(
     // next restart to try again.
     let shared = shared_state.clone();
     type BoxedFetch = std::pin::Pin<
-        Box<dyn std::future::Future<Output = kallipai_runtime::context::FetchedImage> + Send>,
+        Box<dyn std::future::Future<Output = kallipai_adk::context::FetchedImage> + Send>,
     >;
     let mut fetch = move |record_id, blob_id: Option<String>| -> BoxedFetch {
         let shared = shared.clone();
@@ -280,7 +280,7 @@ async fn restore_one(
         })
     };
     let reports = [
-        kallipai_runtime::context::reassemble_attachments(
+        kallipai_adk::context::reassemble_attachments(
             &mut restored.store,
             &restored.agent_dir,
             &mut fetch,
@@ -288,7 +288,7 @@ async fn restore_one(
         .await,
         // Pins persist as text plus references, so their bytes come back
         // through the same mechanism (invalidated references excluded).
-        kallipai_runtime::context::reassemble_pin_attachments(
+        kallipai_adk::context::reassemble_pin_attachments(
             &mut restored.store,
             &restored.agent_dir,
             &mut fetch,
@@ -301,19 +301,17 @@ async fn restore_one(
                 id = %p.agent_id, turn_id, %record_id,
                 "attachment reference invalidated during restore: {reason}"
             );
-            kallipai_runtime::history::HistoryWriter::new(restored.agent_dir.clone())
+            kallipai_adk::history::HistoryWriter::new(restored.agent_dir.clone())
                 .append(
                     None,
                     &[],
                     0,
-                    kallipai_runtime::history::RecordKind::System,
-                    Some(
-                        kallipai_runtime::history::SystemEvent::ReferenceInvalidated {
-                            turn_id: *turn_id,
-                            record_id: *record_id,
-                            reason: reason.clone(),
-                        },
-                    ),
+                    kallipai_adk::history::RecordKind::System,
+                    Some(kallipai_adk::history::SystemEvent::ReferenceInvalidated {
+                        turn_id: *turn_id,
+                        record_id: *record_id,
+                        reason: reason.clone(),
+                    }),
                     &[],
                 )
                 .ok();
@@ -512,8 +510,8 @@ async fn register_refused(state: &SharedState, refused: &[persistence::RefusedRe
             role: String::new(),
             description: String::new(),
             workspace_root: PathBuf::new(),
-            permissions_class: kallipai_runtime::config::PermissionClass::default(),
-            delegation_mode: kallipai_runtime::config::DelegationMode::default(),
+            permissions_class: kallipai_adk::config::PermissionClass::default(),
+            delegation_mode: kallipai_adk::config::DelegationMode::default(),
             ..AgentConfig::default()
         };
         let entry = FaultedEntry {
@@ -819,14 +817,14 @@ mod tests {
     use super::{
         ChainNode, faulted_from_meta, set_for_restore, validate_permission_class_from_chain,
     };
+    use kallipai_adk::config::PermissionClass;
+    use kallipai_adk::persistence::AgentMeta;
     use kallipai_common::agentid::AgentId;
     use kallipai_common::policy::ExecPolicy;
-    use kallipai_runtime::config::PermissionClass;
-    use kallipai_runtime::persistence::AgentMeta;
 
     // Minimal BackendSource: an empty registry never consults it.
     struct NilSource;
-    impl kallipai_runtime::profile::BackendSource for NilSource {
+    impl kallipai_adk::profile::BackendSource for NilSource {
         fn get(&self, _: &str) -> anyhow::Result<std::sync::Arc<dyn just_llm_client::LlmBackend>> {
             anyhow::bail!("nil source")
         }
@@ -834,27 +832,27 @@ mod tests {
 
     // A bundle with one set, named by config.default: the fallback target.
     fn bundle_with_default() -> crate::state::ProfileBundle {
-        let set = kallipai_runtime::profile::ProfileSet {
+        let set = kallipai_adk::profile::ProfileSet {
             name: "research".into(),
             description: None,
-            profiles: vec![kallipai_runtime::profile::Profile {
+            profiles: vec![kallipai_adk::profile::Profile {
                 id: "p".into(),
                 endpoint: "ds".into(),
                 model: "m".into(),
                 max_context_window: 500_000,
                 store: None,
                 effort: None,
-                modalities: kallipai_runtime::profile::Profile::default_modalities(),
+                modalities: kallipai_adk::profile::Profile::default_modalities(),
             }],
         };
-        let cfg = kallipai_runtime::profile::ProfileConfig {
+        let cfg = kallipai_adk::profile::ProfileConfig {
             sets: std::collections::BTreeMap::from([("research".to_string(), set)]),
             default: "research".into(),
             endpoints: Default::default(),
             parking: vec![],
         };
         let registry = std::sync::Arc::new(
-            kallipai_runtime::profile::ProfileRegistry::new(
+            kallipai_adk::profile::ProfileRegistry::new(
                 cfg.sets.clone(),
                 std::sync::Arc::new(NilSource),
             )
@@ -868,13 +866,13 @@ mod tests {
 
     #[test]
     fn dangling_binding_restores_against_placeholder_without_default() {
-        let reg = kallipai_runtime::profile::ProfileRegistry::new(
+        let reg = kallipai_adk::profile::ProfileRegistry::new(
             std::collections::BTreeMap::new(),
             std::sync::Arc::new(NilSource),
         )
         .expect("empty set map is constructible");
         let bundle = crate::state::ProfileBundle {
-            config: kallipai_runtime::profile::ProfileConfig {
+            config: kallipai_adk::profile::ProfileConfig {
                 sets: Default::default(),
                 default: String::new(),
                 endpoints: Default::default(),
@@ -923,7 +921,7 @@ mod tests {
                 description: String::new(),
                 profile_set: None,
                 permissions_class: class,
-                delegation_mode: kallipai_runtime::config::DelegationMode::CarveOut,
+                delegation_mode: kallipai_adk::config::DelegationMode::CarveOut,
             },
             exec_policy: ExecPolicy::default(),
         }
@@ -942,7 +940,7 @@ mod tests {
             description: "goners".into(),
             profile_set: Some("research".into()),
             permissions_class: PermissionClass::Guest,
-            delegation_mode: kallipai_runtime::config::DelegationMode::CarveOut,
+            delegation_mode: kallipai_adk::config::DelegationMode::CarveOut,
         };
         let entry = faulted_from_meta(
             &id,

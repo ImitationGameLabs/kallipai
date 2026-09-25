@@ -257,14 +257,14 @@ pub(super) fn probe_lock_pairs(pairs: Vec<(String, AgentId)>) -> Vec<LockPair> {
     pairs
         .into_iter()
         .map(|(role, id)| {
-            let in_inactive = match kallipai_runtime::persistence::inactive_dir(&id) {
+            let in_inactive = match kallipai_adk::persistence::inactive_dir(&id) {
                 Ok(dir) => dir.is_dir(),
                 Err(err) => {
                     warn!(agent = %id, error = %err, "inactive-area probe failed");
                     false
                 }
             };
-            let in_archived = match kallipai_runtime::persistence::archived_dir(&id) {
+            let in_archived = match kallipai_adk::persistence::archived_dir(&id) {
                 Ok(dir) => dir.is_dir(),
                 Err(err) => {
                     warn!(agent = %id, error = %err, "archived-area probe failed");

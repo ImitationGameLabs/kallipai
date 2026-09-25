@@ -12,7 +12,7 @@ pub mod history;
 pub(crate) mod lifecycle;
 
 // Re-exported so the tagma can seed the initial state on `AgentContext`
-// construction (spawn/restore); all transitions stay runtime-internal.
+// construction (spawn/restore); all transitions stay adk-internal.
 pub use lifecycle::LifecycleState;
 pub(crate) mod llm_error;
 pub(crate) mod persisted_message;

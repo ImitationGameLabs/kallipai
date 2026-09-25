@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use axum::Json;
 use axum::extract::State;
+use kallipai_adk::config::AgentConfig;
 use kallipai_common::AgentId;
 use kallipai_common::declaration::{RoleDeclaration, TeamDeclaration, parse_declaration};
 use kallipai_common::protocol::{
@@ -12,7 +13,6 @@ use kallipai_common::protocol::{
     TeamConvergeOutcome, TeamConvergeRequest, TeamConvergeResponse, TeamLockEntry, TeamPlanRow,
     TeamRejection, TeamRejectionKind, TeamRowOutcome,
 };
-use kallipai_runtime::config::AgentConfig;
 
 use super::status::{LiveEntry, LockPair, compare_team, parse_lock_pairs, probe_lock_pairs};
 use crate::state::SharedState;
@@ -27,7 +27,7 @@ pub(super) struct LiveBody {
     pub(super) workspace_root: std::path::PathBuf,
     pub(super) description: String,
     pub(super) profile_set: Option<String>,
-    pub(super) permissions_class: kallipai_runtime::config::PermissionClass,
+    pub(super) permissions_class: kallipai_adk::config::PermissionClass,
     pub(super) busy: bool,
     pub(super) children: usize,
     pub(super) faulted: bool,
@@ -41,7 +41,7 @@ pub(super) struct AlignItems {
     pub(super) profile_set: Option<String>,
     /// Downgrades only: converge never raises a class (an upgrade is
     /// an explicit operator action outside converge's scope).
-    pub(super) permissions_class: Option<kallipai_runtime::config::PermissionClass>,
+    pub(super) permissions_class: Option<kallipai_adk::config::PermissionClass>,
 }
 
 impl AlignItems {
@@ -134,7 +134,7 @@ fn alignment_of(declared: &RoleDeclaration, body: &LiveBody) -> (AlignItems, Vec
         items.profile_set = Some(want.clone());
     }
     if let Some(want) = &declared.permission_class {
-        match kallipai_runtime::config::PermissionClass::from_str(want) {
+        match kallipai_adk::config::PermissionClass::from_str(want) {
             Ok(want_class) if want_class < body.permissions_class => {
                 items.permissions_class = Some(want_class);
             }
@@ -597,7 +597,7 @@ pub(super) fn preflight_converge(
         // A stale inactive body under the same id would refuse the rename
         // mid-execution; surface it at preflight with guidance instead.
         if let Some(id) = &a.target
-            && let Ok(dir) = kallipai_runtime::persistence::inactive_dir(id)
+            && let Ok(dir) = kallipai_adk::persistence::inactive_dir(id)
             && dir.is_dir()
         {
             rejections.push(TeamRejection {
@@ -659,7 +659,7 @@ pub(super) fn preflight_converge(
                 Some(_) => {}
             }
             if let Some(raw) = &d.permission_class {
-                match kallipai_runtime::config::PermissionClass::from_str(raw) {
+                match kallipai_adk::config::PermissionClass::from_str(raw) {
                     Ok(want) => {
                         if let Some(r) = root
                             && want > r.permissions_class
@@ -685,7 +685,7 @@ pub(super) fn preflight_converge(
                 }
             }
             for skill in &d.skills {
-                if let Err(e) = kallipai_runtime::tools::load_skill(skill) {
+                if let Err(e) = kallipai_adk::tools::load_skill(skill) {
                     rejections.push(TeamRejection {
                         kind: TeamRejectionKind::SpawnSkill,
                         message: format!(
@@ -939,7 +939,7 @@ async fn spawn_action(
     config.role = a.role.clone();
     config.description = d.description.clone();
     config.delegation_mode = DELEGATION_CARVE_OUT
-        .parse::<kallipai_runtime::config::DelegationMode>()
+        .parse::<kallipai_adk::config::DelegationMode>()
         .map_err(|e| e.to_string())?;
     config.profile_set = d.profile_set.clone();
     let requested_class = crate::routes::agent::parse_requested_class(
@@ -984,7 +984,7 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
             ));
         }
     }
-    let inactive_dir = match kallipai_runtime::persistence::inactive_dir(&id) {
+    let inactive_dir = match kallipai_adk::persistence::inactive_dir(&id) {
         Ok(dir) => dir,
         Err(e) => {
             return degraded(
@@ -996,7 +996,7 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
             .await;
         }
     };
-    let mut meta = match kallipai_runtime::persistence::read_meta_from_dir(&inactive_dir) {
+    let mut meta = match kallipai_adk::persistence::read_meta_from_dir(&inactive_dir) {
         Ok(meta) => meta,
         Err(e) => {
             return degraded(
@@ -1010,12 +1010,12 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
             .await;
         }
     };
-    if let Err(e) = kallipai_runtime::persistence::reactivate_agent_dir(&id) {
+    if let Err(e) = kallipai_adk::persistence::reactivate_agent_dir(&id) {
         return RestoreFallout::Failed(format!(
             "could not move the inactive body back to the live area: {e:#}"
         ));
     }
-    let dir = match kallipai_runtime::persistence::agent_dir(&id) {
+    let dir = match kallipai_adk::persistence::agent_dir(&id) {
         Ok(dir) => dir,
         Err(e) => return RestoreFallout::Failed(format!("live dir unresolved: {e:#}")),
     };
@@ -1039,7 +1039,7 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
             notes.push("aligned profile_set".to_string());
         }
         if let Some(want) = &d.permission_class {
-            match kallipai_runtime::config::PermissionClass::from_str(want) {
+            match kallipai_adk::config::PermissionClass::from_str(want) {
                 Ok(want_class) if want_class < meta.permissions_class => {
                     class = Some(want_class);
                     meta.permissions_class = want_class;
@@ -1056,7 +1056,7 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
         }
         let meta_write = desc.is_some() || pset.is_some() || class.is_some();
         if meta_write
-            && let Err(e) = kallipai_runtime::persistence::rewrite_meta(
+            && let Err(e) = kallipai_adk::persistence::rewrite_meta(
                 &dir,
                 None,
                 desc.as_deref(),
@@ -1067,7 +1067,7 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
             let mut loss = vec![format!(
                 "IDENTITY LOSS: aligned metadata could not be written ({e:#}); spawned a fresh replacement"
             )];
-            if let Err(park) = kallipai_runtime::persistence::deactivate_agent_dir(&id) {
+            if let Err(park) = kallipai_adk::persistence::deactivate_agent_dir(&id) {
                 loss.push(format!(
                     "old body re-park failed; manual cleanup needed ({park:#})"
                 ));
@@ -1087,7 +1087,7 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
     match crate::lifecycle::restore_inactive(
         state.shutdown.clone(),
         state.clone(),
-        kallipai_runtime::persistence::PendingRestore {
+        kallipai_adk::persistence::PendingRestore {
             agent_id: id.clone(),
             agent_dir: dir.clone(),
             meta,
@@ -1112,7 +1112,7 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
                     crate::state::RegistryEntry::Live(entry),
                 )
                 .await;
-                let parked = kallipai_runtime::persistence::deactivate_agent_dir(&id);
+                let parked = kallipai_adk::persistence::deactivate_agent_dir(&id);
                 let mut detail = "registry changed in the plan→execute window (role or id taken); batch stopped, the body was re-parked".to_string();
                 if parked.is_err() {
                     detail.push_str(" (re-park failed; manual cleanup needed)");
@@ -1131,7 +1131,7 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
             let mut loss = vec![format!(
                 "IDENTITY LOSS: restore failed ({e:#}); spawned a fresh replacement"
             )];
-            if let Err(park) = kallipai_runtime::persistence::deactivate_agent_dir(&id) {
+            if let Err(park) = kallipai_adk::persistence::deactivate_agent_dir(&id) {
                 loss.push(format!(
                     "old body re-park failed; manual cleanup needed ({park:#})"
                 ));
@@ -1214,7 +1214,7 @@ async fn align_live(state: &SharedState, a: &PlannedAction) -> Result<Vec<String
             .ok_or_else(|| "agent has no on-disk directory".to_string())?;
         // Persist first (disk is the source of truth across restarts),
         // then memory — the same commit shape as the PUT routes.
-        kallipai_runtime::persistence::rewrite_meta(
+        kallipai_adk::persistence::rewrite_meta(
             &dir,
             None,
             a.align.description.as_deref(),
@@ -1234,7 +1234,7 @@ async fn align_live(state: &SharedState, a: &PlannedAction) -> Result<Vec<String
                 match bundle.config.sets.get(s) {
                     Some(set) => {
                         signal = Some((
-                            kallipai_runtime::ProfileReset {
+                            kallipai_adk::ProfileReset {
                                 set: set.clone(),
                                 registry: bundle.registry.clone(),
                             },
@@ -1313,7 +1313,7 @@ async fn deactivate_action(
         let _ = crate::routes::agent::interrupt_core(state, &id).await;
     }
     crate::routes::agent::teardown_agent(state, &id, entry).await;
-    kallipai_runtime::persistence::deactivate_agent_dir(&id)
+    kallipai_adk::persistence::deactivate_agent_dir(&id)
         .map_err(|e| format!("agent {id} is unregistered but the park failed: {e:#}"))?;
     state.invalidate();
     Ok(notes)

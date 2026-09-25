@@ -252,7 +252,7 @@ fn body(role: &str) -> LiveBody {
         workspace_root: std::path::PathBuf::from("/tmp/kallipai-team-tests/unused"),
         description: String::new(),
         profile_set: None,
-        permissions_class: kallipai_runtime::config::PermissionClass::default(),
+        permissions_class: kallipai_adk::config::PermissionClass::default(),
         busy: false,
         children: 0,
         faulted: false,
@@ -315,7 +315,7 @@ fn converge_plan_aligns_metadata_a_live_body_drifted_from() {
     assert_eq!(row.align.description.as_deref(), Some("builds the thing"));
     assert_eq!(
         row.align.permissions_class,
-        Some(kallipai_runtime::config::PermissionClass::Guest)
+        Some(kallipai_adk::config::PermissionClass::Guest)
     );
 }
 
@@ -323,7 +323,7 @@ fn converge_plan_aligns_metadata_a_live_body_drifted_from() {
 fn converge_plan_never_raises_a_permission_class() {
     let declaration = declaration("[[role]]\nname = \"dev\"\npermission_class = \"normal\"\n");
     let mut b = body("dev");
-    b.permissions_class = kallipai_runtime::config::PermissionClass::Guest;
+    b.permissions_class = kallipai_adk::config::PermissionClass::Guest;
     let lock = vec![lock_pair("dev", &b.id, false)];
     let plan = converge_plan(&declaration, &lock, std::slice::from_ref(&b));
     let row = row_of(&plan, "dev");
@@ -577,7 +577,7 @@ fn preflight_rejects_a_spawn_class_spelling_it_does_not_know() {
 fn preflight_rejects_a_spawn_class_above_the_root() {
     let state = make_state();
     let mut root = body("root");
-    root.permissions_class = kallipai_runtime::config::PermissionClass::Guest;
+    root.permissions_class = kallipai_adk::config::PermissionClass::Guest;
     let declaration = declaration(
         "[[role]]\nname = \"pilot\"\nprofile_set = \"default\"\npermission_class = \"normal\"\n",
     );
@@ -603,8 +603,8 @@ fn preflight_rejects_a_converge_over_capacity() {
             5,
             profiles,
             PolicyPreset::Default,
-            kallipai_runtime::usage_stats::UsageStats::default(),
-            kallipai_runtime::token_budget::TokenBudget::unlimited(),
+            kallipai_adk::usage_stats::UsageStats::default(),
+            kallipai_adk::token_budget::TokenBudget::unlimited(),
             None,
         ));
     let root = body("root");
@@ -683,7 +683,7 @@ async fn restore_degrades_loudly_when_the_body_meta_is_unreadable() {
     // A parked body whose meta cannot be read: the restore path must
     // degrade loudly (a fresh-spawn attempt surfaces), never land as
     // if nothing happened.
-    let dir = kallipai_runtime::persistence::inactive_dir(&id).unwrap();
+    let dir = kallipai_adk::persistence::inactive_dir(&id).unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("meta.json"), "not valid meta").unwrap();
     let row = planned("dev", TeamAction::Restore, Some(id));

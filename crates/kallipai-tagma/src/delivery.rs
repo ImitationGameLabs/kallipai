@@ -452,7 +452,7 @@ pub(crate) async fn enqueue_prompt(
             // itself is unaffected.
             if entry.state_for_summary() != crate::state::AgentState::Faulted
                 && entry.identity().config.permissions_class
-                    == kallipai_runtime::config::PermissionClass::Normal
+                    == kallipai_adk::config::PermissionClass::Normal
                 && !state
                     .lock_manager
                     .holds_exact(id, &entry.identity().config.workspace_root)

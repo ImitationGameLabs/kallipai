@@ -2,15 +2,15 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use kallipai_adk::context::AgenticContext;
+use kallipai_adk::persistence;
+use kallipai_adk::policy::classifier;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::policy::ExecPolicy;
 use kallipai_common::protocol::{
     ActiveProfile, AgentPermissionsResponse, AgentStatusResponse, AgentUsageStats, ApiError,
     TagmaUsageTotals,
 };
-use kallipai_runtime::context::AgenticContext;
-use kallipai_runtime::persistence;
-use kallipai_runtime::policy::classifier;
 
 use crate::state::SharedState;
 
@@ -237,7 +237,7 @@ mod tests {
         {
             let reg = state.registry.read().await;
             let live = reg.get(&id).unwrap().as_live().unwrap();
-            *live.agent.profile_snapshot.lock().unwrap() = kallipai_runtime::ProfileSnapshot {
+            *live.agent.profile_snapshot.lock().unwrap() = kallipai_adk::ProfileSnapshot {
                 set_name: "set1".into(),
                 provider: "oc-go".into(),
                 profile_id: "set1-deepseek".into(),

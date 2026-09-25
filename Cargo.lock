@@ -2547,12 +2547,12 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "dirs",
+ "kallipai-adk",
  "kallipai-archeion-common",
  "kallipai-blob-store",
  "kallipai-client",
  "kallipai-common",
  "kallipai-files",
- "kallipai-runtime",
  "kallipai-testkit",
  "reqwest",
  "sea-orm",
@@ -2568,6 +2568,39 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "kallipai-adk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "dirs",
+ "futures-util",
+ "just-llm-client",
+ "kallipai-blob-store",
+ "kallipai-common",
+ "kallipai-shell",
+ "kallipai-testkit",
+ "rable",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "temp-env",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokenx-rs",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -3014,39 +3047,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallipai-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "dirs",
- "futures-util",
- "just-llm-client",
- "kallipai-blob-store",
- "kallipai-common",
- "kallipai-shell",
- "kallipai-testkit",
- "rable",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "serial_test",
- "temp-env",
- "tempfile",
- "thiserror 2.0.18",
- "time",
- "tokenx-rs",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "uuid",
- "wiremock",
-]
-
-[[package]]
 name = "kallipai-shell"
 version = "0.1.0"
 dependencies = [
@@ -3090,6 +3090,7 @@ dependencies = [
  "hkdf 0.13.0",
  "jiff",
  "just-llm-client",
+ "kallipai-adk",
  "kallipai-archeion-client",
  "kallipai-archeion-common",
  "kallipai-blob-store",
@@ -3098,7 +3099,6 @@ dependencies = [
  "kallipai-e2ee",
  "kallipai-lesche-client",
  "kallipai-lesche-common",
- "kallipai-runtime",
  "kallipai-shell",
  "kallipai-task",
  "kallipai-testkit",

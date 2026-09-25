@@ -7,18 +7,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64};
 
 use just_llm_client::types::generation::Message;
+use kallipai_adk::agent_task::{self, AgentContext};
+use kallipai_adk::approval::ApprovalStore;
+use kallipai_adk::config::AgentConfig;
+use kallipai_adk::context::{AgenticContext, ContextStore, ContextSummarizer};
+use kallipai_adk::history::HistoryWriter;
+use kallipai_adk::persistence;
+use kallipai_adk::policy::{AgentPolicy, AuthorizedToolExecutor};
+use kallipai_adk::tools::{ToolDispatchInputs, build_tool_dispatch, load_skill};
 use kallipai_common::agentid::AgentId;
 use kallipai_common::authtoken::{MintedToken, TokenHash};
 use kallipai_common::policy::{ExecPolicy, PolicyPreset};
 use kallipai_common::protocol::{ApiError, SseEvent, TransientRetryInfo};
-use kallipai_runtime::agent_task::{self, AgentContext};
-use kallipai_runtime::approval::ApprovalStore;
-use kallipai_runtime::config::AgentConfig;
-use kallipai_runtime::context::{AgenticContext, ContextStore, ContextSummarizer};
-use kallipai_runtime::history::HistoryWriter;
-use kallipai_runtime::persistence;
-use kallipai_runtime::policy::{AgentPolicy, AuthorizedToolExecutor};
-use kallipai_runtime::tools::{ToolDispatchInputs, build_tool_dispatch, load_skill};
 use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -56,7 +56,7 @@ pub struct SpawnArgs {
     /// The resolved profile set (selected by the caller). The active profile is
     /// `set.profiles[0]`; the rest form the within-set failover chain. Owned so the
     /// runtime can carry the chain without re-touching the registry.
-    pub set: kallipai_runtime::profile::ProfileSet,
+    pub set: kallipai_adk::profile::ProfileSet,
     /// Pre-created prompt channel for reactivation. When provided,
     /// `prompt_queue_size` is ignored and both ends are used as-is.
     /// The sender is already installed in the registry entry; spawn_agent
@@ -99,7 +99,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     let retry_notify = Arc::new(Notify::new());
     // Round-scoped interrupt slot: `Some` only while a round runs. Shared with the agent
     // task so `interrupt_agent` can cancel the current round without terminating the task.
-    let round_cancel: Arc<std::sync::Mutex<Option<kallipai_runtime::agent_task::RoundToken>>> =
+    let round_cancel: Arc<std::sync::Mutex<Option<kallipai_adk::agent_task::RoundToken>>> =
         Arc::new(std::sync::Mutex::new(None));
 
     let system_prompt = compose_system_prompt(
@@ -149,7 +149,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     // Per-agent execution gate: READ across this agent's shell forks (threaded
     // into the dispatch), WRITE across a workspace carve-out when a subagent is
     // spawned under this agent (reached via the returned `Agent.exec_gate`).
-    let exec_gate = kallipai_runtime::ExecGate::new();
+    let exec_gate = kallipai_adk::ExecGate::new();
 
     let dispatch = build_tool_dispatch(ToolDispatchInputs {
         ctx: args.store.clone(),
@@ -196,19 +196,19 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     // The active-profile snapshot cell: created here so both holders share
     // one Arc — the runtime's FailoverState writes it (spawn seeds the
     // active profile), the tagma's Agent reads it for status surfaces.
-    let profile_snapshot: Arc<std::sync::Mutex<kallipai_runtime::ProfileSnapshot>> = Arc::new(
-        std::sync::Mutex::new(kallipai_runtime::ProfileSnapshot::default()),
+    let profile_snapshot: Arc<std::sync::Mutex<kallipai_adk::ProfileSnapshot>> = Arc::new(
+        std::sync::Mutex::new(kallipai_adk::ProfileSnapshot::default()),
     );
 
     let bundle = args.shared_state.profiles.load();
     // Create the inbox message puller for this agent. None if the inbox store
     // is not installed (edge case: should not happen in production).
-    let message_puller: Option<Arc<dyn kallipai_runtime::agent_task::MessagePuller>> =
+    let message_puller: Option<Arc<dyn kallipai_adk::agent_task::MessagePuller>> =
         args.shared_state.inboxes.get().map(|store| {
             Arc::new(crate::inbox::InboxPuller::new(
                 store.clone(),
                 args.agent_id.clone(),
-            )) as Arc<dyn kallipai_runtime::agent_task::MessagePuller>
+            )) as Arc<dyn kallipai_adk::agent_task::MessagePuller>
         });
 
     // The seeded conversation's store flag rides the spawn-time active profile
@@ -219,7 +219,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         // precede the `client` move one line below (fresh provider → fresh chain).
         conversation: client.conversation().with_store(active_store),
         client,
-        failover: kallipai_runtime::FailoverState::new(
+        failover: kallipai_adk::FailoverState::new(
             args.set,
             bundle.registry.clone(),
             Some(system_prompt),
@@ -238,7 +238,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         retry_notify: retry_notify.clone(),
         retry_at: Arc::new(std::sync::Mutex::new(None)),
         transient_fails: 0,
-        lifecycle: std::sync::Mutex::new(kallipai_runtime::LifecycleState::Idle),
+        lifecycle: std::sync::Mutex::new(kallipai_adk::LifecycleState::Idle),
         wait_until: Arc::new(std::sync::Mutex::new(None)),
         wait_notify: Arc::new(tokio::sync::Notify::new()),
         wait_armed_secs: 0,
@@ -565,17 +565,17 @@ impl<'a> Materialize<'a> {
         // Clone the supervisor's gate under a brief registry read-lock; the WRITE
         // guard below borrows this owned Arc, so it lives in this scope (outside
         // the read-lock critical section).
-        let supervisor_gate: Option<Arc<kallipai_runtime::ExecGate>> =
-            match config.created_by.as_ref() {
-                Some(supervisor_id) => {
-                    let registry = state.registry.read().await;
-                    registry
-                        .get(supervisor_id)
-                        .and_then(RegistryEntry::as_live)
-                        .map(|s| s.agent.exec_gate.clone())
-                }
-                None => None,
-            };
+        let supervisor_gate: Option<Arc<kallipai_adk::ExecGate>> = match config.created_by.as_ref()
+        {
+            Some(supervisor_id) => {
+                let registry = state.registry.read().await;
+                registry
+                    .get(supervisor_id)
+                    .and_then(RegistryEntry::as_live)
+                    .map(|s| s.agent.exec_gate.clone())
+            }
+            None => None,
+        };
         let _supervisor_exec_guard = match &supervisor_gate {
             // Supervisor not live (faulted) -> None: no in-flight shell to race.
             Some(g) => Some(match g.try_write() {

@@ -157,7 +157,7 @@ pub struct CreateAgentRequest {
     /// request only as a downgrade, rejecting it with `forbidden` if it
     /// exceeds the supervisor's own granted class. The string carries no
     /// runtime type here to keep `kallipai-common` free of any
-    /// `kallipai-runtime` dependency.
+    /// `kallipai-adk` dependency.
     pub permission_class: String,
     /// Optional workspace delegation mode for a subagent spawn, as the lowercase
     /// wire spelling ([`DELEGATION_CARVE_OUT`] / [`DELEGATION_FULL_HANDOFF`]). Omit
@@ -165,7 +165,7 @@ pub struct CreateAgentRequest {
     /// subdirectory of the supervisor's workspace. [`DELEGATION_FULL_HANDOFF`]
     /// transfers the supervisor's entire workspace write-lock to the child for its
     /// lifetime (exclusive: the supervisor may have no other child while it lives).
-    /// String-typed to keep `kallipai-common` free of a `kallipai-runtime` dependency.
+    /// String-typed to keep `kallipai-common` free of a `kallipai-adk` dependency.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delegation_mode: Option<String>,
 }

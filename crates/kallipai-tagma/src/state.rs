@@ -11,6 +11,11 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use kallipai_adk::agent_task::RoundToken;
+use kallipai_adk::approval::ApprovalStore;
+use kallipai_adk::config::{AgentConfig, PermissionClass};
+use kallipai_adk::context::ContextStore;
+use kallipai_adk::profile::{ProfileConfig, ProfileRegistry};
 pub use kallipai_common::agentid::AgentId;
 use kallipai_common::authtoken::TokenHash;
 use kallipai_common::policy::{ExecPolicy, PolicyPreset};
@@ -19,11 +24,6 @@ pub use kallipai_common::protocol::AgentSummary;
 use kallipai_common::protocol::ApiError;
 use kallipai_common::protocol::SseEvent;
 use kallipai_common::protocol::{LockState, ParkedReason, TransientRetryInfo};
-use kallipai_runtime::agent_task::RoundToken;
-use kallipai_runtime::approval::ApprovalStore;
-use kallipai_runtime::config::{AgentConfig, PermissionClass};
-use kallipai_runtime::context::ContextStore;
-use kallipai_runtime::profile::{ProfileConfig, ProfileRegistry};
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -43,7 +43,7 @@ pub type SharedState = Arc<AppState>;
 /// (for GET /profiles) and the assembled registry (for agent spawn + apply).
 /// Swapped as a unit on PUT /profiles via [`ArcSwap`]; readers load a
 /// consistent snapshot. Each running agent pins its own `Arc<ProfileRegistry>`
-/// snapshot in its [`FailoverState`](kallipai_runtime::FailoverState) — a swap does not disturb running agents
+/// snapshot in its [`FailoverState`](kallipai_adk::FailoverState) — a swap does not disturb running agents
 /// until an explicit apply.
 pub struct ProfileBundle {
     /// The config as loaded (GET) or written (PUT) — serializable, no backends.
@@ -70,8 +70,7 @@ impl ProfileBundle {
         &self,
         binding: Option<&str>,
         is_root: bool,
-    ) -> Result<&kallipai_runtime::profile::ProfileSet, kallipai_runtime::profile::DanglingSet>
-    {
+    ) -> Result<&kallipai_adk::profile::ProfileSet, kallipai_adk::profile::DanglingSet> {
         let known = binding.is_some_and(|name| self.registry.sets().contains_key(name));
         let fallback =
             !self.config.default.is_empty() && (binding.is_none() || (is_root && !known));
@@ -221,7 +220,7 @@ pub struct AppState {
     /// lifetime as [`AppState::preset`].
     /// Installed after construction (the `work_schedules` pattern): unset
     /// means no rules, and every spawned agent clones the same set.
-    pub hook_rules: std::sync::OnceLock<Arc<Vec<kallipai_runtime::policy::HookRule>>>,
+    pub hook_rules: std::sync::OnceLock<Arc<Vec<kallipai_adk::policy::HookRule>>>,
     pub shutdown: CancellationToken,
     /// SHA-256 of the operator token. The plaintext is printed once at startup and
     /// never retained; this hash is what incoming bearer tokens are compared against.
@@ -233,10 +232,10 @@ pub struct AppState {
     /// Message channel capacity per agent.
     pub prompt_queue_size: usize,
     /// Tagma-wide token budget shared by all agents.
-    pub token_budget: kallipai_runtime::token_budget::TokenBudget,
+    pub token_budget: kallipai_adk::token_budget::TokenBudget,
     /// Per-agent, single-launch token usage shared process-wide. In-memory
     /// only (resets at boot); cloned into every spawned agent's context.
-    pub usage_stats: kallipai_runtime::usage_stats::UsageStats,
+    pub usage_stats: kallipai_adk::usage_stats::UsageStats,
     /// Profile registry loaded once at startup (config file or implicit env profile).
     /// Shared so the pre-built backends survive across agents.
     pub profiles: Arc<ArcSwap<ProfileBundle>>,
@@ -255,7 +254,7 @@ pub struct AppState {
     /// Tagma-wide directory write-lock coordinator. Shared across all agents so
     /// one agent holding a dir's write-lock blocks another. The tagma build
     /// enforces locks via landlock on Linux (mandatory); advisory elsewhere.
-    pub lock_manager: Arc<kallipai_runtime::dirlock::DirLockManager>,
+    pub lock_manager: Arc<kallipai_adk::dirlock::DirLockManager>,
     /// Online-mode relay connectors, keyed by entry name (one per configured
     /// archeion), each with its long-running tunnel task's `JoinHandle` so
     /// graceful shutdown can drain it. Empty in pure-local deployments and
@@ -469,10 +468,10 @@ pub struct Agent {
     /// the backend) with workspace carve-outs (WRITE here when a subagent is
     /// spawned under this agent). Stored on the agent so the carve-out paths
     /// (`Materialize::run`, `restore_one`) reach it via `AgentEntry`.
-    pub exec_gate: Arc<kallipai_runtime::ExecGate>,
+    pub exec_gate: Arc<kallipai_adk::ExecGate>,
     /// Pending profile-reset cell shared with the agent task's `AgentContext`.
     /// The apply route writes here; the agent drains it on its next wake-up.
-    pub pending_profile_reset: Arc<std::sync::Mutex<Option<kallipai_runtime::ProfileReset>>>,
+    pub pending_profile_reset: Arc<std::sync::Mutex<Option<kallipai_adk::ProfileReset>>>,
     /// Parked snapshot, written by the bridge at a parking terminal event and
     /// cleared on any non-parked terminal. Shared (same `Arc`) with the bridge
     /// task; read by the delivery gate's auto-wake (kick turn text) and the status surfaces.
@@ -482,10 +481,10 @@ pub struct Agent {
     /// with the bridge; read by the status surfaces as the `retrying` field.
     pub retrying: Arc<std::sync::Mutex<Option<TransientRetryInfo>>>,
     /// Active-profile snapshot, shared (same `Arc`) with the runtime's
-    /// [`kallipai_runtime::FailoverState`]: the runtime's active-profile writers
+    /// [`kallipai_adk::FailoverState`]: the runtime's active-profile writers
     /// (spawn, failover advance, profile apply) keep it current; the tagma only
     /// reads it, for the status surfaces.
-    pub profile_snapshot: Arc<std::sync::Mutex<kallipai_runtime::ProfileSnapshot>>,
+    pub profile_snapshot: Arc<std::sync::Mutex<kallipai_adk::ProfileSnapshot>>,
 }
 
 impl Agent {
@@ -524,7 +523,7 @@ impl Agent {
         *self.retrying.lock().unwrap_or_else(|e| e.into_inner())
     }
     /// Snapshot the runtime-active profile for wire surfaces.
-    pub fn active_profile_snapshot(&self) -> kallipai_runtime::ProfileSnapshot {
+    pub fn active_profile_snapshot(&self) -> kallipai_adk::ProfileSnapshot {
         self.profile_snapshot
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -729,8 +728,8 @@ impl AppState {
             5,
             profiles,
             preset,
-            kallipai_runtime::usage_stats::UsageStats::default(),
-            kallipai_runtime::token_budget::TokenBudget::unlimited(),
+            kallipai_adk::usage_stats::UsageStats::default(),
+            kallipai_adk::token_budget::TokenBudget::unlimited(),
             None,
         )
     }
@@ -744,8 +743,8 @@ impl AppState {
         prompt_queue_size: usize,
         profiles: Arc<ArcSwap<ProfileBundle>>,
         preset: PolicyPreset,
-        usage_stats: kallipai_runtime::usage_stats::UsageStats,
-        token_budget: kallipai_runtime::token_budget::TokenBudget,
+        usage_stats: kallipai_adk::usage_stats::UsageStats,
+        token_budget: kallipai_adk::token_budget::TokenBudget,
         files_token: Option<String>,
     ) -> Self {
         let (invalidations, _) = tokio::sync::watch::channel(0u64);
@@ -770,7 +769,7 @@ impl AppState {
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("files HTTP client constructs without network"),
-            lock_manager: Arc::new(kallipai_runtime::dirlock::DirLockManager::new()),
+            lock_manager: Arc::new(kallipai_adk::dirlock::DirLockManager::new()),
             relays: std::sync::Mutex::new(HashMap::new()),
             bus: crate::bus::tagma_bus().expect("static topic registry is conflict-free"),
             external: std::sync::OnceLock::new(),
@@ -802,13 +801,13 @@ impl AppState {
     /// process state.
     pub(crate) fn startup_token_budget(
         raw: Option<String>,
-    ) -> anyhow::Result<kallipai_runtime::token_budget::TokenBudget> {
+    ) -> anyhow::Result<kallipai_adk::token_budget::TokenBudget> {
         Ok(match raw {
-            None => kallipai_runtime::token_budget::TokenBudget::unlimited(),
+            None => kallipai_adk::token_budget::TokenBudget::unlimited(),
             Some(raw) => {
                 let value = kallipai_common::tokens::parse_token_amount(&raw)
                     .map_err(|err| anyhow::anyhow!("invalid value {raw:?}: {err}"))?;
-                kallipai_runtime::token_budget::TokenBudget::new(value, 0)
+                kallipai_adk::token_budget::TokenBudget::new(value, 0)
             }
         })
     }
@@ -1056,7 +1055,7 @@ impl AgentRegistry {
     /// The strict delegation ancestors of an agent whose supervisor is
     /// `start_supervisor_id` — i.e. the `created_by` chain `[start_supervisor_id,
     /// …, root]` as owned [`AgentId`]s. Passed into
-    /// [`DirLockManager::acquire`](kallipai_runtime::dirlock::DirLockManager::acquire)
+    /// [`DirLockManager::acquire`](kallipai_adk::dirlock::DirLockManager::acquire)
     /// so a nested lock held under an ancestor is treated as delegation rather
     /// than conflict. Mirrors [`Self::walk_supervisor_chain`]'s cycle detection;
     /// returns owned ids so the caller may drop the registry read guard before

@@ -14,7 +14,7 @@ from kallipai_harbor.tagma import agents_dir
 
 class AgentsDirTest(unittest.TestCase):
     def test_mirrors_the_rust_data_dir_root(self):
-        # kallipai_runtime::persistence::data_dir_root resolves
+        # kallipai_adk::persistence::data_dir_root resolves
         # <platform data dir>/kallipai/tagmata/<KALLIPAI_TAGMA_SLUG>; the agents
         # subtree hangs directly under it.
         self.assertEqual(

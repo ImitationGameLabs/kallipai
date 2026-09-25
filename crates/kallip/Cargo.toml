@@ -12,7 +12,7 @@ kallipai-blob-store = { workspace = true }
 kallipai-client = { workspace = true }
 kallipai-common = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
-kallipai-runtime = { workspace = true }
+kallipai-adk = { workspace = true }
 dirs = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
 clap = { workspace = true }

@@ -3,9 +3,9 @@
 
 use std::path::PathBuf;
 
+use kallipai_adk::config::{AgentConfig, DelegationMode, PermissionClass};
 use kallipai_common::agentid::AgentId;
 use kallipai_common::protocol::ApiError;
-use kallipai_runtime::config::{AgentConfig, DelegationMode, PermissionClass};
 
 use crate::state::SharedState;
 
@@ -66,7 +66,7 @@ pub(crate) enum WorkspaceAcquireFailure {
 /// is taken, so the "a Normal agent holds a write-lock on its workspace for the
 /// lifetime of its task" invariant cannot be bypassed by skipping a call site.
 ///
-/// [`DirLockManager::acquire`]: kallipai_runtime::dirlock::DirLockManager::acquire
+/// [`DirLockManager::acquire`]: kallipai_adk::dirlock::DirLockManager::acquire
 pub(crate) fn try_acquire_workspace_lock<'a>(
     state: &'a SharedState,
     id: &'a AgentId,
@@ -80,15 +80,13 @@ pub(crate) fn try_acquire_workspace_lock<'a>(
         .lock_manager
         .acquire(id, &config.workspace_root, chain)
     {
-        Ok(kallipai_runtime::dirlock::AcquireOutcome::Acquired)
-        | Ok(kallipai_runtime::dirlock::AcquireOutcome::AlreadyHeld) => {
-            Ok(Some(WorkspaceLockGuard {
-                state,
-                id,
-                armed: true,
-            }))
-        }
-        Ok(kallipai_runtime::dirlock::AcquireOutcome::Busy { holder, conflict }) => {
+        Ok(kallipai_adk::dirlock::AcquireOutcome::Acquired)
+        | Ok(kallipai_adk::dirlock::AcquireOutcome::AlreadyHeld) => Ok(Some(WorkspaceLockGuard {
+            state,
+            id,
+            armed: true,
+        })),
+        Ok(kallipai_adk::dirlock::AcquireOutcome::Busy { holder, conflict }) => {
             Err(WorkspaceAcquireFailure::Busy { holder, conflict })
         }
         Err(e) => Err(WorkspaceAcquireFailure::Other(e)),
@@ -299,8 +297,8 @@ pub(crate) fn establish_lock_api_error(e: EstablishLockFailure) -> ApiError {
 /// Map an exec-gate WRITE failure (a carve-out refused because the supervisor
 /// has an in-flight shell) to a client-facing conflict. The carve is retried by
 /// the caller once the supervisor is quiescent.
-pub(crate) fn exec_gate_failure(failure: kallipai_runtime::ExecGateFailure) -> ApiError {
-    use kallipai_runtime::ExecGateFailure;
+pub(crate) fn exec_gate_failure(failure: kallipai_adk::ExecGateFailure) -> ApiError {
+    use kallipai_adk::ExecGateFailure;
     let msg = match failure {
         ExecGateFailure::ForegroundExecInProgress => {
             "supervisor has an in-flight shell; wait for it to finish and retry".to_string()

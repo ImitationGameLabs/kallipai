@@ -37,8 +37,8 @@ pub mod work_schedule;
 pub mod test_helpers;
 
 use anyhow::{Context, Result};
+use kallipai_adk::profile::ProfileRegistry;
 use kallipai_common::authtoken::MintedToken;
-use kallipai_runtime::profile::ProfileRegistry;
 #[cfg(test)]
 use kallipai_testkit::wait_for;
 use state::AppState;
@@ -112,7 +112,7 @@ pub async fn run(args: Args) -> Result<()> {
     // construction; the runtime holds the pre-built backends and does selection (plus reuse of
     // `reqwest` types for HTTP-shape retry classification). A
     // misconfigured provider (unknown family, bad config) fails fast here at startup.
-    let cfg = kallipai_runtime::profile::load().context("failed to load model profiles")?;
+    let cfg = kallipai_adk::profile::load().context("failed to load model profiles")?;
     let factory = just_llm_client::client::BackendFactory::new();
     let user_agent = backend::resolve_user_agent(args.llm_api_user_agent.as_deref());
     let source = backend::build_backends(&cfg, factory, user_agent)
@@ -150,8 +150,8 @@ pub async fn run(args: Args) -> Result<()> {
         args.max_subagents,
         args.prompt_queue_size,
         profiles,
-        kallipai_runtime::config::policy_preset_from_env(),
-        kallipai_runtime::usage_stats::UsageStats::default(),
+        kallipai_adk::config::policy_preset_from_env(),
+        kallipai_adk::usage_stats::UsageStats::default(),
         token_budget,
         files_token,
     ));
@@ -168,13 +168,13 @@ pub async fn run(args: Args) -> Result<()> {
     // builtin preset with a warning: hooks are an operator addition, and
     // their absence must not block a boot that could otherwise run.
     let hook_rules = match exec_hooks_toml_path() {
-        Ok(path) => kallipai_runtime::config::load_exec_hook_rules(&path),
+        Ok(path) => kallipai_adk::config::load_exec_hook_rules(&path),
         Err(error) => {
             tracing::warn!(
                 %error,
                 "exec-hook overrides unavailable; builtin preset only"
             );
-            kallipai_runtime::config::builtin_exec_hook_rules()
+            kallipai_adk::config::builtin_exec_hook_rules()
         }
     };
     state.hook_rules.set(Arc::new(hook_rules)).ok();
@@ -195,7 +195,7 @@ pub async fn run(args: Args) -> Result<()> {
     // `TaskStore::open` runs the migration chain, so the boot brings the
     // schema to head. This process is the SOLE writer of tasks.sqlite.
     let task_store = kallipai_task::TaskStore::open(
-        &kallipai_runtime::persistence::data_dir_root()?.join("tasks.sqlite"),
+        &kallipai_adk::persistence::data_dir_root()?.join("tasks.sqlite"),
     )
     .await
     .context("open task store")?;
@@ -208,7 +208,7 @@ pub async fn run(args: Args) -> Result<()> {
     state
         .task_blobs
         .set(kallipai_blob_store::LocalBackend::arc_with(
-            kallipai_runtime::persistence::data_dir_root()?
+            kallipai_adk::persistence::data_dir_root()?
                 .join("blobs")
                 .join("tasks"),
             settings::load_task_blob_compression(),
@@ -230,7 +230,7 @@ pub async fn run(args: Args) -> Result<()> {
     state
         .attachment_blobs
         .set(kallipai_blob_store::LocalBackend::arc_with(
-            kallipai_runtime::persistence::data_dir_root()?
+            kallipai_adk::persistence::data_dir_root()?
                 .join("blobs")
                 .join("attachments"),
             settings::load_attachment_blob_compression(),
@@ -247,7 +247,7 @@ pub async fn run(args: Args) -> Result<()> {
     // dropped on a fresh data dir and root's first write would fail opaquely. Must
     // precede `restore_agents`: a restored root rebuilds its tool dispatch (and
     // thus captures the landlock closure) inside restore.
-    std::fs::create_dir_all(kallipai_runtime::tools::skill_dir()?)
+    std::fs::create_dir_all(kallipai_adk::tools::skill_dir()?)
         .map_err(|e| anyhow::anyhow!("failed to create shared skills dir: {e}"))?;
 
     // Seed the shipped skill defaults into the now-existing (and empty on a
@@ -257,7 +257,7 @@ pub async fn run(args: Args) -> Result<()> {
     // best-effort: skills are optional context (the meta-skill is compiled in,
     // agents degrade gracefully with an empty dir), so a failure is logged and
     // the tagma continues rather than aborting boot.
-    if let Err(e) = kallipai_runtime::tools::seed_skills_if_empty() {
+    if let Err(e) = kallipai_adk::tools::seed_skills_if_empty() {
         tracing::warn!("skill seed failed: {e:#}; skipping");
     }
 
@@ -476,7 +476,7 @@ fn boot_slug() -> Result<String> {
 /// log leaves are appended by `logs_target`). `install_instance_roots`
 /// runs this derivation before logging: log placement itself hangs off
 /// the state root.
-fn instance_roots_from_env() -> Result<kallipai_runtime::persistence::InstanceRoots> {
+fn instance_roots_from_env() -> Result<kallipai_adk::persistence::InstanceRoots> {
     let slug = boot_slug()?;
     let data = match std::env::var_os("KALLIPAI_TAGMA_DATA_DIR").filter(|d| !d.is_empty()) {
         Some(dir) => std::path::PathBuf::from(dir),
@@ -494,7 +494,7 @@ fn instance_roots_from_env() -> Result<kallipai_runtime::persistence::InstanceRo
     let state = dirs::state_dir()
         .context("could not determine platform state directory")?
         .join("kallipai");
-    Ok(kallipai_runtime::persistence::InstanceRoots {
+    Ok(kallipai_adk::persistence::InstanceRoots {
         data,
         config,
         state,
@@ -505,7 +505,7 @@ fn instance_roots_from_env() -> Result<kallipai_runtime::persistence::InstanceRo
 /// placement itself hangs off the state root.
 pub fn install_instance_roots() -> Result<()> {
     let roots = instance_roots_from_env()?;
-    kallipai_runtime::persistence::install_instance_roots(roots)
+    kallipai_adk::persistence::install_instance_roots(roots)
 }
 
 /// This process's data root for the installed identity
@@ -513,7 +513,7 @@ pub fn install_instance_roots() -> Result<()> {
 /// for it).
 fn boot_identity() -> Result<std::path::PathBuf> {
     boot_slug()?;
-    kallipai_runtime::persistence::data_dir_root()
+    kallipai_adk::persistence::data_dir_root()
 }
 
 /// Where this tagma's log files live: always the state tree —
@@ -527,7 +527,7 @@ fn logs_target() -> Result<std::path::PathBuf> {
         .ok()
         .filter(|s| !s.is_empty())
         .context("cannot place logs: KALLIPAI_TAGMA_SLUG is not set")?;
-    Ok(kallipai_runtime::persistence::state_dir_root()?
+    Ok(kallipai_adk::persistence::state_dir_root()?
         .join("tagmata")
         .join(slug)
         .join("logs"))
@@ -972,7 +972,7 @@ fn resolve_relay_plan(args: &args::Args) -> Result<Vec<(RelayEntry, EnrollEntry)
 
 /// The instance data root, slug-derived (see `boot_identity`).
 pub(crate) fn data_root() -> Result<std::path::PathBuf> {
-    kallipai_runtime::persistence::data_dir_root()
+    kallipai_adk::persistence::data_dir_root()
 }
 
 fn credentials_dir() -> Result<std::path::PathBuf> {
@@ -998,7 +998,7 @@ fn inbox_path() -> Result<std::path::PathBuf> {
 /// `<config_root>/exec_hooks.toml` (operator-declared config lives in the
 /// config tree; the runtime data tree stays data-only).
 fn exec_hooks_toml_path() -> Result<std::path::PathBuf> {
-    kallipai_runtime::persistence::config_dir_root().map(|d| d.join("exec_hooks.toml"))
+    kallipai_adk::persistence::config_dir_root().map(|d| d.join("exec_hooks.toml"))
 }
 
 /// Start the direct status driver. Always runs, independent of whether the

@@ -3,10 +3,10 @@
 
 use std::collections::HashMap;
 
+use kallipai_adk::config::{AgentConfig, PermissionClass};
+pub(crate) use kallipai_adk::tools::meta_skill_content;
+use kallipai_adk::tools::skill_dir;
 use kallipai_common::agentid::AgentId;
-use kallipai_runtime::config::{AgentConfig, PermissionClass};
-pub(crate) use kallipai_runtime::tools::meta_skill_content;
-use kallipai_runtime::tools::skill_dir;
 
 /// Inject the per-agent identity env vars into an existing env map.
 ///

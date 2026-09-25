@@ -7,7 +7,7 @@
 #     image and the arion dev compose reference a bit-identical store path.
 #
 # The tagma seeds `<data_dir>/skills/` from this tree on first boot (see
-# `seed_skills_if_empty` in crates/kallipai-runtime); it never serves skills
+# `seed_skills_if_empty` in crates/kallipai-adk); it never serves skills
 # directly from this read-only path.
 #
 # `${../../skills}` is a path literal relative to this file's location

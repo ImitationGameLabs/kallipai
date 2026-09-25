@@ -11,7 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 jiff = { workspace = true }
-kallipai-runtime = { workspace = true, features = ["landlock", "seccomp"] }
+kallipai-adk = { workspace = true, features = ["landlock", "seccomp"] }
 kallipai-common = { workspace = true, features = ["axum"] }
 kallipai-task = { workspace = true }
 kallipai-blob-store = { workspace = true }
@@ -103,8 +103,8 @@ serial_test = { workspace = true }
 ctor = { workspace = true }
 kallipai-shell = { workspace = true }
 # Test-only instance-roots override for disk-fixture tests (see
-# kallipai-runtime's `testutils` feature).
-kallipai-runtime = { workspace = true, features = ["testutils"] }
+# kallipai-adk's `testutils` feature).
+kallipai-adk = { workspace = true, features = ["testutils"] }
 # Relay op-tests (ported from the former standalone connector): mock lesche + inline AEAD app side.
 chacha20poly1305 = { workspace = true }
 getrandom = { workspace = true }

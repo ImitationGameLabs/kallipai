@@ -19,12 +19,12 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 
 use just_llm_client::types::generation::ReasoningEffort;
-use kallipai_common::protocol::{
-    ApiError, DeleteSetResponse, Modality, SetDefaultRequest, SetReference,
-};
-use kallipai_runtime::profile::{
+use kallipai_adk::profile::{
     Profile, ProfileConfig, ProfileRegistry, ProfileSet, Provider, is_valid_set_name,
     normalize_default,
+};
+use kallipai_common::protocol::{
+    ApiError, DeleteSetResponse, Modality, SetDefaultRequest, SetReference,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -92,7 +92,7 @@ pub async fn put_profiles(
     let registry = validate_config(&config)?;
     // Declared-capability shrinkage inside a set is never silent on the PUT
     // path either; load_file warns the same way at startup.
-    for (name, effective) in kallipai_runtime::profile::shadowed_set_notices(&config.sets) {
+    for (name, effective) in kallipai_adk::profile::shadowed_set_notices(&config.sets) {
         warn!(
             set = %name,
             effective = %effective,
@@ -134,7 +134,7 @@ struct ProfileWire {
     /// Absent on the wire = the text-only default (matching the runtime
     /// model's TOML semantics), so older clients that omit the key keep
     /// their declarations intact across a PUT.
-    #[serde(default = "kallipai_runtime::profile::Profile::default_modalities")]
+    #[serde(default = "kallipai_adk::profile::Profile::default_modalities")]
     modalities: Vec<Modality>,
 }
 
@@ -301,12 +301,12 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
     // default to [text] and never trip).
     for set in sets.values() {
         for p in &set.profiles {
-            kallipai_runtime::profile::require_text_member("set", p)
+            kallipai_adk::profile::require_text_member("set", p)
                 .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
         }
     }
     for p in &parking {
-        kallipai_runtime::profile::require_text_member("parking", p)
+        kallipai_adk::profile::require_text_member("parking", p)
             .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
     }
     Ok(ProfileConfig {
@@ -344,7 +344,7 @@ pub struct ApplyResponse {
 /// POST /profiles/apply — push the current registry to all live agents.
 ///
 /// For each live agent, resolves its recorded set name against the new
-/// registry and writes a [`ProfileReset`](kallipai_runtime::ProfileReset) to the agent's pending-reset
+/// registry and writes a [`ProfileReset`](kallipai_adk::ProfileReset) to the agent's pending-reset
 /// cell. An unbound root instead derives its binding from the current
 /// default set, and the derived name is written back to the in-memory
 /// record (not meta.json — restore re-derives it on the next boot).
@@ -391,7 +391,7 @@ pub async fn apply_profiles(
                     rebinds.push((id.clone(), Some(set.name.clone())));
                 }
                 targets.push((
-                    kallipai_runtime::ProfileReset {
+                    kallipai_adk::ProfileReset {
                         set: set.clone(),
                         registry: registry.clone(),
                     },
@@ -443,9 +443,9 @@ fn validate_config(config: &ProfileConfig) -> Result<Arc<ProfileRegistry>, ApiEr
 /// block the swap, since the in-memory state is already validated). Shared
 /// by every set-management mutation.
 fn persist_config(config: &ProfileConfig) {
-    match kallipai_runtime::profile::config_path() {
+    match kallipai_adk::profile::config_path() {
         Ok(path) => {
-            if let Err(e) = kallipai_runtime::profile::save(config, &path) {
+            if let Err(e) = kallipai_adk::profile::save(config, &path) {
                 warn!(path = %path.display(), "failed to persist profiles to disk: {e:#}");
             } else {
                 info!(path = %path.display(), "profiles persisted to disk");
@@ -475,8 +475,8 @@ async fn dangling_bindings(state: &SharedState, config: &ProfileConfig) -> Vec<S
 /// Write a ProfileReset into the agent's pending cell and wake it — the
 /// shared tail of apply and the explicit per-agent rebind.
 pub(crate) fn signal_profile_reset(
-    reset: kallipai_runtime::ProfileReset,
-    cell: &std::sync::Mutex<Option<kallipai_runtime::ProfileReset>>,
+    reset: kallipai_adk::ProfileReset,
+    cell: &std::sync::Mutex<Option<kallipai_adk::ProfileReset>>,
     notify: &tokio::sync::Notify,
 ) {
     let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());

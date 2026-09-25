@@ -2,7 +2,7 @@
 //! (or freshly-paired) device pulls via `TagmaControl::History` on each open,
 //! so the user sees what it missed while the app was offline.
 //!
-//! Distinct from `kallipai_runtime::history` (the agent's own LLM-turn log):
+//! Distinct from `kallipai_adk::history` (the agent's own LLM-turn log):
 //! this is the *relay wire transcript* of the conversation — both directions:
 //! outbound `TagmaReply::Event` frames the pump produced AND inbound
 //! `TagmaRequest::SendMessage` frames the user sent, in arrival order, kept as

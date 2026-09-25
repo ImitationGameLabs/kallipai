@@ -23,6 +23,7 @@ use args::{
 };
 use clap::{CommandFactory, Parser};
 use kallip::file::FilesClient;
+use kallipai_adk::profile::{ProfileConfig, ProfileSet};
 use kallipai_client::TagmaClient;
 use kallipai_client::types::LescheSessionEntry;
 use kallipai_common::agentid::AgentId;
@@ -30,7 +31,6 @@ use kallipai_common::policy::{ExecDecision, ExecOverride};
 use kallipai_common::protocol::ProfileSetUpdateRequest;
 use kallipai_common::timefmt;
 use kallipai_common::tokens::parse_token_amount;
-use kallipai_runtime::profile::{ProfileConfig, ProfileSet};
 use uuid::Uuid;
 
 /// Read agent ID from KALLIPAI_ID env var.

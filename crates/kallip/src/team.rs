@@ -258,13 +258,11 @@ fn install_local_instance_roots() -> Result<()> {
     let state = dirs::state_dir()
         .context("could not determine platform state directory")?
         .join("kallipai");
-    kallipai_runtime::persistence::install_instance_roots(
-        kallipai_runtime::persistence::InstanceRoots {
-            data,
-            config,
-            state,
-        },
-    )
+    kallipai_adk::persistence::install_instance_roots(kallipai_adk::persistence::InstanceRoots {
+        data,
+        config,
+        state,
+    })
 }
 async fn run_converge(client: &TagmaClient, args: &TeamConvergeArgs) -> Result<()> {
     let (declaration, lock_path) = resolve_paths(&args.common.file, &args.common.lock)?;
@@ -371,7 +369,7 @@ fn warn_orphaned_parked(declaration: &str, mapping: &[kallipai_common::protocol:
             return;
         }
     };
-    match kallipai_runtime::persistence::scan_inactive() {
+    match kallipai_adk::persistence::scan_inactive() {
         Ok(parked) => {
             for (id, meta) in parked {
                 if mapping.iter().any(|e| e.id.to_string() == id.to_string()) {
@@ -507,7 +505,7 @@ fn render_converge(
 async fn run_lock_rebuild(client: &TagmaClient, args: &TeamLockRebuildArgs) -> Result<()> {
     install_local_instance_roots()?;
     let live = client.list_agents(None).await?;
-    let parked = kallipai_runtime::persistence::scan_inactive().context(
+    let parked = kallipai_adk::persistence::scan_inactive().context(
         "cannot scan the inactive area (is KALLIPAI_TAGMA_DATA_DIR / KALLIPAI_TAGMA_SLUG set for this tagma?)",
     )?;
 

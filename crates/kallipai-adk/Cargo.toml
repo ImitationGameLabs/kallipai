@@ -1,6 +1,6 @@
 [package]
-name = "kallipai-runtime"
-description = "Agent runtime: agent context, policy, and tool dispatch (tagma-only)"
+name = "kallipai-adk"
+description = "Agent development kit: agent context, policy, and tool dispatch (tagma-only)"
 edition = "2024"
 version.workspace = true
 license.workspace = true

@@ -1,4 +1,4 @@
-//! Runtime-internal event and outcome types.
+//! Adk-internal event and outcome types.
 //!
 //! These types carry information between the agent runner/agent_task modules
 //! and the tagma bridge. They are not serialized over the wire -- the
@@ -236,7 +236,7 @@ mod tests {
     /// plus, for struct variants, field names. Tuple-variant payloads
     /// (Reasoning/AssistantContent/ToolResult/Error/Status carry one String)
     /// show only the value; their field meaning is positional by definition.
-    /// AgentEvent is runtime-internal (never serialized), so this Debug pin
+    /// AgentEvent is adk-internal (never serialized), so this Debug pin
     /// is the layer's shape contract: adding/renaming/removing a variant or
     /// field reds here. Values are not pinned — fixtures reuse [`SAMPLES`]
     /// empty/zero values; semantics live in the classification snapshot.

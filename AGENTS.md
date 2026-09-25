@@ -17,7 +17,7 @@ Code and test comments are self-contained: do not reference out-of-repo document
 ├── flake.nix                  # Flake entry point
 ├── crates/                    # Rust workspace members
 │   ├── kallipai-common/   # Shared types and command parsing
-│   ├── kallipai-runtime/  # Agent runtime: agent context, policy, tool dispatch (tagma-only)
+│   ├── kallipai-adk/  # Agent development kit: agent context, policy, tool dispatch (tagma-only)
 │   ├── kallipai-shell/    # Reusable shell/session tools for LLM applications
 │   ├── kallip/           # Headless CLI for agent (tagma client)
 │   ├── kallipai-tagma/   # HTTP API server hosting multiple agent instances
