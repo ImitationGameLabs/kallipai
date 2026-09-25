@@ -14,60 +14,21 @@ Code and test comments are self-contained: do not reference out-of-repo document
 
 ```text
 .
-├── flake.nix                  # Flake entry point
-├── crates/                    # Rust workspace members
-│   ├── kallipai-common/   # Shared types and command parsing
-│   ├── kallipai-adk/  # Agent development kit: agent context, policy, tool dispatch (tagma-only)
-│   ├── kallipai-shell/    # Reusable shell/session tools for LLM applications
-│   ├── kallip/           # Headless CLI for agent (tagma client)
-│   ├── kallipai-tagma/   # HTTP API server hosting multiple agent instances
-│   ├── kallipai-run/      # Agent runner for scripting and benchmarking
-│   ├── kallipai-client/   # Tagma client library
-│   ├── time/             # Timer/scheduling subsystem: cron daemon that fires schedules and injects them into conversations, plus its wire types, HTTP client, and management CLI
-│   ├── platform/        # Public-internet relay subsystem (servers + wire types + clients + admin + E2E crypto)
-│       ├── kallipai-archeion/     # Control-plane relay server
-│       ├── kallipai-lesche/      # Data-plane relay server
-│       ├── kallipai-archeion-common/ # Wire types for the relay and its clients
-│       ├── kallipai-lesche-common/ # Wire types for the relay data plane
-│       ├── kallipai-e2ee/        # End-to-end encryption primitives (Ed25519 device key, X3DH KEX, AEAD)
-│       ├── kallipai-archeion-client/ # Archeion relay HTTP client (enroll + admin surface)
-│       ├── kallipai-lesche-client/ # Lesche data-plane relay HTTP client
-│       ├── kallipai-admin/        # Headless archeion admin CLI (sk-admin HTTP client)
-│       ├── kallipai-instances/  # Local instance management service (web API + static UI over the daemon)
-│   └── daemon/          # Local instance management subsystem (UDS daemon + wire types + clients + spawn helper + CLI)
-│       ├── kallipai-daemon/     # Stateless, directory-driven manager for local instances (UDS control socket)
-│       ├── kallipai-daemon-common/ # Wire types for the daemon protocol
-│       ├── kallipai-daemon-client/ # UDS client library for the daemon
-│       ├── kallipai-daemon-spawn/  # Detached spawn helper that launches instance processes
-│       └── kallipctl/            # Management CLI for the daemon
-├── packages/                  # JS/TS workspace (Deno-first; see below)
-│   ├── kallipai-common/         # Transport-agnostic shared types + SSE parser
-│   ├── kallipai-client/         # Direct tagma HTTP+SSE client (offline path)
-│   ├── kallipai-archeion-client/   # Archeion control-plane + WebAuthn client
-│   ├── kallipai-lesche-client/  # Lesche data-plane client (online E2EE path)
-│   ├── kallipai-ui/             # Shared SvelteKit UI library
-│   ├── kallipai-web/            # SvelteKit web app
-│   └── kallipai-app/            # Tauri (Android) app shell
-├── docs/                      # Project documentation
-│   └── en/                   # Documentation tree the site renders
-│       ├── architecture.md       # System architecture, tagma design, policy
-│       ├── context-management.md # Agentic context management design
-│       ├── development/      # Contributor guides
-│       │   ├── setup.md      # Workspace bring-up and verification
-│       │   ├── frontend.md   # Deno-first frontend toolchain
-│       │   └── i18n.md       # Message catalogs (i18n)
-│       └── reference/        # Reference documentation
-│           ├── auth.md       # Authentication and authorization
-│           ├── tagma-api.md  # HTTP API endpoints
-│           ├── env/          # Environment variable reference
-│           ├── kallip.md     # `kallip` headless CLI for agent
-│           └── kallipai-run.md # `kallipai-run` agent runner for scripting
-└── nix/
-      ├── common.nix           # Core config (crate paths, dependencies)
-      ├── checks.nix           # CI checks
-      └── packages/
-            └── tarball.nix    # Release tarball builder
+├── flake.nix            # Flake entry point
+├── crates/              # Rust workspace members
+├── packages/            # JS/TS workspace (Deno-first; see below)
+├── docs/                # Project documentation (en/, zh-cn/)
+├── skills/              # Agent skill library
+├── harbor-integration/  # Harbor test-framework integration
+├── compose/             # Container compositions (dev and prod)
+└── nix/                 # Nix packaging and checks
 ```
+
+`crates/` holds the core crates plus three subsystem homes: `platform/`
+(public-internet relay), `daemon/` (local instance management), and
+`time/` (timer/scheduling). Each subsystem directory contains its own
+crates; elsewhere one directory is one crate, and directory names match
+crate names. The README table describes the core crates.
 
 ## Frontend development
 
