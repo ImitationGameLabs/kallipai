@@ -11,6 +11,7 @@ kallip-blob-store = { workspace = true }
 kallip-daemon-common = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true, features = ["unstable-dynamic"] }
 tokio = { workspace = true, features = [
   "io-util",
   "net",

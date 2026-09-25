@@ -6,11 +6,15 @@
 //! (separate installation surfaces).
 
 use anyhow::{Context as _, Result};
+use clap::CommandFactory;
 use clap::{Parser, Subcommand};
+use clap_complete::Shell;
+use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
 use kallip_daemon_client::DaemonClient;
 use kallip_daemon_common::wire::{
     ErrorCode, InstanceState, LogCursor, OkPayload, RequestBody, Response, ResponseBody,
 };
+use std::ffi::OsStr;
 
 #[derive(Parser)]
 #[command(
@@ -57,15 +61,22 @@ enum Command {
         user: Option<String>,
     },
     /// Terminate an instance (TERM, grace, KILL).
-    Stop { slug: String },
+    Stop {
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+    },
     /// Deregister an instance without touching its process: a
     /// running instance keeps running unmanaged — stop it first if
     /// you want it terminated. Idempotent.
-    Remove { slug: String },
+    Remove {
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+    },
     /// Relaunch a stopped or dead instance under its recorded workspace
     /// and env.
     Start {
         /// Instance slug.
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
         slug: String,
         /// One-shot env overlay, KEY=VALUE (repeatable); applied to this
         /// launch only, never persisted to the instance's record.
@@ -76,7 +87,10 @@ enum Command {
     /// List managed instances.
     List,
     /// Daemon health, or one instance's health by slug.
-    Health { slug: Option<String> },
+    Health {
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: Option<String>,
+    },
     /// Register an existing instance (running or stopped) under this
     /// daemon: pure registration, no process is launched or signaled.
     Adopt {
@@ -111,12 +125,16 @@ enum Command {
     /// record's latest env: an already-stopped instance simply starts.
     /// The systemd restart shape — the end state is one process running
     /// the newest recorded configuration.
-    Restart { slug: String },
+    Restart {
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+    },
     /// Tail an instance's log files (read-only diagnostic): the
     /// merged tail across retained daily files, one file with
     /// --file, or live with --follow.
     Logs {
         /// Instance slug: same grammar as spawn's.
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
         slug: String,
         /// Lines from the tail (default 20, capped at 1000).
         #[arg(short = 'n', long = "lines")]
@@ -136,6 +154,15 @@ enum Command {
     Blobs {
         #[command(subcommand)]
         command: BlobsCommand,
+    },
+    /// Emit a shell completion script for this CLI to stdout. Hidden:
+    /// an installer concern (nix postInstall, user dotfiles), not a
+    /// daily verb.
+    #[command(hide = true)]
+    Generate {
+        /// The shell to emit completions for.
+        #[arg(value_enum)]
+        shell: Shell,
     },
 }
 
@@ -224,12 +251,16 @@ enum EnvCommand {
     /// Print the persisted pairs, one KEY=VALUE per line with a blank
     /// line between variables. Values are shown in full, so a line can
     /// be copied straight into a shell.
-    List { slug: String },
+    List {
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+    },
     /// Merge the given KEY=VALUE pairs into the persisted env: existing
     /// keys are replaced in place, new keys are appended (same allowlist
     /// as spawn's env). The running process is untouched; the change
     /// takes effect on next start.
     Set {
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
         slug: String,
         #[arg(value_name = "KEY=VALUE")]
         pairs: Vec<String>,
@@ -237,15 +268,30 @@ enum EnvCommand {
     /// Remove keys from the persisted env. A key that is not present
     /// fails the whole request and is named in the error.
     Unset {
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
         slug: String,
         #[arg(value_name = "KEY")]
         keys: Vec<String>,
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // The dynamic-completion hook runs before any runtime is up: the
+    // slug completer does synchronous daemon IPC, and a runtime nested
+    // inside another would panic. With COMPLETE unset (every normal
+    // invocation) this is a no-op.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::Generate { shell } = cli.command {
+        let mut cmd = Cli::command();
+        clap_complete::generate(shell, &mut cmd, "kallipctl", &mut std::io::stdout());
+        return Ok(());
+    }
     // The shared chain, probed in order - the first socket that answers
     // is wherever the daemon actually bound (identical ordering on both
     // sides is what keeps client and daemon converged).
@@ -383,6 +429,9 @@ async fn main() -> Result<()> {
             EnvCommand::Set { slug, pairs } => RequestBody::EnvSet { slug, env: pairs },
             EnvCommand::Unset { slug, keys } => RequestBody::EnvUnset { slug, keys },
         },
+        // Unreachable: Generate early-returns before the connection is
+        // set up; the arm only keeps this match exhaustive.
+        Command::Generate { .. } => unreachable!("handled in main"),
     };
     let response = client
         .call(body)
@@ -785,4 +834,49 @@ fn error_prefix_is_the_scripting_vocabulary() {
         error_prefix(ErrorCode::WorkspaceOverlap),
         "instance path overlap"
     );
+}
+
+/// Dynamic completion for slug arguments: list the daemon's managed
+/// instances and offer their slugs. Every failure path (no reachable
+/// socket, IPC error) degrades to an empty candidate set: a completion
+/// hook must never print an error into the shell's input line.
+fn complete_slug(current: &OsStr) -> Vec<CompletionCandidate> {
+    use kallip_daemon_common::wire::RequestBody;
+    use kallip_daemon_common::wire::ResponseBody;
+
+    // The hook runs before any tokio runtime is up, so a throwaway
+    // current-thread runtime drives the async UDS client here.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => return Vec::new(),
+    };
+    let prefix = current.to_string_lossy();
+    rt.block_on(async move {
+        let candidates = kallip_daemon_common::socket::candidates_from_env(None);
+        let socket = match kallip_daemon_common::socket::probe(&candidates) {
+            Ok(socket) => socket,
+            Err(_) => return Vec::new(),
+        };
+        let client = DaemonClient::new(socket);
+        let response = match client.call(RequestBody::List).await {
+            Ok(response) => response,
+            Err(_) => return Vec::new(),
+        };
+        let ResponseBody::Ok {
+            payload: kallip_daemon_common::wire::OkPayload::List { instances },
+        } = response.body
+        else {
+            return Vec::new();
+        };
+        instances
+            .into_iter()
+            .filter(|instance| instance.slug.starts_with(prefix.as_ref()))
+            .map(|instance| {
+                CompletionCandidate::new(instance.slug).help(Some(instance.state.as_str().into()))
+            })
+            .collect()
+    })
 }

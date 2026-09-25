@@ -30,6 +30,27 @@ let
         doCheck = false;
       }
     );
+
+  # Shell completions for the two operator CLIs: each binary carries a
+  # hidden `generate <shell>` verb (clap_complete) so the nix build can
+  # produce the scripts without a build.rs (the CLIs are single-file
+  # mains -- no library surface for a build script to reach). The three
+  # shells with standard profile locations install via
+  # installShellFiles; all five land under share/kallipai/completions
+  # so elvish/powershell users (no standard profile location) and
+  # non-nix installs can copy them by hand.
+  genCompletions = bins: ''
+    for binname in ${pkgs.lib.concatStringsSep " " bins}; do
+      for shell in bash zsh fish elvish powershell; do
+        mkdir -p $out/share/kallipai/completions/$binname
+        $out/bin/$binname generate $shell > $out/share/kallipai/completions/$binname/$shell
+      done
+      installShellCompletion --cmd $binname \
+        --bash $out/share/kallipai/completions/$binname/bash \
+        --zsh $out/share/kallipai/completions/$binname/zsh \
+        --fish $out/share/kallipai/completions/$binname/fish
+    done
+  '';
 in
 {
   # The full workspace: every kallip binary. This is `packages.default` and the
@@ -44,24 +65,35 @@ in
   workspace = (buildCrate "cargo build --release").overrideAttrs (old: {
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
       pkgs.makeWrapper
+      pkgs.installShellFiles
     ];
-    postInstall = (old.postInstall or "") + ''
-      # Seed the shared skills by default on nix installs: the wrapper
-      # exports KALLIP_SKILLS_SEED only when unset, so an explicit env
-      # value (or the container image Env) still wins. Only kallip-tagma
-      # reads the seed -- the agent-side kallip CLI sharing its bin/
-      # directory never does, so it stays unwrapped.
-      wrapProgram $out/bin/kallip-tagma \
-        --set-default KALLIP_SKILLS_SEED ${sharedSkills}/share/kallipai/skills
-    '';
+    postInstall =
+      (old.postInstall or "")
+      + ''
+        # Seed the shared skills by default on nix installs: the wrapper
+        # exports KALLIP_SKILLS_SEED only when unset, so an explicit env
+        # value (or the container image Env) still wins. Only kallip-tagma
+        # reads the seed -- the agent-side kallip CLI sharing its bin/
+        # directory never does, so it stays unwrapped.
+        wrapProgram $out/bin/kallip-tagma \
+          --set-default KALLIP_SKILLS_SEED ${sharedSkills}/share/kallipai/skills
+      ''
+      + genCompletions [
+        "kallipctl"
+        "kallip-admin"
+      ];
   });
   # The archeion control-plane server (pure HTTP/Postgres; no shell-out deps).
   archeion = buildCrate "cargo build --release -p kallip-archeion";
   # The headless archeion admin CLI (HTTP client; runs on the operator host). A
-  # separate attr so it can be built/deployed without the server. Not baked into
-  # the archeion image -- the image is deliberately minimal; operators run this
-  # against any reachable archeion.
-  admin = buildCrate "cargo build --release -p kallip-admin";
+  # separate attr so it can be built/deployed without the server. The
+  # archeion image does carry this binary via copyToRoot, so the admin
+  # tool -- and its completion scripts -- ship inside the image too;
+  # operators run it against any reachable archeion.
+  admin = (buildCrate "cargo build --release -p kallip-admin").overrideAttrs (old: {
+    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.installShellFiles ];
+    postInstall = (old.postInstall or "") + genCompletions [ "kallip-admin" ];
+  });
   # The lesche data-plane relay (tagma relay tunnels, app SSE, envelope
   # routing; pure HTTP, no shell-out deps). Its own image so the archeion and
   # lesche services deploy independently -- see
@@ -90,7 +122,10 @@ in
   # so the daemon (operator host) and helper (root-owned install path)
   # never share a deployment unit.
   daemon = buildCrate "cargo build --release -p kallip-daemon";
-  ctl = buildCrate "cargo build --release -p kallipctl";
+  ctl = (buildCrate "cargo build --release -p kallipctl").overrideAttrs (old: {
+    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.installShellFiles ];
+    postInstall = (old.postInstall or "") + genCompletions [ "kallipctl" ];
+  });
   daemon-spawn = buildCrate "cargo build --release -p kallip-daemon-spawn";
   # The HTTP front door of the daemon family: proxies the bare resource
   # to the daemon's UDS socket -- the only networked door the family

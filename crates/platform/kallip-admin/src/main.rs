@@ -14,7 +14,9 @@
 //!   KALLIP_ARCHEION_ADMIN_TOKEN=$(kallip-admin admin-token reset)
 
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::{Parser, Subcommand};
+use clap_complete::Shell;
 use comfy_table::{ContentArrangement, Table};
 use kallip_archeion_client::{ApiError, ArcheionClient};
 use kallip_archeion_common::admin::{
@@ -62,7 +64,18 @@ enum Cmd {
     /// Mint an enrollment code (sk-enroll) on a user's behalf.
     NewEnrollment {
         /// User id (UUID) to mint the enrollment code for.
+        // No completion: the user base is unbounded (platform scale); we are
+        // not implementing this for now.
         user_id: String,
+    },
+    /// Emit a shell completion script for this CLI to stdout. Hidden:
+    /// an installer concern (nix postInstall, user dotfiles), not a
+    /// daily verb.
+    #[command(hide = true)]
+    Generate {
+        /// The shell to emit completions for.
+        #[arg(value_enum)]
+        shell: Shell,
     },
 }
 
@@ -80,11 +93,15 @@ enum UsersCmd {
     /// Ban a user (disables the account; takes effect on every auth path).
     Ban {
         /// User id (UUID), as shown by `users list`.
+        // No completion: the user base is unbounded (platform scale); we are
+        // not implementing this for now.
         user_id: String,
     },
     /// Re-enable a banned user.
     Enable {
         /// User id (UUID), as shown by `users list`.
+        // No completion: the user base is unbounded (platform scale); we are
+        // not implementing this for now.
         user_id: String,
     },
 }
@@ -94,6 +111,8 @@ enum PasskeysCmd {
     /// List a user's passkeys.
     List {
         /// User id (UUID) whose passkeys to list.
+        // No completion: the user base is unbounded (platform scale); we are
+        // not implementing this for now.
         user_id: String,
     },
     /// Revoke a passkey by id (hard-delete + audit row).
@@ -118,6 +137,11 @@ enum AdminTokenCmd {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+    if let Cmd::Generate { shell } = args.cmd {
+        let mut cmd = Args::command();
+        clap_complete::generate(shell, &mut cmd, "kallip-admin", &mut std::io::stdout());
+        return;
+    }
     // `admin-token show` is a pure local file read: it cannot require the
     // KALLIP_ARCHEION_ADMIN_TOKEN env var (that is what it recovers) and
     // must not build an HTTP client. Dispatch before the env read.
@@ -290,6 +314,9 @@ async fn run(client: &ArcheionClient, json: bool, cmd: Cmd) -> Result<()> {
         Cmd::AdminToken(AdminTokenCmd::Show) => {
             unreachable!("admin-token show is handled in main")
         }
+        // `generate` never reaches `run`: main dispatches it before the
+        // env read. Exhaustiveness only.
+        Cmd::Generate { .. } => unreachable!("handled in main"),
     }
     Ok(())
 }
