@@ -216,3 +216,15 @@ export function appendRoomLine(
   }
   return [...lines, line];
 }
+
+/** Whether a transcript line renders as still-sending (the dimmed pending
+ * bubble). TRUE only for the caller's OWN optimistic lines: they carry a
+ * synthetic negative seq until the next history fetch lands the
+ * lesche-assigned seq. A live INBOUND frame carries a synthetic seq too (the
+ * SSE envelope has no server seq), but an inbound message is by definition
+ * already delivered -- reading its missing seq as "pending" is what left
+ * received room messages permanently grey. The view must ask mine, not the
+ * seq sign alone. Pure: unit-tested in room-message_test.ts. */
+export function roomLinePending(line: Pick<RoomLine, "mine" | "seq">): boolean {
+  return line.mine && line.seq < 0;
+}

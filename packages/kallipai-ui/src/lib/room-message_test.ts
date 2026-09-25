@@ -4,6 +4,7 @@ import {
   decodeRoomMessage,
   encodeRoomSendMessage,
   parseParticipantHandle,
+  roomLinePending,
   type RoomLine,
 } from "./room-message.ts";
 
@@ -330,3 +331,30 @@ Deno.test(
     ]);
   },
 );
+
+Deno.test("roomLinePending is true for an own unsynced optimistic line", () => {
+  const mine: Pick<RoomLine, "mine" | "seq"> = { mine: true, seq: -3 };
+  assertEquals(roomLinePending(mine), true);
+});
+
+Deno.test(
+  "roomLinePending is false once the own line holds its real seq",
+  () => {
+    const mine: Pick<RoomLine, "mine" | "seq"> = { mine: true, seq: 41 };
+    assertEquals(roomLinePending(mine), false);
+  },
+);
+
+Deno.test("roomLinePending is false for a live inbound line", () => {
+  // The regression: a live inbound frame carries a synthetic NEGATIVE seq
+  // (the SSE envelope has no server seq). The old `seq < 0` view check read
+  // that as still-sending and left every received room message permanently
+  // grey. mine is false for an inbound line, so it must never render pending.
+  const inbound: Pick<RoomLine, "mine" | "seq"> = { mine: false, seq: -2 };
+  assertEquals(roomLinePending(inbound), false);
+  const inboundSynced: Pick<RoomLine, "mine" | "seq"> = {
+    mine: false,
+    seq: 42,
+  };
+  assertEquals(roomLinePending(inboundSynced), false);
+});

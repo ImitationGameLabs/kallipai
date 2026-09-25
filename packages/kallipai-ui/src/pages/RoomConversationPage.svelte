@@ -25,6 +25,7 @@
   import { createComposer } from "../lib/composer.svelte.ts";
   import { bindDraft } from "../lib/session/drafts.svelte.ts";
   import { roomDraftKey } from "../lib/session/drafts.ts";
+  import { roomLinePending } from "../lib/room-message.ts";
   import MemberRow from "../components/rooms/MemberRow.svelte";
   import SenderIdentity from "../components/rooms/SenderIdentity.svelte";
   import { roomConversationsStore } from "../lib/session/roomConversations.svelte.ts";
@@ -277,7 +278,9 @@
             </p>
           {/if}
           {#each conv.lines as line (line.seq)}
-            {@const pending = line.seq < 0}
+            <!-- Still-sending = own optimistic line (see roomLinePending); an
+            inbound frame carries no seq yet but is delivered. -->
+            {@const pending = roomLinePending(line)}
             {@const href = profileHref(
               line.senderKind,
               line.senderHandle,
