@@ -117,8 +117,8 @@ Once the NixOS configuration has built and switched to the new generation, verif
 Check the five units:
 
 ```sh
-systemctl status kallip-daemon kallip-archeion kallip-lesche \
-  kallip-files kallip-instances
+systemctl status kallipai-daemon kallipai-archeion kallipai-lesche \
+  kallipai-files kallipai-instances
 ```
 
 Then confirm the two hosts answer: `api.kallipai.lan` for the
@@ -133,7 +133,7 @@ on first boot and reads it, never rewriting it, after that. Read it with
 the CLI (a local file read, no server round-trip):
 
 ```sh
-sudo kallip-admin admin-token show
+sudo kallipai-admin admin-token show
 ```
 
 Rotate the minted token when needed (authenticated with the current
@@ -143,11 +143,11 @@ it on the archeion host; `sudo` must keep the token in the
 environment (`-E`):
 
 ```sh
-export KALLIP_ARCHEION_ADMIN_TOKEN=$(sudo kallip-admin admin-token show)
-sudo -E kallip-admin admin-token reset
+export KALLIPAI_ARCHEION_ADMIN_TOKEN=$(sudo kallipai-admin admin-token show)
+sudo -E kallipai-admin admin-token reset
 ```
 
-The value that reset prints is the new active token; later commands must re-export it (run `sudo kallip-admin admin-token show` again, or capture the reset output directly).
+The value that reset prints is the new active token; later commands must re-export it (run `sudo kallipai-admin admin-token show` again, or capture the reset output directly).
 
 With `adminTokenFile` set, the operator-pinned token is used as-is and
 rotation is refused.

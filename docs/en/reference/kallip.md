@@ -7,7 +7,7 @@ order: 70
 This is the CLI an agent uses to coordinate with other agents and manage its own
 subagents and runtime concerns.
 
-All subcommands use `KALLIP_AUTH_TOKEN` (mandatory) and `KALLIP_TAGMA_URL`
+All subcommands use `KALLIPAI_AUTH_TOKEN` (mandatory) and `KALLIPAI_TAGMA_URL`
 (env, default `http://127.0.0.1:3000`).
 
 ## Subcommands
@@ -27,7 +27,7 @@ prints a one-line JSON echo of the accepted text (and nothing on failure,
 a failed send never looks delivered):
 
 ```json
-{"kallip.message.sent":{"to":"<id>","text":"<message>","queue_depth":0}}
+{"kallipai.message.sent":{"to":"<id>","text":"<message>","queue_depth":0}}
 ```
 
 `queue_depth` counts messages queued ahead of this one (0 = immediate
@@ -67,7 +67,7 @@ kallip subagent <subcommand> [args]
 ```
 
 Manage the **current agent's direct subagents**. The acting supervisor is taken
-from the `KALLIP_ID` env var, so these commands only make sense inside an
+from the `KALLIPAI_ID` env var, so these commands only make sense inside an
 agent context; they error if it is unset. `subagent` is the sole management
 entry point; spawning, listing, removing, interrupting, and relabeling agents
 all go through here.
@@ -186,7 +186,7 @@ $ kallip approval deny "ap_a1b2c3d4..." "too risky"
 ### `file`: Content Transfer against the Files Service
 
 Upload, download, deliver, and list records on the files service
-(`kallip-files`; HTTP reference in `docs/en/reference/files-api.md`). The
+(`kallipai-files`; HTTP reference in `docs/en/reference/files-api.md`). The
 acting principal is the tagma named by the bearer token (the spawn env);
 `--space self` is its own region, `shared` the space's shared region.
 
@@ -197,13 +197,13 @@ $ kallip file send <ID> (--to-tagma <TAGMA> | --to-user <USER>) [--json]
 $ kallip file ls --space self|shared [--prefix <PREFIX>] [--limit <N>] [--json]
 ```
 
-Credentials ride the environment, never flags: `KALLIP_POLIS_URL`
+Credentials ride the environment, never flags: `KALLIPAI_POLIS_URL`
 (the platform edge origin: the CLI derives `<origin>/v1/files` from it;
 required, and unset is an error: credentials are never sent to an
-assumed deployment) and `KALLIP_FILES_TOKEN` (a tagma's
+assumed deployment) and `KALLIPAI_FILES_TOKEN` (a tagma's
 long-lived bearer). Provision them where the CLI runs; agent shells inherit the
 tagma's environment as it stands at spawn time, and the boot sweep
-removes `KALLIP_FILES_TOKEN` first, so a provisioned token never
+removes `KALLIPAI_FILES_TOKEN` first, so a provisioned token never
 reaches an agent shell
 (server-side file fetches authenticate with the tagma's registered
 enrollment credential). `--json` prints successful responses as
@@ -275,7 +275,7 @@ kallip inbox done <MSG_ID>
 kallip inbox clear [--all]        # done-only unless --all
 ```
 
-`--id` addresses another agent's inbox; it defaults to `KALLIP_ID`.
+`--id` addresses another agent's inbox; it defaults to `KALLIPAI_ID`.
 List output is newest first.
 
 ### `lesche`: Deliver Messages through the Chat Relay
@@ -324,23 +324,23 @@ one skill's metadata, read directly from the filesystem.
 Queue, state machine, confirmation cycle, event trail, hard gates, and
 closed-task archives, served by the tagma task API:
 
-| Subcommand | Purpose |
-| --- | --- |
-| `task create` | Register a task (`--title ...`); `--require` fixes the confirmer roster (repeatable), resolved to identities at create; `--assignee` defaults to whoever picks it up; plus the association keys |
-| `task start` | Pick a queued task up by id; the serial gate applies unless `--force` |
-| `task confirm` | File your confirmation toward the close gate, with an optional `--note` and a report body read from `--file` |
-| `task review` | Move an in-progress task to review |
-| `task pause` | Park an in-progress task; no gate applies |
-| `task resume` | Unpause a paused task; the serial gate applies unless `--force` |
-| `task note` | Append a work note to the trail without moving the state machine |
-| `task close` | Close a task with a `--reason` and an optional `--summary`; every registered confirmer must have confirmed unless `--force`. With `--dossier <dir>` the directory packs canonically and archives with the close |
-| `task reopen` | Reopen a closed task; the serial gate applies unless `--force` |
-| `task archive` | Archive a closed task so it leaves the default list view; the closed-only gate applies unless `--force` |
-| `task list` | List tasks (`--status`, `--assignee`, `--archived`, time-window filters, paging, `--relative-time`) |
-| `task show` | Show one task's state, association keys, and event trail |
-| `task export` | Export one task or all tasks; `--json` emits the machine face |
-| `task extract` | Extract a closed task's content-addressed dossier archive |
-| `task report` | Read confirmations back from the trail: `report list` (optional `--confirmer` filter, `--out`), `report show` one confirmation (`--confirmer`, `--version`, `--out`) |
+| Subcommand     | Purpose                                                                                                                                                                                                         |
+| ---            | ---                                                                                                                                                                                                             |
+| `task create`  | Register a task (`--title ...`); `--require` fixes the confirmer roster (repeatable), resolved to identities at create; `--assignee` defaults to whoever picks it up; plus the association keys                 |
+| `task start`   | Pick a queued task up by id; the serial gate applies unless `--force`                                                                                                                                           |
+| `task confirm` | File your confirmation toward the close gate, with an optional `--note` and a report body read from `--file`                                                                                                    |
+| `task review`  | Move an in-progress task to review                                                                                                                                                                              |
+| `task pause`   | Park an in-progress task; no gate applies                                                                                                                                                                       |
+| `task resume`  | Unpause a paused task; the serial gate applies unless `--force`                                                                                                                                                 |
+| `task note`    | Append a work note to the trail without moving the state machine                                                                                                                                                |
+| `task close`   | Close a task with a `--reason` and an optional `--summary`; every registered confirmer must have confirmed unless `--force`. With `--dossier <dir>` the directory packs canonically and archives with the close |
+| `task reopen`  | Reopen a closed task; the serial gate applies unless `--force`                                                                                                                                                  |
+| `task archive` | Archive a closed task so it leaves the default list view; the closed-only gate applies unless `--force`                                                                                                         |
+| `task list`    | List tasks (`--status`, `--assignee`, `--archived`, time-window filters, paging, `--relative-time`)                                                                                                             |
+| `task show`    | Show one task's state, association keys, and event trail                                                                                                                                                        |
+| `task export`  | Export one task or all tasks; `--json` emits the machine face                                                                                                                                                   |
+| `task extract` | Extract a closed task's content-addressed dossier archive                                                                                                                                                       |
+| `task report`  | Read confirmations back from the trail: `report list` (optional `--confirmer` filter, `--out`), `report show` one confirmation (`--confirmer`, `--version`, `--out`)                                            |
 
 ### `team`: Declarative Team Management
 
@@ -412,7 +412,7 @@ kallip subagent interrupt $CHILD
 
 ### Environment Variables
 
-`KALLIP_AUTH_TOKEN` (required) and `KALLIP_TAGMA_URL` (default `http://127.0.0.1:3000`) are the primary variables. For the complete reference including LLM provider configuration and agent tuning parameters, see [Configuration](../configuration/index.md).
+`KALLIPAI_AUTH_TOKEN` (required) and `KALLIPAI_TAGMA_URL` (default `http://127.0.0.1:3000`) are the primary variables. For the complete reference including LLM provider configuration and agent tuning parameters, see [Configuration](../configuration/index.md).
 
 ### Client Library
 
@@ -421,7 +421,7 @@ client library provides the CLI operations as async methods, plus a
 few advanced paths (event streaming, subagent spawn, root lookup):
 
 ```rust
-use kallip_client::TagmaClient;
+use kallipai_client::TagmaClient;
 
 let client = TagmaClient::builder("http://127.0.0.1:3000")
     .auth_token(token)
@@ -442,7 +442,7 @@ let usage = client.agent_status(&id).await?;
 ```
 
 The root agent is tagma-managed: it is created once at startup from env vars
-(`KALLIP_WORKSPACE_ROOT`, `KALLIP_MAX_TOOL_ROUNDS`,
-`KALLIP_ROOT_AGENT_PERMISSION_CLASS`; see [Agent core and shell](../configuration/tagma/agent.md)) and surfaced via
+(`KALLIPAI_WORKSPACE_ROOT`, `KALLIPAI_MAX_TOOL_ROUNDS`,
+`KALLIPAI_ROOT_AGENT_PERMISSION_CLASS`; see [Agent core and shell](../configuration/tagma/agent.md)) and surfaced via
 `get_root_agent()`. `spawn()` is for **subagents** only; it requires
 `created_by`.

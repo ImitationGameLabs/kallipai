@@ -1,5 +1,5 @@
 # Dev tagma composition: the agent host (tagma) + its in-process relay
-# connector, plus the kallip-cron timer daemon that fires schedules and injects
+# connector, plus the kallipai-cron timer daemon that fires schedules and injects
 # them into the tagma's conversations. Split from arion-compose.nix so tagma-side
 # operations don't drag the archeion side along and there is no COMPOSE_PROFILES
 # dance. Cron lives here (not as its own project) because it is a tagma-side
@@ -9,14 +9,14 @@
 #   arion -f compose/dev/tagma.nix up -d
 #
 # Bring-up order: start the archeion side first (`arion up -d`), sign up and mint a
-# `sk-enroll-...` code into `.env` as KALLIP_TAGMA_RELAY_ENROLLMENT_CODE, then
+# `sk-enroll-...` code into `.env` as KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE, then
 # start this. On a missing/empty enrollment code the tagma degrades to
 # local-only and keeps serving local agents.
 #
 # Runs on the host network (`network_mode: host`) and reaches the platform through
-# the edge's loopback plaintext face (KALLIP_POLIS_URL=http://127.0.0.1:7443, the
+# the edge's loopback plaintext face (KALLIPAI_POLIS_URL=http://127.0.0.1:7443, the
 # Caddyfile.dev dev-tagma edge) rather than compose DNS.
-# KALLIP_TAGMA_ADDR binds host
+# KALLIPAI_TAGMA_ADDR binds host
 # :<tagmaPort> directly (no `ports:` mapping; ignored under host net anyway). The
 # landlock/seccomp shell sandbox still needs SYS_ADMIN + seccomp=unconfined.
 #
@@ -49,10 +49,10 @@ let
       throw "arion: ${name} must be an absolute, colon-free host path other than '/' (got '${v}')"
     else
       "${v}:${target}";
-  dataBind = bindOverride "KALLIP_ARION_DATA_PATH" "/var/lib/kallipai/tagmata/main";
-  workspaceBind = bindOverride "KALLIP_ARION_WORKSPACE_PATH" "/workspace";
-  skillsBind = bindOverride "KALLIP_ARION_SKILLS_PATH" "/var/lib/kallipai/tagmata/main/skills";
-  cronDataBind = bindOverride "KALLIP_ARION_CRON_DATA_PATH" "/var/lib/kallipai/cron";
+  dataBind = bindOverride "KALLIPAI_ARION_DATA_PATH" "/var/lib/kallipai/tagmata/main";
+  workspaceBind = bindOverride "KALLIPAI_ARION_WORKSPACE_PATH" "/workspace";
+  skillsBind = bindOverride "KALLIPAI_ARION_SKILLS_PATH" "/var/lib/kallipai/tagmata/main/skills";
+  cronDataBind = bindOverride "KALLIPAI_ARION_CRON_DATA_PATH" "/var/lib/kallipai/cron";
 
   dataVolume =
     if dataBind != null then dataBind else "kallipai_tagma_data:/var/lib/kallipai/tagmata/main";
@@ -63,8 +63,8 @@ let
   # Tagma port override (mirrors the bindOverride pattern). Unset -> 3000
   # (the existing default). Set via env or .env (direnv sources it into the
   # arion process) to run the tagma on a different port:
-  #   KALLIP_TAGMA_PORT=3001 arion -f compose/dev/tagma.nix up -d
-  tagmaPortRaw = builtins.getEnv "KALLIP_TAGMA_PORT";
+  #   KALLIPAI_TAGMA_PORT=3001 arion -f compose/dev/tagma.nix up -d
+  tagmaPortRaw = builtins.getEnv "KALLIPAI_TAGMA_PORT";
   tagmaPort = if tagmaPortRaw == "" then "3000" else tagmaPortRaw;
 in
 {
@@ -105,7 +105,7 @@ in
       # /nix/var/nix/daemon-socket dir; the closure itself comes from the host
       # store via useHostStore above.
       service.useHostNixDaemon = true;
-      service.command = [ "${workspace}/bin/kallip-tagma" ];
+      service.command = [ "${workspace}/bin/kallipai-tagma" ];
       service.environment = {
         PATH = "${workspace}/bin:${binPath}";
         # The in-container nix client has no /etc/nix/nix.conf (only the store +
@@ -114,47 +114,47 @@ in
         # owns build/substitution policy.
         NIX_CONFIG = "extra-experimental-features = nix-command flakes";
         HOME = "/var/lib";
-        # Slug boot: the instance data root derives from KALLIP_TAGMA_SLUG under
+        # Slug boot: the instance data root derives from KALLIPAI_TAGMA_SLUG under
         # the XDG data home - /var/lib/kallipai/tagmata/main, which is
         # exactly the mounted data volume. Logs land inside the volume too
         # (XDG_STATE_HOME points at the same parent).
-        KALLIP_TAGMA_SLUG = "main";
+        KALLIPAI_TAGMA_SLUG = "main";
         XDG_DATA_HOME = "/var/lib";
         XDG_STATE_HOME = "/var/lib";
         # The tagma eagerly creates the singleton root agent at startup; its
-        # workspace is resolved by AgentConfig::load from KALLIP_WORKSPACE_ROOT.
+        # workspace is resolved by AgentConfig::load from KALLIPAI_WORKSPACE_ROOT.
         # Pin the mounted workspace volume, which is disjoint from
         # /var/lib/kallipai/tagmata/main (the data dir) -- a CWD fallback would be "/" in the
         # container, overlap the data tree, and fail startup
         # (ensure_workspace_disjoint rejects the overlap).
-        KALLIP_WORKSPACE_ROOT = "/workspace";
-        KALLIP_TAGMA_ADDR = "0.0.0.0:${tagmaPort}";
+        KALLIPAI_WORKSPACE_ROOT = "/workspace";
+        KALLIPAI_TAGMA_ADDR = "0.0.0.0:${tagmaPort}";
         # In-process relay connector: enroll at the archeion and tunnel to the
         # lesche through the edge's loopback plaintext face (host network;
-        # KALLIP_POLIS_URL=http://127.0.0.1:7443, the Caddyfile.dev dev-tagma
-        # edge -- not compose DNS). KALLIP_TAGMA_RELAY_ENROLLMENT_CODE comes
+        # KALLIPAI_POLIS_URL=http://127.0.0.1:7443, the Caddyfile.dev dev-tagma
+        # edge -- not compose DNS). KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE comes
         # from .env (minted after signup); until then the tagma runs local-only.
-        KALLIP_POLIS_URL = "http://127.0.0.1:7443";
+        KALLIPAI_POLIS_URL = "http://127.0.0.1:7443";
         # Seed source for <data_dir>/skills/ on first boot (read-only bundled
         # defaults). Set here rather than baked into the image because dev
         # builds its image ad-hoc via image.contents/useHostStore (not
-        # kallip-tagma-image) -- mirrors how PATH is handled above. The store
+        # kallipai-tagma-image) -- mirrors how PATH is handled above. The store
         # path is reachable directly via the shared host /nix/store.
-        KALLIP_SKILLS_SEED = skillsSeed;
+        KALLIPAI_SKILLS_SEED = skillsSeed;
         # A rootful container has no uid mapping, so the tagma would run as the
         # host's real root -- which the real-root boot guard refuses by default
         # (docs/en/reference/env/daemon.md). This flag is the explicit, documented escape:
         # instances inherit the container's root. Rootless or userns-remap
         # deployments remain the preferred shapes.
-        KALLIP_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT = "1";
+        KALLIPAI_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT = "1";
         RUST_LOG = "info";
       };
     };
 
     # The timer/notification daemon: fires schedules and injects them into the
     # tagma's conversations via the host-networked tagma at 127.0.0.1:3000. A
-    # tagma-side companion, not a separate project. KALLIP_CRON_TOKEN and
-    # KALLIP_AUTH_TOKEN (= the tagma's operator secret) come from .env.
+    # tagma-side companion, not a separate project. KALLIPAI_CRON_TOKEN and
+    # KALLIPAI_AUTH_TOKEN (= the tagma's operator secret) come from .env.
     services.cron = {
       service.restart = "unless-stopped";
       service.network_mode = "host";
@@ -167,18 +167,18 @@ in
       ]
       ++ cacert;
       service.useHostStore = true;
-      service.command = [ "${workspace}/bin/kallip-cron-daemon" ];
+      service.command = [ "${workspace}/bin/kallipai-cron-daemon" ];
       service.environment = {
         PATH = "${workspace}/bin:${binPath}";
         HOME = "/var/lib/kallipai/cron";
-        KALLIP_CRON_DATA_DIR = "/var/lib/kallipai/cron";
+        KALLIPAI_CRON_DATA_DIR = "/var/lib/kallipai/cron";
         # Loopback only — cron is an internal tagma-side service, never
         # network-exposed (no cron-specific token; the management API is gated
         # by per-request agent-token verification via the tagma).
-        KALLIP_CRON_ADDR = "127.0.0.1:3010";
+        KALLIPAI_CRON_ADDR = "127.0.0.1:3010";
         # Delivery target: the tagma service above (host network).
-        KALLIP_TAGMA_URL = "http://127.0.0.1:${tagmaPort}";
-        # KALLIP_AUTH_TOKEN (= tagma operator secret) comes from .env — used for
+        KALLIPAI_TAGMA_URL = "http://127.0.0.1:${tagmaPort}";
+        # KALLIPAI_AUTH_TOKEN (= tagma operator secret) comes from .env — used for
         # delivery; management requests carry each caller's own agent token.
         RUST_LOG = "info";
       };

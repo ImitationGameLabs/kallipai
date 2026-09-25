@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run kallip through Harbor's benchmarking pipeline.
+# Run kallipai through Harbor's benchmarking pipeline.
 # Defaults to hello-world for quick verification.
 #
 # Build method is auto-detected:
@@ -17,7 +17,7 @@
 #
 # Prerequisites:
 #   - Completed setup (./harbor-integration/setup-venv.sh)
-#   - Provider API key exported (e.g. KALLIP_LLM_DEEPSEEK_API_KEY)
+#   - Provider API key exported (e.g. KALLIPAI_LLM_DEEPSEEK_API_KEY)
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -63,11 +63,11 @@ if [[ "$_use_cargo" == "1" ]]; then
   cargo build --release
 
   version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
-  tarball_dir="target/kallip-tarball"
+  tarball_dir="target/kallipai-tarball"
   rm -rf "$tarball_dir"
   mkdir -p "$tarball_dir/bin"
 
-  binaries=(kallip kallip-tagma kallip-run)
+  binaries=(kallip kallipai-tagma kallipai-run)
   for bin in "${binaries[@]}"; do
     if [[ ! -f "target/release/$bin" ]]; then
       echo "error: expected binary not found: target/release/$bin" >&2
@@ -76,20 +76,20 @@ if [[ "$_use_cargo" == "1" ]]; then
     cp "target/release/$bin" "$tarball_dir/bin/"
   done
 
-  tar -czf "$tarball_dir/kallip-${version}-linux-x86_64.tar.gz" -C "$tarball_dir" bin/
-  pkg_path="$tarball_dir/kallip-${version}-linux-x86_64.tar.gz"
+  tar -czf "$tarball_dir/kallipai-${version}-linux-x86_64.tar.gz" -C "$tarball_dir" bin/
+  pkg_path="$tarball_dir/kallipai-${version}-linux-x86_64.tar.gz"
 else
   echo "==> Building tarballs (nix)..."
-  nix build .#kallip-tarball --out-link result-kallip
+  nix build .#kallipai-tarball --out-link result-kallipai
   nix build .#aifed-tarball      --out-link result-aifed
 
-  pkg_path="$(readlink -f result-kallip/*.tar.gz)"
+  pkg_path="$(readlink -f result-kallipai/*.tar.gz)"
   aifed_pkg_path="$(readlink -f result-aifed/*.tar.gz)"
 fi
 
 activate="harbor-integration/.venv/bin/activate"
-sed -i '/^export KALLIP_PACKAGE_PATH=/d; /^export AIFED_PACKAGE_PATH=/d' "$activate" 2>/dev/null || true
-printf 'export KALLIP_PACKAGE_PATH="%s"\n' "$pkg_path" >> "$activate"
+sed -i '/^export KALLIPAI_PACKAGE_PATH=/d; /^export AIFED_PACKAGE_PATH=/d' "$activate" 2>/dev/null || true
+printf 'export KALLIPAI_PACKAGE_PATH="%s"\n' "$pkg_path" >> "$activate"
 # aifed-tarball is only built in the nix path; leave AIFED_PACKAGE_PATH unset
 # in cargo mode and the adapter skips it (optional package).
 if [[ -n "${aifed_pkg_path:-}" ]]; then

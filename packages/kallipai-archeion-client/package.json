@@ -1,0 +1,17 @@
+{
+  "name": "@kallipai/kallipai-archeion-client",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "deno check src",
+    "test": "deno test src"
+  },
+  "dependencies": {
+    "@kallipai/kallipai-common": "workspace:*",
+    "@std/assert": "npm:@jsr/std__assert@^1.0.19"
+  }
+}

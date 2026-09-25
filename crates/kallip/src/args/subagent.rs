@@ -2,10 +2,10 @@
 
 use super::agent::IdArgs;
 use clap::{Args, Subcommand};
-use kallip_common::agentid::AgentId;
+use kallipai_common::agentid::AgentId;
 
 // ---------------------------------------------------------------------------
-// Subagent commands — manage the current agent's (KALLIP_ID) direct subagents
+// Subagent commands — manage the current agent's (KALLIPAI_ID) direct subagents
 // ---------------------------------------------------------------------------
 
 /// Args for `kallip subagent spawn`. The optional initial prompt is read from
@@ -58,7 +58,7 @@ pub(crate) struct MetadataArgs {
 }
 
 /// Manage the current agent's direct subagents. The acting superior is taken
-/// from the `KALLIP_ID` env var, so these commands only make sense inside
+/// from the `KALLIPAI_ID` env var, so these commands only make sense inside
 /// an agent context.
 #[derive(Subcommand)]
 pub(crate) enum SubagentCommand {

@@ -111,8 +111,8 @@ users.users."<username>".extraGroups = [ "kallipai-daemon" ];
 检查五个 unit：
 
 ```sh
-systemctl status kallip-daemon kallip-archeion kallip-lesche \
-  kallip-files kallip-instances
+systemctl status kallipai-daemon kallipai-archeion kallipai-lesche \
+  kallipai-files kallipai-instances
 ```
 
 然后确认两个域名都有响应：`api.kallipai.lan` 承载平台，`app.kallipai.lan` 承载 web 应用。部署健康的标志：应用能加载，能注册登录，能创建第一个 agent。
@@ -122,17 +122,17 @@ systemctl status kallip-daemon kallip-archeion kallip-lesche \
 `adminTokenFile` 未设置时，archeion 首次启动在状态目录铸造管理令牌（`/var/lib/kallipai/archeion/admin-token.env`，权限 0600），此后只读取、不再改写。用 CLI 读取（本地读文件，不经过服务端）：
 
 ```sh
-sudo kallip-admin admin-token show
+sudo kallipai-admin admin-token show
 ```
 
 需要时轮换铸造令牌（用当前令牌认证，旧令牌随即失效）。reset 在调用服务端前也会本地读取状态文件，因此需在 archeion 主机上运行；`sudo` 需用 `-E` 保留环境中的令牌：
 
 ```sh
-export KALLIP_ARCHEION_ADMIN_TOKEN=$(sudo kallip-admin admin-token show)
-sudo -E kallip-admin admin-token reset
+export KALLIPAI_ARCHEION_ADMIN_TOKEN=$(sudo kallipai-admin admin-token show)
+sudo -E kallipai-admin admin-token reset
 ```
 
-reset 打印的新值即当前有效令牌，后续命令需重新 export（sudo kallip-admin admin-token show 再取，或直接捕获 reset 输出）。
+reset 打印的新值即当前有效令牌，后续命令需重新 export（sudo kallipai-admin admin-token show 再取，或直接捕获 reset 输出）。
 
 设置 `adminTokenFile` 时使用操作者钉住的令牌，轮换会被拒绝。
 

@@ -36,7 +36,7 @@ refuses an inferred in-place launch (the error asks for `--user`), so
 every `adopt` and `start` on NixOS names one of the declared users
 explicitly; nothing the platform hosts runs as the host's real root,
 and a tagma started directly as real root refuses to boot outright
-(the escape hatch is `KALLIP_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT=1`, not
+(the escape hatch is `KALLIPAI_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT=1`, not
 meant for this deployment form).
 
 The declared users are provisioned with a home directory and linger:
@@ -54,6 +54,6 @@ A missing internal-token file is not an error on the archeion's first
 boot; it generates one. The lesche, files, and instances units require
 the archeion and read that file at boot; if it has not appeared within a
 short grace window the unit refuses to start, and
-`journalctl -u kallip-instances` shows the path it waited for. An empty
+`journalctl -u kallipai-instances` shows the path it waited for. An empty
 token file fails every reader explicitly; delete the file to
 re-provision rather than editing it by hand.

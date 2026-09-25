@@ -15,7 +15,7 @@ self-identifying and easy for secret scanners to flag.
   pending actions. The tagma's single root agent is created at startup and
   never through the API.
 - **Agent token** (`sk-agent-…`): issued per agent at creation and injected
-  into that agent's shell as `KALLIP_AUTH_TOKEN`. Agents use it to call back
+  into that agent's shell as `KALLIPAI_AUTH_TOKEN`. Agents use it to call back
   to the tagma; people never handle it.
 
 The platform stores only hashes of token material, never the secrets

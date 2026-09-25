@@ -1,17 +1,17 @@
 ---
 title: Tagma HTTP API
-description: HTTP endpoints exposed by the kallip-tagma host.
+description: HTTP endpoints exposed by the kallipai-tagma host.
 order: 40
 internal: true
 ---
 
-The tagma (`kallip-tagma`) exposes an HTTP API at `KALLIP_TAGMA_ADDR`
+The tagma (`kallipai-tagma`) exposes an HTTP API at `KALLIPAI_TAGMA_ADDR`
 (default `127.0.0.1:3000`). Two event surfaces sit side by side:
 
 - The **internal event stream** (`GET /agents/{id}/events`) carries the full
   rich `SseEvent` vocabulary (streaming deltas, tool events, retry/failover
   telemetry) and is consumed by the agent CLI (`kallip`), the runner
-  (`kallip-run`), and admin/automation clients.
+  (`kallipai-run`), and admin/automation clients.
 - The **external chat-room API** (`GET /agents/{id}/external/events`) is the
   frontend's sole window onto a conversation: a single multiplexed SSE carrying
   authored messages, runtime signals, and status snapshots (see
@@ -23,7 +23,7 @@ see [Authentication and authorization](auth.md); the full authorization matrix l
 
 ## Conventions
 
-- **Base URL**: `http://{KALLIP_TAGMA_ADDR}` (default `127.0.0.1:3000`).
+- **Base URL**: `http://{KALLIPAI_TAGMA_ADDR}` (default `127.0.0.1:3000`).
   See [Tagma service](../configuration/tagma/service.md) for configuration.
 - **Authentication**: `Authorization: Bearer <token>` on every request.
   See [Authentication and authorization](auth.md).
@@ -33,7 +33,7 @@ see [Authentication and authorization](auth.md); the full authorization matrix l
 - **Error responses**: plain text strings (not JSON-wrapped). For example,
   a `403` returns `"not a superior"`.
 - **Body size limit**: any endpoint that accepts a request body may return
-  `413 Payload Too Large` when the body exceeds `KALLIP_MAX_BODY_SIZE_KB`
+  `413 Payload Too Large` when the body exceeds `KALLIPAI_MAX_BODY_SIZE_KB`
   (default 1024 KB, configurable; `0` = axum built-in 2 MB).
 - **Timestamps**: RFC 3339 format (e.g. `2025-06-05T14:30:00Z`), except
   `recent_retries.timestamp` which is Unix epoch seconds (`u64`).
@@ -54,41 +54,41 @@ single operator comparison additionally uses a constant-time compare.
 
 ### Endpoint Overview
 
-| Method   | Path                              | Purpose                                    | Auth                         |
-| -------- | --------------------------------- | ------------------------------------------ | ---------------------------- |
-| `POST`   | `/agents`                         | Create a subagent (`created_by` required)  | supervisor / operator        |
-| `GET`    | `/agents`                         | List running agents (`?created_by=`)       | any                          |
-| `GET`    | `/agents/root`                    | Fetch the tagma-managed root agent         | any                          |
-| `DELETE` | `/agents/{id}`                    | Stop and remove an agent (never the root)  | operator / superior          |
-| `POST`   | `/agents/{id}/interrupt`          | Interrupt current agent operation          | operator / superior          |
-| `POST`   | `/agents/{id}/message`            | Send a user message (inbound)              | any (peer-to-peer)           |
-| `POST`   | `/agents/{id}/lesche/messages`    | Deliver an agent-authored message (root)   | self (root agent)            |
-| `GET`    | `/agents/{id}/lesche/sessions`    | List addressable lesche surfaces (root)    | self (root) / operator       |
-| `GET`    | `/agents/{id}/lesche/direct-sessions/{peer}/messages` | Read a direct session's history (root) | self (root) / operator       |
-| `GET`    | `/agents/{id}/events`             | Internal event stream (SSE, rich vocab)    | any                          |
-| `GET`    | `/agents/{id}/external/events`    | External chat-room stream (SSE, frontend)  | any                          |
-| `GET`    | `/agents/{id}/status`             | Get context usage and retry history        | any                          |
-| `GET`    | `/agents/{id}/permissions`        | Get permission profile and classify preset | any                          |
-| `PUT`    | `/agents/{id}/metadata`           | Update role / description                  | direct supervisor / operator |
-| `PUT`    | `/agents/{id}/activity`           | Report current activity (self)             | self / operator              |
-| `PUT`    | `/agents/{id}/profile-set`        | Rebind an agent to another named set       | operator / superior          |
-| `GET`    | `/agents/{id}/exec-policy`        | Read the `bash_exec` per-command overrides | any                          |
-| `PUT`    | `/agents/{id}/exec-policy`        | Update the `bash_exec` overrides (strictly monotonic) | operator / superior |
-| `GET`    | `/agents/{id}/verify`             | Confirm a bearer matches this agent (`204`/`401`) | any (self-consistent) |
-| `PUT`    | `/profiles/default`               | Transfer the default-set marker            | operator                     |
-| `DELETE` | `/profiles/sets/{name}`           | Remove a set (`?force=true` interrupts)    | operator                     |
-| `GET`    | `/profiles`                       | Read the profile config (masked)           | operator                     |
-| `PUT`    | `/profiles`                       | Validate, persist, hot-swap the registry   | operator                     |
-| `POST`   | `/profiles/apply`                 | Push the registry to all live agents       | operator                     |
-| `POST`   | `/profiles/probe`                 | Trial-probe candidate endpoints and sets   | operator                     |
-| `GET`    | `/budget`                         | Get tagma-wide token budget status         | any                          |
-| `POST`   | `/budget`                         | Adjust or set tagma-wide token budget      | operator                     |
-| `GET`    | `/approvals`                      | List approvals                             | any (filtered by scope)      |
-| `GET`    | `/approvals/{id}`                 | Get a single approval                      | operator / superior          |
-| `POST`   | `/approvals/{id}`                 | Approve or deny an approval                | operator / superior          |
- | `GET`    | `/tasks`                          | One page of task rows (filter and paging query params) | any                          |
- | `GET`    | `/tasks/{id}`                     | One task with its full event trail      | any                          |
-| `POST`   | `/tasks`, `/tasks/{id}/…`         | Write verbs: `create` plus start, confirm, review, pause, resume, note, close, reopen, archive; see Task Ledger | any                          |
+| Method   | Path                                                  | Purpose                                                                                                         | Auth                         |
+| -------- | ---------------------------------                     | ------------------------------------------                                                                      | ---------------------------- |
+| `POST`   | `/agents`                                             | Create a subagent (`created_by` required)                                                                       | supervisor / operator        |
+| `GET`    | `/agents`                                             | List running agents (`?created_by=`)                                                                            | any                          |
+| `GET`    | `/agents/root`                                        | Fetch the tagma-managed root agent                                                                              | any                          |
+| `DELETE` | `/agents/{id}`                                        | Stop and remove an agent (never the root)                                                                       | operator / superior          |
+| `POST`   | `/agents/{id}/interrupt`                              | Interrupt current agent operation                                                                               | operator / superior          |
+| `POST`   | `/agents/{id}/message`                                | Send a user message (inbound)                                                                                   | any (peer-to-peer)           |
+| `POST`   | `/agents/{id}/lesche/messages`                        | Deliver an agent-authored message (root)                                                                        | self (root agent)            |
+| `GET`    | `/agents/{id}/lesche/sessions`                        | List addressable lesche surfaces (root)                                                                         | self (root) / operator       |
+| `GET`    | `/agents/{id}/lesche/direct-sessions/{peer}/messages` | Read a direct session's history (root)                                                                          | self (root) / operator       |
+| `GET`    | `/agents/{id}/events`                                 | Internal event stream (SSE, rich vocab)                                                                         | any                          |
+| `GET`    | `/agents/{id}/external/events`                        | External chat-room stream (SSE, frontend)                                                                       | any                          |
+| `GET`    | `/agents/{id}/status`                                 | Get context usage and retry history                                                                             | any                          |
+| `GET`    | `/agents/{id}/permissions`                            | Get permission profile and classify preset                                                                      | any                          |
+| `PUT`    | `/agents/{id}/metadata`                               | Update role / description                                                                                       | direct supervisor / operator |
+| `PUT`    | `/agents/{id}/activity`                               | Report current activity (self)                                                                                  | self / operator              |
+| `PUT`    | `/agents/{id}/profile-set`                            | Rebind an agent to another named set                                                                            | operator / superior          |
+| `GET`    | `/agents/{id}/exec-policy`                            | Read the `bash_exec` per-command overrides                                                                      | any                          |
+| `PUT`    | `/agents/{id}/exec-policy`                            | Update the `bash_exec` overrides (strictly monotonic)                                                           | operator / superior          |
+| `GET`    | `/agents/{id}/verify`                                 | Confirm a bearer matches this agent (`204`/`401`)                                                               | any (self-consistent)        |
+| `PUT`    | `/profiles/default`                                   | Transfer the default-set marker                                                                                 | operator                     |
+| `DELETE` | `/profiles/sets/{name}`                               | Remove a set (`?force=true` interrupts)                                                                         | operator                     |
+| `GET`    | `/profiles`                                           | Read the profile config (masked)                                                                                | operator                     |
+| `PUT`    | `/profiles`                                           | Validate, persist, hot-swap the registry                                                                        | operator                     |
+| `POST`   | `/profiles/apply`                                     | Push the registry to all live agents                                                                            | operator                     |
+| `POST`   | `/profiles/probe`                                     | Trial-probe candidate endpoints and sets                                                                        | operator                     |
+| `GET`    | `/budget`                                             | Get tagma-wide token budget status                                                                              | any                          |
+| `POST`   | `/budget`                                             | Adjust or set tagma-wide token budget                                                                           | operator                     |
+| `GET`    | `/approvals`                                          | List approvals                                                                                                  | any (filtered by scope)      |
+| `GET`    | `/approvals/{id}`                                     | Get a single approval                                                                                           | operator / superior          |
+| `POST`   | `/approvals/{id}`                                     | Approve or deny an approval                                                                                     | operator / superior          |
+| `GET`    | `/tasks`                                              | One page of task rows (filter and paging query params)                                                          | any                          |
+| `GET`    | `/tasks/{id}`                                         | One task with its full event trail                                                                              | any                          |
+| `POST`   | `/tasks`, `/tasks/{id}/…`                             | Write verbs: `create` plus start, confirm, review, pause, resume, note, close, reopen, archive; see Task Ledger | any                          |
 
 The `kallip policy` CLI wraps the exec-policy reads and writes
 (`kallip policy show` / `exec-get` / `exec-set`).
@@ -131,7 +131,7 @@ spawn **requires a non-empty `role`** (fleet discipline so a superior can tell
 its subagents apart). Both default to `""` and are never used as an address,
 `AgentId` is canonical. Mutable later via `PUT /agents/{id}/metadata`.
 
-**`max_tool_rounds`**: override the default/env-configured max tool-call rounds for this agent. Omit or `null` to use the tagma default (`KALLIP_MAX_TOOL_ROUNDS` env var, or unlimited). To set an explicit value:
+**`max_tool_rounds`**: override the default/env-configured max tool-call rounds for this agent. Omit or `null` to use the tagma default (`KALLIPAI_MAX_TOOL_ROUNDS` env var, or unlimited). To set an explicit value:
 
 ```json
 "max_tool_rounds": {"limited": 64}
@@ -159,7 +159,7 @@ itself. The granted class is observable on
 `GET /agents/{id}/permissions`.
 
 > **Token budget:** All agents share a single tagma-wide spend cap. Start with
-> no cap (unlimited); `KALLIP_TOKEN_BUDGET` or `POST /budget` imposes one,
+> no cap (unlimited); `KALLIPAI_TOKEN_BUDGET` or `POST /budget` imposes one,
 > see [Token Budget](#token-budget).
 
 ##### Response
@@ -178,7 +178,7 @@ Status: `201 Created`
 | 403  | Not the supervisor; supervisor has no remaining delegation depth; `workspace_root` outside supervisor's workspace |
 | 404  | Supervisor agent not found                                                                                        |
 | 409  | `created_by` absent (the root is tagma-managed; use `GET /agents/root`)                                           |
-| 503  | Agent limit reached (`KALLIP_MAX_AGENTS`), or supervisor already has max subagents (`KALLIP_MAX_SUBAGENTS`)       |
+| 503  | Agent limit reached (`KALLIPAI_MAX_AGENTS`), or supervisor already has max subagents (`KALLIPAI_MAX_SUBAGENTS`)   |
 | 500  | Session creation failure, agent spawn failure, or supervisor removed during creation                              |
 
 > **Subagent constraints:** The supervisor must have remaining delegation depth
@@ -186,10 +186,10 @@ Status: `201 Created`
 > supervisor's workspace. The per-command `bash_exec` exec-policy is inherited
 > from the supervisor; the classify preset is tagma-global (same for every
 > agent).
-> Each supervisor may have at most `KALLIP_MAX_SUBAGENTS` (default 20) direct subagents.
+> Each supervisor may have at most `KALLIPAI_MAX_SUBAGENTS` (default 20) direct subagents.
 >
 > **Crash recovery:** Restore is exempt from resource limits. After a tagma
-> restart, the agent count may temporarily exceed `KALLIP_MAX_AGENTS`. New
+> restart, the agent count may temporarily exceed `KALLIPAI_MAX_AGENTS`. New
 > creation requests will return 503 until agents are removed to make room.
 
 #### `GET /agents/root`: Fetch the Root Agent
@@ -215,7 +215,7 @@ Auth: any authenticated identity. Response contains no secrets. See [Authenticat
 
 | Param        | Description                                                                                                                                                                                   |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `created_by` | `AgentId`: only list the direct subagents of this superior. Omit to list all. Any string is accepted (AgentId is not UUID-validated); a value that matches no superior yields an empty list. |
+| `created_by` | `AgentId`: only list the direct subagents of this superior. Omit to list all. Any string is accepted (AgentId is not UUID-validated); a value that matches no superior yields an empty list.  |
 
 ##### Response
 
@@ -316,11 +316,11 @@ no supervisor relationship is required. See [Authentication and authorization](a
 
 Status: `202 Accepted`
 
-| Code | Condition                                                                        |
-| ---- | -------------------------------------------------------------------------------- |
-| 404  | Agent not found                                                                  |
-| 503  | Message queue is full (`KALLIP_PROMPT_QUEUE_SIZE` messages pending); retry later |
-| 500  | Agent reactivation failure                                                       |
+| Code | Condition                                                                          |
+| ---- | --------------------------------------------------------------------------------   |
+| 404  | Agent not found                                                                    |
+| 503  | Message queue is full (`KALLIPAI_PROMPT_QUEUE_SIZE` messages pending); retry later |
+| 500  | Agent reactivation failure                                                         |
 
 > **Reactivation:** If the agent's task has terminated (channel closed), the
 > tagma creates a fresh message channel, pre-queues the incoming message, then
@@ -329,7 +329,7 @@ Status: `202 Accepted`
 > and the next message attempt will retry.
 >
 > **Backpressure:** The message queue has a configurable capacity
-> (`KALLIP_PROMPT_QUEUE_SIZE`, default 5). When the queue is full, the
+> (`KALLIPAI_PROMPT_QUEUE_SIZE`, default 5). When the queue is full, the
 > tagma returns `503` instead of accepting the message. Callers should wait
 > and retry.
 
@@ -337,7 +337,7 @@ Status: `202 Accepted`
 
 Opens an SSE connection to receive the full, rich agent event vocabulary
 (streaming deltas, tool calls/results, retry/failover telemetry, approvals).
-This is the surface `kallip` and `kallip-run` consume; the browser
+This is the surface `kallip` and `kallipai-run` consume; the browser
 frontend uses the [external chat-room stream](#external-chat-room-api) instead.
 See [SSE Event Types](#sse-event-types) for the event format.
 
@@ -404,13 +404,13 @@ as the profiles config file, with `api_key` values masked.
 Operator only. Removal is refused while it would break an invariant, and
 each refusal names its recovery path:
 
-| Condition | Status | Body |
-| --------- | ------ | ---- |
-| Unknown set name | `404` | `unknown set '{name}'` |
-| The set is the default | `409` | transfer it first (`PUT /profiles/default`) |
-| The root agent is bound to it | `409` | rebind the root first (`PUT /agents/{id}/profile-set`) |
-| Other agents bound, no `force` | `409` | binder ids; pass `force=true` to interrupt and remove |
-| New bindings arrived mid-sweep | `409` | retry the same delete (state unchanged) |
+| Condition                      | Status | Body                                                   |
+| ---------                      | ------ | ----                                                   |
+| Unknown set name               | `404`  | `unknown set '{name}'`                                 |
+| The set is the default         | `409`  | transfer it first (`PUT /profiles/default`)            |
+| The root agent is bound to it  | `409`  | rebind the root first (`PUT /agents/{id}/profile-set`) |
+| Other agents bound, no `force` | `409`  | binder ids; pass `force=true` to interrupt and remove  |
+| New bindings arrived mid-sweep | `409`  | retry the same delete (state unchanged)                |
 
 With `?force=true` every binder is released (live agents are interrupted)
 and the set is removed:
@@ -500,10 +500,10 @@ Root-only: the direct conversation is the root agent's, so a non-root id is
 rejected. The stream discriminates frames by the SSE `event:` field name (not a
 JSON `type` field); each frame's `data:` is the JSON payload:
 
-| `event:` name | `data:` payload | Meaning                                                     |
-| ------------- | --------------- | ----------------------------------------------------------- |
-| `authored`    | `TagmaReply`    | An authored message (ack / op error / replayed user row / `assistant_content`). |
-| `signal`      | `SignalEvent`   | A runtime signal (busy/idle/interrupted/cancelled/terminals/error). |
+| `event:` name | `data:` payload      | Meaning                                                                               |
+| ------------- | ---------------      | -----------------------------------------------------------                           |
+| `authored`    | `TagmaReply`         | An authored message (ack / op error / replayed user row / `assistant_content`).       |
+| `signal`      | `SignalEvent`        | A runtime signal (busy/idle/interrupted/cancelled/terminals/error).                   |
 | `status`      | `TagmaStatusPayload` | An aggregate runtime snapshot (root state, subagent counts, token budget). Ephemeral. |
 
 The `TagmaReply` shape mirrors the relay's envelope payload (`kind`-tagged,
@@ -625,7 +625,7 @@ Auth: any authenticated identity. See [Authentication and authorization](auth.md
 
 **`preset`**: the tagma-global `bash_exec` classify rule-set in effect for
 this agent (read-only; it is set once at tagma startup from
-`KALLIP_POLICY_PRESET`).
+`KALLIPAI_POLICY_PRESET`).
 
 **`permission_class`**: the FS-access permission class actually granted to
 this agent (lowercase `"normal"` / `"guest"`): the value the tagma clamped at
@@ -695,7 +695,7 @@ Status: `200 OK`
 
 Sets the agent's ephemeral `activity` (free text, e.g. `"reading docs/x.md"`).
 Self-reported: an agent sets **its own** activity via the `kallip activity`
-CLI (which reads `KALLIP_ID`); a supervisor observes activity via
+CLI (which reads `KALLIPAI_ID`); a supervisor observes activity via
 [`GET /agents`](#get-agents-list-agents), it does not write it. An empty string
 clears it (the bridge also auto-clears on terminal events). Truncated to 256 chars.
 
@@ -725,7 +725,7 @@ Status: `204 No Content`
 
 A single tagma-wide spend cap is shared by all agents. It starts unlimited,
 no enforcement until a cap is set. Impose one at boot with
-`KALLIP_TOKEN_BUDGET`, or at runtime with `POST /budget` below.
+`KALLIPAI_TOKEN_BUDGET`, or at runtime with `POST /budget` below.
 
 #### `GET /budget`: Get Budget Status
 
@@ -808,14 +808,14 @@ accumulated value. Impose a finite cap later with `set_remaining`.
 
 Status: `200 OK`
 
-| Code | Condition |
-| ---- | --------- |
-| 400  | Not exactly one of `set_remaining`/`delta`/`set_unlimited` provided, or `delta` is zero |
-| 403  | Not the operator |
+| Code | Condition                                                                                                                 |
+| ---- | ---------                                                                                                                 |
+| 400  | Not exactly one of `set_remaining`/`delta`/`set_unlimited` provided, or `delta` is zero                                   |
+| 403  | Not the operator                                                                                                          |
 | 409  | `delta` while the budget is unlimited (set a finite budget first), or a delta landing at or below tokens already consumed |
 
 > **No persistence:** Budget changes are in-memory only. On restart the cap
-> comes back from `KALLIP_TOKEN_BUDGET`: unset, the tagma boots unlimited.
+> comes back from `KALLIPAI_TOKEN_BUDGET`: unset, the tagma boots unlimited.
 
 ### Approvals
 
@@ -943,24 +943,24 @@ append-only event trail, and content-addressed closed-task
 archives. All list/show endpoints return `TaskExport` shapes; the
 write verbs return the updated `TaskExport`.
 
-| Endpoint                     | Purpose                                                                 |
-| ---------------------------- | ----------------------------------------------------------------------- |
-| `GET /tasks`                 | One page of lightweight rows plus the filter total (`status`, `assignee`, `archived`, `time`, `since`, `until`, `limit`, `offset`) |
-| `GET /tasks/{id}`            | One task with its full event trail |
-| `GET /tasks/export`          | Every task, including closed and archived |
-| `GET /tasks/{id}/export`     | One task's export |
-| `GET /tasks/{id}/archive`    | The closed task's content-addressed dossier archive (octet stream) |
-| `GET /tasks/{id}/reports/{blob}` | A filed confirmation report body fetched by blob id (plain text) |
-| `POST /tasks`                | Register a task; the creator is the authenticated identity |
-| `POST /tasks/{id}/start`     | Claim a queued task; the serial gate applies unless `force` |
-| `POST /tasks/{id}/confirm`   | File the actor's confirmation toward the close gate |
-| `POST /tasks/{id}/review`    | Move an in-progress task to review |
-| `POST /tasks/{id}/pause`     | Park an in-progress task |
-| `POST /tasks/{id}/resume`    | Unpause; the serial gate applies unless `force` |
-| `POST /tasks/{id}/note`      | Append a work note to the trail |
-| `POST /tasks/{id}/close`     | Close with a reason; the confirmation gate applies unless `force` |
-| `POST /tasks/{id}/reopen`    | Reopen a closed task; the serial gate applies unless `force` |
-| `POST /tasks/{id}/archive`   | Archive a closed task; the closed-only gate applies unless `force` |
+| Endpoint                         | Purpose                                                                                                                            |
+| ----------------------------     | -----------------------------------------------------------------------                                                            |
+| `GET /tasks`                     | One page of lightweight rows plus the filter total (`status`, `assignee`, `archived`, `time`, `since`, `until`, `limit`, `offset`) |
+| `GET /tasks/{id}`                | One task with its full event trail                                                                                                 |
+| `GET /tasks/export`              | Every task, including closed and archived                                                                                          |
+| `GET /tasks/{id}/export`         | One task's export                                                                                                                  |
+| `GET /tasks/{id}/archive`        | The closed task's content-addressed dossier archive (octet stream)                                                                 |
+| `GET /tasks/{id}/reports/{blob}` | A filed confirmation report body fetched by blob id (plain text)                                                                   |
+| `POST /tasks`                    | Register a task; the creator is the authenticated identity                                                                         |
+| `POST /tasks/{id}/start`         | Claim a queued task; the serial gate applies unless `force`                                                                        |
+| `POST /tasks/{id}/confirm`       | File the actor's confirmation toward the close gate                                                                                |
+| `POST /tasks/{id}/review`        | Move an in-progress task to review                                                                                                 |
+| `POST /tasks/{id}/pause`         | Park an in-progress task                                                                                                           |
+| `POST /tasks/{id}/resume`        | Unpause; the serial gate applies unless `force`                                                                                    |
+| `POST /tasks/{id}/note`          | Append a work note to the trail                                                                                                    |
+| `POST /tasks/{id}/close`         | Close with a reason; the confirmation gate applies unless `force`                                                                  |
+| `POST /tasks/{id}/reopen`        | Reopen a closed task; the serial gate applies unless `force`                                                                       |
+| `POST /tasks/{id}/archive`       | Archive a closed task; the closed-only gate applies unless `force`                                                                 |
 
 Request bodies (all optional fields omitted rather than null):
 
@@ -988,7 +988,7 @@ standalone `force_*` events of the other gated verbs.
 ### SSE Event Types
 
 These are the **internal** event stream's variants (`GET /agents/{id}/events`),
-consumed by `kallip` and `kallip-run`. The
+consumed by `kallip` and `kallipai-run`. The
 [external chat-room stream](#external-chat-room-api) is a separate surface that
 does not use this vocabulary -- it discriminates frames by the SSE `event:`
 field (`authored` / `signal` / `status`) and carries only complete authored
@@ -1030,24 +1030,24 @@ varies: `idle`/`interrupted` return to idle, `waiting` parks on a wake timer,
 outcomes park the agent (the next incoming message auto-wakes it). Only `cancelled`
 (a lifecycle cancel from remove / tagma shutdown) ends the stream.
 
-| `type`                   | Fields                                                                                                                               | Description                                                                                                                                                                                                                                                                                                                                       |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `idle`                   | _(none)_                                                                                                                              | Agent completed the turn and returned to idle (a `finished`-style content event is `assistantContent`)                                                                                              |
-| `maxRoundsExceeded`      | _(none)_                                                                                                                             | Hit the max tool rounds limit for this turn; the agent parks                                                                                                                                              |
-| `error`                  | `message: string` | Turn failed with a fatal error; the agent parks (a message auto-wakes it) |
-| `failoverChainExhausted` | `reason: "noFailoverConfigured" \| "allBackupsExhausted" \| "allCandidatesUnbuildable" \| "allCandidatesInfeasible", detail: string, transient_retry: { attempt, max_attempts, retry_in_secs }` | Within-set failover chain exhausted: every profile in the set is unavailable; `reason` distinguishes the cause (`allCandidatesInfeasible` = every candidate's declared window violated the budget shape; tune `KALLIP_SUMMARY_MAX_TOKENS` / `KALLIP_PINNED_BUDGET_RATIO` or raise the window), `detail` is the original trigger. With `transient_retry` present the agent enters a retrying backoff (the timer re-runs the original prompt); absent, it parks |
-| `waiting`                | `timeout_secs: u64`                                                                                                                  | Turn ended on `break(wait)`; the agent parks on a wake timer; the timer expiring or any external event resumes it                                                                                         |
-| `interrupted`            | _(none)_                                                                                                                             | Round aborted via interrupt; agent stays alive and idle                                                                                                                                                                                                                                                                                           |
-| `tokenBudgetExceeded`    | `consumed: u64, budget: u64`                                                                                                         | Token budget hit; the agent parks on a re-armed wait timer as a zero-cost recovery probe (waiting, not idle) until the budget is raised                                                                                                 |
-| `cancelled`              | _(none)_                                                                                                                             | Lifecycle cancel (remove / shutdown): agent stops, stream ends                                                                                                                                                                                                                                                                                   |
+| `type`                   | Fields                                                                                                                                                                                          | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------                                                            | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------                                                                                                                 |
+| `idle`                   | _(none)_                                                                                                                                                                                        | Agent completed the turn and returned to idle (a `finished`-style content event is `assistantContent`)                                                                                                                                                                                                                                                                                                                                                            |
+| `maxRoundsExceeded`      | _(none)_                                                                                                                                                                                        | Hit the max tool rounds limit for this turn; the agent parks                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `error`                  | `message: string`                                                                                                                                                                               | Turn failed with a fatal error; the agent parks (a message auto-wakes it)                                                                                                                                                                                                                                                                                                                                                                                         |
+| `failoverChainExhausted` | `reason: "noFailoverConfigured" \| "allBackupsExhausted" \| "allCandidatesUnbuildable" \| "allCandidatesInfeasible", detail: string, transient_retry: { attempt, max_attempts, retry_in_secs }` | Within-set failover chain exhausted: every profile in the set is unavailable; `reason` distinguishes the cause (`allCandidatesInfeasible` = every candidate's declared window violated the budget shape; tune `KALLIPAI_SUMMARY_MAX_TOKENS` / `KALLIPAI_PINNED_BUDGET_RATIO` or raise the window), `detail` is the original trigger. With `transient_retry` present the agent enters a retrying backoff (the timer re-runs the original prompt); absent, it parks |
+| `waiting`                | `timeout_secs: u64`                                                                                                                                                                             | Turn ended on `break(wait)`; the agent parks on a wake timer; the timer expiring or any external event resumes it                                                                                                                                                                                                                                                                                                                                                 |
+| `interrupted`            | _(none)_                                                                                                                                                                                        | Round aborted via interrupt; agent stays alive and idle                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `tokenBudgetExceeded`    | `consumed: u64, budget: u64`                                                                                                                                                                    | Token budget hit; the agent parks on a re-armed wait timer as a zero-cost recovery probe (waiting, not idle) until the budget is raised                                                                                                                                                                                                                                                                                                                           |
+| `cancelled`              | _(none)_                                                                                                                                                                                        | Lifecycle cancel (remove / shutdown): agent stops, stream ends                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 #### State and Notifications
 
-| `type`            | Fields                                                                                   | Description                                                                                                                        |
-| ----------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `busy`            | _(none)_                                                                                 | Agent transitioned to busy state                                                                                                   |
-| `status`          | `message: string`                                                                        | Informational status message                                                                                                       |
-| `approvalUpdated` | `id: string, status: "committed" \| "approved" \| "denied" \| "redeemed" \| "cancelled"` | Approval state changed                                                                                                             |
-| `retrying`        | `attempt: u32, max_attempts: u32, error: string, delay_secs: f64`                        | LLM API retry in progress                                                                                                          |
-| `failover`        | `from: string, to: string, reason: string`                                               | Within-set failover to the next profile (`from`/`to` are profile ids); non-terminal; the agent stays busy and continues the turn |
-| `streamReset`    | `error: string, attempt: u32, max_attempts: u32, delay_secs: f64`                        | LLM stream dropped mid-turn (transport error after content started flowing); the runner retries from scratch; discard partial content since the last boundary. Non-terminal; mirrors `retrying` plus the carried `error` |
+| `type`            | Fields                                                                                   | Description                                                                                                                                                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------                                                                                       |
+| `busy`            | _(none)_                                                                                 | Agent transitioned to busy state                                                                                                                                                                                         |
+| `status`          | `message: string`                                                                        | Informational status message                                                                                                                                                                                             |
+| `approvalUpdated` | `id: string, status: "committed" \| "approved" \| "denied" \| "redeemed" \| "cancelled"` | Approval state changed                                                                                                                                                                                                   |
+| `retrying`        | `attempt: u32, max_attempts: u32, error: string, delay_secs: f64`                        | LLM API retry in progress                                                                                                                                                                                                |
+| `failover`        | `from: string, to: string, reason: string`                                               | Within-set failover to the next profile (`from`/`to` are profile ids); non-terminal; the agent stays busy and continues the turn                                                                                         |
+| `streamReset`     | `error: string, attempt: u32, max_attempts: u32, delay_secs: f64`                        | LLM stream dropped mid-turn (transport error after content started flowing); the runner retries from scratch; discard partial content since the last boundary. Non-terminal; mirrors `retrying` plus the carried `error` |

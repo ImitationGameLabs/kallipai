@@ -1,0 +1,495 @@
+//! Internal `ControlPlane` HTTP API wire types.
+//!
+//! The on-wire contract shared by `kallipai-archeion`'s `/internal/*` handlers (which
+//! wrap its DB-backed `ControlPlane`) and `kallipai-lesche`'s `HttpControlPlane`
+//! client. Lives in this shared crate so the two sides cannot drift apart.
+//!
+//! These types are deliberately NOT the same as the public `/v1/*` surface: the
+//! `/internal` API is a service-to-service boundary authenticated by a shared
+//! secret, not a public route. `None` outcomes (unknown session / token / tagma)
+//! are carried as HTTP `404`, not as a body variant, so the client maps status
+//! directly to `Option::None` without parsing a sentinel.
+
+use crate::principal::Principal;
+use serde::{Deserialize, Serialize};
+
+use crate::ids::{TagmaId, UserId};
+
+// --- verify-session ---
+
+/// `POST /internal/verify-session`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifySessionRequest {
+    pub cookie: String,
+}
+
+/// `200` body: the session's owning user plus the authoritative display
+/// identity. (`404` = no body, maps to `None`.) The display is resolved here,
+/// once per connection-open, rather than via a per-message call. An alias
+/// of the trait-side [`crate::control_plane::VerifiedSession`].
+pub type VerifySessionResponse = crate::control_plane::VerifiedSession;
+
+// --- verify-bearer ---
+
+/// `POST /internal/verify-bearer`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyBearerRequest {
+    pub token: String,
+}
+
+/// The on-wire principal for `verify_bearer`. A `User` never appears here:
+/// `verify_bearer` can only resolve an `Admin` (admin token) or a `Tagma`
+/// (tagma token). The session-cookie path resolves a user through
+/// `verify_session`, which carries a bare `UserId`, not a `Principal`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum WirePrincipal {
+    Admin,
+    Tagma { tagma_id: TagmaId },
+}
+
+/// Project a [`Principal`] onto the wire. The single centralization of the
+/// bearer-path mapping; `User` -- cookie-sourced by construction -- is handed
+/// back in the `Err` so the caller can fail loudly (500) instead of silently
+/// minting a wire form the contract forbids.
+impl TryFrom<Principal> for WirePrincipal {
+    type Error = Principal;
+
+    fn try_from(principal: Principal) -> Result<Self, Self::Error> {
+        match principal {
+            Principal::Admin => Ok(WirePrincipal::Admin),
+            Principal::Tagma(tagma_id) => Ok(WirePrincipal::Tagma { tagma_id }),
+            Principal::User(_) => Err(principal),
+        }
+    }
+}
+
+/// Lift a [`WirePrincipal`] back into a [`Principal`]. Total (no variant is
+/// rejected): the wire enum is exactly the bearer-reachable subset.
+impl From<WirePrincipal> for Principal {
+    fn from(wire: WirePrincipal) -> Self {
+        match wire {
+            WirePrincipal::Admin => Principal::Admin,
+            WirePrincipal::Tagma { tagma_id } => Principal::Tagma(tagma_id),
+        }
+    }
+}
+
+/// `200` body: the resolved principal. (`404` = no body, maps to `None`.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyBearerResponse {
+    pub principal: WirePrincipal,
+}
+
+// --- tagma-profiles (canonical tagma fact read) ---
+
+/// `POST /internal/tagma-profiles`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagmaProfilesRequest {
+    pub tagma_ids: Vec<TagmaId>,
+}
+
+/// One tagma's facts in [`TagmaProfilesResponse`]. UNFILTERED: carries the raw
+/// identity + usability state (`enrolled`/`revoked`/`owner_disabled`/key) so the
+/// relay, not the registry, derives authorization. An alias of the trait-side
+/// [`crate::control_plane::TagmaProfile`].
+pub type TagmaProfileResponse = crate::control_plane::TagmaProfile;
+
+/// `200` body: one entry per existing input id (unknown ids omitted). Always
+/// `200` (never `404`) -- absence is expressed by omission, so the relay maps
+/// status straight to the result list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagmaProfilesResponse {
+    pub profiles: Vec<TagmaProfileResponse>,
+}
+
+// --- user-identities (canonical user fact read) ---
+
+/// `POST /internal/user-identities`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserIdentitiesRequest {
+    pub user_ids: Vec<UserId>,
+}
+
+/// One user's facts in [`UserIdentitiesResponse`]. UNFILTERED: carries the raw
+/// `disabled` state so the relay derives the invite gate locally. An alias of
+/// the trait-side [`crate::control_plane::UserIdentity`].
+pub type UserIdentityResponse = crate::control_plane::UserIdentity;
+
+/// `200` body: one entry per existing input user (unknown ids omitted). Always
+/// `200` (never `404`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserIdentitiesResponse {
+    pub users: Vec<UserIdentityResponse>,
+}
+
+// --- user-identity-by-username (singular handle resolve) ---
+
+/// `POST /internal/user-identity-by-username`. The invite gate's handle ->
+/// identity resolve. Carries a BARE handle (the caller strips any `@` sigil
+/// first); the registry normalizes + validates it. `200` body is
+/// [`UserIdentityResponse`] (same shape as the bulk read); an unknown /
+/// malformed handle is `404` with no body, which the client maps to `None` --
+/// matching the `None`-as-404 convention of `verify-session` / `verify-bearer`,
+/// not the omission convention of the bulk reader, because this lookup is
+/// singular.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserIdentityByUsernameRequest {
+    pub username: String,
+}
+
+// --- tunnel-proof-ts ---
+
+/// `POST /internal/tunnel-proof-ts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelProofTsRequest {
+    pub tagma_id: TagmaId,
+    pub ts: i64,
+}
+
+/// `200` body: whether the proof timestamp advanced the high-water-mark.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelProofTsResponse {
+    pub fresh: bool,
+}
+
+// --- enrollment-lookup (user-space enrollment set resolve) ---
+
+/// `POST /internal/enrollment-lookup`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollmentLookupRequest {
+    pub tagma_id: TagmaId,
+}
+
+/// `200` body: the tagma's owning user plus every enrolled, non-revoked
+/// tagma in that user's space (the requested tagma included, sorted). (`404`
+/// = no body, maps to `None`: unknown, pending, revoked, and owner-disabled
+/// all collapse here -- the same population `verify-bearer` rejects, so a
+/// tagma that cannot authenticate is also one that cannot be addressed.)
+/// An alias of the trait-side
+/// [`crate::control_plane::EnrollmentLookup`].
+pub type EnrollmentLookupResponse = crate::control_plane::EnrollmentLookup;
+#[cfg(test)]
+mod tests {
+    //! Round-trip every wire type so a serde shape change here surfaces as a
+    //! test failure before the two services drift in prod.
+
+    use super::*;
+    use crate::bytes::Ed25519PublicKey;
+
+    #[test]
+    fn verify_session_round_trips() {
+        let req = VerifySessionRequest {
+            cookie: "sk-sess-x".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"cookie":"sk-sess-x"}"#);
+        let back: VerifySessionRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.cookie, "sk-sess-x");
+
+        let resp = VerifySessionResponse {
+            user_id: UserId::from("u1".to_string()),
+            username: "alice".to_string(),
+            display_name: Some("Alice".to_string()),
+            local_admin: false,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: VerifySessionResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.user_id, resp.user_id);
+        assert_eq!(back.username, "alice");
+        assert_eq!(back.display_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn verified_session_serializes_the_wire_key_set() {
+        // VerifiedSession (aliased as VerifySessionResponse) owns the wire
+        // shape; pin the 3 contract keys so a field add/drop/rename
+        // surfaces here instead of drifting between the services.
+        let session = VerifySessionResponse {
+            user_id: UserId::from("u1".to_string()),
+            username: "alice".to_string(),
+            display_name: None,
+            local_admin: false,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let obj: std::collections::BTreeSet<_> = serde_json::from_str::<serde_json::Value>(&json)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let expected: std::collections::BTreeSet<_> =
+            ["user_id", "username", "display_name", "local_admin"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        assert_eq!(obj, expected);
+    }
+
+    #[test]
+    fn verified_session_defaults_local_admin_when_absent() {
+        // Additive-field contract: a payload from an older producer (or the
+        // default-constructed test shape) must deserialize with
+        // local_admin = false, never fail.
+        let legacy = r#"{"user_id":"u1","username":"alice","display_name":null}"#;
+        let back: VerifySessionResponse = serde_json::from_str(legacy).unwrap();
+        assert!(!back.local_admin);
+    }
+
+    #[test]
+    fn wire_principal_admin_tag_round_trips() {
+        let admin = VerifyBearerResponse {
+            principal: WirePrincipal::Admin,
+        };
+        let json = serde_json::to_string(&admin).unwrap();
+        assert_eq!(json, r#"{"principal":{"kind":"admin"}}"#);
+        let back: VerifyBearerResponse = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.principal, WirePrincipal::Admin));
+
+        let tagma = VerifyBearerResponse {
+            principal: WirePrincipal::Tagma {
+                tagma_id: TagmaId::from("t1".to_string()),
+            },
+        };
+        let json = serde_json::to_string(&tagma).unwrap();
+        assert_eq!(json, r#"{"principal":{"kind":"tagma","tagma_id":"t1"}}"#);
+        let back: VerifyBearerResponse = serde_json::from_str(&json).unwrap();
+        match back.principal {
+            WirePrincipal::Tagma { tagma_id } => {
+                assert_eq!(tagma_id, TagmaId::from("t1".to_string()))
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn principal_round_trips_through_the_wire_projection() {
+        // Admin/Tagma project onto the wire and lift back losslessly --
+        // the TryFrom/From pair is the only mapping site (debt-#4).
+        let wire = WirePrincipal::try_from(Principal::Admin).unwrap();
+        assert!(matches!(Principal::from(wire), Principal::Admin));
+
+        let tagma_id = TagmaId::from("t1".to_string());
+        let wire = WirePrincipal::try_from(Principal::Tagma(tagma_id.clone())).unwrap();
+        assert!(matches!(Principal::from(wire), Principal::Tagma(id) if id == tagma_id));
+    }
+
+    #[test]
+    fn user_principal_is_rejected_on_the_wire() {
+        // THE invariant: a User is cookie-sourced and can never ride the
+        // bearer path. The projection hands the principal back (Err) so the
+        // caller 500s loudly -- a silent drop or a minted wire form would
+        // break the deputy guard.
+        let rejected = WirePrincipal::try_from(Principal::User(UserId::from("u1".to_string())))
+            .expect_err("User must not project onto the wire");
+        assert!(matches!(rejected, Principal::User(id) if id == UserId::from("u1".to_string())));
+    }
+
+    #[test]
+    fn tagma_profiles_round_trips() {
+        let req = TagmaProfilesRequest {
+            tagma_ids: vec![TagmaId::from("t1".to_string())],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"tagma_ids":["t1"]}"#);
+        let back: TagmaProfilesRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tagma_ids, req.tagma_ids);
+
+        // Rich shape: key + owner + display + raw usability facts.
+        let resp = TagmaProfilesResponse {
+            profiles: vec![TagmaProfileResponse {
+                tagma_id: TagmaId::from("t1".to_string()),
+                pinned_public_key: Some(Ed25519PublicKey(vec![1u8; 32])),
+                owner_user_id: UserId::from("owner".to_string()),
+                label: Some("Laptop".to_string()),
+                owner_username: "alice".to_string(),
+                owner_display_name: None,
+                enrolled: true,
+                revoked: false,
+                owner_disabled: false,
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: TagmaProfilesResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.profiles.len(), 1);
+        let p = &back.profiles[0];
+        assert_eq!(p.tagma_id, TagmaId::from("t1".to_string()));
+        assert_eq!(p.pinned_public_key.as_ref().unwrap().0, vec![1u8; 32]);
+        assert_eq!(p.owner_user_id, UserId::from("owner".to_string()));
+        assert_eq!(p.label.as_deref(), Some("Laptop"));
+        assert_eq!(p.owner_username, "alice");
+        assert!(p.owner_display_name.is_none());
+        assert!(p.enrolled && !p.revoked && !p.owner_disabled);
+
+        // A pending tagma (no key) round-trips with `pinned_public_key: null`.
+        let pending = TagmaProfileResponse {
+            tagma_id: TagmaId::from("t2".to_string()),
+            pinned_public_key: None,
+            owner_user_id: UserId::from("owner".to_string()),
+            label: None,
+            owner_username: "alice".to_string(),
+            owner_display_name: None,
+            enrolled: false,
+            revoked: false,
+            owner_disabled: false,
+        };
+        let json = serde_json::to_string(&pending).unwrap();
+        assert!(json.contains(r#""pinned_public_key":null"#));
+        let back: TagmaProfileResponse = serde_json::from_str(&json).unwrap();
+        assert!(back.pinned_public_key.is_none());
+    }
+
+    #[test]
+    fn tagma_profile_serializes_the_wire_key_set() {
+        // TagmaProfile (aliased as TagmaProfileResponse) owns the wire shape
+        // now; pin the 9 contract keys so a future field add/drop/rename
+        // surfaces here instead of drifting silently between the services.
+        let profile = TagmaProfileResponse {
+            tagma_id: TagmaId::from("t1".to_string()),
+            pinned_public_key: None,
+            owner_user_id: UserId::from("owner".to_string()),
+            label: None,
+            owner_username: "alice".to_string(),
+            owner_display_name: None,
+            enrolled: true,
+            revoked: false,
+            owner_disabled: false,
+        };
+        let json = serde_json::to_string(&profile).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = v.as_object().unwrap();
+        let expected = [
+            "tagma_id",
+            "pinned_public_key",
+            "owner_user_id",
+            "label",
+            "owner_username",
+            "owner_display_name",
+            "enrolled",
+            "revoked",
+            "owner_disabled",
+        ];
+        assert_eq!(obj.len(), expected.len());
+        for key in expected {
+            assert!(obj.contains_key(key), "missing wire key {key}");
+        }
+    }
+
+    #[test]
+    fn user_identities_round_trips() {
+        let req = UserIdentitiesRequest {
+            user_ids: vec![UserId::from("u1".to_string())],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"user_ids":["u1"]}"#);
+        let back: UserIdentitiesRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.user_ids, req.user_ids);
+
+        let resp = UserIdentitiesResponse {
+            users: vec![UserIdentityResponse {
+                user_id: UserId::from("u1".to_string()),
+                username: "alice".to_string(),
+                display_name: Some("Alice".to_string()),
+                disabled: false,
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: UserIdentitiesResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.users.len(), 1);
+        assert_eq!(back.users[0].user_id, UserId::from("u1".to_string()));
+        assert_eq!(back.users[0].username, "alice");
+        assert_eq!(back.users[0].display_name.as_deref(), Some("Alice"));
+        assert!(!back.users[0].disabled);
+    }
+
+    #[test]
+    fn user_identity_by_username_round_trips() {
+        // A raw handle (with a leading `@`, as a client might forward) is
+        // carried verbatim; the registry normalizes, not the wire.
+        let req = UserIdentityByUsernameRequest {
+            username: "@alice".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"username":"@alice"}"#);
+        let back: UserIdentityByUsernameRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.username, "@alice");
+
+        // The 200 body reuses the bulk reader's identity shape verbatim.
+        let resp = UserIdentityResponse {
+            user_id: UserId::from("u1".to_string()),
+            username: "alice".to_string(),
+            display_name: None,
+            disabled: false,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: UserIdentityResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.user_id, UserId::from("u1".to_string()));
+        assert_eq!(back.username, "alice");
+        assert!(back.display_name.is_none());
+        assert!(!back.disabled);
+    }
+
+    #[test]
+    fn user_identity_serializes_the_wire_key_set() {
+        // UserIdentity (aliased as UserIdentityResponse) owns the wire shape
+        // for BOTH reads (bulk + by-username); pin the 4 contract keys so a
+        // field change surfaces here instead of drifting between services.
+        let identity = UserIdentityResponse {
+            user_id: UserId::from("u1".to_string()),
+            username: "alice".to_string(),
+            display_name: None,
+            disabled: false,
+        };
+        let json = serde_json::to_string(&identity).unwrap();
+        let obj: std::collections::BTreeSet<_> = serde_json::from_str::<serde_json::Value>(&json)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let expected: std::collections::BTreeSet<_> =
+            ["user_id", "username", "display_name", "disabled"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        assert_eq!(obj, expected);
+    }
+
+    #[test]
+    fn tunnel_proof_ts_round_trips() {
+        let resp = TunnelProofTsResponse { fresh: true };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert_eq!(json, r#"{"fresh":true}"#);
+        let back: TunnelProofTsResponse = serde_json::from_str(&json).unwrap();
+        assert!(back.fresh);
+    }
+
+    #[test]
+    fn enrollment_lookup_round_trips() {
+        let req = EnrollmentLookupRequest {
+            tagma_id: TagmaId::from("tagma-abc".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"tagma_id":"tagma-abc"}"#);
+        let back: EnrollmentLookupRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tagma_id, req.tagma_id);
+
+        let resp = EnrollmentLookupResponse {
+            user_id: UserId::from("user-1".to_string()),
+            enrolled_tagmas: vec![
+                TagmaId::from("tagma-abc".to_string()),
+                TagmaId::from("tagma-xyz".to_string()),
+            ],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert_eq!(
+            json,
+            r#"{"user_id":"user-1","enrolled_tagmas":["tagma-abc","tagma-xyz"]}"#
+        );
+        let back: EnrollmentLookupResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.user_id, resp.user_id);
+        assert_eq!(back.enrolled_tagmas, resp.enrolled_tagmas);
+    }
+}

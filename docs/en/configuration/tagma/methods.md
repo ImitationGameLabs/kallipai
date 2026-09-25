@@ -45,12 +45,12 @@ Four subcommands cover inspection, rebinding, marker transfer, and removal:
 
 The profiles config file lives at the instance config root's
 `profiles.toml`: `<config home>/kallipai/tagmata/<slug>/`.
-A config root that cannot be derived (no `KALLIP_TAGMA_SLUG`, no config
+A config root that cannot be derived (no `KALLIPAI_TAGMA_SLUG`, no config
 home) degrades the read to the implicit env profile with a warning;
 a write with no config root errors out. Without a config file (the
 default for benchmark/scripting via Harbor, an external agent
-benchmarking framework, and `kallip-run`), a single implicit profile is
-used: its `max_context_window` is derived from `KALLIP_CONTEXT_WINDOW_TOKENS`
+benchmarking framework, and `kallipai-run`), a single implicit profile is
+used: its `max_context_window` is derived from `KALLIPAI_CONTEXT_WINDOW_TOKENS`
 (default `128000`).
 
 With a config file, the tagma loads multiple provider/model combinations, each
@@ -68,7 +68,7 @@ default = "primary"
 
 [endpoints.deepseek-primary]
 family = "deepseek"
-api_key = "${KALLIP_LLM_DEEPSEEK_API_KEY}" # env-var indirection keeps secrets out of the file
+api_key = "${KALLIPAI_LLM_DEEPSEEK_API_KEY}" # env-var indirection keeps secrets out of the file
 
 [endpoints.openrouter]
 family = "openai-compatible"
@@ -142,7 +142,7 @@ the turn survives the switch. A candidate whose window would violate a budget
 invariant is skipped _before_ the advance (so the agent never sends an oversized
 request to a smaller-window model); if no feasible candidate remains, the chain
 is reported as an infeasible-window error: every candidate conflicts with
-the budget (tune `KALLIP_SUMMARY_MAX_TOKENS` / `KALLIP_PINNED_BUDGET_RATIO` or raise the window). The _active_ profile's window (not a
+the budget (tune `KALLIPAI_SUMMARY_MAX_TOKENS` / `KALLIPAI_PINNED_BUDGET_RATIO` or raise the window). The _active_ profile's window (not a
 failover candidate) is validated at spawn: a window that violates a budget
 invariant rejects the spawn outright (fail-fast) rather than silently falling
 back.
@@ -150,7 +150,7 @@ back.
 The retry budget is **per-endpoint**, not per-profile: rate limits are
 endpoint-scoped, so two profiles sharing one endpoint share one budget. A
 profile's transient retries accumulate within `retry_timeout` (the retry
-deadline that `KALLIP_RETRY_TIMEOUT_SECS`, default 300, configures)
+deadline that `KALLIPAI_RETRY_TIMEOUT_SECS`, default 300, configures)
 **across rounds**. This is intentional rate-limit backpressure (a persistently failing endpoint
 gets fewer retries, forcing failover or a round error), and it matches the
 pre-failover agent-wide behavior for the active profile. The index only advances

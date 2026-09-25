@@ -2547,13 +2547,13 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "dirs",
- "kallip-archeion-common",
- "kallip-blob-store",
- "kallip-client",
- "kallip-common",
- "kallip-files",
- "kallip-runtime",
- "kallip-testkit",
+ "kallipai-archeion-common",
+ "kallipai-blob-store",
+ "kallipai-client",
+ "kallipai-common",
+ "kallipai-files",
+ "kallipai-runtime",
+ "kallipai-testkit",
  "reqwest",
  "sea-orm",
  "serde",
@@ -2571,15 +2571,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-admin"
+name = "kallipai-admin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
  "comfy-table",
- "kallip-archeion-client",
- "kallip-archeion-common",
+ "kallipai-archeion-client",
+ "kallipai-archeion-common",
  "libc",
  "serde",
  "serde_json",
@@ -2589,7 +2589,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-archeion"
+name = "kallipai-archeion"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2603,8 +2603,8 @@ dependencies = [
  "hex",
  "http-body-util",
  "ipnet",
- "kallip-archeion-common",
- "kallip-common",
+ "kallipai-archeion-common",
+ "kallipai-common",
  "reqwest",
  "sea-orm",
  "sea-orm-migration",
@@ -2628,13 +2628,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-archeion-client"
+name = "kallipai-archeion-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "kallip-archeion-common",
- "kallip-common",
- "kallip-e2ee",
+ "kallipai-archeion-common",
+ "kallipai-common",
+ "kallipai-e2ee",
  "reqwest",
  "serde",
  "serde_json",
@@ -2643,13 +2643,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-archeion-common"
+name = "kallipai-archeion-common"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "ed25519-dalek",
- "kallip-common",
+ "kallipai-common",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2658,7 +2658,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-blob-store"
+name = "kallipai-blob-store"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2675,13 +2675,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-client"
+name = "kallipai-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures-util",
  "just-llm-client",
- "kallip-common",
+ "kallipai-common",
  "percent-encoding",
  "reqwest",
  "serde",
@@ -2691,7 +2691,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-common"
+name = "kallipai-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2700,7 +2700,7 @@ dependencies = [
  "futures-core",
  "getrandom 0.4.2",
  "jiff",
- "kallip-testkit",
+ "kallipai-testkit",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2716,25 +2716,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-cron"
+name = "kallipai-cron"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "kallip-common",
- "kallip-cron-client",
- "kallip-cron-common",
+ "kallipai-common",
+ "kallipai-cron-client",
+ "kallipai-cron-common",
  "time",
  "tokio",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "kallip-cron-client"
+name = "kallipai-cron-client"
 version = "0.1.0"
 dependencies = [
- "kallip-common",
- "kallip-cron-common",
+ "kallipai-common",
+ "kallipai-cron-common",
  "reqwest",
  "serde",
  "serde_json",
@@ -2744,26 +2744,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-cron-common"
+name = "kallipai-cron-common"
 version = "0.1.0"
 dependencies = [
- "kallip-common",
+ "kallipai-common",
  "serde",
  "thiserror 2.0.18",
  "time",
 ]
 
 [[package]]
-name = "kallip-cron-daemon"
+name = "kallipai-cron-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
  "clap",
  "dirs",
- "kallip-client",
- "kallip-common",
- "kallip-cron-common",
+ "kallipai-client",
+ "kallipai-common",
+ "kallipai-cron-common",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -2781,14 +2781,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-daemon"
+name = "kallipai-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs",
- "kallip-daemon-client",
- "kallip-daemon-common",
- "kallip-testkit",
+ "kallipai-daemon-client",
+ "kallipai-daemon-common",
+ "kallipai-testkit",
  "libc",
  "serde",
  "serde_json",
@@ -2801,34 +2801,34 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-daemon-client"
+name = "kallipai-daemon-client"
 version = "0.1.0"
 dependencies = [
- "kallip-daemon-common",
+ "kallipai-daemon-common",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
 
 [[package]]
-name = "kallip-daemon-common"
+name = "kallipai-daemon-common"
 version = "0.1.0"
 dependencies = [
  "dirs",
- "kallip-testkit",
+ "kallipai-testkit",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "kallip-daemon-spawn"
+name = "kallipai-daemon-spawn"
 version = "0.1.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
-name = "kallip-e2ee"
+name = "kallipai-e2ee"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2842,7 +2842,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-files"
+name = "kallipai-files"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2851,9 +2851,9 @@ dependencies = [
  "cookie",
  "futures-util",
  "http-body-util",
- "kallip-archeion-common",
- "kallip-blob-store",
- "kallip-common",
+ "kallipai-archeion-common",
+ "kallipai-blob-store",
+ "kallipai-common",
  "reqwest",
  "sea-orm",
  "sea-orm-migration",
@@ -2875,7 +2875,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-instances"
+name = "kallipai-instances"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2885,10 +2885,10 @@ dependencies = [
  "cookie",
  "dirs",
  "http-body-util",
- "kallip-archeion-common",
- "kallip-common",
- "kallip-daemon-client",
- "kallip-daemon-common",
+ "kallipai-archeion-common",
+ "kallipai-common",
+ "kallipai-daemon-client",
+ "kallipai-daemon-common",
  "libc",
  "reqwest",
  "serde",
@@ -2904,7 +2904,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-lesche"
+name = "kallipai-lesche"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2915,9 +2915,9 @@ dependencies = [
  "cookie",
  "ed25519-dalek",
  "futures-util",
- "kallip-archeion-common",
- "kallip-common",
- "kallip-lesche-common",
+ "kallipai-archeion-common",
+ "kallipai-common",
+ "kallipai-lesche-common",
  "reqwest",
  "sea-orm",
  "sea-orm-migration",
@@ -2939,7 +2939,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-lesche-client"
+name = "kallipai-lesche-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2947,9 +2947,9 @@ dependencies = [
  "base64 0.22.1",
  "futures-core",
  "futures-util",
- "kallip-archeion-common",
- "kallip-e2ee",
- "kallip-lesche-common",
+ "kallipai-archeion-common",
+ "kallipai-e2ee",
+ "kallipai-lesche-common",
  "reqwest",
  "serde",
  "serde_json",
@@ -2960,12 +2960,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-lesche-common"
+name = "kallipai-lesche-common"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
- "kallip-archeion-common",
- "kallip-common",
+ "kallipai-archeion-common",
+ "kallipai-common",
  "serde",
  "serde_json",
  "time",
@@ -2973,7 +2973,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-model-gateway"
+name = "kallipai-model-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2983,7 +2983,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hex",
- "kallip-common",
+ "kallipai-common",
  "reqwest",
  "sea-orm",
  "sea-orm-migration",
@@ -3000,21 +3000,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-run"
+name = "kallipai-run"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "futures-util",
- "kallip-client",
- "kallip-common",
+ "kallipai-client",
+ "kallipai-common",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "kallip-runtime"
+name = "kallipai-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3023,10 +3023,10 @@ dependencies = [
  "dirs",
  "futures-util",
  "just-llm-client",
- "kallip-blob-store",
- "kallip-common",
- "kallip-shell",
- "kallip-testkit",
+ "kallipai-blob-store",
+ "kallipai-common",
+ "kallipai-shell",
+ "kallipai-testkit",
  "rable",
  "regex",
  "reqwest",
@@ -3047,14 +3047,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-shell"
+name = "kallipai-shell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "criterion",
  "just-llm-client",
- "kallip-testkit",
+ "kallipai-testkit",
  "libc",
  "libsandbox",
  "nix 0.31.3",
@@ -3072,7 +3072,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-tagma"
+name = "kallipai-tagma"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3090,18 +3090,18 @@ dependencies = [
  "hkdf 0.13.0",
  "jiff",
  "just-llm-client",
- "kallip-archeion-client",
- "kallip-archeion-common",
- "kallip-blob-store",
- "kallip-common",
- "kallip-daemon-common",
- "kallip-e2ee",
- "kallip-lesche-client",
- "kallip-lesche-common",
- "kallip-runtime",
- "kallip-shell",
- "kallip-task",
- "kallip-testkit",
+ "kallipai-archeion-client",
+ "kallipai-archeion-common",
+ "kallipai-blob-store",
+ "kallipai-common",
+ "kallipai-daemon-common",
+ "kallipai-e2ee",
+ "kallipai-lesche-client",
+ "kallipai-lesche-common",
+ "kallipai-runtime",
+ "kallipai-shell",
+ "kallipai-task",
+ "kallipai-testkit",
  "libc",
  "percent-encoding",
  "reqwest",
@@ -3134,13 +3134,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-task"
+name = "kallipai-task"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "kallip-blob-store",
- "kallip-common",
- "kallip-testkit",
+ "kallipai-blob-store",
+ "kallipai-common",
+ "kallipai-testkit",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -3154,7 +3154,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kallip-testkit"
+name = "kallipai-testkit"
 version = "0.1.0"
 dependencies = [
  "tempfile",
@@ -3168,9 +3168,9 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
- "kallip-blob-store",
- "kallip-daemon-client",
- "kallip-daemon-common",
+ "kallipai-blob-store",
+ "kallipai-daemon-client",
+ "kallipai-daemon-common",
  "tokio",
 ]
 

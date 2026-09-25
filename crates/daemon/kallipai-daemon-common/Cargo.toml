@@ -1,0 +1,14 @@
+[package]
+name = "kallipai-daemon-common"
+description = "UDS wire types for the kallipai local daemon and its clients"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+kallipai-testkit = { workspace = true }

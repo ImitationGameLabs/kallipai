@@ -1,0 +1,25 @@
+[package]
+name = "kallipai-admin"
+description = "Headless admin CLI for kallipai-archeion (HTTP client, sk-admin bearer)"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kallipai-admin"
+path = "src/main.rs"
+
+[dependencies]
+kallipai-archeion-client = { workspace = true }
+kallipai-archeion-common = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+comfy-table = { workspace = true }
+time = { workspace = true }
+[dev-dependencies]
+libc = { workspace = true }
+tempfile = { workspace = true }

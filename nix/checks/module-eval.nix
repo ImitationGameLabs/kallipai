@@ -21,7 +21,7 @@
               # the plain site root must pass both through; a baked root
               # must overwrite the former and carry the latter.
               value = pkgs.runCommand "${name}-stub" { } (
-                if name == "kallip-web-dist" then
+                if name == "kallipai-web-dist" then
                   ''
                     mkdir $out
                     echo bundle-shell > $out/config.js
@@ -32,12 +32,12 @@
               );
             })
             [
-              "kallip-daemon"
-              "kallip-archeion"
-              "kallip-lesche"
-              "kallip-files"
-              "kallip-instances"
-              "kallip-web-dist"
+              "kallipai-daemon"
+              "kallipai-archeion"
+              "kallipai-lesche"
+              "kallipai-files"
+              "kallipai-instances"
+              "kallipai-web-dist"
               "workspace"
             ]
         );
@@ -95,28 +95,28 @@
       # the unit's path line loses the Environment line and this check
       # goes red.
       daemonUnitFile =
-        pkgs.writeText "kallip-daemon.service-test"
-          aligned.config.systemd.units."kallip-daemon.service".text;
+        pkgs.writeText "kallipai-daemon.service-test"
+          aligned.config.systemd.units."kallipai-daemon.service".text;
       # The derived service defaults must reach the process: these two
       # files carry the archeion unit env for the derived (tls on) and
       # the tls-off hosts, and the assertions below grep them.
       webDerivedUnit =
-        pkgs.writeText "kallip-archeion-derived-test"
-          webDerived.config.systemd.units."kallip-archeion.service".text;
+        pkgs.writeText "kallipai-archeion-derived-test"
+          webDerived.config.systemd.units."kallipai-archeion.service".text;
       webTlsOffUnit =
-        pkgs.writeText "kallip-archeion-tls-off-test"
-          webTlsOff.config.systemd.units."kallip-archeion.service".text;
+        pkgs.writeText "kallipai-archeion-tls-off-test"
+          webTlsOff.config.systemd.units."kallipai-archeion.service".text;
       polisLescheUnit =
-        pkgs.writeText "kallip-lesche-test"
-          webDerived.config.systemd.units."kallip-lesche.service".text;
+        pkgs.writeText "kallipai-lesche-test"
+          webDerived.config.systemd.units."kallipai-lesche.service".text;
       polisFilesUnit =
-        pkgs.writeText "kallip-files-test"
-          webDerived.config.systemd.units."kallip-files.service".text;
+        pkgs.writeText "kallipai-files-test"
+          webDerived.config.systemd.units."kallipai-files.service".text;
       polisInstancesUnit =
-        pkgs.writeText "kallip-instances-test"
-          webDerived.config.systemd.units."kallip-instances.service".text;
+        pkgs.writeText "kallipai-instances-test"
+          webDerived.config.systemd.units."kallipai-instances.service".text;
       inherit (import ../lib.nix) bakeRuntimeConfig;
-      stubDist = stubPackages.${pkgs.stdenv.hostPlatform.system}."kallip-web-dist";
+      stubDist = stubPackages.${pkgs.stdenv.hostPlatform.system}."kallipai-web-dist";
       # No runtime keys: the site root is the bundle itself.
       webPlain = evalHost {
         services.kallipai.web.enable = true;
@@ -204,7 +204,7 @@
       # last leg). Pin both definition lines: editing either side
       # alone turns this check red.
       grep -q 'daemonSocket = "/run/kallipai/daemon.sock";' "${../nixos-modules.nix}"
-      grep -q 'SYSTEM_DAEMON_SOCKET: &str = "/run/kallipai/daemon.sock";' "${../../crates/daemon/kallip-daemon-common/src/socket.rs}"
+      grep -q 'SYSTEM_DAEMON_SOCKET: &str = "/run/kallipai/daemon.sock";' "${../../crates/daemon/kallipai-daemon-common/src/socket.rs}"
 
       # A drifted polis-only host stays warning-free: no drift warning
       # exists since the subdomain shape hides ports behind the edge.
@@ -240,11 +240,11 @@
       # names the web page (the passkey ceremony runs there and the
       # archeion admits exactly that origin), tls-on leaves the cookie
       # flag to the code default, and tls-off forces it non-Secure.
-      grep -q 'KALLIP_ARCHEION_WEBAUTHN_RP_ORIGIN=https://app.kallipai.com' '${webDerivedUnit}'
-      grep -q 'KALLIP_ARCHEION_CORS_ORIGINS=https://app.kallipai.com' '${webDerivedUnit}'
-      grep -q 'KALLIP_ARCHEION_OAUTH_REDIRECT_BASE=https://app.kallipai.com' '${webDerivedUnit}'
-      test -z "$(grep KALLIP_ARCHEION_COOKIE_SECURE '${webDerivedUnit}')"
-      grep -q 'KALLIP_ARCHEION_COOKIE_SECURE=false' '${webTlsOffUnit}'
+      grep -q 'KALLIPAI_ARCHEION_WEBAUTHN_RP_ORIGIN=https://app.kallipai.com' '${webDerivedUnit}'
+      grep -q 'KALLIPAI_ARCHEION_CORS_ORIGINS=https://app.kallipai.com' '${webDerivedUnit}'
+      grep -q 'KALLIPAI_ARCHEION_OAUTH_REDIRECT_BASE=https://app.kallipai.com' '${webDerivedUnit}'
+      test -z "$(grep KALLIPAI_ARCHEION_COOKIE_SECURE '${webDerivedUnit}')"
+      grep -q 'KALLIPAI_ARCHEION_COOKIE_SECURE=false' '${webTlsOffUnit}'
       test "${lib.boolToString webOverride.config.services.kallipai.polis.archeion.cookieSecure}" = "false"
 
       # The gate-group handoff is single-tracked: the archeion unit runs
@@ -256,9 +256,9 @@
       test -z "$(grep SupplementaryGroups '${polisLescheUnit}')"
       test -z "$(grep SupplementaryGroups '${polisFilesUnit}')"
       test -z "$(grep SupplementaryGroups '${polisInstancesUnit}')"
-      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallip-lesche.extraGroups)}" = "1"
-      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallip-files.extraGroups)}" = "1"
-      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallip-instances.extraGroups)}" = "1"
+      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-lesche.extraGroups)}" = "1"
+      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-files.extraGroups)}" = "1"
+      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-instances.extraGroups)}" = "1"
       derived="${webDerived.config.services.kallipai.web.distWithRuntimeConfig}"
       grep -q '"domain":"kallipai.com"' "$derived/config.js"
       # The baking helper, called directly, writes exactly the payload.

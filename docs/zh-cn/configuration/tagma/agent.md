@@ -15,13 +15,13 @@ order: 30
 
 部分变量带有启动时为隐式 profile 窗口强制执行的交叉校验：
 
-- `KALLIP_OUTPUT_RESERVE_TOKENS` 必须严格小于活跃上下文窗口。
-- `KALLIP_SUMMARY_MAX_TOKENS` 不得超过固定条目预算，即 `(上下文窗口 − KALLIP_OUTPUT_RESERVE_TOKENS) × KALLIP_PINNED_BUDGET_RATIO`。
+- `KALLIPAI_OUTPUT_RESERVE_TOKENS` 必须严格小于活跃上下文窗口。
+- `KALLIPAI_SUMMARY_MAX_TOKENS` 不得超过固定条目预算，即 `(上下文窗口 − KALLIPAI_OUTPUT_RESERVE_TOKENS) × KALLIPAI_PINNED_BUDGET_RATIO`。
 
-这两项在启动时对隐式 profile 窗口（`KALLIP_CONTEXT_WINDOW_TOKENS`）检查；配置文件 profile 的窗口在 spawn 时逐 profile 检查（set 内故障转移时再惰性查一次）。配置文件 profile 窗口从不在 tagma 启动时校验。
+这两项在启动时对隐式 profile 窗口（`KALLIPAI_CONTEXT_WINDOW_TOKENS`）检查；配置文件 profile 的窗口在 spawn 时逐 profile 检查（set 内故障转移时再惰性查一次）。配置文件 profile 窗口从不在 tagma 启动时校验。
 
-- `KALLIP_CONTEXT_THRESHOLDS` 至少 2 个值，升序，各在 `1`–`99`。
-- `KALLIP_TOKEN_BUDGET_WARNINGS` 至少 1 个值，升序，各在 `1`–`99`。
+- `KALLIPAI_CONTEXT_THRESHOLDS` 至少 2 个值，升序，各在 `1`–`99`。
+- `KALLIPAI_TOKEN_BUDGET_WARNINGS` 至少 1 个值，升序，各在 `1`–`99`。
 
 注入 shell 的变量集有独立页面：
 [Agent shell 会话](../../reference/environment-variables/agent-shell.md)。

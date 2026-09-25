@@ -50,7 +50,7 @@ the child's FS-access class below the supervisor's own granted class. The tagma
 is the reference monitor: a value above the supervisor's class is rejected with
 `403 Forbidden`: downgrade only, never an escalation. A `normal` root may thus
 spawn a read-only `guest` reviewer. This field is subagent-only; the tagma's
-own root takes its class at startup from `KALLIP_ROOT_AGENT_PERMISSION_CLASS`
+own root takes its class at startup from `KALLIPAI_ROOT_AGENT_PERMISSION_CLASS`
 (see [Agent core and shell](../configuration/tagma/agent.md)). The granted class is reported by
 `GET /agents/{id}/permissions` (see the tagma API reference).
 
@@ -112,13 +112,13 @@ credential -- no separate token to configure or paste.
 
 Security boundary, three sentences: only the admin principal may enter
 (any other credential is a plain 401); the route is not mounted unless
-`KALLIP_ARCHEION_ADMIN_USER_LOGIN` is explicitly set, so the production
+`KALLIPAI_ARCHEION_ADMIN_USER_LOGIN` is explicitly set, so the production
 default has no such surface at all; and when it is set, an operator-chosen
 admin token shorter than 32 chars refuses to boot (the generated 256-bit
 token is exempt). Deleting the marker row together with its user row
 resets the account -- the next admin-login recreates both. Mounting the
 route is an explicit operator act that pre-provisions an operator
-account, so `KALLIP_ARCHEION_SIGNUP_ENABLED` does not gate it.
+account, so `KALLIPAI_ARCHEION_SIGNUP_ENABLED` does not gate it.
 
 #### Instances Service Auth (Platform Mode)
 
@@ -130,7 +130,7 @@ the fixed local-admin account's session (`local_admin`; any other user
 session is 403, an absent one 401 with code `admin_session_required`).
 Cookie-bearing state-changing requests carry the same two-pillar CSRF
 defense as the archeion/lesche (`SameSite=Strict` + the mandatory
-`X-Requested-With: kallip` marker on non-GETs; bearer requests are
+`X-Requested-With: kallipai` marker on non-GETs; bearer requests are
 exempt).
 
 #### Username Availability Probe (Public, Pre-Release)

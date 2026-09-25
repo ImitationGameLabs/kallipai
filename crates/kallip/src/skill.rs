@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use kallip_common::protocol::{SkillMeta, parse_frontmatter, parse_frontmatter_description};
+use kallipai_common::protocol::{SkillMeta, parse_frontmatter, parse_frontmatter_description};
 
 /// Upper bound on `--depth`. Bounds pathological cost and cyclic-symlink
 /// recursion — the collector's depth budget itself guarantees termination, and

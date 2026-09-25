@@ -1,0 +1,26 @@
+[package]
+name = "kallipai-lesche-client"
+description = "HTTP client for the kallipai-lesche data-plane relay (tagma tunnel, envelopes, key exchange)"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallipai-archeion-common = { workspace = true }
+kallipai-lesche-common = { workspace = true }
+kallipai-e2ee = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+async-stream = { workspace = true }
+reqwest = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+base64 = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = { workspace = true }

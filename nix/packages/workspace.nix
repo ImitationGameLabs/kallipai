@@ -53,7 +53,7 @@ let
   '';
 in
 {
-  # The full workspace: every kallip binary. This is `packages.default` and the
+  # The full workspace: every kallipai binary. This is `packages.default` and the
   # single source of truth consumed by the tarball + dev compose; the flake
   # also exposes it by name (`packages.workspace`), which is the form the
   # NixOS module installs by -- its daemon unit rides the system path, so
@@ -71,64 +71,64 @@ in
       (old.postInstall or "")
       + ''
         # Seed the shared skills by default on nix installs: the wrapper
-        # exports KALLIP_SKILLS_SEED only when unset, so an explicit env
-        # value (or the container image Env) still wins. Only kallip-tagma
+        # exports KALLIPAI_SKILLS_SEED only when unset, so an explicit env
+        # value (or the container image Env) still wins. Only kallipai-tagma
         # reads the seed -- the agent-side kallip CLI sharing its bin/
         # directory never does, so it stays unwrapped.
-        wrapProgram $out/bin/kallip-tagma \
-          --set-default KALLIP_SKILLS_SEED ${sharedSkills}/share/kallipai/skills
+        wrapProgram $out/bin/kallipai-tagma \
+          --set-default KALLIPAI_SKILLS_SEED ${sharedSkills}/share/kallipai/skills
       ''
       + genCompletions [
         "kallipctl"
-        "kallip-admin"
+        "kallipai-admin"
       ];
   });
   # The archeion control-plane server (pure HTTP/Postgres; no shell-out deps).
-  archeion = buildCrate "cargo build --release -p kallip-archeion";
+  archeion = buildCrate "cargo build --release -p kallipai-archeion";
   # The headless archeion admin CLI (HTTP client; runs on the operator host). A
   # separate attr so it can be built/deployed without the server. The
   # archeion image does carry this binary via copyToRoot, so the admin
   # tool -- and its completion scripts -- ship inside the image too;
   # operators run it against any reachable archeion.
-  admin = (buildCrate "cargo build --release -p kallip-admin").overrideAttrs (old: {
+  admin = (buildCrate "cargo build --release -p kallipai-admin").overrideAttrs (old: {
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.installShellFiles ];
-    postInstall = (old.postInstall or "") + genCompletions [ "kallip-admin" ];
+    postInstall = (old.postInstall or "") + genCompletions [ "kallipai-admin" ];
   });
   # The lesche data-plane relay (tagma relay tunnels, app SSE, envelope
   # routing; pure HTTP, no shell-out deps). Its own image so the archeion and
   # lesche services deploy independently -- see
   # nix/packages/docker-images/lesche.nix.
-  lesche = buildCrate "cargo build --release -p kallip-lesche";
+  lesche = buildCrate "cargo build --release -p kallipai-lesche";
   # The files transfer service (content-addressed blobs, ACL'd spaces;
   # pure HTTP/Postgres, no shell-out deps). Its own image so it deploys
   # independently of the archeion/lesche pair -- see
   # nix/packages/docker-images/files.nix.
-  files = buildCrate "cargo build --release -p kallip-files";
+  files = buildCrate "cargo build --release -p kallipai-files";
   # The host/"tagma" side: the tagma service (agent host + in-process relay
   # connector) and the `kallip` CLI (whose `lesche send` subcommand the agent
   # invokes to address the user) share most of their closure, so one build
   # beats many. The container image (docker-images/tagma.nix) and the dev
-  # compose inject KALLIP_SKILLS_SEED explicitly, so this build stays bare
+  # compose inject KALLIPAI_SKILLS_SEED explicitly, so this build stays bare
   # -- the seed wrapper lives on `workspace` above.
   # Excludes archeion.
-  tagma = buildCrate "cargo build --release -p kallip-tagma -p kallip";
+  tagma = buildCrate "cargo build --release -p kallipai-tagma -p kallip";
   # The timer/notification daemon: fires schedules and injects them into agent
   # conversations via the tagma HTTP API. Separate attrs for the daemon and its
   # management CLI so each can be built/deployed independently.
-  cron-daemon = buildCrate "cargo build --release -p kallip-cron-daemon";
-  cron = buildCrate "cargo build --release -p kallip-cron";
+  cron-daemon = buildCrate "cargo build --release -p kallipai-cron-daemon";
+  cron = buildCrate "cargo build --release -p kallipai-cron";
   # Local daemon family: the stateless instance manager, its
   # kallipctl CLI, and the setuid-candidate spawn helper -- separate attrs
   # so the daemon (operator host) and helper (root-owned install path)
   # never share a deployment unit.
-  daemon = buildCrate "cargo build --release -p kallip-daemon";
+  daemon = buildCrate "cargo build --release -p kallipai-daemon";
   ctl = (buildCrate "cargo build --release -p kallipctl").overrideAttrs (old: {
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.installShellFiles ];
     postInstall = (old.postInstall or "") + genCompletions [ "kallipctl" ];
   });
-  daemon-spawn = buildCrate "cargo build --release -p kallip-daemon-spawn";
+  daemon-spawn = buildCrate "cargo build --release -p kallipai-daemon-spawn";
   # The HTTP front door of the daemon family: proxies the bare resource
   # to the daemon's UDS socket -- the only networked door the family
   # exposes, with its own host guard and auth modes.
-  instances = buildCrate "cargo build --release -p kallip-instances";
+  instances = buildCrate "cargo build --release -p kallipai-instances";
 }

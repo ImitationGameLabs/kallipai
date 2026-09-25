@@ -1,5 +1,5 @@
 //! The test-Postgres plumbing for the CLI's file e2e: one reusable
-//! container shared with the kallip-files integration suite (the same
+//! container shared with the kallipai-files integration suite (the same
 //! container name and db-name prefix, so whichever test binary starts it,
 //! everyone reuses it and every sweep cleans everyone's dead databases --
 //! ownership is encoded in the name via the creating pid). Needs Docker
@@ -16,7 +16,7 @@ use tokio::sync::OnceCell;
 static SHARED_PG_PORT: OnceCell<u16> = OnceCell::const_new();
 static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-// Deliberately identical to crates/kallip-files/tests/common: one shared
+// Deliberately identical to crates/kallipai-files/tests/common: one shared
 // container, one shared dead-db sweep domain.
 const CONTAINER_NAME: &str = "kallipai-testcontainers-pg-files-api";
 const DB_PREFIX: &str = "files_api_test_";
@@ -41,7 +41,7 @@ fn owner_dead(db_name: &str) -> bool {
 
 /// Best-effort, once-per-process cleanup of databases left dead by earlier
 /// runs (the reusable container never drops them). Same hygiene contract
-/// as the kallip-files suite's sweep; DROP DATABASE cannot run inside a
+/// as the kallipai-files suite's sweep; DROP DATABASE cannot run inside a
 /// transaction block, so candidates are selected first, then one
 /// autocommit DROP each, failures swallowed.
 async fn sweep_dead_test_dbs(port: u16) {

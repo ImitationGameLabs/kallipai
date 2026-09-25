@@ -17,18 +17,18 @@ Runtime tuning variables live in the environment variables reference:
 Some variables have cross-validation rules enforced at startup for the
 implicit-profile window:
 
-- `KALLIP_OUTPUT_RESERVE_TOKENS` must be strictly less than the active context window.
-- `KALLIP_SUMMARY_MAX_TOKENS` must not exceed the pinned budget, calculated as
-  `(the context window − KALLIP_OUTPUT_RESERVE_TOKENS) × KALLIP_PINNED_BUDGET_RATIO`.
+- `KALLIPAI_OUTPUT_RESERVE_TOKENS` must be strictly less than the active context window.
+- `KALLIPAI_SUMMARY_MAX_TOKENS` must not exceed the pinned budget, calculated as
+  `(the context window − KALLIPAI_OUTPUT_RESERVE_TOKENS) × KALLIPAI_PINNED_BUDGET_RATIO`.
 
 These are checked at startup against the implicit-profile window
-(`KALLIP_CONTEXT_WINDOW_TOKENS`); a config-file profile's window is checked per-profile
+(`KALLIPAI_CONTEXT_WINDOW_TOKENS`); a config-file profile's window is checked per-profile
 at spawn (and again, lazily, on within-set failover). Config-file profile
 windows were never validated at tagma startup.
 
-- `KALLIP_CONTEXT_THRESHOLDS` must have at least 2 values, sorted ascending, each in
+- `KALLIPAI_CONTEXT_THRESHOLDS` must have at least 2 values, sorted ascending, each in
   `1`–`99`.
-- `KALLIP_TOKEN_BUDGET_WARNINGS` must have at least 1 value, sorted ascending, each in
+- `KALLIPAI_TOKEN_BUDGET_WARNINGS` must have at least 1 value, sorted ascending, each in
   `1`–`99`.
 
 The injected-shell variable set has its own page:

@@ -1,11 +1,11 @@
 ---
-title: kallip-files HTTP API
-description: HTTP endpoints exposed by the kallip-files service.
+title: kallipai-files HTTP API
+description: HTTP endpoints exposed by the kallipai-files service.
 order: 50
 internal: true
 ---
 
-The file transfer service `kallip-files` hosts a small content API (default
+The file transfer service `kallipai-files` hosts a small content API (default
 `127.0.0.1:7400`; in deployments it sits behind a TLS-terminating reverse
 proxy). Blobs are content-addressed (SHA-256) and deduplicate by
 construction; record metadata (paths, owners, reference counts, the
@@ -14,10 +14,10 @@ facts stay in the archeion, reached through its `/internal/*` ControlPlane API
 over a shared secret on the private network, never through a public edge.
 The service reads its archeion connection from two required variables:
 
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `KALLIP_FILES_ARCHEION_INTERNAL_URL` | yes (service) | _(unset)_ | Archeion internal base URL for `/internal/*` ControlPlane calls. Must NOT be publicly reachable. |
-| `KALLIP_POLIS_INTERNAL_TOKEN_FILE` | yes (service) | _(unset)_ | File holding the platform-internal secret bearer for the archeion `/internal/*` API, provisioned by the archeion (0640 under its state directory) and read at boot by the lesche, files, and instances services. |
+| Variable                               | Required      | Default   | Description                                                                                                                                                                                                      |
+| ---                                    | ---           | ---       | ---                                                                                                                                                                                                              |
+| `KALLIPAI_FILES_ARCHEION_INTERNAL_URL` | yes (service) | _(unset)_ | Archeion internal base URL for `/internal/*` ControlPlane calls. Must NOT be publicly reachable.                                                                                                                 |
+| `KALLIPAI_POLIS_INTERNAL_TOKEN_FILE`   | yes (service) | _(unset)_ | File holding the platform-internal secret bearer for the archeion `/internal/*` API, provisioned by the archeion (0640 under its state directory) and read at boot by the lesche, files, and instances services. |
 
 ## Auth: Archeion-Verified Principals
 
@@ -33,7 +33,7 @@ principal:
 - User session tokens verify on the web face, not the bearer path: a User
   bearer resolves nowhere here.
 
-Authorization is the per-path ACL matrix ([`acl.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/platform/kallip-files/src/acl.rs)):
+Authorization is the per-path ACL matrix ([`acl.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/platform/kallipai-files/src/acl.rs)):
 every path lives inside a user's space: `/users/{user}/shared` (the
 space's shared region), `/users/{user}/tagmas/{tagma}` (one tagma's private
 region, `inbox/` inside it), `/users/{user}/inbox` (the user's delivery
@@ -57,7 +57,7 @@ without credentials.
 
 Upload content to a space path. The body streams straight into the content
 store in one pass (SHA-256 hashed en route), never buffered whole; a body
-over `KALLIP_FILES_MAX_BODY_SIZE_MB` is cut off with `413`. Re-uploading
+over `KALLIPAI_FILES_MAX_BODY_SIZE_MB` is cut off with `413`. Re-uploading
 identical bytes deduplicates onto the same blob. `201` returns:
 
 ```json
@@ -123,11 +123,11 @@ Admin-only: the delivery log, newest first. Optional `blob_id` filter,
 ### CLI
 
 The `kallip file` family (put/get/send/ls) is a thin face over these
-routes; credentials ride the environment (`KALLIP_POLIS_URL`, whose
+routes; credentials ride the environment (`KALLIPAI_POLIS_URL`, whose
 `/v1/files` derivation is the CLI's base URL, +
-`KALLIP_FILES_TOKEN`), never CLI flags. Server-side callers
+`KALLIPAI_FILES_TOKEN`), never CLI flags. Server-side callers
 authenticate as themselves: the tagma presents its registered
 enrollment credential for record media fetches. See
 [kallip CLI reference](kallip.md).
 
-Source: [`crates/platform/kallip-files/src/`](https://github.com/ImitationGameLabs/kallipai/tree/main/crates/platform/kallip-files/src/).
+Source: [`crates/platform/kallipai-files/src/`](https://github.com/ImitationGameLabs/kallipai/tree/main/crates/platform/kallipai-files/src/).

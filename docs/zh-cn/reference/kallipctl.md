@@ -16,7 +16,7 @@ start/stop/restart、持久化 env、日志与 blob 存储维护。守护进程�
 kallipctl generate bash    # 可选 zsh、fish、elvish、powershell
 ```
 
-nix 安装（`kallipctl`、`kallip-admin` 或 `workspace` 包）在构建期生成并
+nix 安装（`kallipctl`、`kallipai-admin` 或 `workspace` 包）在构建期生成并
 自动安装：bash、zsh、fish 补全落入各 shell 的标准 profile 路径；五种
 shell 的脚本同时保留在 `share/kallipai/completions/kallipctl/` 下，便于
 手工安装到其它环境。

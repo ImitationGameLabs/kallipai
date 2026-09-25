@@ -1,0 +1,25 @@
+[package]
+name = "kallipai-task"
+description = "Task ledger library: coarse state machine, event trail, hard gates, and closed-task content-addressed archives"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+kallipai-blob-store = { workspace = true }
+kallipai-common = { workspace = true }
+sea-orm = { workspace = true, features = ["sqlx-sqlite"] }
+sea-orm-migration = { workspace = true, features = ["sqlx-sqlite"] }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+thiserror = { workspace = true }
+tar = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+kallipai-testkit = { workspace = true }

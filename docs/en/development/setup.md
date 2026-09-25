@@ -5,7 +5,7 @@ order: 30
 internal: true
 ---
 
-Local development runs the full kallip stack under
+Local development runs the full kallipai stack under
 [Arion](https://docs.hercules-ci.com/arion/) (a Nix-native docker-compose). The
 dev archeion side lives at `compose/dev/polis.nix`; the repo-root
 `arion-compose.nix` is a one-line shim that re-exports it for arion's
@@ -22,7 +22,7 @@ For the NixOS host deployment, see
 
 - Arion + a Docker (or Podman with the docker socket) daemon. Under rootless
   docker, the Caddy service uses host networking and binds the edge port
-  (`KALLIP_EDGE_PORT`, default 443) on the host, which requires
+  (`KALLIPAI_EDGE_PORT`, default 443) on the host, which requires
   `sysctl net.ipv4.ip_unprivileged_port_start=80` (or
   running the daemon as root) when that port is below 1024.
 - [mkcert](https://github.com/FiloSottile/mkcert) for the dev TLS
@@ -30,29 +30,29 @@ For the NixOS host deployment, see
 - Copy `.env.example` to `.env` and fill in the LLM provider credentials. Arion
   reads `.env` via `service.env_file`.
 
-### Plain-http Quick Start (KALLIP_EDGE_TLS=off)
+### Plain-http Quick Start (KALLIPAI_EDGE_TLS=off)
 
-Set `KALLIP_EDGE_TLS=off` in `.env` for a plain-http edge with no mkcert
-and no DNS-trust setup. Keep `KALLIP_DOMAIN=localhost` (the default is
+Set `KALLIPAI_EDGE_TLS=off` in `.env` for a plain-http edge with no mkcert
+and no DNS-trust setup. Keep `KALLIPAI_DOMAIN=localhost` (the default is
 the prod domain; the quick start pins localhost) and move the edge off
-the privileged default port: `KALLIP_EDGE_PORT=8080`. Then `arion up -d`
+the privileged default port: `KALLIPAI_EDGE_PORT=8080`. Then `arion up -d`
 
 - `deno task dev` and open `http://app.localhost:8080`: browsers
 resolve every `*.localhost` name to the loopback interface, so no
 hosts-file entry is needed. Login surface: admin key + GitHub oauth;
 passkeys work on localhost out of the box (a browser secure-context
-exemption). For multi-machine access set `KALLIP_DOMAIN` to the LAN
+exemption). For multi-machine access set `KALLIPAI_DOMAIN` to the LAN
 host and resolve `*.<domain>` on your LAN DNS (passkey/Google then
 stay browser-blocked on plain http).
 
 Gotchas on this shape:
 
 - A browser that has visited the same hostname over https keeps the old
-  `Secure`-flagged `kallip_session` cookie and then refuses to store the
+  `Secure`-flagged `kallipai_session` cookie and then refuses to store the
   new non-`Secure` one: delete the old cookie first.
 - After editing `.env`, restart `deno task dev` and `arion up`: both
   read the env at startup, not per request.
-- The host you browse must match `KALLIP_DOMAIN` (`localhost` here);
+- The host you browse must match `KALLIPAI_DOMAIN` (`localhost` here);
   any other host is rejected.
 
 #### TLS + DNS Setup (the Default https Edge, One-Time)
@@ -62,25 +62,25 @@ cross-machine on the LAN (browsers only allow WebAuthn in a secure
 context, so plain HTTP + a raw LAN IP cannot work). This is a
 one-time setup, and the https edge is the default shape.
 
-The dev domain is `kallipai.lan`. The code default for `KALLIP_DOMAIN` is
+The dev domain is `kallipai.lan`. The code default for `KALLIPAI_DOMAIN` is
 the production domain (`kallipai.com`); `.env.example` sets it to
 `kallipai.lan` for local dev (so dev DNS/certs never clash with
 production), and you get that when you copy `.env.example` to `.env`.
 direnv's `dotenv` loads `.env` into the shell, so arion eval, `mkcert`,
 and vite all see it. The whole stack (the archeion/lesche env, the
 Caddyfile, and vite's dev-server shaping (allowedHosts, HMR websocket)
-) derives from `KALLIP_DOMAIN` plus the two edge knobs
-(`KALLIP_EDGE_TLS`, `KALLIP_EDGE_PORT`). The web app's own API URLs
+) derives from `KALLIPAI_DOMAIN` plus the two edge knobs
+(`KALLIPAI_EDGE_TLS`, `KALLIPAI_EDGE_PORT`). The web app's own API URLs
 read none of them: they derive at runtime from the browser location
 (see the offline-login notes below).
 
 1. Generate the leaf cert with `mkcert` (provided by the nix devShell). Run this
-   from the repo root; `$KALLIP_DOMAIN` comes from `.env` (`kallipai.lan`):
+   from the repo root; `$KALLIPAI_DOMAIN` comes from `.env` (`kallipai.lan`):
 
    ```sh
    mkdir -p compose/dev/.certs && \
      mkcert -cert-file compose/dev/.certs/cert.pem -key-file compose/dev/.certs/key.pem \
-       "*.$KALLIP_DOMAIN" "$KALLIP_DOMAIN"
+       "*.$KALLIPAI_DOMAIN" "$KALLIPAI_DOMAIN"
    ```
 
    This writes `cert.pem` / `key.pem` into `./compose/dev/.certs/` for
@@ -147,8 +147,8 @@ read none of them: they derive at runtime from the browser location
    `rootCA.pem` into the device's trust store). Tauri Android/iOS builds need
    the root trusted at the OS level, which is more involved.
 
-> **Scope:** this topology covers the **web** app (`packages/kallip-web`). The
-> Tauri Android shell (`packages/kallip-app`) is a separate target that still
+> **Scope:** this topology covers the **web** app (`packages/kallipai-web`). The
+> Tauri Android shell (`packages/kallipai-app`) is a separate target that still
 > defaults to `http://localhost:7100` / `:7200` and is not wired to the
 > `*.kallipai.lan` dev cert; see [Frontend package development](frontend.md).
 
@@ -156,7 +156,7 @@ read none of them: they derive at runtime from the browser location
 
 The stack comes up in two phases because the tagma's relay connector cannot
 enroll with the archeion until a real user signs up in the web UI and mints an
-enrollment code -- starting it with `KALLIP_POLIS_URL` set but no code
+enrollment code -- starting it with `KALLIPAI_POLIS_URL` set but no code
 degrades the tagma to local-only (it logs an error and keeps serving local
 agents; the lesche message route returns 503).
 
@@ -170,21 +170,21 @@ Dev is fronted by Caddy (see the one-time setup above): the browser loads the
 web app at `https://app.kallipai.lan` and calls the platform at
 `https://api.kallipai.lan`, all TLS-terminated by Caddy. Everything shares
 the one origin pair, so the session cookie stays first-party. The web app
-(`deno task dev` from `packages/kallip-web`) derives its API base in the
+(`deno task dev` from `packages/kallipai-web`) derives its API base in the
 browser from the origin it runs on: `https://app.kallipai.lan` yields
 `https://api.kallipai.lan`, and every client hangs its templates off the
 `/v1/<service>` paths under that base. The derived URLs already match the
 Caddy topology, so no `.env` override is needed for normal LAN dev;
 
 archeion and lesche also publish `7100` / `7200` to the host for plain-HTTP
-tooling: `kallip-admin` and curl keep using `http://localhost:7100` /
+tooling: `kallipai-admin` and curl keep using `http://localhost:7100` /
 `http://localhost:7200` directly, bypassing Caddy. The files service
 publishes `7400` on the loopback interface only; the browser reaches files
 only through the edge (the edge strips `/v1/files`), while the `kallip file`
-CLI points `KALLIP_POLIS_URL` at the dev edge (`https://api.kallipai.lan`) and presents a
-tagma bearer (`KALLIP_FILES_TOKEN`); see docs/en/reference/files-api.md.
+CLI points `KALLIPAI_POLIS_URL` at the dev edge (`https://api.kallipai.lan`) and presents a
+tagma bearer (`KALLIPAI_FILES_TOKEN`); see docs/en/reference/files-api.md.
 The tagma process itself authenticates to the files service with its
-registered enrollment credential: `KALLIP_FILES_TOKEN` provisions
+registered enrollment credential: `KALLIPAI_FILES_TOKEN` provisions
 CLI shells, and the tagma removes a leftover copy from its own
 environment at boot.
 
@@ -200,7 +200,7 @@ up. The `archeion_pgdata` volume persists across `arion down` / `up`, so this
 sub-flow runs **once per volume** -- check before doing it:
 
 ```sh
-KALLIP_ARCHEION_ADMIN_TOKEN=sk-admin-dev-0123456789abcdef0123456789abcdef cargo run -q -p kallip-admin -- --archeion-url http://localhost:7100 users list
+KALLIPAI_ARCHEION_ADMIN_TOKEN=sk-admin-dev-0123456789abcdef0123456789abcdef cargo run -q -p kallipai-admin -- --archeion-url http://localhost:7100 users list
 ```
 
 If `users list` already shows a row, a test account exists -- skip to minting
@@ -210,7 +210,7 @@ the enrollment code below. If the table is empty (fresh volume, or after a
 Open the web app at `https://app.kallipai.lan` and sign up with a username +
 passkey (or "Continue with GitHub/Google" once OAuth is configured). Once signed
 in, mint a `sk-enroll-...` enrollment code in the web UI and paste it into
-`.env` as `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE`, and set `KALLIP_AUTH_TOKEN` to
+`.env` as `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`, and set `KALLIPAI_AUTH_TOKEN` to
 the tagma's operator token. (The tagma's platform edge origin is wired by arion
 to the loopback edge -- `http://127.0.0.1:7443` -- so it
 needs no `.env` override.)
@@ -225,25 +225,25 @@ curl -si -X POST http://localhost:7100/auth/admin-login \
   -H 'Authorization: Bearer sk-admin-dev-0123456789abcdef0123456789abcdef'
 ```
 
-The `Set-Cookie: kallip_session=...` header is the session (see
-docs/en/reference/auth.md); pass it as `-b kallip_session=...` to mint an
+The `Set-Cookie: kallipai_session=...` header is the session (see
+docs/en/reference/auth.md); pass it as `-b kallipai_session=...` to mint an
 enrollment code at `POST /tagmata` on the same direct port (no
 `/v1/archeion` prefix) without signing up.
 
 ###### The admin token
 
-`kallip-admin` authenticates with the archeion's admin token. The clean path is to
+`kallipai-admin` authenticates with the archeion's admin token. The clean path is to
 pin it **before** first boot so the same known value works on every run: make
 sure `.env` contains
 
 ```text
-KALLIP_ARCHEION_ADMIN_TOKEN=sk-admin-dev-0123456789abcdef0123456789abcdef
+KALLIPAI_ARCHEION_ADMIN_TOKEN=sk-admin-dev-0123456789abcdef0123456789abcdef
 ```
 
 then run `arion up -d`. The dev compose pins this same fixture in the archeion
 service's environment (a local-platform login is enabled there, and that
 route refuses to boot with an operator-set token shorter than 32 chars),
-so `kallip-admin` authenticates with it -- no log scraping.
+so `kallipai-admin` authenticates with it -- no log scraping.
 
 The dev compose pins the fixture itself (the `environment` block in
 `polis.nix` overrides any legacy `.env` value), so a stack booted from
@@ -283,7 +283,7 @@ url = "https://relay2.example.com"
 ```
 
 Rules: a `polis.toml` entry and the env-configured single relay
-(`KALLIP_POLIS_URL`, optionally with `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE`)
+(`KALLIPAI_POLIS_URL`, optionally with `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`)
 are mutually exclusive -- unset the env vars or delete the file (the env
 vars keep working as one implicit `default` entry when the file is
 absent). Each entry enrolls with its own edge identity
@@ -297,7 +297,7 @@ cache key).
 
 Multi-edge acceptance runs on a second, parallel stack: the same compose
 file parameterized by env vars:
-`KALLIP_ARION_PROJECT_NAME=kallipai-dev2 KALLIP_ARION_ARCHEION_PORT=7101 KALLIP_ARION_LESCHE_PORT=7201 arion up -d archeion lesche`
+`KALLIPAI_ARION_PROJECT_NAME=kallipai-dev2 KALLIPAI_ARION_ARCHEION_PORT=7101 KALLIPAI_ARION_LESCHE_PORT=7201 arion up -d archeion lesche`
 -- with its own containers, volumes, and edge: the second stack's caddy
 routes its own `api.` host to those ports, giving the tagma a second
 platform origin. Enroll a code on each side, fill `polis.toml`, and watch the
@@ -312,7 +312,7 @@ receiving) is a manual residual item. Verify it by hand once per dual-archeion
 setup:
 
 1. Bring the archeion side and the web dev server up (`deno task dev` from
-   `packages/kallip-web`), open `https://app.kallipai.lan/register`, and
+   `packages/kallipai-web`), open `https://app.kallipai.lan/register`, and
    create a user (username + passkey).
 2. Open `https://app.kallipai.lan/tagmata`, pick the enrolled tagma, send a
    message, and wait for the agent reply.
@@ -321,7 +321,7 @@ setup:
 
    ```sh
    for c in kallipai-dev-lesche-postgres-1 kallipai-dev2-lesche-postgres-1; do
-     docker exec "$c" psql -U kallip -d kallip -c \
+     docker exec "$c" psql -U kallipai -d kallipai -c \
        'select room_id, seq, sender_kind, created_at
         from room_messages order by created_at desc limit 4'
    done
@@ -338,11 +338,11 @@ its record area (default `~/.local/state/kallipai/daemon/instances/`,
 one `<slug>.json` per instance); the record and the instance's own
 `runtime.json` are the only truth. `kallipctl` talks to it over a
 0600 control socket (0660 group-widened when
-`KALLIP_DAEMON_SOCKET_GROUP` is set; the system form):
+`KALLIPAI_DAEMON_SOCKET_GROUP` is set; the system form):
 
 ```sh
-kallipctl spawn <slug> <workspace> -e KALLIP_LLM_PROVIDER=... \
-    -e KALLIP_LLM_MODEL=... -e KALLIP_LLM_DEEPSEEK_API_KEY=...
+kallipctl spawn <slug> <workspace> -e KALLIPAI_LLM_PROVIDER=... \
+    -e KALLIPAI_LLM_MODEL=... -e KALLIPAI_LLM_DEEPSEEK_API_KEY=...
 kallipctl spawn <slug> <workspace> --user <account>  # drop to a pre-declared user
 kallipctl list           # every record in the record area
 kallipctl health <slug>  # pid liveness via /proc/<pid>/comm
@@ -354,17 +354,17 @@ launch anchor, and the pointer at the data directory
 (`~/.local/share/kallipai/tagmata/<slug>`); the tagma publishes
 `runtime.json` (pid + port + starttime) into the data directory on
 every boot. Env
-pairs must start with `KALLIP_` or be `RUST_LOG` or `PATH`; the reserved
-keys (`KALLIP_TAGMA_SLUG`,
-`KALLIP_WORKSPACE_ROOT`, `KALLIP_TAGMA_DATA_DIR`) are daemon-owned.
-`KALLIP_TAGMA_ADDR` is the one user-set listen knob: the daemon injects
+pairs must start with `KALLIPAI_` or be `RUST_LOG` or `PATH`; the reserved
+keys (`KALLIPAI_TAGMA_SLUG`,
+`KALLIPAI_WORKSPACE_ROOT`, `KALLIPAI_TAGMA_DATA_DIR`) are daemon-owned.
+`KALLIPAI_TAGMA_ADDR` is the one user-set listen knob: the daemon injects
 `127.0.0.1:0` unless any channel carries the key: a request pair,
 the harvested base, or the persisted record replayed on start; every
 channel is shape-checked as a `SocketAddr`,
 and a pinned port already in use only surfaces at bind time; spawn
 times out and rolls the record back; start keeps the record and
 reports the timeout pointing at the logs.
-A `start` relaunch drops `KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` from the
+A `start` relaunch drops `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE` from the
 replayed env once the instance holds stored relay credentials
 (`credentials/default/`) and scrubs it from the record in the same stroke:
 the code is single-use, and replaying it after a completed enrollment trips
@@ -372,11 +372,11 @@ tagma's conflicting-relay-configuration fail-fast. An instance whose
 enrollment never completed still replays the code, so a restart can retry.
 A daemon-managed tagma instance logs into the state tree:
 `~/.local/state/kallipai/tagmata/<slug>/logs/` (created 0700): daily-rolling
-files, the last 7 kept. Set `KALLIP_TAGMA_LOG_TO_STDERR=1`
+files, the last 7 kept. Set `KALLIPAI_TAGMA_LOG_TO_STDERR=1`
 (or `true`) to log to the terminal's stderr instead -- handy when manually
 debugging a managed data dir; any other value keeps the file default, and
 a log directory that cannot be resolved or created falls back to stderr.
-The web management face lives in `crates/platform/kallip-instances`: a
+The web management face lives in `crates/platform/kallipai-instances`: a
 pure JSON API at the root, proxying the daemon over its
 UDS socket. Platform mode: the archeion's internal face
 verifies the SPA's `sk-admin-` key (the operator-key login). The SPA
@@ -410,13 +410,13 @@ By default the tagma data, the agent workspace, and shared skills live in
 docker volumes. Set these env vars (absolute, colon-free host paths) to
 bind-mount them on the host instead:
 
-| Env var                       | Mounts                   | Use case                            |
-| ----------------------------- | ------------------------ | ----------------------------------- |
-| `KALLIP_ARION_DATA_PATH`      | `/var/lib/kallipai/tagmata/main` | keep tagma state on a known disk    |
-| `KALLIP_ARION_WORKSPACE_PATH` | `/workspace`             | make the agent's files host-visible |
-| `KALLIP_ARION_SKILLS_PATH`    | `/var/lib/kallipai/tagmata/main/skills` | curate shared skills on the host    |
+| Env var                         | Mounts                                  | Use case                            |
+| -----------------------------   | ------------------------                | ----------------------------------- |
+| `KALLIPAI_ARION_DATA_PATH`      | `/var/lib/kallipai/tagmata/main`        | keep tagma state on a known disk    |
+| `KALLIPAI_ARION_WORKSPACE_PATH` | `/workspace`                            | make the agent's files host-visible |
+| `KALLIPAI_ARION_SKILLS_PATH`    | `/var/lib/kallipai/tagmata/main/skills` | curate shared skills on the host    |
 
-Leave `KALLIP_SKILLS_ROOT` unset when using `KALLIP_ARION_SKILLS_PATH` -- the
+Leave `KALLIPAI_SKILLS_ROOT` unset when using `KALLIPAI_ARION_SKILLS_PATH` -- the
 former redirects `skill_dir()` away from the bind-mount target.
 
 ### Integration Tests

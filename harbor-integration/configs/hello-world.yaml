@@ -9,7 +9,7 @@
 jobs_dir: harbor-integration/jobs
 
 agents:
-  - import_path: kallip_harbor:KallipAdapter
+  - import_path: kallipai_harbor:KallipaiAdapter
     model_name: deepseek/deepseek-v4-flash
 
 datasets:

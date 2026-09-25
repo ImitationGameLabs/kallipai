@@ -1,0 +1,9 @@
+[package]
+name = "kallipai-daemon-spawn"
+description = "Privilege-dropping double-fork exec helper for the kallipai local daemon"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = { workspace = true }

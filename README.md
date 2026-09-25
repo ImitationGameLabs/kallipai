@@ -7,10 +7,10 @@ An agent harness designed from the start as a multi-agent system. Agents manage 
 ## Not another coding assistant
 
 Existing coding assistants excel at single-project, single-session work.
-kallip aims at a different problem: **cross-project, multi-agent coordination**
+kallipai aims at a different problem: **cross-project, multi-agent coordination**
 — without being a "multi-agent manager."
 
-Instead of a top-down orchestration layer, kallip is driven through a
+Instead of a top-down orchestration layer, kallipai is driven through a
 headless CLI: the agent itself decides when to spawn, switch between, and
 coordinate multiple agent instances across projects.
 
@@ -18,21 +18,21 @@ For planned direction, see the [roadmap](docs/en/roadmap.md).
 
 ## Architecture
 
-| Crate            | Description                                                                           |
-| ---------------- | ------------------------------------------------------------------------------------- |
-| `kallip-common`  | Shared types and command parsing                                                      |
-| `kallip-runtime` | Agent runtime: agent context management, policy engine, tool dispatch                 |
-| `kallip-shell`   | Provider-neutral shell/session tools for LLM applications (used by the runtime)       |
-| `kallip-tagma`   | HTTP API server hosting multiple agent instances                                      |
-| `kallip-client`  | Async client library for the tagma HTTP API                                           |
-| `kallip`         | Headless CLI — designed for agents to call, so an agent can manage other agents       |
-| `kallip-run`     | Agent runner for scripting and automation — CI, benchmarks, scripted workflows        |
+| Crate              | Description                                                                           |
+| ----------------   | ------------------------------------------------------------------------------------- |
+| `kallipai-common`  | Shared types and command parsing                                                      |
+| `kallipai-runtime` | Agent runtime: agent context management, policy engine, tool dispatch                 |
+| `kallipai-shell`   | Provider-neutral shell/session tools for LLM applications (used by the runtime)       |
+| `kallipai-tagma`   | HTTP API server hosting multiple agent instances                                      |
+| `kallipai-client`  | Async client library for the tagma HTTP API                                           |
+| `kallip`           | Headless CLI — designed for agents to call, so an agent can manage other agents       |
+| `kallipai-run`     | Agent runner for scripting and automation — CI, benchmarks, scripted workflows        |
 
 > Note: `just-llm-client` is an unrelated upstream crate, not part of this project.
 
 ## Agentic context management
 
-The most experimental part of the design. Context management in kallip is not
+The most experimental part of the design. Context management in kallipai is not
 hidden behind heuristics — the agent manages its own attention explicitly
 through tools:
 
@@ -95,13 +95,13 @@ without a human in the loop. Or it can surface the decision to a human.
 ## Quick start
 
 ```bash
-KALLIP_LLM_PROVIDER=deepseek \
-KALLIP_LLM_MODEL=deepseek-v4-flash \
-KALLIP_LLM_DEEPSEEK_API_KEY=your-key \
-cargo run -p kallip-tagma
+KALLIPAI_LLM_PROVIDER=deepseek \
+KALLIPAI_LLM_MODEL=deepseek-v4-flash \
+KALLIPAI_LLM_DEEPSEEK_API_KEY=your-key \
+cargo run -p kallipai-tagma
 
 # Web frontend (the human entry point): deno task dev
 ```
 
 For terminals and scripts, the headless `kallip` CLI and the
-`kallip-run` runner cover the same API.
+`kallipai-run` runner cover the same API.

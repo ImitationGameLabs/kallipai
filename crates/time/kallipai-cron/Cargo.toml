@@ -1,0 +1,16 @@
+[package]
+name = "kallipai-cron"
+description = "Management CLI for the kallipai-cron timer daemon"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallipai-cron-client = { workspace = true }
+kallipai-cron-common = { workspace = true }
+kallipai-common = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+time = { workspace = true }
+tracing-subscriber = { workspace = true }

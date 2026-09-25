@@ -1,14 +1,14 @@
 //! `inbox` command subtree of the `kallip` CLI (clap derive).
 
 use clap::{Args, Subcommand};
-use kallip_common::agentid::AgentId;
+use kallipai_common::agentid::AgentId;
 
 // ---------------------------------------------------------------------------
-// Inbox commands — self-scoped via KALLIP_ID
+// Inbox commands — self-scoped via KALLIPAI_ID
 // ---------------------------------------------------------------------------
 
 /// Manage this agent's message inbox. The acting agent is taken from
-/// `KALLIP_ID` (self-only).
+/// `KALLIPAI_ID` (self-only).
 #[derive(Subcommand)]
 pub(crate) enum InboxCommand {
     /// List messages in the inbox (newest first).
@@ -25,7 +25,7 @@ pub(crate) enum InboxCommand {
 
 #[derive(Args)]
 pub(crate) struct InboxListArgs {
-    /// Agent ID or role (defaults to KALLIP_ID).
+    /// Agent ID or role (defaults to KALLIPAI_ID).
     #[arg(long)]
     pub id: Option<AgentId>,
     /// Filter by status: unread, read, done.
@@ -45,7 +45,7 @@ pub(crate) struct InboxListArgs {
 
 #[derive(Args)]
 pub(crate) struct InboxReadArgs {
-    /// Agent ID or role (defaults to KALLIP_ID).
+    /// Agent ID or role (defaults to KALLIPAI_ID).
     #[arg(long)]
     pub id: Option<AgentId>,
     /// Message ID (positional).
@@ -58,14 +58,14 @@ pub(crate) struct InboxReadArgs {
 
 #[derive(Args)]
 pub(crate) struct InboxSummaryArgs {
-    /// Agent ID or role (defaults to KALLIP_ID).
+    /// Agent ID or role (defaults to KALLIPAI_ID).
     #[arg(long)]
     pub id: Option<AgentId>,
 }
 
 #[derive(Args)]
 pub(crate) struct InboxClearArgs {
-    /// Agent ID or role (defaults to KALLIP_ID).
+    /// Agent ID or role (defaults to KALLIPAI_ID).
     #[arg(long)]
     pub id: Option<AgentId>,
     /// Clear all messages, not just done ones.

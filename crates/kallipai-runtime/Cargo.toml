@@ -1,0 +1,53 @@
+[package]
+name = "kallipai-runtime"
+description = "Agent runtime: agent context, policy, and tool dispatch (tagma-only)"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+kallipai-blob-store = { workspace = true }
+kallipai-common = { workspace = true }
+kallipai-shell = { workspace = true }
+just-llm-client = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rable = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+futures-util = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+toml = { workspace = true }
+tokenx-rs = { workspace = true }
+
+[features]
+# Linux-only: enable landlock enforcement of `DirLockManager` write-locks in
+# the shell backend. Off by default; the coordinator (`dirlock`) and its
+# HTTP/CLI surface are always built (advisory mode without this feature).
+landlock = ["kallipai-shell/landlock"]
+# Linux-only: install the seccomp denylist as the last step of every spawned
+# `bash`'s pre_exec (after landlock/mount-ns setup). Implies `landlock`, since
+# the install site lives in the landlock spawn path. Off by default; the tagma
+# enables it. See `kallipai-shell`'s `seccomp` feature.
+seccomp = ["landlock", "kallipai-shell/seccomp"]
+# Test-only surface: `set_instance_roots_for_tests` (the instance-roots
+# override used by this crate's own tests and by dependent crates'
+# tests). Off by default; nothing test-only ships in a default build.
+testutils = []
+
+[dev-dependencies]
+temp-env = { workspace = true }
+kallipai-shell = { workspace = true, features = ["testutils"] }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+serial_test = { workspace = true }
+kallipai-testkit = { workspace = true }

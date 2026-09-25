@@ -13,7 +13,7 @@ let
     cargoArtifacts
     ;
 
-  project = "kallip";
+  project = "kallipai";
 in
 {
   # Run clippy (and deny all warnings) on the workspace source
@@ -66,7 +66,7 @@ in
   };
 
   # Temporarily commented out per operator directive 2026-09-17
-  # 15:40:17Z; reason = kallip-audit hits three RUSTSEC advisories
+  # 15:40:17Z; reason = kallipai-audit hits three RUSTSEC advisories
   # (2023-0071 / 2026-0173 / 2026-0190) pending a triage batch.
   # Restore when the triage batch lands.
   # "${project}-audit" = craneLib.cargoAudit {

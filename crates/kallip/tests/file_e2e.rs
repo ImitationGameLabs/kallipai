@@ -14,16 +14,16 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use kallip::file::FilesClient;
-use kallip_archeion_common::control_plane::EnrollmentLookup;
-use kallip_archeion_common::ids::{TagmaId, UserId};
-use kallip_archeion_common::internal_api::{
+use kallipai_archeion_common::control_plane::EnrollmentLookup;
+use kallipai_archeion_common::ids::{TagmaId, UserId};
+use kallipai_archeion_common::internal_api::{
     EnrollmentLookupRequest, VerifyBearerRequest, VerifyBearerResponse, WirePrincipal,
 };
-use kallip_files::LocalBackend;
-use kallip_files::auth::FilesControlPlane;
-use kallip_files::gc::GcConfig;
-use kallip_files::metadata::connect_and_migrate;
-use kallip_files::state::{AppState, FilesConfig};
+use kallipai_files::LocalBackend;
+use kallipai_files::auth::FilesControlPlane;
+use kallipai_files::gc::GcConfig;
+use kallipai_files::metadata::connect_and_migrate;
+use kallipai_files::state::{AppState, FilesConfig};
 use tempfile::TempDir;
 
 /// The mock registry: bearer tokens -> wire principals, tagmas -> their
@@ -197,7 +197,7 @@ async fn spawn_world() -> World {
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
-        axum::serve(listener, kallip_files::state::router(state))
+        axum::serve(listener, kallipai_files::state::router(state))
             .await
             .expect("serve");
     });

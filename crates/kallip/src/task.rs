@@ -7,8 +7,8 @@ use std::io::Cursor;
 
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
-use kallip_client::TagmaClient;
-use kallip_common::protocol::{
+use kallipai_client::TagmaClient;
+use kallipai_common::protocol::{
     ClosedReason, DOSSIER_MAX_BYTES, REPORT_MAX_BYTES, TaskCloseRequest, TaskConfirmFile,
     TaskConfirmRequest, TaskCreateRequest, TaskExport, TaskForceRequest, TaskListQuery,
     TaskNoteRequest, TaskStatus,
@@ -17,8 +17,8 @@ use kallip_common::protocol::{
 use crate::args::task::{
     TaskCloseReason, TaskCommand, TaskReportCommand, TaskTimeAxisArg, parse_time_anchor,
 };
-use kallip_common::timefmt;
-use kallip_common::timefmt::DisplayZone;
+use kallipai_common::timefmt;
+use kallipai_common::timefmt::DisplayZone;
 
 /// Resolve the zone absolute stamps render in: `--utc` wins, then the
 /// tagma's configured timezone, then the machine's local zone. The
@@ -140,8 +140,10 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                     if !dir.is_dir() {
                         return Err(anyhow!("dossier {} is not a directory", dir.display()));
                     }
-                    let packed =
-                        kallip_blob_store::archive::pack_dir(dir, Some(DOSSIER_MAX_BYTES as u64))?;
+                    let packed = kallipai_blob_store::archive::pack_dir(
+                        dir,
+                        Some(DOSSIER_MAX_BYTES as u64),
+                    )?;
                     Some(base64::engine::general_purpose::STANDARD.encode(packed))
                 }
                 None => None,
@@ -580,7 +582,7 @@ mod list_render_tests {
     /// one, else the raw actor) in event id order, from 1.
     #[test]
     fn confirm_versions_count_per_confirmer_by_event_order() {
-        let export = kallip_common::protocol::TaskExport {
+        let export = kallipai_common::protocol::TaskExport {
             id: 1,
             title: "t".into(),
             status: "review".into(),
@@ -621,8 +623,8 @@ mod list_render_tests {
         id: i64,
         actor: &str,
         role: Option<&str>,
-    ) -> kallip_common::protocol::EventExport {
-        kallip_common::protocol::EventExport {
+    ) -> kallipai_common::protocol::EventExport {
+        kallipai_common::protocol::EventExport {
             id,
             kind: "action".into(),
             name: "confirm".into(),

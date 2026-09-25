@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
-use kallip_client::TagmaClient;
-use kallip_common::declaration::parse_declaration;
-use kallip_common::protocol::{
+use kallipai_client::TagmaClient;
+use kallipai_common::declaration::parse_declaration;
+use kallipai_common::protocol::{
     RoleDisposition, TeamAction, TeamConvergeOutcome, TeamConvergeRequest, TeamStatusQuery,
 };
 use serde::{Deserialize, Serialize};
@@ -231,18 +231,18 @@ fn verdict_word(d: RoleDisposition) -> &'static str {
 /// Install the instance roots for the two commands that read this
 /// machine's instance tree (the converge's parked-area check and the
 /// lock rebuild). Same derivation as the tagma's boot: slug identity,
-/// `KALLIP_TAGMA_DATA_DIR` override, platform homes. Every other
+/// `KALLIPAI_TAGMA_DATA_DIR` override, platform homes. Every other
 /// subcommand is identity-free — it talks to the tagma over HTTP — so
 /// this stays scoped to the local-disk readers.
 fn install_local_instance_roots() -> Result<()> {
-    let slug = std::env::var("KALLIP_TAGMA_SLUG")
+    let slug = std::env::var("KALLIPAI_TAGMA_SLUG")
         .ok()
         .filter(|s| !s.is_empty())
         .context(concat!(
-            "KALLIP_TAGMA_SLUG is not set; this command reads the local instance tree — ",
-            "run it with the tagma's KALLIP_TAGMA_SLUG"
+            "KALLIPAI_TAGMA_SLUG is not set; this command reads the local instance tree — ",
+            "run it with the tagma's KALLIPAI_TAGMA_SLUG"
         ))?;
-    let data = match std::env::var_os("KALLIP_TAGMA_DATA_DIR").filter(|d| !d.is_empty()) {
+    let data = match std::env::var_os("KALLIPAI_TAGMA_DATA_DIR").filter(|d| !d.is_empty()) {
         Some(dir) => std::path::PathBuf::from(dir),
         None => dirs::data_dir()
             .context("could not determine platform data directory")?
@@ -258,8 +258,8 @@ fn install_local_instance_roots() -> Result<()> {
     let state = dirs::state_dir()
         .context("could not determine platform state directory")?
         .join("kallipai");
-    kallip_runtime::persistence::install_instance_roots(
-        kallip_runtime::persistence::InstanceRoots {
+    kallipai_runtime::persistence::install_instance_roots(
+        kallipai_runtime::persistence::InstanceRoots {
             data,
             config,
             state,
@@ -288,10 +288,10 @@ async fn run_converge(client: &TagmaClient, args: &TeamConvergeArgs) -> Result<(
             force: args.force,
         };
         let (outcome, resp) = client.team_converge(&req).await?;
-        let busy: Vec<&kallip_common::protocol::TeamRejection> = resp
+        let busy: Vec<&kallipai_common::protocol::TeamRejection> = resp
             .rejections
             .iter()
-            .filter(|r| r.kind == kallip_common::protocol::TeamRejectionKind::Busy)
+            .filter(|r| r.kind == kallipai_common::protocol::TeamRejectionKind::Busy)
             .collect();
         let only_busy = !busy.is_empty() && busy.len() == resp.rejections.len();
         if args.drain && outcome == TeamConvergeOutcome::Rejected && only_busy {
@@ -323,7 +323,7 @@ fn action_word(a: TeamAction) -> &'static str {
 
 /// Results counted per verb for the summary line.
 fn count_results(
-    results: &[kallip_common::protocol::TeamActionResult],
+    results: &[kallipai_common::protocol::TeamActionResult],
 ) -> BTreeMap<&'static str, usize> {
     let mut counts = BTreeMap::new();
     for key in [
@@ -354,7 +354,7 @@ fn count_results(
 /// declaration: name them loudly at lock-write time, so invisibility
 /// never masquerades as convergence. Best-effort — a scan failure
 /// warns, it never fails the converge.
-fn warn_orphaned_parked(declaration: &str, mapping: &[kallip_common::protocol::TeamLockEntry]) {
+fn warn_orphaned_parked(declaration: &str, mapping: &[kallipai_common::protocol::TeamLockEntry]) {
     // Converge just read and parsed this same file; a failure here is
     // still warned loudly instead of silently skipping the check, the
     // same treatment a scan failure gets below.
@@ -371,7 +371,7 @@ fn warn_orphaned_parked(declaration: &str, mapping: &[kallip_common::protocol::T
             return;
         }
     };
-    match kallip_runtime::persistence::scan_inactive() {
+    match kallipai_runtime::persistence::scan_inactive() {
         Ok(parked) => {
             for (id, meta) in parked {
                 if mapping.iter().any(|e| e.id.to_string() == id.to_string()) {
@@ -399,7 +399,7 @@ fn warn_orphaned_parked(declaration: &str, mapping: &[kallip_common::protocol::T
     }
 }
 fn write_lock_from(
-    resp: &kallip_common::protocol::TeamConvergeResponse,
+    resp: &kallipai_common::protocol::TeamConvergeResponse,
     lock_path: &Path,
 ) -> Result<()> {
     let lock = LockFile {
@@ -419,7 +419,7 @@ fn write_lock_from(
 fn render_converge(
     args: &TeamConvergeArgs,
     outcome: &TeamConvergeOutcome,
-    resp: &kallip_common::protocol::TeamConvergeResponse,
+    resp: &kallipai_common::protocol::TeamConvergeResponse,
     lock_path: &Path,
     declaration: &str,
 ) -> Result<()> {
@@ -448,8 +448,8 @@ fn render_converge(
         }
         for r in &resp.results {
             let marker = match r.outcome {
-                kallip_common::protocol::TeamRowOutcome::Applied => "ok",
-                kallip_common::protocol::TeamRowOutcome::Failed => "FAILED",
+                kallipai_common::protocol::TeamRowOutcome::Applied => "ok",
+                kallipai_common::protocol::TeamRowOutcome::Failed => "FAILED",
             };
             println!(
                 "  [{marker}] {:<14} {}: {}",
@@ -507,11 +507,11 @@ fn render_converge(
 async fn run_lock_rebuild(client: &TagmaClient, args: &TeamLockRebuildArgs) -> Result<()> {
     install_local_instance_roots()?;
     let live = client.list_agents(None).await?;
-    let parked = kallip_runtime::persistence::scan_inactive().context(
-        "cannot scan the inactive area (is KALLIP_TAGMA_DATA_DIR / KALLIP_TAGMA_SLUG set for this tagma?)",
+    let parked = kallipai_runtime::persistence::scan_inactive().context(
+        "cannot scan the inactive area (is KALLIPAI_TAGMA_DATA_DIR / KALLIPAI_TAGMA_SLUG set for this tagma?)",
     )?;
 
-    let now = kallip_common::timefmt::format_utc(kallip_common::timefmt::now_epoch());
+    let now = kallipai_common::timefmt::format_utc(kallipai_common::timefmt::now_epoch());
     let mut roles: Vec<LockRole> = Vec::new();
     for a in &live {
         // The root carries no lock-managed role; every other live member
@@ -660,7 +660,7 @@ mod tests {
         }
     }
 
-    use kallip_testkit::DevDir;
+    use kallipai_testkit::DevDir;
 
     fn write_scratch_dir(name: &str) -> DevDir {
         DevDir::new(&format!("lock-write-{name}"))

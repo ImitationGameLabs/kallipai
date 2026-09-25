@@ -1,0 +1,20 @@
+{
+  "name": "@kallipai/kallipai-lesche-client",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "deno check src",
+    "test": "deno test src"
+  },
+  "dependencies": {
+    "@kallipai/kallipai-common": "workspace:*",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@std/assert": "npm:@jsr/std__assert@^1.0.19"
+  }
+}

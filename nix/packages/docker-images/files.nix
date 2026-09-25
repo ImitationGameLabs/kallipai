@@ -22,14 +22,14 @@ in
 # and the environment. A separate image so the three server-side services
 # rebuild/redeploy independently.
 pkgs.dockerTools.buildImage {
-  name = "kallip-files";
+  name = "kallipai-files";
   tag = gitVersion;
   copyToRoot = [
     files
   ]
   ++ cacert;
   config = {
-    Cmd = [ "${files}/bin/kallip-files" ];
+    Cmd = [ "${files}/bin/kallipai-files" ];
     ExposedPorts = {
       "7400/tcp" = { };
     };

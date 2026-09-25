@@ -18,7 +18,7 @@ in
 # interpreter, which does not exist in standard container images.
 # We use patchelf to rewrite the interpreter and rpath so the
 # binaries run on any FHS-compliant Linux (Ubuntu, Debian, etc.).
-pkgs.runCommand "kallip-tarball"
+pkgs.runCommand "kallipai-tarball"
   {
     nativeBuildInputs = with pkgs; [
       gnutar
@@ -29,15 +29,15 @@ pkgs.runCommand "kallip-tarball"
     mkdir -p $out
     cp -r ${workspace}/bin bin
     chmod -R u+w bin
-    # The workspace's kallip-tagma is the skills-seed wrapper script; its
+    # The workspace's kallipai-tagma is the skills-seed wrapper script; its
     # store-path shebang and seed value do not exist on FHS hosts. Ship the
     # wrapped ELF in its place -- tarball targets carry no seed default.
-    if [ -e bin/.kallip-tagma-wrapped ]; then
-      mv bin/.kallip-tagma-wrapped bin/kallip-tagma
+    if [ -e bin/.kallipai-tagma-wrapped ]; then
+      mv bin/.kallipai-tagma-wrapped bin/kallipai-tagma
     fi
 
     # Patch ELF interpreter and remove Nix-specific rpath. Skip non-ELF
-    # files: the kallip-tagma skills-seed wrapper is a shell script, and
+    # files: the kallipai-tagma skills-seed wrapper is a shell script, and
     # patchelf errors out on anything but ELF headers.
     for bin in bin/*; do
       if [ "$(head -c 4 "$bin")" != $'\x7fELF' ]; then
@@ -47,5 +47,5 @@ pkgs.runCommand "kallip-tarball"
       patchelf --remove-rpath "$bin"
     done
 
-    tar -czf $out/kallip-${gitVersion}-linux-x86_64.tar.gz bin/
+    tar -czf $out/kallipai-${gitVersion}-linux-x86_64.tar.gz bin/
   ''

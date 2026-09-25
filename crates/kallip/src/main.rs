@@ -23,20 +23,20 @@ use args::{
 };
 use clap::{CommandFactory, Parser};
 use kallip::file::FilesClient;
-use kallip_client::TagmaClient;
-use kallip_client::types::LescheSessionEntry;
-use kallip_common::agentid::AgentId;
-use kallip_common::policy::{ExecDecision, ExecOverride};
-use kallip_common::protocol::ProfileSetUpdateRequest;
-use kallip_common::timefmt;
-use kallip_common::tokens::parse_token_amount;
-use kallip_runtime::profile::{ProfileConfig, ProfileSet};
+use kallipai_client::TagmaClient;
+use kallipai_client::types::LescheSessionEntry;
+use kallipai_common::agentid::AgentId;
+use kallipai_common::policy::{ExecDecision, ExecOverride};
+use kallipai_common::protocol::ProfileSetUpdateRequest;
+use kallipai_common::timefmt;
+use kallipai_common::tokens::parse_token_amount;
+use kallipai_runtime::profile::{ProfileConfig, ProfileSet};
 use uuid::Uuid;
 
-/// Read agent ID from KALLIP_ID env var.
+/// Read agent ID from KALLIPAI_ID env var.
 pub(crate) fn agent_id_from_env() -> anyhow::Result<AgentId> {
-    std::env::var("KALLIP_ID")
-        .map_err(|_| anyhow::anyhow!("KALLIP_ID env var not set"))
+    std::env::var("KALLIPAI_ID")
+        .map_err(|_| anyhow::anyhow!("KALLIPAI_ID env var not set"))
         .and_then(|s| s.parse::<AgentId>().map_err(Into::into))
 }
 /// Read the full stdin as a text payload (multiline — pipe, heredoc, or
@@ -55,9 +55,9 @@ fn read_text_stdin() -> Result<String> {
 /// Shared by `profile-set list` and the per-agent `status` deep view so both
 /// faces read the same fact.
 fn modality_list(
-    effective: std::collections::BTreeSet<kallip_common::protocol::Modality>,
+    effective: std::collections::BTreeSet<kallipai_common::protocol::Modality>,
 ) -> String {
-    kallip_common::protocol::Modality::ALL
+    kallipai_common::protocol::Modality::ALL
         .iter()
         .filter(|m| effective.contains(m))
         .map(|m| m.as_str())
@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
                 let resp = client.post_message(&id, &text, args.defer).await?;
                 println!(
                     "{}",
-                    kallip_common::message::message_sent_line(
+                    kallipai_common::message::message_sent_line(
                         id.as_ref(),
                         &text,
                         resp.queue_depth,
@@ -214,13 +214,13 @@ async fn main() -> Result<()> {
             }
             AgentCommand::Activity(args) => {
                 // Activity is self-reported: the target is always the calling
-                // agent (KALLIP_ID); the tagma only accepts this from the
+                // agent (KALLIPAI_ID); the tagma only accepts this from the
                 // agent itself or an operator.
                 let id = agent_id_from_env()?;
                 client
                     .update_activity(
                         &id,
-                        kallip_common::protocol::UpdateActivityRequest {
+                        kallipai_common::protocol::UpdateActivityRequest {
                             activity: args.activity,
                         },
                     )
@@ -232,7 +232,7 @@ async fn main() -> Result<()> {
         },
         Commands::Lesche(cmd) => match cmd {
             LescheCommand::Send(args) => {
-                // Self-only: send as the calling agent (KALLIP_ID). The text
+                // Self-only: send as the calling agent (KALLIPAI_ID). The text
                 // is the full stdin (multiline). Deliver via the tagma's relay
                 // first, then print the stable marker only on success — so a
                 // failed POST (relay down, burst cap, etc.) does not let local
@@ -242,7 +242,7 @@ async fn main() -> Result<()> {
                 client
                     .post_message_delivery(&id, &text, args.room.as_deref(), args.tagma.as_deref())
                     .await?;
-                println!("{}", kallip_common::message::marker_line(&text));
+                println!("{}", kallipai_common::message::marker_line(&text));
             }
             LescheCommand::Rooms => {
                 // Self-only: list the calling tagma's joined rooms.
@@ -303,7 +303,7 @@ async fn main() -> Result<()> {
                     // through verbatim.
                     let prompt = prompt_from_stdin_text(read_text_stdin()?);
                     let id = client
-                        .spawn(kallip_common::protocol::CreateAgentRequest {
+                        .spawn(kallipai_common::protocol::CreateAgentRequest {
                             workspace_root: args.workspace_root,
                             skills: args.skills,
                             prompt,
@@ -314,7 +314,7 @@ async fn main() -> Result<()> {
                             profile_set: args.profile_set,
                             permission_class: args.permission_class,
                             delegation_mode: args.full_handoff.then(|| {
-                                kallip_common::protocol::DELEGATION_FULL_HANDOFF.to_owned()
+                                kallipai_common::protocol::DELEGATION_FULL_HANDOFF.to_owned()
                             }),
                         })
                         .await?;
@@ -347,7 +347,7 @@ async fn main() -> Result<()> {
                     let updated = client
                         .update_agent_metadata(
                             &id,
-                            kallip_common::protocol::UpdateAgentMetadataRequest {
+                            kallipai_common::protocol::UpdateAgentMetadataRequest {
                                 role: args.role.clone(),
                                 description: args.description,
                             },
@@ -380,7 +380,7 @@ async fn main() -> Result<()> {
                     None => None,
                 };
                 let resp = client
-                    .list_approvals(&kallip_client::ListApprovalsParams {
+                    .list_approvals(&kallipai_client::ListApprovalsParams {
                         offset: args.offset,
                         limit: args.limit,
                         requested_by,
@@ -669,10 +669,10 @@ fn parse_record_id(raw: &str) -> Result<Uuid> {
 
 fn resolve_id(id: Option<AgentId>) -> Result<AgentId, anyhow::Error> {
     id.map(Ok).unwrap_or_else(|| {
-        std::env::var("KALLIP_ID")
+        std::env::var("KALLIPAI_ID")
             .map(|s| s.parse::<AgentId>())
-            .map_err(|_| anyhow::anyhow!("KALLIP_ID not set and --id not given"))?
-            .map_err(|e| anyhow::anyhow!("invalid KALLIP_ID: {e}"))
+            .map_err(|_| anyhow::anyhow!("KALLIPAI_ID not set and --id not given"))?
+            .map_err(|e| anyhow::anyhow!("invalid KALLIPAI_ID: {e}"))
     })
 }
 
@@ -687,7 +687,7 @@ fn now_epoch() -> u64 {
 }
 
 fn print_inbox_entry(
-    e: &kallip_client::InboxEntry,
+    e: &kallipai_client::InboxEntry,
     now: u64,
     relative: bool,
     zone: &timefmt::DisplayZone,
@@ -705,7 +705,7 @@ fn print_inbox_entry(
     println!("body: {}", e.body);
 }
 
-fn print_approval_entry(a: &kallip_common::protocol::ApprovalEntry) {
+fn print_approval_entry(a: &kallipai_common::protocol::ApprovalEntry) {
     println!("id: {}", a.id);
     println!("status: {}", a.status);
     println!("requested_by: {}", a.requested_by);
@@ -722,8 +722,8 @@ fn print_approval_entry(a: &kallip_common::protocol::ApprovalEntry) {
 
 /// Triage rank for the fleet overview: anomalies first (faulted, parked,
 /// waiting), healthy work later. Lower sorts earlier.
-fn state_rank(s: kallip_common::protocol::AgentState) -> u8 {
-    use kallip_common::protocol::AgentState;
+fn state_rank(s: kallipai_common::protocol::AgentState) -> u8 {
+    use kallipai_common::protocol::AgentState;
     match s {
         AgentState::Faulted => 0,
         AgentState::Parked => 1,
@@ -738,7 +738,7 @@ fn state_rank(s: kallip_common::protocol::AgentState) -> u8 {
 /// fields on their own lines. The description is untruncated and the
 /// workspace is the full absolute path — these views are read end-to-end,
 /// not scanned, so density would only hurt.
-fn render_agent_block(a: &kallip_common::protocol::AgentSummary, now: u64) -> String {
+fn render_agent_block(a: &kallipai_common::protocol::AgentSummary, now: u64) -> String {
     let since = a
         .state_since
         .map(|t| timefmt::format_relative(now, t))
@@ -754,7 +754,7 @@ fn render_agent_block(a: &kallip_common::protocol::AgentSummary, now: u64) -> St
 
 /// Print agent blocks with one blank line between them; both the overview
 /// and the directory render through this single path.
-fn print_agent_blocks(agents: &[kallip_common::protocol::AgentSummary], now: u64) {
+fn print_agent_blocks(agents: &[kallipai_common::protocol::AgentSummary], now: u64) {
     let blocks: Vec<String> = agents.iter().map(|a| render_agent_block(a, now)).collect();
     println!("{}", blocks.join("\n\n"));
 }
@@ -811,7 +811,7 @@ async fn print_agent_directory(client: &TagmaClient) -> Result<()> {
 }
 /// Display label for an agent: its role, falling back to the id when no role
 /// is set so every row is identifiable.
-fn agent_label(a: &kallip_common::protocol::AgentSummary) -> String {
+fn agent_label(a: &kallipai_common::protocol::AgentSummary) -> String {
     if a.role.is_empty() {
         a.id.to_string()
     } else {
@@ -820,7 +820,7 @@ fn agent_label(a: &kallip_common::protocol::AgentSummary) -> String {
 }
 
 /// Print a list of agents one row per line, or `empty_msg` when there are none.
-fn print_agent_list(agents: &[kallip_common::protocol::AgentSummary], empty_msg: &str) {
+fn print_agent_list(agents: &[kallipai_common::protocol::AgentSummary], empty_msg: &str) {
     if agents.is_empty() {
         println!("{empty_msg}");
         return;
@@ -843,12 +843,12 @@ fn print_agent_list(agents: &[kallip_common::protocol::AgentSummary], empty_msg:
             line.push_str(reason);
         }
         match a.lock {
-            Some(kallip_common::protocol::LockState::Missing) => {
+            Some(kallipai_common::protocol::LockState::Missing) => {
                 // A live Normal-class agent without its workspace lock is the
                 // lock-evaporation signature — make it unmissable.
                 line.push_str("  !! lock=missing");
             }
-            Some(kallip_common::protocol::LockState::Held) => line.push_str("  lock=held"),
+            Some(kallipai_common::protocol::LockState::Held) => line.push_str("  lock=held"),
             None => {}
         }
         println!("{line}");
@@ -856,7 +856,7 @@ fn print_agent_list(agents: &[kallip_common::protocol::AgentSummary], empty_msg:
 }
 
 /// Print an agent's role/description summary (e.g. after a metadata update).
-fn print_agent_summary(updated: &kallip_common::protocol::AgentSummary) {
+fn print_agent_summary(updated: &kallipai_common::protocol::AgentSummary) {
     println!(
         "{}  role={}  description={}",
         updated.id,

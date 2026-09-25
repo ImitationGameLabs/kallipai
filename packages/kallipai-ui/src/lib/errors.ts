@@ -1,0 +1,67 @@
+// Headless error classification. Projects a raw thrown value (TransportError,
+// KallipaiError, or anything else) into the { title, detail, hint } a user-facing
+// banner can render, so we never leak internal paths like
+// `tagma request failed: /agents/<id>/events` to the user. The full error
+// (with cause chain) is logged separately to the browser console by the caller.
+//
+// Pure, no runes, no app imports — stays reusable across consuming apps (the
+// paraglide messages it renders are this package's own compiled output).
+
+import { KallipaiError, TransportError } from "@kallipai/kallipai-common";
+import {
+  error_couldnt_reach,
+  error_hint_check_settings,
+  error_request_rejected,
+  error_tagma,
+  error_unknown,
+} from "../paraglide/messages.js";
+
+export interface ErrorView {
+  readonly title: string;
+  readonly detail?: string;
+  readonly hint?: string;
+}
+
+// instanceof can break if a bundler ever duplicates @kallipai/kallipai-common;
+// both classes set `.name`, so accept by name as a fallback.
+function isTransportError(e: unknown): e is TransportError {
+  return (
+    e instanceof TransportError ||
+    (e instanceof Error && e.name === "TransportError")
+  );
+}
+
+function isKallipaiError(e: unknown): e is KallipaiError {
+  return (
+    e instanceof KallipaiError ||
+    (e instanceof Error && e.name === "KallipaiError")
+  );
+}
+
+export function classifyError(e: unknown): ErrorView {
+  if (isKallipaiError(e)) {
+    // Guard `.api`: the name-based fallback above can match an Error renamed to
+    // "KallipaiError" that lacks the `api` field, and this runs in a $derived, so
+    // a throw here would blank the layout.
+    const status = e.api?.status;
+    // 4xx -> the request itself was rejected (user-actionable); 5xx -> the
+    // tagma failed server-side.
+    return {
+      title:
+        typeof status === "number" && status >= 500
+          ? error_tagma()
+          : error_request_rejected(),
+      detail: e.api?.message,
+    };
+  }
+  if (isTransportError(e)) {
+    return {
+      title: error_couldnt_reach(),
+      hint: error_hint_check_settings(),
+    };
+  }
+  return {
+    title: error_unknown(),
+    detail: e instanceof Error ? e.message : undefined,
+  };
+}

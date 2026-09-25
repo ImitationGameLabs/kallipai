@@ -4,7 +4,7 @@ AI Agent working guide. This document provides code structure and decision rules
 
 ## Naming
 
-The project name is `kallipai` (literally `kallip` + `ai`) and its technical stem is `kallip`. The brand has one written form, `KallipAI`; use it on every human-facing surface: the README and doc H1, and prose where the brand appears. Use `kallip` for every technical surface: crate names, binaries, Rust module paths, env var prefixes (`KALLIP_*`), on-disk paths, container paths/volumes, Nix attrs, Cargo/flake `description` strings, User-Agent, Harbor `name()`. When a sentence is mixed, prefer `kallip`. For the history and rationale behind these names, see [naming.md](docs/en/naming.md).
+The project name is `kallipai` (literally `kallip` + `ai`). The brand has one written form, `KallipAI`; use it on every human-facing surface: the README and doc H1, and prose where the brand appears. Use `kallipai` for every technical surface: crate names, package names, binaries, Rust module paths, env var prefixes (`KALLIPAI_*`), on-disk paths, container paths/volumes, Nix attrs, Cargo/flake `description` strings, User-Agent. Two grandfathered exceptions keep their names: the headless CLI `kallip` and the operator CLI `kallipctl`. When a sentence is mixed, prefer `kallipai`. For the name's origin and the rules behind it, see [naming.md](docs/en/naming.md).
 
 ## Comments
 
@@ -16,38 +16,38 @@ Code and test comments are self-contained: do not reference out-of-repo document
 .
 ├── flake.nix                  # Flake entry point
 ├── crates/                    # Rust workspace members
-│   ├── kallip-common/    # Shared types and command parsing
-│   ├── kallip-runtime/   # Agent runtime: agent context, policy, tool dispatch (tagma-only)
-│   ├── kallip-shell/     # Reusable shell/session tools for LLM applications
+│   ├── kallipai-common/   # Shared types and command parsing
+│   ├── kallipai-runtime/  # Agent runtime: agent context, policy, tool dispatch (tagma-only)
+│   ├── kallipai-shell/    # Reusable shell/session tools for LLM applications
 │   ├── kallip/           # Headless CLI for agent (tagma client)
-│   ├── kallip-tagma/    # HTTP API server hosting multiple agent instances
-│   ├── kallip-run/       # Agent runner for scripting and benchmarking
-│   ├── kallip-client/    # Tagma client library
+│   ├── kallipai-tagma/   # HTTP API server hosting multiple agent instances
+│   ├── kallipai-run/      # Agent runner for scripting and benchmarking
+│   ├── kallipai-client/   # Tagma client library
 │   ├── time/             # Timer/scheduling subsystem: cron daemon that fires schedules and injects them into conversations, plus its wire types, HTTP client, and management CLI
 │   ├── platform/        # Public-internet relay subsystem (servers + wire types + clients + admin + E2E crypto)
-│       ├── kallip-archeion/        # Control-plane relay server
-│       ├── kallip-lesche/       # Data-plane relay server
-│       ├── kallip-archeion-common/ # Wire types for the relay and its clients
-│       ├── kallip-lesche-common/ # Wire types for the relay data plane
-│       ├── kallip-e2ee/         # End-to-end encryption primitives (Ed25519 device key, X3DH KEX, AEAD)
-│       ├── kallip-archeion-client/ # Archeion relay HTTP client (enroll + admin surface)
-│       ├── kallip-lesche-client/ # Lesche data-plane relay HTTP client
-│       ├── kallip-admin/        # Headless archeion admin CLI (sk-admin HTTP client)
-│       ├── kallip-instances/   # Local instance management service (web API + static UI over the daemon)
+│       ├── kallipai-archeion/     # Control-plane relay server
+│       ├── kallipai-lesche/      # Data-plane relay server
+│       ├── kallipai-archeion-common/ # Wire types for the relay and its clients
+│       ├── kallipai-lesche-common/ # Wire types for the relay data plane
+│       ├── kallipai-e2ee/        # End-to-end encryption primitives (Ed25519 device key, X3DH KEX, AEAD)
+│       ├── kallipai-archeion-client/ # Archeion relay HTTP client (enroll + admin surface)
+│       ├── kallipai-lesche-client/ # Lesche data-plane relay HTTP client
+│       ├── kallipai-admin/        # Headless archeion admin CLI (sk-admin HTTP client)
+│       ├── kallipai-instances/  # Local instance management service (web API + static UI over the daemon)
 │   └── daemon/          # Local instance management subsystem (UDS daemon + wire types + clients + spawn helper + CLI)
-│       ├── kallip-daemon/        # Stateless, directory-driven manager for local instances (UDS control socket)
-│       ├── kallip-daemon-common/ # Wire types for the daemon protocol
-│       ├── kallip-daemon-client/ # UDS client library for the daemon
-│       ├── kallip-daemon-spawn/  # Detached spawn helper that launches instance processes
+│       ├── kallipai-daemon/     # Stateless, directory-driven manager for local instances (UDS control socket)
+│       ├── kallipai-daemon-common/ # Wire types for the daemon protocol
+│       ├── kallipai-daemon-client/ # UDS client library for the daemon
+│       ├── kallipai-daemon-spawn/  # Detached spawn helper that launches instance processes
 │       └── kallipctl/            # Management CLI for the daemon
 ├── packages/                  # JS/TS workspace (Deno-first; see below)
-│   ├── kallip-common/         # Transport-agnostic shared types + SSE parser
-│   ├── kallip-client/         # Direct tagma HTTP+SSE client (offline path)
-│   ├── kallip-archeion-client/   # Archeion control-plane + WebAuthn client
-│   ├── kallip-lesche-client/  # Lesche data-plane client (online E2EE path)
-│   ├── kallip-ui/             # Shared SvelteKit UI library
-│   ├── kallip-web/            # SvelteKit web app
-│   └── kallip-app/            # Tauri (Android) app shell
+│   ├── kallipai-common/         # Transport-agnostic shared types + SSE parser
+│   ├── kallipai-client/         # Direct tagma HTTP+SSE client (offline path)
+│   ├── kallipai-archeion-client/   # Archeion control-plane + WebAuthn client
+│   ├── kallipai-lesche-client/  # Lesche data-plane client (online E2EE path)
+│   ├── kallipai-ui/             # Shared SvelteKit UI library
+│   ├── kallipai-web/            # SvelteKit web app
+│   └── kallipai-app/            # Tauri (Android) app shell
 ├── docs/                      # Project documentation
 │   └── en/                   # Documentation tree the site renders
 │       ├── architecture.md       # System architecture, tagma design, policy
@@ -61,7 +61,7 @@ Code and test comments are self-contained: do not reference out-of-repo document
 │           ├── tagma-api.md  # HTTP API endpoints
 │           ├── env/          # Environment variable reference
 │           ├── kallip.md     # `kallip` headless CLI for agent
-│           └── kallip-run.md # `kallip-run` agent runner for scripting
+│           └── kallipai-run.md # `kallipai-run` agent runner for scripting
 └── nix/
       ├── common.nix           # Core config (crate paths, dependencies)
       ├── checks.nix           # CI checks

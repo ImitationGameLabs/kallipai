@@ -1,0 +1,22 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/forms";
+@plugin "@tailwindcss/typography";
+@import "@fontsource/fira-mono";
+
+/* Scan the shared UI package so Tailwind generates the utility classes its
+   Svelte components use (it lives outside this package's source tree). */
+@source "../../kallipai-ui/src";
+
+@import "@skeletonlabs/skeleton";
+@import "@skeletonlabs/skeleton-svelte";
+@import "@skeletonlabs/skeleton/themes/rocket";
+
+/* kallipai-level theme customizations live in the shared UI package
+   so both apps import one source. */
+@import "../../kallipai-ui/src/styles/theme.css";
+@import "../../kallipai-ui/src/styles/markdown.css";
+
+html,
+body {
+  height: 100%;
+}

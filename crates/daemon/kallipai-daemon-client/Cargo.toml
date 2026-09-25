@@ -1,0 +1,12 @@
+[package]
+name = "kallipai-daemon-client"
+description = "UDS client library for the kallipai local daemon"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallipai-daemon-common = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }

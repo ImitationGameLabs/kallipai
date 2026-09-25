@@ -8,7 +8,7 @@
 # Local drafts
 /.draft/
 
-# Test scratch data (sandbox integration tests under kallip-tagma)
+# Test scratch data (sandbox integration tests under kallipai-tagma)
 /.testdata/
 
 # Nix

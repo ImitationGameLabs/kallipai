@@ -47,7 +47,7 @@ The type names the category of change, not the file it touches.
 ## Choosing the scope
 
 The scope names the module or crate the change lives in — not the
-mechanism. A change to `kallip-tagma`'s relay module is
+mechanism. A change to `kallipai-tagma`'s relay module is
 `feat(tagma):` or `fix(relay):`, not `feat(tokio):` just because it
 touches async code. Omit the scope when the change is cross-cutting
 (a project-wide rename, a repo-level docs pass), because a scope that
@@ -105,7 +105,7 @@ feat(rooms): add multi-member room chat
 - Multi-member rooms: create, invite, open-access join, and chat
   with per-member presence and room history.
 - Public profiles: user and tagma profile pages backed by new
-  agora endpoints.
+  archeion endpoints.
 ```
 
 *Avoid:* packing each bullet with implementation detail (function
@@ -126,12 +126,12 @@ Mark a breaking change with `!` after the type/scope and a
 these without reading every body.
 
 ```text
-refactor(tagma)!: rename kallip-daemon to kallip-tagma
+refactor(tagma)!: rename kallipai-daemon to kallipai-tagma
 
 <body>
 
 BREAKING CHANGE: the crate, binary, env vars, and CLI flags rename.
-Operators must update KALLIP_DAEMON_ADDR to KALLIP_TAGMA_ADDR.
+Operators must update every KALLIPAI_* variable in their environment.
 ```
 
 The footer should name *what breaks for the consumer* — env vars,

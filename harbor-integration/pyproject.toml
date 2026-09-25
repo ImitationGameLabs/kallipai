@@ -1,7 +1,7 @@
 [project]
-name = "kallip-harbor"
+name = "kallipai-harbor"
 version = "0.1.0"
-description = "Harbor benchmarking adapter for kallip"
+description = "Harbor benchmarking adapter for kallipai"
 requires-python = ">=3.12"
 dependencies = []
 
@@ -10,4 +10,4 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["kallip_harbor*"]
+include = ["kallipai_harbor*"]

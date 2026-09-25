@@ -1,0 +1,41 @@
+[package]
+name = "kallipai-files"
+description = "Content-addressed blob storage for the kallipai file transfer service"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kallipai-files"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+thiserror = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "net"] }
+time = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+kallipai-archeion-common = { workspace = true }
+kallipai-blob-store = { workspace = true }
+kallipai-common = { workspace = true, features = ["axum", "logging"] }
+axum = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
+futures-util = { workspace = true }
+http-body-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+cookie = { workspace = true }
+
+[dev-dependencies]
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+testcontainers = { workspace = true, features = ["reusable-containers"] }
+testcontainers-modules = { workspace = true }
+tower = { workspace = true, features = ["util"] }

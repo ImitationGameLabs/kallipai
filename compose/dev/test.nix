@@ -13,14 +13,14 @@
 # integration-tests closure and the shared shell/CA layer from
 # container-shared.nix. A flat single-purpose file here mirrors
 # compose/dev/tagma.nix and lets arion-compose.nix drop the old
-# KALLIP_ARION_MODE switch entirely.
+# KALLIPAI_ARION_MODE switch entirely.
 { pkgs, ... }:
 let
   # Load via git+file URL (not a bare path) so getFlake applies fetchGit's VCS
   # filtering and the resolved package matches `nix build
-  # .#kallip-integration-tests` bit-for-bit.
+  # .#kallipai-integration-tests` bit-for-bit.
   flake = builtins.getFlake "git+file://${toString ../..}";
-  integrationTests = flake.packages.x86_64-linux.kallip-integration-tests;
+  integrationTests = flake.packages.x86_64-linux.kallipai-integration-tests;
 
   shared = import ../../nix/packages/container-shared.nix { inherit pkgs; };
   inherit (shared)
@@ -89,8 +89,8 @@ in
         PATH = "${integrationTests}/bin:${binPath}";
         # Explicit agent-bin dir for resolve_bin -- current_exe() resolves
         # the buildEnv symlink into a sub-store path, not the shared bin/.
-        KALLIP_BIN_DIR = "${integrationTests}/bin";
-        KALLIP_TESTDATA_DIR = "/testdata";
+        KALLIPAI_BIN_DIR = "${integrationTests}/bin";
+        KALLIPAI_TESTDATA_DIR = "/testdata";
         HOME = "/var/lib/kallipai";
         RUST_LOG = "info";
       };

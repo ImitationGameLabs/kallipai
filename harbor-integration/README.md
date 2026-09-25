@@ -1,8 +1,8 @@
 # kallipai Harbor Integration
 
-Binary/crate stem: `kallip`.
+Binary/crate stem: `kallipai` (grandfathered CLI names: `kallip`, `kallipctl`).
 
-Harbor benchmarking adapter for [kallipai](../). Allows running kallip inside Harbor's container-based evaluation pipeline (e.g. terminal-bench).
+Harbor benchmarking adapter for [kallipai](../). Allows running kallipai inside Harbor's container-based evaluation pipeline (e.g. terminal-bench).
 
 ## Prerequisites
 
@@ -12,14 +12,14 @@ Harbor benchmarking adapter for [kallipai](../). Allows running kallip inside Ha
 
 ## Architecture
 
-The adapter runs the full kallip stack **inside the Harbor container**:
+The adapter runs the full kallipai stack **inside the Harbor container**:
 
 ```text
 install()  →  upload tarball → unpack → start tagma (background)
-run()      →  kallip-run --prompt "$instruction" (connects to localhost tagma)
+run()      →  kallipai-run --prompt "$instruction" (connects to localhost tagma)
 ```
 
-Both `kallip-tagma` and `kallip-run` run inside the container so the agent has direct filesystem access to benchmark task files.
+Both `kallipai-tagma` and `kallipai-run` run inside the container so the agent has direct filesystem access to benchmark task files.
 
 ## Setup
 
@@ -27,31 +27,31 @@ Both `kallip-tagma` and `kallip-run` run inside the container so the agent has d
 # Create venv + install adapter and harbor (tarball is built by harbor-test.sh)
 ./harbor-integration/setup-venv.sh
 
-# Activate the environment (includes KALLIP_PACKAGE_PATH)
+# Activate the environment (includes KALLIPAI_PACKAGE_PATH)
 source harbor-integration/.venv/bin/activate
 ```
 
 Or manually:
 
 ```bash
-nix build .#kallip-tarball
+nix build .#kallipai-tarball
 python3 -m venv harbor-integration/.venv
 source harbor-integration/.venv/bin/activate
 pip install -e ./harbor-integration
-export KALLIP_PACKAGE_PATH=./result/kallip-*-linux-x86_64.tar.gz
+export KALLIPAI_PACKAGE_PATH=./result/kallipai-*-linux-x86_64.tar.gz
 ```
 
 `harbor-test.sh` builds and injects **two** tarballs (both pinned by one `flake.lock`):
 
-**`kallip-tarball`** (always installed):
+**`kallipai-tarball`** (always installed):
 
-| Binary         | Purpose                                       |
-| -------------- | --------------------------------------------- |
-| `kallip`       | Headless CLI for agent-to-agent orchestration |
-| `kallip-tagma` | HTTP server hosting agent instances           |
-| `kallip-run`   | One-shot runner for scripting/benchmarking    |
+| Binary           | Purpose                                       |
+| --------------   | --------------------------------------------- |
+| `kallip`         | Headless CLI for agent-to-agent orchestration |
+| `kallipai-tagma` | HTTP server hosting agent instances           |
+| `kallipai-run`   | One-shot runner for scripting/benchmarking    |
 
-**`aifed-tarball`** (opt-in via `AIFED_PACKAGE_PATH`; aifed is kallip's intended file-editing dependency — runtime adoption pending — `x86_64-linux` only):
+**`aifed-tarball`** (opt-in via `AIFED_PACKAGE_PATH`; aifed is kallipai's intended file-editing dependency — runtime adoption pending — `x86_64-linux` only):
 
 | Binary         | Purpose                                          |
 | -------------- | ------------------------------------------------ |
@@ -64,13 +64,13 @@ export KALLIP_PACKAGE_PATH=./result/kallip-*-linux-x86_64.tar.gz
 
 Set these on the **host** before running Harbor. They are forwarded into the container via Harbor's `ENV_VARS` mechanism.
 
-| Variable                           | Required | Description                                                                       |
-| ---------------------------------- | -------- | --------------------------------------------------------------------------------- |
-| `KALLIP_LLM_DEEPSEEK_API_KEY`      | Yes\*    | API key for DeepSeek provider                                                     |
-| `KALLIP_LLM_OPENAI_COMPAT_API_KEY` | Yes\*    | API key for OpenAI-compatible provider                                            |
-| `KALLIP_LLM_PROVIDER`              | No       | LLM backend: `deepseek` or `openai-compatible`. Auto-set from config `model_name` |
-| `KALLIP_LLM_MODEL`                 | No       | Model identifier. Auto-set from config `model_name`                               |
-| `KALLIP_OPERATOR_TOKEN`            | No       | Pre-set auth token; auto-generated if omitted                                     |
+| Variable                             | Required | Description                                                                       |
+| ----------------------------------   | -------- | --------------------------------------------------------------------------------- |
+| `KALLIPAI_LLM_DEEPSEEK_API_KEY`      | Yes\*    | API key for DeepSeek provider                                                     |
+| `KALLIPAI_LLM_OPENAI_COMPAT_API_KEY` | Yes\*    | API key for OpenAI-compatible provider                                            |
+| `KALLIPAI_LLM_PROVIDER`              | No       | LLM backend: `deepseek` or `openai-compatible`. Auto-set from config `model_name` |
+| `KALLIPAI_LLM_MODEL`                 | No       | Model identifier. Auto-set from config `model_name`                               |
+| `KALLIPAI_OPERATOR_TOKEN`            | No       | Pre-set auth token; auto-generated if omitted                                     |
 
 \* Set the key matching your provider.
 
@@ -83,7 +83,7 @@ off mid-completion.
 Pre-built config files are in `harbor-integration/configs/`. Each config encodes the agent, model, dataset, and output directory so you don't need to pass them as CLI flags.
 
 ```bash
-export KALLIP_LLM_DEEPSEEK_API_KEY=<your-key>
+export KALLIPAI_LLM_DEEPSEEK_API_KEY=<your-key>
 
 # Quick verification (hello-world)
 ./harbor-integration/harbor-test.sh
@@ -98,9 +98,9 @@ export KALLIP_LLM_DEEPSEEK_API_KEY=<your-key>
 ## How It Works
 
 1. Harbor creates a container for the benchmark task
-2. `install()` uploads the tarball, unpacks it to `/opt/kallip`, starts the tagma as a background process
-3. `run()` invokes `kallip-run --prompt <instruction>` — it prints the final assistant reply to stdout and a completion hint (agent id + how to continue) to stderr. Pass `--verbose` to the runner for the full reasoning/tool log.
-4. `kallip-run` exits with semantic codes: `0` success, `1` error, `2` max rounds, `3` cancelled, `4` budget exceeded
+2. `install()` uploads the tarball, unpacks it to `/opt/kallipai`, starts the tagma as a background process
+3. `run()` invokes `kallipai-run --prompt <instruction>` — it prints the final assistant reply to stdout and a completion hint (agent id + how to continue) to stderr. Pass `--verbose` to the runner for the full reasoning/tool log.
+4. `kallipai-run` exits with semantic codes: `0` success, `1` error, `2` max rounds, `3` cancelled, `4` budget exceeded
 5. Harbor evaluates the result against the task's test suite
 
 ## Limitations

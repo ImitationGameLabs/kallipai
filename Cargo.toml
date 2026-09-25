@@ -1,35 +1,35 @@
 [workspace]
 members = [
-  "crates/kallip-common",
-  "crates/platform/kallip-archeion-common",
-  "crates/platform/kallip-lesche-common",
-  "crates/platform/kallip-archeion",
-  "crates/platform/kallip-lesche",
-  "crates/platform/kallip-e2ee",
-  "crates/platform/kallip-archeion-client",
-  "crates/platform/kallip-lesche-client",
-  "crates/platform/kallip-admin",
-  "crates/kallip-runtime",
-  "crates/kallip-shell",
+  "crates/kallipai-common",
+  "crates/platform/kallipai-archeion-common",
+  "crates/platform/kallipai-lesche-common",
+  "crates/platform/kallipai-archeion",
+  "crates/platform/kallipai-lesche",
+  "crates/platform/kallipai-e2ee",
+  "crates/platform/kallipai-archeion-client",
+  "crates/platform/kallipai-lesche-client",
+  "crates/platform/kallipai-admin",
+  "crates/kallipai-runtime",
+  "crates/kallipai-shell",
   "crates/kallip",
-  "crates/kallip-tagma",
-  "crates/kallip-client",
-  "crates/kallip-run",
-  "crates/time/kallip-cron-common",
-  "crates/time/kallip-cron-client",
-  "crates/time/kallip-cron",
-  "crates/time/kallip-cron-daemon",
-  "crates/daemon/kallip-daemon-common",
-  "crates/daemon/kallip-daemon-client",
-  "crates/daemon/kallip-daemon",
-  "crates/daemon/kallip-daemon-spawn",
-  "crates/daemon/kallip-task",
+  "crates/kallipai-tagma",
+  "crates/kallipai-client",
+  "crates/kallipai-run",
+  "crates/time/kallipai-cron-common",
+  "crates/time/kallipai-cron-client",
+  "crates/time/kallipai-cron",
+  "crates/time/kallipai-cron-daemon",
+  "crates/daemon/kallipai-daemon-common",
+  "crates/daemon/kallipai-daemon-client",
+  "crates/daemon/kallipai-daemon",
+  "crates/daemon/kallipai-daemon-spawn",
+  "crates/daemon/kallipai-task",
   "crates/daemon/kallipctl",
-  "crates/platform/kallip-instances",
-  "crates/platform/kallip-files",
-  "crates/platform/kallip-model-gateway",
-  "crates/kallip-blob-store",
-  "crates/kallip-testkit",
+  "crates/platform/kallipai-instances",
+  "crates/platform/kallipai-files",
+  "crates/platform/kallipai-model-gateway",
+  "crates/kallipai-blob-store",
+  "crates/kallipai-testkit",
 ]
 
 resolver = "3"
@@ -39,7 +39,7 @@ version = "0.1.0"
 license = "MIT"
 
 [workspace.metadata.crane]
-name = "kallip"
+name = "kallipai"
 
 [workspace.dependencies]
 just-llm-client = { git = "https://github.com/ImitationGameLabs/just-agent-libs.git", rev = "4a9585f", features = [
@@ -47,31 +47,31 @@ just-llm-client = { git = "https://github.com/ImitationGameLabs/just-agent-libs.
   "anthropic",
 ] }
 
-kallip-common = { path = "crates/kallip-common", default-features = false }
-kallip-archeion-common = { path = "crates/platform/kallip-archeion-common" }
-kallip-lesche-common = { path = "crates/platform/kallip-lesche-common" }
-kallip-archeion = { path = "crates/platform/kallip-archeion" }
-kallip-lesche = { path = "crates/platform/kallip-lesche" }
-kallip-e2ee = { path = "crates/platform/kallip-e2ee" }
-kallip-archeion-client = { path = "crates/platform/kallip-archeion-client" }
-kallip-lesche-client = { path = "crates/platform/kallip-lesche-client" }
-kallip-runtime = { path = "crates/kallip-runtime" }
-kallip-shell = { path = "crates/kallip-shell" }
-kallip-client = { path = "crates/kallip-client" }
-kallip-tagma = { path = "crates/kallip-tagma" }
-kallip-cron-common = { path = "crates/time/kallip-cron-common" }
-kallip-cron-client = { path = "crates/time/kallip-cron-client" }
-kallip-cron-daemon = { path = "crates/time/kallip-cron-daemon" }
-kallip-daemon-common = { path = "crates/daemon/kallip-daemon-common" }
-kallip-daemon-client = { path = "crates/daemon/kallip-daemon-client" }
-kallip-daemon = { path = "crates/daemon/kallip-daemon" }
-kallip-daemon-spawn = { path = "crates/daemon/kallip-daemon-spawn" }
-kallip-task = { path = "crates/daemon/kallip-task" }
+kallipai-common = { path = "crates/kallipai-common", default-features = false }
+kallipai-archeion-common = { path = "crates/platform/kallipai-archeion-common" }
+kallipai-lesche-common = { path = "crates/platform/kallipai-lesche-common" }
+kallipai-archeion = { path = "crates/platform/kallipai-archeion" }
+kallipai-lesche = { path = "crates/platform/kallipai-lesche" }
+kallipai-e2ee = { path = "crates/platform/kallipai-e2ee" }
+kallipai-archeion-client = { path = "crates/platform/kallipai-archeion-client" }
+kallipai-lesche-client = { path = "crates/platform/kallipai-lesche-client" }
+kallipai-runtime = { path = "crates/kallipai-runtime" }
+kallipai-shell = { path = "crates/kallipai-shell" }
+kallipai-client = { path = "crates/kallipai-client" }
+kallipai-tagma = { path = "crates/kallipai-tagma" }
+kallipai-cron-common = { path = "crates/time/kallipai-cron-common" }
+kallipai-cron-client = { path = "crates/time/kallipai-cron-client" }
+kallipai-cron-daemon = { path = "crates/time/kallipai-cron-daemon" }
+kallipai-daemon-common = { path = "crates/daemon/kallipai-daemon-common" }
+kallipai-daemon-client = { path = "crates/daemon/kallipai-daemon-client" }
+kallipai-daemon = { path = "crates/daemon/kallipai-daemon" }
+kallipai-daemon-spawn = { path = "crates/daemon/kallipai-daemon-spawn" }
+kallipai-task = { path = "crates/daemon/kallipai-task" }
 kallipctl = { path = "crates/daemon/kallipctl" }
-kallip-instances = { path = "crates/platform/kallip-instances" }
-kallip-blob-store = { path = "crates/kallip-blob-store" }
-kallip-files = { path = "crates/platform/kallip-files" }
-kallip-testkit = { path = "crates/kallip-testkit" }
+kallipai-instances = { path = "crates/platform/kallipai-instances" }
+kallipai-blob-store = { path = "crates/kallipai-blob-store" }
+kallipai-files = { path = "crates/platform/kallipai-files" }
+kallipai-testkit = { path = "crates/kallipai-testkit" }
 
 anyhow = "1.0.102"
 async-trait = "0.1.89"
@@ -82,7 +82,7 @@ email_address = "0.2.9"
 nix = { version = "0.31", features = ["fs", "signal", "user"] }
 # Linux-first sandbox toolbox (landlock ruleset + mount-ns composable
 # `prepare_*`/`install_*` primitives). Used only behind the `landlock` feature of
-# kallip-shell, which is Linux-only. `default-features = false` drops its
+# kallipai-shell, which is Linux-only. `default-features = false` drops its
 # tokio proxy runtime — we only consume the spawn-independent primitives.
 libsandbox = { git = "https://github.com/ImitationGameLabs/libsandbox-rs.git", rev = "979de21ae3f8a05d7efa0ff891343380b3622473", default-features = false }
 libc = "0.2"
@@ -159,7 +159,7 @@ hkdf = "0.13"
 zeroize = "1.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Daily-rolling log files for managed instances (see kallip-tagma's logging).
+# Daily-rolling log files for managed instances (see kallipai-tagma's logging).
 tracing-appender = "0.2"
 rable = "0.2.0"
 clap = { version = "4.6", features = ["derive", "env"] }
@@ -189,5 +189,5 @@ wiremock = "0.6.5"
 serial_test = "3.5.0"
 # Dev-only: process-start constructor for the tagma test harness — installs a global default tracing subscriber before any test thread runs (callsite interest-cache race guard).
 ctor = "1.0.13"
-# Dev-only: the `spawn` benchmark in kallip-shell (criterion). Not a runtime dep.
+# Dev-only: the `spawn` benchmark in kallipai-shell (criterion). Not a runtime dep.
 criterion = "0.8.2"

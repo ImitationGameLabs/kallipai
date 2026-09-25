@@ -10,9 +10,9 @@
 #
 # This is generic: any `[[test]]` added anywhere in the workspace is picked up
 # automatically. Today the workspace has two -- `sandbox` (gated by
-# kallip-tagma's `sandbox-test` feature) and `exec` (kallip-shell).
+# kallipai-tagma's `sandbox-test` feature) and `exec` (kallipai-shell).
 #
-# The agent binaries (`kallip-tagma`, `kallip-run`, `kallip`) come
+# The agent binaries (`kallipai-tagma`, `kallipai-run`, `kallip`) come
 # from the shared `workspace` derivation; `buildEnv` merges them into `bin/`
 # while the test binaries live under a separate `integration-tests/` so the
 # container can iterate them independently of the agent bins.
@@ -37,7 +37,7 @@ let
       # default CARGO_PROFILE=release (used by both buildDepsOnly and
       # buildPackage, so cargoArtifacts is release-built) -- the dep cache is
       # reused. The feature is package-scoped: `sandbox-test` lives on
-      # `kallip-tagma` and gates the `sandbox` target; `exec` needs none.
+      # `kallipai-tagma` and gates the `sandbox` target; `exec` needs none.
       #
       # doNotPostBuildInstallCargoBinaries: the buildPhase is a custom `cargo
       # test --no-run` (not `cargo build`), so crane's auto-install-from-build-log
@@ -46,7 +46,7 @@ let
       buildPhase = ''
         runHook preBuild
         cargo test --no-run --release --locked \
-          --features kallip-tagma/sandbox-test \
+          --features kallipai-tagma/sandbox-test \
           --message-format=json \
           | ${pkgs.jq}/bin/jq -r 'select(.reason=="compiler-artifact" and ((.target.kind // []) | any(. == "test")) and .executable != null) | "\(.target.name)\t\(.executable)"' \
           > "$NIX_BUILD_TOP/test-bins"
@@ -80,7 +80,7 @@ let
   );
 in
 pkgs.buildEnv {
-  name = "kallip-integration-tests";
+  name = "kallipai-integration-tests";
   paths = [
     workspace
     integrationTestsBin

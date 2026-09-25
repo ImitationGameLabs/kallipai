@@ -13,7 +13,7 @@ let
   # Shared by the tagma docker image (nix/packages/docker-images/tagma.nix) and
   # the dev compose (arion-compose.nix) so the two cannot drift.
   toolEnv = pkgs.buildEnv {
-    name = "kallip-path-env";
+    name = "kallipai-path-env";
     paths = [
       pkgs.bashInteractive
       pkgs.coreutils
@@ -38,7 +38,7 @@ let
   # works uniformly in buildImage.copyToRoot (prod) and image.contents (dev) —
   # buildImage's extraCommands runs without fakeroot and cannot mkdir under the
   # non-writable `etc` that cacert's copyToRoot brings in.
-  certLinks = pkgs.runCommand "kallip-cert-links" { } ''
+  certLinks = pkgs.runCommand "kallipai-cert-links" { } ''
     mkdir -p $out/etc/ssl/certs $out/etc/pki/tls/certs
     ln -s ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/etc/ssl/certs/ca-certificates.crt
     ln -s ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/etc/pki/tls/certs/ca-bundle.crt
@@ -69,8 +69,8 @@ let
 
   # Curated shared-skill tree (read-only bundled defaults). The tagma copies
   # this into the mutable <data_dir>/skills/ on first boot via the
-  # KALLIP_SKILLS_SEED env var below. Same file the flake exposes as
-  # `kallip-shared-skills`, so the image/compose and the flake output agree
+  # KALLIPAI_SKILLS_SEED env var below. Same file the flake exposes as
+  # `kallipai-shared-skills`, so the image/compose and the flake output agree
   # bit-for-bit. let-local: only the derived `skillsSeed` path is consumed by
   # the image/compose; the package itself is not part of the public surface
   # (callers that want the package use the flake output).

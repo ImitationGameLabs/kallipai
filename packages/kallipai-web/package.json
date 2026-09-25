@@ -1,0 +1,45 @@
+{
+  "name": "@kallipai/kallipai-web",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "prepare": "(svelte-kit sync || echo '') && paraglide-js compile --project ../kallipai-ui/i18n/project.inlang --strategy cookie preferredLanguage baseLocale --emit-ts-declarations --output-structure message-modules --outdir ../kallipai-ui/src/paraglide",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "clean": "rm -rf node_modules/.vite .svelte-kit",
+    "test": "deno test"
+  },
+  "dependencies": {
+    "@kallipai/kallipai-archeion-client": "workspace:*",
+    "@kallipai/kallipai-lesche-client": "workspace:*",
+    "@kallipai/kallipai-client": "workspace:*",
+    "@kallipai/kallipai-common": "workspace:*",
+    "@kallipai/kallipai-ui": "workspace:*",
+    "@inlang/paraglide-js": "2.20.0",
+    "@lucide/svelte": "^1.24.0"
+  },
+  "devDependencies": {
+    "@std/assert": "npm:@jsr/std__assert@^1.0.19",
+    "@fontsource/fira-mono": "^5.2.7",
+    "@inlang/plugin-message-format": "4.4.0",
+    "@inlang/plugin-m-function-matcher": "2.2.6",
+    "@neoconfetti/svelte": "^2.2.2",
+    "@skeletonlabs/skeleton": "^5.0.0",
+    "@skeletonlabs/skeleton-svelte": "^5.0.0",
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.63.0",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tailwindcss/forms": "^0.5.11",
+    "@tailwindcss/typography": "^0.5.19",
+    "@tailwindcss/vite": "^4.3.0",
+    "svelte": "^5.56.1",
+    "svelte-check": "^4.6.0",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16"
+  }
+}

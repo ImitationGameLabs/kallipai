@@ -1,9 +1,0 @@
-[package]
-name = "kallip-daemon-spawn"
-description = "Privilege-dropping double-fork exec helper for the kallip local daemon"
-edition = "2024"
-version.workspace = true
-license.workspace = true
-
-[dependencies]
-libc = { workspace = true }

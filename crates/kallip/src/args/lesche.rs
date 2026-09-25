@@ -3,7 +3,7 @@
 use clap::{Args, Subcommand};
 
 /// Deliver messages via the tagma's relay (the lesche data-plane).
-/// Targets the calling agent (resolved from `KALLIP_ID`), like `activity`.
+/// Targets the calling agent (resolved from `KALLIPAI_ID`), like `activity`.
 ///
 /// The primitive is "send a message", not "reply": a message may be a
 /// response, a proactive heads-up, or (future) a file. Three addressing

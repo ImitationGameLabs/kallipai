@@ -1,0 +1,33 @@
+[package]
+name = "kallipai-instances"
+description = "Local instance management service for the kallipai daemon"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+kallipai-common = { workspace = true, features = ["axum"] }
+kallipai-archeion-common = { workspace = true }
+kallipai-daemon-client = { workspace = true }
+kallipai-daemon-common = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+cookie = { workspace = true }
+reqwest = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+subtle = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["cors"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+libc = { workspace = true }
+temp-env = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

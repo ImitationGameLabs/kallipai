@@ -35,7 +35,7 @@ because silence and omission look the same after eviction.
 - **Locators** — file paths, commit hashes, agent IDs, plan paths, room
   IDs. Concrete references the post-eviction context will need, because
   "the runtime crate" is not as useful as
-  `crates/kallip-runtime/src/tools/skill/mod.rs`.
+  `crates/kallipai-runtime/src/tools/skill/mod.rs`.
 - **User constraints** — preferences, limits, and requirements the user
   stated. These constrain future work and are easy to lose, because
   they often appear as asides rather than primary instructions.

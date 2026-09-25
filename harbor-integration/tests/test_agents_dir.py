@@ -9,13 +9,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kallip_harbor.tagma import agents_dir
+from kallipai_harbor.tagma import agents_dir
 
 
 class AgentsDirTest(unittest.TestCase):
     def test_mirrors_the_rust_data_dir_root(self):
-        # kallip_runtime::persistence::data_dir_root resolves
-        # <platform data dir>/kallipai/tagmata/<KALLIP_TAGMA_SLUG>; the agents
+        # kallipai_runtime::persistence::data_dir_root resolves
+        # <platform data dir>/kallipai/tagmata/<KALLIPAI_TAGMA_SLUG>; the agents
         # subtree hangs directly under it.
         self.assertEqual(
             agents_dir("/logs/agent", "bench-abc12345"),

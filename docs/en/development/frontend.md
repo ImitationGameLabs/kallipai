@@ -6,17 +6,17 @@ internal: true
 ---
 
 This guide covers the JS/TS workspace packages under `packages/`
-(`kallip-common`, `kallip-client`, `kallip-archeion-client`,
-`kallip-lesche-client`, `kallip-ui`, `kallip-web`, `kallip-app`,
-`kallip-direct`). They share a
+(`kallipai-common`, `kallipai-client`, `kallipai-archeion-client`,
+`kallipai-lesche-client`, `kallipai-ui`, `kallipai-web`, `kallipai-app`,
+`kallipai-direct`). They share a
 single toolchain, **Deno**, laid out as an npm-style workspace but never driven
 by npm. The Rust crates under `crates/` are unrelated (cargo).
 
 The frontend reaches the tagma over two transports behind one `Transport` seam
-(in `kallip-ui/src/lib/session/`): `DirectTransport` for the offline path
-(consuming `/agents/{id}/external/events` via `kallip-client`) and a
-`RelayChannel` from `kallip-lesche-client` for the online E2EE path. Both reduce
-through the shared `kallip-ui/src/lib/transcript.ts` reducer (`applyTagmaReply`
+(in `kallipai-ui/src/lib/session/`): `DirectTransport` for the offline path
+(consuming `/agents/{id}/external/events` via `kallipai-client`) and a
+`RelayChannel` from `kallipai-lesche-client` for the online E2EE path. Both reduce
+through the shared `kallipai-ui/src/lib/transcript.ts` reducer (`applyTagmaReply`
 / `applySignal`).
 
 The short version: **everything goes through `deno task`. Never drop down to
@@ -45,11 +45,11 @@ assume it.
 
 | Task                        | What it does                                                           |
 | --------------------------- | ---------------------------------------------------------------------- |
-| `deno task dev`             | Dev server for `kallip-web`                                            |
-| `deno task build`           | Build `kallip-web`                                                     |
+| `deno task dev`             | Dev server for `kallipai-web`                                          |
+| `deno task build`           | Build `kallipai-web`                                                   |
 | `deno task check`           | Type / svelte checks across all JS/TS packages                         |
 | `deno task test`            | Run tests for the packages that define them                            |
-| `deno task sync`            | `svelte-kit sync` for `kallip-web`                                     |
+| `deno task sync`            | `svelte-kit sync` for `kallipai-web`                                   |
 | `deno task fmt`             | Prettier (TS/Svelte/CSS/JSON) + rumdl (Markdown) across the repo       |
 | `deno task fmt:file <path>` | Prettier `--write` a single non-md file (format just what you touched) |
 | `deno task fmt:md <path>`   | rumdl `fmt` a single Markdown file                                     |
@@ -59,14 +59,14 @@ assume it.
 #### Single Package (Run inside the Package Directory)
 
 Each package's own `scripts` are available as `deno task <name>`: e.g. inside
-`packages/kallip-web`: `deno task dev`, `deno task check`, `deno task build`,
+`packages/kallipai-web`: `deno task dev`, `deno task check`, `deno task build`,
 `deno task prepare`. Use these for a tight edit loop on one package; use the
 root tasks when a change spans packages.
 
 ### Message Catalogs (i18n)
 
 UI copy lives in per-domain paraglide catalogs under
-`packages/kallip-ui/i18n/project.inlang/messages/`. Key naming, the guard test,
+`packages/kallipai-ui/i18n/project.inlang/messages/`. Key naming, the guard test,
 and the edit workflow are documented in [Message catalogs (i18n)](./i18n.md).
 
 ### Form-To-URL Map
@@ -86,18 +86,18 @@ root route owns the small-screen handoff:
 `/files` (user-scope file management) lands with its own batch and
 inherits the same contract then.
 
-### Tauri Android App (`kallip-app`)
+### Tauri Android App (`kallipai-app`)
 
-`kallip-app` is the Tauri Android target (desktop is intentionally not built;
-use `kallip-web` in a browser). Its SvelteKit frontend is a normal package, but
+`kallipai-app` is the Tauri Android target (desktop is intentionally not built;
+use `kallipai-web` in a browser). Its SvelteKit frontend is a normal package, but
 the Tauri/Android toolchain is **not** in the default devShell, so enter the
 mobile shell first:
 
 ```sh
-nix develop .#tauri            # or set KALLIP_DEVSHELL=tauri under direnv
+nix develop .#tauri            # or set KALLIPAI_DEVSHELL=tauri under direnv
 ```
 
-Then, from `packages/kallip-app`:
+Then, from `packages/kallipai-app`:
 
 ```sh
 deno task tauri android dev                           # emulator, defaults to x86_64
@@ -121,27 +121,27 @@ Gradle writes through `user.home` (inside the sandbox that is the read-only
 `/root`), so the wrapper lock fails until `GRADLE_USER_HOME` points at a
 writable directory, e.g. `export GRADLE_USER_HOME=$PWD/.gradle`.
 
-### Offline Direct Shell (`kallip-direct`)
+### Offline Direct Shell (`kallipai-direct`)
 
-`kallip-direct` is the developer fallback for reaching a tagma when the web
+`kallipai-direct` is the developer fallback for reaching a tagma when the web
 stack is down: it mounts the offline product (the `/local/*` routes plus the
-`/connect` front door) from the shared `kallip-ui` components, with no Tauri
+`/connect` front door) from the shared `kallipai-ui` components, with no Tauri
 and no online/archeion surface; the shell declares itself offline-only at
 bootstrap (`setOfflineOnlyShell()`), so the gate, navigation, and account
 chrome never enter the online product. It is a plain SvelteKit web app;
-run it standalone from `packages/kallip-direct`:
+run it standalone from `packages/kallipai-direct`:
 
 ```sh
 deno task dev        # http://127.0.0.1:5175 (strict port, loopback)
 ```
 
-Port `5175` is reserved for this shell so it can run next to a `kallip-web`
+Port `5175` is reserved for this shell so it can run next to a `kallipai-web`
 dev server (5173). First use: open `/connect`, enter the tagma URL and the
 operator token; the session is stored locally and reconnected on boot.
 
 Route guards that need kit's `$app/navigation` belong in the host app's
-`+page.svelte` wrappers (`kallip-direct`, `kallip-web`), never inside
-`kallip-ui` components - the UI package stays a pure-UI library with zero
+`+page.svelte` wrappers (`kallipai-direct`, `kallipai-web`), never inside
+`kallipai-ui` components - the UI package stays a pure-UI library with zero
 `$app` imports. Shared dirty-state lives in the store, which both layers
 import (`profilesStore` is the precedent).
 Shell navigation from any layer goes through ShellPort (`navigate`),
@@ -169,10 +169,10 @@ Two formatters, split by file type:
 Prettier plugins are **declared per package** in a local `.prettierrc.json`,
 scoped to where they are actually used:
 
-- `packages/kallip-web`, `packages/kallip-app`: Tailwind + Svelte:
+- `packages/kallipai-web`, `packages/kallipai-app`: Tailwind + Svelte:
   `["prettier-plugin-tailwindcss", "prettier-plugin-svelte"]`
-- `packages/kallip-ui`: Svelte only: `["prettier-plugin-svelte"]`
-- `kallip-common`, `kallip-client`, `kallip-archeion-client`: plain TS, no
+- `packages/kallipai-ui`: Svelte only: `["prettier-plugin-svelte"]`
+- `kallipai-common`, `kallipai-client`, `kallipai-archeion-client`: plain TS, no
   plugins.
 
 The plugin npm packages themselves are root `devDependencies` (shared formatter
@@ -216,7 +216,7 @@ devDependencies. Do not use `npm install` / `npm i`.
 Interactive elements use outlined-at-rest presets with a filled hover
 (`preset-outlined-{color}-500 hover:preset-filled-{color}-500`). Two blessed
 exceptions keep tonal at rest with a filled hover: the shared icon-button
-family (`TONAL_ICON_*` in `packages/kallip-ui/src/lib/classes.ts`) and
+family (`TONAL_ICON_*` in `packages/kallipai-ui/src/lib/classes.ts`) and
 inactive nav items (`NavLink`, `MobileShell`). Segmented toggles and tabs
 mark the selected state with a filled preset (`preset-filled-primary-200-800`
 or `-500`) and leave the unselected state `preset-tonal-surface`. Elsewhere
@@ -234,7 +234,7 @@ discoverable for every agent, instead of each one hand-rolling a
 
 - `deno task check`: types / svelte checks for the touched package(s).
 - `deno task fmt:file <paths>` (or `deno task fmt`): formatting.
-- `deno task build`: for packages with a build step (e.g. `kallip-web`).
+- `deno task build`: for packages with a build step (e.g. `kallipai-web`).
 - `deno task lint`: Deno lint.
 - the 375/1280 dual-form walkthrough for page-facing changes: empty
   states, cap note, delete confirm, upload landing, breakpoint

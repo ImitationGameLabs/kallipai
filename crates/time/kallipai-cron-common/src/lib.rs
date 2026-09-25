@@ -1,0 +1,16 @@
+//! Wire types for `kallipai-cron` — the timer/notification daemon.
+//!
+//! Pure data types shared by the daemon (`kallipai-cron-daemon`), the HTTP client
+//! (`kallipai-cron-client`), and the management CLI (`kallipai-cron`). The daemon
+//! is a host-side scheduler that fires timed events and, on fire, injects a
+//! message into an agent conversation via the tagma HTTP API. No behavior lives
+//! here — only the `Schedule` model, trigger specs, and request/response DTOs —
+//! so the future platform-side time-record service can reuse these without
+//! pulling daemon internals.
+
+pub mod schedule;
+
+pub use schedule::{
+    CreateScheduleRequest, MIN_RECURRENCE_SECONDS, Priority, Schedule, ScheduleError, ScheduleId,
+    ScheduleStatus, SchedulesListResponse, StatusResponse, TriggerSpec, UpdateScheduleRequest,
+};

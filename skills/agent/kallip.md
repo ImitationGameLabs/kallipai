@@ -40,7 +40,7 @@ reference pinned:
   the tagma processes asynchronously. Poll `kallip status <ID>` or
   `kallip subagent list` to observe results.
 - **`activity` and `lesche send` are self-only.** The target is always the
-  calling agent (from `KALLIP_ID`); you cannot set another agent's activity.
+  calling agent (from `KALLIPAI_ID`); you cannot set another agent's activity.
 - **Approvals gate risky tool actions.** State machine: `pending` -> `committed`
   -> `approved`/`denied` -> `redeemed`/`cancelled`. `kallip approval list`
   defaults to **committed** (awaiting your decision); `--all` for every status.

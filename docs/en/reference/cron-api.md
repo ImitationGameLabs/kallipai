@@ -1,12 +1,12 @@
 ---
-title: kallip-cron HTTP API
-description: HTTP endpoints exposed by the kallip-cron service.
+title: kallipai-cron HTTP API
+description: HTTP endpoints exposed by the kallipai-cron service.
 order: 60
 internal: true
 ---
 
-The timer/notification daemon `kallip-cron-daemon` hosts a small management HTTP
-API (loopback only, default `127.0.0.1:3010`) consumed by the `kallip-cron` CLI.
+The timer/notification daemon `kallipai-cron-daemon` hosts a small management HTTP
+API (loopback only, default `127.0.0.1:3010`) consumed by the `kallipai-cron` CLI.
 When a schedule fires, the daemon injects its `message` into the target agent
 conversation via the tagma HTTP API (`POST /agents/{id}/message`), not through
 this API.
@@ -26,8 +26,8 @@ verification:
 - `401` = the claimed id does not match the token; `503` = the tagma is
   unreachable (not an auth failure); `400` = missing bearer/agent.
 
-The `kallip-cron` CLI is env-driven, like `kallip`: it reads `KALLIP_AUTH_TOKEN`
-(bearer) and `KALLIP_ID` (claimed id) from the agent shell (both auto-injected
+The `kallipai-cron` CLI is env-driven, like `kallip`: it reads `KALLIPAI_AUTH_TOKEN`
+(bearer) and `KALLIPAI_ID` (claimed id) from the agent shell (both auto-injected
 by the tagma). Schedules are self-managed: an agent can only create, list, or
 mutate its own schedules; an operator bearer is rejected (no agent match).
 

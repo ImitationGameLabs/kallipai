@@ -52,12 +52,12 @@ pub enum Commands {
     ProfileSet(ProfileSetCommand),
     /// Transfer files through the files service (direct HTTP; no tagma
     /// daemon connection). Credentials come from the spawn env:
-    /// KALLIP_POLIS_URL (edge origin; /v1/files is derived) + KALLIP_FILES_TOKEN.
+    /// KALLIPAI_POLIS_URL (edge origin; /v1/files is derived) + KALLIPAI_FILES_TOKEN.
     #[command(subcommand)]
     File(FileCommand),
     /// Read an image record into this agent's conversation. Self-scoped:
     /// the tagma enforces the bound set's modalities and records the turn.
-    /// Connects to the tagma (KALLIP_TAGMA_URL + KALLIP_AUTH_TOKEN), not
+    /// Connects to the tagma (KALLIPAI_TAGMA_URL + KALLIPAI_AUTH_TOKEN), not
     /// the file family's direct files-service connection.
     #[command(subcommand)]
     Image(ImageCommand),

@@ -1,8 +1,8 @@
 //! The files-service client behind `kallip file *`: a thin reqwest face
 //! over `PUT|GET /v1/files`, `GET /v1/files/{id}` and
 //! `POST /v1/files/{id}/send`. Credentials ride the spawn env
-//! (`KALLIP_POLIS_URL` origin, deriving the /v1/files base, plus
-//! `KALLIP_FILES_TOKEN` bearer) -- the enrollment-code channel shape, so
+//! (`KALLIPAI_POLIS_URL` origin, deriving the /v1/files base, plus
+//! `KALLIPAI_FILES_TOKEN` bearer) -- the enrollment-code channel shape, so
 //! the secret reaches the agent's environment without any CLI flag
 //! ever carrying it.
 
@@ -62,15 +62,16 @@ pub struct FilesClient {
 }
 
 impl FilesClient {
-    /// Read the configuration from the environment: `KALLIP_POLIS_URL`
+    /// Read the configuration from the environment: `KALLIPAI_POLIS_URL`
     /// names the platform edge origin (required -- a files token is
     /// credentials, so there is no deployment to assume), and
-    /// `KALLIP_FILES_TOKEN` carries the bearer.
+    /// `KALLIPAI_FILES_TOKEN` carries the bearer.
     pub fn from_env() -> anyhow::Result<Self> {
-        let origin = kallip_common::polis::polis_origin(std::env::var("KALLIP_POLIS_URL").ok())?;
+        let origin =
+            kallipai_common::polis::polis_origin(std::env::var("KALLIPAI_POLIS_URL").ok())?;
         let base_url = format!("{origin}/v1/files");
-        let token = std::env::var("KALLIP_FILES_TOKEN")
-            .map_err(|_| anyhow::anyhow!("KALLIP_FILES_TOKEN env var not set"))?;
+        let token = std::env::var("KALLIPAI_FILES_TOKEN")
+            .map_err(|_| anyhow::anyhow!("KALLIPAI_FILES_TOKEN env var not set"))?;
         Ok(Self::new(base_url, token))
     }
 

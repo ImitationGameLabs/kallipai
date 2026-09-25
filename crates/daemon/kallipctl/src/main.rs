@@ -1,4 +1,4 @@
-//! kallipctl: operator-side management CLI for the kallip local daemon.
+//! kallipctl: operator-side management CLI for the kallipai local daemon.
 //!
 //! Five verbs over the daemon's UDS protocol; the socket's 0600 mode is the
 //! auth. Deliberately NOT part of the `kallip` command family: `kallip` is
@@ -10,8 +10,8 @@ use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
-use kallip_daemon_client::DaemonClient;
-use kallip_daemon_common::wire::{
+use kallipai_daemon_client::DaemonClient;
+use kallipai_daemon_common::wire::{
     ErrorCode, InstanceState, LogCursor, OkPayload, RequestBody, Response, ResponseBody,
 };
 use std::ffi::OsStr;
@@ -19,12 +19,12 @@ use std::ffi::OsStr;
 #[derive(Parser)]
 #[command(
     name = "kallipctl",
-    about = "Manage local kallip instances via the kallip daemon",
+    about = "Manage local kallipai instances via the kallipai daemon",
     version
 )]
 struct Cli {
     /// Daemon control socket. When omitted the shared resolution chain
-    /// is probed in order: $KALLIP_DAEMON_SOCKET, the runtime dir, the
+    /// is probed in order: $KALLIPAI_DAEMON_SOCKET, the runtime dir, the
     /// state home default - the first socket that answers wins.
     #[arg(long, global = true)]
     socket: Option<String>,
@@ -48,8 +48,8 @@ enum Command {
         /// Absolute path of the instance workspace.
         workspace: String,
         /// Extra env for the instance, KEY=VALUE (repeatable); only
-        /// KALLIP_* keys plus RUST_LOG and PATH are accepted by the daemon.
-        /// `KALLIP_TAGMA_ADDR=<addr>` pins the tagma's listen address
+        /// KALLIPAI_* keys plus RUST_LOG and PATH are accepted by the daemon.
+        /// `KALLIPAI_TAGMA_ADDR=<addr>` pins the tagma's listen address
         /// (default 127.0.0.1:0); prefer a concrete interface or the
         /// polis proxy over 0.0.0.0 — the API is Bearer-gated but plain
         /// HTTP on the LAN.
@@ -187,12 +187,12 @@ enum BlobsCommand {
         )]
         slug: Option<String>,
         /// The files blob store root (the directory containing blobs/
-        /// and tmp/). Defaults to env KALLIP_FILES_BLOB_ROOT. Only the
+        /// and tmp/). Defaults to env KALLIPAI_FILES_BLOB_ROOT. Only the
         /// files target reads this.
         #[arg(long)]
         blob_root: Option<String>,
         /// Raw objects whose stored size exceeds this many bytes stay
-        /// raw. Defaults to env KALLIP_FILES_BLOB_COMPRESSION_ABOVE_BYTES
+        /// raw. Defaults to env KALLIPAI_FILES_BLOB_COMPRESSION_ABOVE_BYTES
         /// (8 MiB) for the files target; 0 = no limit.
         #[arg(long)]
         above_bytes: Option<u64>,
@@ -295,11 +295,11 @@ async fn run() -> Result<()> {
     // The shared chain, probed in order - the first socket that answers
     // is wherever the daemon actually bound (identical ordering on both
     // sides is what keeps client and daemon converged).
-    let candidates = kallip_daemon_common::socket::candidates_from_env(
+    let candidates = kallipai_daemon_common::socket::candidates_from_env(
         cli.socket.as_deref().map(std::path::Path::new),
     );
-    let socket = kallip_daemon_common::socket::probe(&candidates).map_err(|err| {
-        anyhow::anyhow!(kallip_daemon_common::socket::describe_probe_failure(&err))
+    let socket = kallipai_daemon_common::socket::probe(&candidates).map_err(|err| {
+        anyhow::anyhow!(kallipai_daemon_common::socket::describe_probe_failure(&err))
     })?;
     let client = DaemonClient::new(socket);
 
@@ -332,7 +332,7 @@ async fn run() -> Result<()> {
         _ => None,
     };
     if let Some(slug) = slug
-        && !kallip_daemon_common::wire::valid_slug(slug)
+        && !kallipai_daemon_common::wire::valid_slug(slug)
     {
         anyhow::bail!("slug {slug:?} does not match [a-z0-9][a-z0-9-]* (max 64 chars)");
     }
@@ -342,7 +342,7 @@ async fn run() -> Result<()> {
     if let Command::Spawn { env, .. } | Command::Start { env, .. } = &cli.command
         && env
             .iter()
-            .any(|pair| pair.starts_with("KALLIP_TAGMA_ADDR="))
+            .any(|pair| pair.starts_with("KALLIPAI_TAGMA_ADDR="))
     {
         eprintln!("listening address explicitly set; the reported port is the actual bind result");
     }
@@ -436,7 +436,7 @@ async fn run() -> Result<()> {
     let response = client
         .call(body)
         .await
-        .context("talking to the kallip daemon")?;
+        .context("talking to the kallipai daemon")?;
     print(response, started)
 }
 
@@ -458,9 +458,9 @@ struct RewriteInvocation {
 /// target names.
 async fn run_blobs_rewrite(args: RewriteInvocation, client: &DaemonClient) -> Result<()> {
     let corrupt = if args.skip_corrupt {
-        kallip_blob_store::CorruptPolicy::Skip
+        kallipai_blob_store::CorruptPolicy::Skip
     } else {
-        kallip_blob_store::CorruptPolicy::Fail
+        kallipai_blob_store::CorruptPolicy::Fail
     };
     let root = match args.target {
         RewriteTarget::Tasks | RewriteTarget::Attachments => {
@@ -479,7 +479,7 @@ async fn run_blobs_rewrite(args: RewriteInvocation, client: &DaemonClient) -> Re
                     slug: slug.to_owned(),
                 })
                 .await
-                .context("talking to the kallip daemon")?;
+                .context("talking to the kallipai daemon")?;
             let data_dir = match response.body {
                 ResponseBody::Ok {
                     payload: OkPayload::Record { data_dir, state },
@@ -502,14 +502,14 @@ async fn run_blobs_rewrite(args: RewriteInvocation, client: &DaemonClient) -> Re
             if args.slug.is_some() {
                 anyhow::bail!("--slug applies to the tasks/attachments targets only");
             }
-            let addr =
-                std::env::var("KALLIP_FILES_ADDR").unwrap_or_else(|_| "127.0.0.1:7400".to_owned());
+            let addr = std::env::var("KALLIPAI_FILES_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:7400".to_owned());
             if let Some(detail) = files_service_answers(&addr).await {
                 eprintln!("warning: the files service answers on {addr} ({detail})");
             }
             args.blob_root
-                .or_else(|| std::env::var("KALLIP_FILES_BLOB_ROOT").ok())
-                .context("--blob-root or KALLIP_FILES_BLOB_ROOT is required")?
+                .or_else(|| std::env::var("KALLIPAI_FILES_BLOB_ROOT").ok())
+                .context("--blob-root or KALLIPAI_FILES_BLOB_ROOT is required")?
                 .into()
         }
     };
@@ -521,10 +521,10 @@ async fn run_blobs_rewrite(args: RewriteInvocation, client: &DaemonClient) -> Re
         Some(v) => v,
         None => match args.target {
             RewriteTarget::Files => {
-                match std::env::var("KALLIP_FILES_BLOB_COMPRESSION_ABOVE_BYTES") {
+                match std::env::var("KALLIPAI_FILES_BLOB_COMPRESSION_ABOVE_BYTES") {
                     Ok(v) => v
                         .parse::<u64>()
-                        .context("KALLIP_FILES_BLOB_COMPRESSION_ABOVE_BYTES is not a number")?,
+                        .context("KALLIPAI_FILES_BLOB_COMPRESSION_ABOVE_BYTES is not a number")?,
                     Err(_) => 8 * 1024 * 1024,
                 }
             }
@@ -532,9 +532,9 @@ async fn run_blobs_rewrite(args: RewriteInvocation, client: &DaemonClient) -> Re
             _ => 0,
         },
     };
-    let report = kallip_blob_store::rewrite_root(
+    let report = kallipai_blob_store::rewrite_root(
         &root,
-        &kallip_blob_store::RewriteOptions {
+        &kallipai_blob_store::RewriteOptions {
             dry_run: args.dry_run,
             level: args.level,
             corrupt,
@@ -548,7 +548,7 @@ async fn run_blobs_rewrite(args: RewriteInvocation, client: &DaemonClient) -> Re
 
 /// The shared end-of-run summary: the same honestly-counted totals in
 /// every mode. The dry run never invents an "after" number.
-fn print_rewrite_summary(report: &kallip_blob_store::RewriteReport) {
+fn print_rewrite_summary(report: &kallipai_blob_store::RewriteReport) {
     println!(
         "scanned={} rewritten={} would_rewrite={} already_compressed={} skipped_corrupt={} skipped_oversized={} bytes_raw={} bytes_compressed={}",
         report.scanned,
@@ -622,7 +622,7 @@ async fn run_logs(
         let response = client
             .call(body)
             .await
-            .context("talking to the kallip daemon")?;
+            .context("talking to the kallipai daemon")?;
         match response.body {
             ResponseBody::Ok {
                 payload: OkPayload::Log { text, next_cursor },
@@ -666,7 +666,7 @@ async fn run_restart(client: &DaemonClient, slug: &str) -> Result<()> {
             slug: slug.to_owned(),
         })
         .await
-        .context("talking to the kallip daemon")?;
+        .context("talking to the kallipai daemon")?;
     match stop.body {
         ResponseBody::Ok { .. } => println!("stopped {slug}"),
         ResponseBody::Err {
@@ -684,7 +684,7 @@ async fn run_restart(client: &DaemonClient, slug: &str) -> Result<()> {
             exe: None,
         })
         .await
-        .context("talking to the kallip daemon")?;
+        .context("talking to the kallipai daemon")?;
     print(start, true)
 }
 
@@ -841,8 +841,8 @@ fn error_prefix_is_the_scripting_vocabulary() {
 /// socket, IPC error) degrades to an empty candidate set: a completion
 /// hook must never print an error into the shell's input line.
 fn complete_slug(current: &OsStr) -> Vec<CompletionCandidate> {
-    use kallip_daemon_common::wire::RequestBody;
-    use kallip_daemon_common::wire::ResponseBody;
+    use kallipai_daemon_common::wire::RequestBody;
+    use kallipai_daemon_common::wire::ResponseBody;
 
     // The hook runs before any tokio runtime is up, so a throwaway
     // current-thread runtime drives the async UDS client here.
@@ -855,8 +855,8 @@ fn complete_slug(current: &OsStr) -> Vec<CompletionCandidate> {
     };
     let prefix = current.to_string_lossy();
     rt.block_on(async move {
-        let candidates = kallip_daemon_common::socket::candidates_from_env(None);
-        let socket = match kallip_daemon_common::socket::probe(&candidates) {
+        let candidates = kallipai_daemon_common::socket::candidates_from_env(None);
+        let socket = match kallipai_daemon_common::socket::probe(&candidates) {
             Ok(socket) => socket,
             Err(_) => return Vec::new(),
         };
@@ -866,7 +866,7 @@ fn complete_slug(current: &OsStr) -> Vec<CompletionCandidate> {
             Err(_) => return Vec::new(),
         };
         let ResponseBody::Ok {
-            payload: kallip_daemon_common::wire::OkPayload::List { instances },
+            payload: kallipai_daemon_common::wire::OkPayload::List { instances },
         } = response.body
         else {
             return Vec::new();

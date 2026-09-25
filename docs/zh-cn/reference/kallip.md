@@ -6,7 +6,7 @@ order: 70
 
 这是 agent 用来与其他 agent 协作、管理自己的 subagent 与运行时事务的 CLI。
 
-所有子命令都使用 `KALLIP_AUTH_TOKEN`（必填）与 `KALLIP_TAGMA_URL`（环境变量，默认 `http://127.0.0.1:3000`）。
+所有子命令都使用 `KALLIPAI_AUTH_TOKEN`（必填）与 `KALLIPAI_TAGMA_URL`（环境变量，默认 `http://127.0.0.1:3000`）。
 
 ## 子命令
 
@@ -19,7 +19,7 @@ kallip message <ID>
 把消息送进 agent 的输入队列。消息文本从完整 stdin 读取（支持多行：管道、heredoc、`< file` 都可以）；没有文本参数，shell 展开因此无法破坏消息。tagma 立即受理（202 Accepted）并异步处理。轮询 `status` 观察结果。成功时 CLI 打印一行受理文本的 JSON 回显（失败时什么都不打印，失败的发送绝不伪装成已送达）：
 
 ```json
-{"kallip.message.sent":{"to":"<id>","text":"<message>","queue_depth":0}}
+{"kallipai.message.sent":{"to":"<id>","text":"<message>","queue_depth":0}}
 ```
 
 `queue_depth` 统计排在这条消息之前的条数（0 = 立即处理）；tagma 也可能附带一条 `"warning"` 注记（例如消息为下班状态的 agent 暂存时）。回显键与 lesche 标记刻意不同，本地客户端因此不会把 agent 间发送渲染成用户聊天行。
@@ -50,15 +50,15 @@ kallip status <ID>
 kallip subagent <subcommand> [args]
 ```
 
-管理**当前 agent 的直接 subagent**。执行操作的 supervisor 取自 `KALLIP_ID` 环境变量，这些命令只在 agent 上下文里有意义，未设置时报错。`subagent` 是唯一的管理入口；spawn、list、remove、interrupt、改标签全部经此。
+管理**当前 agent 的直接 subagent**。执行操作的 supervisor 取自 `KALLIPAI_ID` 环境变量，这些命令只在 agent 上下文里有意义，未设置时报错。`subagent` 是唯一的管理入口；spawn、list、remove、interrupt、改标签全部经此。
 
-| 子命令                    | 用途                                             |
+| 子命令                       | 用途                                               |
 | ------------------------- | ------------------------------------------------ |
-| `subagent spawn`          | 创建直接 subagent（必填标志见下文说明）。        |
-| `subagent list`           | 列出当前 agent 的直接 subagent。                 |
-| `subagent remove <ID>`    | 移除直接 subagent。                              |
-| `subagent interrupt <ID>` | 中断直接 subagent 当前操作。                     |
-| `subagent metadata <ID>`  | 更新直接 subagent 的 role/description。          |
+| `subagent spawn`          | 创建直接 subagent（必填标志见下文说明）。                        |
+| `subagent list`           | 列出当前 agent 的直接 subagent。                         |
+| `subagent remove <ID>`    | 移除直接 subagent。                                   |
+| `subagent interrupt <ID>` | 中断直接 subagent 当前操作。                              |
+| `subagent metadata <ID>`  | 更新直接 subagent 的 role/description。                |
 
 作用域说明（服务端强制）：
 
@@ -145,7 +145,7 @@ $ kallip approval deny "ap_a1b2c3d4..." "too risky"
 
 ### `file`：对接 files 服务的内容传输
 
-在 files 服务（`kallip-files`；HTTP 参考见 `docs/en/reference/files-api.md`）上传、下载、投递、列举记录。执行主体是 bearer 令牌所指的 tagma（即 spawn 环境里的那个）；`--space self` 是它自己的区域，`shared` 是该 space 的共享区域。
+在 files 服务（`kallipai-files`；HTTP 参考见 `docs/en/reference/files-api.md`）上传、下载、投递、列举记录。执行主体是 bearer 令牌所指的 tagma（即 spawn 环境里的那个）；`--space self` 是它自己的区域，`shared` 是该 space 的共享区域。
 
 ```bash
 $ kallip file put <PATH> --file <FILE> [--json]   # PATH may be relative for a tagma: it lands in its own region (e.g. images/x.png)
@@ -154,7 +154,7 @@ $ kallip file send <ID> (--to-tagma <TAGMA> | --to-user <USER>) [--json]
 $ kallip file ls --space self|shared [--prefix <PREFIX>] [--limit <N>] [--json]
 ```
 
-凭据走环境变量，不走标志：`KALLIP_POLIS_URL`（平台边缘 origin，CLI 从它推导 `<origin>/v1/files`；必填，未设置即报错（凭据绝不发往假定的部署））与 `KALLIP_FILES_TOKEN`（tagma 的长效 bearer）。在 CLI 运行处供给它们；agent shell 继承 spawn 时点 tagma 环境的实况，而启动清扫会最先移除 `KALLIP_FILES_TOKEN`，所以被供给的令牌绝不会到达 agent shell（服务端文件读取以 tagma 注册的登记凭据认证）。`--json` 把成功响应打成 JSON；`get` 缓冲内容（受服务最大 body 尺寸约束）写到 stdout（或 `--out`），内容从不被 JSON 包裹。
+凭据走环境变量，不走标志：`KALLIPAI_POLIS_URL`（平台边缘 origin，CLI 从它推导 `<origin>/v1/files`；必填，未设置即报错（凭据绝不发往假定的部署））与 `KALLIPAI_FILES_TOKEN`（tagma 的长效 bearer）。在 CLI 运行处供给它们；agent shell 继承 spawn 时点 tagma 环境的实况，而启动清扫会最先移除 `KALLIPAI_FILES_TOKEN`，所以被供给的令牌绝不会到达 agent shell（服务端文件读取以 tagma 注册的登记凭据认证）。`--json` 把成功响应打成 JSON；`get` 缓冲内容（受服务最大 body 尺寸约束）写到 stdout（或 `--out`），内容从不被 JSON 包裹。
 
 ### `image`：把图片读入会话
 
@@ -208,7 +208,7 @@ kallip inbox done <MSG_ID>
 kallip inbox clear [--all]        # 默认只清已处理，--all 清全部
 ```
 
-`--id` 可指定其他 agent 的收件箱，默认取 `KALLIP_ID`。列表按最新在前排列。
+`--id` 可指定其他 agent 的收件箱，默认取 `KALLIPAI_ID`。列表按最新在前排列。
 
 ### `lesche`：经聊天中继投递消息
 
@@ -246,23 +246,23 @@ kallip skill meta <PATH>
 
 队列、状态机、确认周期、事件轨迹、硬门与已关闭任务的归档，由 tagma task API 提供：
 
-| 子命令 | 用途 |
-| --- | --- |
-| `task create` | 注册任务（`--title ...`）；`--require` 固定确认人名单（可重复），注册时解析为身份；`--assignee` 默认为认领人；另加关联键 |
-| `task start` | 按 id 认领排队任务；串行门生效，`--force` 可越过 |
-| `task confirm` | 为关单门交回确认，可附 `--note` 与从 `--file` 读取的报告正文 |
-| `task review` | 将进行中任务转入评审 |
-| `task pause` | 暂停进行中任务；无门生效 |
-| `task resume` | 恢复已暂停任务；串行门生效，`--force` 可越过 |
-| `task note` | 向事件轨迹追加工作注记，不移动状态机 |
-| `task close` | 以 `--reason` 与可选 `--summary` 关闭任务；每个登记确认人都已确认，否则需 `--force`。带 `--dossier <目录>` 时该目录在关闭时规范化打包并随任务归档 |
-| `task reopen` | 重新打开已关闭任务；串行门生效，`--force` 可越过 |
-| `task archive` | 归档已关闭任务，使其离开默认列表视图；closed-only 门生效，`--force` 可越过 |
-| `task list` | 列出任务（`--status`、`--assignee`、`--archived`、时间窗过滤、分页、`--relative-time`） |
-| `task show` | 显示单个任务的状态、关联键与事件轨迹 |
-| `task export` | 导出单个或全部任务；`--json` 输出供机器消费的 JSON |
-| `task extract` | 解包已关闭任务的内容寻址 dossier 归档 |
-| `task report` | 回读事件轨迹中的确认：`report list` 列出已交回的确认（可选 `--confirmer` 过滤、`--out` 写文件），`report show` 显示单个确认（`--confirmer`、`--version`、`--out`） |
+| 子命令            | 用途                                                                                                                         |
+| ---            | ---                                                                                                                        |
+| `task create`  | 注册任务（`--title ...`）；`--require` 固定确认人名单（可重复），注册时解析为身份；`--assignee` 默认为认领人；另加关联键                                            |
+| `task start`   | 按 id 认领排队任务；串行门生效，`--force` 可越过                                                                                            |
+| `task confirm` | 为关单门交回确认，可附 `--note` 与从 `--file` 读取的报告正文                                                                                   |
+| `task review`  | 将进行中任务转入评审                                                                                                                 |
+| `task pause`   | 暂停进行中任务；无门生效                                                                                                               |
+| `task resume`  | 恢复已暂停任务；串行门生效，`--force` 可越过                                                                                                |
+| `task note`    | 向事件轨迹追加工作注记，不移动状态机                                                                                                         |
+| `task close`   | 以 `--reason` 与可选 `--summary` 关闭任务；每个登记确认人都已确认，否则需 `--force`。带 `--dossier <目录>` 时该目录在关闭时规范化打包并随任务归档                         |
+| `task reopen`  | 重新打开已关闭任务；串行门生效，`--force` 可越过                                                                                              |
+| `task archive` | 归档已关闭任务，使其离开默认列表视图；closed-only 门生效，`--force` 可越过                                                                           |
+| `task list`    | 列出任务（`--status`、`--assignee`、`--archived`、时间窗过滤、分页、`--relative-time`）                                                      |
+| `task show`    | 显示单个任务的状态、关联键与事件轨迹                                                                                                         |
+| `task export`  | 导出单个或全部任务；`--json` 输出供机器消费的 JSON                                                                                           |
+| `task extract` | 解包已关闭任务的内容寻址 dossier 归档                                                                                                    |
+| `task report`  | 回读事件轨迹中的确认：`report list` 列出已交回的确认（可选 `--confirmer` 过滤、`--out` 写文件），`report show` 显示单个确认（`--confirmer`、`--version`、`--out`） |
 
 ### `team`：声明式团队管理
 
@@ -328,14 +328,14 @@ kallip subagent interrupt $CHILD
 
 ### 环境变量
 
-`KALLIP_AUTH_TOKEN`（必填）与 `KALLIP_TAGMA_URL`（默认 `http://127.0.0.1:3000`）是主变量。含 LLM provider 配置与 agent 调优参数的完整参考见 [配置](../configuration/index.md)。
+`KALLIPAI_AUTH_TOKEN`（必填）与 `KALLIPAI_TAGMA_URL`（默认 `http://127.0.0.1:3000`）是主变量。含 LLM provider 配置与 agent 调优参数的完整参考见 [配置](../configuration/index.md)。
 
 ### 客户端库
 
-Rust 程序需要比 CLI 更多的控制时，`kallip-client` crate 把 CLI 操作提供为异步方法，外加少数高级路径（事件流、subagent 拉起、root 查询）：
+Rust 程序需要比 CLI 更多的控制时，`kallipai-client` crate 把 CLI 操作提供为异步方法，外加少数高级路径（事件流、subagent 拉起、root 查询）：
 
 ```rust
-use kallip_client::TagmaClient;
+use kallipai_client::TagmaClient;
 
 let client = TagmaClient::builder("http://127.0.0.1:3000")
     .auth_token(token)
@@ -355,4 +355,4 @@ let usage = client.agent_status(&id).await?;
 // subagents only.
 ```
 
-root agent 由 tagma 自管：启动时从环境变量一次性创建（`KALLIP_WORKSPACE_ROOT`、`KALLIP_MAX_TOOL_ROUNDS`、`KALLIP_ROOT_AGENT_PERMISSION_CLASS`；见 [Agent core 与 shell](../configuration/tagma/agent.md)），经 `get_root_agent()` 暴露。`spawn()` 只用于 **subagent**，它要求 `created_by`。
+root agent 由 tagma 自管：启动时从环境变量一次性创建（`KALLIPAI_WORKSPACE_ROOT`、`KALLIPAI_MAX_TOOL_ROUNDS`、`KALLIPAI_ROOT_AGENT_PERMISSION_CLASS`；见 [Agent core 与 shell](../configuration/tagma/agent.md)），经 `get_root_agent()` 暴露。`spawn()` 只用于 **subagent**，它要求 `created_by`。

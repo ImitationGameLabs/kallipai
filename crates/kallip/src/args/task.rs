@@ -13,11 +13,11 @@ pub(crate) enum TaskTimeAxisArg {
     Closed,
 }
 
-impl From<TaskTimeAxisArg> for kallip_common::protocol::TaskTimeAxis {
+impl From<TaskTimeAxisArg> for kallipai_common::protocol::TaskTimeAxis {
     fn from(a: TaskTimeAxisArg) -> Self {
         match a {
-            TaskTimeAxisArg::Updated => kallip_common::protocol::TaskTimeAxis::Updated,
-            TaskTimeAxisArg::Closed => kallip_common::protocol::TaskTimeAxis::Closed,
+            TaskTimeAxisArg::Updated => kallipai_common::protocol::TaskTimeAxis::Updated,
+            TaskTimeAxisArg::Closed => kallipai_common::protocol::TaskTimeAxis::Closed,
         }
     }
 }
@@ -33,7 +33,7 @@ pub(crate) fn parse_time_anchor(raw: &str, now_secs: u64) -> anyhow::Result<u64>
         })?;
         return Ok(now_secs.saturating_sub(days.saturating_mul(24 * 60 * 60)));
     }
-    kallip_common::timefmt::parse_utc_day(raw)
+    kallipai_common::timefmt::parse_utc_day(raw)
         .map_err(|_| anyhow::anyhow!("bad --since/--until value '{raw}' (try 3d or 2026-09-15)"))
 }
 
@@ -334,7 +334,7 @@ pub(crate) struct TaskReportShowArgs {
 #[cfg(test)]
 mod window_tests {
     use super::parse_time_anchor;
-    use kallip_common::timefmt;
+    use kallipai_common::timefmt;
 
     #[test]
     fn relative_days_anchored_to_now() {

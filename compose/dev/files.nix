@@ -34,7 +34,7 @@ let
       v = builtins.getEnv name;
     in
     if v == "" then default else v;
-  filesHostPort = envOrDefault "KALLIP_ARION_FILES_PORT" "7400";
+  filesHostPort = envOrDefault "KALLIPAI_ARION_FILES_PORT" "7400";
 in
 {
   config = {
@@ -51,9 +51,9 @@ in
       service.image = "postgres:17.5";
       service.volumes = [ "files_pgdata:/var/lib/postgresql/data" ];
       service.environment = {
-        POSTGRES_USER = "kallip";
-        POSTGRES_PASSWORD = "kallip";
-        POSTGRES_DB = "kallip";
+        POSTGRES_USER = "kallipai";
+        POSTGRES_PASSWORD = "kallipai";
+        POSTGRES_DB = "kallipai";
       };
     };
 
@@ -69,7 +69,7 @@ in
         "files-postgres"
       ];
       service.useHostStore = true;
-      service.command = [ "${workspace}/bin/kallip-files" ];
+      service.command = [ "${workspace}/bin/kallipai-files" ];
       # Loopback-tight publish: the browser path rides the edge vhost;
       # the loopback publish serves the `kallip file` CLI.
       service.ports = [ "127.0.0.1:${filesHostPort}:7400" ];
@@ -79,21 +79,21 @@ in
       ]
       ++ cacert;
       service.environment = {
-        KALLIP_FILES_ADDR = "0.0.0.0:7400";
-        KALLIP_FILES_DATABASE_URL = "postgres://kallip:kallip@files-postgres:5432/kallip";
+        KALLIPAI_FILES_ADDR = "0.0.0.0:7400";
+        KALLIPAI_FILES_DATABASE_URL = "postgres://kallipai:kallipai@files-postgres:5432/kallipai";
         # Blob root inside the container, backed by the named volume below.
         # Service-owned data, not shared with the host daemon tree (unlike
         # the instances binds).
-        KALLIP_FILES_BLOB_ROOT = "/var/lib/kallipai/files/blobs";
+        KALLIPAI_FILES_BLOB_ROOT = "/var/lib/kallipai/files/blobs";
         # Private compose-network hop to the archeion's /internal surface; never
         # routed through the public edge.
-        KALLIP_FILES_ARCHEION_INTERNAL_URL = "http://archeion:7100";
+        KALLIPAI_FILES_ARCHEION_INTERNAL_URL = "http://archeion:7100";
         # Read the archeion-provisioned internal secret (shared volume).
-        KALLIP_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
-        KALLIP_FILES_NOTIFY_URL = "http://lesche:7200";
+        KALLIPAI_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
+        KALLIPAI_FILES_NOTIFY_URL = "http://lesche:7200";
         # Same dev shared secret discipline: must equal the lesche's
-        # KALLIP_LESCHE_INTERNAL_TOKEN.
-        KALLIP_FILES_NOTIFY_TOKEN = "dev-notify-secret";
+        # KALLIPAI_LESCHE_INTERNAL_TOKEN.
+        KALLIPAI_FILES_NOTIFY_TOKEN = "dev-notify-secret";
         RUST_LOG = "info";
       };
       service.volumes = [

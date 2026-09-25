@@ -1,12 +1,12 @@
 # Dev edge proxy (see arion-compose.nix services.caddy). The one entry
-# point for the dev stack: host-routes the app.{$KALLIP_DOMAIN} (web app) and
-# api.{$KALLIP_DOMAIN} (platform, path-routed /v1/<service>) vhosts to the dev
+# point for the dev stack: host-routes the app.{$KALLIPAI_DOMAIN} (web app) and
+# api.{$KALLIPAI_DOMAIN} (platform, path-routed /v1/<service>) vhosts to the dev
 # services on 127.0.0.1 (caddy runs on the host network). A loopback
 # plaintext edge (http://127.0.0.1:7443) mirrors the api route table for the
 # dev tagma, whose webpki-roots reqwest cannot trust the mkcert edge.
 # The same vhosts serve both edge shapes: https (default) terminates TLS with
-# the mkcert leaf cert mounted at /certs; KALLIP_EDGE_TLS=off serves the
-# identical routes plain http -- the {$KALLIP_EDGE_SCHEME} prefix on the
+# the mkcert leaf cert mounted at /certs; KALLIPAI_EDGE_TLS=off serves the
+# identical routes plain http -- the {$KALLIPAI_EDGE_SCHEME} prefix on the
 # site address (set to http://) keeps Caddy's auto-https out of a
 # non-public TLD, and the mounted tls.caddy snippet beside this file
 # `tls` directive only for the https shape. The explicit `tls` directive
@@ -31,24 +31,24 @@
   }
 }
 
-{$KALLIP_EDGE_SCHEME}*.{$KALLIP_DOMAIN}:{$KALLIP_EDGE_PORT} {
+{$KALLIPAI_EDGE_SCHEME}*.{$KALLIPAI_DOMAIN}:{$KALLIPAI_EDGE_PORT} {
   import tls.caddy
 
-  @app host app.{$KALLIP_DOMAIN}
+  @app host app.{$KALLIPAI_DOMAIN}
   handle @app {
-    # the host vite dev server (packages/kallip-web `deno task dev`,
+    # the host vite dev server (packages/kallipai-web `deno task dev`,
     # appHost in its vite.config) serves the SPA with HMR.
     reverse_proxy 127.0.0.1:5173
   }
 
-  @api host api.{$KALLIP_DOMAIN}
+  @api host api.{$KALLIPAI_DOMAIN}
   handle @api {
     # The platform's single API face, path-routed by service segment.
     # handle_path strips /v1/<service> and forwards the remainder as-is:
     # all four backends serve bare resource paths, so the strip is the
     # whole story - no rewrites, and no identity-mapping exception for files
     # (its named matcher below covers the bare /v1/files prefix too).
-    import kallip-api-routes
+    import kallipai-api-routes
   }
 
   # Any other *.<devDomain> host (typo, or the bare apex) matched the wildcard
@@ -62,7 +62,7 @@
 # The api.<domain> route table, shared by the https wildcard edge above and
 # the loopback plaintext edge below (one place to review the path map):
 # /v1/<service>/* -> the stripped remainder, forwarded as-is.
-(kallip-api-routes) {
+(kallipai-api-routes) {
   handle_path /v1/archeion/* {
     reverse_proxy 127.0.0.1:7100
   }
@@ -89,8 +89,8 @@
 # Loopback plaintext edge for the dev tagma (host network): the tagma's
 # reqwest uses webpki-roots, so the mkcert https edge is untrusted from
 # inside the container; the tagma rides the same route table over plain
-# HTTP on loopback instead (KALLIP_POLIS_URL points here). Dev-only --
+# HTTP on loopback instead (KALLIPAI_POLIS_URL points here). Dev-only --
 # prod tagmas reach the public https api.<domain> face directly.
 http://127.0.0.1:7443 {
-  import kallip-api-routes
+  import kallipai-api-routes
 }

@@ -1,14 +1,14 @@
 [package]
 name = "kallipctl"
-description = "Management CLI (kallipctl) for the kallip local daemon"
+description = "Management CLI (kallipctl) for the kallipai local daemon"
 edition = "2024"
 version.workspace = true
 license.workspace = true
 
 [dependencies]
-kallip-daemon-client = { workspace = true }
-kallip-blob-store = { workspace = true }
-kallip-daemon-common = { workspace = true }
+kallipai-daemon-client = { workspace = true }
+kallipai-blob-store = { workspace = true }
+kallipai-daemon-common = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true, features = ["unstable-dynamic"] }

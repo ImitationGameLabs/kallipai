@@ -30,7 +30,7 @@ let
     src = lib.cleanSource root;
     filter =
       path: type: craneLib.filterCargoSources path type || baseNameOf path == "route-shapes.json";
-    name = "kallip-source";
+    name = "kallipai-source";
   };
 
   # Use git shortRev as version, fallback to "dirty" if working tree is dirty

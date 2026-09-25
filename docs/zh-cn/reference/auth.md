@@ -9,7 +9,7 @@ order: 20
 所有进入 KallipAI 的请求都以 bearer 令牌认证。每种令牌的前缀一眼标明其类别，泄露的凭据因此能自我标识，密钥扫描器也容易标记它。
 
 - **operator 令牌**（`sk-operator-…`）：tagma 启动时打印一次。授予对一个 tagma 的完全控制：管理任意 agent、批准或驳回 approval。tagma 唯一的 root agent 在启动时创建，从不经 API 创建。
-- **agent 令牌**（`sk-agent-…`）：agent 创建时逐个签发，以 `KALLIP_AUTH_TOKEN` 注入该 agent 的 shell。agent 用它回调 tagma；人不会经手它。
+- **agent 令牌**（`sk-agent-…`）：agent 创建时逐个签发，以 `KALLIPAI_AUTH_TOKEN` 注入该 agent 的 shell。agent 用它回调 tagma；人不会经手它。
 
 平台只存储令牌材料的哈希，绝不存储密钥本身。
 

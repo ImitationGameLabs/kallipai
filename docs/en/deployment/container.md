@@ -10,11 +10,11 @@ The platform's services ship as **scratch-based** container images built with
 closure of its binaries. Only `x86_64-linux` images are published. Two
 purpose-built images cover the split production deploy:
 
-- `packages.kallip-tagma-image`: the tagma service (the agent host with its
+- `packages.kallipai-tagma-image`: the tagma service (the agent host with its
   relay connector) plus the `kallip` CLI and the tagma's shell toolset
   (bash, coreutils, ripgrep, git, pgrep, kill). No baked-in configuration,
   the compose `tagma` service sets its own command and env.
-- `packages.kallip-archeion-image`: the platform's control-plane service:
+- `packages.kallipai-archeion-image`: the platform's control-plane service:
   the service binary and the CA bundle, nothing else.
 
 The recommended way to run them is [Arion](https://docs.hercules-ci.com/arion/),
@@ -27,15 +27,15 @@ brings up the dev platform side. The others are invoked with `arion -f`:
 | -------------- | -------------------------------------- | --------------------------------------------------------------- | ------------------------------------------ |
 | **dev**        | `arion up -d` (default)                | caddy + platform services + their postgres stores               | `packages.default`, run via `useHostStore` |
 | **dev** tagma  | `arion -f compose/dev/tagma.nix up -d` | tagma                                                           | `packages.default`, run via `useHostStore` |
-| **test**       | `arion -f compose/dev/test.nix up`     | tagma (integration suite)                                       | `packages.kallip-integration-tests`        |
+| **test**       | `arion -f compose/dev/test.nix up`     | tagma (integration suite)                                       | `packages.kallipai-integration-tests`      |
 
 Production is split into two **standalone compositions** under `compose/prod/`
 (run from the repo root so `.env` resolves):
 
-| Composition  | Command                                 | Services                                  | Image source                                  |
-| ------------ | --------------------------------------- | ----------------------------------------- | --------------------------------------------- |
-| **tagma**    | `arion -f compose/prod/tagma.nix up -d` | tagma                                     | `packages.kallip-tagma-image` (pre-built)     |
-| **platform** | `arion -f compose/prod/polis.nix up -d` | platform services + their postgres stores | `packages.kallip-archeion-image` + `postgres:17.5` + siblings |
+| Composition  | Command                                 | Services                                  | Image source                                                    |
+| ------------ | --------------------------------------- | ----------------------------------------- | ---------------------------------------------                   |
+| **tagma**    | `arion -f compose/prod/tagma.nix up -d` | tagma                                     | `packages.kallipai-tagma-image` (pre-built)                     |
+| **platform** | `arion -f compose/prod/polis.nix up -d` | platform services + their postgres stores | `packages.kallipai-archeion-image` + `postgres:17.5` + siblings |
 
 The two production halves run on **separate hosts** with distinct compose
 project names (`kallipai-tagma` / `kallipai-platform`) so their containers
@@ -69,14 +69,14 @@ uses the official `postgres:17.5` image.
 The dev tagma lives in its own composition (`compose/dev/tagma.nix`), so a
 plain `arion up` brings up only the platform side; bring the tagma up with
 `arion -f compose/dev/tagma.nix up -d`. With
-`KALLIP_TAGMA_RELAY_ENROLLMENT_CODE` unset it degrades to local-only (it logs
+`KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE` unset it degrades to local-only (it logs
 an error and keeps serving local agents; see
 [Relay bootstrap](#relay-bootstrap)).
 
 Dev is fronted by a Caddy edge proxy that terminates TLS for
 `*.kallipai.lan` with an mkcert certificate, so the stack is reachable
 cross-machine on the LAN and the browser sees a secure context. The dev
-domain comes from `.env` (`.env.example` sets `KALLIP_DOMAIN=kallipai.lan`).
+domain comes from `.env` (`.env.example` sets `KALLIPAI_DOMAIN=kallipai.lan`).
 One-time host setup is covered in the
 [development setup guide](../development/setup.md).
 
@@ -84,9 +84,9 @@ One-time host setup is covered in the
 
 #### The Tagma Host: `arion -f compose/prod/tagma.nix up -d`
 
-Brings up the tagma service from `packages.kallip-tagma-image`. The relay
+Brings up the tagma service from `packages.kallipai-tagma-image`. The relay
 connector talks to the deployed platform over the public internet through one
-origin (`KALLIP_POLIS_URL`, e.g. `https://api.kallipai.com`): enrollment
+origin (`KALLIPAI_POLIS_URL`, e.g. `https://api.kallipai.com`): enrollment
 happens once on first boot against that origin, and the relay connection is
 held through it afterwards.
 
@@ -105,7 +105,7 @@ files service, instances proxy) plus one postgres store per stateful service
 (`postgres:17.5`), co-located on one host. **None of the services is
 published**: all sit behind your TLS-terminating edge proxy, which
 path-routes the single `api.<your-domain>` host by service and sets
-`X-Forwarded-For`; configure `KALLIP_ARCHEION_TRUSTED_PROXIES` to the
+`X-Forwarded-For`; configure `KALLIPAI_ARCHEION_TRUSTED_PROXIES` to the
 proxy's CIDR. Secret-bearing env and the postgres credentials come from
 `.env`; operational env is pinned in `service.environment`, which overrides
 `env_file`.
@@ -141,10 +141,10 @@ one switch:
 ```nix
 services.kallipai.polis = {
   enable = true;
-  archeionPackage = inputs.self.packages.x86_64-linux.kallip-archeion;
-  leschePackage = inputs.self.packages.x86_64-linux.kallip-lesche;
-  filesPackage = inputs.self.packages.x86_64-linux.kallip-files;
-  instancesPackage = inputs.self.packages.x86_64-linux.kallip-instances;
+  archeionPackage = inputs.self.packages.x86_64-linux.kallipai-archeion;
+  leschePackage = inputs.self.packages.x86_64-linux.kallipai-lesche;
+  filesPackage = inputs.self.packages.x86_64-linux.kallipai-files;
+  instancesPackage = inputs.self.packages.x86_64-linux.kallipai-instances;
 };
 ```
 
@@ -184,7 +184,7 @@ server behind the dev Caddyfile.
 
 The tagma enrolls with the platform on its **first** boot, using a
 single-use enrollment code minted via the platform dashboard after a user
-signs up (`KALLIP_TAGMA_RELAY_ENROLLMENT_CODE`). The issued tagma token is
+signs up (`KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`). The issued tagma token is
 persisted inside the `data` volume and reused after that; leave the code
 unset on subsequent boots. If enrollment cannot complete, the tagma logs an
 error, keeps serving local agents, and comes back to it on a later boot
@@ -209,7 +209,7 @@ Docker's default shape is rootful: the container's uid 0 is the host's uid
 0, exactly what the sandbox guard refuses, since every spawned instance
 would be a host-root process. Prefer a rootless or userns-remapped runtime.
 Where that is not an option, set
-`KALLIP_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT=1` (exact value) in the tagma
+`KALLIPAI_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT=1` (exact value) in the tagma
 service's environment and accept the per-boot warning; anything else:
 unset, empty, `0`, keeps the refusal.
 
@@ -240,13 +240,13 @@ checkout); shared skills overlay the same way. Prod-tagma uses plain named
 volumes: to pin tagma state on a specific disk, edit the compose:
 
 ```sh
-KALLIP_ARION_DATA_PATH=$PWD/data arion up -d        # /var/lib/kallipai/tagmata/main ← host ./data
-KALLIP_ARION_WORKSPACE_PATH=$PWD/ws arion up -d     # /workspace ← host ./ws
-KALLIP_ARION_SKILLS_PATH=$PWD/skills arion up -d    # /var/lib/kallipai/tagmata/main/skills ← host ./skills
+KALLIPAI_ARION_DATA_PATH=$PWD/data arion up -d        # /var/lib/kallipai/tagmata/main ← host ./data
+KALLIPAI_ARION_WORKSPACE_PATH=$PWD/ws arion up -d     # /workspace ← host ./ws
+KALLIPAI_ARION_SKILLS_PATH=$PWD/skills arion up -d    # /var/lib/kallipai/tagmata/main/skills ← host ./skills
 ```
 
-Don't point `KALLIP_ARION_SKILLS_PATH` at the same host path as
-`KALLIP_ARION_DATA_PATH`; the skills subdir would shadow itself
+Don't point `KALLIPAI_ARION_SKILLS_PATH` at the same host path as
+`KALLIPAI_ARION_DATA_PATH`; the skills subdir would shadow itself
 confusingly. The override value must be an absolute, colon-free path (the
 compose throws at eval otherwise).
 
@@ -271,43 +271,43 @@ via `.env` in that mode. The full variable tables live in the
 ### Without Arion (Plain Docker)
 
 If you cannot use Arion, build and load the image(s) directly. The tagma
-runs from `kallip-tagma-image`:
+runs from `kallipai-tagma-image`:
 
 ```sh
-nix build .#kallip-tagma-image
+nix build .#kallipai-tagma-image
 docker load < result
 # The tag is the built git version, not "latest" — take it from the
 # "Loaded image" line docker load just printed:
-docker images | grep kallip-tagma
+docker images | grep kallipai-tagma
 docker run --rm \
   --security-opt seccomp=unconfined --cap-add SYS_ADMIN \
   -p 3000:3000 \
   -v kallipai-tagma_data:/var/lib/kallipai/tagmata/main \
   -v kallipai-tagma_workspace:/workspace \
-  -e KALLIP_LLM_PROVIDER=deepseek \
-  -e KALLIP_LLM_MODEL=deepseek-v4-flash \
-  -e KALLIP_LLM_DEEPSEEK_API_KEY="$DEEPSEEK_KEY" \
-  kallip-tagma:<gitVersion> kallip-tagma
+  -e KALLIPAI_LLM_PROVIDER=deepseek \
+  -e KALLIPAI_LLM_MODEL=deepseek-v4-flash \
+  -e KALLIPAI_LLM_DEEPSEEK_API_KEY="$DEEPSEEK_KEY" \
+  kallipai-tagma:<gitVersion> kallipai-tagma
 ```
 
-(The image has no default `Cmd`: pass the binary name `kallip-tagma`
+(The image has no default `Cmd`: pass the binary name `kallipai-tagma`
 explicitly.)
 
-The platform's control plane runs from `kallip-archeion-image` (behind your
+The platform's control plane runs from `kallipai-archeion-image` (behind your
 own TLS reverse proxy and a postgres):
 
 ```sh
-nix build .#kallip-archeion-image
+nix build .#kallipai-archeion-image
 docker load < result
 # The tag is the built git version, not "latest" — take it from the
 # "Loaded image" line docker load just printed:
-docker images | grep kallip-archeion
+docker images | grep kallipai-archeion
 docker run --rm \
-  -e KALLIP_ARCHEION_DATABASE_URL=postgres://kallip:...@postgres:5432/kallip \
-  -e KALLIP_ARCHEION_WEBAUTHN_RP_ID=app.<your-domain> \
-  -e KALLIP_ARCHEION_WEBAUTHN_RP_ORIGIN=https://app.<your-domain> \
-  -e KALLIP_ARCHEION_CORS_ORIGINS=https://app.<your-domain> \
-  kallip-archeion:<gitVersion>
+  -e KALLIPAI_ARCHEION_DATABASE_URL=postgres://kallipai:...@postgres:5432/kallipai \
+  -e KALLIPAI_ARCHEION_WEBAUTHN_RP_ID=app.<your-domain> \
+  -e KALLIPAI_ARCHEION_WEBAUTHN_RP_ORIGIN=https://app.<your-domain> \
+  -e KALLIPAI_ARCHEION_CORS_ORIGINS=https://app.<your-domain> \
+  kallipai-archeion:<gitVersion>
 ```
 
 Then create an agent via the tagma API with `workspace_root: /workspace`.

@@ -21,14 +21,14 @@ in
 # environment. A separate image from the archeion so the two services can be
 # rebuilt/redeployed independently (the point of the control/data-plane split).
 pkgs.dockerTools.buildImage {
-  name = "kallip-lesche";
+  name = "kallipai-lesche";
   tag = gitVersion;
   copyToRoot = [
     lesche
   ]
   ++ cacert;
   config = {
-    Cmd = [ "${lesche}/bin/kallip-lesche" ];
+    Cmd = [ "${lesche}/bin/kallipai-lesche" ];
     ExposedPorts = {
       "7200/tcp" = { };
     };

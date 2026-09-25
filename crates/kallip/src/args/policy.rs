@@ -2,7 +2,7 @@
 
 use super::agent::IdArgs;
 use clap::{Args, Subcommand};
-use kallip_common::agentid::AgentId;
+use kallipai_common::agentid::AgentId;
 
 #[derive(Subcommand)]
 pub(crate) enum PolicyCommand {

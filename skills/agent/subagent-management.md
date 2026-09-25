@@ -117,7 +117,7 @@ messages or prompts. This is not an error — clean them up with `remove`.
 
 Instead of polling with `sleep`, have the subagent message you when done.
 The message arrives as a new turn, waking you automatically — no wasted
-waits. The subagent learns your ID from `$KALLIP_ID` in your message, or you
+waits. The subagent learns your ID from `$KALLIPAI_ID` in your message, or you
 pass it explicitly. This is the natural coordination pattern — no sleep or
 status-polling needed.
 
@@ -141,11 +141,11 @@ messages you when done, and you resolve disagreements as decision points.
 - **Tagma restarts re-establish workspace locks automatically** during
   restore; if writes are briefly denied right after a restart, retry once
   your agent is restored.
-- **Subagent env** has `KALLIP_ID`, `KALLIP_AUTH_TOKEN`, `KALLIP_TAGMA_URL`,
-  `KALLIP_SUPERVISOR_AGENT_ID` (the supervisor), and `KALLIP_ROOT_AGENT_ID`
-  (the root) — but NOT `KALLIP_TAGMA_SLUG`. Use the agent's known path
+- **Subagent env** has `KALLIPAI_ID`, `KALLIPAI_AUTH_TOKEN`, `KALLIPAI_TAGMA_URL`,
+  `KALLIPAI_SUPERVISOR_AGENT_ID` (the supervisor), and `KALLIPAI_ROOT_AGENT_ID`
+  (the root) — but NOT `KALLIPAI_TAGMA_SLUG`. Use the agent's known path
   (`~/.local/share/kallipai/tagmata/<slug>/agents/<id>/`) instead.
-  (`KALLIP_SUPERVISOR_AGENT_ID` is absent, not empty, for the root agent.)
+  (`KALLIPAI_SUPERVISOR_AGENT_ID` is absent, not empty, for the root agent.)
 - **`subagent list` only shows direct children** — use the HTTP API
   (`GET /agents?created_by=<id>`) for the same, or check grandchildren via
   their supervisor.

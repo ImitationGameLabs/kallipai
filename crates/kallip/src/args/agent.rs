@@ -1,7 +1,7 @@
 //! `agent` command subtree of the `kallip` CLI (clap derive).
 
 use clap::{Args, Subcommand};
-use kallip_common::agentid::AgentId;
+use kallipai_common::agentid::AgentId;
 
 /// The `kallip agent` command family: a read-only fleet directory.
 #[derive(Subcommand)]

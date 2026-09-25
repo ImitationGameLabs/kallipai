@@ -1,13 +1,13 @@
 //! `kallip image read` — the agent-side image ingest entrance.
 
-//! Self-scoped: the target agent id comes from `KALLIP_ID` (the command
+//! Self-scoped: the target agent id comes from `KALLIPAI_ID` (the command
 //! runs in the agent shell). A local path stores the bytes in the
 //! tagma's local blob store; `--blob` re-ingests a stored copy; `--id`
 //! keeps reading a files record. The tagma enforces the modalities.
 
 use anyhow::{Context, Result};
-use kallip_client::TagmaClient;
-use kallip_common::protocol::{AttachmentIngestRequest, Modality};
+use kallipai_client::TagmaClient;
+use kallipai_common::protocol::{AttachmentIngestRequest, Modality};
 
 use crate::args::image::{ImageCommand, ImageReadArgs};
 

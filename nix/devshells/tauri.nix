@@ -1,11 +1,11 @@
-# Optional devShell for the kallip-app Android (Tauri mobile) target.
+# Optional devShell for the kallipai-app Android (Tauri mobile) target.
 #
 # Desktop is intentionally NOT supported here. Tauri's Linux desktop backend
 # (WebKitGTK, GTK3) does not handle Wayland fractional scaling: it reports a
 # broken devicePixelRatio and renders content tiny on HiDPI fractional displays
 # (upstream tauri#5600 / #6224 / #14590). Rather than carry the heavy Linux GUI
 # toolchain (webkitgtk / gtk / cairo / ... / pkg-config) to paper over an
-# upstream bug, desktop-class use is served by kallip-web in a browser, and this
+# upstream bug, desktop-class use is served by kallipai-web in a browser, and this
 # shell builds only the Android app. `tauri dev` / `tauri build` (desktop) will
 # therefore FAIL on Linux for lack of webkitgtk / pkg-config — that is expected.
 #
@@ -14,12 +14,12 @@
 # `packages`.
 #
 # Why separate from devShells.default:
-#   The app's Rust lives in packages/kallip-app/src-tauri as a standalone Cargo
+#   The app's Rust lives in packages/kallipai-app/src-tauri as a standalone Cargo
 #   project (NOT a member of the root workspace) precisely so Tauri's heavy
 #   native toolchain + Android SDK never leak into backend builds or the
 #   default devShell. This shell is opt-in: `nix develop .#tauri`.
 #
-#   Mirrors the proven talk-tree config (nix/dev/shell.nix), adapted for kallip:
+#   Mirrors the proven talk-tree config (nix/dev/shell.nix), adapted for kallipai:
 #   - appCraneLib carries the cross targets the backend toolchain omits: the
 #     android std targets (tauri android).
 #

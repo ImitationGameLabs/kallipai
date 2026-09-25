@@ -2163,7 +2163,7 @@
       ]
     },
     "members": {
-      "packages/kallip-app": {
+      "packages/kallipai-app": {
         "packageJson": {
           "dependencies": [
             "npm:@fontsource/fira-mono@^5.2.7",
@@ -2189,21 +2189,21 @@
           ]
         }
       },
-      "packages/kallip-archeion-client": {
+      "packages/kallipai-archeion-client": {
         "packageJson": {
           "dependencies": [
             "npm:@jsr/std__assert@^1.0.19"
           ]
         }
       },
-      "packages/kallip-client": {
+      "packages/kallipai-client": {
         "packageJson": {
           "dependencies": [
             "npm:@jsr/std__assert@^1.0.19"
           ]
         }
       },
-      "packages/kallip-common": {
+      "packages/kallipai-common": {
         "packageJson": {
           "dependencies": [
             "npm:@jsr/std__assert@^1.0.19",
@@ -2211,7 +2211,7 @@
           ]
         }
       },
-      "packages/kallip-direct": {
+      "packages/kallipai-direct": {
         "packageJson": {
           "dependencies": [
             "npm:@fontsource/fira-mono@^5.2.7",
@@ -2233,14 +2233,14 @@
           ]
         }
       },
-      "packages/kallip-files-client": {
+      "packages/kallipai-files-client": {
         "packageJson": {
           "dependencies": [
             "npm:@jsr/std__assert@^1.0.19"
           ]
         }
       },
-      "packages/kallip-lesche-client": {
+      "packages/kallipai-lesche-client": {
         "packageJson": {
           "dependencies": [
             "npm:@jsr/std__assert@^1.0.19",
@@ -2250,7 +2250,7 @@
           ]
         }
       },
-      "packages/kallip-site": {
+      "packages/kallipai-site": {
         "packageJson": {
           "dependencies": [
             "npm:@comark/svelte@0.7",
@@ -2272,7 +2272,7 @@
           ]
         }
       },
-      "packages/kallip-ui": {
+      "packages/kallipai-ui": {
         "packageJson": {
           "dependencies": [
             "npm:@humanspeak/svelte-markdown@^1.8.5",
@@ -2292,7 +2292,7 @@
           ]
         }
       },
-      "packages/kallip-web": {
+      "packages/kallipai-web": {
         "packageJson": {
           "dependencies": [
             "npm:@fontsource/fira-mono@^5.2.7",

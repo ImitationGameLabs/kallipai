@@ -8,11 +8,11 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }
-kallip-blob-store = { workspace = true }
-kallip-client = { workspace = true }
-kallip-common = { workspace = true }
+kallipai-blob-store = { workspace = true }
+kallipai-client = { workspace = true }
+kallipai-common = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
-kallip-runtime = { workspace = true }
+kallipai-runtime = { workspace = true }
 dirs = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
 clap = { workspace = true }
@@ -27,9 +27,9 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-kallip-files = { workspace = true }
-kallip-testkit = { workspace = true }
-kallip-archeion-common = { workspace = true }
+kallipai-files = { workspace = true }
+kallipai-testkit = { workspace = true }
+kallipai-archeion-common = { workspace = true }
 axum = { workspace = true }
 sea-orm = { workspace = true }
 testcontainers = { workspace = true, features = ["reusable-containers"] }

@@ -1,0 +1,414 @@
+use std::convert::Infallible;
+
+use axum::response::sse::{Event, KeepAlive, Sse};
+use futures_core::Stream;
+use kallipai_common::agentid::AgentId;
+use kallipai_common::protocol::SignalEvent;
+use kallipai_common::protocol::SseEvent;
+use kallipai_common::sse::OnDrop;
+use kallipai_lesche_common::event::TagmaStatusPayload;
+use kallipai_lesche_common::message::{Participant, TagmaReply};
+use tokio::sync::broadcast;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+
+use crate::bus::{AuthoredFrame, SignalFrame, StatusSnapshot, TopicReceiver};
+
+/// One frame on the direct SSE stream — the endpoint's private wire-assembly
+/// enum, not a bus item.
+/// The variant is the SSE event-name discriminator; the inner value is the
+/// `data:` payload. Serialization (variant name + inner JSON) lives in
+/// `serialize_direct_frame`.
+#[derive(Clone, Debug)]
+pub enum DirectFrame {
+    /// An authored message forwarded from the projector: an `assistant_content`
+    /// event, a `user_message` echo, etc. Carries the sender alongside the
+    /// content reply (mirrors the online envelope's `{sender, body}`); already
+    /// persisted by the projector.
+    Authored {
+        sender: Participant,
+        reply: TagmaReply,
+    },
+    /// A runtime signal (busy/idle presence, turn terminals, errors). Ephemeral.
+    Signal(SignalEvent),
+    /// An aggregate runtime snapshot. Ephemeral.
+    Status(TagmaStatusPayload),
+}
+
+/// The JSON payload serialized for an `authored` direct-SSE event: the sender
+/// paired with the content reply, so the offline frontend (which has no relay
+/// envelope) renders the author from one uniform shape.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DirectAuthoredPayload {
+    pub sender: Participant,
+    pub reply: TagmaReply,
+}
+/// A shutdown-aware SSE stream over one agent's broadcast channel, with
+/// subscribe/unsubscribe transition logging.
+///
+/// The stream ends for two reasons:
+/// - the broadcast sender is dropped (all subscribers gone / agent removed), or
+/// - the tagma-wide `shutdown` token fires.
+///
+/// The shutdown arm is load-bearing: without it, a long-lived SSE connection
+/// (e.g. an attached client) keeps the inner `BroadcastStream` open, so hyper's
+/// `serve_connection` never completes and `axum::serve(...).with_graceful_shutdown`
+/// never returns — Ctrl-C hangs. `take_until(shutdown.cancelled())` ends the
+/// stream the instant the tagma-wide token fires, letting graceful shutdown
+/// proceed.
+///
+/// The token passed here is the **tagma-wide** parent, not a per-agent child:
+/// SSE shutdown is a tagma lifecycle concern, not an agent lifecycle one.
+/// (Compare `bridge_task`, which uses the same parent token for its forced-exit
+/// arm for the same reason.)
+///
+/// # Subscriber-state logging
+///
+/// Subscribe/unsubscribe is the source of truth for "are this agent's runtime
+/// events being observed." We log exactly the `0 <-> 1` transitions of
+/// `events_tx.receiver_count()` here — not per runtime event, which would spam
+/// on every token delta for any agent (notably subagents) that runs without a
+/// subscriber. Attach is logged synchronously in this function; detach is logged
+/// from an [`OnDrop`] guard whose closure runs when the stream is dropped.
+pub fn sse_stream(
+    id: AgentId,
+    events_tx: broadcast::Sender<SseEvent>,
+    rx: broadcast::Receiver<SseEvent>,
+    shutdown: CancellationToken,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // 0 -> 1 transition: this subscriber is the first (and, right now, only)
+    // one. `subscribe()` already ran at the call site, so the count includes us.
+    if events_tx.receiver_count() == 1 {
+        info!(id = %id, "SSE subscriber attached");
+    }
+
+    // Detach fires from the `OnDrop` guard's `Drop::drop`, which runs before
+    // any field is dropped — in particular before the inner broadcast receiver,
+    // whose `receiver_count()` decrement is what `should_log_detach` keys off
+    // of. Invariant relied on below: the closure observes the receiver still
+    // counted. Re-verify if `event_stream` is ever wrapped in a combinator with
+    // a custom `Drop` that could drop an inner field early.
+    let detach_id = id.clone();
+    let detach_tx = events_tx.clone();
+    let detach_shutdown = shutdown.clone();
+
+    Sse::new(OnDrop::new(event_stream(rx, shutdown), move || {
+        if should_log_detach(&detach_shutdown, &detach_tx) {
+            info!(id = %detach_id, "SSE subscriber detached");
+        }
+    }))
+    .keep_alive(KeepAlive::default())
+}
+
+/// Whether dropping one subscriber right now should be logged as the
+/// "no one is watching" transition.
+///
+/// - `receiver_count() == 1`: this connection's receiver is still alive in
+///   `Drop::drop` (Rust drops fields after the `Drop::drop` body), so a count of
+///   1 means we are the last — after the drop completes, none remain. With more
+///   than one subscriber, dropping one leaves others watching, so no transition.
+/// - `!shutdown.is_cancelled()`: on tagma-wide shutdown every still-attached
+///   stream ends via `take_until`, which would otherwise emit a misleading
+///   "detached" line per connection (nothing is left to reattach to).
+///
+/// Best-effort: `receiver_count()` is atomic but a concurrent subscribe/detach
+/// can at worst yield one misleading `info`-level line.
+fn should_log_detach(
+    shutdown: &CancellationToken,
+    events_tx: &broadcast::Sender<SseEvent>,
+) -> bool {
+    !shutdown.is_cancelled() && events_tx.receiver_count() == 1
+}
+
+/// Build the shutdown-aware event stream without the SSE/keepalive framing.
+///
+/// Extracted from [`sse_stream`] so the shutdown contract is directly
+/// unit-testable (an `axum::response::Sse` is a response body, not a pollable
+/// stream).
+///
+/// `take_until` lives in `futures_util::stream::StreamExt`; it is applied here
+/// via its fully-qualified path so the surrounding sync `filter_map` (from
+/// `tokio_stream::StreamExt`, whose closure returns `Option<T>` rather than a
+/// future) stays unambiguous.
+fn event_stream(
+    rx: tokio::sync::broadcast::Receiver<SseEvent>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    futures_util::stream::StreamExt::take_until(
+        BroadcastStream::new(rx),
+        shutdown.cancelled_owned(),
+    )
+    .filter_map(|result| match result {
+        Ok(event) => match serde_json::to_string(&event) {
+            Ok(data) => Some(Ok(Event::default().data(data))),
+            Err(e) => {
+                warn!(error = %e, "failed to serialize SSE event, dropping");
+                None
+            }
+        },
+        Err(_) => None, // skip lagged messages
+    })
+}
+
+/// Merge the direct SSE's three sources — the two chat topics off the bus
+/// — now all three bus topics — into one [`DirectFrame`] stream. The
+/// SSE `event:` names and payload shapes are unchanged (the wire contract
+/// with the frontend).
+///
+/// Cross-topic ordering (settled at this
+/// assembly point): intra-topic FIFO holds per source; across sources the
+/// interleaving is whatever the three receivers yield. This is an explicit
+/// release, not an accident: the frontend demuxes by event name into three
+/// queues drained concurrently, so its processing order never depended on
+/// cross-type wire order; the online face already carries replies and
+/// signals on two independent transports; and `applySignal` /
+/// `applyReplyCore` are order-independent reducers. If a future consumer
+/// needs cross-type program order, that is a new gate (a merge order tag),
+/// not a silent extension of this merge.
+pub(crate) fn merge_direct_frames(
+    authored: TopicReceiver<AuthoredFrame>,
+    signals: TopicReceiver<SignalFrame>,
+    status: TopicReceiver<StatusSnapshot>,
+) -> impl Stream<Item = DirectFrame> + Send {
+    let authored = authored.into_stream().map(|frame| DirectFrame::Authored {
+        sender: frame.sender,
+        reply: frame.reply,
+    });
+    let signals = signals
+        .into_stream()
+        .map(|frame| DirectFrame::Signal(frame.0));
+    let status = status
+        .into_stream()
+        .map(|frame| DirectFrame::Status(frame.0));
+    // Three erased sources, interleaved as they yield (no cross-source
+    // ordering promise); a lagged source is skipped here and its loss
+    // lands in the topic's lagged counter (`into_stream` keeps the
+    // counting leg at the bus core). All three sources are counted alike.
+    let sources: Vec<std::pin::Pin<Box<dyn Stream<Item = DirectFrame> + Send>>> =
+        vec![Box::pin(authored), Box::pin(signals), Box::pin(status)];
+    futures_util::stream::select_all(sources)
+}
+
+/// A shutdown-aware SSE stream over the direct serving channel. Each
+/// [`DirectFrame`] becomes one SSE `Event` whose `event:` name is the frame's
+/// channel discriminator (`authored` / `signal` / `status`) and whose `data:`
+/// is the inner value's JSON. The same shutdown contract as [`sse_stream`].
+///
+/// `initial` is an optional one-shot frame prepended to the stream — used to
+/// push an immediate status snapshot on connect so the chat header renders at
+/// once instead of after the next pump tick (~2 s). Serialized through the same
+/// `serialize_direct_frame` so the wire shape is identical to a pump-driven
+/// status frame; `None` skips it (no leading event).
+pub fn direct_sse_stream(
+    frames: impl Stream<Item = DirectFrame> + Send + 'static,
+    initial: Option<DirectFrame>,
+    shutdown: CancellationToken,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let initial_event = initial.and_then(|frame| match serialize_direct_frame(&frame) {
+        Ok(event) => Some(Ok(event)),
+        Err(e) => {
+            warn!(error = %e, "failed to serialize initial direct SSE frame, dropping");
+            None
+        }
+    });
+    let live = futures_util::stream::StreamExt::take_until(frames, shutdown.cancelled_owned())
+        .filter_map(|frame| match serialize_direct_frame(&frame) {
+            Ok(event) => Some(Ok(event)),
+            Err(e) => {
+                warn!(error = %e, "failed to serialize direct SSE frame, dropping");
+                None
+            }
+        });
+    // `stream::iter(Option)` yields the single initial event or nothing, then
+    // chains into the live stream. One concrete stream type either way.
+    let with_initial = futures_util::stream::iter(initial_event).chain(live);
+    Sse::new(with_initial).keep_alive(KeepAlive::default())
+}
+
+fn serialize_direct_frame(frame: &DirectFrame) -> serde_json::Result<Event> {
+    let (name, data) = match frame {
+        // The offline SSE carries the sender alongside the reply (the offline
+        // path has no relay envelope), so the frontend renders the author from
+        // one uniform `{sender, reply}` shape.
+        DirectFrame::Authored { sender, reply } => (
+            "authored",
+            serde_json::to_string(&DirectAuthoredPayload {
+                sender: sender.clone(),
+                reply: reply.clone(),
+            })?,
+        ),
+        DirectFrame::Signal(event) => ("signal", serde_json::to_string(event)?),
+        DirectFrame::Status(payload) => ("status", serde_json::to_string(payload)?),
+    };
+    Ok(Event::default().event(name).data(data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kallipai_common::protocol::SseEvent;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    /// Regression: without the `take_until(shutdown.cancelled())` arm, a
+    /// long-lived SSE connection (e.g. an attached client) keeps the inner stream
+    /// open and hangs graceful shutdown. The stream must end promptly when the
+    /// tagma-wide shutdown token fires — proven here with a tight 100ms bound
+    /// (a regression that re-introduces a seconds-long park would be caught).
+    #[tokio::test]
+    async fn sse_stream_ends_on_shutdown() {
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<SseEvent>(16);
+        let rx = events_tx.subscribe();
+        let shutdown = CancellationToken::new();
+
+        let stream = event_stream(rx, shutdown.clone());
+        tokio::pin!(stream);
+
+        // No events have been sent, so the stream is parked — only the
+        // shutdown arm can end it.
+        shutdown.cancel();
+
+        let next = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+        assert!(
+            matches!(next, Ok(None)),
+            "SSE stream did not end cleanly after shutdown fired"
+        );
+    }
+
+    /// A pending event is still delivered when shutdown has not fired.
+    ///
+    /// Note: `take_until` polls the shutdown future *before* the inner stream,
+    /// so a shutdown that is already cancelled by the time the stream is polled
+    /// wins and drops the queued event. This test isolates the delivery path by
+    /// leaving the token uncancelled.
+    #[tokio::test]
+    async fn sse_stream_delivers_queued_event() {
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<SseEvent>(16);
+        let rx = events_tx.subscribe();
+        let shutdown = CancellationToken::new();
+
+        let stream = event_stream(rx, shutdown);
+        tokio::pin!(stream);
+
+        // Subscribe first, then publish — broadcast only reaches live receivers.
+        events_tx
+            .send(SseEvent::Status {
+                message: "hi".into(),
+            })
+            .unwrap();
+
+        // First poll yields the queued event before shutdown ends the stream.
+        let first = tokio::time::timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("timed out waiting for first event")
+            .expect("stream ended before yielding the event");
+        assert!(first.is_ok(), "queued event should have been delivered");
+    }
+
+    /// The `OnDrop` guard fires its closure exactly once when the wrapped
+    /// stream is dropped — the mechanism that lets `sse_stream` detect a
+    /// subscriber detaching.
+    #[tokio::test]
+    async fn on_drop_runs_closure_when_stream_dropped() {
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_for_closure = fired.clone();
+
+        // Inner stream type doesn't matter here — the test never polls it, only
+        // asserts the closure runs on drop. Use an empty stream with the Item
+        // type `OnDrop` is pinned to.
+        let stream = futures_util::stream::empty::<Result<Event, Infallible>>();
+        let wrapped = OnDrop::new(stream, move || {
+            fired_for_closure.store(true, Ordering::SeqCst);
+        });
+        drop(wrapped);
+
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "OnDrop closure must run when the wrapped stream is dropped"
+        );
+    }
+
+    /// `should_log_detach` is the precise detach-transition predicate: only when
+    /// this is the last subscriber AND the tagma is not shutting down.
+    #[tokio::test]
+    async fn should_log_detach_only_when_last_subscriber_and_not_shutting_down() {
+        // Single subscriber: last one -> log.
+        let (tx, _rx) = tokio::sync::broadcast::channel::<SseEvent>(4);
+        assert!(should_log_detach(&CancellationToken::new(), &tx));
+
+        // Two subscribers: dropping one leaves another -> no log.
+        let _second = tx.subscribe();
+        assert!(!should_log_detach(&CancellationToken::new(), &tx));
+
+        // Tagma shutting down: suppress even if this is the last subscriber.
+        let (tx2, _rx2) = tokio::sync::broadcast::channel::<SseEvent>(4);
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        assert!(!should_log_detach(&shutdown, &tx2));
+    }
+    /// The endpoint merge carries all three sources — the authored topic, the
+    /// signal topic, and the status topic — as `DirectFrame`s. It closes
+    /// once its sources end. Order-agnostic asserts: the merge makes
+    /// no cross-source ordering promise.
+    #[tokio::test]
+    async fn merge_direct_frames_carries_all_three_sources() {
+        use kallipai_archeion_common::ids::{ParticipantId, ParticipantKind, UserId};
+        let bus = crate::bus::tagma_bus().unwrap();
+        let authored = bus.subscribe::<AuthoredFrame>().unwrap();
+        let signals = bus.subscribe::<SignalFrame>().unwrap();
+        let status = bus.subscribe::<StatusSnapshot>().unwrap();
+        bus.publish(AuthoredFrame {
+            sender: Participant {
+                id: ParticipantId::for_user(&UserId::from("u".to_string())),
+                kind: ParticipantKind::Human,
+                handle: "Alice".into(),
+                tagma_id: None,
+            },
+            reply: TagmaReply::UserMessage {
+                history_id: 0,
+                text: "hi".into(),
+                created_at: None,
+                attachment: None,
+            },
+        })
+        .unwrap();
+        bus.publish(SignalFrame(SignalEvent::Busy)).unwrap();
+        bus.publish(StatusSnapshot(
+            kallipai_lesche_common::event::TagmaStatusPayload {
+                root_state: kallipai_common::protocol::AgentState::Idle,
+                subagents_total: 0,
+                subagents_active: 0,
+                token_budget: 50_000,
+                token_consumed: 0,
+                token_budget_unlimited: false,
+            },
+        ))
+        .unwrap();
+        drop(bus); // end the bus-borne sources so the merged stream closes
+        let merged = merge_direct_frames(authored, signals, status);
+        let frames = tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio_stream::StreamExt::collect::<Vec<_>>(merged),
+        )
+        .await
+        .expect("merge closes once its sources end");
+        let mut authored_n = 0;
+        let mut status_n = 0;
+        let mut busy = false;
+        for frame in &frames {
+            match frame {
+                DirectFrame::Authored { .. } => authored_n += 1,
+                DirectFrame::Signal(SignalEvent::Busy) => busy = true,
+                DirectFrame::Signal(_) => {
+                    panic!("unexpected frame")
+                }
+                DirectFrame::Status(_) => status_n += 1,
+            }
+        }
+        assert_eq!((authored_n, busy, status_n), (1, true, 1));
+    }
+}
