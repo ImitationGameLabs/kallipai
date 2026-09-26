@@ -8,8 +8,8 @@
 use super::TagmaClient;
 use anyhow::{Context, Result};
 use kallipai_common::protocol::{
-    TeamConvergeOutcome, TeamConvergeRequest, TeamConvergeResponse, TeamStatusQuery,
-    TeamStatusResponse,
+    TeamConvergeOutcome, TeamConvergeRequest, TeamConvergeResponse, TeamInactiveAgentsListing,
+    TeamStatusQuery, TeamStatusResponse,
 };
 
 impl TagmaClient {
@@ -44,6 +44,20 @@ impl TagmaClient {
             .await?;
         let outcome = resp.outcome;
         Ok((outcome, resp))
+    }
+
+    /// List every body currently in the tagma's inactive area
+    /// (machine-wide, at response time). Read-only; lock rebuild is
+    /// the substrate consumer.
+    pub async fn list_inactive_agents(&self) -> Result<TeamInactiveAgentsListing> {
+        self.handle_response(
+            self.with_auth(self.inner.http.get(self.url("/team/inactive-agents")))
+                .send()
+                .await
+                .context("failed to connect to tagma")?,
+            "failed to parse the inactive-agent listing response",
+        )
+        .await
     }
 }
 

@@ -23,8 +23,8 @@ use args::{
 };
 use clap::{CommandFactory, Parser};
 use kallip::file::FilesClient;
-use kallipai_adk::profile::{ProfileConfig, ProfileSet};
 use kallipai_client::TagmaClient;
+use kallipai_client::profile::{ProfileConfig, ProfileSet};
 use kallipai_client::types::LescheSessionEntry;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::policy::{ExecDecision, ExecOverride};

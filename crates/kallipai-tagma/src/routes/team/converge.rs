@@ -10,8 +10,8 @@ use kallipai_common::AgentId;
 use kallipai_common::declaration::{RoleDeclaration, TeamDeclaration, parse_declaration};
 use kallipai_common::protocol::{
     ApiError, DELEGATION_CARVE_OUT, RoleDisposition, TeamAction, TeamActionResult,
-    TeamConvergeOutcome, TeamConvergeRequest, TeamConvergeResponse, TeamLockEntry, TeamPlanRow,
-    TeamRejection, TeamRejectionKind, TeamRowOutcome,
+    TeamConvergeOutcome, TeamConvergeRequest, TeamConvergeResponse, TeamInactiveAgent,
+    TeamLockEntry, TeamPlanRow, TeamRejection, TeamRejectionKind, TeamRowOutcome,
 };
 
 use super::status::{LiveEntry, LockPair, compare_team, parse_lock_pairs, probe_lock_pairs};
@@ -426,6 +426,7 @@ pub(super) async fn team_converge(
             results: Vec::new(),
             rejections,
             lock: mapping,
+            inactive_agents: None,
         }));
     }
 
@@ -441,11 +442,17 @@ pub(super) async fn team_converge(
             results: Vec::new(),
             rejections: Vec::new(),
             lock: mapping,
+            inactive_agents: None,
         }));
     }
 
     let (results, aborted) =
         execute_converge(&state, &plan, &mut mapping, &root, req.force, &stamped).await;
+    // Post-execution snapshot, inside the same mutex window: a body this
+    // run deactivated is already in the inactive area and IS in the
+    // listing, matching the lock the response carries. Scan failure
+    // degrades to None (advisory consumer) — never a 500.
+    let inactive_agents = fill_inactive_agents();
     let outcome = if aborted {
         TeamConvergeOutcome::Aborted
     } else {
@@ -459,7 +466,30 @@ pub(super) async fn team_converge(
         results,
         rejections: Vec::new(),
         lock: mapping,
+        inactive_agents,
     }))
+}
+
+/// The post-execution inactive-area snapshot: scan mapped to the wire
+/// shape, degrading to `None` on a scan failure (the consumer is
+/// advisory; see the response field's doc). Extracted so the degrade
+/// path is testable without a full converge run.
+pub(super) fn fill_inactive_agents() -> Option<Vec<TeamInactiveAgent>> {
+    match kallipai_adk::persistence::scan_inactive() {
+        Ok(entries) => Some(
+            entries
+                .into_iter()
+                .map(|(id, meta)| TeamInactiveAgent {
+                    id,
+                    role: meta.role,
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Err(e) => {
+            tracing::warn!("inactive-agent scan failed while filling the converge response: {e:#}");
+            None
+        }
+    }
 }
 
 /// Upsert one role→id binding into the mapping (the record replaces any

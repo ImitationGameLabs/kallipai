@@ -9,11 +9,12 @@ use axum::extract::{Query, State};
 use kallipai_common::AgentId;
 use kallipai_common::declaration::{TeamDeclaration, parse_declaration};
 use kallipai_common::protocol::{
-    RoleDisposition, TeamAction, TeamConvergeRequest, TeamLockEntry, TeamRejectionKind,
-    TeamRoleStatus, TeamRowOutcome, TeamStatusQuery,
+    RoleDisposition, TeamAction, TeamConvergeOutcome, TeamConvergeRequest, TeamLockEntry,
+    TeamRejectionKind, TeamRoleStatus, TeamRowOutcome, TeamStatusQuery,
 };
 
 use kallipai_testkit::DevDir;
+use serial_test::serial;
 
 fn dev_tempdir(label: &str) -> DevDir {
     DevDir::new(label)
@@ -956,4 +957,137 @@ async fn converge_and_status_refuse_relative_declaration_paths() {
     };
     assert_eq!(err.status, 400);
     assert!(err.message.contains("path must be absolute"));
+}
+
+// -- inactive-agents wire face --
+
+/// A dry run never fills the snapshot: the Planned construction is one
+/// of the documented None causes, so the client must read the orphan
+/// check as skipped, not as an empty inactive area.
+#[tokio::test]
+async fn dry_run_response_leaves_inactive_agents_none() {
+    let state = make_state();
+    let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+    // An in-sync role (live body, matching lock record): the plan is a
+    // pure retain, so the dry run evaluates to Planned without touching
+    // the root or the disk.
+    let id = AgentId::random();
+    let (mut entry, _rx) = crate::test_helpers::make_entry_with_rx(None, "op-token".to_string());
+    entry.identity.config.role = "dev".to_string();
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), crate::state::RegistryEntry::Live(entry));
+    let dir = tempfile::TempDir::new().unwrap();
+    let declaration = dir.path().join("tagma.toml");
+    std::fs::write(
+        &declaration,
+        "[[role]]\nname = \"dev\"\nprofile_set = \"default\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("tagma.lock"),
+        format!(
+            "[[role]]\nname = \"dev\"\nid = \"{id}\"\nconverged_at = \"2026-01-01T00:00:00+00:00\"\n"
+        ),
+    )
+    .unwrap();
+    let resp = team_converge(
+        State(Arc::clone(&state)),
+        auth,
+        Json(TeamConvergeRequest {
+            file: declaration.display().to_string(),
+            dry_run: true,
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("an in-sync dry run evaluates");
+    assert_eq!(resp.0.outcome, TeamConvergeOutcome::Planned);
+    assert!(resp.0.inactive_agents.is_none());
+}
+
+#[tokio::test]
+async fn rejected_response_leaves_inactive_agents_none() {
+    use kallipai_common::authtoken::TokenHash;
+    use kallipai_common::policy::PolicyPreset;
+    let profiles = make_profile_bundle();
+    let state: crate::state::SharedState =
+        std::sync::Arc::new(crate::state::AppState::with_limits(
+            TokenHash::of("op-token"),
+            1,
+            1,
+            5,
+            profiles,
+            PolicyPreset::Default,
+            kallipai_adk::usage_stats::UsageStats::default(),
+            kallipai_adk::token_budget::TokenBudget::unlimited(),
+            None,
+        ));
+    let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+    let dir = tempfile::TempDir::new().unwrap();
+    let declaration = dir.path().join("tagma.toml");
+    std::fs::write(
+        &declaration,
+        "[[role]]\nname = \"a\"\nprofile_set = \"default\"\n\n[[role]]\nname = \"b\"\nprofile_set = \"default\"\n",
+    )
+    .unwrap();
+    let resp = team_converge(
+        State(Arc::clone(&state)),
+        auth,
+        Json(TeamConvergeRequest {
+            file: declaration.display().to_string(),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("an over-capacity run evaluates to a rejection body");
+    assert_eq!(resp.0.outcome, TeamConvergeOutcome::Rejected);
+    assert!(resp.0.inactive_agents.is_none());
+}
+
+/// The endpoint face and the fill face observe the same inactive area:
+/// over one scan each, taken back to back, the sets must agree (the
+/// listing is the substrate lock rebuild folds into the archive).
+#[tokio::test]
+async fn inactive_listing_matches_the_scan() {
+    let state = make_state();
+    let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+    let resp = super::inactive::list_inactive_agents(State(Arc::clone(&state)), auth)
+        .await
+        .expect("the listing reads the same tree the scan reads");
+    let from_scan: std::collections::BTreeSet<(String, String)> =
+        kallipai_adk::persistence::scan_inactive()
+            .expect("the scan succeeds under the installed test roots")
+            .into_iter()
+            .map(|(id, meta)| (id.to_string(), meta.role))
+            .collect();
+    let from_listing: std::collections::BTreeSet<(String, String)> = resp
+        .0
+        .inactive_agents
+        .into_iter()
+        .map(|e| (e.id.to_string(), e.role))
+        .collect();
+    assert_eq!(from_listing, from_scan);
+}
+
+/// The degrade/500 asymmetry: with no instance roots installed the scan
+/// fails, the converge fill degrades to None (advisory consumer), and
+/// the endpoint fails loud with a 500 (lock rebuild's substrate).
+#[tokio::test]
+#[serial]
+async fn scan_failure_degrades_fill_and_fails_the_endpoint_loud() {
+    let state = make_state();
+    crate::test_helpers::ensure_test_data_dir();
+    kallipai_adk::persistence::set_instance_roots_for_tests(None);
+    assert!(super::converge::fill_inactive_agents().is_none());
+    let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+    let err = match super::inactive::list_inactive_agents(State(Arc::clone(&state)), auth).await {
+        Err(err) => err,
+        Ok(_) => panic!("an unresolvable inactive area must fail the listing"),
+    };
+    assert_eq!(err.status, 500);
+    // Reinstall the pinned roots so sibling tests see the shared tree.
+    crate::test_helpers::ensure_test_data_dir();
 }

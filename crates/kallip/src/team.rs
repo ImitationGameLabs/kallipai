@@ -228,47 +228,8 @@ fn verdict_word(d: RoleDisposition) -> &'static str {
     }
 }
 
-/// Install the instance roots for the two commands that read this
-/// machine's instance tree (the converge's parked-area check and the
-/// lock rebuild). Same derivation as the tagma's boot: slug identity,
-/// `KALLIPAI_TAGMA_DATA_DIR` override, platform homes. Every other
-/// subcommand is identity-free — it talks to the tagma over HTTP — so
-/// this stays scoped to the local-disk readers.
-fn install_local_instance_roots() -> Result<()> {
-    let slug = std::env::var("KALLIPAI_TAGMA_SLUG")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .context(concat!(
-            "KALLIPAI_TAGMA_SLUG is not set; this command reads the local instance tree — ",
-            "run it with the tagma's KALLIPAI_TAGMA_SLUG"
-        ))?;
-    let data = match std::env::var_os("KALLIPAI_TAGMA_DATA_DIR").filter(|d| !d.is_empty()) {
-        Some(dir) => std::path::PathBuf::from(dir),
-        None => dirs::data_dir()
-            .context("could not determine platform data directory")?
-            .join("kallipai")
-            .join("tagmata")
-            .join(&slug),
-    };
-    let config = dirs::config_dir()
-        .context("could not determine platform config directory")?
-        .join("kallipai")
-        .join("tagmata")
-        .join(&slug);
-    let state = dirs::state_dir()
-        .context("could not determine platform state directory")?
-        .join("kallipai");
-    kallipai_adk::persistence::install_instance_roots(kallipai_adk::persistence::InstanceRoots {
-        data,
-        config,
-        state,
-    })
-}
 async fn run_converge(client: &TagmaClient, args: &TeamConvergeArgs) -> Result<()> {
     let (declaration, lock_path) = resolve_paths(&args.common.file, &args.common.lock)?;
-    // Best-effort: the parked-area check is advisory, so a missing
-    // identity degrades to the scan-warning path below, as before.
-    let _ = install_local_instance_roots();
     // A corrupt archive refuses the run (never reads as empty): the
     // operator decides — rebuild or fix — instead of losing every
     // identity binding to a silent re-spawn.
@@ -353,14 +314,18 @@ fn count_results(
     counts
 }
 
-/// Parked agents referenced by neither the fresh lock nor the
+/// Inactive agents referenced by neither the fresh lock nor the
 /// declaration: name them loudly at lock-write time, so invisibility
-/// never masquerades as convergence. Best-effort — a scan failure
-/// warns, it never fails the converge.
-fn warn_orphaned_parked(declaration: &str, mapping: &[kallipai_common::protocol::TeamLockEntry]) {
+/// never masquerades as convergence. Best-effort — a missing
+/// inactive-agent set (an older daemon, or the daemon's own scan
+/// failing) prints a one-line skip warning and never fails the run.
+fn warn_orphaned_inactive_agents(
+    declaration: &str,
+    mapping: &[kallipai_common::protocol::TeamLockEntry],
+    inactive_agents: Option<&[kallipai_common::protocol::TeamInactiveAgent]>,
+) {
     // Converge just read and parsed this same file; a failure here is
-    // still warned loudly instead of silently skipping the check, the
-    // same treatment a scan failure gets below.
+    // still warned loudly instead of passing silently.
     let declared: std::collections::HashSet<String> = match std::fs::read_to_string(declaration) {
         Ok(raw) => match parse_declaration(&raw) {
             Ok(d) => d.roles.into_iter().map(|r| r.name).collect(),
@@ -374,32 +339,54 @@ fn warn_orphaned_parked(declaration: &str, mapping: &[kallipai_common::protocol:
             return;
         }
     };
-    match kallipai_adk::persistence::scan_inactive() {
-        Ok(parked) => {
-            for (id, meta) in parked {
-                if mapping.iter().any(|e| e.id.to_string() == id.to_string()) {
-                    continue;
-                }
-                if let Some(entry) = mapping.iter().find(|e| e.role == meta.role) {
-                    eprintln!(
-                        "warning: parked agent {id} (role {:?}) is superseded by {} in the new lock — it stays parked, untouched",
-                        meta.role, entry.id
-                    );
-                } else if declared.contains(&meta.role) {
-                    eprintln!(
-                        "warning: parked agent {id} (role {:?}) is declared but absent from the new lock — it stays parked, untouched",
-                        meta.role
-                    );
-                } else {
-                    eprintln!(
-                        "warning: parked agent {id} (role {:?}) is referenced by neither the new lock nor the declaration — it stays parked, untouched",
-                        meta.role
-                    );
-                }
-            }
+    let inactive = match inactive_agents {
+        Some(entries) => entries,
+        None => {
+            eprintln!(
+                "warning: the daemon did not report the inactive-agent set; skipping the orphan check"
+            );
+            return;
         }
-        Err(e) => eprintln!("warning: cannot scan the inactive area for orphans: {e:#}"),
+    };
+    for line in orphan_warning_lines(&declared, mapping, inactive) {
+        eprintln!("{line}");
     }
+}
+
+/// The three orphan classifications over fixed slices, extracted so the
+/// branch behaviors are pin-testable without a daemon. Each line is a
+/// complete warning, ready to print.
+fn orphan_warning_lines(
+    declared: &std::collections::HashSet<String>,
+    mapping: &[kallipai_common::protocol::TeamLockEntry],
+    inactive: &[kallipai_common::protocol::TeamInactiveAgent],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for entry in inactive {
+        if mapping
+            .iter()
+            .any(|e| e.id.to_string() == entry.id.to_string())
+        {
+            continue;
+        }
+        if let Some(bound) = mapping.iter().find(|e| e.role == entry.role) {
+            lines.push(format!(
+                "warning: parked agent {} (role {:?}) is superseded by {} in the new lock — it stays parked, untouched",
+                entry.id, entry.role, bound.id
+            ));
+        } else if declared.contains(&entry.role) {
+            lines.push(format!(
+                "warning: parked agent {} (role {:?}) is declared but absent from the new lock — it stays parked, untouched",
+                entry.id, entry.role
+            ));
+        } else {
+            lines.push(format!(
+                "warning: parked agent {} (role {:?}) is referenced by neither the new lock nor the declaration — it stays parked, untouched",
+                entry.id, entry.role
+            ));
+        }
+    }
+    lines
 }
 fn write_lock_from(
     resp: &kallipai_common::protocol::TeamConvergeResponse,
@@ -494,7 +481,11 @@ fn render_converge(
                 }
             } else {
                 write_lock_from(resp, lock_path)?;
-                warn_orphaned_parked(declaration, &resp.lock);
+                warn_orphaned_inactive_agents(
+                    declaration,
+                    &resp.lock,
+                    resp.inactive_agents.as_deref(),
+                );
                 println!("lock written: {}", lock_path.display());
             }
             Ok(())
@@ -506,7 +497,7 @@ fn render_converge(
                 )
             }
             write_lock_from(resp, lock_path)?;
-            warn_orphaned_parked(declaration, &resp.lock);
+            warn_orphaned_inactive_agents(declaration, &resp.lock, resp.inactive_agents.as_deref());
             anyhow::bail!(
                 "converge aborted mid-execution; the written lock keeps the surviving records and the rows that landed — re-run to converge the rest"
             )
@@ -519,16 +510,19 @@ fn render_converge(
 }
 
 /// `team lock rebuild`: reconstruct the archive from reality. Live
-/// members come from the registry; parked members come from the inactive
-/// area, where the agent's own directory carries its role. Every
+/// members come from the registry; inactive agents come from the daemon's
+/// listing, where each entry carries its role. Every
 /// recovered parked body is listed — a rebuild that silently absorbed a
 /// parked body would hide a member, the invisibility rebuild must prevent.
 async fn run_lock_rebuild(client: &TagmaClient, args: &TeamLockRebuildArgs) -> Result<()> {
-    install_local_instance_roots()?;
     let live = client.list_agents(None).await?;
-    let parked = kallipai_adk::persistence::scan_inactive().context(
-        "cannot scan the inactive area (is KALLIPAI_TAGMA_DATA_DIR / KALLIPAI_TAGMA_SLUG set for this tagma?)",
-    )?;
+    let inactive = client
+        .list_inactive_agents()
+        .await
+        .context(
+            "the daemon does not expose the inactive-agent listing; upgrade the daemon to use lock rebuild",
+        )?
+        .inactive_agents;
 
     let now = kallipai_common::timefmt::format_utc(kallipai_common::timefmt::now_epoch());
     let mut roles: Vec<LockRole> = Vec::new();
@@ -545,14 +539,14 @@ async fn run_lock_rebuild(client: &TagmaClient, args: &TeamLockRebuildArgs) -> R
         });
     }
     let mut recovered = Vec::new();
-    for (id, meta) in &parked {
-        if meta.role.is_empty() {
+    for entry in &inactive {
+        if entry.role.is_empty() {
             continue;
         }
-        recovered.push(format!("{} (role {:?})", id, meta.role));
+        recovered.push(format!("{} (role {:?})", entry.id, entry.role));
         roles.push(LockRole {
-            name: meta.role.clone(),
-            id: id.to_string(),
+            name: entry.role.clone(),
+            id: entry.id.to_string(),
             converged_at: now.clone(),
         });
     }
@@ -824,6 +818,7 @@ mod tests {
             results: Vec::new(),
             rejections: Vec::new(),
             lock,
+            inactive_agents: None,
         }
     }
 
@@ -927,5 +922,70 @@ mod tests {
         let counts = count_results(&rows);
         assert_eq!(counts["spawned"], 2);
         assert_eq!(counts["restored"], 0);
+    }
+
+    /// The three orphan classifications over a fixed slice: a body whose
+    /// id is in the mapping is skipped, a role rebound elsewhere is
+    /// superseded, a declared role missing from the lock is named as
+    /// such, and everything else is referenced by neither.
+    #[test]
+    fn orphan_lines_classify_the_three_branches() {
+        let declared: std::collections::HashSet<String> =
+            ["declared".to_string()].into_iter().collect();
+        let mapping = vec![lock_entry("bound")];
+        let bound_id = mapping[0].id.to_string();
+        let inactive = vec![
+            agent("bound"),
+            agent("declared"),
+            agent("orphan"),
+            kallipai_common::protocol::TeamInactiveAgent {
+                id: mapping[0].id.clone(),
+                role: "shadow".to_string(),
+            },
+        ];
+        let lines = orphan_warning_lines(&declared, &mapping, &inactive);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].contains("superseded"), "{lines:?}");
+        assert!(lines[0].contains(&bound_id), "{lines:?}");
+        assert!(lines[1].contains("declared but absent"), "{lines:?}");
+        assert!(lines[2].contains("referenced by neither"), "{lines:?}");
+    }
+
+    fn agent(role: &str) -> kallipai_common::protocol::TeamInactiveAgent {
+        kallipai_common::protocol::TeamInactiveAgent {
+            id: kallipai_common::agentid::AgentId::random(),
+            role: role.to_string(),
+        }
+    }
+
+    /// A lock rebuild against a daemon that does not expose the listing
+    /// fails loud with the upgrade guidance and writes no archive.
+    #[tokio::test]
+    async fn lock_rebuild_fails_loud_on_a_404_listing() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/agents"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("{\"agents\": []}"))
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/team/inactive-agents"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let client = kallipai_client::TagmaClient::builder(&server.uri())
+            .build()
+            .unwrap();
+        let dir = write_scratch_dir("rebuild-404");
+        let args = crate::args::team::TeamLockRebuildArgs {
+            dir: Some(dir.path().to_path_buf()),
+            json: false,
+        };
+        let err = run_lock_rebuild(&client, &args)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("upgrade the daemon"), "{err}");
+        assert!(!dir.path().join("tagma.lock").exists());
     }
 }

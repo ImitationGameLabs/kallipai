@@ -271,6 +271,16 @@ pub struct TeamLockEntry {
     pub converged_at: String,
 }
 
+/// One inactive-area body on the wire: the minimum both consumers
+/// need (orphan warning branches on the pair; lock rebuild binds
+/// role to id). No timestamps and no metadata passthrough: the
+/// listing is an environment observation, not a restore handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamInactiveAgent {
+    pub id: AgentId,
+    pub role: String,
+}
+
 /// Response body for `POST /team/converge`.
 ///
 /// HTTP status: `200` for every evaluated run (including a preflight
@@ -297,4 +307,104 @@ pub struct TeamConvergeResponse {
     /// planned spawns, whose ids do not exist yet. Rejected runs
     /// return the input lock, pruned of discarded records.
     pub lock: Vec<TeamLockEntry>,
+    /// Full inactive-area enumeration taken inside the converge mutex window,
+    /// after execution lands. `None` has three causes: an older daemon (field absent), the daemon's
+    /// own scan failing while filling the Applied/Aborted response, or the Rejected/Planned
+    /// (dry-run) response constructions, which never fill it — in every case the client must
+    /// treat the orphan check as skipped, never as an authoritative empty set.
+    #[serde(default)]
+    pub inactive_agents: Option<Vec<TeamInactiveAgent>>,
+}
+
+/// Response body for `GET /team/inactive-agents`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TeamInactiveAgentsListing {
+    pub inactive_agents: Vec<TeamInactiveAgent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_response() -> TeamConvergeResponse {
+        TeamConvergeResponse {
+            declaration_path: "tagma.toml".to_string(),
+            dry_run: false,
+            outcome: TeamConvergeOutcome::Applied,
+            plan: Vec::new(),
+            results: Vec::new(),
+            rejections: Vec::new(),
+            lock: Vec::new(),
+            inactive_agents: None,
+        }
+    }
+
+    /// An old daemon serializes no `inactive_agents` key at all; the new
+    /// CLI must read that as `None` (skipped check), never as an empty
+    /// authoritative snapshot.
+    #[test]
+    fn missing_field_deserializes_to_none() {
+        let resp = sample_response();
+        let json = serde_json::to_value(&resp).unwrap();
+        let json = match json {
+            serde_json::Value::Object(mut map) => {
+                map.remove("inactive_agents");
+                serde_json::Value::Object(map)
+            }
+            other => panic!("expected an object, got {other}"),
+        };
+        let back: TeamConvergeResponse = serde_json::from_value(json).unwrap();
+        assert!(back.inactive_agents.is_none());
+    }
+
+    /// A new daemon's extra field is invisible to an old reader: serde
+    /// ignores unknown fields by default (no deny_unknown_fields).
+    #[test]
+    fn unknown_field_is_ignored_by_a_struct_without_it() {
+        #[derive(serde::Deserialize)]
+        struct OldReader {
+            #[allow(dead_code)]
+            declaration_path: String,
+        }
+        let mut resp = sample_response();
+        resp.inactive_agents = Some(Vec::new());
+        let json = serde_json::to_value(&resp).unwrap();
+        let old: OldReader = serde_json::from_value(json).unwrap();
+        assert_eq!(old.declaration_path, "tagma.toml");
+    }
+
+    /// An empty snapshot (Some(vec![])) and a populated one both survive
+    /// a round trip unchanged: empty is authoritative and distinct from
+    /// the absent (None) case.
+    #[test]
+    fn some_snapshots_round_trip_distinctly() {
+        let mut empty = sample_response();
+        empty.inactive_agents = Some(Vec::new());
+        let back: TeamConvergeResponse =
+            serde_json::from_value(serde_json::to_value(&empty).unwrap()).unwrap();
+        assert_eq!(back.inactive_agents, Some(Vec::new()));
+
+        let mut full = sample_response();
+        full.inactive_agents = Some(vec![TeamInactiveAgent {
+            id: AgentId::random(),
+            role: "dev".to_string(),
+        }]);
+        let back: TeamConvergeResponse =
+            serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        assert_eq!(back.inactive_agents, full.inactive_agents);
+        assert_ne!(back.inactive_agents, empty.inactive_agents);
+    }
+
+    #[test]
+    fn listing_round_trips() {
+        let listing = TeamInactiveAgentsListing {
+            inactive_agents: vec![TeamInactiveAgent {
+                id: AgentId::random(),
+                role: "ops".to_string(),
+            }],
+        };
+        let back: TeamInactiveAgentsListing =
+            serde_json::from_value(serde_json::to_value(&listing).unwrap()).unwrap();
+        assert_eq!(back.inactive_agents, listing.inactive_agents);
+    }
 }

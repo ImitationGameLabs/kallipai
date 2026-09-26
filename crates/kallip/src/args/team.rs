@@ -17,7 +17,7 @@ pub(crate) enum TeamCommand {
     /// fail-fast. Writes the lock on applied/aborted outcomes.
     Converge(TeamConvergeArgs),
     /// Rebuild the lock archive from reality: live members come from the
-    /// registry, parked members from the inactive area (their agent dirs
+    /// registry, inactive agents from the daemon's listing (their agent dirs
     /// carry the role). Every recovered parked body is listed.
     LockRebuild(TeamLockRebuildArgs),
 }

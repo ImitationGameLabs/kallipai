@@ -12,8 +12,6 @@ kallipai-blob-store = { workspace = true }
 kallipai-client = { workspace = true }
 kallipai-common = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
-kallipai-adk = { workspace = true }
-dirs = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
 clap = { workspace = true }
 tracing = { workspace = true }
@@ -27,6 +25,7 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = { workspace = true }
 kallipai-files = { workspace = true }
 kallipai-testkit = { workspace = true }
 kallipai-archeion-common = { workspace = true }

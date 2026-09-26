@@ -139,13 +139,12 @@ fn install_rejects_second_install() {
 
 #[test]
 #[serial]
-fn roots_error_names_both_install_paths() {
-    // No roots installed: the error must name both legitimate remedies
-    // (a boot-time host install and the deriving kallip team family),
-    // because the same failure surfaces from either context.
+fn roots_error_names_the_boot_install_path() {
+    // No roots installed: the error points at the boot-time host
+    // install, the only legitimate remedy (only the boot host installs
+    // roots; the CLI never derives them).
     set_instance_roots_for_tests(None);
     let err = roots().unwrap_err().to_string();
     assert!(err.contains("not installed"), "{err}");
     assert!(err.contains("boot"), "{err}");
-    assert!(err.contains("kallip team"), "{err}");
 }

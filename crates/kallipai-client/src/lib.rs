@@ -1,4 +1,5 @@
 pub mod client;
+pub mod profile;
 pub mod types;
 
 pub use client::{TagmaClient, TagmaClientBuilder};

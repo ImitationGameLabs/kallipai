@@ -5,13 +5,14 @@
 //! into the request, and the live registry. It reports what converge
 //! WOULD decide, never what it did.
 //!
-//! Child modules: `status` (the three-way comparison report + lock-pair
-//! parsing shared by both endpoints) and `converge` (the planned-actions
-//! executor).
+//! Child modules: `inactive` (the inactive-area listing), `status` (the
+//! three-way comparison report + lock-pair parsing shared by both
+//! endpoints) and `converge` (the planned-actions executor).
 
 use crate::state::SharedState;
 
 mod converge;
+mod inactive;
 mod status;
 #[cfg(test)]
 mod tests;
@@ -21,4 +22,8 @@ pub(crate) fn router() -> axum::Router<SharedState> {
     axum::Router::new()
         .route("/status", axum::routing::get(status::team_status))
         .route("/converge", axum::routing::post(converge::team_converge))
+        .route(
+            "/inactive-agents",
+            axum::routing::get(inactive::list_inactive_agents),
+        )
 }

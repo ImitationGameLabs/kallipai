@@ -53,7 +53,7 @@ fn roots() -> Result<InstanceRoots> {
         .read()
         .map_err(|_| anyhow::anyhow!("instance roots lock poisoned"))?
         .clone()
-        .context("instance roots not installed in this process; install them at boot (daemon host) or run through kallip team, which derives them from the environment")
+        .context("instance roots not installed in this process; install them at boot (daemon host)")
 }
 
 /// Available with the `testutils` feature (and during this crate's own

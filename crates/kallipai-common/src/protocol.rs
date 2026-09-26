@@ -39,6 +39,7 @@ pub use task::{
 };
 pub use team::{
     RoleDisposition, TeamAction, TeamActionResult, TeamConvergeOutcome, TeamConvergeRequest,
-    TeamConvergeResponse, TeamLockEntry, TeamPlanRow, TeamRejection, TeamRejectionKind,
-    TeamRoleStatus, TeamRowOutcome, TeamStatusQuery, TeamStatusResponse,
+    TeamConvergeResponse, TeamInactiveAgent, TeamInactiveAgentsListing, TeamLockEntry, TeamPlanRow,
+    TeamRejection, TeamRejectionKind, TeamRoleStatus, TeamRowOutcome, TeamStatusQuery,
+    TeamStatusResponse,
 };
