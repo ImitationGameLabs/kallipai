@@ -536,10 +536,14 @@ pub struct AttachmentIngestRequest {
     pub caption: Option<String>,
 }
 
-/// Response body for an attachment ingest: the recorded turn id.
+/// Response body for a record-form attachment ingest (`POST
+/// /agents/{id}/attachments/ingest`): the recorded turn id plus the
+/// content address of the local master copy the bytes were stored
+/// under — the handle the CLI prints and a later `--blob` re-ingest cites.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentIngestResponse {
     pub turn_id: u64,
+    pub blob_id: String,
 }
 
 /// Response body for a path-form attachment store (`POST

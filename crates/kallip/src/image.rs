@@ -28,7 +28,14 @@ async fn run_read(client: &TagmaClient, args: &ImageReadArgs) -> Result<()> {
                 caption: args.caption.clone(),
             };
             let response = client.attachment_ingest(&agent_id, &req).await?;
-            println!("Ingested {id} into turn {}.", response.turn_id);
+            println!(
+                "Ingested {id} into turn {} as blob {}.",
+                response.turn_id, response.blob_id
+            );
+            println!(
+                "Read it again later with `kallip image read --blob {}`.",
+                response.blob_id
+            );
         }
         Target::Path(local) => {
             let (bytes, media_type, name) = read_local_image(local, args).await?;

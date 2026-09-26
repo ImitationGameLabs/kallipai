@@ -1,9 +1,9 @@
 //! Attachment faces for [`TagmaClient`].
 
 //! `attachment_ingest` is the record form: the tagma fetches the bytes
-//! from the files service. `attachment_store` is the path form: the
-//! bytes ride the request body and land in the tagma's local blob
-//! store as the master copy. `attachment_store_blob` re-ingests an
+//! from the files service once and stores them locally as the master
+//! copy, returning the content address. `attachment_store` is the path
+//! form: the bytes ride the request body and land in the same store.
 //! already-stored blob by its content address. All faces are
 //! self-scoped server-side (the operator token may target any agent);
 //! the tagma enforces the bound set's modalities before recording the

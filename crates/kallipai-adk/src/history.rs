@@ -27,20 +27,23 @@ use time::OffsetDateTime;
 pub struct AttachmentRef {
     /// The modality of the referenced content.
     pub modality: Modality,
-    /// The files-service record id of the referenced media — assigned by
-    /// media storage and known to the caller before the turn exists. Turn
-    /// membership is carried by the enclosing record's `turn_id`, never
-    /// here: this struct is built before the turn is recorded.
-    pub record_id: uuid::Uuid,
+    /// The files-service record id behind the reference, when one exists
+    /// (the `--id` ingest form). Purely provenance: sharing and restore
+    /// never touch it. Absent for path/blob-form references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<uuid::Uuid>,
     /// MIME type of the referenced media (e.g. `image/png`).
     pub media_type: String,
-    /// The local copy's content address for the same bytes
-    /// (`sha256-<hex>`, the `kallipai-blob-store` id), when the tagma data
-    /// area holds one. Absent for references recorded before the
-    /// local-copy store existed: restore then falls back to the files
-    /// service.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blob_id: Option<String>,
+    /// The reference anchor: the content address of the master copy in
+    /// this tagma's `blobs/attachments` area (`sha256-<hex>`, the
+    /// `kallipai-blob-store` id). `default` is contractual: hydration
+    /// skips unparseable lines silently, so without it one blob_id-less
+    /// legacy line would drop the whole turn (text included) from the
+    /// restored window. The default value then fails the read-side
+    /// parse, which classifies as Gone -- never Transient (a damaged
+    /// line must not enter the retry loop) and never an error.
+    #[serde(default)]
+    pub blob_id: String,
     /// Optional human-readable caption carried alongside the reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
@@ -768,7 +771,7 @@ mod tests {
     fn attachment(modality: Modality, record_id: u64) -> AttachmentRef {
         AttachmentRef {
             modality,
-            record_id: uuid::Uuid::from_bytes([
+            record_id: Some(uuid::Uuid::from_bytes([
                 0,
                 0,
                 0,
@@ -785,9 +788,9 @@ mod tests {
                 0,
                 0,
                 record_id as u8,
-            ]),
+            ])),
             media_type: "image/png".to_owned(),
-            blob_id: None,
+            blob_id: format!("sha256-{record_id:064x}"),
             caption: Some("a chart".to_owned()),
         }
     }
@@ -838,7 +841,7 @@ mod tests {
     fn invalidated_event(turn_id: u64, seed: u64) -> SystemEvent {
         SystemEvent::ReferenceInvalidated {
             turn_id,
-            record_id: attachment(Modality::Image, seed).record_id,
+            record_id: attachment(Modality::Image, seed).record_id.unwrap(),
             reason: "files record no longer exists".to_owned(),
         }
     }

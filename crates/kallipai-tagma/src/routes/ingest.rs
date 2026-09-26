@@ -58,7 +58,10 @@ pub(crate) async fn ingest_attachment(
         req.record_id,
     )
     .await?;
-    let blob_id = crate::files::store_mirror(state.attachment_blobs.get(), &bytes).await;
+    // The fetched bytes become the local master copy (fail-closed: the
+    // ingest fails rather than recording a reference whose bytes no
+    // store holds), then the turn is recorded against that anchor.
+    let blob_id = store_blob(&state, &bytes).await?;
     let turn_id = record_ingest(
         &target,
         req.modality,
@@ -66,12 +69,15 @@ pub(crate) async fn ingest_attachment(
             .clone()
             .unwrap_or_else(|| "image/png".to_owned()),
         req.caption.clone(),
-        req.record_id,
+        Some(req.record_id),
         bytes,
-        blob_id,
+        blob_id.as_str().to_owned(),
     )
     .await?;
-    Ok(Json(AttachmentIngestResponse { turn_id }))
+    Ok(Json(AttachmentIngestResponse {
+        turn_id,
+        blob_id: blob_id.as_str().to_owned(),
+    }))
 }
 
 /// POST /agents/{id}/attachments — the path form. The media bytes ride
@@ -151,9 +157,9 @@ pub(crate) async fn store_attachment(
         Modality::Image,
         media_type.clone(),
         query.caption.clone(),
-        uuid::Uuid::nil(),
+        None,
         bytes,
-        Some(blob_id.as_str().to_owned()),
+        blob_id.as_str().to_owned(),
     )
     .await?;
 
@@ -313,13 +319,17 @@ async fn record_ingest(
     modality: Modality,
     media_type: String,
     caption: Option<String>,
-    record_id: uuid::Uuid,
+    record_id: Option<uuid::Uuid>,
     bytes: Vec<u8>,
-    blob_id: Option<String>,
+    blob_id: String,
 ) -> Result<u64, ApiError> {
+    // A provenance-less reference (path/blob form) answers to the
+    // nil-id pointer line its ingest writes, matching the restore-side
+    // pointer_line().
+    let pointer_record = record_id.unwrap_or(uuid::Uuid::nil());
     let text = caption
         .clone()
-        .unwrap_or_else(|| format!("[image {record_id}]"));
+        .unwrap_or_else(|| format!("[image {pointer_record}]"));
     let attachments = vec![AttachmentRef {
         modality,
         record_id,
@@ -334,7 +344,7 @@ async fn record_ingest(
     // upstream request. A files deletion leaves no image data in the
     // record; a restart re-assembles the parts message from the sidecar
     // reference via the compose path (context::compose::reassemble_attachments).
-    let pointer = format!("[image {record_id}]");
+    let pointer = format!("[image {pointer_record}]");
     let history_message = match &caption {
         Some(caption) => Message::user(format!("{caption}\n{pointer}")),
         None => Message::user(pointer),
@@ -418,9 +428,9 @@ mod tests {
             Modality::Image,
             "image/png".to_owned(),
             Some("a chart".to_owned()),
-            record_id,
+            Some(record_id),
             vec![1, 2, 3, 4],
-            None,
+            "sha256-missing-copy".to_owned(),
         )
         .await
         .unwrap();
@@ -459,7 +469,7 @@ mod tests {
             serde_json::from_str(line.lines().next().unwrap()).unwrap();
         assert_eq!(record.attachments.len(), 1);
         let attachment = &record.attachments[0];
-        assert_eq!(attachment.record_id, record_id);
+        assert_eq!(attachment.record_id, Some(record_id));
         assert_eq!(attachment.modality, Modality::Image);
         assert_eq!(attachment.media_type, "image/png");
         assert_eq!(attachment.caption.as_deref(), Some("a chart"));
@@ -476,7 +486,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_ingest_writes_the_mirror_anchor_into_the_sidecar() {
+    async fn record_ingest_writes_the_master_anchor_into_the_sidecar() {
         let dir = tempfile::tempdir().unwrap();
         let mirror_dir = tempfile::tempdir().unwrap();
         let backend = kallipai_blob_store::LocalBackend::arc(mirror_dir.path().to_owned());
@@ -486,17 +496,19 @@ mod tests {
         let target = IngestTarget::of(&entry);
         let record_id = uuid::Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
 
-        let blob_id = crate::files::store_mirror(Some(&backend), &[7, 8])
+        let blob_id = backend
+            .put(&mut std::io::Cursor::new(&[7u8, 8][..]))
             .await
             .unwrap();
+        let blob_id = blob_id.id.as_str().to_owned();
         let _turn = record_ingest(
             &target,
             Modality::Image,
             "image/png".to_owned(),
             Some("a chart".to_owned()),
-            record_id,
+            Some(record_id),
             vec![7, 8],
-            Some(blob_id.clone()),
+            blob_id.clone(),
         )
         .await
         .unwrap();
@@ -510,11 +522,8 @@ mod tests {
         let line = std::fs::read_to_string(&file).unwrap();
         let record: kallipai_adk::history::HistoryRecord =
             serde_json::from_str(line.lines().next().unwrap()).unwrap();
-        assert_eq!(
-            record.attachments[0].blob_id.as_deref(),
-            Some(blob_id.as_str())
-        );
-        // The mirror holds the same bytes under that address.
+        assert_eq!(record.attachments[0].blob_id, blob_id);
+        // The store holds the same bytes under that address.
         let stored = backend
             .get(&kallipai_blob_store::BlobId::parse(&blob_id).unwrap())
             .await
@@ -615,12 +624,10 @@ mod tests {
             serde_json::from_str(line.lines().next().unwrap()).unwrap();
         assert_eq!(record.attachments.len(), 1);
         let attachment = &record.attachments[0];
-        assert_eq!(attachment.record_id, uuid::Uuid::nil());
+        assert_eq!(attachment.record_id, None);
         assert_eq!(attachment.media_type, "image/jpeg");
-        assert_eq!(
-            attachment.blob_id.as_deref(),
-            Some(response.blob_id.as_str())
-        );
+        assert_eq!(attachment.blob_id, response.blob_id);
+
         assert_eq!(response.turn_id, record.turn_id.unwrap());
         // The pointer keeps the nil-UUID text form (machine-parseable).
         let stored = record.messages[0]
@@ -720,6 +727,43 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("blob store"), "got: {err}");
+        // Fail closed: no turn, no sidecar row.
+        let registry = state.registry.read().await;
+        let entry = registry.get(&id).unwrap().as_live().unwrap();
+        assert!(entry.agent.store.lock().await.turns().is_empty());
+        assert!(!dir.path().join("history").exists());
+    }
+
+    #[tokio::test]
+    async fn record_ingest_fails_closed_without_a_blob_store() {
+        // No attachment_blobs wired: the master-copy write cannot
+        // happen, so the ingest fails before any turn is recorded.
+        let state = make_state_with_image_set();
+        let dir = tempfile::tempdir().unwrap();
+        let id = AgentId::random();
+        let mut entry = make_entry(None, "tok".to_owned());
+        entry.identity.agent_dir = Some(dir.path().to_owned());
+        {
+            let mut reg = state.registry.write().await;
+            reg.register(id.clone(), RegistryEntry::Live(entry));
+        }
+        seed_default_snapshot(&state, &id);
+
+        let req = AttachmentIngestRequest {
+            record_id: uuid::Uuid::from_u128(0x77),
+            modality: Modality::Image,
+            media_type: None,
+            caption: None,
+        };
+        let err = ingest_attachment(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(id.clone()),
+            Json(req),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, 503);
         // Fail closed: no turn, no sidecar row.
         let registry = state.registry.read().await;
         let entry = registry.get(&id).unwrap().as_live().unwrap();
@@ -832,11 +876,8 @@ mod tests {
         let record: kallipai_adk::history::HistoryRecord =
             serde_json::from_str(line.lines().next().unwrap()).unwrap();
         assert_eq!(record.attachments.len(), 1);
-        assert_eq!(record.attachments[0].record_id, uuid::Uuid::nil());
-        assert_eq!(
-            record.attachments[0].blob_id.as_deref(),
-            Some(stored.as_str())
-        );
+        assert_eq!(record.attachments[0].record_id, None);
+        assert_eq!(record.attachments[0].blob_id, stored.as_str());
     }
 
     #[tokio::test]

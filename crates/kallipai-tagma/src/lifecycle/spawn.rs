@@ -465,7 +465,11 @@ impl<'a> Materialize<'a> {
             // instead — a client error the caller can act on.
         };
 
-        let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
+        let store = Arc::new(tokio::sync::Mutex::new({
+            let mut store = ContextStore::new();
+            store.set_attachment_blobs(state.attachment_blobs.get().cloned());
+            store
+        }));
         let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
 
         // Create the agent directory before persisting the exec policy and the

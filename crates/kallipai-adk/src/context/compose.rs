@@ -62,9 +62,14 @@ pub fn ingest_message(text: &str, images: &[IngestImage]) -> Message {
 /// The attachment references a pinned message's pointer lines name: each
 /// `[image <uuid>]` line is paired, in order, with an image part's media
 /// type. Parts-mode only — a plain-text message names no bytes to carry.
-/// An image part with no pointer line (or a non-stored source, like a
-/// remote URL) has nothing to re-fetch on restore and is logged as dropped.
-pub(crate) fn extract_pin_attachments(msg: &Message) -> Vec<PinAttachment> {
+/// Each image part's bytes are seeded into the attachment store at pin
+/// time (content-addressed), so the pin's anchors are self-sufficient;
+/// a part with no pointer line, a non-decodable body, or a failed store
+/// write is logged as dropped and the pin keeps text only.
+pub(crate) fn extract_pin_attachments(
+    msg: &Message,
+    blobs: Option<&std::sync::Arc<dyn kallipai_blob_store::BlobStore>>,
+) -> Vec<PinAttachment> {
     let Some(parts) = msg.content_parts() else {
         return Vec::new();
     };
@@ -87,7 +92,7 @@ pub(crate) fn extract_pin_attachments(msg: &Message) -> Vec<PinAttachment> {
             continue;
         };
         let ImageSource::Base64 { data, media_type } = source else {
-            // Not a stored record (e.g. a remote URL): nothing to re-fetch.
+            // Not a stored source (e.g. a remote URL): nothing to anchor.
             dropped += 1;
             continue;
         };
@@ -95,17 +100,22 @@ pub(crate) fn extract_pin_attachments(msg: &Message) -> Vec<PinAttachment> {
             dropped += 1;
             continue;
         };
-        // Hash the live bytes for the mirror anchor: every write-through
-        // path seeds the local store, so restore resolves this locally and
-        // only reaches the files service when the copy is missing. A decode
-        // failure just drops the anchor -- the reference stays files-backed.
-        let blob_id = STANDARD.decode(data).ok().map(|bytes| {
-            kallipai_blob_store::BlobId::for_bytes(&bytes)
-                .as_str()
-                .to_owned()
+        // Seed the anchor from the live bytes: decode, write the master
+        // copy into the attachment store (content-addressed, so writing
+        // bytes that are already stored is a no-op), and anchor on the
+        // id. A decode or write failure — or no wired store — drops the
+        // attachment: the pin is saved as text only, never as a
+        // reference whose bytes no store holds.
+        let blob_id = STANDARD.decode(data).ok().and_then(|bytes| match blobs {
+            Some(blobs) => store_blob_sync(blobs, &bytes),
+            None => None,
         });
+        let Some(blob_id) = blob_id else {
+            dropped += 1;
+            continue;
+        };
         refs.push(PinAttachment {
-            record_id,
+            record_id: Some(record_id),
             media_type: media_type.clone(),
             blob_id,
         });
@@ -117,6 +127,42 @@ pub(crate) fn extract_pin_attachments(msg: &Message) -> Vec<PinAttachment> {
         );
     }
     refs
+}
+
+/// Synchronous master-copy write for pin-time seeding. The pin path is
+/// fully synchronous (the store lock is held), and the write is a
+/// low-frequency content-addressed put, so a throwaway current-thread
+/// runtime is cheaper and simpler than threading async through the pin
+/// chain. `None` on write failure: the caller drops the attachment.
+fn store_blob_sync(
+    blobs: &std::sync::Arc<dyn kallipai_blob_store::BlobStore>,
+    bytes: &[u8],
+) -> Option<String> {
+    // The write runs on its own OS thread with a throwaway runtime: the
+    // pin chain is synchronous and usually already inside a tokio
+    // runtime, where block_on would panic. The thread pays a one-shot
+    // runtime build per pin -- a low-frequency operation.
+    let blobs = blobs.clone();
+    let bytes = bytes.to_vec();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        runtime
+            .block_on(blobs.put(&mut std::io::Cursor::new(bytes)))
+            .ok()
+            .map(|outcome| outcome.id.as_str().to_owned())
+    })
+    .join()
+    .ok()
+    .flatten()
+}
+
+/// The pointer line a reference answers to. Provenance-only record ids
+/// (path/blob-form ingests) answer to the nil-id line their ingest wrote.
+fn pointer_line(record_id: Option<uuid::Uuid>) -> String {
+    format!("[image {}]", record_id.unwrap_or(uuid::Uuid::nil()))
 }
 
 /// Scan text for `[image <uuid>]` pointer lines, in order. Bracket
@@ -143,7 +189,8 @@ fn pointer_record_ids(text: &str) -> Vec<uuid::Uuid> {
 pub enum FetchedImage {
     /// The bytes arrived; the media type rides the sidecar reference.
     Bytes(Vec<u8>),
-    /// The media is deterministically gone (the files record was deleted).
+    /// The media is deterministically gone (the local master copy is
+    /// missing, or the anchor does not parse).
     Gone,
     /// A transient failure (5xx / timeout / network) with its description.
     Transient(String),
@@ -151,14 +198,14 @@ pub enum FetchedImage {
 
 /// What one restore-time re-assembly pass gave up on or deferred.
 pub struct ReassemblyReport {
-    /// `(turn_id, record_id, reason)` — deterministic failures. The caller
+    /// `(turn_id, blob_id, reason)` — deterministic failures. The caller
     /// records nothing to history — invalidations are not remembered
     /// across restarts; the list feeds the caller's warning log.
-    pub invalidated: Vec<(u64, uuid::Uuid, String)>,
-    /// `(turn_id, record_id, reason)` — transient failures. The turn stays
+    pub invalidated: Vec<(u64, String, String)>,
+    /// `(turn_id, blob_id, reason)` — transient failures. The turn stays
     /// text-only and the reference stays valid: the bytes may come back,
     /// and the next restore tries again.
-    pub skipped: Vec<(u64, uuid::Uuid, String)>,
+    pub skipped: Vec<(u64, String, String)>,
 }
 
 /// Retry budget for a transient reference fetch within one restore pass.
@@ -169,17 +216,17 @@ const REFETCH_ATTEMPTS: usize = 3;
 /// verdict stands. Deterministic verdicts (`Bytes`/`Gone`) return
 /// immediately. Shared by the conversation-window pass and the pins pass.
 async fn fetch_with_retry(
-    record_id: uuid::Uuid,
-    blob_id: Option<String>,
+    blob_id: String,
+    record_id: Option<uuid::Uuid>,
     fetch: &mut impl FnMut(
-        uuid::Uuid,
-        Option<String>,
+        String,
+        Option<uuid::Uuid>,
     )
         -> std::pin::Pin<Box<dyn std::future::Future<Output = FetchedImage> + Send>>,
 ) -> FetchedImage {
     let mut attempt = 0;
     loop {
-        match (fetch)(record_id, blob_id.clone()).await {
+        match (fetch)(blob_id.clone(), record_id).await {
             FetchedImage::Transient(reason) => {
                 attempt += 1;
                 if attempt >= REFETCH_ATTEMPTS {
@@ -194,28 +241,29 @@ async fn fetch_with_retry(
 
 /// Restore-time image re-assembly: the compose-path twin of the live
 /// ingest. Hydrated turns carry the text form only (the caption and the
-/// pointer line) — this pass fetches each sidecar reference's bytes and
-/// swaps the assembled multimodal message back in, so a restarted agent's
-/// context matches what it held before the restart. Gone verdicts are
-/// reported to the caller but not remembered: a later restore retries
-/// the fetch (the local mirror usually serves it at zero cost).
+/// pointer line) — this pass reads each sidecar reference's master copy
+/// from the attachment store and swaps the assembled multimodal message
+/// back in, so a restarted agent's context matches what it held before
+/// the restart, with zero network.
 ///
-/// A missing media file (`FetchedImage::Gone`) is deterministic and
-/// reported for observability; a transient fetch failure retries within
-/// the pass and then leaves the turn text-only without invalidating.
-/// Either way the pass never fails the restore — text-only boots are
-/// always possible, images are additive.
+/// A missing copy (`FetchedImage::Gone`) is deterministic and reported
+/// for observability; its pointer line is marked "(image unavailable at
+/// restore)" in the in-memory message only — the persisted line stays
+/// untouched, so the next restore re-evaluates. A transient read failure
+/// retries within the pass and then leaves the turn text-only. Either
+/// way the pass never fails the restore — text-only boots are always
+/// possible, images are additive.
 pub async fn reassemble_attachments(
     store: &mut ContextStore,
     sidecar: &BTreeMap<u64, Vec<crate::history::AttachmentRef>>,
     // Boxed so the closure can be process-state-driven without dragging the AsyncFn
     // trait's lifetime generalization through every `Send` bound up the boot path.
-    // The second argument is the reference's local-mirror hash (absent for
-    // pre-mirror records): the fetcher decides how to use it; this pass stays
+    // The first argument is the reference anchor (the content address); the
+    // second is the provenance record id, when one exists. This pass stays
     // store-agnostic and only classifies verdicts.
     mut fetch: impl FnMut(
-        uuid::Uuid,
-        Option<String>,
+        String,
+        Option<uuid::Uuid>,
     )
         -> std::pin::Pin<Box<dyn std::future::Future<Output = FetchedImage> + Send>>,
 ) -> ReassemblyReport {
@@ -234,14 +282,15 @@ pub async fn reassemble_attachments(
         if turn.messages.len() != 1 {
             continue;
         }
-        let Some(text) = turn.messages[0].content().map(str::to_owned) else {
+        let Some(mut text) = turn.messages[0].content().map(str::to_owned) else {
             // Pinned image turns hold their assembled parts (pins persist the
             // live message), so there is nothing to re-assemble for them.
             continue;
         };
+        let mut text_marked = false;
         let mut images = Vec::new();
         for r in refs {
-            match fetch_with_retry(r.record_id, r.blob_id.clone(), &mut fetch).await {
+            match fetch_with_retry(r.blob_id.clone(), r.record_id, &mut fetch).await {
                 FetchedImage::Bytes(bytes) => {
                     images.push(IngestImage {
                         media_type: r.media_type.clone(),
@@ -251,16 +300,33 @@ pub async fn reassemble_attachments(
                 FetchedImage::Gone => {
                     report.invalidated.push((
                         turn_id,
-                        r.record_id,
-                        "files record no longer exists".to_owned(),
+                        r.blob_id.clone(),
+                        "local blob copy is missing".to_owned(),
                     ));
+                    // Mark the pointer line so the member sees why the image
+                    // is absent; deduped, so images going missing one by one
+                    // never stack repeated markers on one line.
+                    let pointer = pointer_line(r.record_id);
+                    let marked = format!("{pointer} (image unavailable at restore)");
+                    if text.contains(&pointer) && !text.contains(&marked) {
+                        text = text.replace(&pointer, &marked);
+                        text_marked = true;
+                    }
                 }
                 FetchedImage::Transient(reason) => {
-                    report.skipped.push((turn_id, r.record_id, reason));
+                    report.skipped.push((turn_id, r.blob_id.clone(), reason));
                 }
             }
         }
+        if text_marked {
+            // In-memory presentation only; nothing is written back to the
+            // history log or manifest (see the pass doc).
+            turn.messages[0] = Message::user(text.clone());
+        }
         if images.is_empty() {
+            if text_marked {
+                store.mark_needs_full_estimate();
+            }
             continue;
         }
         let assembled = ingest_message(&text, &images);
@@ -280,15 +346,15 @@ pub async fn reassemble_attachments(
 /// with the references carried by the pinned turns themselves
 /// (extracted at pin time from the pointer lines — pins have no history sidecars).
 ///
-/// A `Gone` fetch is reported to the caller for observability (the pin
-/// stays text-only; the pointer line remains, so the text form stays
-/// truthful), and a transient failure leaves the pin text-only for the
-/// next restore to retry. The pass never fails the restore.
+/// A `Gone` fetch drops the reference from the pinned turn (so it does
+/// not ride back into pins.json) and marks its pointer line "(image
+/// unavailable at restore)" in the in-memory message only; a transient
+/// failure leaves the pin text-only for the next restore to retry.
 pub async fn reassemble_pin_attachments(
     store: &mut ContextStore,
     mut fetch: impl FnMut(
-        uuid::Uuid,
-        Option<String>,
+        String,
+        Option<uuid::Uuid>,
     )
         -> std::pin::Pin<Box<dyn std::future::Future<Output = FetchedImage> + Send>>,
 ) -> ReassemblyReport {
@@ -308,11 +374,12 @@ pub async fn reassemble_pin_attachments(
         if live.is_empty() {
             continue;
         };
-        let text = turn.messages[0].content().map(str::to_owned);
+        let mut text = turn.messages[0].content().map(str::to_owned);
         let mut images = Vec::new();
         let mut gone = Vec::new();
+        let mut text_marked = false;
         for r in &live {
-            match fetch_with_retry(r.record_id, r.blob_id.clone(), &mut fetch).await {
+            match fetch_with_retry(r.blob_id.clone(), r.record_id, &mut fetch).await {
                 FetchedImage::Bytes(bytes) => {
                     images.push(IngestImage {
                         media_type: r.media_type.clone(),
@@ -320,15 +387,28 @@ pub async fn reassemble_pin_attachments(
                     });
                 }
                 FetchedImage::Gone => {
-                    gone.push(r.record_id);
+                    gone.push(r.blob_id.clone());
                     report.invalidated.push((
                         turn_id,
-                        r.record_id,
-                        "files record no longer exists".to_owned(),
+                        r.blob_id.clone(),
+                        "local blob copy is missing".to_owned(),
                     ));
+                    // Mark the pointer line so the member sees why the image
+                    // is absent. The marked text form rides persist into
+                    // pins.json -- an honest label on a permanently abandoned
+                    // reference; the dropped anchor never re-triggers it, so
+                    // it lands exactly once. Deduped against the live text.
+                    if let Some(t) = text.as_mut() {
+                        let pointer = pointer_line(r.record_id);
+                        let marked = format!("{pointer} (image unavailable at restore)");
+                        if t.contains(&pointer) && !t.contains(&marked) {
+                            *t = t.replace(&pointer, &marked);
+                            text_marked = true;
+                        }
+                    }
                 }
                 FetchedImage::Transient(reason) => {
-                    report.skipped.push((turn_id, r.record_id, reason));
+                    report.skipped.push((turn_id, r.blob_id.clone(), reason));
                 }
             }
         }
@@ -336,10 +416,18 @@ pub async fn reassemble_pin_attachments(
             // A deterministically-gone reference must not ride back into
             // pins.json on the next projection: drop it from the turn.
             if let Some(attachments) = turn.pinned_attachments_mut() {
-                attachments.retain(|a| !gone.contains(&a.record_id));
+                attachments.retain(|a| !gone.contains(&a.blob_id));
             }
         }
+        if text_marked && let Some(t) = text.as_ref() {
+            // The marked text form rides persist into pins.json (see the
+            // Gone arm); it lands once and never re-triggers.
+            turn.messages[0] = Message::user(t.clone());
+        }
         if images.is_empty() {
+            if text_marked {
+                store.mark_needs_full_estimate();
+            }
             continue;
         };
         let Some(text) = text else {
@@ -489,11 +577,7 @@ mod tests {
     }
 
     /// History holding the text form of turn 0 with one image reference.
-    fn seed_history_with_image(
-        dir: &std::path::Path,
-        record_id: uuid::Uuid,
-        blob_id: Option<&str>,
-    ) {
+    fn seed_history_with_image(dir: &std::path::Path, record_id: uuid::Uuid, blob_id: &str) {
         HistoryWriter::new(dir.to_owned())
             .append(
                 Some(0),
@@ -503,9 +587,9 @@ mod tests {
                 None,
                 &[crate::history::AttachmentRef {
                     modality: kallipai_common::protocol::Modality::Image,
-                    record_id,
+                    record_id: Some(record_id),
                     media_type: "image/png".to_owned(),
-                    blob_id: blob_id.map(str::to_owned),
+                    blob_id: blob_id.to_owned(),
                     caption: Some("caption".to_owned()),
                 }],
             )
@@ -531,14 +615,14 @@ mod tests {
     async fn reassembly_rebuilds_the_parts_message_from_the_sidecar() {
         let dir = tempfile::tempdir().unwrap();
         let record_id = uuid::Uuid::from_u128(0xA11CE);
-        seed_history_with_image(dir.path(), record_id, None);
+        seed_history_with_image(dir.path(), record_id, "sha256-missing-copy");
 
         let mut store = ContextStore::new();
         store.push_turn(vec![Message::user("[image x] caption")]);
         let report =
-            reassemble_attachments(&mut store, &sidecar_of(dir.path(), &[0]), |id, _blob| {
+            reassemble_attachments(&mut store, &sidecar_of(dir.path(), &[0]), |_blob, id| {
                 Box::pin(async move {
-                    assert_eq!(id, record_id);
+                    assert_eq!(id, Some(record_id));
                     FetchedImage::Bytes(png_header(64, 48))
                 })
             })
@@ -572,10 +656,10 @@ mod tests {
     async fn gone_reference_is_reported_and_stays_text_only() {
         let dir = tempfile::tempdir().unwrap();
         let record_id = uuid::Uuid::from_u128(0xB0B);
-        seed_history_with_image(dir.path(), record_id, None);
+        seed_history_with_image(dir.path(), record_id, "sha256-missing-copy");
 
         let mut store = ContextStore::new();
-        store.push_turn(vec![Message::user("[image x] caption")]);
+        store.push_turn(vec![Message::user(format!("[image {record_id}] caption"))]);
 
         let report =
             reassemble_attachments(&mut store, &sidecar_of(dir.path(), &[0]), |_, _blob| {
@@ -584,15 +668,61 @@ mod tests {
             .await;
         assert_eq!(report.invalidated.len(), 1);
         assert_eq!(report.invalidated[0].0, 0);
-        assert_eq!(report.invalidated[0].1, record_id);
-        assert!(text_of(&store.turns()[0].messages).contains("[image x]"));
+        assert_eq!(report.invalidated[0].1, "sha256-missing-copy");
+        assert!(text_of(&store.turns()[0].messages).contains(&format!("[image {record_id}]")));
+        assert!(
+            text_of(&store.turns()[0].messages).contains("(image unavailable at restore)"),
+            "a gone image marks its pointer line in memory"
+        );
+        // The marker is an in-memory presentation only: the history file
+        // on disk keeps the plain pointer line.
+        let file = std::fs::read_dir(dir.path().join("history"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let line = std::fs::read_to_string(file).unwrap();
+        assert!(!line.contains("(image unavailable at restore)"));
+    }
+
+    /// The serde default on blob_id keeps a legacy line written before
+    /// anchors were mandatory alive, and its empty anchor reaches the
+    /// fetcher verbatim (where the parse failure classifies it as Gone, never Transient).
+    #[tokio::test]
+    async fn a_blob_id_less_legacy_line_survives_and_reaches_the_fetcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let record_id = uuid::Uuid::from_u128(0xDADA);
+        seed_history_with_image(dir.path(), record_id, "");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let mut store = ContextStore::new();
+        store.push_turn(vec![Message::user(format!("[image {record_id}] caption"))]);
+        let report = reassemble_attachments(
+            &mut store,
+            &sidecar_of(dir.path(), &[0]),
+            move |blob, _id| {
+                let sink = sink.clone();
+                Box::pin(async move {
+                    sink.lock().unwrap().push(blob);
+                    FetchedImage::Gone
+                })
+            },
+        )
+        .await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["".to_owned()],
+            "the default anchor reaches the fetcher verbatim"
+        );
+        assert_eq!(report.invalidated.len(), 1);
     }
 
     #[tokio::test]
     async fn transient_failures_stay_text_only_without_invalidation() {
         let dir = tempfile::tempdir().unwrap();
         let record_id = uuid::Uuid::from_u128(0xC0FFEE);
-        seed_history_with_image(dir.path(), record_id, None);
+        seed_history_with_image(dir.path(), record_id, "sha256-missing-copy");
 
         let mut store = ContextStore::new();
         store.push_turn(vec![Message::user("[image x] caption")]);
@@ -602,7 +732,7 @@ mod tests {
         let report = reassemble_attachments(
             &mut store,
             &sidecar_of(dir.path(), &[0]),
-            move |id, _blob| {
+            move |_blob, id| {
                 let counter = counter.clone();
                 let _ = id;
                 Box::pin(async move {
@@ -614,7 +744,7 @@ mod tests {
         .await;
         assert!(report.invalidated.is_empty());
         assert_eq!(report.skipped.len(), 1);
-        assert_eq!(report.skipped[0].1, record_id);
+        assert_eq!(report.skipped[0].1, "sha256-missing-copy");
         assert!(text_of(&store.turns()[0].messages).contains("[image x]"));
         assert_eq!(
             fetches.load(std::sync::atomic::Ordering::SeqCst),
@@ -638,7 +768,7 @@ mod tests {
     #[test]
     fn extract_keeps_plain_text_pins_unchanged() {
         let msg = Message::user("plain note");
-        assert!(extract_pin_attachments(&msg).is_empty());
+        assert!(extract_pin_attachments(&msg, None).is_empty());
     }
 
     #[test]
@@ -651,9 +781,11 @@ mod tests {
                 bytes: png_header(8, 8),
             }],
         );
-        let refs = extract_pin_attachments(&msg);
+        let dir = tempfile::tempdir().unwrap();
+        let backend = kallipai_blob_store::LocalBackend::arc(dir.path().to_owned());
+        let refs = extract_pin_attachments(&msg, Some(&backend));
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].record_id, record_id);
+        assert_eq!(refs[0].record_id, Some(record_id));
         assert_eq!(refs[0].media_type, "image/png");
     }
 
@@ -666,7 +798,7 @@ mod tests {
                 bytes: png_header(8, 8),
             }],
         );
-        assert!(extract_pin_attachments(&msg).is_empty());
+        assert!(extract_pin_attachments(&msg, None).is_empty());
     }
 
     fn parts_pin(record_id: uuid::Uuid) -> Message {
@@ -683,10 +815,13 @@ mod tests {
     async fn pin_reassembly_swaps_the_bytes_back_in() {
         let record_id = uuid::Uuid::from_u128(0xB0B);
         let mut store = ContextStore::new();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = kallipai_blob_store::LocalBackend::arc(dir.path().to_owned());
+        store.set_attachment_blobs(Some(backend));
         store.pin("shot", parts_pin(record_id)).unwrap();
-        let report = reassemble_pin_attachments(&mut store, |id, _blob| {
+        let report = reassemble_pin_attachments(&mut store, |_blob, id| {
             Box::pin(async move {
-                assert_eq!(id, record_id);
+                assert_eq!(id, Some(record_id));
                 FetchedImage::Bytes(png_header(64, 48))
             })
         })
@@ -706,13 +841,16 @@ mod tests {
     async fn pin_gone_reference_invalidates_and_is_dropped() {
         let record_id = uuid::Uuid::from_u128(0xB0B);
         let mut store = ContextStore::new();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = kallipai_blob_store::LocalBackend::arc(dir.path().to_owned());
+        store.set_attachment_blobs(Some(backend));
         store.pin("shot", parts_pin(record_id)).unwrap();
         let report = reassemble_pin_attachments(&mut store, |_, _blob| {
             Box::pin(async move { FetchedImage::Gone })
         })
         .await;
         assert_eq!(report.invalidated.len(), 1);
-        assert_eq!(report.invalidated[0].1, record_id);
+        assert!(report.invalidated[0].1.starts_with("sha256-"));
         assert!(
             store
                 .pinned_turns()
@@ -723,14 +861,106 @@ mod tests {
         );
     }
 
+    /// The pin-side marker rides persist into pins.json exactly once: a
+    /// cold-restored (text-form) pin whose blob is gone gains one marker
+    /// per gone pointer line, and projection-reload round trips never
+    /// add another (the dropped anchor has no trigger left).
+    #[tokio::test]
+    async fn pin_gone_marker_lands_in_pins_json_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = kallipai_blob_store::LocalBackend::arc(dir.path().to_owned());
+        let mut store = ContextStore::new();
+        store.set_attachment_blobs(Some(backend));
+        store
+            .pin("shot", parts_pin(uuid::Uuid::from_u128(0xB0B)))
+            .unwrap();
+
+        // Cold restore: the pin reloads from its persisted text form.
+        let pins = store.to_pins_doc();
+        let manifest = store.to_manifest_doc();
+        let mut store = ContextStore::from_persisted(&pins, Vec::new(), &manifest);
+        reassemble_pin_attachments(&mut store, |_, _| {
+            Box::pin(async move { FetchedImage::Gone })
+        })
+        .await;
+        let text = store.to_pins_doc().pins[0]
+            .message
+            .content()
+            .unwrap()
+            .to_owned();
+        assert_eq!(text.matches("(image unavailable at restore)").count(), 1);
+
+        // A projection-reload round trip re-runs the pass with no
+        // references left; the marker count must not grow.
+        let pins = store.to_pins_doc();
+        let manifest = store.to_manifest_doc();
+        let mut store = ContextStore::from_persisted(&pins, Vec::new(), &manifest);
+        let report = reassemble_pin_attachments(&mut store, |_, _| {
+            Box::pin(async move { FetchedImage::Gone })
+        })
+        .await;
+        assert!(report.invalidated.is_empty());
+        let text = store.to_pins_doc().pins[0]
+            .message
+            .content()
+            .unwrap()
+            .to_owned();
+        assert_eq!(text.matches("(image unavailable at restore)").count(), 1);
+    }
+
+    /// Two gone images mark their own pointer lines once each: the
+    /// dedup guard keeps one line's marker from stacking.
+    #[tokio::test]
+    async fn two_gone_pins_mark_each_line_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = kallipai_blob_store::LocalBackend::arc(dir.path().to_owned());
+        let mut store = ContextStore::new();
+        store.set_attachment_blobs(Some(backend));
+        let a = uuid::Uuid::from_u128(0xA);
+        let b = uuid::Uuid::from_u128(0xB);
+        let msg = ingest_message(
+            &format!("cap\n[image {a}]\n[image {b}]"),
+            &[
+                IngestImage {
+                    media_type: "image/png".to_owned(),
+                    bytes: png_header(8, 8),
+                },
+                IngestImage {
+                    media_type: "image/png".to_owned(),
+                    bytes: png_header(9, 9),
+                },
+            ],
+        );
+        store.pin("two", msg).unwrap();
+
+        // Cold restore: the pin reloads from its persisted text form.
+        let pins = store.to_pins_doc();
+        let manifest = store.to_manifest_doc();
+        let mut store = ContextStore::from_persisted(&pins, Vec::new(), &manifest);
+        let report = reassemble_pin_attachments(&mut store, |_, _| {
+            Box::pin(async move { FetchedImage::Gone })
+        })
+        .await;
+        assert_eq!(report.invalidated.len(), 2);
+        let text = store.to_pins_doc().pins[0]
+            .message
+            .content()
+            .unwrap()
+            .to_owned();
+        assert_eq!(text.matches("(image unavailable at restore)").count(), 2);
+    }
+
     #[tokio::test]
     async fn pin_transient_failures_stay_textual_within_the_retry_budget() {
         let record_id = uuid::Uuid::from_u128(0xB0B);
         let mut store = ContextStore::new();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = kallipai_blob_store::LocalBackend::arc(dir.path().to_owned());
+        store.set_attachment_blobs(Some(backend));
         store.pin("shot", parts_pin(record_id)).unwrap();
         let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = fetches.clone();
-        let report = reassemble_pin_attachments(&mut store, move |id, _blob| {
+        let report = reassemble_pin_attachments(&mut store, move |_blob, id| {
             let counter = counter.clone();
             let _ = id;
             Box::pin(async move {
@@ -768,7 +998,7 @@ mod tests {
         let anchor = kallipai_blob_store::BlobId::for_bytes(&png_header(8, 8))
             .as_str()
             .to_owned();
-        seed_history_with_image(dir.path(), record_id, Some(&anchor));
+        seed_history_with_image(dir.path(), record_id, &anchor);
 
         let mut store = ContextStore::new();
         store.push_turn(vec![Message::user("[image x] caption")]);
@@ -777,10 +1007,10 @@ mod tests {
         let report = reassemble_attachments(
             &mut store,
             &sidecar_of(dir.path(), &[0]),
-            move |id, blob| {
+            move |blob, id| {
                 let sink = sink.clone();
                 Box::pin(async move {
-                    assert_eq!(id, record_id);
+                    assert_eq!(id, Some(record_id));
                     sink.lock().unwrap().push(blob);
                     FetchedImage::Bytes(png_header(64, 48))
                 })
@@ -791,7 +1021,7 @@ mod tests {
         assert!(report.skipped.is_empty());
         assert_eq!(
             *seen.lock().unwrap(),
-            vec![Some(anchor)],
+            vec![anchor.clone()],
             "the stored anchor must reach the fetcher, not a folded None"
         );
     }
@@ -807,11 +1037,13 @@ mod tests {
                 bytes: bytes.clone(),
             }],
         );
-        let refs = extract_pin_attachments(&msg);
+        let dir = tempfile::tempdir().unwrap();
+        let backend = kallipai_blob_store::LocalBackend::arc(dir.path().to_owned());
+        let refs = extract_pin_attachments(&msg, Some(&backend));
         assert_eq!(refs.len(), 1);
         assert_eq!(
-            refs[0].blob_id.as_deref(),
-            Some(kallipai_blob_store::BlobId::for_bytes(&bytes).as_str()),
+            refs[0].blob_id,
+            kallipai_blob_store::BlobId::for_bytes(&bytes).as_str(),
             "the anchor is the content address of the decoded bytes"
         );
     }

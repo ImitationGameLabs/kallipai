@@ -162,6 +162,12 @@ pub struct ContextStore {
     /// so `next_turn_id` stays monotonic.
     #[serde(skip)]
     injected_turn_ids: HashSet<u64>,
+    /// The attachment blob store, wired by the host process after the
+    /// store is built (never persisted, never defaulted). Pin-time
+    /// seeding writes the master copy through this handle; when absent,
+    /// image parts cannot be anchored and the pin is saved as text only.
+    #[serde(skip)]
+    attachment_blobs: Option<std::sync::Arc<dyn kallipai_blob_store::BlobStore>>,
 }
 
 impl AgenticContext for ContextStore {
@@ -178,7 +184,8 @@ impl AgenticContext for ContextStore {
             );
         }
         let id = TurnId(self.next_turn_id);
-        let attachments = super::compose::extract_pin_attachments(&message);
+        let attachments =
+            super::compose::extract_pin_attachments(&message, self.attachment_blobs.as_ref());
         self.next_turn_id += 1;
         self.turns.insert(
             self.pinned_turn_count(),
@@ -286,14 +293,16 @@ impl AgenticContext for ContextStore {
 
         if let Some(idx) = existing_idx {
             // In-place update keeps the turn's position and id; only content/tokens change.
-            let refs = super::compose::extract_pin_attachments(&message);
+            let refs =
+                super::compose::extract_pin_attachments(&message, self.attachment_blobs.as_ref());
             if let Some(attachments) = self.turns[idx].pinned_attachments_mut() {
                 *attachments = refs;
             }
             self.turns[idx].messages = vec![message];
             self.turns[idx].estimated_tokens = msg_tokens;
         } else {
-            let refs = super::compose::extract_pin_attachments(&message);
+            let refs =
+                super::compose::extract_pin_attachments(&message, self.attachment_blobs.as_ref());
             let id = TurnId(self.next_turn_id);
             self.next_turn_id += 1;
             self.turns.insert(
@@ -374,9 +383,19 @@ impl ContextStore {
             highest_warned_pct: None,
             highest_budget_warned_pct: None,
             injected_turn_ids: HashSet::new(),
+            attachment_blobs: None,
         }
     }
 
+    /// Wire the attachment blob store (a host-process concern; see the
+    /// field doc). Wiring `None` leaves pins unseedable (text-only);
+    /// the last wiring wins.
+    pub fn set_attachment_blobs(
+        &mut self,
+        blobs: Option<std::sync::Arc<dyn kallipai_blob_store::BlobStore>>,
+    ) {
+        self.attachment_blobs = blobs;
+    }
     /// Append retry records, first evicting records older than `keep_since`
     /// (a unix-seconds cutoff — stale for the budget, so eviction only frees
     /// slots for in-window records), then keeping only the

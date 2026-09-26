@@ -906,9 +906,9 @@ mod tests {
             None,
             &[crate::history::AttachmentRef {
                 modality: kallipai_common::protocol::Modality::Image,
-                record_id,
+                record_id: Some(record_id),
                 media_type: "image/png".to_owned(),
-                blob_id: None,
+                blob_id: format!("sha256-{record_id:064x}"),
                 caption: Some("chart caption".to_owned()),
             }],
         );

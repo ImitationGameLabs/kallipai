@@ -219,8 +219,9 @@ bound set's modalities and records the turn). Three target forms:
 - a local path: the bytes land in the tagma's own content-addressed
   attachment store (keyed by content hash) and the turn records
   them; the command prints the blob id and the turn id.
-- `--id`: a files record id, fetched by the tagma under its
-  own registered credential.
+- `--id`: a files record id, fetched once under the tagma's own
+  credential and stored locally as the master copy (the command
+  prints the blob id, like the path form).
 - `--blob`: an already-stored attachment blob, re-ingested
   by content address; no bytes travel.
 

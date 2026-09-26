@@ -41,18 +41,22 @@ pub(crate) struct ManifestDoc {
 }
 
 /// One attachment reference carried alongside a pinned message's text
-/// form: the files record to fetch on restore and the media type the
+/// form: the local blob to read on restore and the media type the
 /// bytes were stored with.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PinAttachment {
-    pub record_id: uuid::Uuid,
-    pub media_type: String,
-    /// The local copy's content address for the same bytes
-    /// (`sha256-<hex>`, the `kallipai-blob-store` id), when the tagma data
-    /// area holds one. Absent on pins recorded before the local-copy
-    /// store existed: restore then falls back to the files service.
+    /// The files-service record id behind the reference, when one
+    /// exists (the `--id` ingest form); purely provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blob_id: Option<String>,
+    pub record_id: Option<uuid::Uuid>,
+    pub media_type: String,
+    /// The reference anchor: the content address of the master copy
+    /// in this tagma's `blobs/attachments` area (`sha256-<hex>`).
+    /// `default` mirrors `AttachmentRef::blob_id`: hydration skips
+    /// unparseable lines, so a blob_id-less legacy pin line survives
+    /// and the read-side parse failure classifies as Gone.
+    #[serde(default)]
+    pub blob_id: String,
 }
 
 /// One pinned turn, in full. `message` is single-message by construction
@@ -129,9 +133,9 @@ mod tests {
                 message: assistant_msg("summary text"),
                 estimated_tokens: 12,
                 attachments: vec![PinAttachment {
-                    record_id: uuid::Uuid::from_u128(0x42),
+                    record_id: Some(uuid::Uuid::from_u128(0x42)),
                     media_type: "image/png".to_owned(),
-                    blob_id: None,
+                    blob_id: "sha256-abc".to_owned(),
                 }],
             }],
         };
@@ -145,7 +149,7 @@ mod tests {
         assert_eq!(back.pins[0].attachments.len(), 1);
         assert_eq!(
             back.pins[0].attachments[0].record_id,
-            uuid::Uuid::from_u128(0x42)
+            Some(uuid::Uuid::from_u128(0x42))
         );
     }
 

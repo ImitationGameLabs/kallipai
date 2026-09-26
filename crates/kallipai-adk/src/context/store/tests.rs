@@ -468,6 +468,9 @@ fn usage_snapshot_caps_largest_turns_at_five() {
 #[test]
 fn pins_projection_strips_image_bytes_to_text_and_references() {
     let mut store = new_store();
+    let dir = tempfile::tempdir().unwrap();
+    let backend = kallipai_blob_store::LocalBackend::arc(dir.path().to_owned());
+    store.set_attachment_blobs(Some(backend));
     let record_id = uuid::Uuid::from_u128(0xB0B);
     let message = crate::context::compose::ingest_message(
         &format!("caption\n[image {record_id}]"),
@@ -481,7 +484,7 @@ fn pins_projection_strips_image_bytes_to_text_and_references() {
     let doc = store.to_pins_doc();
     assert_eq!(doc.pins.len(), 1);
     assert_eq!(doc.pins[0].attachments.len(), 1);
-    assert_eq!(doc.pins[0].attachments[0].record_id, record_id);
+    assert_eq!(doc.pins[0].attachments[0].record_id, Some(record_id));
     assert_eq!(doc.pins[0].attachments[0].media_type, "image/png");
     assert_eq!(
         doc.pins[0].message.content(),

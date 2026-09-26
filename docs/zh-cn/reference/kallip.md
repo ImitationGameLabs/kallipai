@@ -161,7 +161,7 @@ $ kallip file ls --space self|shared [--prefix <PREFIX>] [--limit <N>] [--json]
 把一张图片摄取进本 agent 的实时上下文（tagma 强制所属 set 的模态并记录该轮）。三种目标形态：
 
 - 本地路径：字节落进 tagma 自己的内容寻址附件存储（以内容哈希为键），该轮记录之；命令打印 blob id 与 turn id。
-- `--id`：files 记录 id，由 tagma 以自己注册的凭据取回。
+- `--id`：files 记录 id，由 tagma 以自己注册的凭据取回一次并存为本地正本；命令同路径形态打印 blob id 与 turn id。
 - `--blob`：已存储的附件 blob，按内容地址重新摄取，零字节传输。
 
 可解析且无路径分隔符的 UUID 读作记录 id；`--id` 与 `--path` 钉死解释方式，`--blob` 从不猜测。媒体类型来自 `--media-type` 或文件扩展名（默认 `image/png`；svg 作为非位图被拒，除非 `--media-type` 覆盖）。路径形态的图片必须放得进 tagma 的请求体上限，大图先降采样。

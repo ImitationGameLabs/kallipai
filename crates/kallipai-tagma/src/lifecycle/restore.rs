@@ -249,35 +249,26 @@ async fn restore_one(
         tracing::warn!(id = %p.agent_id, kind = ?d.kind, "agent restored degraded: {}", d.detail);
     }
 
-    // Re-assemble image attachments: hydrated turns carry the text form
-    // only, so each sidecar reference's bytes are fetched and the assembled
-    // multimodal message swapped back in. Gone verdicts are logged for
-    // observability only — invalidations are not remembered across
-    // restarts, so the next restore retries the fetch. Never fails the
-    // restore: a text-only boot is always possible, and transient fetch
-    // failures simply leave the turn text-only.
     let shared = shared_state.clone();
+    // Re-assemble image attachments: hydrated turns carry the text form
+    // only, so each sidecar reference's master copy is read from the
+    // attachment store and the assembled multimodal message swapped back
+    // in — pure local reads, zero network. Gone verdicts (a missing or
+    // unparseable anchor) are logged for observability, mark the pointer
+    // line in memory, and are not remembered across restarts: the next
+    // restore re-evaluates. Never fails the restore: a text-only boot is
+    // always possible, and transient read failures simply leave the turn
+    // text-only.
     type BoxedFetch = std::pin::Pin<
         Box<dyn std::future::Future<Output = kallipai_adk::context::FetchedImage> + Send>,
     >;
-    let mut fetch = move |record_id, blob_id: Option<String>| -> BoxedFetch {
+    let mut fetch = move |blob_id: String, record_id: Option<uuid::Uuid>| -> BoxedFetch {
+        // The record id is provenance only; restore never touches files.
+        let _ = record_id;
         let shared = shared.clone();
-        Box::pin(async move {
-            // fetch_record_bytes is only constructed here, not started:
-            // fetch_local_first awaits it only when the local copy is
-            // missing, so a local hit starts no files request.
-            crate::files::fetch_local_first(
-                shared.attachment_blobs.get(),
-                record_id,
-                crate::files::fetch_record_bytes(
-                    &shared.files_http,
-                    shared.files_token.as_deref(),
-                    record_id,
-                ),
-                blob_id.as_deref(),
-            )
-            .await
-        })
+        Box::pin(
+            async move { crate::files::fetch_local(shared.attachment_blobs.get(), &blob_id).await },
+        )
     };
     let reports = [
         kallipai_adk::context::reassemble_attachments(
@@ -291,15 +282,15 @@ async fn restore_one(
         kallipai_adk::context::reassemble_pin_attachments(&mut restored.store, &mut fetch).await,
     ];
     for report in &reports {
-        for (turn_id, record_id, reason) in &report.invalidated {
+        for (turn_id, blob_id, reason) in &report.invalidated {
             tracing::warn!(
-                id = %p.agent_id, turn_id, %record_id,
+                id = %p.agent_id, turn_id, %blob_id,
                 "attachment reference gone during restore: {reason}"
             );
         }
-        for (_, record_id, reason) in &report.skipped {
+        for (_, blob_id, reason) in &report.skipped {
             tracing::warn!(
-                id = %p.agent_id, %record_id,
+                id = %p.agent_id, %blob_id,
                 "attachment reference left text-only after transient fetch failure: {reason}"
             );
         }
@@ -367,7 +358,11 @@ async fn restore_one(
         set_for_restore(&bundle, config.profile_set.as_deref(), config.is_root())
     };
 
-    let store = Arc::new(tokio::sync::Mutex::new(restored.store));
+    let store = Arc::new(tokio::sync::Mutex::new({
+        let mut store = restored.store;
+        store.set_attachment_blobs(shared_state.attachment_blobs.get().cloned());
+        store
+    }));
     let approvals = Arc::new(tokio::sync::Mutex::new(restored.approvals));
     let (events_tx, _) = broadcast::channel(256);
 
