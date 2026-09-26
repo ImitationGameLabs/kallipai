@@ -470,7 +470,7 @@ fn preflight_rejects_a_lock_id_keyed_under_two_roles() {
         rejections
             .iter()
             .any(|r| r.kind == TeamRejectionKind::LockAmbiguity
-                && r.message.contains("lock rebuild"))
+                && r.message.contains("lock-rebuild"))
     );
 }
 

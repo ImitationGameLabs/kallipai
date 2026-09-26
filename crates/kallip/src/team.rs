@@ -1,7 +1,7 @@
 //! The `kallip team` family: declarative team management over the tagma's
 //! team domain. `status` renders the three-way comparison, `converge`
 //! plans/preflights/executes through the tagma and rewrites the lock
-//! archive from the response, `lock rebuild` reconstructs the archive
+//! archive from the response, `lock-rebuild` reconstructs the archive
 //! from reality (live registry + inactive area) when it is lost or
 //! suspected stale.
 //!
@@ -82,7 +82,7 @@ fn read_lock(path: &Path) -> Result<Option<LockFile>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             return Err(anyhow::Error::new(e).context(format!(
-                "cannot read the lock archive {}; run `kallip team lock rebuild` — converging with a lost mapping would re-spawn every member as fresh agents",
+                "cannot read the lock archive {}; run `kallip team lock-rebuild` — converging with a lost mapping would re-spawn every member as fresh agents",
                 path.display()
             )))
         }
@@ -95,12 +95,12 @@ fn read_lock(path: &Path) -> Result<Option<LockFile>> {
     // the next converge is a legitimate first converge.
     if raw.trim().is_empty() {
         return Err(anyhow!(
-            "the lock archive {} is empty; run `kallip team lock rebuild` — converging with a lost mapping would re-spawn every member as fresh agents",
+            "the lock archive {} is empty; run `kallip team lock-rebuild` — converging with a lost mapping would re-spawn every member as fresh agents",
             path.display()
         ));
     }
     let lock: LockFile = toml::from_str(&raw).context(format!(
-        "the lock archive {} is invalid; run `kallip team lock rebuild` — converging with a lost mapping would re-spawn every member as fresh agents",
+        "the lock archive {} is invalid; run `kallip team lock-rebuild` — converging with a lost mapping would re-spawn every member as fresh agents",
         path.display()
     ))?;
     // A legal document recording no members — only comments, an
@@ -109,7 +109,7 @@ fn read_lock(path: &Path) -> Result<Option<LockFile>> {
     // file.
     if lock.roles.is_empty() {
         return Err(anyhow!(
-            "the lock archive {} holds no role records; run `kallip team lock rebuild` — converging with a lost mapping would re-spawn every member as fresh agents",
+            "the lock archive {} holds no role records; run `kallip team lock-rebuild` — converging with a lost mapping would re-spawn every member as fresh agents",
             path.display()
         ));
     }
@@ -509,7 +509,7 @@ fn render_converge(
     }
 }
 
-/// `team lock rebuild`: reconstruct the archive from reality. Live
+/// `team lock-rebuild`: reconstruct the archive from reality. Live
 /// members come from the registry; inactive agents come from the daemon's
 /// listing, where each entry carries its role. Every
 /// recovered parked body is listed — a rebuild that silently absorbed a
@@ -520,7 +520,7 @@ async fn run_lock_rebuild(client: &TagmaClient, args: &TeamLockRebuildArgs) -> R
         .list_inactive_agents()
         .await
         .context(
-            "the daemon does not expose the inactive-agent listing; upgrade the daemon to use lock rebuild",
+            "the daemon does not expose the inactive-agent listing; upgrade the daemon to use lock-rebuild",
         )?
         .inactive_agents;
 
@@ -626,11 +626,19 @@ mod tests {
         std::fs::write(&empty, "").unwrap();
         let err = read_lock(&empty).unwrap_err().to_string();
         assert!(err.contains("is empty"));
-        assert!(err.contains("lock rebuild"));
+        assert!(err.contains("lock-rebuild"));
         std::fs::write(&bad, "not valid toml at all").unwrap();
         let err = read_lock(&bad).unwrap_err().to_string();
-        assert!(err.contains("lock rebuild"));
+        assert!(err.contains("lock-rebuild"));
         assert!(err.contains("re-spawn every member"));
+
+        // A directory path trips the io-error branch: it must name the
+        // archive and the rebuild command, never read as "no members".
+        let dirpath = dir.join("as-dir.lock");
+        std::fs::create_dir(&dirpath).unwrap();
+        let err = read_lock(&dirpath).unwrap_err().to_string();
+        assert!(err.contains("cannot read the lock archive"), "{err}");
+        assert!(err.contains("lock-rebuild"), "{err}");
         // Valid: parsed.
         let good = dir.join("good.lock");
         std::fs::write(
@@ -659,7 +667,7 @@ mod tests {
             std::fs::write(&path, body).unwrap();
             let err = read_lock(&path).unwrap_err().to_string();
             assert!(err.contains("holds no role records"), "{name}: {err}");
-            assert!(err.contains("lock rebuild"));
+            assert!(err.contains("lock-rebuild"));
         }
     }
 
@@ -986,6 +994,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("upgrade the daemon"), "{err}");
+        assert!(err.contains("lock-rebuild"), "{err}");
         assert!(!dir.path().join("tagma.lock").exists());
     }
 }

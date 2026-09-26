@@ -558,7 +558,7 @@ pub(super) fn preflight_converge(
             rejections.push(TeamRejection {
                 kind: TeamRejectionKind::LockAmbiguity,
                 message: format!(
-                    "lock maps agent {} to both {prev:?} and {:?} — run `kallip team lock rebuild`",
+                    "lock maps agent {} to both {prev:?} and {:?} — run `kallip team lock-rebuild`",
                     pair.id, pair.role
                 ),
             });
