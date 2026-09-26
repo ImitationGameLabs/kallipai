@@ -915,6 +915,16 @@ pub(super) enum RestoreFallout {
     Failed(String),
 }
 
+/// Create a team body's workspace directory, idempotently. Spawn needs
+/// the directory to exist before registration; restore needs the
+/// recorded root to be usable before waking the body, so a vanished
+/// workspace fails the row instead of producing an agent that cannot
+/// write its own workspace.
+fn ensure_workspace_dir(ws: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(ws)
+        .map_err(|e| format!("cannot create workspace {}: {e}", ws.display()))
+}
+
 /// Spawn one declared role under the tagma root: derived workspace
 /// (`<root workspace>/team/<role>`), declaration prompt and skills,
 /// carve-out delegation. The reference monitor inside `spawn_subagent`
@@ -934,6 +944,9 @@ async fn spawn_action(
         return Err("spawn row without a declaration entry".to_string());
     };
     let ws = root_ws.join("team").join(&a.role);
+    // The workspace must exist before AgentConfig pins it and the body
+    // registers; creation is idempotent for already-present roots.
+    ensure_workspace_dir(&ws)?;
     let mut config = AgentConfig::load(d.prompt.clone(), d.skills.clone(), Some(ws.clone()))
         .map_err(|e| e.to_string())?;
     config.role = a.role.clone();
@@ -1010,6 +1023,11 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
             .await;
         }
     };
+    // A parked body whose recorded workspace vanished must fail this
+    // row rather than wake unable to write its own workspace.
+    if let Err(e) = ensure_workspace_dir(&meta.workspace_root) {
+        return RestoreFallout::Failed(e);
+    }
     if let Err(e) = kallipai_adk::persistence::reactivate_agent_dir(&id) {
         return RestoreFallout::Failed(format!(
             "could not move the inactive body back to the live area: {e:#}"
@@ -1317,4 +1335,35 @@ async fn deactivate_action(
         .map_err(|e| format!("agent {id} is unregistered but the park failed: {e:#}"))?;
     state.invalidate();
     Ok(notes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_workspace_dir_creates_missing_and_accepts_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().join("team").join("dev");
+
+        // Missing: created, including the missing parent chain.
+        ensure_workspace_dir(&ws).unwrap();
+        assert!(ws.is_dir());
+
+        // Present: idempotent, still a directory, no error.
+        ensure_workspace_dir(&ws).unwrap();
+        assert!(ws.is_dir());
+    }
+
+    #[test]
+    fn ensure_workspace_dir_fails_when_a_parent_is_a_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let ws = blocker.join("team");
+
+        let err = ensure_workspace_dir(&ws).unwrap_err();
+        assert!(err.contains("cannot create workspace"), "{err}");
+        assert!(err.contains("blocker"), "{err}");
+    }
 }

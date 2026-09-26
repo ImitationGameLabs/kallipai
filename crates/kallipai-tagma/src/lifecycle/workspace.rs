@@ -93,6 +93,22 @@ pub(crate) fn try_acquire_workspace_lock<'a>(
     }
 }
 
+/// Distinguish a vanished workspace from any other acquire failure:
+/// a missing path gets its own variant that names the path, so the
+/// restore operator sees the fix instead of a bare OS error string.
+fn classify_acquire_error(
+    e: std::io::Error,
+    workspace_root: &std::path::Path,
+) -> EstablishLockFailure {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        EstablishLockFailure::NotFound {
+            path: workspace_root.to_path_buf(),
+        }
+    } else {
+        EstablishLockFailure::AcquireFailed(e)
+    }
+}
+
 /// The result of [`establish_workspace_lock`]: the workspace write-lock guard
 /// and, for a `FullHandoff` spawn, the data to reverse the forward transfer.
 ///
@@ -181,6 +197,11 @@ pub(crate) enum EstablishLockFailure {
     /// forward transfer (if any) has already been reversed before this is
     /// returned.
     AcquireFailed(std::io::Error),
+    /// The workspace path does not exist on disk (a restore whose
+    /// directory vanished, or a mistyped workspace). The forward
+    /// transfer (if any) has already been reversed before this is
+    /// returned.
+    NotFound { path: PathBuf },
 }
 
 impl std::fmt::Display for EstablishLockFailure {
@@ -199,6 +220,11 @@ impl std::fmt::Display for EstablishLockFailure {
                 conflict.display()
             ),
             Self::AcquireFailed(io) => write!(f, "failed to acquire workspace lock: {io}"),
+            Self::NotFound { path } => write!(
+                f,
+                "workspace {} does not exist; create it or correct the configured workspace path",
+                path.display()
+            ),
         }
     }
 }
@@ -260,7 +286,7 @@ pub(crate) fn establish_workspace_lock<'a>(
             if let Some(s) = &supervisor_id {
                 let _ = state.lock_manager.transfer(id, s, &config.workspace_root);
             }
-            return Err(EstablishLockFailure::AcquireFailed(e));
+            return Err(classify_acquire_error(e, &config.workspace_root));
         }
     };
 
@@ -289,7 +315,7 @@ pub(crate) fn establish_lock_api_error(e: EstablishLockFailure) -> ApiError {
     use EstablishLockFailure::*;
     match &e {
         Busy { .. } => ApiError::conflict(e.to_string()),
-        AcquireFailed(_) => ApiError::bad_request(e.to_string()),
+        AcquireFailed(_) | NotFound { .. } => ApiError::bad_request(e.to_string()),
         HandoffWithoutSupervisor | ForwardTransferFailed(_) => ApiError::internal(e.to_string()),
     }
 }
@@ -308,4 +334,37 @@ pub(crate) fn exec_gate_failure(failure: kallipai_adk::ExecGateFailure) -> ApiEr
         ),
     };
     ApiError::conflict(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::path::Path;
+    #[test]
+    fn acquire_error_not_found_classifies_with_path() {
+        let e = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        match classify_acquire_error(e, Path::new("/no/such/ws")) {
+            EstablishLockFailure::NotFound { path } => {
+                assert_eq!(path, PathBuf::from("/no/such/ws"));
+            }
+            other => panic!("expected NotFound, got {other}"),
+        }
+
+        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert!(matches!(
+            classify_acquire_error(e, Path::new("/ws")),
+            EstablishLockFailure::AcquireFailed(_)
+        ));
+    }
+
+    #[test]
+    fn not_found_display_names_the_missing_path() {
+        let e = EstablishLockFailure::NotFound {
+            path: PathBuf::from("/no/such/ws"),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("/no/such/ws"), "{msg}");
+        assert!(msg.contains("does not exist"), "{msg}");
+    }
 }

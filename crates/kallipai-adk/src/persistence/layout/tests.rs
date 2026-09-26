@@ -134,3 +134,18 @@ fn install_rejects_second_install() {
         );
     });
 }
+
+// ----- roots() error copy test -----
+
+#[test]
+#[serial]
+fn roots_error_names_both_install_paths() {
+    // No roots installed: the error must name both legitimate remedies
+    // (a boot-time host install and the deriving kallip team family),
+    // because the same failure surfaces from either context.
+    set_instance_roots_for_tests(None);
+    let err = roots().unwrap_err().to_string();
+    assert!(err.contains("not installed"), "{err}");
+    assert!(err.contains("boot"), "{err}");
+    assert!(err.contains("kallip team"), "{err}");
+}
