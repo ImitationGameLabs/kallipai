@@ -53,7 +53,8 @@ pub fn repair_agent_context(
     let mut degraded = Vec::new();
     // Repair never persists the store, so a legacy directory's deferred
     // migration stays pending for the next restore to finish.
-    let (mut store, _migrate_pending) = load_store(agent_dir, tail_budget, &mut degraded)?;
+    let (mut store, _migrate_pending, _sidecar) =
+        load_store(agent_dir, tail_budget, &mut degraded)?;
     let history = crate::history::HistoryWriter::new(agent_dir.to_owned());
     let mut actions = Vec::new();
 

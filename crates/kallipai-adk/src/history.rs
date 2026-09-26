@@ -4,7 +4,7 @@
 //! directory. History files are append-only (O(1) per write) and survive
 //! context compaction — evicted turns remain accessible in history.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -102,9 +102,7 @@ pub enum SystemEvent {
     AgentRestore,
     /// Context compaction summarized and evicted turns.
     CompactionSummary,
-    /// A previously recorded attachment reference was invalidated at runtime
-    /// (the media is gone, or the provider rejected it): restore-time
-    /// re-assembly and the wake modality gate skip it from here on.
+    /// Legacy log event; kept so older history lines still parse.
     ReferenceInvalidated {
         /// The turn whose sidecar record carries the invalidated reference.
         turn_id: u64,
@@ -211,6 +209,10 @@ pub(crate) struct HydrationReport {
     pub bad_lines: usize,
     /// Wanted turn IDs with no readable history record.
     pub missing_ids: Vec<u64>,
+    /// The window's attachment sidecar references, keyed by turn id:
+    /// carried out of the read pass (the history records were in hand)
+    /// so the restore's re-assembly never rescans the log.
+    pub sidecar: BTreeMap<u64, Vec<AttachmentRef>>,
 }
 
 /// Per-day NDJSON files under `<agent_dir>/history/`, chronologically.
@@ -257,6 +259,7 @@ pub(crate) fn hydrate_turns(agent_dir: &Path, ids: &[u64]) -> (Vec<Turn>, Hydrat
     let mut wanted: HashSet<u64> = ids.iter().copied().collect();
     let mut turns = Vec::new();
     let mut bad_lines = 0usize;
+    let mut sidecar: BTreeMap<u64, Vec<AttachmentRef>> = BTreeMap::new();
 
     'files: for path in history_files(agent_dir).into_iter().rev() {
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -275,6 +278,9 @@ pub(crate) fn hydrate_turns(agent_dir: &Path, ids: &[u64]) -> (Vec<Turn>, Hydrat
                         continue;
                     };
                     if wanted.remove(&id) {
+                        if !rec.attachments.is_empty() {
+                            sidecar.insert(id, rec.attachments);
+                        }
                         turns.push(Turn {
                             id: TurnId(id),
                             messages: rec.messages,
@@ -299,123 +305,11 @@ pub(crate) fn hydrate_turns(agent_dir: &Path, ids: &[u64]) -> (Vec<Turn>, Hydrat
         HydrationReport {
             bad_lines,
             missing_ids,
+            sidecar,
         },
     )
 }
 
-/// Scan the history log for the modalities its attachment sidecar
-/// references claim. Pure metadata: attachment lines are read, message
-/// bodies are never parsed, and no media file is touched. Every record in
-/// every daily file is in scope (an old image turn still demands an
-/// image-capable set at wake), so the scan is O(history lines).
-///
-/// `excluded` filters out invalidated references: turn IDs (matched against
-/// the enclosing record's `turn_id`) whose attachments the runtime has
-/// given up on, derived at wake from `scan_invalidated_refs` — the
-/// parameter shape is the frozen contract.
-pub(crate) fn scan_history_modalities(
-    agent_dir: &Path,
-    excluded: &HashSet<u64>,
-) -> BTreeSet<Modality> {
-    let mut modalities = BTreeSet::new();
-    for path in history_files(agent_dir) {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in content.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let Ok(rec) = serde_json::from_str::<HistoryRecord>(line) else {
-                continue;
-            };
-            if rec.kind != RecordKind::Turn {
-                continue;
-            }
-            let Some(id) = rec.turn_id else {
-                continue;
-            };
-            if excluded.contains(&id) {
-                continue;
-            }
-            for a in &rec.attachments {
-                modalities.insert(a.modality);
-            }
-        }
-    }
-    modalities
-}
-
-/// Run `f` over every parseable record in the log, newest file first and
-/// newest line first within a file (the `hydrate_turns` traversal order).
-fn for_each_record(agent_dir: &Path, mut f: impl FnMut(HistoryRecord)) {
-    for path in history_files(agent_dir).into_iter().rev() {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in content.lines().rev() {
-            if line.is_empty() {
-                continue;
-            }
-            if let Ok(rec) = serde_json::from_str::<HistoryRecord>(line) {
-                f(rec);
-            }
-        }
-    }
-}
-
-/// Scan the history log for attachment references invalidated at runtime
-/// (`SystemEvent::ReferenceInvalidated` records). Returns the
-/// `(turn_id, record_id)` pairs: both the wake modality gate and the
-/// restore-time re-assembly filter by the pair, so one invalidation never
-/// poisons a different reference that shares only a turn or only a record id.
-pub(crate) fn scan_invalidated_refs(agent_dir: &Path) -> HashSet<(u64, uuid::Uuid)> {
-    let mut out = HashSet::new();
-    for_each_record(agent_dir, |rec| {
-        if let Some(SystemEvent::ReferenceInvalidated {
-            turn_id, record_id, ..
-        }) = rec.event
-        {
-            out.insert((turn_id, record_id));
-        }
-    });
-    out
-}
-
-/// Collect the sidecar attachment references of `turn_ids` (the restore
-/// window). A turn id recorded more than once resolves to the newest record,
-/// mirroring `hydrate_turns` — offline repair appends corrected records under
-/// the same id instead of rewriting. Pairs in `invalidated` are dropped: the
-/// runtime has given up on them, and re-fetching would replay the same
-/// deterministic failure on every restore.
-pub(crate) fn collect_sidecar_refs(
-    agent_dir: &Path,
-    turn_ids: &[u64],
-    invalidated: &HashSet<(u64, uuid::Uuid)>,
-) -> BTreeMap<u64, Vec<AttachmentRef>> {
-    let mut wanted: HashSet<u64> = turn_ids.iter().copied().collect();
-    let mut out: BTreeMap<u64, Vec<AttachmentRef>> = BTreeMap::new();
-    for_each_record(agent_dir, |rec| {
-        if rec.kind != RecordKind::Turn {
-            return;
-        }
-        let Some(id) = rec.turn_id else {
-            return;
-        };
-        if !wanted.remove(&id) {
-            return;
-        }
-        let refs = rec
-            .attachments
-            .into_iter()
-            .filter(|a| !invalidated.contains(&(id, a.record_id)))
-            .collect::<Vec<_>>();
-        if !refs.is_empty() {
-            out.insert(id, refs);
-        }
-    });
-    out
-}
 /// Highest turn ID ever recorded in the history log (`0` when none).
 ///
 /// Used by the manifest-loss rebuild to keep `next_turn_id` ahead of every
@@ -453,10 +347,14 @@ pub(crate) fn max_turn_id(agent_dir: &Path) -> u64 {
 /// A turn ID already collected is skipped: repair appends the corrected
 /// messages under the same ID, and the older duplicate must neither
 /// double-count the budget nor enter the window twice.
-pub(crate) fn tail_turns_within_budget(agent_dir: &Path, budget: usize) -> Vec<Turn> {
+pub(crate) fn tail_turns_within_budget(
+    agent_dir: &Path,
+    budget: usize,
+) -> (Vec<Turn>, BTreeMap<u64, Vec<AttachmentRef>>) {
     let mut turns = Vec::new();
     let mut used = 0usize;
     let mut seen: HashSet<u64> = HashSet::new();
+    let mut sidecar: BTreeMap<u64, Vec<AttachmentRef>> = BTreeMap::new();
     'files: for path in history_files(agent_dir).into_iter().rev() {
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
@@ -486,10 +384,13 @@ pub(crate) fn tail_turns_within_budget(agent_dir: &Path, budget: usize) -> Vec<T
                 estimated_tokens: rec.estimated_tokens,
                 kind: TurnKind::Conversation,
             });
+            if !rec.attachments.is_empty() {
+                sidecar.insert(id, rec.attachments);
+            }
         }
     }
     turns.reverse();
-    turns
+    (turns, sidecar)
 }
 
 // ---------------------------------------------------------------------------
@@ -812,16 +713,16 @@ mod tests {
         // The 30-token newest turn fits only a generous budget.
         let ids = |ts: Vec<Turn>| ts.iter().map(|t| t.id.0).collect::<Vec<_>>();
         assert_eq!(
-            ids(tail_turns_within_budget(dir.path(), 20)),
+            ids(tail_turns_within_budget(dir.path(), 20).0),
             Vec::<u64>::new()
         );
         assert_eq!(
-            ids(tail_turns_within_budget(dir.path(), 37)),
+            ids(tail_turns_within_budget(dir.path(), 37).0),
             vec![4],
             "30-token newest fits, the next 8-token turn would cross"
         );
         assert_eq!(
-            ids(tail_turns_within_budget(dir.path(), 54)),
+            ids(tail_turns_within_budget(dir.path(), 54).0),
             vec![1, 2, 3, 4],
             "spans days, ascending"
         );
@@ -837,8 +738,8 @@ mod tests {
             "2026-08-19",
             &[turn_line(Some(9), "whatever"), system_line()],
         );
-        assert!(tail_turns_within_budget(dir.path(), 0).is_empty());
-        assert!(tail_turns_within_budget(dir.path(), 8).len() == 1);
+        assert!(tail_turns_within_budget(dir.path(), 0).0.is_empty());
+        assert!(tail_turns_within_budget(dir.path(), 8).0.len() == 1);
     }
 
     /// A repaired turn's older duplicate counts once: no double budget,
@@ -858,7 +759,7 @@ mod tests {
         );
 
         // Budget 16 fits both turns only if the duplicate is skipped.
-        let turns = tail_turns_within_budget(dir.path(), 16);
+        let (turns, _sidecar) = tail_turns_within_budget(dir.path(), 16);
         let ids: Vec<u64> = turns.iter().map(|t| t.id.0).collect();
         assert_eq!(ids, vec![2, 3]);
         assert_eq!(turns[1].messages[0].content(), Some("repaired"));
@@ -933,100 +834,6 @@ mod tests {
         assert!(parsed.attachments.is_empty());
     }
 
-    #[test]
-    fn scan_history_modalities_collects_and_respects_exclusion() {
-        let dir = tmp_agent_dir();
-        let writer = HistoryWriter::new(dir.path().to_owned());
-        writer
-            .append(
-                Some(0),
-                &[user_msg("with chart")],
-                8,
-                RecordKind::Turn,
-                None,
-                &[attachment(Modality::Image, 0)],
-            )
-            .unwrap();
-        writer
-            .append(
-                Some(1),
-                &[user_msg("plain")],
-                8,
-                RecordKind::Turn,
-                None,
-                &[],
-            )
-            .unwrap();
-        writer
-            .append(
-                Some(2),
-                &[user_msg("audio note")],
-                8,
-                RecordKind::Turn,
-                None,
-                &[attachment(Modality::Audio, 2)],
-            )
-            .unwrap();
-        // System records never contribute, whatever they carry.
-        writer
-            .append(
-                None,
-                &[user_msg("system")],
-                8,
-                RecordKind::System,
-                Some(SystemEvent::AgentRestore),
-                &[attachment(Modality::Video, 9)],
-            )
-            .unwrap();
-
-        let all = scan_history_modalities(dir.path(), &HashSet::new());
-        assert_eq!(all, BTreeSet::from([Modality::Image, Modality::Audio]));
-
-        let mut excluded = HashSet::new();
-        excluded.insert(2u64);
-        let minus_two = scan_history_modalities(dir.path(), &excluded);
-        assert_eq!(minus_two, BTreeSet::from([Modality::Image]));
-    }
-
-    #[test]
-    fn wake_modality_gate_blocks_text_only_set_and_passes_covering_set() {
-        let dir = tmp_agent_dir();
-        let writer = HistoryWriter::new(dir.path().to_owned());
-        writer
-            .append(
-                Some(0),
-                &[user_msg("with chart")],
-                8,
-                RecordKind::Turn,
-                None,
-                &[attachment(Modality::Image, 0)],
-            )
-            .unwrap();
-        let required = scan_history_modalities(dir.path(), &HashSet::new());
-
-        // Positive arm: a text-only set cannot serve the context — the
-        // error carries both values plus the recovery action.
-        let set = crate::profile::ProfileSet {
-            name: "a".into(),
-            description: None,
-            profiles: vec![crate::test_support::profile("p", "ds", 1000)],
-        };
-        let err = set.ensure_supports(&required).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("image"), "got: {msg}");
-        assert!(msg.contains("text"), "got: {msg}");
-        assert!(msg.contains("rebind"), "got: {msg}");
-
-        // Negative arm: a set whose intersection covers the context passes.
-        let mut cover = crate::test_support::profile("p", "ds", 1000);
-        cover.modalities = vec![Modality::Text, Modality::Image];
-        let covering = crate::profile::ProfileSet {
-            name: "a".into(),
-            description: None,
-            profiles: vec![cover],
-        };
-        covering.ensure_supports(&required).unwrap();
-    }
     /// A reference-invalidation event for `turn_id` about record `seed`.
     fn invalidated_event(turn_id: u64, seed: u64) -> SystemEvent {
         SystemEvent::ReferenceInvalidated {
@@ -1066,42 +873,12 @@ mod tests {
     }
 
     #[test]
-    fn scan_invalidated_refs_collects_event_pairs() {
-        let dir = tmp_agent_dir();
-        let writer = HistoryWriter::new(dir.path().to_owned());
-        writer
-            .append(
-                None,
-                &[],
-                0,
-                RecordKind::System,
-                Some(invalidated_event(7, 3)),
-                &[],
-            )
-            .unwrap();
-        writer
-            .append(
-                None,
-                &[],
-                0,
-                RecordKind::System,
-                Some(invalidated_event(9, 4)),
-                &[],
-            )
-            .unwrap();
-        let refs = scan_invalidated_refs(dir.path());
-        assert_eq!(refs.len(), 2);
-        assert!(refs.contains(&(7, attachment(Modality::Image, 3).record_id)));
-        assert!(refs.contains(&(9, attachment(Modality::Image, 4).record_id)));
-    }
-
-    #[test]
-    fn collect_sidecar_refs_newest_wins_and_filters_by_pair() {
+    fn hydrate_sidecar_newest_wins() {
         let dir = tmp_agent_dir();
         let writer = HistoryWriter::new(dir.path().to_owned());
 
-        // Turn 7 recorded twice: the newest record's refs win, mirroring
-        // hydrate_turns' same-id resolution.
+        // Turn 7 recorded twice: the newest record's refs and messages win,
+        // mirroring the same-id resolution the turns and the sidecar share.
         writer
             .append(
                 Some(7),
@@ -1122,7 +899,6 @@ mod tests {
                 &[attachment(Modality::Image, 2)],
             )
             .unwrap();
-        // Turn 9 with its own record id — a different turn, a different ref.
         writer
             .append(
                 Some(9),
@@ -1134,54 +910,10 @@ mod tests {
             )
             .unwrap();
 
-        // No invalidations: newest wins for turn 7, turn 9 intact.
-        let empty = HashSet::new();
-        let refs = collect_sidecar_refs(dir.path(), &[7, 9], &empty);
-        assert_eq!(refs[&7], vec![attachment(Modality::Image, 2)]);
-        assert_eq!(refs[&9], vec![attachment(Modality::Image, 5)]);
-
-        // Invalidate exactly (7, record 2): turn 7 drops out entirely; turn
-        // 9 keeps its ref — the pair (7, 2) never poisons (9, 5), and a
-        // turn_id alone never excludes a record_id that was not named.
-        let mut invalidated = HashSet::new();
-        invalidated.insert((7, attachment(Modality::Image, 2).record_id));
-        let refs = collect_sidecar_refs(dir.path(), &[7, 9], &invalidated);
-        assert!(!refs.contains_key(&7));
-        assert_eq!(refs[&9], vec![attachment(Modality::Image, 5)]);
-    }
-
-    #[test]
-    fn scan_history_modalities_skips_invalidated_turns() {
-        let dir = tmp_agent_dir();
-        let writer = HistoryWriter::new(dir.path().to_owned());
-        writer
-            .append(
-                Some(7),
-                &[user_msg("with chart")],
-                8,
-                RecordKind::Turn,
-                None,
-                &[attachment(Modality::Image, 3)],
-            )
-            .unwrap();
-        writer
-            .append(
-                None,
-                &[],
-                0,
-                RecordKind::System,
-                Some(invalidated_event(7, 3)),
-                &[],
-            )
-            .unwrap();
-
-        // Without the invalidation the turn demands image; with it the log
-        // is text-only and the wake gate must pass a text-only set.
-        let mut excluded = HashSet::new();
-        excluded.insert(7);
-        let required = scan_history_modalities(dir.path(), &excluded);
-        assert!(required.is_empty());
-        let required = scan_history_modalities(dir.path(), &HashSet::new());
-        assert!(required.contains(&Modality::Image));
+        let (turns, report) = hydrate_turns(dir.path(), &[7, 9]);
+        assert_eq!(report.sidecar[&7], vec![attachment(Modality::Image, 2)]);
+        assert_eq!(report.sidecar[&9], vec![attachment(Modality::Image, 5)]);
+        let seven = turns.iter().find(|t| t.id.0 == 7).unwrap();
+        assert_eq!(seven.messages[0].content(), Some("newest"));
     }
 }

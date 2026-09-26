@@ -9,7 +9,6 @@
 
 use anyhow::Error;
 use futures_util::StreamExt;
-use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -19,7 +18,6 @@ use crate::context::{
 };
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::failover::FailoverOutcome;
-use crate::history::collect_sidecar_refs;
 use crate::stream_accumulator::ToolCallAccumulator;
 use just_llm_client::types::generation::{
     GenerationEvent, GenerationRequest, Message, ToolCall, ToolChoice, ToolChoiceMode,
@@ -159,10 +157,10 @@ pub(crate) fn fatal_provider_status(error: &Error) -> Option<reqwest::StatusCode
 /// request with a 4xx while the composed request carried images. Strip
 /// the images from a recomposed copy (the store stays untouched until
 /// the retry proves the images were the problem), retry once, and on
-/// success apply the strip for good — recording each affected sidecar
-/// reference as invalidated (`SystemEvent::ReferenceInvalidated`) so
-/// neither later rounds nor a restore replays the failure, plus a
-/// plain-language note turn so the agent knows its images were dropped.
+/// success apply the strip for good, plus a plain-language note turn so
+/// the agent knows its images were dropped. The strip lives in the
+/// store only: invalidations are not remembered across restarts, so a
+/// later restore re-fetches the references and degrades again if gone.
 ///
 /// Returns `Some(result)` when the degrade path owned the outcome (the
 /// retried stream, or a cancel/budget outcome from the retry); `None`
@@ -225,34 +223,10 @@ pub(crate) async fn degrade_on_image_rejection(
                 guard.mark_needs_full_estimate();
             }
 
-            // Mark every reference of the stripped turns invalid, with the
-            // reason carried for the recovery truth.
-            if let Some(agent_dir) = ctx.agent_dir.as_ref() {
-                let sidecar = collect_sidecar_refs(agent_dir, &image_turn_ids, &HashSet::new());
-                for (turn_id, refs) in sidecar {
-                    for r in refs {
-                        ctx.append_history(
-                            None,
-                            &[],
-                            0,
-                            crate::history::RecordKind::System,
-                            Some(crate::history::SystemEvent::ReferenceInvalidated {
-                                turn_id,
-                                record_id: r.record_id,
-                                reason: format!(
-                                    "provider rejected the image content (HTTP {status})"
-                                ),
-                            }),
-                            &[],
-                        );
-                    }
-                }
-            }
-
             // Tell the agent, in plain text, what happened to its images.
             let note = format!(
                 "[system] image attachments were removed from the request: the provider \
-                 rejected them (HTTP {status}). The affected references are marked invalid; \
+                 rejected them (HTTP {status}). the affected turns stay text-only; \
                  continue without the image content."
             );
             ctx.record_turn(vec![Message::user(&note)]).await;
@@ -953,7 +927,7 @@ mod tests {
             },
         ));
         backend.queue_stream("resp-1");
-        let (mut ctx, _dir, record_id) = image_ctx(backend.clone()).await;
+        let (mut ctx, _dir, _record_id) = image_ctx(backend.clone()).await;
 
         let messages = compose_context(ctx.store.clone()).await;
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
@@ -995,13 +969,6 @@ mod tests {
             let note = guard.turns().back().unwrap();
             assert!(format!("{:?}", note.messages).contains("[system]"));
         }
-
-        // The sidecar reference is invalidated with the provider's verdict
-        // carried as the recovery truth.
-        let dir_path = ctx.agent_dir.as_ref().unwrap();
-        let invalidated = crate::history::scan_invalidated_refs(dir_path);
-        assert_eq!(invalidated.len(), 1);
-        assert!(invalidated.contains(&(0, record_id)));
     }
 
     #[tokio::test]
@@ -1037,7 +1004,7 @@ mod tests {
         assert!(result.is_none());
 
         // Nothing moved: the image turn keeps its parts, no note turn was
-        // appended, and no reference was invalidated.
+        // appended.
         {
             let guard = ctx.store.lock().await;
             assert_eq!(guard.turn_count(), 1);
@@ -1048,8 +1015,6 @@ mod tests {
                     .any(crate::context::message_has_images)
             );
         }
-        let invalidated = crate::history::scan_invalidated_refs(ctx.agent_dir.as_ref().unwrap());
-        assert!(invalidated.is_empty());
         let _ = record_id;
     }
 

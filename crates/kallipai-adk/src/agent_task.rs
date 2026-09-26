@@ -626,37 +626,32 @@ pub async fn run_and_report(
     apply_pending_profile_reset(ctx);
     // Every entry here is from a non-Running state by construction (the outer
     // loop parks between runs); the transition table asserts exactly that.
-    // Wake modality gate: a restored context whose sidecar attachments claim
+    // Wake modality gate: a restored context whose assembled content needs
     // modalities the bound set cannot serve must not start a round — the
     // model would silently never see the referenced content. Surface one
     // actionable error and park; a rebind (profile apply) clears the gate
-    // on the next wake. References recorded as invalidated are excluded:
-    // a deterministic failure was already recorded once — the gate must
-    // not keep demanding a modality the runtime has given up on.
-    if let Some(agent_dir) = ctx.agent_dir.as_ref() {
-        let excluded_turns: std::collections::HashSet<u64> =
-            crate::history::scan_invalidated_refs(agent_dir)
-                .into_iter()
-                .map(|(turn_id, _)| turn_id)
-                .collect();
-        let required = crate::history::scan_history_modalities(agent_dir, &excluded_turns);
-        if let Err(blocked) = ctx.failover.set().ensure_supports(&required) {
-            tracing::warn!(error = %blocked, "wake blocked by modality gate");
-            agent_tx
-                .send(AgentEvent::Error(blocked.to_string()))
-                .await
-                .ok();
-            ctx.lifecycle
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .transition(LifecycleState::Parked {
-                    reason: ParkedReason::FatalError {
-                        message: blocked.to_string(),
-                    },
-                    at: std::time::Instant::now(),
-                });
-            return false;
-        }
+    // on the next wake. The requirement is computed from what the store
+    // actually holds (window + pins), never from a history rescan.
+    let required = {
+        let store = ctx.store.lock().await;
+        crate::context::required_modalities(&store)
+    };
+    if let Err(blocked) = ctx.failover.set().ensure_supports(&required) {
+        tracing::warn!(error = %blocked, "wake blocked by modality gate");
+        agent_tx
+            .send(AgentEvent::Error(blocked.to_string()))
+            .await
+            .ok();
+        ctx.lifecycle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .transition(LifecycleState::Parked {
+                reason: ParkedReason::FatalError {
+                    message: blocked.to_string(),
+                },
+                at: std::time::Instant::now(),
+            });
+        return false;
     }
     ctx.lifecycle
         .lock()

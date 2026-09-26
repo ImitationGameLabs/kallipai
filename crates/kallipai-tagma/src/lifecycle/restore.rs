@@ -251,11 +251,11 @@ async fn restore_one(
 
     // Re-assemble image attachments: hydrated turns carry the text form
     // only, so each sidecar reference's bytes are fetched and the assembled
-    // multimodal message swapped back in (invalidated references stay
-    // excluded — a deterministic failure is marked once, never replayed).
-    // Never fails the restore: a text-only boot is always possible, and
-    // transient fetch failures simply leave the turn text-only for the
-    // next restart to try again.
+    // multimodal message swapped back in. Gone verdicts are logged for
+    // observability only — invalidations are not remembered across
+    // restarts, so the next restore retries the fetch. Never fails the
+    // restore: a text-only boot is always possible, and transient fetch
+    // failures simply leave the turn text-only.
     let shared = shared_state.clone();
     type BoxedFetch = std::pin::Pin<
         Box<dyn std::future::Future<Output = kallipai_adk::context::FetchedImage> + Send>,
@@ -282,39 +282,20 @@ async fn restore_one(
     let reports = [
         kallipai_adk::context::reassemble_attachments(
             &mut restored.store,
-            &restored.agent_dir,
+            &restored.sidecar,
             &mut fetch,
         )
         .await,
         // Pins persist as text plus references, so their bytes come back
-        // through the same mechanism (invalidated references excluded).
-        kallipai_adk::context::reassemble_pin_attachments(
-            &mut restored.store,
-            &restored.agent_dir,
-            &mut fetch,
-        )
-        .await,
+        // through the same mechanism carried by the pinned turns themselves.
+        kallipai_adk::context::reassemble_pin_attachments(&mut restored.store, &mut fetch).await,
     ];
     for report in &reports {
         for (turn_id, record_id, reason) in &report.invalidated {
             tracing::warn!(
                 id = %p.agent_id, turn_id, %record_id,
-                "attachment reference invalidated during restore: {reason}"
+                "attachment reference gone during restore: {reason}"
             );
-            kallipai_adk::history::HistoryWriter::new(restored.agent_dir.clone())
-                .append(
-                    None,
-                    &[],
-                    0,
-                    kallipai_adk::history::RecordKind::System,
-                    Some(kallipai_adk::history::SystemEvent::ReferenceInvalidated {
-                        turn_id: *turn_id,
-                        record_id: *record_id,
-                        reason: reason.clone(),
-                    }),
-                    &[],
-                )
-                .ok();
         }
         for (_, record_id, reason) in &report.skipped {
             tracing::warn!(

@@ -25,7 +25,7 @@ pub use compose::{
     FetchedImage, IngestImage, ReassemblyReport, compose_context, ingest_message,
     reassemble_attachments, reassemble_pin_attachments,
 };
-pub(crate) use compose::{message_has_images, strip_message_images};
+pub(crate) use compose::{message_has_images, required_modalities, strip_message_images};
 pub use store::{AgenticContext, ContextStore};
 pub use summarize::{ContextSummarizer, Summary};
 pub(crate) use tokens::estimate_text;

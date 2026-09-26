@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -43,6 +44,10 @@ pub struct RestorableAgent {
     /// corrupt lines). Empty on a clean restore. Consumed by the caller for
     /// structured warning logs.
     pub degraded: Vec<Degradation>,
+    /// The window's attachment sidecar references (hydrated out of the
+    /// history records in the same pass that built the turns). Consumed
+    /// by the restore-time image re-assembly.
+    pub sidecar: BTreeMap<u64, Vec<crate::history::AttachmentRef>>,
 }
 
 /// List the agents directory, mapping "missing" (a fresh install) to `None`.
@@ -194,7 +199,7 @@ pub fn restore_agent(
     tail_budget: usize,
 ) -> Result<RestorableAgent> {
     let mut degraded = Vec::new();
-    let (mut store, migrate_pending) = load_store(dir, tail_budget, &mut degraded)?;
+    let (mut store, migrate_pending, sidecar) = load_store(dir, tail_budget, &mut degraded)?;
 
     let approvals: ApprovalStore = match fs::read_to_string(dir.join("approvals.json")) {
         Ok(json) => serde_json::from_str(&json).context("parsing approvals.json")?,
@@ -266,6 +271,7 @@ pub fn restore_agent(
         store,
         approvals,
         degraded,
+        sidecar,
     })
 }
 

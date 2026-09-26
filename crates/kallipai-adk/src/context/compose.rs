@@ -4,11 +4,13 @@
 //! and the restore-time re-assembly path both go through here.
 
 use super::Turn;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use just_llm_client::types::generation::{ContentPart, ImageSource, Message, MessageContent};
+use kallipai_common::protocol::Modality;
 use tokio::sync::Mutex;
 
 use super::manifest::PinAttachment;
@@ -150,8 +152,8 @@ pub enum FetchedImage {
 /// What one restore-time re-assembly pass gave up on or deferred.
 pub struct ReassemblyReport {
     /// `(turn_id, record_id, reason)` — deterministic failures. The caller
-    /// records `SystemEvent::ReferenceInvalidated` for each so later passes
-    /// and the wake modality gate skip them.
+    /// records nothing to history — invalidations are not remembered
+    /// across restarts; the list feeds the caller's warning log.
     pub invalidated: Vec<(u64, uuid::Uuid, String)>,
     /// `(turn_id, record_id, reason)` — transient failures. The turn stays
     /// text-only and the reference stays valid: the bytes may come back,
@@ -194,18 +196,18 @@ async fn fetch_with_retry(
 /// ingest. Hydrated turns carry the text form only (the caption and the
 /// pointer line) — this pass fetches each sidecar reference's bytes and
 /// swaps the assembled multimodal message back in, so a restarted agent's
-/// context matches what it held before the restart. References recorded
-/// as invalidated (see `SystemEvent::ReferenceInvalidated`) are skipped:
-/// a deterministic failure is marked once, never replayed every boot.
+/// context matches what it held before the restart. Gone verdicts are
+/// reported to the caller but not remembered: a later restore retries
+/// the fetch (the local mirror usually serves it at zero cost).
 ///
 /// A missing media file (`FetchedImage::Gone`) is deterministic and
-/// reported for invalidation; a transient fetch failure retries within
+/// reported for observability; a transient fetch failure retries within
 /// the pass and then leaves the turn text-only without invalidating.
 /// Either way the pass never fails the restore — text-only boots are
 /// always possible, images are additive.
 pub async fn reassemble_attachments(
     store: &mut ContextStore,
-    agent_dir: &std::path::Path,
+    sidecar: &BTreeMap<u64, Vec<crate::history::AttachmentRef>>,
     // Boxed so the closure can be process-state-driven without dragging the AsyncFn
     // trait's lifetime generalization through every `Send` bound up the boot path.
     // The second argument is the reference's local-mirror hash (absent for
@@ -221,10 +223,7 @@ pub async fn reassemble_attachments(
         invalidated: Vec::new(),
         skipped: Vec::new(),
     };
-    let invalidated = crate::history::scan_invalidated_refs(agent_dir);
-    let wanted: Vec<u64> = store.turns().iter().map(|t| t.id.0).collect();
-    let sidecar = crate::history::collect_sidecar_refs(agent_dir, &wanted, &invalidated);
-    for (turn_id, refs) in sidecar {
+    for (&turn_id, refs) in sidecar {
         let Some(turn) = store.turns_mut().iter_mut().find(|t| t.id.0 == turn_id) else {
             continue;
         };
@@ -241,7 +240,7 @@ pub async fn reassemble_attachments(
             continue;
         };
         let mut images = Vec::new();
-        for r in &refs {
+        for r in refs {
             match fetch_with_retry(r.record_id, r.blob_id.clone(), &mut fetch).await {
                 FetchedImage::Bytes(bytes) => {
                     images.push(IngestImage {
@@ -281,15 +280,12 @@ pub async fn reassemble_attachments(
 /// with the references carried by the pinned turns themselves
 /// (extracted at pin time from the pointer lines — pins have no history sidecars).
 ///
-/// Invalidation semantics match: a reference recorded as invalidated is
-/// skipped (a deterministic failure is marked once, never replayed every
-/// boot), a `Gone` fetch is reported for invalidation (the pin stays
-/// text-only; the pointer line remains, so the text form stays
+/// A `Gone` fetch is reported to the caller for observability (the pin
+/// stays text-only; the pointer line remains, so the text form stays
 /// truthful), and a transient failure leaves the pin text-only for the
 /// next restore to retry. The pass never fails the restore.
 pub async fn reassemble_pin_attachments(
     store: &mut ContextStore,
-    agent_dir: &std::path::Path,
     mut fetch: impl FnMut(
         uuid::Uuid,
         Option<String>,
@@ -300,7 +296,6 @@ pub async fn reassemble_pin_attachments(
         invalidated: Vec::new(),
         skipped: Vec::new(),
     };
-    let invalidated = crate::history::scan_invalidated_refs(agent_dir);
     let pin_ids: Vec<u64> = store.pinned_turns().map(|t| t.id.0).collect();
     for turn_id in pin_ids {
         let Some(turn) = store.turns_mut().iter_mut().find(|t| t.id.0 == turn_id) else {
@@ -309,12 +304,7 @@ pub async fn reassemble_pin_attachments(
         if turn.messages.len() != 1 {
             continue;
         };
-        let live: Vec<PinAttachment> = turn
-            .pinned_attachments()
-            .iter()
-            .filter(|r| !invalidated.contains(&(turn_id, r.record_id)))
-            .cloned()
-            .collect();
+        let live: Vec<PinAttachment> = turn.pinned_attachments().to_vec();
         if live.is_empty() {
             continue;
         };
@@ -370,6 +360,24 @@ pub(crate) fn message_has_images(message: &Message) -> bool {
     message
         .content_parts()
         .is_some_and(|parts| parts.iter().any(|p| matches!(p, ContentPart::Image { .. })))
+}
+/// The modalities the store's assembled content requires: window turns
+/// and pinned turns are examined as actually assembled — a message
+/// counts toward [`Modality::Image`] only when it carries a real image
+/// part, so a degraded text form (a pointer line left behind by a
+/// failed fetch) makes no demand. Pure in-memory, O(window + pins): no
+/// history scan — the wake gate reads what the runtime would send.
+pub(crate) fn required_modalities(store: &ContextStore) -> BTreeSet<Modality> {
+    let mut required = BTreeSet::new();
+    let has_images = store
+        .turns()
+        .iter()
+        .chain(store.pinned_turns())
+        .any(|t| t.messages.iter().any(message_has_images));
+    if has_images {
+        required.insert(Modality::Image);
+    }
+    required
 }
 
 /// The image-stripped twin of one message: text parts kept, image parts
@@ -503,6 +511,13 @@ mod tests {
             )
             .unwrap();
     }
+    /// The seeded history's window sidecar, hydrated the way restore does.
+    fn sidecar_of(
+        dir: &std::path::Path,
+        turn_ids: &[u64],
+    ) -> BTreeMap<u64, Vec<crate::history::AttachmentRef>> {
+        crate::history::hydrate_turns(dir, turn_ids).1.sidecar
+    }
 
     fn text_of(turn_messages: &[Message]) -> String {
         turn_messages
@@ -520,13 +535,14 @@ mod tests {
 
         let mut store = ContextStore::new();
         store.push_turn(vec![Message::user("[image x] caption")]);
-        let report = reassemble_attachments(&mut store, dir.path(), |id, _blob| {
-            Box::pin(async move {
-                assert_eq!(id, record_id);
-                FetchedImage::Bytes(png_header(64, 48))
+        let report =
+            reassemble_attachments(&mut store, &sidecar_of(dir.path(), &[0]), |id, _blob| {
+                Box::pin(async move {
+                    assert_eq!(id, record_id);
+                    FetchedImage::Bytes(png_header(64, 48))
+                })
             })
-        })
-        .await;
+            .await;
         assert!(report.invalidated.is_empty());
         assert!(report.skipped.is_empty());
         assert!(
@@ -553,7 +569,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gone_reference_is_reported_once_and_never_fetched_again() {
+    async fn gone_reference_is_reported_and_stays_text_only() {
         let dir = tempfile::tempdir().unwrap();
         let record_id = uuid::Uuid::from_u128(0xB0B);
         seed_history_with_image(dir.path(), record_id, None);
@@ -561,46 +577,15 @@ mod tests {
         let mut store = ContextStore::new();
         store.push_turn(vec![Message::user("[image x] caption")]);
 
-        let report = reassemble_attachments(&mut store, dir.path(), |_, _blob| {
-            Box::pin(async move { FetchedImage::Gone })
-        })
-        .await;
+        let report =
+            reassemble_attachments(&mut store, &sidecar_of(dir.path(), &[0]), |_, _blob| {
+                Box::pin(async move { FetchedImage::Gone })
+            })
+            .await;
         assert_eq!(report.invalidated.len(), 1);
         assert_eq!(report.invalidated[0].0, 0);
         assert_eq!(report.invalidated[0].1, record_id);
         assert!(text_of(&store.turns()[0].messages).contains("[image x]"));
-
-        // Record the invalidation (as the caller does) and re-run: the
-        // loop cut — the deterministic failure is not replayed, the
-        // fetcher never fires again.
-        HistoryWriter::new(dir.path().to_owned())
-            .append(
-                None,
-                &[],
-                0,
-                crate::history::RecordKind::System,
-                Some(crate::history::SystemEvent::ReferenceInvalidated {
-                    turn_id: 0,
-                    record_id,
-                    reason: "files record no longer exists".to_owned(),
-                }),
-                &[],
-            )
-            .unwrap();
-        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = fetches.clone();
-        let report = reassemble_attachments(&mut store, dir.path(), move |id, _blob| {
-            let counter = counter.clone();
-            Box::pin(async move {
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = id;
-                FetchedImage::Bytes(png_header(8, 8))
-            })
-        })
-        .await;
-        assert!(report.invalidated.is_empty());
-        assert!(report.skipped.is_empty());
-        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -614,14 +599,18 @@ mod tests {
 
         let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = fetches.clone();
-        let report = reassemble_attachments(&mut store, dir.path(), move |id, _blob| {
-            let counter = counter.clone();
-            let _ = id;
-            Box::pin(async move {
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                FetchedImage::Transient("upstream 503".to_owned())
-            })
-        })
+        let report = reassemble_attachments(
+            &mut store,
+            &sidecar_of(dir.path(), &[0]),
+            move |id, _blob| {
+                let counter = counter.clone();
+                let _ = id;
+                Box::pin(async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    FetchedImage::Transient("upstream 503".to_owned())
+                })
+            },
+        )
         .await;
         assert!(report.invalidated.is_empty());
         assert_eq!(report.skipped.len(), 1);
@@ -634,10 +623,11 @@ mod tests {
         );
 
         // Nothing was invalidated: the next pass tries again.
-        let report = reassemble_attachments(&mut store, dir.path(), |_, _blob| {
-            Box::pin(async move { FetchedImage::Bytes(png_header(8, 8)) })
-        })
-        .await;
+        let report =
+            reassemble_attachments(&mut store, &sidecar_of(dir.path(), &[0]), |_, _blob| {
+                Box::pin(async move { FetchedImage::Bytes(png_header(8, 8)) })
+            })
+            .await;
         assert!(report.invalidated.is_empty());
         assert!(report.skipped.is_empty());
         assert!(message_has_images(&store.turns()[0].messages[0]));
@@ -691,11 +681,10 @@ mod tests {
 
     #[tokio::test]
     async fn pin_reassembly_swaps_the_bytes_back_in() {
-        let dir = tempfile::tempdir().unwrap();
         let record_id = uuid::Uuid::from_u128(0xB0B);
         let mut store = ContextStore::new();
         store.pin("shot", parts_pin(record_id)).unwrap();
-        let report = reassemble_pin_attachments(&mut store, dir.path(), |id, _blob| {
+        let report = reassemble_pin_attachments(&mut store, |id, _blob| {
             Box::pin(async move {
                 assert_eq!(id, record_id);
                 FetchedImage::Bytes(png_header(64, 48))
@@ -715,11 +704,10 @@ mod tests {
 
     #[tokio::test]
     async fn pin_gone_reference_invalidates_and_is_dropped() {
-        let dir = tempfile::tempdir().unwrap();
         let record_id = uuid::Uuid::from_u128(0xB0B);
         let mut store = ContextStore::new();
         store.pin("shot", parts_pin(record_id)).unwrap();
-        let report = reassemble_pin_attachments(&mut store, dir.path(), |_, _blob| {
+        let report = reassemble_pin_attachments(&mut store, |_, _blob| {
             Box::pin(async move { FetchedImage::Gone })
         })
         .await;
@@ -737,13 +725,12 @@ mod tests {
 
     #[tokio::test]
     async fn pin_transient_failures_stay_textual_within_the_retry_budget() {
-        let dir = tempfile::tempdir().unwrap();
         let record_id = uuid::Uuid::from_u128(0xB0B);
         let mut store = ContextStore::new();
         store.pin("shot", parts_pin(record_id)).unwrap();
         let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = fetches.clone();
-        let report = reassemble_pin_attachments(&mut store, dir.path(), move |id, _blob| {
+        let report = reassemble_pin_attachments(&mut store, move |id, _blob| {
             let counter = counter.clone();
             let _ = id;
             Box::pin(async move {
@@ -775,42 +762,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pin_invalidated_reference_is_not_refetched() {
-        let dir = tempfile::tempdir().unwrap();
-        let record_id = uuid::Uuid::from_u128(0xB0B);
-        let mut store = ContextStore::new();
-        store.pin("shot", parts_pin(record_id)).unwrap();
-        let turn_id = store.pinned_turns().next().unwrap().id.0;
-        HistoryWriter::new(dir.path().to_owned())
-            .append(
-                None,
-                &[],
-                0,
-                crate::history::RecordKind::System,
-                Some(crate::history::SystemEvent::ReferenceInvalidated {
-                    turn_id,
-                    record_id,
-                    reason: "files record no longer exists".to_owned(),
-                }),
-                &[],
-            )
-            .unwrap();
-        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = fetches.clone();
-        let report = reassemble_pin_attachments(&mut store, dir.path(), move |id, _blob| {
-            let counter = counter.clone();
-            Box::pin(async move {
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = id;
-                FetchedImage::Bytes(png_header(8, 8))
-            })
-        })
-        .await;
-        assert!(report.invalidated.is_empty());
-        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
     async fn blob_anchor_rides_the_fetch_call() {
         let dir = tempfile::tempdir().unwrap();
         let record_id = uuid::Uuid::from_u128(0xD00D);
@@ -823,14 +774,18 @@ mod tests {
         store.push_turn(vec![Message::user("[image x] caption")]);
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
-        let report = reassemble_attachments(&mut store, dir.path(), move |id, blob| {
-            let sink = sink.clone();
-            Box::pin(async move {
-                assert_eq!(id, record_id);
-                sink.lock().unwrap().push(blob);
-                FetchedImage::Bytes(png_header(64, 48))
-            })
-        })
+        let report = reassemble_attachments(
+            &mut store,
+            &sidecar_of(dir.path(), &[0]),
+            move |id, blob| {
+                let sink = sink.clone();
+                Box::pin(async move {
+                    assert_eq!(id, record_id);
+                    sink.lock().unwrap().push(blob);
+                    FetchedImage::Bytes(png_header(64, 48))
+                })
+            },
+        )
         .await;
         assert!(report.invalidated.is_empty());
         assert!(report.skipped.is_empty());
@@ -858,6 +813,48 @@ mod tests {
             refs[0].blob_id.as_deref(),
             Some(kallipai_blob_store::BlobId::for_bytes(&bytes).as_str()),
             "the anchor is the content address of the decoded bytes"
+        );
+    }
+
+    /// The wake gate's requirement reads the assembled content only: real
+    /// image parts demand Image, degraded pointer lines and plain text do
+    /// not, and pinned turns count as much as window turns.
+    #[test]
+    fn required_modalities_read_the_assembled_content() {
+        // Plain window and no pins: no demand at all.
+        let mut store = ContextStore::new();
+        store.push_turn(vec![Message::user("plain text")]);
+        assert!(required_modalities(&store).is_empty());
+
+        // A window turn assembled with real image parts demands Image.
+        store.push_turn(vec![ingest_message(
+            "chart",
+            &[IngestImage {
+                media_type: "image/png".to_owned(),
+                bytes: png_header(8, 8),
+            }],
+        )]);
+        assert_eq!(
+            required_modalities(&store),
+            BTreeSet::from([Modality::Image])
+        );
+
+        // A degraded pointer line (text form, no image parts) makes no
+        // demand: the wake gate must not block on content nobody holds.
+        let mut degraded = ContextStore::new();
+        degraded.push_turn(vec![Message::user("[image x] caption")]);
+        assert!(required_modalities(&degraded).is_empty());
+
+        // A pinned turn with image parts demands Image even with a plain
+        // conversation window.
+        let mut pinned = ContextStore::new();
+        pinned.push_turn(vec![Message::user("plain")]);
+        pinned
+            .pin("shot", parts_pin(uuid::Uuid::from_u128(0xF00)))
+            .unwrap();
+        assert_eq!(
+            required_modalities(&pinned),
+            BTreeSet::from([Modality::Image])
         );
     }
 }

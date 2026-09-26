@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -49,7 +50,11 @@ pub(crate) fn load_store(
     dir: &Path,
     tail_budget: usize,
     degraded: &mut Vec<Degradation>,
-) -> Result<(ContextStore, bool)> {
+) -> Result<(
+    ContextStore,
+    bool,
+    BTreeMap<u64, Vec<crate::history::AttachmentRef>>,
+)> {
     let manifest_path = dir.join("manifest.json");
     let legacy_path = dir.join("context.json");
 
@@ -71,10 +76,9 @@ pub(crate) fn load_store(
                 // of faulting the agent (the manifest alone is not worth a
                 // Faulted — history and pins survive independently).
                 Err(e) => {
-                    return Ok((
-                        rebuild_window_from_tail(dir, tail_budget, degraded, e),
-                        false,
-                    ));
+                    let (rebuilt, sidecar) =
+                        rebuild_window_from_tail(dir, tail_budget, degraded, e);
+                    return Ok((rebuilt, false, sidecar));
                 }
             };
         let pins = load_pins(dir, degraded);
@@ -95,7 +99,11 @@ pub(crate) fn load_store(
                 detail: format!("no history record for turns {:?}", report.missing_ids),
             });
         }
-        return Ok((ContextStore::from_persisted(&pins, convo, &manifest), false));
+        return Ok((
+            ContextStore::from_persisted(&pins, convo, &manifest),
+            false,
+            report.sidecar,
+        ));
     }
 
     if legacy_path.exists() {
@@ -106,24 +114,22 @@ pub(crate) fn load_store(
         strip_restart_turns(&mut store);
         // Deferred migration: the caller writes the split documents after
         // its folds; writing here would persist the raw legacy shape.
-        return Ok((store, true));
+        return Ok((store, true, BTreeMap::new()));
     }
 
     // Neither split document: with no history this is a fresh directory;
     // with history the manifest went missing, and a fresh store would
     // renumber turn IDs from zero, aliasing every history record.
     if crate::history::has_history(dir) {
-        return Ok((
-            rebuild_window_from_tail(
-                dir,
-                tail_budget,
-                degraded,
-                anyhow::anyhow!("manifest.json and its backup are missing"),
-            ),
-            false,
-        ));
+        let (rebuilt, sidecar) = rebuild_window_from_tail(
+            dir,
+            tail_budget,
+            degraded,
+            anyhow::anyhow!("manifest.json and its backup are missing"),
+        );
+        return Ok((rebuilt, false, sidecar));
     }
-    Ok((ContextStore::new(), false))
+    Ok((ContextStore::new(), false, BTreeMap::new()))
 }
 
 /// Load pins.json through its backup chain, degrading to empty pins
@@ -166,15 +172,22 @@ fn rebuild_window_from_tail(
     tail_budget: usize,
     degraded: &mut Vec<Degradation>,
     manifest_err: anyhow::Error,
-) -> ContextStore {
+) -> (
+    ContextStore,
+    BTreeMap<u64, Vec<crate::history::AttachmentRef>>,
+) {
     let pins = load_pins(dir, degraded);
-    let mut turns = crate::history::tail_turns_within_budget(dir, tail_budget);
+    let (mut turns, mut sidecar) = crate::history::tail_turns_within_budget(dir, tail_budget);
     let tail_len = turns.len();
     let damaged_leading = turns
         .iter()
         .take_while(|t| pairing_damaged(&t.messages))
         .count();
+    let dropped: Vec<u64> = turns.iter().take(damaged_leading).map(|t| t.id.0).collect();
     turns.drain(..damaged_leading);
+    for id in dropped {
+        sidecar.remove(&id);
+    }
     let next_turn_id = crate::history::max_turn_id(dir) + 1;
     degraded.push(Degradation {
         kind: DegradationKind::TailRecovery,
@@ -190,7 +203,10 @@ fn rebuild_window_from_tail(
         next_turn_id,
         retry_log: Vec::new(),
     };
-    ContextStore::from_persisted(&pins, turns, &manifest)
+    (
+        ContextStore::from_persisted(&pins, turns, &manifest),
+        sidecar,
+    )
 }
 
 /// Whether a turn's messages violate tool-call/result pairing in either
