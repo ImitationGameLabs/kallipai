@@ -335,6 +335,11 @@ fn count_results(
         counts.insert(key, 0usize);
     }
     for r in results {
+        // A failed row still carries its action; count only rows that
+        // landed so a fail-fast summary cannot inflate the successes.
+        if r.outcome != kallipai_common::protocol::TeamRowOutcome::Applied {
+            continue;
+        }
         let key = match r.action {
             TeamAction::Spawn => "spawned",
             TeamAction::Restore => "restored",
@@ -478,12 +483,28 @@ fn render_converge(
             Ok(())
         }
         TeamConvergeOutcome::Applied => {
-            write_lock_from(resp, lock_path)?;
-            warn_orphaned_parked(declaration, &resp.lock);
-            println!("lock written: {}", lock_path.display());
+            if resp.lock.is_empty() {
+                if lock_path.exists() {
+                    eprintln!(
+                        "warning: converge left no surviving records; no lock written; the existing lock file at {} is left untouched and may be stale",
+                        lock_path.display()
+                    );
+                } else {
+                    eprintln!("warning: converge left no surviving records; no lock written");
+                }
+            } else {
+                write_lock_from(resp, lock_path)?;
+                warn_orphaned_parked(declaration, &resp.lock);
+                println!("lock written: {}", lock_path.display());
+            }
             Ok(())
         }
         TeamConvergeOutcome::Aborted => {
+            if resp.lock.is_empty() {
+                anyhow::bail!(
+                    "converge aborted before anything landed; no lock written; re-run to converge"
+                )
+            }
             write_lock_from(resp, lock_path)?;
             warn_orphaned_parked(declaration, &resp.lock);
             anyhow::bail!(
@@ -776,5 +797,135 @@ mod tests {
         .unwrap();
         assert_eq!(declaration, "/etc/kallip/tagma.toml");
         assert_eq!(lock, PathBuf::from("relative.lock"));
+    }
+
+    fn converge_args() -> TeamConvergeArgs {
+        TeamConvergeArgs {
+            common: crate::args::team::TeamCommonArgs {
+                file: None,
+                lock: None,
+                json: false,
+            },
+            dry_run: false,
+            drain: false,
+            force: false,
+        }
+    }
+
+    fn converge_resp(
+        outcome: TeamConvergeOutcome,
+        lock: Vec<kallipai_common::protocol::TeamLockEntry>,
+    ) -> kallipai_common::protocol::TeamConvergeResponse {
+        kallipai_common::protocol::TeamConvergeResponse {
+            declaration_path: "tagma.toml".to_string(),
+            dry_run: false,
+            outcome,
+            plan: Vec::new(),
+            results: Vec::new(),
+            rejections: Vec::new(),
+            lock,
+        }
+    }
+
+    fn lock_entry(role: &str) -> kallipai_common::protocol::TeamLockEntry {
+        kallipai_common::protocol::TeamLockEntry {
+            role: role.to_string(),
+            id: kallipai_common::agentid::AgentId::random(),
+            converged_at: "2026-01-01T00:00:00+00:00".to_string(),
+        }
+    }
+
+    fn action_result(
+        outcome: kallipai_common::protocol::TeamRowOutcome,
+    ) -> kallipai_common::protocol::TeamActionResult {
+        kallipai_common::protocol::TeamActionResult {
+            role: "dev".to_string(),
+            action: TeamAction::Spawn,
+            agent_id: None,
+            outcome,
+            detail: "ok".to_string(),
+            notes: Vec::new(),
+        }
+    }
+
+    /// An empty surviving lock must not be written: a zero-record
+    /// archive would read back as corrupt and demand a rebuild, so the
+    /// applied path warns and skips; the aborted path bails instead.
+    #[test]
+    fn empty_lock_is_never_written() {
+        let dir = write_scratch_dir("empty-lock");
+        let lock_path = dir.join("tagma.lock");
+
+        let resp = converge_resp(TeamConvergeOutcome::Applied, Vec::new());
+        render_converge(
+            &converge_args(),
+            &TeamConvergeOutcome::Applied,
+            &resp,
+            &lock_path,
+            "tagma.toml",
+        )
+        .unwrap();
+        assert!(!lock_path.exists());
+
+        let resp = converge_resp(TeamConvergeOutcome::Aborted, Vec::new());
+        let err = render_converge(
+            &converge_args(),
+            &TeamConvergeOutcome::Aborted,
+            &resp,
+            &lock_path,
+            "tagma.toml",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no lock written"), "{err}");
+        assert!(!lock_path.exists());
+    }
+
+    /// A lock with surviving records writes on both applied and aborted
+    /// runs; the aborted run still fails the command after publishing.
+    #[test]
+    fn surviving_lock_writes_on_applied_and_aborted() {
+        let dir = write_scratch_dir("surviving-lock");
+        let lock_path = dir.join("tagma.lock");
+        let entries = vec![lock_entry("dev")];
+
+        let resp = converge_resp(TeamConvergeOutcome::Applied, entries.clone());
+        render_converge(
+            &converge_args(),
+            &TeamConvergeOutcome::Applied,
+            &resp,
+            &lock_path,
+            "tagma.toml",
+        )
+        .unwrap();
+        assert!(lock_path.exists());
+
+        std::fs::remove_file(&lock_path).unwrap();
+        let resp = converge_resp(TeamConvergeOutcome::Aborted, entries);
+        let err = render_converge(
+            &converge_args(),
+            &TeamConvergeOutcome::Aborted,
+            &resp,
+            &lock_path,
+            "tagma.toml",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("mid-execution"), "{err}");
+        assert!(lock_path.exists());
+    }
+
+    /// The success summary counts landed rows only: a failed row keeps
+    /// its action label, and counting it would inflate the successes.
+    #[test]
+    fn count_results_counts_only_applied_rows() {
+        let rows = vec![
+            action_result(kallipai_common::protocol::TeamRowOutcome::Applied),
+            action_result(kallipai_common::protocol::TeamRowOutcome::Failed),
+            action_result(kallipai_common::protocol::TeamRowOutcome::Applied),
+        ];
+        let counts = count_results(&rows);
+        assert_eq!(counts["spawned"], 2);
+        assert_eq!(counts["restored"], 0);
     }
 }
