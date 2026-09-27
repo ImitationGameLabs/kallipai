@@ -33,6 +33,16 @@ let
   lescheImage = flake.packages.x86_64-linux.kallipai-lesche-image;
   files = flake.packages.x86_64-linux.kallipai-files;
   filesImage = flake.packages.x86_64-linux.kallipai-files-image;
+  # Bound container stdout logs: the json-file driver caps each service's
+  # on-disk log at 50m x 5 rotated files (docker logs reads them). Shared
+  # verbatim by every service in this composition.
+  logLimits = {
+    driver = "json-file";
+    options = {
+      "max-size" = "50m";
+      "max-file" = "5";
+    };
+  };
 in
 {
   config = {
@@ -49,6 +59,15 @@ in
       polis_internal = { };
     };
 
+    # Container log rotation caps (50m x 5 json-file per service). The
+    # `logging` key has no typed arion option, so it rides the per-service
+    # raw `out.service` attrs (the module's documented escape hatch).
+    services.archeion-postgres.out.service.logging = logLimits;
+    services.lesche-postgres.out.service.logging = logLimits;
+    services.files-postgres.out.service.logging = logLimits;
+    services.archeion.out.service.logging = logLimits;
+    services.lesche.out.service.logging = logLimits;
+    services.files.out.service.logging = logLimits;
     # POSTGRES_USER/PASSWORD/DB come from .env ONLY and are read by all
     # three postgres services -- do NOT set them in service.environment
     # (compose precedence would pin a weak default password on a public DB).

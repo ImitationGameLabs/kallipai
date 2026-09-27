@@ -174,6 +174,16 @@ let
   archeionHostPort = envOrDefault "KALLIPAI_ARION_ARCHEION_PORT" "7100";
   lescheHostPort = envOrDefault "KALLIPAI_ARION_LESCHE_PORT" "7200";
   instancesHostPort = envOrDefault "KALLIPAI_ARION_INSTANCES_PORT" "7300";
+  # Bound container stdout logs: the json-file driver caps each service's
+  # on-disk log at 50m x 5 rotated files (docker logs reads them). Shared
+  # verbatim by every service in this composition.
+  logLimits = {
+    driver = "json-file";
+    options = {
+      "max-size" = "50m";
+      "max-file" = "5";
+    };
+  };
 in
 {
   imports = [ ./files.nix ];
@@ -199,6 +209,15 @@ in
       polis_internal = { };
     };
 
+    # Container log rotation caps (50m x 5 json-file per service). The
+    # `logging` key has no typed arion option, so it rides the per-service
+    # raw `out.service` attrs (the module's documented escape hatch).
+    services.archeion-postgres.out.service.logging = logLimits;
+    services.lesche-postgres.out.service.logging = logLimits;
+    services.caddy.out.service.logging = logLimits;
+    services.archeion.out.service.logging = logLimits;
+    services.lesche.out.service.logging = logLimits;
+    services.instances.out.service.logging = logLimits;
     # Dev-only hardcoded creds (prod reads them from .env).
     services.archeion-postgres = {
       service.image = "postgres:17.5";

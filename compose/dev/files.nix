@@ -35,6 +35,16 @@ let
     in
     if v == "" then default else v;
   filesHostPort = envOrDefault "KALLIPAI_ARION_FILES_PORT" "7400";
+  # Bound container stdout logs: the json-file driver caps each service's
+  # on-disk log at 50m x 5 rotated files (docker logs reads them). Shared
+  # verbatim by every service in this composition.
+  logLimits = {
+    driver = "json-file";
+    options = {
+      "max-size" = "50m";
+      "max-file" = "5";
+    };
+  };
 in
 {
   config = {
@@ -47,6 +57,11 @@ in
       kallipai_files_blobs = { };
     };
 
+    # Container log rotation caps (50m x 5 json-file per service). The
+    # `logging` key has no typed arion option, so it rides the per-service
+    # raw `out.service` attrs (the module's documented escape hatch).
+    services.files-postgres.out.service.logging = logLimits;
+    services.files.out.service.logging = logLimits;
     services.files-postgres = {
       service.image = "postgres:17.5";
       service.volumes = [ "files_pgdata:/var/lib/postgresql/data" ];

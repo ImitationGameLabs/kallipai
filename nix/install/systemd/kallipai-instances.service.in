@@ -20,11 +20,14 @@ Environment=KALLIPAI_INSTANCES_ADDR=127.0.0.1:7300
 Environment=KALLIPAI_DAEMON_SOCKET=/run/kallipai/daemon.sock
 Environment=KALLIPAI_INSTANCES_ARCHEION_URL=http://127.0.0.1:7100
 Environment=KALLIPAI_POLIS_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
+Environment=KALLIPAI_INSTANCES_LOG_DIR=/var/log/kallipai/instances
 ExecStart=@BINDIR@/kallipai-instances
 User=kallipai-instances
 Group=kallipai-instances
-# A pure UDS proxy: no state or log directory of its own -- the daemon
-# owns both sides of that split.
+# State stays with the daemon (a pure UDS proxy mounts none); the
+# unit owns only its rolling log directory.
+LogsDirectory=kallipai/instances
+LogsDirectoryMode=0750
 Restart=on-failure
 RestartSec=5s
 

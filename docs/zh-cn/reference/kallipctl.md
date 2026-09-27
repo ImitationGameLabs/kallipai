@@ -8,6 +8,9 @@ order: 75
 start/stop/restart、持久化 env、日志与 blob 存储维护。守护进程部署见
 [部署文档](../deployment/nixos/minimal.md)；套接字的 `0600` 权限即认证。
 
+polis 服务自身的日志可用 `logs --service <name>` 直读本机 `/var/log/kallipai/<service>`
+下的滚动文件（不经守护进程）；裸 `kallipctl logs` 列出本机有日志的服务。
+
 ## Shell 补全
 
 `kallipctl` 内置隐藏的 `generate` 动词，按 shell 输出补全脚本：

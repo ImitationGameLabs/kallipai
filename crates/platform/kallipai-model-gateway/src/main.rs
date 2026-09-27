@@ -48,9 +48,9 @@ async fn main() -> Result<()> {
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    // File logging is opt-in via KALLIPAI_MODEL_GATEWAY_LOG_DIR (same shape as
-    // the lesche: set, events are double-written to a rolling file and
-    // stdout; unset keeps stdout-only).
+    // File logging is opt-in via KALLIPAI_MODEL_GATEWAY_LOG_DIR (same
+    // shape as the lesche: set, the rolling file is the only event
+    // channel; unset keeps stdout-only).
     let log_dir = kallipai_common::logging::parse_log_dir(
         std::env::var("KALLIPAI_MODEL_GATEWAY_LOG_DIR").ok(),
     );

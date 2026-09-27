@@ -48,9 +48,9 @@ async fn main() -> Result<()> {
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    // File logging is opt-in via KALLIPAI_LESCHE_LOG_DIR: set, events are
-    // double-written to a rolling file and stdout; unset keeps the historical
-    // stdout-only behavior, so container and dev forms are untouched.
+    // File logging is opt-in via KALLIPAI_LESCHE_LOG_DIR: set, the rolling
+    // file is the only event channel; unset keeps the stdout-only
+    // behavior, so container and dev forms are untouched.
     let log_dir =
         kallipai_common::logging::parse_log_dir(std::env::var("KALLIPAI_LESCHE_LOG_DIR").ok());
     kallipai_common::logging::init_service_logging(&filter, "lesche", log_dir.as_deref());

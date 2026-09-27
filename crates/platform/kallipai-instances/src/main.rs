@@ -10,7 +10,13 @@ use kallipai_instances::{AppState, Config, build_router, resolve_auth};
 async fn main() -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // File logging is opt-in via KALLIPAI_INSTANCES_LOG_DIR (same shape
+    // as the other platform services: set, the rolling file is the only
+    // event channel; unset keeps stdout-only, so container and dev
+    // compose forms are untouched).
+    let log_dir =
+        kallipai_common::logging::parse_log_dir(std::env::var("KALLIPAI_INSTANCES_LOG_DIR").ok());
+    kallipai_common::logging::init_service_logging(&filter, "instances", log_dir.as_deref());
 
     let mut config = Config::parse();
     // Load the archeion-internal secret from its provisioned file (the

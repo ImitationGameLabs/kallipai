@@ -961,6 +961,7 @@ in
             KALLIPAI_DAEMON_SOCKET = daemonSocket;
             KALLIPAI_INSTANCES_ARCHEION_URL = "http://127.0.0.1:${toString polisPorts.archeion}";
             KALLIPAI_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/archeion/internal-token";
+            KALLIPAI_INSTANCES_LOG_DIR = "/var/log/kallipai/instances";
           }
           // envOpt "KALLIPAI_INSTANCES_CORS_ORIGINS" polisCfg.instances.corsOrigins
           // envOpt "KALLIPAI_INSTANCES_ALLOWED_HOSTS" polisCfg.instances.allowedHosts;
@@ -968,8 +969,10 @@ in
             ExecStart = "${polisCfg.instancesPackage}/bin/kallipai-instances";
             User = "kallipai-instances";
             Group = "kallipai-instances";
-            # A pure UDS proxy: no state or log directory of its own --
-            # the daemon owns both sides of that split.
+            # State stays with the daemon (a pure UDS proxy mounts none);
+            # the unit owns only its rolling log directory.
+            LogsDirectory = "kallipai/instances";
+            LogsDirectoryMode = "0750";
             Restart = "on-failure";
             # A crash-looping unit must not slam the start-rate limit
             # and lock itself out of restarting (archeion precedent).

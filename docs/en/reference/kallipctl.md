@@ -8,6 +8,9 @@ order: 75
 socket: spawn, adopt, start/stop/restart, persisted env, logs, and blob-store
 maintenance. See [deployment](../deployment/nixos/minimal.md) for the daemon
 setup; the socket's `0600` mode is the auth.
+For a polis service's own log file, `logs --service <name>` reads the rolling
+file under `/var/log/kallipai/<service>` on this host directly (no daemon), and
+bare `kallipctl logs` lists the services that have logs there.
 
 ## Shell completions
 
