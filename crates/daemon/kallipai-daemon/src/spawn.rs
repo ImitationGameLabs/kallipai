@@ -275,6 +275,7 @@ pub(crate) struct ResolvedUser {
     pub(crate) gid: u32,
     pub(crate) username: String,
     pub(crate) home: PathBuf,
+    pub(crate) shell: String,
 }
 
 impl LaunchIdentity {
@@ -378,7 +379,6 @@ pub(crate) fn ensure_not_root_inplace(daemon_uid: u32) -> Result<(), SpawnError>
     }
     Ok(())
 }
-
 /// Re-resolve a record's target identity for a relaunch. The record's
 /// uid is authoritative; the passwd entry supplies gid/home fresh at
 /// relaunch time — a persisted username is a lookup hint, never the
@@ -564,11 +564,17 @@ fn resolved_from_passwd(pw: Option<&libc::passwd>) -> Option<ResolvedUser> {
     } else {
         unsafe { CStr::from_ptr(pw.pw_name) }.to_bytes()
     };
+    let shell = if pw.pw_shell.is_null() {
+        &[]
+    } else {
+        unsafe { CStr::from_ptr(pw.pw_shell) }.to_bytes()
+    };
     Some(ResolvedUser {
         uid: pw.pw_uid,
         gid: pw.pw_gid,
         username: OsStr::from_bytes(username).to_string_lossy().into_owned(),
         home: PathBuf::from(OsStr::from_bytes(home)),
+        shell: OsStr::from_bytes(shell).to_string_lossy().into_owned(),
     })
 }
 /// The denial guidance tail for the three per-instance verbs: the
@@ -654,11 +660,14 @@ enum HarvestError {
 
 /// The minimal identity a login shell needs before it can find the user's
 /// profile chain: HOME locates ~/.profile; USER/LOGNAME are what profile
-/// scripts expect to see.
+/// scripts expect to see. XDG_RUNTIME_DIR, when the user's runtime
+/// directory exists, lets session scripts that derive from it (a
+/// DOCKER_HOST socket, for one) evaluate as in a real login.
 #[derive(Debug, Default)]
 struct HarvestSeed {
     home: Option<OsString>,
     user: Option<OsString>,
+    runtime_dir: Option<OsString>,
 }
 
 impl HarvestSeed {
@@ -674,7 +683,15 @@ impl HarvestSeed {
         let passwd = cached_passwd_identity();
         let home = std::env::var_os("HOME").or_else(|| passwd.as_ref().map(|(_, dir)| dir.clone()));
         let user = std::env::var_os("USER").or_else(|| passwd.map(|(name, _)| name));
-        Self { home, user }
+        let runtime_dir = runtime_dir_in_place(
+            std::env::var_os("XDG_RUNTIME_DIR"),
+            runtime_dir_for(unsafe { libc::geteuid() }),
+        );
+        Self {
+            home,
+            user,
+            runtime_dir,
+        }
     }
     /// Identity of a drop-to target: everything comes from the passwd
     /// resolution, never from the daemon's environment — the daemon's
@@ -684,8 +701,28 @@ impl HarvestSeed {
         Self {
             home: Some(target.home.clone().into_os_string()),
             user: Some(OsString::from(target.username.as_str())),
+            runtime_dir: runtime_dir_for(target.uid),
         }
     }
+}
+
+/// The user's runtime directory, derived: it exists only under a
+/// per-user tmpfs (linger or an active session); the absence case is
+/// the answer, not an error.
+fn runtime_dir_for(uid: u32) -> Option<OsString> {
+    let dir = Path::new("/run/user").join(uid.to_string());
+    dir.is_dir().then_some(dir.into_os_string())
+}
+
+/// The in-place runtime dir decision: a non-empty daemon environment
+/// value wins (the daemon's own login already resolved it); otherwise
+/// the euid's runtime-directory derivation answers. Pure so the
+/// precedence is testable without touching process state.
+fn runtime_dir_in_place(
+    env_value: Option<OsString>,
+    derived: Option<OsString>,
+) -> Option<OsString> {
+    env_value.filter(|value| !value.is_empty()).or(derived)
 }
 
 /// Cached passwd identity of the effective user: NSS storage is not
@@ -704,7 +741,7 @@ pub(crate) fn cached_passwd_identity() -> Option<(OsString, OsString)> {
 }
 
 /// Run one login shell under a cleared environment (seeding only the
-/// identity above) and capture the environment it computes. `env -0`
+/// identity and runtime dir above) and capture the environment it computes. `env -0`
 /// keeps multiline values intact; the NUL-separated stream is parsed
 /// strictly — see [`parse_harvest_output`].
 fn harvest_login_env(
@@ -729,6 +766,9 @@ fn harvest_login_env(
     }
     if let Some(user) = &seed.user {
         command.env("USER", user).env("LOGNAME", user);
+    }
+    if let Some(dir) = &seed.runtime_dir {
+        command.env("XDG_RUNTIME_DIR", dir);
     }
     if let Some((uid, gid)) = run_as {
         // The drop must include the supplementary-group wipe: a
@@ -939,11 +979,12 @@ fn degrade_to_fallback(fallback_bin_dir: Option<&Path>) -> Vec<(String, String)>
 ///   explicit pair supplies one — the one user-set listen knob;
 /// * the data-dir handoff and the state anchor land last — daemon-owned
 ///   like the slug, they pin where the instance's data root and logs
-///   resolve. The dedicated form additionally pins the whole XDG tree
-///   (HOME, XDG_CONFIG_HOME/XDG_DATA_HOME/XDG_STATE_HOME, the runtime
-///   dir when it exists) to the target user's home — daemon-owned like
-///   the rest, so neither a polluted profile nor a request pair can
-///   describe a foreign home into the instance.
+///   resolve. The dedicated form additionally pins the standard identity
+///   set (HOME, USER, LOGNAME, SHELL from the passwd entry, and the XDG
+///   config/data/state/cache tree, plus the runtime dir when it exists)
+///   to the target user: daemon-owned like the rest, so neither a
+///   polluted profile nor a request pair can describe a foreign home
+///   into the instance.
 fn compose_launch_env(
     base: &[(String, String)],
     user_env: &[String],
@@ -980,6 +1021,9 @@ fn compose_launch_env(
         env.insert("HOME", user.home.display().to_string());
         env.insert("USER", user.username.clone());
         env.insert("LOGNAME", user.username.clone());
+        if !user.shell.is_empty() {
+            env.insert("SHELL", user.shell.clone());
+        }
         env.insert(
             "XDG_CONFIG_HOME",
             user.home.join(".config").display().to_string(),
@@ -991,6 +1035,10 @@ fn compose_launch_env(
         env.insert(
             "XDG_STATE_HOME",
             user.home.join(".local/state").display().to_string(),
+        );
+        env.insert(
+            "XDG_CACHE_HOME",
+            user.home.join(".cache").display().to_string(),
         );
         // linger (declared in the system deployment) is what guarantees
         // this directory; a dev host without it just omits the key —
@@ -1829,6 +1877,7 @@ mod tests {
         let seed = HarvestSeed {
             home: Some(home.path().as_os_str().to_owned()),
             user: Some("probe".into()),
+            runtime_dir: None,
         };
         let pairs = harvest_login_env(&bash, &seed, HARVEST_TEST_BUDGET, None).expect("harvest ok");
         let marker = pairs.iter().find(|(k, _)| k == "KALLIPAI_UNIT_MARKER");
@@ -2078,12 +2127,15 @@ mod tests {
             gid: 4242,
             username: "kallipai-team".into(),
             home: PathBuf::from("/home/kallipai-team"),
+            shell: "/bin/bash".into(),
         };
         let env = compose_launch_env(
             &base_env(),
             &[
                 "HOME=/polluted".to_owned(),
                 "XDG_STATE_HOME=/polluted/state".to_owned(),
+                "XDG_CACHE_HOME=/polluted/cache".to_owned(),
+                "SHELL=/polluted/shell".to_owned(),
             ],
             "i1",
             Path::new("/ws"),
@@ -2110,6 +2162,11 @@ mod tests {
             get(&env, "XDG_STATE_HOME"),
             Some("/home/kallipai-team/.local/state")
         );
+        assert_eq!(
+            get(&env, "XDG_CACHE_HOME"),
+            Some("/home/kallipai-team/.cache")
+        );
+        assert_eq!(get(&env, "SHELL"), Some("/bin/bash"));
         // The runtime dir appears only when the host actually has it
         // (linger supplies it in the system form); either way the
         // instance never sees a polluted value.
@@ -2117,7 +2174,30 @@ mod tests {
             assert_eq!(runtime, "/run/user/4242");
         }
     }
-
+    #[test]
+    fn dedicated_env_pins_no_shell_when_the_passwd_shell_is_empty() {
+        // An empty passwd shell pins nothing: SHELL stays absent rather
+        // than degrading to a guess; the rest of the identity set is
+        // unaffected.
+        let target = ResolvedUser {
+            uid: 4242,
+            gid: 4242,
+            username: "kallipai-team".into(),
+            home: PathBuf::from("/home/kallipai-team"),
+            shell: String::new(),
+        };
+        let env = compose_launch_env(
+            &base_env(),
+            &[],
+            "i1",
+            Path::new("/ws"),
+            Path::new("/data/i1"),
+            None,
+            Some(&target),
+        );
+        assert_eq!(get(&env, "SHELL"), None);
+        assert_eq!(get(&env, "HOME"), Some("/home/kallipai-team"));
+    }
     #[test]
     fn in_place_env_gains_no_identity_keys() {
         // The same-uid form is pinned: the pre-dedicated env shape —
@@ -2136,6 +2216,45 @@ mod tests {
         assert_eq!(get(&env, "USER"), None);
         assert_eq!(get(&env, "LOGNAME"), None);
         assert_eq!(get(&env, "XDG_CONFIG_HOME"), None);
+        assert_eq!(get(&env, "SHELL"), None);
+        assert_eq!(get(&env, "XDG_CACHE_HOME"), None);
+    }
+
+    #[test]
+    fn drop_to_seed_derives_the_runtime_dir_only_when_it_exists() {
+        // The derivation answers with the directory's existence, not an
+        // error: no per-user tmpfs, no seed. The profile then sees
+        // exactly what a real login on such a host would see.
+        if Path::new("/run/user/4242").is_dir() {
+            return;
+        }
+        let target = ResolvedUser {
+            uid: 4242,
+            gid: 4242,
+            username: "kallipai-team".into(),
+            home: PathBuf::from("/home/kallipai-team"),
+            shell: String::new(),
+        };
+        let seed = HarvestSeed::for_target(&target);
+        assert!(seed.runtime_dir.is_none());
+    }
+    #[test]
+    fn in_place_runtime_dir_env_value_wins() {
+        let env_value = Some(OsString::from("/run/user/1000"));
+        let derived = Some(OsString::from("/run/user/0"));
+        assert_eq!(runtime_dir_in_place(env_value.clone(), derived), env_value);
+    }
+    #[test]
+    fn in_place_runtime_dir_empty_or_missing_env_falls_back() {
+        assert_eq!(
+            runtime_dir_in_place(Some(OsString::new()), Some(OsString::from("/run/user/0"))),
+            Some(OsString::from("/run/user/0"))
+        );
+        assert_eq!(
+            runtime_dir_in_place(None, Some(OsString::from("/run/user/0"))),
+            Some(OsString::from("/run/user/0"))
+        );
+        assert_eq!(runtime_dir_in_place(Some(OsString::new()), None), None);
     }
     #[test]
     fn harvest_bash_override_wins_and_default_survives() {

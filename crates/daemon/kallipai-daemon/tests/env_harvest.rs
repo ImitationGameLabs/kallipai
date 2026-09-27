@@ -97,6 +97,7 @@ fn start_daemon_with_home(home: &Path) -> DaemonProc {
             state_dir.path().join("control.sock"),
         )
         .env("HOME", home)
+        .env("KALLIPAI_DAEMON_CONTEXT_MARKER", "root-side-only")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -250,6 +251,143 @@ fn record_env(records: &Path) -> serde_json::Value {
     serde_json::from_str::<serde_json::Value>(&text).expect("parse record")["env"].clone()
 }
 
+/// The passwd entry the drop-to test targets: home and shell as the
+/// resolution captures them.
+struct PasswdInfo {
+    home: String,
+    shell: String,
+    uid: u32,
+    gid: u32,
+}
+
+fn passwd_user(name: &str) -> Option<PasswdInfo> {
+    let name_c = std::ffi::CString::new(name).ok()?;
+    let mut buf = vec![0u8; 1024];
+    loop {
+        let mut pwd: std::mem::MaybeUninit<libc::passwd> = std::mem::MaybeUninit::uninit();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let rc = unsafe {
+            libc::getpwnam_r(
+                name_c.as_ptr(),
+                pwd.as_mut_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        if rc == libc::ERANGE {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+        let pwd = unsafe { pwd.assume_init_ref() };
+        let field = |ptr: *const libc::c_char| -> String {
+            if ptr.is_null() {
+                String::new()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        return Some(PasswdInfo {
+            home: field(pwd.pw_dir),
+            shell: field(pwd.pw_shell),
+            uid: pwd.pw_uid,
+            gid: pwd.pw_gid,
+        });
+    }
+}
+#[test]
+fn drop_to_environ_is_target_owned_and_daemon_context_free() {
+    // Root-gated: the drop-to form needs a root daemon. The criteria are
+    // the /proc/<pid>/environ judgment read directly: the identity and
+    // XDG keys carry the target user's passwd values, a request pair
+    // cannot slip past the daemon-owned pins, and nothing from the
+    // daemon's own context (the boot-time marker) leaks into the
+    // instance.
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skip: the drop-to form needs the daemon to run as root");
+        return;
+    }
+    let Some(target) = passwd_user("nobody") else {
+        eprintln!("skip: no `nobody` passwd entry on this host");
+        return;
+    };
+    if !harvest_bash_exists() {
+        eprintln!("skip: no /bin/bash on this host");
+        return;
+    }
+    if !workspace_bins_available() {
+        eprintln!("skip: workspace binaries not built — build the workspace first");
+        return;
+    }
+    let home = fixture_home();
+    let daemon = start_daemon_with_home(home.path());
+    let client = DaemonClient::new(&daemon.socket);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    // The provisioning loop doubles as the sandbox gate: a host where the
+    // target home cannot be created under proves nothing about the
+    // drop-to env shape (the same documented limitation as the harvest
+    // drop test's capability probe).
+    // Provision the derived roots under the target home the way the
+    // system deployment provisions homes: the daemon hands over the data
+    // directory itself; the config/state trees belong to the boot.
+    for rel in [".config/kallipai/tagmata", ".local/state/kallipai"] {
+        let dir = PathBuf::from(&target.home).join(rel);
+        if std::fs::create_dir_all(&dir).is_err() {
+            eprintln!("skip: cannot provision the target home on this host");
+            return;
+        }
+        let cpath = std::ffi::CString::new(dir.to_str().expect("utf8 path")).expect("path");
+        unsafe {
+            libc::chown(cpath.as_ptr(), target.uid, target.gid);
+        }
+    }
+    let OkPayload::Spawn { pid, .. } = expect_ok(exchange(
+        &client,
+        RequestBody::Spawn {
+            slug: "dropto-env".to_owned(),
+            workspace: workspace.path().display().to_string(),
+            env: boot_env(&["XDG_CACHE_HOME=/polluted/cache"]),
+            exe: None,
+            user: Some("nobody".to_owned()),
+        },
+    )) else {
+        panic!("expected spawn payload");
+    };
+    let env = read_environ(pid);
+    assert_eq!(get(&env, "HOME"), Some(target.home.as_str()));
+    assert_eq!(get(&env, "USER"), Some("nobody"));
+    assert_eq!(get(&env, "LOGNAME"), Some("nobody"));
+    let data = format!("{}/.local/share", target.home);
+    let cache = format!("{}/.cache", target.home);
+    assert_eq!(get(&env, "XDG_DATA_HOME"), Some(data.as_str()));
+    assert_eq!(get(&env, "XDG_CACHE_HOME"), Some(cache.as_str()));
+    if !target.shell.is_empty() {
+        assert_eq!(get(&env, "SHELL"), Some(target.shell.as_str()));
+    }
+    assert_eq!(
+        get(&env, "KALLIPAI_DAEMON_CONTEXT_MARKER"),
+        None,
+        "the instance must not inherit the daemon's own context"
+    );
+    expect_ok(exchange(
+        &client,
+        RequestBody::Stop {
+            slug: "dropto-env".to_owned(),
+        },
+    ));
+    for _ in 0..100 {
+        if !PathBuf::from(format!("/proc/{pid}")).exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("tagma {pid} did not exit after stop");
+}
 #[test]
 fn harvest_supplies_login_env_and_daemon_keys_stay_owned() {
     if !harvest_bash_exists() {

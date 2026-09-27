@@ -1062,6 +1062,7 @@ mod tests {
             gid: 4242,
             username: "dedicated".to_string(),
             home: home.path().to_path_buf(),
+            shell: String::new(),
         });
         let ws = tempdir();
         let canonical = instance_data_dir(&identity, "team-a").unwrap();
