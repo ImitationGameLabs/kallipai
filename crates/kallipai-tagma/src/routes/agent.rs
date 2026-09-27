@@ -21,7 +21,8 @@ use tracing::{debug, error, info, warn};
 
 use kallipai_common::protocol::{
     CreateAgentRequest, CreateAgentResponse, ListAgentsQuery, ProfileSetUpdateRequest,
-    UpdateActivityRequest, UpdateAgentMetadataRequest,
+    UpdateActivityRequest, UpdateAgentMetadataRequest, WorkspaceRootUpdateRequest,
+    WorkspaceRootUpdated,
 };
 
 use super::ListAgentsResponse;
@@ -416,6 +417,217 @@ pub async fn update_metadata(
     state.invalidate();
     let summary = state.summarize(&id, entry);
     Ok(Json(summary))
+}
+
+/// `PUT /agents/{id}/workspace-root` — relocate a parked agent's workspace.
+///
+/// Parked-only by design: the body must live in the inactive area, and a
+/// live body for the same id is a double-body hazard that refuses the
+/// route. The orchestration around this mutation is the relocation
+/// runbook: deactivate, move the files (externally — git semantics stay
+/// out of the tagma), this route, then re-restore. Validation fails
+/// closed before the single meta write; once it lands the new path is
+/// the truth and rollback is the same runbook executed the other way.
+pub async fn update_workspace_root(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+    Json(body): Json<WorkspaceRootUpdateRequest>,
+) -> Result<Json<WorkspaceRootUpdated>, ApiError> {
+    authorize_relocation(&state, auth.identity()).await?;
+
+    // Eligibility: a parked body must exist, and no live double.
+    let inactive = persistence::inactive_dir(&id).map_err(ApiError::internal)?;
+    if !inactive.is_dir() {
+        return Err(ApiError::not_found("no parked body for this agent id"));
+    }
+    if persistence::agent_dir(&id)
+        .map_err(ApiError::internal)?
+        .is_dir()
+    {
+        return Err(ApiError::conflict(
+            "agent has a live body; only parked agents can be relocated",
+        ));
+    }
+
+    let meta = persistence::read_meta_from_dir(&inactive).map_err(ApiError::internal)?;
+    let old = meta.workspace_root.display().to_string();
+
+    // Root bodies are excluded: no supervisor means the nesting predicate
+    // has no anchor, and a root workspace change is a deployment change.
+    let Some(supervisor_id) = meta.created_by.clone() else {
+        return Err(ApiError::bad_request(
+            "the root agent's workspace is not relocatable",
+        ));
+    };
+
+    // Canonical domain from here on. canonicalize succeeds for plain files
+    // too, so the directory check is explicit (a file target must not
+    // reach the write point).
+    let new_canon = std::path::PathBuf::from(&body.workspace_root)
+        .canonicalize()
+        .map_err(|_| ApiError::bad_request("workspace_root must be an existing directory"))?;
+    if !new_canon.is_dir() {
+        return Err(ApiError::bad_request(
+            "workspace_root must be an existing directory",
+        ));
+    }
+    persistence::ensure_workspace_disjoint(&new_canon)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    // Walk the supervisor chain once: the immediate supervisor's recorded
+    // workspace anchors the nesting predicate, and the full id chain lets
+    // the lock pre-check read ancestor locks as delegation — exactly as
+    // the restore-time acquire will see them.
+    let mut chain_ids = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut current = Some(supervisor_id.clone());
+    let mut supervisor_ws = None;
+    while let Some(link) = current {
+        if !visited.insert(link.clone()) {
+            return Err(ApiError::internal("circular supervisor chain"));
+        }
+        let (created_by, ws) = resolve_ancestor(&state, &link).await?;
+        if supervisor_ws.is_none() {
+            supervisor_ws = Some(ws);
+        }
+        chain_ids.push(link);
+        current = created_by;
+    }
+    let supervisor_ws = supervisor_ws.expect("created_by was Some, so the chain is non-empty");
+    if !new_canon.starts_with(&supervisor_ws) {
+        return Err(ApiError::bad_request(format!(
+            "workspace outside supervisor boundary ({})",
+            supervisor_ws.display()
+        )));
+    }
+
+    // Lock pre-check: an early, well-labeled version of the collision the
+    // restore-time acquire would raise. Not enforcement — the in-memory
+    // lock set can change between here and restore; restore remains the
+    // authority and its failure semantics cover the race.
+    // Guest parked bodies skip the probe: restore never acquires a lock
+    // for a Guest, so a probe hit there would be a false positive.
+    if meta.permissions_class == PermissionClass::Normal
+        && let Some((holder, conflict)) = state
+            .lock_manager
+            .probe_conflict(&id, &new_canon, &chain_ids)
+            .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::conflict(format!(
+            "workspace {new_canon:?} would collide with the lock held by {holder} on {conflict:?}"
+        )));
+    }
+
+    // Worktree self-consistency: the NEW workspace carrying a .git file
+    // must point at a live gitdir. `git worktree move` rewrites the file;
+    // a dangling pointer means the workspace and its git registration
+    // disagree, and the move is not done.
+    let git_file = new_canon.join(".git");
+    if git_file.is_file() {
+        let raw = std::fs::read_to_string(&git_file).map_err(ApiError::internal)?;
+        let Some(gitdir) = raw.lines().find_map(|l| l.strip_prefix("gitdir: ")) else {
+            return Err(ApiError::bad_request(
+                "body carries a malformed .git file (no gitdir line); finish `git worktree move` first",
+            ));
+        };
+        let gitdir_path = std::path::PathBuf::from(gitdir.trim());
+        let resolved = if gitdir_path.is_absolute() {
+            gitdir_path
+        } else {
+            new_canon.join(gitdir_path)
+        };
+        if !resolved.is_dir() {
+            return Err(ApiError::bad_request(
+                "body carries a .git file whose gitdir does not resolve; finish `git worktree move` first",
+            ));
+        }
+    }
+
+    // The single truth switch: one atomic write flips old to new.
+    let updated =
+        persistence::update_agent_workspace(&inactive, &new_canon).map_err(ApiError::internal)?;
+    Ok(Json(WorkspaceRootUpdated {
+        agent_id: id.to_string(),
+        old_workspace_root: old,
+        workspace_root: updated.workspace_root.display().to_string(),
+    }))
+}
+
+/// The operator or the root agent — the same mutation authority as the
+/// converge face (see `authorize_converge`). A parked agent has no
+/// registry entry, so chain-based authorization is unavailable and the
+/// declaration owner is the right residual holder.
+async fn authorize_relocation(
+    state: &SharedState,
+    identity: &crate::auth::Identity,
+) -> Result<(), ApiError> {
+    match identity {
+        crate::auth::Identity::Operator => Ok(()),
+        crate::auth::Identity::Agent { id } => {
+            let registry = state.registry.read().await;
+            if registry
+                .root_agent()
+                .is_some_and(|(root_id, _)| root_id == id)
+            {
+                Ok(())
+            } else {
+                Err(ApiError::forbidden(
+                    "workspace relocation is reserved for the operator or the root agent",
+                ))
+            }
+        }
+    }
+}
+
+/// Resolve one supervisor-chain link to its (created_by, workspace_root)
+/// pair: live registry first, then the active and inactive on-disk bodies
+/// (a parked supervisor is a legitimate anchor). A link missing on every
+/// surface is a 500 — chain corruption, not absence.
+async fn resolve_ancestor(
+    state: &SharedState,
+    id: &AgentId,
+) -> Result<(Option<AgentId>, std::path::PathBuf), ApiError> {
+    {
+        let registry = state.registry.read().await;
+        if let Some(entry) = registry.get(id) {
+            let cfg = &entry.identity().config;
+            return Ok((cfg.created_by.clone(), cfg.workspace_root.clone()));
+        }
+    }
+    // Active surface: present-but-corrupt meta is chain corruption (a 500
+    // naming the surface), NOT absence — never silently fall through to
+    // the inactive face, which could resolve a stale twin.
+    let active = persistence::agent_dir(id).map_err(ApiError::internal)?;
+    if active.is_dir() {
+        match persistence::read_meta_from_dir(&active) {
+            Ok(meta) => {
+                return Ok((meta.created_by, meta.workspace_root));
+            }
+            Err(e) => {
+                return Err(ApiError::internal(format!(
+                    "supervisor {id} active meta unreadable: {e}"
+                )));
+            }
+        }
+    }
+    // Inactive surface: same discrimination.
+    let parked = persistence::inactive_dir(id).map_err(ApiError::internal)?;
+    if parked.is_dir() {
+        match persistence::read_meta_from_dir(&parked) {
+            Ok(meta) => {
+                return Ok((meta.created_by, meta.workspace_root));
+            }
+            Err(e) => {
+                return Err(ApiError::internal(format!(
+                    "supervisor {id} inactive meta unreadable: {e}"
+                )));
+            }
+        }
+    }
+    Err(ApiError::internal(format!(
+        "supervisor {id} metadata not found in registry, active or inactive areas"
+    )))
 }
 
 /// `PUT /agents/{id}/activity` — the agent reports its current activity.

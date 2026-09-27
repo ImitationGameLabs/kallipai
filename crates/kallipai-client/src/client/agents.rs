@@ -12,6 +12,7 @@ use kallipai_common::agentid::AgentId;
 use kallipai_common::protocol::{
     AgentSummary, CreateAgentRequest, CreateAgentResponse, ListAgentsResponse,
     ProfileSetUpdateRequest, SseEvent, UpdateActivityRequest, UpdateAgentMetadataRequest,
+    WorkspaceRootUpdateRequest, WorkspaceRootUpdated,
 };
 
 impl TagmaClient {
@@ -135,6 +136,28 @@ impl TagmaClient {
                 self.inner
                     .http
                     .put(self.url(&format!("/agents/{id}/metadata")))
+                    .json(&body),
+            )
+            .send()
+            .await
+            .context("failed to connect to tagma")?,
+            "failed to parse response",
+        )
+        .await
+    }
+
+    /// Relocate a parked agent's workspace. Caller must be the operator or
+    /// the root agent; the body must live in the inactive area.
+    pub async fn update_workspace_root(
+        &self,
+        id: &AgentId,
+        body: WorkspaceRootUpdateRequest,
+    ) -> Result<WorkspaceRootUpdated> {
+        self.handle_response(
+            self.with_auth(
+                self.inner
+                    .http
+                    .put(self.url(&format!("/agents/{id}/workspace-root")))
                     .json(&body),
             )
             .send()

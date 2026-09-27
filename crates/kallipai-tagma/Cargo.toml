@@ -112,3 +112,11 @@ x25519-dalek = { workspace = true, features = ["reusable_secrets"] }
 # KEX unit tests (relay::kex): initiator-side HKDF to assert both sides agree.
 hkdf = { workspace = true }
 sha2 = { workspace = true }
+
+# The workspace-relocation suite re-points the process-wide instance-roots
+# singleton (via the test-support-gated test_helpers); it must only compile
+# when that feature is on, so plain `cargo test`/nix builds skip it instead
+# of failing on the gated imports.
+[[test]]
+name = "workspace_relocation"
+required-features = ["test-support"]

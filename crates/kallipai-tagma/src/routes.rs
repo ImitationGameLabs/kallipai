@@ -122,6 +122,10 @@ pub fn router() -> Router<SharedState> {
             axum::routing::put(agent::update_metadata),
         )
         .route(
+            "/agents/{id}/workspace-root",
+            axum::routing::put(agent::update_workspace_root),
+        )
+        .route(
             "/agents/{id}/profile-set",
             axum::routing::put(agent::update_profile_set),
         )

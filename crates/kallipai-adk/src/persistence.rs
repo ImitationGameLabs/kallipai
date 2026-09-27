@@ -26,7 +26,10 @@ pub use layout::{
     ensure_workspace_disjoint, inactive_dir, install_instance_roots, state_dir_root,
     workspace_overlaps_data_root,
 };
-pub use meta::{AgentMeta, create_agent_dir, read_meta, read_meta_from_dir, rewrite_meta};
+pub use meta::{
+    AgentMeta, create_agent_dir, read_meta, read_meta_from_dir, rewrite_meta,
+    update_agent_workspace,
+};
 pub use repair::{RepairAction, RepairReport, repair_agent_context};
 pub use scan::{
     PendingRestore, RefusedRestore, RestorableAgent, find_disk_root, restore_agent, scan_agents,

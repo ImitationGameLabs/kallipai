@@ -612,3 +612,59 @@ fn transfer_then_transfer_back_round_trips() {
     );
     assert_eq!(mgr.holder(&dir).unwrap(), Some(supervisor));
 }
+
+#[test]
+fn probe_conflict_mirrors_acquire_without_touching_state() {
+    let mgr = DirLockManager::new();
+    let a = agent("a");
+    let b = agent("b");
+    let dir = tmp_dir();
+    let canon = std::fs::canonicalize(&dir).unwrap();
+
+    // Free path: no conflict reported, and the probe left no lock behind
+    // (a later real acquire by another agent still succeeds).
+    assert_eq!(mgr.probe_conflict(&a, &dir, &[]).unwrap(), None);
+    assert_eq!(
+        mgr.acquire(&b, &dir, &[]).unwrap(),
+        AcquireOutcome::Acquired
+    );
+    // A third party sees the exact holder through the probe.
+    assert_eq!(
+        mgr.probe_conflict(&a, &dir, &[]).unwrap(),
+        Some((b.clone(), canon.clone()))
+    );
+    // The holder's own probe is the idempotent-acquire case: no conflict.
+    assert_eq!(mgr.probe_conflict(&b, &dir, &[]).unwrap(), None);
+}
+
+#[test]
+fn probe_conflict_ancestor_conflict_and_delegation() {
+    let mgr = DirLockManager::new();
+    let supervisor = agent("supervisor");
+    let peer = agent("peer");
+    let parked = agent("parked");
+    let dir = tmp_dir();
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    // A peer holding an ancestor lock blocks the probe (no chain).
+    mgr.acquire(&peer, &dir, &[]).unwrap();
+    assert_eq!(
+        mgr.probe_conflict(&parked, &sub, &[]).unwrap(),
+        Some((peer.clone(), std::fs::canonicalize(&dir).unwrap()))
+    );
+    // The supervisor's ancestor lock is delegation for the chained child:
+    // the relocation pre-check must not report the supervisor's lock.
+    mgr.release(&peer, &dir).unwrap();
+    mgr.acquire(&supervisor, &dir, &[]).unwrap();
+    assert_eq!(
+        mgr.probe_conflict(&parked, &sub, std::slice::from_ref(&supervisor))
+            .unwrap(),
+        None
+    );
+    // But a *peer's* ancestor lock (not in the chain) still conflicts.
+    assert_eq!(
+        mgr.probe_conflict(&parked, &sub, &[]).unwrap(),
+        Some((supervisor.clone(), std::fs::canonicalize(&dir).unwrap()))
+    );
+}

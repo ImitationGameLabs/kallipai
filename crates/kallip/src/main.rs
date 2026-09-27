@@ -365,6 +365,21 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                SubagentCommand::WorkspaceRoot(args) => {
+                    let id = client.resolve_agent_ref(args.id.as_ref()).await?;
+                    let updated = client
+                        .update_workspace_root(
+                            &id,
+                            kallipai_common::protocol::WorkspaceRootUpdateRequest {
+                                workspace_root: args.workspace_root,
+                            },
+                        )
+                        .await?;
+                    println!(
+                        "workspace-root: {} -> {}",
+                        updated.old_workspace_root, updated.workspace_root
+                    );
+                }
             }
         }
         Commands::Approval(cmd) => match cmd {

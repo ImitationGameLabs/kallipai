@@ -57,6 +57,14 @@ pub(crate) struct MetadataArgs {
     pub description: Option<String>,
 }
 
+#[derive(Args)]
+pub(crate) struct WorkspaceRootArgs {
+    /// Agent ID or role.
+    pub id: AgentId,
+    /// New workspace root (must exist; the agent must be parked).
+    pub workspace_root: String,
+}
+
 /// Manage the current agent's direct subagents. The acting superior is taken
 /// from the `KALLIPAI_ID` env var, so these commands only make sense inside
 /// an agent context.
@@ -72,4 +80,6 @@ pub(crate) enum SubagentCommand {
     Interrupt(IdArgs),
     /// Update a direct subagent's role and/or description
     Metadata(MetadataArgs),
+    /// Relocate a parked subagent's workspace (operator or root only)
+    WorkspaceRoot(WorkspaceRootArgs),
 }

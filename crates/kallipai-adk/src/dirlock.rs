@@ -416,6 +416,35 @@ impl DirLockManager {
             .get(&canon)
             .is_some_and(|s| s.writer.as_ref() == Some(agent)))
     }
+    /// Dry-run of [`Self::acquire`]'s conflict phase: report the overlapping
+    /// lock that would block `path` for `agent` (with `chain` delegation
+    /// ancestors), without touching any state. `Ok(None)` = acquire would
+    /// have proceeded (past the exact-path and overlap checks; the per-agent
+    /// cap is *not* probed — callers about to really acquire hit it there).
+    /// A self-overlap surfaces as the same error `acquire` would return.
+    /// Canonicalizes like `acquire`; a canonicalize failure propagates —
+    /// for the relocation pre-check that is the caller's validation
+    /// failure, not a lock-state question.
+    pub fn probe_conflict(
+        &self,
+        agent: &AgentId,
+        path: &Path,
+        chain: &[AgentId],
+    ) -> io::Result<Option<(AgentId, PathBuf)>> {
+        let canon = canonicalize(path)?;
+        let dirs = locked(&self.dirs);
+        if let Some(state) = dirs.get(&canon)
+            && let Some(holder) = &state.writer
+            && holder != agent
+        {
+            return Ok(Some((holder.clone(), canon.clone())));
+        }
+        Ok(match overlap_conflict(&dirs, &canon, agent, chain) {
+            Some(Ok(AcquireOutcome::Busy { holder, conflict })) => Some((holder, conflict)),
+            Some(Err(e)) => return Err(e),
+            _ => None,
+        })
+    }
 }
 
 impl Default for DirLockManager {

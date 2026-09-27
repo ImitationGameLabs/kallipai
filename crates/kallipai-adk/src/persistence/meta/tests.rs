@@ -81,3 +81,55 @@ fn agent_meta_loads_legacy_file_without_optional_fields() {
         crate::config::DelegationMode::CarveOut
     );
 }
+
+#[test]
+fn update_agent_workspace_changes_only_that_field() {
+    let dir = kallipai_testkit::DevDir::new("meta-update-test");
+    let meta = AgentMeta {
+        workspace_root: PathBuf::from("/old-ws"),
+        created_by: Some(AgentId::from("root".to_owned())),
+        role: "dev".into(),
+        description: "surgeon".into(),
+        profile_set: Some("dev-set".into()),
+        permissions_class: crate::config::PermissionClass::Normal,
+        delegation_mode: crate::config::DelegationMode::CarveOut,
+    };
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+
+    let updated = update_agent_workspace(&dir, Path::new("/new-ws")).unwrap();
+    assert_eq!(updated.workspace_root, PathBuf::from("/new-ws"));
+    assert_eq!(updated.role, "dev");
+    assert_eq!(updated.profile_set.as_deref(), Some("dev-set"));
+
+    // The disk copy is the updated one, and only that field moved.
+    let reread: AgentMeta =
+        serde_json::from_str(&fs::read_to_string(dir.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(reread.workspace_root, PathBuf::from("/new-ws"));
+    assert_eq!(
+        reread.permissions_class,
+        crate::config::PermissionClass::Normal
+    );
+    assert_eq!(
+        reread.delegation_mode,
+        crate::config::DelegationMode::CarveOut
+    );
+}
+
+#[test]
+fn update_agent_workspace_fails_cleanly_without_meta() {
+    let dir = kallipai_testkit::DevDir::new("meta-update-missing");
+    assert!(update_agent_workspace(&dir, Path::new("/x")).is_err());
+}
+
+#[test]
+fn update_agent_workspace_fails_cleanly_on_corrupt_meta() {
+    let dir = kallipai_testkit::DevDir::new("meta-update-corrupt");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("meta.json"), "not json at all").unwrap();
+    assert!(update_agent_workspace(&dir, Path::new("/x")).is_err());
+}

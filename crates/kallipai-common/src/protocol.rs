@@ -20,7 +20,8 @@ pub use agent::{
     DELEGATION_FULL_HANDOFF, DeleteSetResponse, DeliveryMode, DutyStatus, ListAgentsQuery,
     ListAgentsResponse, LockState, MaxToolRounds, MessageRequest, MessageResponse, Modality,
     ParkedReason, ProfileSetUpdateRequest, SetDefaultRequest, SetReference, TagmaUsageTotals,
-    UpdateActivityRequest, UpdateAgentMetadataRequest,
+    UpdateActivityRequest, UpdateAgentMetadataRequest, WorkspaceRootUpdateRequest,
+    WorkspaceRootUpdated,
 };
 pub use approval::{
     ApprovalDecisionBody, ApprovalEntry, ListApprovalsQuery, ListApprovalsResponse,

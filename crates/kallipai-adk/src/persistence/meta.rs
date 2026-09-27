@@ -107,5 +107,19 @@ pub fn read_meta_from_dir(dir: &Path) -> Result<AgentMeta> {
     serde_json::from_str(&json).context("parsing meta.json")
 }
 
+/// Update only `workspace_root` in an agent's meta.json (the relocation
+/// route's write point). Read-modify-write, atomic; every other field is
+/// preserved verbatim. The caller owns all validation (the body must be
+/// parked, the target path checked); this function is pure persistence.
+/// Returns the new meta for response assembly.
+pub fn update_agent_workspace(dir: &Path, workspace_root: &Path) -> Result<AgentMeta> {
+    let path = dir.join("meta.json");
+    let json = fs::read_to_string(&path).context("reading meta.json")?;
+    let mut meta: AgentMeta = serde_json::from_str(&json).context("parsing meta.json")?;
+    meta.workspace_root = workspace_root.to_path_buf();
+    atomic_write(&path, &serde_json::to_string_pretty(&meta)?)?;
+    Ok(meta)
+}
+
 #[cfg(test)]
 mod tests;

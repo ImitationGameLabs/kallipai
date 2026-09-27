@@ -294,6 +294,26 @@ pub struct ProfileSetUpdateRequest {
     pub profile_set: String,
 }
 
+/// Request body for `PUT /agents/{id}/workspace-root` — relocate a parked
+/// agent's workspace. The body must be in the inactive area (parked-only:
+/// a live agent's workspace is held by its lock, sandbox decision and
+/// running env — hot relocation is out of scope). The caller is the
+/// operator or the root agent, mirroring the converge mutation guard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRootUpdateRequest {
+    pub workspace_root: String,
+}
+
+/// Response for `PUT /agents/{id}/workspace-root`: the old and new
+/// workspace paths, for the caller's audit trail. Deliberately not an
+/// `AgentSummary` — a parked agent has no live summary to project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRootUpdated {
+    pub agent_id: String,
+    pub old_workspace_root: String,
+    pub workspace_root: String,
+}
+
 /// Request body for `PUT /profiles/default` — transfer the default-set marker
 /// to an existing set.
 #[derive(Debug, Clone, Serialize, Deserialize)]
