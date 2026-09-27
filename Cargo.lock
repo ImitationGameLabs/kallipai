@@ -3167,9 +3167,13 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "dirs",
  "kallipai-blob-store",
+ "kallipai-common",
  "kallipai-daemon-client",
  "kallipai-daemon-common",
+ "libc",
+ "tempfile",
  "tokio",
 ]
 

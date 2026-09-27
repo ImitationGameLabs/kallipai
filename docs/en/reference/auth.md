@@ -10,7 +10,11 @@ Every request into KallipAI authenticates with a bearer token. Each token's
 prefix names its kind at a glance, so a leaked credential is
 self-identifying and easy for secret scanners to flag.
 
-- **Operator token** (`sk-operator-…`): printed once when the tagma starts.
+- **Operator token** (`sk-operator-…`): persisted 0600 to the tagma's
+  `credentials/operator-token.env` at startup (retrieve it with `kallipctl
+  operator-token show <slug>`; boot never prints it, and `operator-token
+  reset` prints a freshly minted value at the operator's explicit
+  request).
   Grants full control of one tagma: manage any agent, approve or deny
   pending actions. The tagma's single root agent is created at startup and
   never through the API.

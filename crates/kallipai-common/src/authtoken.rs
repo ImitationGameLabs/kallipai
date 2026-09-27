@@ -28,6 +28,17 @@ const SECRET_BYTES: usize = 32;
 #[derive(Debug, Clone, Copy)]
 pub struct TokenKind(pub &'static str);
 
+/// The env var that pins an operator token: a tagma takes it verbatim at
+/// boot and never persists a pinned value.
+pub const OPERATOR_TOKEN_ENV_KEY: &str = "KALLIPAI_OPERATOR_TOKEN";
+
+/// The credentials-dir file name carrying a persisted operator token, in
+/// env-file form (`OPERATOR_TOKEN_ENV_KEY=<secret>`; systemd
+/// EnvironmentFile compatible). The tagma writes it at boot; `kallipctl
+/// operator-token` reads and rotates it — one shared contract, defined
+/// once here because both sides speak it.
+pub const OPERATOR_TOKEN_FILE: &str = "operator-token.env";
+
 /// SHA-256 of a token string. Holds a *hash*, not a secret — the only form to
 /// retain in long-lived state. `Debug` is safe: a hash reveals nothing about the
 /// token (preimage-infeasible), so logging it cannot leak the secret.

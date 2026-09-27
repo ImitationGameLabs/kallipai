@@ -222,8 +222,10 @@ pub struct AppState {
     /// means no rules, and every spawned agent clones the same set.
     pub hook_rules: std::sync::OnceLock<Arc<Vec<kallipai_adk::policy::HookRule>>>,
     pub shutdown: CancellationToken,
-    /// SHA-256 of the operator token. The plaintext is printed once at startup and
-    /// never retained; this hash is what incoming bearer tokens are compared against.
+    /// SHA-256 of the operator token. The plaintext is persisted 0600 in the
+    /// credentials dir (pinned tokens stay wherever the operator keeps them) and
+    /// never retained in memory; this hash is what incoming bearer tokens are
+    /// compared against.
     pub operator_token_hash: TokenHash,
     /// Maximum number of concurrent agents.
     pub max_agents: usize,

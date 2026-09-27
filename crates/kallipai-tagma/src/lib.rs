@@ -38,7 +38,7 @@ pub mod test_helpers;
 
 use anyhow::{Context, Result};
 use kallipai_adk::profile::ProfileRegistry;
-use kallipai_common::authtoken::MintedToken;
+use kallipai_common::authtoken::{MintedToken, OPERATOR_TOKEN_ENV_KEY, OPERATOR_TOKEN_FILE};
 #[cfg(test)]
 use kallipai_testkit::wait_for;
 use state::AppState;
@@ -58,26 +58,28 @@ pub async fn run(args: Args) -> Result<()> {
     // data root itself) hangs off the slug-derived tree, so an unnamed or
     // legacy-addressed boot must fail before it touches the filesystem.
     boot_identity()?;
-    // Mint the operator token: honor KALLIPAI_OPERATOR_TOKEN if set (back-compat
-    // for automation), otherwise generate a fresh 256-bit `sk-operator-…` token.
-    // Only the SHA-256 hash is retained by AppState; the plaintext is printed below
-    // then dropped at end of scope.
-    let operator = match std::env::var("KALLIPAI_OPERATOR_TOKEN") {
-        Ok(s) => MintedToken::from_secret(s),
-        Err(_) => MintedToken::generate(token::OPERATOR),
-    };
-    anyhow::ensure!(
-        !operator.secret().trim().is_empty(),
-        "KALLIPAI_OPERATOR_TOKEN must not be empty"
-    );
-    println!("─────────────────────────────────────────────────");
-    println!("  kallipai {}", env!("CARGO_PKG_VERSION"));
-    println!("  Operator Token:");
-    println!("  {}", operator.secret());
-    println!();
-    println!("  WARNING: Do not leak this token.");
-    println!();
-    println!("─────────────────────────────────────────────────");
+    // Mint-load-or-take the operator token (priority: env pin > existing
+    // token file > fresh mint). Only the SHA-256 hash is retained by
+    // AppState; the plaintext lives only in the 0600 file — stdout is a
+    // leak surface (captured into logs), so nothing secret is printed.
+    let (operator, resolution) = resolve_operator_token()?;
+    match &resolution {
+        OperatorTokenResolution::Pinned => {
+            eprintln!("kallipai-tagma: operator token pinned via KALLIPAI_OPERATOR_TOKEN");
+        }
+        OperatorTokenResolution::Loaded(path) => {
+            eprintln!(
+                "kallipai-tagma: operator token loaded from {}",
+                path.display()
+            );
+        }
+        OperatorTokenResolution::Minted(path) => {
+            eprintln!(
+                "kallipai-tagma: operator token minted and written to {} (mode 0600)",
+                path.display()
+            );
+        }
+    }
 
     anyhow::ensure!(
         args.prompt_queue_size >= 1,
@@ -433,6 +435,93 @@ pub async fn run(args: Args) -> Result<()> {
     shutdown::graceful_agent_shutdown(&state).await;
     info!("tagma exited");
 
+    Ok(())
+}
+
+/// How the operator token was obtained at boot.
+#[derive(Debug)]
+pub enum OperatorTokenResolution {
+    /// `KALLIPAI_OPERATOR_TOKEN` env pin: taken verbatim, nothing persisted.
+    /// The operator already holds the value.
+    Pinned,
+    /// Loaded from the existing 0600 token file: a minted token survives
+    /// restarts by living here (stdout is captured into logs and leaks,
+    /// so the file is the only plaintext carrier).
+    Loaded(std::path::PathBuf),
+    /// Freshly minted and persisted 0600: first boot, or after
+    /// `kallipctl operator-token reset` removed the file.
+    Minted(std::path::PathBuf),
+}
+
+/// Mint-or-load-or-take the operator token, in priority order:
+/// 1. `KALLIPAI_OPERATOR_TOKEN` env pin — taken as-is, never written to disk;
+/// 2. an existing `<credentials>/operator-token.env` — loaded verbatim, so
+///    a minted token survives restarts;
+/// 3. otherwise mint fresh and persist it 0600. Stdout is a leak surface
+///    (the daemon captures it into logs), so the 0600 file is the only
+///    plaintext carrier. Returns the token plus how it was obtained.
+pub fn resolve_operator_token() -> Result<(MintedToken, OperatorTokenResolution)> {
+    if let Ok(s) = std::env::var("KALLIPAI_OPERATOR_TOKEN") {
+        anyhow::ensure!(
+            !s.trim().is_empty(),
+            "KALLIPAI_OPERATOR_TOKEN must not be empty"
+        );
+        return Ok((MintedToken::from_secret(s), OperatorTokenResolution::Pinned));
+    }
+    let credentials_dir = ensure_credentials_root()?;
+    let path = credentials_dir.join(OPERATOR_TOKEN_FILE);
+    if let Some(secret) = read_operator_token_file(&path)? {
+        return Ok((
+            MintedToken::from_secret(secret),
+            OperatorTokenResolution::Loaded(path),
+        ));
+    }
+    let secret = MintedToken::generate(token::OPERATOR);
+    write_operator_token_file(&credentials_dir, secret.secret())?;
+    Ok((secret, OperatorTokenResolution::Minted(path)))
+}
+
+/// Parse the env-file form: the value of the `KALLIPAI_OPERATOR_TOKEN=`
+/// line. `Ok(None)` when the file is absent (first boot); an existing but
+/// valueless file is an error, not a silent re-mint.
+pub fn read_operator_token_file(path: &std::path::Path) -> Result<Option<String>> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!("reading {}", path.display())));
+        }
+    };
+    let prefix = format!("{OPERATOR_TOKEN_ENV_KEY}=");
+    raw.lines()
+        .find_map(|l| l.strip_prefix(prefix.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .map(Some)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} carries no {OPERATOR_TOKEN_ENV_KEY} value",
+                path.display()
+            )
+        })
+}
+
+/// Persist the operator token: write the temp file, chmod 0600, then rename
+/// into place (atomic, and the secret is never world-readable). The
+/// owner-only credentials dir is the first line of defense: it shields the
+/// pre-chmod window in which the temp file still carries default modes.
+fn write_operator_token_file(credentials_dir: &std::path::Path, secret: &str) -> Result<()> {
+    let path = credentials_dir.join(OPERATOR_TOKEN_FILE);
+    let body = format!("{OPERATOR_TOKEN_ENV_KEY}={secret}\n");
+    let tmp = credentials_dir.join(".operator-token.env.tmp");
+    std::fs::write(&tmp, body).context("write operator token temp file")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .context("chmod operator token file")?;
+    }
+    std::fs::rename(&tmp, &path).context("rename operator token file into place")?;
     Ok(())
 }
 

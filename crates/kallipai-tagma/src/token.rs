@@ -8,8 +8,8 @@
 
 use kallipai_common::authtoken::TokenKind;
 
-/// Full-access operator token. Plaintext is printed once at startup; only its
-/// hash is retained on [`crate::state::AppState`].
+/// Full-access operator token. Minted tokens are persisted 0600 to the
+/// credentials dir at startup; only the hash is retained on [`crate::state::AppState`].
 pub const OPERATOR: TokenKind = TokenKind("sk-operator-");
 
 /// Per-agent token, injected into the agent shell as `KALLIPAI_AUTH_TOKEN` and
