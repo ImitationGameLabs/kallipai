@@ -344,7 +344,7 @@ pub(crate) async fn acquire_stream(
                     // Unreachable in practice: the memo pairs the just-completed
                     // attempt and `into_response` yields a non-empty id. The prior
                     // anchor stays valid server-side, so warn and continue: the next
-                    // turn falls back to a full send.
+                    // turn re-sends the messages past the kept anchor.
                     tracing::warn!(
                         "failed to adopt the completed stream: {}",
                         crate::llm_error::render_error(&error)
@@ -693,7 +693,7 @@ mod tests {
 
     use crate::retry::{RetryCall, RetryPolicy, stream_with_retry};
     use crate::test_support::{
-        MapSource, RecordingBackend, ctx_from_source, profile, request, user_msg,
+        MapSource, RecordingBackend, ctx_from_source, profile, request, system_msg, user_msg,
     };
     use just_llm_client::LlmBackend;
     use just_llm_client::types::generation::ReasoningEffort;
@@ -1083,5 +1083,214 @@ mod tests {
         );
         // A pre-flight (non-provider) failure has no status at all.
         assert_eq!(fatal_provider_status(&anyhow::anyhow!("boom")), None);
+    }
+
+    /// End to end: a mid-stream drop keeps the anchor, so the in-place retry re-sends
+    /// the same delta, and the next turn continues from the retry's response — a failed
+    /// turn never pollutes the chain.
+    #[tokio::test]
+    async fn mid_stream_drop_retries_delta_and_the_anchor_advances_past_it() {
+        let backend = RecordingBackend::new();
+        backend.queue_stream("resp-1");
+        backend.queue_dropped_stream(
+            vec![just_llm_client::types::generation::GenerationEvent::Text {
+                delta: "partial".to_owned(),
+            }],
+            just_llm_client::TransportError::InvalidResponse(
+                "stream closed before the terminal event".to_owned(),
+            ),
+        );
+        backend.queue_stream("resp-2");
+        backend.queue_stream("resp-3");
+        let source = Arc::new(MapSource(HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let policy = RetryPolicy {
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(5),
+            ..RetryPolicy::default()
+        };
+        let mut ctx = ctx_from_source(vec![profile("a", "p1", 100_000)], source, policy).await;
+
+        // Turn 1: full open; resp-1 settles the anchor.
+        let outcome = acquire_stream(
+            &mut ctx,
+            vec![user_msg("q1")],
+            Vec::new(),
+            &tokio::sync::mpsc::channel(16).0,
+            &tokio_util::sync::CancellationToken::new(),
+            0,
+        )
+        .await;
+        assert!(matches!(outcome, AcquireResult::Consumed(_)));
+        let mirror1 = ctx.conversation.last_message().expect("turn 1 anchored");
+
+        // Turn 2: the first stream drops after one delta; the in-place retry succeeds.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let outcome = acquire_stream(
+            &mut ctx,
+            vec![user_msg("q1"), mirror1.clone(), user_msg("q2")],
+            Vec::new(),
+            &tx,
+            &tokio_util::sync::CancellationToken::new(),
+            1,
+        )
+        .await;
+        assert!(matches!(outcome, AcquireResult::Consumed(_)));
+
+        // The dropped attempt told downstream to fold the partial it had rendered.
+        let mut resets = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::StreamReset {
+                attempt,
+                max_attempts,
+                ..
+            } = event
+            {
+                resets.push((attempt, max_attempts));
+            }
+        }
+        assert_eq!(resets, vec![(1, ctx.config.retry_policy.max_retries)]);
+
+        // Turn 3: continues from the retry's response — the drop left no trace.
+        let mirror2 = ctx.conversation.last_message().expect("turn 2 anchored");
+        let outcome = acquire_stream(
+            &mut ctx,
+            vec![
+                user_msg("q1"),
+                mirror1.clone(),
+                user_msg("q2"),
+                mirror2,
+                user_msg("q3"),
+            ],
+            Vec::new(),
+            &tokio::sync::mpsc::channel(16).0,
+            &tokio_util::sync::CancellationToken::new(),
+            2,
+        )
+        .await;
+        assert!(matches!(outcome, AcquireResult::Consumed(_)));
+
+        let requests = backend.take_requests();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].previous_response_id, None, "turn 1 opens full");
+        assert_eq!(
+            requests[0].messages,
+            vec![system_msg("sys"), user_msg("q1")],
+            "full context, system prompt riding the opening turn"
+        );
+        assert_eq!(
+            requests[1].previous_response_id.as_deref(),
+            Some("resp-1"),
+            "turn 2 chains the settled turn"
+        );
+        assert_eq!(requests[1].messages, vec![user_msg("q2")], "delta only");
+        assert_eq!(
+            requests[2].previous_response_id.as_deref(),
+            Some("resp-1"),
+            "the drop kept the anchor: the retry re-sends the same delta"
+        );
+        assert_eq!(requests[2].messages, vec![user_msg("q2")]);
+        assert_eq!(
+            requests[3].previous_response_id.as_deref(),
+            Some("resp-2"),
+            "the anchor advanced with the retry's response"
+        );
+        assert_eq!(requests[3].messages, vec![user_msg("q3")], "delta only");
+    }
+
+    /// A cancel while the stream is in flight adopts nothing — the anchor stays on
+    /// the last settled turn and the next turn continues it with a delta. (The cancel
+    /// path emits no `StreamReset`; that asymmetry is established behavior.)
+    #[tokio::test]
+    async fn mid_stream_cancel_keeps_the_anchor_and_the_next_turn_continues_it() {
+        let backend = RecordingBackend::new();
+        backend.queue_stream("resp-1");
+        backend.queue_pending_stream();
+        backend.queue_stream("resp-2");
+        let source = Arc::new(MapSource(HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let mut ctx = ctx_from_source(
+            vec![profile("a", "p1", 100_000)],
+            source,
+            RetryPolicy::default(),
+        )
+        .await;
+
+        // Turn 1: full open; resp-1 settles the anchor.
+        let outcome = acquire_stream(
+            &mut ctx,
+            vec![user_msg("q1")],
+            Vec::new(),
+            &tokio::sync::mpsc::channel(16).0,
+            &tokio_util::sync::CancellationToken::new(),
+            0,
+        )
+        .await;
+        assert!(matches!(outcome, AcquireResult::Consumed(_)));
+        let mirror1 = ctx.conversation.last_message().expect("turn 1 anchored");
+
+        // Turn 2: the stream never yields; the round cancel fires mid-flight.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let canceller = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                cancel.cancel();
+            })
+        };
+        let outcome = acquire_stream(
+            &mut ctx,
+            vec![user_msg("q1"), mirror1.clone(), user_msg("q2")],
+            Vec::new(),
+            &tokio::sync::mpsc::channel(16).0,
+            &cancel,
+            1,
+        )
+        .await;
+        canceller.await.unwrap();
+        assert!(
+            matches!(
+                outcome,
+                AcquireResult::Outcome(crate::event::AgentOutcome::Cancelled)
+            ),
+            "the round cancels mid-stream"
+        );
+        assert_eq!(
+            ctx.conversation.last_message().as_ref(),
+            Some(&mirror1),
+            "nothing was adopted past the settled turn"
+        );
+
+        // Turn 3: continues the untouched anchor with a delta.
+        let outcome = acquire_stream(
+            &mut ctx,
+            vec![user_msg("q1"), mirror1, user_msg("q3")],
+            Vec::new(),
+            &tokio::sync::mpsc::channel(16).0,
+            &tokio_util::sync::CancellationToken::new(),
+            2,
+        )
+        .await;
+        assert!(matches!(outcome, AcquireResult::Consumed(_)));
+
+        let requests = backend.take_requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].previous_response_id, None, "turn 1 opens full");
+        assert_eq!(
+            requests[1].previous_response_id.as_deref(),
+            Some("resp-1"),
+            "the cancelled turn chained normally"
+        );
+        assert_eq!(requests[1].messages, vec![user_msg("q2")], "delta only");
+        assert_eq!(
+            requests[2].previous_response_id.as_deref(),
+            Some("resp-1"),
+            "the cancel kept the anchor: the next turn continues it"
+        );
+        assert_eq!(requests[2].messages, vec![user_msg("q3")], "delta only");
     }
 }

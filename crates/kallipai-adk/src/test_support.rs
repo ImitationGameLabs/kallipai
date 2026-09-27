@@ -184,6 +184,11 @@ pub(crate) fn usage(prompt_tokens: u32) -> Usage {
 // body changes touch no test call site. Keep call sites free of chat-face
 // type names: helpers own the types, callers own the intent.
 
+/// A system turn carrying `text` (the wire face of a configured system prompt).
+pub(crate) fn system_msg(text: impl Into<String>) -> Message {
+    Message::system(text)
+}
+
 /// A user turn carrying `text`.
 pub(crate) fn user_msg(text: impl Into<String>) -> Message {
     Message::user(text)
@@ -248,15 +253,29 @@ pub(crate) fn usage_with_completion(prompt_tokens: u32, completion_tokens: u32) 
     }
 }
 
+/// One queued stream answer: plain events, events followed by a mid-stream drop, or a
+/// stream that never yields (for cancel tests).
+enum CannedStream {
+    Events(Vec<just_llm_client::types::generation::GenerationEvent>),
+    /// The wire shape of a stream that dies mid-way: some events, then the transport
+    /// error.
+    Drop {
+        events: Vec<just_llm_client::types::generation::GenerationEvent>,
+        error: just_llm_client::TransportError,
+    },
+    /// Never yields an item — the stream hangs until the caller gives up.
+    Pending,
+}
+
 /// Minimal stateful backend modeled on the upstream conversation test mock: it records
 /// the wire requests it receives through `prepare_streaming` and answers the streaming
-/// path from queues of canned event lists (plus an optional pre-stream error queue),
-/// so tests can assert exactly what reached the provider boundary. Never touches the
-/// network.
+/// path from queues of canned streams — plain events, events followed by a mid-stream
+/// drop, or a stream that never yields — plus an optional pre-stream error queue, so
+/// tests can assert exactly what reached the provider boundary. Never touches the network.
 pub(crate) struct RecordingBackend {
     requests: Mutex<Vec<GenerationRequest>>,
     failures: Mutex<VecDeque<just_llm_client::BackendError>>,
-    streams: Mutex<VecDeque<Vec<just_llm_client::types::generation::GenerationEvent>>>,
+    streams: Mutex<VecDeque<CannedStream>>,
 }
 
 impl RecordingBackend {
@@ -271,20 +290,43 @@ impl RecordingBackend {
     /// One text delta followed by `End` carrying `response_id` — the minimal stream a
     /// successful turn needs (the capture requires at least one accumulated event).
     pub(crate) fn queue_stream(&self, response_id: &str) {
-        self.streams.lock().unwrap().push_back(vec![
-            just_llm_client::types::generation::GenerationEvent::Text {
-                delta: "a".to_owned(),
-            },
-            just_llm_client::types::generation::GenerationEvent::End {
-                finish_reason: None,
-                response_id: Some(response_id.to_owned()),
-            },
-        ]);
+        self.streams
+            .lock()
+            .unwrap()
+            .push_back(CannedStream::Events(vec![
+                just_llm_client::types::generation::GenerationEvent::Text {
+                    delta: "a".to_owned(),
+                },
+                just_llm_client::types::generation::GenerationEvent::End {
+                    finish_reason: None,
+                    response_id: Some(response_id.to_owned()),
+                },
+            ]));
     }
 
     /// Queue an error that surfaces from `prepare_streaming` itself (pre-stream).
     pub(crate) fn queue_error(&self, error: just_llm_client::BackendError) {
         self.failures.lock().unwrap().push_back(error);
+    }
+
+    /// Queue a stream that delivers `events` and then dies with `error` mid-stream.
+    pub(crate) fn queue_dropped_stream(
+        &self,
+        events: Vec<just_llm_client::types::generation::GenerationEvent>,
+        error: just_llm_client::TransportError,
+    ) {
+        self.streams
+            .lock()
+            .unwrap()
+            .push_back(CannedStream::Drop { events, error });
+    }
+
+    /// Queue a stream that never yields an item (a cancel test hangs on it).
+    pub(crate) fn queue_pending_stream(&self) {
+        self.streams
+            .lock()
+            .unwrap()
+            .push_back(CannedStream::Pending);
     }
 
     pub(crate) fn take_requests(&self) -> Vec<GenerationRequest> {
@@ -351,18 +393,41 @@ impl LlmBackend for RecordingBackend {
         &self,
         _response: reqwest::Response,
     ) -> Result<just_llm_client::GenerationStream, just_llm_client::BackendError> {
-        let events = self
+        let canned = self
             .streams
             .lock()
             .unwrap()
             .pop_front()
             .expect("no stream queued for recording backend");
-        let stream = futures_util::stream::iter(
-            events
-                .into_iter()
-                .map(Ok::<_, just_llm_client::TransportError>),
-        );
-        Ok(just_llm_client::GenerationStream::new(Box::pin(stream)))
+        let stream: std::pin::Pin<
+            Box<
+                dyn futures_util::Stream<
+                        Item = Result<
+                            just_llm_client::types::generation::GenerationEvent,
+                            just_llm_client::TransportError,
+                        >,
+                    > + Send,
+            >,
+        > = match canned {
+            CannedStream::Events(events) => Box::pin(futures_util::stream::iter(
+                events
+                    .into_iter()
+                    .map(Ok::<_, just_llm_client::TransportError>),
+            )),
+            CannedStream::Drop { events, error } => Box::pin(futures_util::stream::iter(
+                events
+                    .into_iter()
+                    .map(Ok::<_, just_llm_client::TransportError>)
+                    .chain(std::iter::once(Err(error))),
+            )),
+            CannedStream::Pending => Box::pin(futures_util::stream::pending::<
+                Result<
+                    just_llm_client::types::generation::GenerationEvent,
+                    just_llm_client::TransportError,
+                >,
+            >()),
+        };
+        Ok(just_llm_client::GenerationStream::new(stream))
     }
 
     fn render_messages(
