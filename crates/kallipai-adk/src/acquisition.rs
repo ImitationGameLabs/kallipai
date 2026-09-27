@@ -39,8 +39,9 @@ enum StreamOutcome {
     /// The stream completed normally.
     Completed(StreamConsumed),
     /// The stream dropped mid-way with a transport error. The partial content accumulated so far
-    /// is abandoned (already-emitted deltas are void); the caller retries from scratch. Carries the
-    /// error so the caller can drive retry/failover and surface a diagnostic.
+    /// is abandoned (already-emitted deltas are void); the caller re-sends the same request,
+    /// which the kept anchor turns into a delta continuation. Carries the error so the caller
+    /// can drive retry/failover and surface a diagnostic.
     Transient(just_llm_client::TransportError),
 }
 
@@ -50,14 +51,19 @@ pub(crate) struct StreamConsumed {
     pub(crate) reasoning: String,
     pub(crate) tool_calls: Vec<ToolCall>,
     pub(crate) usage: Option<just_llm_client::types::generation::Usage>,
+    /// The assembled response of a stream that reached its `End` event carrying a response
+    /// id — the adoptable turn record. `None` when the backend is stateless (no id on
+    /// `End`) or the stream never completed; the caller adopts only when this is `Some`.
+    /// Boxed so this struct stays small next to the variants that carry it.
+    pub(crate) response: Option<Box<just_llm_client::types::generation::GenerationResponse>>,
 }
 
 /// Consume an SSE stream, accumulating content, reasoning, tool calls, and usage.
 ///
-/// Takes ownership of the stream and pins it internally.
+/// Takes ownership of the stream; the assembled response rides the `Completed` outcome.
 /// Returns `Cancelled` if the cancellation token fires mid-stream.
 async fn consume_stream(
-    stream: ConversationStream,
+    mut stream: ConversationStream,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     cancel: &CancellationToken,
 ) -> StreamOutcome {
@@ -66,7 +72,6 @@ async fn consume_stream(
     let mut tool_acc = ToolCallAccumulator::new();
     let mut response_usage: Option<just_llm_client::types::generation::Usage> = None;
 
-    tokio::pin!(stream);
     loop {
         tokio::select! {
             event_result = stream.next() => {
@@ -74,8 +79,8 @@ async fn consume_stream(
                     Some(Ok(e)) => e,
                     Some(Err(e)) => {
                         // Mid-stream transport drop (connection reset, h2 error, premature EOF, ...).
-                        // The partial content already emitted via deltas is void; the caller retries
-                        // from scratch and emits a `StreamReset` so downstream folds/discards it.
+                        // The partial content already emitted via deltas is void; the caller re-sends
+                        // the same request and emits a `StreamReset` so downstream folds/discards it.
                         info!(
                             "LLM stream dropped mid-stream: {}",
                             crate::llm_error::render_error(&e)
@@ -113,11 +118,15 @@ async fn consume_stream(
         }
     }
 
+    // The stream was consumed through its terminal `End` event: take the assembled
+    // response for the caller to adopt. `None` = stateless backend or no id — nothing to adopt.
+    let response = stream.into_response().map(Box::new);
     StreamOutcome::Completed(StreamConsumed {
         content,
         reasoning,
         tool_calls: tool_acc.finish(),
         usage: response_usage,
+        response,
     })
 }
 
@@ -324,10 +333,23 @@ pub(crate) async fn acquire_stream(
 
         // Consume the acquired stream. A mid-stream transport drop is retryable in-place:
         // the partial content is abandoned (already-emitted deltas are voided downstream by
-        // a `StreamReset` event) and the request is re-sent from scratch.
+        // a `StreamReset` event) and the same request is re-sent; the kept anchor turns the
+        // retry into a delta continuation.
         match consume_stream(stream, tx, round_cancel).await {
-            StreamOutcome::Completed(c) => {
+            StreamOutcome::Completed(mut c) => {
                 flush_retry_records(ctx, &mut retry_records).await;
+                if let Some(response) = c.response.take()
+                    && let Err(error) = ctx.conversation.adopt(*response)
+                {
+                    // Unreachable in practice: the memo pairs the just-completed
+                    // attempt and `into_response` yields a non-empty id. The prior
+                    // anchor stays valid server-side, so warn and continue: the next
+                    // turn falls back to a full send.
+                    tracing::warn!(
+                        "failed to adopt the completed stream: {}",
+                        crate::llm_error::render_error(&error)
+                    );
+                }
                 break c;
             }
             StreamOutcome::Cancelled => {
@@ -800,6 +822,12 @@ mod tests {
         while let Some(event) = stream.next().await {
             event.expect("turn events are healthy");
         }
+        let response = stream
+            .into_response()
+            .expect("a drained test stream reaches `End` with a response id");
+        ctx.conversation
+            .adopt(response)
+            .expect("the just-prepared turn adopts cleanly");
         assert!(ctx.conversation.last_message().is_some(), "turn 1 anchored");
 
         // Advance the chain the way a Failover outcome does.
@@ -834,6 +862,12 @@ mod tests {
         while let Some(event) = stream.next().await {
             event.expect("turn events are healthy");
         }
+        let response = stream
+            .into_response()
+            .expect("a drained test stream reaches `End` with a response id");
+        ctx.conversation
+            .adopt(response)
+            .expect("the just-prepared turn adopts cleanly");
 
         let requests = backend.take_requests();
         assert_eq!(requests.len(), 2);

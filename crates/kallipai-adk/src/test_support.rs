@@ -249,9 +249,10 @@ pub(crate) fn usage_with_completion(prompt_tokens: u32, completion_tokens: u32) 
 }
 
 /// Minimal stateful backend modeled on the upstream conversation test mock: it records
-/// the wire requests it receives and answers `stream_generate` from a queue of canned
-/// event lists (plus an optional error queue), so tests can assert exactly what reached
-/// the provider boundary. Never touches the network.
+/// the wire requests it receives through `prepare_streaming` and answers the streaming
+/// path from queues of canned event lists (plus an optional pre-stream error queue),
+/// so tests can assert exactly what reached the provider boundary. Never touches the
+/// network.
 pub(crate) struct RecordingBackend {
     requests: Mutex<Vec<GenerationRequest>>,
     failures: Mutex<VecDeque<just_llm_client::BackendError>>,
@@ -281,7 +282,7 @@ impl RecordingBackend {
         ]);
     }
 
-    /// Queue an error that surfaces from `stream_generate` itself (pre-stream).
+    /// Queue an error that surfaces from `prepare_streaming` itself (pre-stream).
     pub(crate) fn queue_error(&self, error: just_llm_client::BackendError) {
         self.failures.lock().unwrap().push_back(error);
     }
@@ -309,21 +310,33 @@ impl LlmBackend for RecordingBackend {
         &self,
         _request: GenerationRequest,
     ) -> Result<reqwest::Request, just_llm_client::BackendError> {
-        unimplemented!("tests drive stream_generate directly")
+        unimplemented!("tests exercise only the streaming path")
     }
 
     fn prepare_streaming(
         &self,
-        _request: GenerationRequest,
+        request: GenerationRequest,
     ) -> Result<reqwest::Request, just_llm_client::BackendError> {
-        unimplemented!("tests drive stream_generate directly")
+        self.requests.lock().unwrap().push(request);
+        if let Some(error) = self.failures.lock().unwrap().pop_front() {
+            return Err(error);
+        }
+        let url = "http://recording.invalid/v1/chat/completions"
+            .parse()
+            .expect("static recording url parses");
+        Ok(reqwest::Request::new(reqwest::Method::POST, url))
     }
 
     async fn send(
         &self,
         _prepared: reqwest::Request,
     ) -> Result<reqwest::Response, just_llm_client::BackendError> {
-        unimplemented!("tests drive stream_generate directly")
+        let response = http::Response::builder()
+            .status(reqwest::StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .body(String::new())
+            .expect("static recording response builds");
+        Ok(reqwest::Response::from(response))
     }
 
     async fn parse(
@@ -331,24 +344,13 @@ impl LlmBackend for RecordingBackend {
         _response: reqwest::Response,
     ) -> Result<just_llm_client::types::generation::GenerationResponse, just_llm_client::BackendError>
     {
-        unimplemented!("tests drive stream_generate directly")
+        unimplemented!("tests exercise only the streaming path")
     }
 
     async fn parse_streaming(
         &self,
         _response: reqwest::Response,
     ) -> Result<just_llm_client::GenerationStream, just_llm_client::BackendError> {
-        unimplemented!("tests drive stream_generate directly")
-    }
-
-    async fn stream_generate(
-        &self,
-        request: GenerationRequest,
-    ) -> Result<just_llm_client::GenerationStream, just_llm_client::BackendError> {
-        self.requests.lock().unwrap().push(request);
-        if let Some(error) = self.failures.lock().unwrap().pop_front() {
-            return Err(error);
-        }
         let events = self
             .streams
             .lock()
@@ -367,14 +369,14 @@ impl LlmBackend for RecordingBackend {
         &self,
         _messages: &[Message],
     ) -> Result<String, just_llm_client::BackendError> {
-        unimplemented!("tests drive stream_generate directly")
+        unimplemented!("tests exercise only the streaming path")
     }
 
     fn render_tools(
         &self,
         _tools: &[just_llm_client::types::generation::ToolDefinition],
     ) -> Result<String, just_llm_client::BackendError> {
-        unimplemented!("tests drive stream_generate directly")
+        unimplemented!("tests exercise only the streaming path")
     }
 
     fn family() -> &'static str {
@@ -386,6 +388,6 @@ impl LlmBackend for RecordingBackend {
         _api_key: &str,
         _base_url: Option<&str>,
     ) -> Result<Arc<dyn LlmBackend>, just_llm_client::BackendConstructError> {
-        unimplemented!("tests drive stream_generate directly")
+        unimplemented!("tests exercise only the streaming path")
     }
 }

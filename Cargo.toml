@@ -42,9 +42,8 @@ license = "MIT"
 name = "kallipai"
 
 [workspace.dependencies]
-just-llm-client = { git = "https://github.com/ImitationGameLabs/just-agent-libs.git", rev = "4a9585f", features = [
-  "responses",
-  "anthropic",
+just-llm-client = { git = "https://github.com/ImitationGameLabs/just-agent-libs.git", rev = "ec10078", features = [
+  "full",
 ] }
 
 kallipai-common = { path = "crates/kallipai-common", default-features = false }
@@ -184,6 +183,7 @@ tempfile = "3"
 # frame-magic sniffing on the read side.
 zstd = "0.14.0"
 zstd-safe = "8.0.0"
+http = "1.5.0"
 http-body-util = "0.1"
 wiremock = "0.6.5"
 serial_test = "3.5.0"

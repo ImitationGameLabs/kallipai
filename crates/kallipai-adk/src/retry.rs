@@ -38,8 +38,9 @@ impl Default for RetryPolicy {
 
 /// Outcome of a single conversation-bound streaming attempt.
 enum Attempt {
-    /// 2xx — a live stream ready to hand off to the caller.
-    Stream(ConversationStream),
+    /// 2xx — a live stream ready to hand off to the caller (boxed: the upstream
+    /// assembling stream is too large to inline beside the error variants).
+    Stream(Box<ConversationStream>),
     /// Transient failure (HTTP 429/5xx/408, or a network send failure). Worth retrying in-profile.
     Retry {
         error: BackendError,
@@ -81,14 +82,15 @@ pub enum RequestFailure {
 /// failures — fatal on every profile. A provider rejection is classified by HTTP status
 /// (429/408/5xx retry, 401/403/404 fail over, other statuses fatal); a provider error with no
 /// reachable HTTP status never reached the provider — transport-level, retried. The request is
-/// re-cloned per attempt: `stream_generate` consumes it, and a failed attempt leaves the
-/// conversation's anchor cleared, so the next attempt resends the full context automatically.
+/// re-cloned per attempt: `stream_generate` consumes it, and a failed attempt keeps the
+/// conversation's anchor valid, so the next attempt continues from the stored context
+/// with a delta instead of resending the full state.
 async fn attempt_once(
     conversation: &mut Conversation,
     request: &just_llm_client::types::generation::GenerationRequest,
 ) -> Attempt {
     match conversation.stream_generate(request.clone()).await {
-        Ok(stream) => Attempt::Stream(stream),
+        Ok(stream) => Attempt::Stream(Box::new(stream)),
         Err(error) => classify_error(error),
     }
 }
@@ -201,7 +203,7 @@ pub async fn stream_with_retry(
 
     for attempt in 1..=max_attempts {
         match attempt_once(conversation, &request).await {
-            Attempt::Stream(stream) => return Ok(stream),
+            Attempt::Stream(stream) => return Ok(*stream),
             Attempt::Failover(error) => return Err(RequestFailure::Failover(error)),
             Attempt::Fatal(error) => return Err(RequestFailure::Fatal(error)),
             Attempt::Retry { error, kind } => {
@@ -702,9 +704,9 @@ mod tests {
 
     use just_llm_client::types::generation::GenerationRequest;
 
-    /// Drive one turn through `stream_with_retry` and drain the returned stream to
-    /// completion — draining is what registers the turn's capture (`End` carries the
-    /// response id), mirroring what `consume_stream` does in production.
+    /// Drive one turn through `stream_with_retry`, drain the stream to completion, and
+    /// adopt the assembled response — the explicit three-step contract the production
+    /// runner follows (`consume_stream` drains, `acquire_stream` adopts).
     async fn run_turn(
         conversation: &mut Conversation,
         request: GenerationRequest,
@@ -726,6 +728,12 @@ mod tests {
         while let Some(event) = stream.next().await {
             event.expect("turn events are healthy");
         }
+        let response = stream
+            .into_response()
+            .expect("a drained test stream reaches `End` with a response id");
+        conversation
+            .adopt(response)
+            .expect("the just-prepared turn adopts cleanly");
         Ok(())
     }
 
@@ -768,7 +776,10 @@ mod tests {
         assert_eq!(requests[1].previous_response_id.as_deref(), Some("resp-1"));
         assert_eq!(requests[1].store, Some(true));
         assert_eq!(requests[1].messages, vec![user_msg("q2")], "delta only");
-        assert!(requests[1].tools.is_none(), "continuation strips tools");
+        assert!(
+            requests[1].tools.is_some(),
+            "continuation keeps the caller's tools"
+        );
     }
 
     #[tokio::test]
@@ -803,7 +814,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_error_retries_and_resends_full_after_anchor_clear() {
+    async fn provider_error_retries_and_resends_delta_with_anchor_kept() {
         let backend = RecordingBackend::new();
         backend.queue_stream("resp-1");
         backend.queue_stream("resp-2");
@@ -818,8 +829,8 @@ mod tests {
         .await
         .expect("turn 1 succeeds");
         let mirror = conversation.last_message().expect("turn 1 mirrored");
-        // Turn 2's first attempt is rate-limited; the anchor must clear so the retry
-        // resends the full context instead of continuing an id the provider rejected.
+        // Turn 2's first attempt is rate-limited; a failed turn keeps the anchor (the
+        // stored response stays valid server-side), so the retry continues it with a delta.
         // (Queued after turn 1: the mock's error queue fires before any stream.)
         backend.queue_error(BackendError::provider(
             "recording",
@@ -861,9 +872,14 @@ mod tests {
             "the rejected attempt chained normally"
         );
         assert_eq!(
-            requests[2].previous_response_id, None,
-            "after the provider rejection the anchor is cleared: full resend"
+            requests[2].previous_response_id.as_deref(),
+            Some("resp-1"),
+            "a failed turn keeps the anchor: the retry continues the stored turn"
         );
-        assert_eq!(requests[2].messages.len(), 3, "full context, not delta");
+        assert_eq!(
+            requests[2].messages,
+            vec![user_msg("q2")],
+            "delta only — the stored prefix is not resent"
+        );
     }
 }

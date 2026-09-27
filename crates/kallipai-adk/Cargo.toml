@@ -48,6 +48,7 @@ testutils = []
 temp-env = { workspace = true }
 kallipai-shell = { workspace = true, features = ["testutils"] }
 tempfile = { workspace = true }
+http = { workspace = true }
 wiremock = { workspace = true }
 serial_test = { workspace = true }
 kallipai-testkit = { workspace = true }
