@@ -3,6 +3,16 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+
+    # Pinned glibc build target for the FHS distribution tarball:
+    # nixos-22.11 carries glibc 2.35, which caps the binary's symbol
+    # floor by construction — the linker takes the build host's libc.
+    # The channel is EOL; acceptable here because the input is a frozen
+    # link anchor, not a runtime dependency. NB: `nix flake update`
+    # with no arguments updates this input too; update it deliberately
+    # via `nix flake update nixpkgs-2211` only when re-validating the
+    # floor.
+    nixpkgs-2211.url = "github:NixOS/nixpkgs/nixos-22.11";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
 
@@ -93,6 +103,39 @@
           };
           inherit (builds) workspace;
 
+          # Pinned 22.11 instance for the FHS distribution tarball. It
+          # supplies only the link layer: its stdenv cc is the cargo
+          # linker, so crt objects, -L search order, the dynamic linker,
+          # and libgcc all come from glibc 2.35 — same-source with the
+          # libc that resolves the symbols. Crane, cargo, and rustc stay
+          # on the main nixpkgs; the toolchain is the official-dist 1.97
+          # derivation.
+          pkgsFhs = import inputs.nixpkgs-2211 {
+            inherit system;
+
+            config = {
+              allowUnfree = true;
+            };
+          };
+
+          commonFhs = import ./nix/common.nix {
+            inherit
+              pkgs
+              lib
+              inputs
+              root
+              pkgsFhs
+              ;
+            rustToolchain = import ./nix/packages/fhs-rust-toolchain.nix {
+              pkgs = pkgsFhs;
+            };
+          };
+
+          buildsFhs = import ./nix/packages/workspace.nix {
+            common = commonFhs;
+            inherit pkgs sharedSkills;
+          };
+
           checks = import ./nix/checks/default.nix {
             inherit pkgs common;
             inherit (inputs) advisory-db;
@@ -125,12 +168,14 @@
             kallipctl = builds.ctl;
             kallipai-daemon-spawn = builds.daemon-spawn;
             kallipai-instances = builds.instances;
+            # The FHS distribution tarball builds on the pinned 22.11
             kallipai-tarball = import ./nix/packages/tarball.nix {
-              inherit
-                pkgs
-                common
-                workspace
-                ;
+              # Tool-side pkgs (patchelf/gnutar) from the main line; the
+              # workspace+common come from the pinned instance — the
+              # tarball carries the pinned-linker binaries.
+              inherit pkgs;
+              common = commonFhs;
+              inherit (buildsFhs) workspace;
             };
             # Re-export the per-system-level sharedSkills derivation as a
             # package so deployments can reference the bit-identical store

@@ -1,0 +1,48 @@
+# kallipai-archeion -- control plane (system-level FHS install).
+# Rendered by install.sh; @BINDIR@ becomes the installed payload bin dir.
+# The PostgreSQL database and peer auth are provided by the deployer
+# (mirroring the NixOS module defaults: db name = role = OS user name).
+# Optional settings (webauthn, cookies, rate limits, CORS, OAuth, ...)
+# go in a drop-in; a root-only env file can carry secrets (systemd reads
+# it, not the unit user, so 0600 root:root is fine):
+#   systemctl edit kallipai-archeion
+#     [Service]
+#     Environment=KALLIPAI_ARCHEION_CORS_ORIGINS=https://app.example.com
+# or uncomment in a rendered copy:
+#   EnvironmentFile=/etc/kallipai/archeion.env
+[Unit]
+Description=kallipai archeion control plane
+After=network.target postgresql.service
+# Soft dependency: the archeion retries its DB connect with a capped
+# backoff, so wants (not requires) -- a slow postgres must not tear it
+# down.
+Wants=postgresql.service
+
+[Service]
+Environment=KALLIPAI_ARCHEION_ADDR=127.0.0.1:7100
+Environment=KALLIPAI_ARCHEION_DATABASE_URL=postgresql:///kallipai-archeion?host=/run/postgresql
+Environment=KALLIPAI_ARCHEION_LOG_DIR=/var/log/kallipai/archeion
+# The internal token is state the archeion owns: generated into its
+# state dir on first boot, read (never rewritten) after.
+Environment=KALLIPAI_ARCHEION_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
+# The minted admin token: generated into the state dir on first boot,
+# read (never rewritten) after; rotate via kallipai-admin admin-token
+# reset.
+Environment=KALLIPAI_ARCHEION_ADMIN_TOKEN_OUT_FILE=/var/lib/kallipai/archeion/admin-token.env
+ExecStart=@BINDIR@/kallipai-archeion
+User=kallipai-archeion
+# The unit runs with the platform gate group as its primary: systemd
+# owns the state tree to it (recursively, every start), so the token is
+# born gate-owned and consumers traverse/read it.
+Group=kallipai-polis
+StateDirectory=kallipai/archeion
+LogsDirectory=kallipai/archeion
+# 0750 (not 0700): gate-group consumers traverse this directory to read
+# the provisioned internal token.
+StateDirectoryMode=0750
+LogsDirectoryMode=0750
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

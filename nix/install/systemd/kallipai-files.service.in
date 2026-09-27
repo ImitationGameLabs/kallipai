@@ -1,0 +1,39 @@
+# kallipai-files -- content-transfer service (system-level FHS install).
+# Rendered by install.sh; @BINDIR@ becomes the installed payload bin dir.
+# The PostgreSQL database and peer auth are provided by the deployer
+# (mirroring the NixOS module defaults: db name = role = OS user name).
+# Optional settings (body size, CORS, degrade mode, GC tuning) go in a
+# drop-in; a root-only env file can carry secrets:
+#   systemctl edit kallipai-files
+#     [Service]
+#     Environment=KALLIPAI_FILES_CORS_ORIGINS=https://app.example.com
+# or uncomment in a rendered copy:
+#   EnvironmentFile=/etc/kallipai/files.env
+[Unit]
+Description=kallipai files content-transfer service
+# Soft dependency: the internal-token file is provisioned by the
+# archeion first; if the archeion goes down later, this unit keeps
+# running degraded and recovers on its own.
+After=network.target kallipai-archeion.service
+Wants=kallipai-archeion.service
+
+[Service]
+Environment=KALLIPAI_FILES_ADDR=127.0.0.1:7400
+Environment=KALLIPAI_FILES_ARCHEION_INTERNAL_URL=http://127.0.0.1:7100
+Environment=KALLIPAI_FILES_DATABASE_URL=postgresql:///kallipai-files?host=/run/postgresql
+Environment=KALLIPAI_FILES_LOG_DIR=/var/log/kallipai/files
+Environment=KALLIPAI_FILES_BLOB_ROOT=/var/lib/kallipai/files/blobs
+Environment=KALLIPAI_FILES_NOTIFY_URL=http://127.0.0.1:7200
+Environment=KALLIPAI_POLIS_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
+ExecStart=@BINDIR@/kallipai-files
+User=kallipai-files
+Group=kallipai-files
+StateDirectory=kallipai/files
+LogsDirectory=kallipai/files
+StateDirectoryMode=0700
+LogsDirectoryMode=0750
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

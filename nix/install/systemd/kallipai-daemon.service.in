@@ -1,0 +1,55 @@
+# kallipai-daemon -- instance daemon (system-level FHS install).
+# Rendered by install.sh; @BINDIR@ becomes the installed payload bin dir.
+# Optional settings go in a drop-in (a full option list lives in the
+# NixOS module, nix/nixos-modules.nix):
+#   systemctl edit kallipai-daemon
+#     [Service]
+#     Environment=KALLIPAI_POLIS_URL=https://app.example.com
+[Unit]
+Description=kallipai instance daemon
+After=network.target
+
+[Service]
+# The spawn helper execs tagmata with execve, which does not search
+# PATH: pin the bin directory of the same install, so daemon, helper,
+# and tagma stay one build. The unit PATH stays the system default for
+# everything else that expects one.
+Environment=KALLIPAI_BIN_DIR=@BINDIR@
+Environment=KALLIPAI_DAEMON_SOCKET=/run/kallipai/daemon.sock
+Environment=KALLIPAI_DAEMON_RECORD_DIR=/var/lib/kallipai/daemon/instances
+# Dedicated socket gate, not the shared platform gate: the group admits
+# only actual socket consumers.
+Environment=KALLIPAI_DAEMON_SOCKET_GROUP=kallipai-daemon
+# The system-level install always carries the polis face, and its
+# instances proxy delegates into the daemon; the daemon refuses an
+# unresolvable name, so this stays in step with what install.sh creates.
+Environment=KALLIPAI_DAEMON_DELEGATES=kallipai-instances
+# The login-environment harvest needs a fixed administrative bash, never
+# the caller's shell.
+Environment=KALLIPAI_HARVEST_BASH=/usr/bin/bash
+ExecStart=@BINDIR@/kallipai-daemon
+# Dedicated-user launches fork+setuid to arbitrary declared users: that
+# needs real root, not a capability subset.
+User=root
+StateDirectory=kallipai/daemon
+# Records enumerate the slugs, uids, and workspaces on the host; 0700
+# keeps that a root-and-daemon-only view (clients read through the
+# socket, not the files).
+StateDirectoryMode=0700
+RuntimeDirectory=kallipai
+# Optional config directory: drop configuration under /etc/kallipai/.
+# Empty by default, no side effects.
+ConfigurationDirectory=kallipai
+Restart=on-failure
+RestartSec=5s
+# Tagmata are forked+setsid'd by kallipai-daemon-spawn: they leave the
+# session but stay in this unit's cgroup, so the default control-group
+# kill would sweep every live instance whenever the daemon restarts --
+# an upgrade would kill running work. "process" kills only the daemon;
+# instances keep running and adopt the new binary at their next
+# deliberate kallipctl stop/start, and a daemon crash with
+# Restart=on-failure does not cascade either.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

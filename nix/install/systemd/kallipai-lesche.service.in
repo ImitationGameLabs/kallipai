@@ -1,0 +1,39 @@
+# kallipai-lesche -- data-plane relay (system-level FHS install).
+# Rendered by install.sh; @BINDIR@ becomes the installed payload bin dir.
+# The PostgreSQL database and peer auth are provided by the deployer
+# (mirroring the NixOS module defaults: db name = role = OS user name).
+# Optional settings (proof skew, key-exchange timeout, body size, CORS)
+# go in a drop-in; a root-only env file can carry secrets:
+#   systemctl edit kallipai-lesche
+#     [Service]
+#     Environment=KALLIPAI_LESCHE_CORS_ORIGINS=https://app.example.com
+# or uncomment in a rendered copy:
+#   EnvironmentFile=/etc/kallipai/lesche.env
+[Unit]
+Description=kallipai lesche data-plane relay
+# Soft dependency: the lesche reads the archeion's provisioned
+# internal-token file at boot, so the archeion starts first. If the
+# archeion goes down later, the lesche keeps running degraded (auth
+# answers 503) and recovers on its own -- an archeion crash does
+# not cascade here.
+After=network.target kallipai-archeion.service
+Wants=kallipai-archeion.service
+
+[Service]
+Environment=KALLIPAI_LESCHE_ADDR=127.0.0.1:7200
+Environment=KALLIPAI_LESCHE_ARCHEION_INTERNAL_URL=http://127.0.0.1:7100
+Environment=KALLIPAI_LESCHE_DATABASE_URL=postgresql:///kallipai-lesche?host=/run/postgresql
+Environment=KALLIPAI_LESCHE_LOG_DIR=/var/log/kallipai/lesche
+Environment=KALLIPAI_POLIS_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
+ExecStart=@BINDIR@/kallipai-lesche
+User=kallipai-lesche
+Group=kallipai-lesche
+StateDirectory=kallipai/lesche
+LogsDirectory=kallipai/lesche
+StateDirectoryMode=0700
+LogsDirectoryMode=0750
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

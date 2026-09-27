@@ -1,0 +1,32 @@
+# kallipai-instances -- instances management proxy (system-level FHS
+# install). Rendered by install.sh; @BINDIR@ becomes the installed
+# payload bin dir.
+# Optional settings (CORS origins, allowed hosts) go in a drop-in:
+#   systemctl edit kallipai-instances
+#     [Service]
+#     Environment=KALLIPAI_INSTANCES_ALLOWED_HOSTS=api.example.com
+[Unit]
+Description=kallipai instances management proxy
+# Two dependencies, one posture: both are soft. The daemon answers a
+# restart with 503 daemon_unreachable, not a failed unit; the
+# archeion's provisioned internal-token file is read at boot, so the
+# archeion starts first, and an outage later leaves this unit running
+# degraded (auth answers 503) until it returns.
+After=network.target kallipai-daemon.service kallipai-archeion.service
+Wants=kallipai-daemon.service kallipai-archeion.service
+
+[Service]
+Environment=KALLIPAI_INSTANCES_ADDR=127.0.0.1:7300
+Environment=KALLIPAI_DAEMON_SOCKET=/run/kallipai/daemon.sock
+Environment=KALLIPAI_INSTANCES_ARCHEION_URL=http://127.0.0.1:7100
+Environment=KALLIPAI_POLIS_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
+ExecStart=@BINDIR@/kallipai-instances
+User=kallipai-instances
+Group=kallipai-instances
+# A pure UDS proxy: no state or log directory of its own -- the daemon
+# owns both sides of that split.
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
