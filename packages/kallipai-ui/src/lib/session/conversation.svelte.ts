@@ -941,6 +941,12 @@ export class RelayConversation extends ConversationBase {
     more: boolean;
     timedOut: boolean;
   }> {
+    // A dead transport has no channel to page through: fold as a timed-out
+    // empty page so the caller keeps hasMoreOlder instead of reading the
+    // miss as a terminal end of history.
+    if (!this.connected) {
+      return { rows: [], count: 0, more: true, timedOut: true };
+    }
     const pull: RelayPull = { rows: [], settle: null };
     const isBeforePage = (opts.before ?? 0) > 0;
     // The try covers the history() call too: if the channel rejects the

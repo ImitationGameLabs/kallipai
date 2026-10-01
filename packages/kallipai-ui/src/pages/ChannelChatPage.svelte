@@ -284,6 +284,11 @@
     if (!conv) return;
     try {
       if (conv instanceof RelayConversation) {
+        // Reading status makes this effect re-run when the drain resurrects
+        // the transport; connected guards the un-attached window so the
+        // backend chain below cannot dereference a missing relay transport.
+        void conv.status;
+        if (!conv.connected) return;
         statusCardStore.attach(
           new OnlineBackend(
             new ManageRestClient(lescheBaseUrlOrFail()),
@@ -318,6 +323,8 @@
   // push or focus.
   $effect(() => {
     if (!(conv instanceof RelayConversation)) return;
+    void conv.status;
+    if (!conv.connected) return;
     const tagmaId = conv.relayTransport.relayChannel.tagmaId;
     let client: ProjectionClient;
     try {

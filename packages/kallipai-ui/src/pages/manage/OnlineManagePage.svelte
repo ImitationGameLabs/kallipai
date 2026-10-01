@@ -83,6 +83,14 @@
       backendReady = false;
       return;
     }
+    // Reading channelState makes this effect re-run when the drain
+    // resurrects the transport; connected guards the un-attached window
+    // so the channel chain below cannot dereference a missing transport.
+    void channelState.kind;
+    if (!conv.connected) {
+      backendReady = false;
+      return;
+    }
     try {
       // conv.kind === "relay" narrows to RelayConversation
       const relayConv =

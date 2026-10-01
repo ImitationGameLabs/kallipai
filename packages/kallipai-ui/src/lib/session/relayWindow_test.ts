@@ -306,3 +306,64 @@ Deno.test(
     assertEquals(shouldNotify(probe.notifyFloor, eventRow(4).reply), true);
   },
 );
+
+Deno.test("a dead transport folds pulls and drops deliveries", async () => {
+  const channel = new FakeChannel([]);
+  let enqueues = 0;
+  (channel as unknown as { enqueue: () => void }).enqueue = () => {
+    enqueues++;
+  };
+  const conv = makeConv(channel);
+  const transport = (
+    conv as unknown as {
+      transport: { enqueueSignal: () => void };
+    }
+  ).transport;
+  let signals = 0;
+  transport.enqueueSignal = () => {
+    signals++;
+  };
+  await conv.run(); // the empty fake replies end the drain: transport=null
+  assertEquals(conv.connected, false);
+
+  // A pull on the dead transport folds to a timed-out empty page, and the
+  // timed-out page leaves the has-more sentinel armed instead of ending it.
+  conv.hasMoreOlder = true;
+  const page = await (
+    conv as unknown as {
+      pullPage(opts: { limit: number }): Promise<{
+        rows: unknown[];
+        count: number;
+        more: boolean;
+        timedOut: boolean;
+      }>;
+    }
+  ).pullPage({ limit: 10 });
+  assertEquals(page, { rows: [], count: 0, more: true, timedOut: true });
+  await (
+    conv as unknown as {
+      loadOlderPage(k: number): Promise<void>;
+    }
+  ).loadOlderPage(10);
+  assertEquals(conv.hasMoreOlder, true);
+
+  // Deliveries aimed at the dead transport drop without touching it.
+  const { ChannelsStore } = await import("./channels.svelte.ts");
+  const store = new ChannelsStore();
+  const conns = store as unknown as {
+    conversations: Map<string, RelayConv>;
+  };
+  conns.conversations.set("conv-1", conv);
+  // Route the index too: without it findByTagma misses and the zero-touch
+  // assertion would pass through the index miss, not the connected guard.
+  (store as unknown as { tagmaIndex: Map<string, string> }).tagmaIndex.set(
+    "tagma-1",
+    "conv-1",
+  );
+  store.deliver({ channel_id: "conv-1" } as Parameters<
+    typeof store.deliver
+  >[0]);
+  store.deliverSignal("tagma-1", { kind: "ping" } as never);
+  assertEquals(enqueues, 0);
+  assertEquals(signals, 0);
+});

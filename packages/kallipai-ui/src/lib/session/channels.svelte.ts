@@ -730,14 +730,20 @@ export class ChannelsStore {
   deliver(envelope: Envelope): void {
     const conv = this.conversations.get(envelope.channel_id);
     if (conv?.kind !== "relay") return;
-    (conv as RelayConversation).relayTransport.relayChannel.enqueue(envelope);
+    const rc = conv as RelayConversation;
+    // Dead transport: the envelope drops like an unknown id.
+    if (!rc.connected) return;
+    rc.relayTransport.relayChannel.enqueue(envelope);
   }
 
   /** Route an inbound runtime signal (from realtime's tagma_signal demux) to the
    *  owning conversation's transport signal queue; its signal drain reduces it
    *  via applySignal. Unknown tagma ids are dropped. */
   deliverSignal(tagmaId: string, signal: SignalEvent): void {
-    this.findByTagma(tagmaId)?.relayTransport.enqueueSignal(signal);
+    // Dead transport: the signal drops like an unknown tagma id.
+    const conv = this.findByTagma(tagmaId);
+    if (!conv?.connected) return;
+    conv.relayTransport.enqueueSignal(signal);
   }
 
   /** Route an aggregate status snapshot (from realtime's tagma_status demux) to
