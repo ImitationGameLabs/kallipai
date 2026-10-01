@@ -1,8 +1,8 @@
 // ManagementBackend: transport-agnostic interface for tagma management operations.
 //
 // Two implementations:
-//   - OfflineBackend: wraps TagmaClient (HTTP to localhost tagma API)
-//   - OnlineBackend: wraps ManageRestClient (plaintext over TLS via lesche proxy)
+// - OfflineBackend: wraps TagmaClient (HTTP to localhost tagma API)
+// - OnlineBackend: wraps ManageRestClient (plaintext over TLS via lesche proxy)
 //
 // Both throw KallipaiError on non-2xx (OnlineBackend reconstructs it from the
 // relayed status+body). Network failures differ: OfflineBackend throws
@@ -53,6 +53,9 @@ export interface ProjectionFeed {
 export interface ManagementBackend {
   /** Present only on transports with a live dirty feed. */
   readonly projectionFeed?: ProjectionFeed;
+  // The tagma this backend manages. The status card scopes its row
+  // cache by it, so a stale roster never crosses tagma boundaries.
+  readonly tagmaId: string;
 
   getBudget(): Promise<BudgetResponse>;
   updateBudget(body: BudgetUpdateRequest): Promise<BudgetResponse>;
@@ -94,6 +97,9 @@ export interface ManagementBackend {
 // --- OfflineBackend (wraps TagmaClient) ---
 
 export class OfflineBackend implements ManagementBackend {
+  // The offline backend manages the local pseudo-tagma; the fixed
+  // key keeps the status card's scope check uniform across both backends.
+  readonly tagmaId = "local";
   constructor(private readonly client: TagmaClient) {}
 
   getBudget() {
@@ -239,12 +245,14 @@ function parseError(status: number, body: unknown): Error {
 
 export class OnlineBackend implements ManagementBackend {
   readonly projectionFeed?: ProjectionFeed;
+  readonly tagmaId: string;
   constructor(
     private readonly rest: ManageRestClient,
     private readonly agent: string,
     private readonly projection?: ProjectionClient,
     private readonly envelope?: ProfilesEnvelopeChannel,
   ) {
+    this.tagmaId = agent;
     if (!projection) return;
     // A single shared reconnect loop -- one sse connection per
     // backend regardless of subscriber count. Subscribers join/leave a
@@ -316,6 +324,9 @@ export class OnlineBackend implements ManagementBackend {
             onFrame(frame.seq);
           }
         } catch (e) {
+          // A teardown abort is the designed exit, not a stream failure:
+          // page switches abort the feed, so it stays out of the console.
+          if (controller === null || controller.signal.aborted) return;
           // Stream error: fall through to the backoff. Warn once per
           // streak (a flapping endpoint must not spam the console at
           // the reconnect pace); the next clean frame re-arms it.

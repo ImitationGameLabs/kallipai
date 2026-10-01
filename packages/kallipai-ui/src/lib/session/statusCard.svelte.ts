@@ -16,6 +16,7 @@ import type { AgentState, WireParkedReason } from "@kallipai/kallipai-client";
 import { type ManagementBackend } from "../manage/backend.ts";
 import { startVisibleInterval } from "../visibleInterval.ts";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
+import { LescheApiError } from "@kallipai/kallipai-lesche-client";
 
 /** One rendered row. `contextTokens` is null until the slow poll lands (or
  * forever, for faulted/parked agents). */
@@ -68,6 +69,10 @@ class StatusCardStore {
   summary = $state<TagmaStatusSummary | undefined>(undefined);
 
   private backend: ManagementBackend | null = null;
+  // The suspended backend's tagma; attach() compares it against the
+  // incoming backend to tell a resume (same tagma, warm cache) from a
+  // cross-tagma switch (cache must reset).
+  private lastBackendTagmaId: string | null = null;
   private rosterStop: (() => void) | null = null;
   private contextStop: (() => void) | null = null;
   private contexts = new Map<string, number>();
@@ -90,6 +95,10 @@ class StatusCardStore {
   // roster-triggered retry (the 30s tick remains the final backstop),
   // so a persistently failing agent cannot recurse with the roster.
   private contextCooldown = new Map<string, number>();
+  // Agents present in the last successful roster round; context pulls
+  // skip ids outside it, so a 404 for a since-removed agent (relay
+  // lag) cannot keep re-polling a ghost row.
+  private readonly liveAgentIds = new Set<string>();
   // Root-row signature: the root row keeps its object identity across
   // refreshes when nothing observable changed. Svelte skips the update
   // for a same-reference $state write, so effects that read rootRow do
@@ -101,11 +110,11 @@ class StatusCardStore {
   /** Set once the first contexts round has been attempted (success or
    * not): the roster-triggered first pull must fire exactly once even
    * when every getAgentStatus fails, or the two recurse. */
-
   private contextsPrimed = false;
   /** Page unmount: stop the pollers, keep every cached row/number so a
    * return to the page paints instantly and only background-refreshes. */
   suspend(): void {
+    this.lastBackendTagmaId = this.backend?.tagmaId ?? null;
     this.rosterStop?.();
     this.rosterBackstopStop?.();
     this.contextStop?.();
@@ -122,6 +131,7 @@ class StatusCardStore {
     this.subRows = [];
     this.summary = undefined;
     this.contexts.clear();
+    this.liveAgentIds.clear();
     this.profileWindows.clear();
     this.profileIds.clear();
     this.lastSubSignature = "";
@@ -139,7 +149,13 @@ class StatusCardStore {
     // so every rootRow write would re-run it (full backend rebuild +
     // feed teardown per write). The signature field mirrors rootRow's
     // data without being reactive.
-    const resuming = this.backend === null && this.lastRootSignature !== "";
+    const resuming =
+      this.backend === null &&
+      this.lastRootSignature !== "" &&
+      this.lastBackendTagmaId === backend.tagmaId;
+    // The warm cache describes the suspended backend's tagma; a
+    // cross-tagma attach must reset, not resume.
+    if (!resuming) this.detach();
     this.suspend();
     this.backend = backend;
     this.refreshRoster();
@@ -200,6 +216,8 @@ class StatusCardStore {
     try {
       const resp = await backend.listAgents();
       if (this.backend !== backend) return; // detached mid-flight
+      this.liveAgentIds.clear();
+      for (const a of resp.agents) this.liveAgentIds.add(a.id);
       let root: StatusCardRow | undefined;
       const subs: StatusCardRow[] = [];
       for (const a of resp.agents) {
@@ -281,7 +299,12 @@ class StatusCardStore {
       const targets = [
         ...(this.rootRow ? [this.rootRow] : []),
         ...this.subRows,
-      ].filter((r) => r.state !== "faulted" && r.state !== "parked");
+      ].filter(
+        (r) =>
+          r.state !== "faulted" &&
+          r.state !== "parked" &&
+          this.liveAgentIds.has(r.id),
+      );
       // Parallel, not serial: N agents cost one RTT round, not N. The
       // per-agent catch keeps one dead agent from sinking the round.
       await Promise.all(
@@ -296,7 +319,10 @@ class StatusCardStore {
             );
             const pid = status.profile?.profile_id;
             if (pid) this.profileIds.set(row.id, pid);
-          } catch {
+          } catch (e) {
+            if (e instanceof LescheApiError && e.status === 404) {
+              this.liveAgentIds.delete(row.id);
+            }
             // agent gone or not yet responsive: it cools down like any
             // other failure, so the gap fill does not hot-loop on it
             this.contextCooldown.set(row.id, Date.now());
@@ -325,6 +351,7 @@ class StatusCardStore {
       (r) =>
         r.state !== "faulted" &&
         r.state !== "parked" &&
+        this.liveAgentIds.has(r.id) &&
         !this.contexts.has(r.id) &&
         (this.contextCooldown.get(r.id) ?? 0) <=
           now - CONTEXT_RETRY_COOLDOWN_MS,

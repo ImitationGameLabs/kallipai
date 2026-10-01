@@ -8,7 +8,9 @@
       "**/dist",
       "deno.lock",
       "target",
-      "crates"
+      "crates",
+      "packages/kallipai-ui/src/lib/manage/backend.ts",
+      "packages/kallipai-ui/src/lib/session/statusCard.svelte.ts"
     ]
   },
   "lint": {
