@@ -33,7 +33,7 @@
 let
   cfg = config.services.kallipai.daemon;
   polisCfg = config.services.kallipai.polis;
-  gatewayCfg = config.services.kallipai.polis.gateway;
+  gatewayCfg = config.services.kallipai.polis.model-gateway;
   webCfg = config.services.kallipai.web;
   # The polis services that serve a /metrics text face today; each
   # entry maps to one upstream Prometheus scrape job, the port
@@ -41,7 +41,7 @@ let
   # that lands later joins this list with ++.
   metricsFaces = lib.optional (polisCfg.enable && gatewayCfg.enable) {
     job_name = "kallipai-model-gateway";
-    port = gatewayCfg.managementPort;
+    inherit (gatewayCfg) port;
   };
   # The jobs services.kallipai.polis.scrapeConfigs hands to the
   # host's recorder wiring.
@@ -494,7 +494,7 @@ in
           description = "Comma-separated extra Host values the host guard admits (IP literals and localhost always pass). The proxied shape receives api.<domain>; a direct-connect LAN shape names the domain browsers use.";
         };
       };
-      gateway = {
+      model-gateway = {
         enable = lib.mkEnableOption "the kallipai model gateway as a system service" // {
           default = true;
         };
@@ -507,21 +507,23 @@ in
 
         port = lib.mkOption {
           type = lib.types.port;
-          default = defaultGatewayPorts.data;
+          default = defaultGatewayPorts.management;
           description = ''
-            Listening port of the gateway's data plane (distribution reads,
-            forwarding, health). Must be 1024-65535; a conflict surfaces at
-            service start as an address-in-use error.
+            Listening port of the gateway's management API face (the
+            /admin family and /metrics). Binds the loopback and is not
+            published by the module: the admin namespace is house-only.
+            Must be 1024-65535; a conflict surfaces at service start
+            as an address-in-use error.
           '';
         };
 
-        managementPort = lib.mkOption {
+        forwardPort = lib.mkOption {
           type = lib.types.port;
-          default = defaultGatewayPorts.management;
+          default = defaultGatewayPorts.data;
           description = ''
-            Listening port of the management plane (the /admin family).
-            Binds the loopback and is not published by the module: the admin
-            namespace is house-only.
+            Listening port of the forwarding face (distribution reads,
+            forwarding, health). Must be 1024-65535; a conflict surfaces
+            at service start as an address-in-use error.
           '';
         };
 
@@ -707,26 +709,26 @@ in
         )
         ++ (lib.optionals gatewayCfg.enable [
           {
-            assertion = gatewayCfg.port != gatewayCfg.managementPort;
-            message = "services.kallipai.polis.gateway.port and services.kallipai.polis.gateway.managementPort are both ${toString gatewayCfg.port}; the gateway's data and management faces must use distinct ports — set one of them to a free port.";
+            assertion = gatewayCfg.port != gatewayCfg.forwardPort;
+            message = "services.kallipai.polis.model-gateway.port and services.kallipai.polis.model-gateway.forwardPort are both ${toString gatewayCfg.port}; the gateway's management and forwarding faces must use distinct ports — set one of them to a free port.";
           }
         ])
         ++ (lib.optionals gatewayCfg.enable (
           map
             (face: {
               assertion = gatewayCfg.${face} >= 1024 && gatewayCfg.${face} <= 65535;
-              message = "services.kallipai.polis.gateway.${face} is ${toString gatewayCfg.${face}}; it must be 1024-65535 — the gateway does not hold CAP_NET_BIND_SERVICE, so a lower port cannot be bound. Set it to a port in that range.";
+              message = "services.kallipai.polis.model-gateway.${face} is ${toString gatewayCfg.${face}}; it must be 1024-65535 — the gateway does not hold CAP_NET_BIND_SERVICE, so a lower port cannot be bound. Set it to a port in that range.";
             })
             [
               "port"
-              "managementPort"
+              "forwardPort"
             ]
         ))
         ++ (lib.optionals (polisCfg.enable && gatewayCfg.enable) (
           map
             (pair: {
               assertion = polisCfg.ports.${builtins.elemAt pair 0} != gatewayCfg.${builtins.elemAt pair 1};
-              message = "services.kallipai.polis.ports.${builtins.elemAt pair 0} and services.kallipai.polis.gateway.${builtins.elemAt pair 1} are both ${
+              message = "services.kallipai.polis.ports.${builtins.elemAt pair 0} and services.kallipai.polis.model-gateway.${builtins.elemAt pair 1} are both ${
                 toString polisCfg.ports.${builtins.elemAt pair 0}
               }; the polis listeners and the gateway faces must use distinct ports — set one of them to a free port.";
             })
@@ -749,19 +751,19 @@ in
               ]
               [
                 "archeion"
-                "managementPort"
+                "forwardPort"
               ]
               [
                 "lesche"
-                "managementPort"
+                "forwardPort"
               ]
               [
                 "files"
-                "managementPort"
+                "forwardPort"
               ]
               [
                 "instances"
-                "managementPort"
+                "forwardPort"
               ]
             ]
         ));
@@ -1202,8 +1204,8 @@ in
           "kallipai-archeion.service"
         ];
         environment = {
-          KALLIPAI_MODEL_GATEWAY_ADDR = "127.0.0.1:${toString gatewayCfg.port}";
-          KALLIPAI_MODEL_GATEWAY_MANAGEMENT_ADDR = "127.0.0.1:${toString gatewayCfg.managementPort}";
+          KALLIPAI_MODEL_GATEWAY_ADDR = "127.0.0.1:${toString gatewayCfg.forwardPort}";
+          KALLIPAI_MODEL_GATEWAY_MANAGEMENT_ADDR = "127.0.0.1:${toString gatewayCfg.port}";
           KALLIPAI_MODEL_GATEWAY_DATABASE_URL = "postgresql:///kallipai-model-gateway?host=/run/postgresql";
           KALLIPAI_MODEL_GATEWAY_LOG_DIR = "/var/log/kallipai/model-gateway";
           KALLIPAI_MODEL_GATEWAY_ARCHEION_URL = "http://127.0.0.1:${toString polisPorts.archeion}";
@@ -1270,11 +1272,11 @@ in
             corsOrigins = lib.mkDefault appOrigin;
             allowedHosts = lib.mkDefault "api.${platformDomain}";
           };
-          gateway.publicBaseUrl = lib.mkDefault "${appScheme}://model-gw.${platformDomain}/v1";
+          model-gateway.publicBaseUrl = lib.mkDefault "${appScheme}://model-gw.${platformDomain}/v1";
           # The admin page (the web origin) is the only browser consumer
           # of the gateway faces; the tagma data-plane clients are server
           # side and carry no CORS semantics.
-          gateway.corsOrigins = lib.mkDefault appOrigin;
+          model-gateway.corsOrigins = lib.mkDefault appOrigin;
         };
         web.runtimeConfig.domain = lib.mkDefault platformDomain;
         web.runtimeConfig.gatewayAdminUrl = lib.mkDefault (

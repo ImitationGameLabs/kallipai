@@ -86,7 +86,7 @@ in
         # a proxy key) except the unauthenticated health and metrics
         # probes; the edge adds none.
         handle_path /v1/model-gateway/* {
-          reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.gateway.managementPort}
+          reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.model-gateway.port}
         }
       '';
 
@@ -96,12 +96,12 @@ in
         handle_path /v1/* {
           # Streaming wire (chat completions stream): like the lesche
           # segment, disable buffering so tokens reach clients live.
-          reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.gateway.port} {
+          reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.model-gateway.forwardPort} {
             flush_interval -1
           }
         }
         # The fallback carries the same streaming surface.
-        reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.gateway.port} {
+        reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.model-gateway.forwardPort} {
           flush_interval -1
         }
       '';

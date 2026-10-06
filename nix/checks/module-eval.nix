@@ -200,7 +200,7 @@
       scrapeGwOff = evalHost {
         services.kallipai.polis = {
           enable = true;
-          gateway.enable = false;
+          model-gateway.enable = false;
         };
       };
       scrapeJob = lib.elemAt aligned.config.services.kallipai.polis.scrapeConfigs 0;
@@ -208,7 +208,7 @@
       scrapeDrifted = evalHost {
         services.kallipai.polis = {
           enable = true;
-          gateway.managementPort = 7510;
+          model-gateway.port = 7510;
         };
       };
       scrapeDriftedTarget = lib.elemAt (lib.elemAt (lib.elemAt scrapeDrifted.config.services.kallipai.polis.scrapeConfigs 0).static_configs 0).targets 0;
@@ -351,7 +351,7 @@
       # internal-token file is group-readable only through membership.
       test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-model-gateway.extraGroups)}" = "1"
       # The domain derivation feeds the admin page CORS allowlist too.
-      test "${webDerived.config.services.kallipai.polis.gateway.corsOrigins}" = "https://app.kallipai.com"
+      test "${webDerived.config.services.kallipai.polis.model-gateway.corsOrigins}" = "https://app.kallipai.com"
       # The gateway admin URL follows apiBase when the platform edge
       # moves (the default arm asserted beside the baked config.js).
       test "${webApiBase.config.services.kallipai.web.runtimeConfig.gatewayAdminUrl}" = "https://edge.example.com/v1/model-gateway"

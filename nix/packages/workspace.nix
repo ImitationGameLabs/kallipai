@@ -134,6 +134,6 @@ in
   # The model gateway: the profiles distribution face plus the
   # credential-injecting forwarding face (pure HTTP/Postgres, no
   # shell-out deps). Its own deployment unit -- see
-  # services.kallipai.polis.gateway in nixos-modules.nix.
+  # services.kallipai.polis.model-gateway in nixos-modules.nix.
   model-gateway = buildCrate "cargo build --release -p kallipai-model-gateway";
 }
