@@ -10,7 +10,7 @@
 use anyhow::Error;
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, warn};
 
 use crate::agent_task::AgentContext;
 use crate::context::{
@@ -81,7 +81,7 @@ async fn consume_stream(
                         // Mid-stream transport drop (connection reset, h2 error, premature EOF, ...).
                         // The partial content already emitted via deltas is void; the caller re-sends
                         // the same request and emits a `StreamReset` so downstream folds/discards it.
-                        info!(
+                        warn!(
                             "LLM stream dropped mid-stream: {}",
                             crate::llm_error::render_error(&e)
                         );
@@ -372,6 +372,12 @@ pub(crate) async fn acquire_stream(
                     // then treat as transient-exhausted and advance the failover chain (a
                     // different profile/endpoint may hold a healthier connection). `attempt`
                     // exceeds `max_attempts` here, honestly signalling the budget is blown.
+                    error!(
+                        attempt,
+                        max_attempts = policy.max_retries,
+                        error = %error_msg,
+                        "mid-stream retry budget exhausted, advancing failover chain"
+                    );
                     tx.try_send(AgentEvent::StreamReset {
                         error: error_msg,
                         attempt,

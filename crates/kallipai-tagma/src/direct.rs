@@ -10,7 +10,7 @@
 
 use std::sync::Weak;
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::bus::{SignalFrame, StatusSnapshot};
 use crate::pump_driver::{
@@ -45,7 +45,7 @@ impl SnapshotSink for DirectStatusSink {
         if let Some(state) = self.0.upgrade() {
             match state.bus.publish(snapshot) {
                 Ok(seq) => debug!(site = "direct_status", seq, "snapshot published"),
-                Err(err) => info!(error = %err, "direct status publish failed; dropping frame"),
+                Err(err) => warn!(error = %err, "direct status publish failed; dropping frame"),
             }
         }
         true
