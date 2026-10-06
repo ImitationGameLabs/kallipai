@@ -44,7 +44,8 @@
   let username = $state("");
   let submitting = $state(false);
   let result: CeremonyResult | null = $state(null);
-  // Network/transport error from a submit attempt (e.g. archeion unreachable now).
+  // Environment error from a submit attempt: archeion unreachable, or an
+  // insecure origin where the passkey ceremony cannot run.
   let error = $state<string | null>(null);
   // Aborts the background conditional-mediation get() before an explicit
   // ceremony (the username form submit) or on unmount. Two concurrent
@@ -65,8 +66,9 @@
   const canKeySubmit = $derived(adminKey.trim().length > 0 && !offlineBusy);
 
   // Passkeys are a browser secure-context feature: on plain http off-
-  // localhost the ceremony cannot run at all, so the form degrades to a
-  // hint and the GitHub/admin-key paths below carry the login surface.
+  // localhost the ceremony cannot run at all, so the passkey path
+  // degrades: a hint above the field, then the inline error at submit;
+  // the GitHub/admin-key paths below carry the login surface.
   const secureContext = window.isSecureContext;
 
   // The reverse guard (already signed in -> /tagmata) and the forward guard
@@ -99,6 +101,13 @@
     // Username is the login id. The server normalizes (trim + ASCII-lowercase),
     // so the user can type their handle in any case.
     if (!canSubmit) return;
+    // The passkey ceremony cannot run off a secure context (plain http
+    // off localhost): fail at the point of action with the reason rather
+    // than a dead-looking disabled form.
+    if (!secureContext) {
+      error = login_passkey_insecure();
+      return;
+    }
     // Kill the background conditional-mediation get before starting the explicit
     // username ceremony (see discoverableCtl's comment).
     discoverableCtl?.abort();
@@ -258,7 +267,7 @@
     {:else}
       <OAuthProviderButtons {returnPath} />
 
-      {#if !secureContext}
+      {#if !secureContext && !error}
         <p class="text-xs opacity-70">{login_passkey_insecure()}</p>
       {/if}
 
@@ -271,7 +280,6 @@
           class="input"
           type="text"
           autocomplete="username webauthn"
-          disabled={!secureContext}
           placeholder={login_username_placeholder()}
           bind:value={username}
           required
@@ -291,7 +299,7 @@
       <button
         type="submit"
         class="btn preset-filled-primary-500 w-full"
-        disabled={!canSubmit || !secureContext}
+        disabled={!canSubmit}
       >
         {submitting ? login_signing_in() : login_submit()}
       </button>
