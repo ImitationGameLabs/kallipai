@@ -253,7 +253,7 @@ fn minted_operator_token_persists_0600_in_credentials_dir() {
     // Serial siblings share the data root: resolve once, drop the file, and
     // pin the first-boot shape (absent file + no env = mint) regardless
     // of test order.
-    let (_, first) = kallipai_tagma::resolve_operator_token().unwrap();
+    let (_, first) = kallipai_tagma::resolve_operator_token(None).unwrap();
     let path = match first {
         kallipai_tagma::OperatorTokenResolution::Minted(path)
         | kallipai_tagma::OperatorTokenResolution::Loaded(path) => path,
@@ -262,7 +262,7 @@ fn minted_operator_token_persists_0600_in_credentials_dir() {
         }
     };
     std::fs::remove_file(&path).unwrap();
-    let (token, resolution) = kallipai_tagma::resolve_operator_token().unwrap();
+    let (token, resolution) = kallipai_tagma::resolve_operator_token(None).unwrap();
     let path = match resolution {
         kallipai_tagma::OperatorTokenResolution::Minted(path) => path,
         other => panic!("a minted token must be persisted, got {other:?}"),
@@ -282,9 +282,8 @@ fn minted_operator_token_persists_0600_in_credentials_dir() {
 #[serial_test::serial]
 fn pinned_operator_token_is_taken_verbatim_and_not_written() {
     ensure_test_data_dir();
-    unsafe { std::env::set_var("KALLIPAI_OPERATOR_TOKEN", "sk-operator-pinned-value") };
-    let (token, resolution) = kallipai_tagma::resolve_operator_token().unwrap();
-    unsafe { std::env::remove_var("KALLIPAI_OPERATOR_TOKEN") };
+    let (token, resolution) =
+        kallipai_tagma::resolve_operator_token(Some("sk-operator-pinned-value".into())).unwrap();
     assert_eq!(token.secret(), "sk-operator-pinned-value");
     assert!(
         matches!(resolution, kallipai_tagma::OperatorTokenResolution::Pinned),
@@ -299,7 +298,7 @@ fn existing_token_file_is_loaded_verbatim_across_restarts() {
     unsafe { std::env::remove_var("KALLIPAI_OPERATOR_TOKEN") };
     // A previous run's token file survives restarts: loaded verbatim, not
     // re-minted and not rewritten (the third tier of the boot priority).
-    let (_, first) = kallipai_tagma::resolve_operator_token().unwrap();
+    let (_, first) = kallipai_tagma::resolve_operator_token(None).unwrap();
     let path = match first {
         kallipai_tagma::OperatorTokenResolution::Minted(path)
         | kallipai_tagma::OperatorTokenResolution::Loaded(path) => path,
@@ -308,7 +307,7 @@ fn existing_token_file_is_loaded_verbatim_across_restarts() {
         }
     };
     std::fs::write(&path, "KALLIPAI_OPERATOR_TOKEN=sk-operator-previous\n").unwrap();
-    let (token, resolution) = kallipai_tagma::resolve_operator_token().unwrap();
+    let (token, resolution) = kallipai_tagma::resolve_operator_token(None).unwrap();
     assert_eq!(token.secret(), "sk-operator-previous");
     assert!(matches!(
         resolution,
@@ -325,7 +324,7 @@ fn valueless_token_file_fails_the_boot_instead_of_re_minting() {
     unsafe { std::env::remove_var("KALLIPAI_OPERATOR_TOKEN") };
     // An existing but valueless token file is a broken state, not a fresh
     // install: the boot must fail loudly rather than silently mint over it.
-    let (_, first) = kallipai_tagma::resolve_operator_token().unwrap();
+    let (_, first) = kallipai_tagma::resolve_operator_token(None).unwrap();
     let path = match first {
         kallipai_tagma::OperatorTokenResolution::Minted(path)
         | kallipai_tagma::OperatorTokenResolution::Loaded(path) => path,
@@ -334,7 +333,7 @@ fn valueless_token_file_fails_the_boot_instead_of_re_minting() {
         }
     };
     std::fs::write(&path, "OTHER=x\n").unwrap();
-    let err = match kallipai_tagma::resolve_operator_token() {
+    let err = match kallipai_tagma::resolve_operator_token(None) {
         Ok(_) => panic!("a valueless token file must fail the boot"),
         Err(e) => e.to_string(),
     };

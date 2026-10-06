@@ -43,8 +43,12 @@ async fn scenario2_normal() {
         Reply::Tool("cat $HOME/.ssh/id_testkey".into()),                // 6: contents readable
         Reply::Tool("cat \"$XDG_CONFIG_HOME/kallipai/tagmata/main/profiles.toml\"".into()), // 7: Normal reads profiles
     ];
+
+    // Boot secret scrub: the harness puts the operator token in the tagma's
+    // environment, so an agent bash reaching for it proves the scrub failed.
+    script.push(Reply::Tool("printenv KALLIPAI_OPERATOR_TOKEN".into())); // 8
     if have_shm {
-        script.push(Reply::Tool(format!("echo s > {shm_probe}"))); // 8: /dev/shm writable
+        script.push(Reply::Tool(format!("echo s > {shm_probe}"))); // 9: /dev/shm writable
     }
     script.push(Reply::End("done"));
 
@@ -58,8 +62,8 @@ async fn scenario2_normal() {
 
     assert_eq!(run.exit, "success", "{}", fx.tagma.diagnostics());
     assert!(
-        results.len() >= 8,
-        "expected >=8 bash results, got {}",
+        results.len() >= 9,
+        "expected >=9 bash results, got {}",
         results.len()
     );
 
@@ -83,8 +87,15 @@ async fn scenario2_normal() {
         results[6].text()
     );
     expect(&results, 7, "profiles read", true);
+    // printenv exits 1 and prints nothing when the variable is unset.
+    expect(&results, 8, "operator token absent from agent env", false);
+    assert!(
+        results[8].text().trim().is_empty(),
+        "printenv must print nothing when scrubbed, got: {:?}",
+        results[8].text(),
+    );
     if have_shm {
-        expect(&results, 8, "/dev/shm write", true);
+        expect(&results, 9, "/dev/shm write", true);
     }
 
     // FS corroboration.

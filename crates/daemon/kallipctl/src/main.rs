@@ -270,9 +270,9 @@ enum ConfigCommand {
 
 #[derive(Subcommand)]
 enum EnvCommand {
-    /// Print the persisted pairs, one KEY=VALUE per line with a blank
-    /// line between variables. Values are shown in full, so a line can
-    /// be copied straight into a shell.
+    /// Print the persisted pairs, one KEY=VALUE per line, no separator.
+    /// Values are shown in full, so a line can be copied straight into
+    /// a shell.
     List {
         #[arg(add = ArgValueCompleter::new(complete_slug))]
         slug: String,
@@ -1062,14 +1062,9 @@ fn print(response: Response, started: bool) -> Result<()> {
                         println!("{slug}: no persisted env");
                         return Ok(());
                     }
-                    // One KEY=VALUE line per variable, blank line between
-                    // variables: each line copies straight into a shell,
-                    // and the blanks keep multi-variable dumps readable
-                    // without wrapping long values by hand.
-                    for (n, pair) in env.iter().enumerate() {
-                        if n > 0 {
-                            println!();
-                        }
+                    // One KEY=VALUE line per variable, no separator:
+                    // each line copies straight into a shell.
+                    for pair in &env {
                         println!("{pair}");
                     }
                 }

@@ -15,16 +15,6 @@ fn polis_toml_rejects_the_relay_table_name() {
 }
 
 #[test]
-fn sweep_removes_a_legacy_files_token_exactly_once() {
-    kallipai_testkit::with_env(&[("KALLIPAI_FILES_TOKEN", Some("legacy-token"))], || {
-        assert!(sweep_legacy_files_token());
-        assert!(std::env::var_os("KALLIPAI_FILES_TOKEN").is_none());
-        // Idempotent: a clean environment sweeps nothing.
-        assert!(!sweep_legacy_files_token());
-    });
-}
-
-#[test]
 fn files_token_follows_the_primary_entry_scan() {
     let root = tempfile::tempdir().unwrap();
     let entry = |name: &str| RelayEntry {

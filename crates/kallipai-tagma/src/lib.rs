@@ -14,6 +14,7 @@ pub mod delivery;
 pub mod direct;
 pub mod duty;
 pub mod engine;
+pub mod env_governance;
 pub mod external;
 pub mod files;
 pub mod inbox;
@@ -50,7 +51,7 @@ use tracing::{info, warn};
 
 pub use args::Args;
 
-pub async fn run(args: Args) -> Result<()> {
+pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     // Real-root guard first: logging is live by now, and no filesystem
     // state or agent surface exists yet — a refusal must land before
     // boot_identity touches the slug-derived tree.
@@ -63,7 +64,7 @@ pub async fn run(args: Args) -> Result<()> {
     // token file > fresh mint). Only the SHA-256 hash is retained by
     // AppState; the plaintext lives only in the 0600 file — stdout is a
     // leak surface (captured into logs), so nothing secret is printed.
-    let (operator, resolution) = resolve_operator_token()?;
+    let (operator, resolution) = resolve_operator_token(operator_pin)?;
     match &resolution {
         OperatorTokenResolution::Pinned => {
             eprintln!("kallipai-tagma: operator token pinned via KALLIPAI_OPERATOR_TOKEN");
@@ -180,17 +181,14 @@ pub async fn run(args: Args) -> Result<()> {
     // credential (the primary relay entry's stored enrollment), never
     // from the environment: agent shells inherit this process env
     // wholesale, so a token there would leak into every agent — a
-    // legacy one is swept below. The scan must precede
-    // `restore_agents`, whose re-assembly fetches record bytes through
-    // the token. Two-phase by design: this build-time scan runs before
+    // legacy one is removed at boot (see `env_governance`). The scan must
+    // precede `restore_agents`, whose re-assembly fetches record bytes
+    // through the token. Two-phase by design: this build-time scan runs before
     // the relay plan resolves, so on a first-registration boot
     // (enrollment happens in the plan phase) the slot stays `None` for
     // that session — nothing to fetch yet — and the next boot picks
     // the credential up.
     let files_token = resolve_files_token(&args)?;
-    if sweep_legacy_files_token() {
-        info!("removed legacy KALLIPAI_FILES_TOKEN from the process environment");
-    }
     // The gateway-signal intake runs in every mode: the adk acquisition
     // loop publishes at most one 401/403 per exhausted failover chain,
     // and the consumer refreshes the snapshot and poisons the source on
@@ -508,7 +506,9 @@ pub async fn run(args: Args) -> Result<()> {
 /// How the operator token was obtained at boot.
 #[derive(Debug)]
 pub enum OperatorTokenResolution {
-    /// `KALLIPAI_OPERATOR_TOKEN` env pin: taken verbatim, nothing persisted.
+    /// `KALLIPAI_OPERATOR_TOKEN` env pin: taken verbatim, nothing persisted,
+    /// and scrubbed from the process environment after capture — agent
+    /// shells inherit this env, so the pin must not stay in it.
     /// The operator already holds the value.
     Pinned,
     /// Loaded from the existing 0600 token file: a minted token survives
@@ -521,14 +521,17 @@ pub enum OperatorTokenResolution {
 }
 
 /// Mint-or-load-or-take the operator token, in priority order:
-/// 1. `KALLIPAI_OPERATOR_TOKEN` env pin — taken as-is, never written to disk;
+/// 1. the operator-token pin captured at boot start — taken as-is,
+///    never written to disk, and already scrubbed from the environment;
 /// 2. an existing `<credentials>/operator-token.env` — loaded verbatim, so
 ///    a minted token survives restarts;
 /// 3. otherwise mint fresh and persist it 0600. Stdout is a leak surface
 ///    (the daemon captures it into logs), so the 0600 file is the only
 ///    plaintext carrier. Returns the token plus how it was obtained.
-pub fn resolve_operator_token() -> Result<(MintedToken, OperatorTokenResolution)> {
-    if let Ok(s) = std::env::var("KALLIPAI_OPERATOR_TOKEN") {
+pub fn resolve_operator_token(
+    pin: Option<String>,
+) -> Result<(MintedToken, OperatorTokenResolution)> {
+    if let Some(s) = pin {
         anyhow::ensure!(
             !s.trim().is_empty(),
             "KALLIPAI_OPERATOR_TOKEN must not be empty"
@@ -987,23 +990,6 @@ pub(crate) fn gateway_params_from(
     })
 }
 
-/// Remove a legacy `KALLIPAI_FILES_TOKEN` from the process environment, if
-/// present: the token source is the registered credential, and an env
-/// token is dead weight that still leaks into every spawned agent shell
-/// (they inherit this process env wholesale). Returns whether anything
-/// was removed.
-fn sweep_legacy_files_token() -> bool {
-    if std::env::var_os("KALLIPAI_FILES_TOKEN").is_none() {
-        return false;
-    }
-    // SAFETY: single-threaded boot path (no agent or serving threads
-    // exist yet); this is the process's only mutation of the variable.
-    unsafe {
-        std::env::remove_var("KALLIPAI_FILES_TOKEN");
-    }
-    true
-}
-
 /// One configured relay entry: one platform identity. `name` is the stable slug
 /// that keys the credentials subdirectory and the AppState relay slot (so a
 /// URL change never moves the identity directory). `polis_url` is the
@@ -1049,40 +1035,7 @@ fn valid_entry_name(name: &str) -> bool {
 ///   wins must never be implicit);
 /// - the file exists but declares zero `[[polis]]` entries;
 /// - a name fails the slug grammar or repeats.
-///
-/// Reject the retired per-service relay env (`KALLIPAI_TAGMA_RELAY_ARCHEION_URL`
-/// / `KALLIPAI_TAGMA_RELAY_LESCHE_URL`). A record snapshotted before the one
-/// polis origin replays them on restart, and the new tagma would otherwise
-/// read nothing relay-shaped and boot local-only -- silently dropping the
-/// relay. The old values were per-service URLs and do not mechanically
-/// derive the origin, so the recoverable move is a fresh enroll against
-/// the configured `KALLIPAI_POLIS_URL`, and this fails loudly pointing
-/// there.
-fn ensure_no_retired_relay_env() -> Result<()> {
-    const RETIRED: &[&str] = &[
-        "KALLIPAI_TAGMA_RELAY_ARCHEION_URL",
-        "KALLIPAI_TAGMA_RELAY_LESCHE_URL",
-    ];
-    let found: Vec<&str> = RETIRED
-        .iter()
-        .copied()
-        .filter(|key| std::env::var_os(key).is_some())
-        .collect();
-    anyhow::ensure!(
-        found.is_empty(),
-        concat!(
-            "retired relay environment variable(s) {} present; the per-service",
-            " relay env was replaced by the single KALLIPAI_POLIS_URL origin --",
-            " remove the retired variables and re-enroll the relay against",
-            " KALLIPAI_POLIS_URL"
-        ),
-        found.join(", ")
-    );
-    Ok(())
-}
-
 fn resolve_relay_entries(args: &args::Args) -> Result<Vec<RelayEntry>> {
-    ensure_no_retired_relay_env()?;
     let toml_path = data_root()?.join("polis.toml");
     let sugar_set = args.polis_url.is_some() || args.relay_enrollment_code.is_some();
     if toml_path.exists() {
