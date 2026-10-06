@@ -320,7 +320,6 @@
           class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
           >{auth_add_this_device()}</a
         >
-        >
       </p>
 
       {#if offlineLogin}
